@@ -162,30 +162,44 @@ class ChatEvent {
     return null;
   }
 
-  /// 从 SSE JSON 构造。
+  /// 从 JSON 构造。支持**两种字段命名形态**：
+  ///
+  /// | 来源 | 命名 | 例子 |
+  /// |---|---|---|
+  /// | SSE 实时流（`chatbus.Event` 的 JSON tag） | camelCase | `eventId` / `eventType` / `globalSeq` |
+  /// | timeline / search（`chat.go` 的 `eventToDict`） | snake_case | `event_id` / `event_type` / `global_seq` |
+  ///
+  /// WHY 必须两种都吃：服务端把「实时广播」与「历史查询」交给两个不同的序列化点，
+  /// 前者用 `chatbus.Event` 的结构体 tag，后者手写 `map[string]any`（键名 snake_case，
+  /// 历史沿袭 Python 版）。客户端只读 camelCase 会让 timeline 整段解析失败——
+  /// 而该异常会被 `ChatStreamController._backfill` 的 `catch (e)` 吞成一条 warn，
+  /// 表现为「历史回填永久静默为空」，排查成本极高。
+  ///
+  /// camelCase 优先：SSE 是主路径且字段更全（含 `transient`/`diagnostic`）。
   ///
   /// 容错策略：缺少非关键字段时给安全默认值，而不是抛异常——一个畸形事件
   /// 不应该让整条流断掉。但 [eventId] / [eventType] 缺失属于契约破坏，
   /// 此时抛 [FormatException] 由调用方决定是否断开。
   factory ChatEvent.fromJson(Map<String, dynamic> json) {
-    final eventId = json['eventId'] as String?;
-    final eventType = json['eventType'] as String?;
+    final eventId = _str2(json, 'eventId', 'event_id');
+    final eventType = _str2(json, 'eventType', 'event_type');
     if (eventId == null || eventType == null) {
       throw FormatException('ChatEvent 缺少必填字段 eventId/eventType: $json');
     }
+    final createdAtRaw = _str2(json, 'createdAt', 'created_at');
     return ChatEvent(
       eventId: eventId,
-      userId: (json['userId'] as String?) ?? '',
-      groupId: (json['groupId'] as String?) ?? '',
-      turnId: (json['turnId'] as String?) ?? '',
-      sessionId: json['sessionId'] as String?,
-      agentId: json['agentId'] as String?,
+      userId: _str2(json, 'userId', 'user_id') ?? '',
+      groupId: _str2(json, 'groupId', 'group_id') ?? '',
+      turnId: _str2(json, 'turnId', 'turn_id') ?? '',
+      sessionId: _str2(json, 'sessionId', 'session_id'),
+      agentId: _str2(json, 'agentId', 'agent_id'),
       eventType: eventType,
       seq: _int(json['seq']) ?? 0,
-      globalSeq: _int(json['globalSeq']),
+      globalSeq: _int(json['globalSeq'] ?? json['global_seq']),
       source: (json['source'] as String?) ?? '',
       createdAt:
-          DateTime.tryParse((json['createdAt'] as String?) ?? '')?.toUtc() ??
+          DateTime.tryParse(createdAtRaw ?? '')?.toUtc() ??
           DateTime.now().toUtc(),
       payload: _asMap(json['payload']),
       transient: json['transient'] == true,
@@ -212,6 +226,15 @@ class ChatEvent {
     if (transient) 'transient': true,
     if (diagnostic) 'diagnostic': true,
   };
+
+  /// 取字符串字段：camelCase 优先，回退 snake_case。
+  ///
+  /// 只接受 String 与 null（timeline 的 `agent_id`/`session_id` 可能是 JSON null，
+  /// 由 Go 侧 `nullStr` 产出）；不把数字/布尔强转成字符串，避免 `1` 被当成 ID。
+  static String? _str2(Map<String, dynamic> json, String camel, String snake) {
+    final v = json[camel] ?? json[snake];
+    return v is String ? v : null;
+  }
 
   static int? _int(Object? v) {
     if (v is int) return v;

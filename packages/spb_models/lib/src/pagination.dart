@@ -2,7 +2,7 @@
 ///
 /// Go API 的分页有两套约定，客户端必须都支持：
 /// 1. **offset 分页**：`?limit=&offset=`，响应 `{items: [...]}`（如 `GET /chat/groups`）
-/// 2. **游标分页**：`?before_global_seq=`，响应含 `next_cursor`（如 timeline）
+/// 2. **游标分页**：`?before_global_seq=`，响应含 `next_before_global_seq`（如 timeline）
 ///
 /// timeline 还有**新旧双游标**：新游标 `before_global_seq`（推荐），
 /// 旧游标 `before_time` + `before_seq`（兼容保留）。客户端一律用新游标。
@@ -44,6 +44,21 @@ class ListResponse<T> {
 /// timeline 的游标分页结果。
 ///
 /// `nextCursor` 为 null 表示已到最早一条（无更多历史）。
+///
+/// ## 游标取值优先级（重要）
+///
+/// 服务端 `chat.go` 的 timeline 响应同时给出三个游标字段：
+///
+/// | 字段 | 含义 | 能否当 `before_global_seq` |
+/// |---|---|---|
+/// | `next_before_global_seq` | 本批**最旧事件的 global_seq** | ✅ 正确 |
+/// | `next_before_time` / `next_before_seq` | 旧客户端兼容（time + per-turn seq） | ⚠️ 旧约定 |
+/// | `next_cursor` | **最旧事件的 event id**（字符串） | ❌ 不是游标 |
+///
+/// `next_cursor` 命名有迷惑性：它**不是**分页游标，而是 event id。把它当作
+/// `before_global_seq` 回传，服务端 `strconv.ParseInt` 失败后会把游标当成 0，
+/// 于是每页都返回最新一批——**翻页变成死循环且不报错**。
+/// 故 [nextCursor] 只承载「可回传的 global_seq」，`next_cursor` 降为最后回退。
 class CursorPage<T> {
   const CursorPage({required this.items, this.nextCursor});
 
@@ -65,11 +80,21 @@ class CursorPage<T> {
         if (e is Map) items.add(fromItem(Map<String, dynamic>.from(e)));
       }
     }
-    final cursor = json['next_cursor'] ?? json['nextCursor'];
-    return CursorPage(
-      items: items,
-      nextCursor: cursor is String && cursor.isNotEmpty ? cursor : null,
-    );
+    // 优先 next_before_global_seq（正确游标），其次驼峰变体，最后才回退
+    // next_cursor（event id，仅在服务端未提供 global_seq 时的降级路径）。
+    final cursor =
+        _nonEmpty(json['next_before_global_seq']) ??
+        _nonEmpty(json['nextBeforeGlobalSeq']) ??
+        _nonEmpty(json['next_cursor']) ??
+        _nonEmpty(json['nextCursor']);
+    return CursorPage(items: items, nextCursor: cursor);
+  }
+
+  /// 把游标字段归一成非空字符串：`int` / `num` 直接 toString，空串与 null 视为无游标。
+  static String? _nonEmpty(Object? v) {
+    if (v == null) return null;
+    final s = v is String ? v : v.toString();
+    return s.isEmpty ? null : s;
   }
 }
 

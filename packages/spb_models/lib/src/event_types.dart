@@ -22,6 +22,21 @@ class EventTypes {
   static const done = 'done';
   static const contextUpdate = 'context_update';
 
+  /// 用户发出的消息（落库事件，每个 turn 的首个事件）。
+  ///
+  /// ⚠️ **不在 `chatbus/broker.go` 的 `Event*` 常量里**——它由
+  /// `internal/chat/enqueue.go` 以字面量 `"user_message"` 落库（单事务内写
+  /// `chat_turns` + `user_message` + 附加事件 + `queue_state`）。
+  /// 这印证了「`broker.go` 不是完整事件集」：**新增事件时必须同时核对落库点**，
+  /// 只看 `broker.go` 会漏掉本类型，而它是时间线里渲染用户气泡的唯一依据。
+  static const userMessage = 'user_message';
+
+  /// 确认超时失效（`internal/chat/turn_worker.go` 的 `writeConfirmationExpired`）。
+  ///
+  /// 与 [confirmationResolved] 成对：前者是「已作废」，后者是「已作答」。
+  /// 两者都需把 UI 上的确认卡置为不可交互，否则用户会对着一张早已失效的卡点下去。
+  static const confirmationExpired = 'confirmation_expired';
+
   // ---- Turn 生命周期与 gate 诊断 ----
   static const executorStarted = 'executor_started';
   static const executorCompleted = 'executor_completed';
@@ -56,6 +71,18 @@ class EventTypes {
   /// goal / task 变更通知（不落库，仅广播）。
   static const goalUpdated = 'goal_updated';
 
+  /// 分组标题被自动生成/改写（`internal/chatgate/title_gate.go`）。
+  ///
+  /// **Transient**：真源在 `chat_groups.title`，事件只提示「你手上的标题过期了」。
+  /// 客户端收到后应重新拉 group 详情，而非把 payload 里的标题当权威值渲染。
+  static const groupTitleUpdated = 'group_title_updated';
+
+  /// pigo session 文件缺失（`internal/chatexec/pigo_session_file.go`）。
+  ///
+  /// 属诊断事件：说明某个 agent 绑定的 session 已丢失，服务端会自愈重建。
+  /// 默认不渲染给用户，仅供排查。
+  static const pigoSessionMissing = 'pigo_session_missing';
+
   /// 本客户端已知的全部事件类型。
   ///
   /// 新增事件时同步加进来；[ChatEvent.isKnown] 依赖它区分「服务端发了新事件」
@@ -71,6 +98,7 @@ class EventTypes {
     error,
     done,
     contextUpdate,
+    userMessage,
     executorStarted,
     executorCompleted,
     gateEvaluated,
@@ -93,10 +121,14 @@ class EventTypes {
     scheduleCreated,
     groupMetadataUpdated,
     goalUpdated,
+    confirmationExpired,
+    groupTitleUpdated,
+    pigoSessionMissing,
   };
 
   /// 渲染进对话时间线的事件类型（其余为控制/诊断事件，不直接展示）。
   static const Set<String> timelineVisible = {
+    userMessage,
     start,
     message,
     thought,
