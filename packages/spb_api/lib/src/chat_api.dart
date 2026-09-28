@@ -205,8 +205,15 @@ class ChatApi {
 
   /// `GET /users/:user_id/chat/messages/pending?group_id=&limit=`
   ///
-  /// 查询「已提交但尚未产出终态」的 turn，用于冷启动时恢复进行中的对话。
-  Future<List<ChatTurn>> pendingMessages(
+  /// 查询尚未处理的**收件箱消息**，用于冷启动时恢复进行中的对话。
+  ///
+  /// ⚠️ 返回的是 `chat_inbox_messages` 行（见 Go 侧 `inboxToDict`），**不是**
+  /// [ChatTurn]：字段名是 `input`（而非 `input_text`）、`agent_type`、`processed_at`。
+  /// 路径名有迷惑性，但服务端实现就在 `internal/server/chat_inbox.go` 的 `pending`。
+  ///
+  /// 默认只返回 `pending`（服务端在无 `group_id` 时还会多取一批再按状态过滤），
+  /// 故调用方拿到的都是 [ChatInboxMessage.isPending] 为 true 的条目。
+  Future<List<ChatInboxMessage>> pendingMessages(
     String userId, {
     String? groupId,
     int limit = 20,
@@ -215,7 +222,7 @@ class ChatApi {
       '/users/$userId/chat/messages/pending',
       query: {if (groupId != null) 'group_id': groupId, 'limit': limit},
     );
-    return unwrapItems(res, ChatTurn.fromJson);
+    return unwrapItems(res, ChatInboxMessage.fromJson);
   }
 
   /// `POST /users/:user_id/chat/messages/:message_id/undo`
