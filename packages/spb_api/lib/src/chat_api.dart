@@ -327,15 +327,32 @@ class ChatApi {
     return unwrapItems(res, (m) => m);
   }
 
-  /// `POST /chat/groups/:group_id/confirmations/:id/resolve`
+  /// `POST /chat/confirmations/:confirmation_id/resolve`
+  ///
+  /// ## 路径与请求体都容易写错（两个坑）
+  ///
+  /// **坑 1：路径没有 group_id。** 直觉会写成
+  /// `/chat/groups/:gid/confirmations/:id/resolve`（那个端点确实存在，见
+  /// `misc.go` 的 `registerConfirmRoutes`），但它的 handler 是**列表 + 动作**
+  /// 语义（`{action, comment}`，把 action 直接写进 status），不是「解决某张卡」。
+  /// webapp 用的是全局路径 `/chat/confirmations/:id/resolve`（`misc.go` 的
+  /// `resolve`），故此处对齐 webapp。
+  ///
+  /// **坑 2：请求体键是 `action` 而非 `decision`。** 服务端
+  /// `misc.go:resolve` 绑定的结构体是 `{Action, Comment}`，用 `decision` 会
+  /// 被 JSON 绑定忽略（不报错）→ `action` 取默认值 `"resolved"`。
+  /// 因为 `resolved_action` 当前无下游消费者，这个错误**不会报错也不会崩溃**，
+  /// 只是把用户选的动作静默丢掉。
+  ///
+  /// [confirmationId] 必须是**卡行 id**（`chat_confirmations.id`），不是事件 id
+  /// ——见 `ConfirmationItem.confirmationId` 的说明。
   Future<void> resolveConfirmation(
-    String groupId,
     String confirmationId, {
-    required String decision,
-    Map<String, dynamic>? payload,
+    required String action,
+    String? comment,
   }) => _post(
-    '/chat/groups/$groupId/confirmations/$confirmationId/resolve',
-    body: {'decision': decision, if (payload != null) ...payload},
+    '/chat/confirmations/$confirmationId/resolve',
+    body: {'action': action, if (comment != null) 'comment': comment},
   );
 
   // ==================== 归属反馈 ====================
