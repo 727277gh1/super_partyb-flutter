@@ -92,6 +92,51 @@ class ChatStreamController {
     _emit();
   }
 
+  /// 插入一条本地合成的用户消息（乐观回显）。
+  ///
+  /// ## 与 send() 共用同一实现
+  ///
+  /// 事件类型、`transient` 标志、payload 形状三者必须完全一致，否则
+  /// 「发送」与「无归属提交」两条路径会出现「一个渲染、一个不渲染」的诡异差异。
+  /// 故本方法把构造逻辑集中到一处，[send] 与 [QuickCaptureUseCase] 都走它。
+  ///
+  /// ## 为什么 transient 必须为 true
+  ///
+  /// 乐观项是**本地合成**、不落库、无有效 eventId。若让它推进 SSE 游标
+  /// （`recordEventId`），重连时会以它为 cursor 请求回放，**跳过**其后的权威帧。
+  /// 故 [send] 与 [QuickCaptureUseCase] 都传 `transient: true`。
+  ///
+  /// ## 为什么需要 turnId
+  ///
+  /// [EventReducer] 按 turnId 去重：服务端的 `user_message` 事件随后会到
+  /// （`enqueue.go` 把它放进 broadcasts，确实经 SSE 推送），两者用同一 turnId
+  /// 时归约器会原位合并，不会渲染出两个气泡。**turnId 为空则不去重**——
+  /// 那时会短暂出现两个气泡（见 [QuickCaptureUseCase] 的说明，这是刻意取舍）。
+  void injectLocalUserMessage({
+    required String input,
+    required String groupId,
+    String? turnId,
+    DateTime? createdAt,
+  }) {
+    final now = createdAt ?? DateTime.now().toUtc();
+    _buffer.add(
+      ChatEvent(
+        eventId: 'local-${now.microsecondsSinceEpoch}',
+        userId: userId,
+        groupId: groupId,
+        turnId: turnId ?? '',
+        eventType: EventTypes.userMessage,
+        seq: 0,
+        source: 'client',
+        createdAt: now,
+        payload: {'input': input},
+        // 见方法文档：绝不能推进游标。
+        transient: true,
+      ),
+    );
+    _emit();
+  }
+
   /// 用 timeline API 拉取历史事件。
   ///
   /// 服务端 timeline 返回的是 `ChatEvent` 列表（按 global_seq 升序），
@@ -202,22 +247,14 @@ class ChatStreamController {
     );
 
     // 乐观回显：立刻把用户消息放进列表，不等服务端事件回来。
-    // 服务端的 start 事件到达后会重新归约，此处仅消除输入延迟感。
-    _buffer.add(
-      ChatEvent(
-        eventId: 'local-${DateTime.now().microsecondsSinceEpoch}',
-        userId: userId,
-        groupId: result.groupId,
-        turnId: result.turnId,
-        eventType: EventTypes.start,
-        seq: 0,
-        source: 'client',
-        createdAt: DateTime.now().toUtc(),
-        payload: {'input': input},
-        transient: true,
-      ),
+    //
+    // 构造细节集中在 injectLocalUserMessage（与 quick capture 路径共用），
+    // 那里解释了「为什么事件类型必须是 user_message」「为什么 transient 必须为 true」。
+    injectLocalUserMessage(
+      input: input,
+      groupId: result.groupId,
+      turnId: result.turnId,
     );
-    _emit();
 
     return result;
   }

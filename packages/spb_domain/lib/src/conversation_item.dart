@@ -154,11 +154,30 @@ final class ConfirmationItem extends ConversationItem {
     super.turnId,
     this.options = const [],
     this.resolved = false,
+    this.confirmationId = '',
   });
 
   final String question;
   final List<String> options;
   final bool resolved;
+
+  /// **确认卡行的 id**（`chat_confirmations.id`），用于调用 resolve 端点。
+  ///
+  /// ⚠️ 与 [id]（= `ChatEvent.eventId`）**不是同一个值**。Go 侧
+  /// `chatgate.emitConfirmationRequired` 发事件时 `ID: NewID()`，而
+  /// `confirmationID` 来自 `EnsureConfirmationCard` 插入的卡行——两者独立生成。
+  /// 真正的 id 在 payload 的 `confirmation_id` 里（见
+  /// `BuildConfirmationRequiredPayload`）。
+  ///
+  /// 用 [id] 去 resolve 会 404（`UpdateChatConfirmation` 按 id 更新，0 行受影响），
+  /// 表现为「点了确认按钮没反应」。
+  ///
+  /// 为空串表示事件未携带该字段（异常载荷）；此时 UI 应禁用按钮，
+  /// 不要退而用 [id] 去试。
+  final String confirmationId;
+
+  /// 是否可调用 resolve 端点。
+  bool get canResolve => confirmationId.isNotEmpty && !resolved;
 }
 
 /// 后续提问建议（`follow_up_suggested`）。
