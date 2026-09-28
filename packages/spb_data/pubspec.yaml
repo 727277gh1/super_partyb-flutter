@@ -1,0 +1,29 @@
+name: spb_data
+description: 本地持久化：drift 数据库、缓存、偏好存储
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  spb_core:
+  spb_models:
+  spb_domain:
+  drift: ^2.28.0
+  sqlite3_flutter_libs: ^0.5.28
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  shared_preferences: ^2.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+  drift_dev: ^2.28.0

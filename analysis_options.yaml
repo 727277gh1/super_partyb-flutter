@@ -1,0 +1,26 @@
+# 工作区级静态分析配置。
+#
+# 各包/应用有自己的 analysis_options.yaml（继承 flutter_lints 或 lints），
+# 这里只放跨包统一的严格度设置。
+analyzer:
+  errors:
+    # 未使用的 import / 变量在 CI 里应视为失败，而非仅警告。
+    unused_import: warning
+    unused_local_variable: warning
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "**/build/**"
+    - "**/flutter/ephemeral/**"
+
+linter:
+  rules:
+    # 显式类型注解公共 API：客户端代码长期可维护性的基础。
+    always_declare_return_types: true
+    # 避免 `print` 绕过 SpbLog。
+    avoid_print: true
+    # 异步安全。
+    unawaited_futures: true
+    # 常量优先。
+    prefer_const_constructors: true
+    prefer_const_declarations: true

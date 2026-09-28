@@ -1,0 +1,21 @@
+name: spb_api
+description: HTTP 与 SSE 传输层（dio + 手写 SSE 解析），不含业务逻辑
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dependencies:
+  spb_core:
+  spb_models:
+  dio: ^5.7.0
+  http_parser: ^4.0.2
+  meta: ^1.16.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0
+  http_mock_adapter: ^0.6.1

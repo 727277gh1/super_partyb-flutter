@@ -1,0 +1,120 @@
+/// 聊天事件类型常量。
+///
+/// ⚠️ **真源是 Go 侧 `apps/go-api/internal/chatbus/broker.go` 的 `Event*` 常量**。
+/// 本文件是它的镜像，新增/改名事件必须两边同步，否则客户端会静默丢弃未知事件。
+///
+/// WHY 用 `String` 常量而非 Dart `enum`：服务端可能新增事件类型，而旧客户端
+/// 不认识它。用 enum 时解析未知值要么抛异常、要么需要 fallback 分支；用字符串
+/// 则天然容忍未知类型（走 [ChatEvent.isKnown] 判定后按通用方式渲染）。
+/// 这是**向前兼容**的刻意选择——移动端发布后无法强制用户升级。
+class EventTypes {
+  const EventTypes._();
+
+  // ---- 基础执行流 ----
+  static const start = 'start';
+  static const message = 'message';
+  static const thought = 'thought';
+  static const plan = 'plan'; // 保留给未来真实 plan 事件，勿用于心跳
+  static const heartbeat = 'heartbeat'; // Transient，不落库不渲染
+  static const toolCall = 'tool_call';
+  static const toolResult = 'tool_result';
+  static const error = 'error';
+  static const done = 'done';
+  static const contextUpdate = 'context_update';
+
+  // ---- Turn 生命周期与 gate 诊断 ----
+  static const executorStarted = 'executor_started';
+  static const executorCompleted = 'executor_completed';
+  static const gateEvaluated = 'gate_evaluated';
+  static const gateCompleted = 'gate_completed';
+  static const gateError = 'gate_error';
+
+  // ---- 前置链路由 / 确认 ----
+  static const routingSelected = 'routing_selected';
+  static const confirmationRequired = 'confirmation_required';
+  static const confirmationResolved = 'confirmation_resolved';
+  static const adaptiveDecision = 'adaptive_decision';
+  static const ttsStarted = 'tts_started';
+  static const ttsCompleted = 'tts_completed';
+  static const ttsFailed = 'tts_failed';
+  static const retryScheduled = 'retry_scheduled';
+  static const followUpSuggested = 'follow_up_suggested';
+  static const queueState = 'queue_state';
+
+  /// 用户对「这条消息归属哪个对话」的人工反馈（正确/错误）。
+  static const routingFeedback = 'routing_feedback';
+
+  /// 向用户**征询**归属是否正确（提问，非标注）。与 [routingFeedback] 一问一答。
+  static const routingFeedbackRequest = 'routing_feedback_request';
+
+  // ---- Goal Gate ----
+  static const goalGateDecision = 'goal_gate_decision';
+  static const goalGateStopped = 'goal_gate_stopped';
+  static const scheduleCreated = 'schedule_created';
+  static const groupMetadataUpdated = 'group_metadata_updated';
+
+  /// goal / task 变更通知（不落库，仅广播）。
+  static const goalUpdated = 'goal_updated';
+
+  /// 本客户端已知的全部事件类型。
+  ///
+  /// 新增事件时同步加进来；[ChatEvent.isKnown] 依赖它区分「服务端发了新事件」
+  /// 与「契约漂移导致解析失败」。
+  static const Set<String> all = {
+    start,
+    message,
+    thought,
+    plan,
+    heartbeat,
+    toolCall,
+    toolResult,
+    error,
+    done,
+    contextUpdate,
+    executorStarted,
+    executorCompleted,
+    gateEvaluated,
+    gateCompleted,
+    gateError,
+    routingSelected,
+    confirmationRequired,
+    confirmationResolved,
+    adaptiveDecision,
+    ttsStarted,
+    ttsCompleted,
+    ttsFailed,
+    retryScheduled,
+    followUpSuggested,
+    queueState,
+    routingFeedback,
+    routingFeedbackRequest,
+    goalGateDecision,
+    goalGateStopped,
+    scheduleCreated,
+    groupMetadataUpdated,
+    goalUpdated,
+  };
+
+  /// 渲染进对话时间线的事件类型（其余为控制/诊断事件，不直接展示）。
+  static const Set<String> timelineVisible = {
+    start,
+    message,
+    thought,
+    toolCall,
+    toolResult,
+    error,
+    done,
+    routingSelected,
+    confirmationRequired,
+    confirmationResolved,
+    followUpSuggested,
+    goalGateDecision,
+    goalGateStopped,
+  };
+
+  /// 流式增量事件：收到时应「追加」而非「替换」。
+  ///
+  /// 与权威帧的区分规则见 [ChatEvent.transient]：Transient 的 message/thought
+  /// 是增量片段，非 Transient 的是完整快照。
+  static const Set<String> streamIncremental = {message, thought};
+}

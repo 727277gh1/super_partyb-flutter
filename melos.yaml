@@ -1,0 +1,43 @@
+name: melos
+
+# Melos 只负责「跑脚本」，依赖解析交给 Dart Pub Workspaces（单一 lockfile）。
+# 因此这里不声明 packages 列表——workspace 成员由根 pubspec.yaml 的 workspace 字段定义。
+packages:
+  - apps/*
+  - packages/*
+
+command:
+  bootstrap:
+    usePubspecOverrides: true
+
+scripts:
+  analyze:
+    description: 全量静态分析（含分层规则检查）
+    run: dart analyze --fatal-infos .
+  test:
+    description: 全量测试
+    run: dart test
+  format:
+    description: 格式化
+    run: dart format .
+  format:check:
+    description: 格式化检查（CI 用）
+    run: dart format --output=none --set-exit-if-changed .
+  layering:
+    description: 分层规则检查（core/api/domain 禁止依赖 Flutter）
+    run: bash tools/check_layering.sh
+  gen:
+    description: 代码生成（freezed / json_serializable / riverpod）
+    run: dart run build_runner build --delete-conflicting-outputs
+  gen:watch:
+    description: 代码生成（监听模式）
+    run: dart run build_runner watch --delete-conflicting-outputs
+  build:linux:
+    description: 构建 Linux 桌面端
+    run: cd apps/spb_desktop && flutter build linux --release
+  build:android:
+    description: 构建 Android APK
+    run: cd apps/spb_mobile && flutter build apk --release
+  build:windows:
+    description: 构建 Windows 桌面端（仅 Windows 主机）
+    run: cd apps/spb_desktop && flutter build windows --release

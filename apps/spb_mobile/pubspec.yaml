@@ -1,0 +1,49 @@
+name: spb_mobile
+description: Super PartyB 移动端（Android / iOS）
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ---- 本工作区内部包 ----
+  spb_core:
+  spb_models:
+  spb_api:
+  spb_domain:
+  spb_data:
+  spb_design:
+  spb_ui:
+  spb_platform:
+  spb_features:
+
+  # ---- 状态管理 ----
+  flutter_riverpod: ^3.0.0
+
+  # ---- 路由 ----
+  go_router: ^16.0.0
+
+  # ---- 移动端平台能力 ----
+  flutter_secure_storage: ^9.2.2   # Keychain / Keystore
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  share_plus: ^10.1.2              # 分享交付物
+  url_launcher: ^6.3.1
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+
+flutter:
+  uses-material-design: true

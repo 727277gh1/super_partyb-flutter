@@ -1,0 +1,52 @@
+# ---- Dart / Flutter ----
+.dart_tool/
+.packages
+build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# 生成物（build_runner 产出）
+*.g.dart
+*.freezed.dart
+!lib/**/*.g.dart
+
+# 依赖
+pubspec.lock
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- 平台构建产物 ----
+apps/*/android/.gradle/
+apps/*/android/local.properties
+apps/*/android/app/debug/
+apps/*/android/app/profile/
+apps/*/android/app/release/
+apps/*/ios/Pods/
+apps/*/ios/.symlinks/
+apps/*/ios/Flutter/Flutter.framework
+apps/*/ios/Flutter/Flutter.podspec
+apps/*/linux/flutter/ephemeral/
+apps/*/macos/Flutter/ephemeral/
+apps/*/windows/flutter/ephemeral/
+
+# ---- 签名与密钥（绝不提交）----
+*.jks
+*.keystore
+key.properties
+*.p12
+*.mobileprovision
+*.pfx
+
+# ---- 本地配置 ----
+.env
+.env.*
+!.env.example
+
+# ---- 其他 ----
+.DS_Store
+*.log
