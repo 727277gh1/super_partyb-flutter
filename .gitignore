@@ -50,3 +50,8 @@ key.properties
 # ---- 其他 ----
 .DS_Store
 *.log
+
+# ---- AI Agent 本地状态 ----
+# pi harness 的目标追踪文件（objective / journal / task cursor），
+# 属本机会话状态而非项目源码，不入库。
+.pi/
