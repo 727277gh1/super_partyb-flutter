@@ -1,52 +1,52 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
 import 'package:spb_design/spb_design.dart';
+
+import 'router.dart';
 
 /// 移动端应用根组件。
 ///
-/// 当前为 M0 骨架，与桌面端共用 `spb_design` 主题与 `spb_features` 页面，
-/// 差异仅在导航形态（底部标签栏 vs 侧边栏）与平台能力。
-class SpbMobileApp extends StatelessWidget {
-  const SpbMobileApp({super.key});
+/// 路由表由 [createMobileRouter] 提供（底部标签栏 + 各标签独立导航栈）。
+///
+/// ## 为什么用 `StatefulWidget` 在 `initState` 里创建 router
+///
+/// `GoRouter` 持有 `Navigator` 与路由栈。若在 `build` 里创建，父级 rebuild
+/// 会换成新实例、导航栈被重置（用户会看到页面莫名跳回列表）。本组件是
+/// `runApp` 的根、几乎不 rebuild，但把创建点固定一次仍是必要的。
+class SpbMobileApp extends StatefulWidget {
+  const SpbMobileApp({super.key, this.router});
+
+  /// 可选的外部路由实例（测试用）。
+  ///
+  /// 测试需要主动导航（如验证 `/quick-capture` 可达），而 router 若在内部
+  /// 创建就无法从外部拿到。生产为 null，由内部创建。
+  final GoRouter? router;
+
+  @override
+  State<SpbMobileApp> createState() => _SpbMobileAppState();
+}
+
+class _SpbMobileAppState extends State<SpbMobileApp> {
+  late final GoRouter _router = widget.router ?? createMobileRouter();
+
+  /// 外部传入的 router 由传入方负责 dispose。
+  late final bool _ownsRouter = widget.router == null;
+
+  @override
+  void dispose() {
+    if (_ownsRouter) _router.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return MaterialApp.router(
       title: 'Super PartyB',
       debugShowCheckedModeBanner: false,
       theme: SpbTheme.light(),
       darkTheme: SpbTheme.dark(),
-      home: const _PlaceholderPage(),
-    );
-  }
-}
-
-class _PlaceholderPage extends StatelessWidget {
-  const _PlaceholderPage();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Super PartyB')),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text('移动端骨架已就绪', style: theme.textTheme.headlineSmall),
-              const SizedBox(height: 12),
-              Text(
-                '与桌面端共用 spb_core / spb_models / spb_api / spb_domain /\n'
-                'spb_design / spb_ui / spb_features。\n\n'
-                '差异收敛在 spb_platform（桌面能力为空实现）。',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium,
-              ),
-            ],
-          ),
-        ),
-      ),
+      routerConfig: _router,
     );
   }
 }
