@@ -1,57 +1,60 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
 import 'package:spb_design/spb_design.dart';
+
+import 'router.dart';
 
 /// 应用根组件。
 ///
-/// 当前为 M0 骨架：只渲染一个状态页，用于验证
-/// 「依赖解析 + 分层编译 + 桌面窗口能起来」。
-/// 真实路由（go_router）与页面在 M1 接入 `spb_features`。
-class SpbDesktopApp extends StatelessWidget {
-  const SpbDesktopApp({super.key});
+/// 路由表由 [createDesktopRouter] 提供；页面本身在 `spb_features`。
+/// 本文件只负责「装配」：主题 + 路由 + 标题。
+///
+/// ## 为什么 router 在 build 里创建（而不是 `late final` 字段）
+///
+/// `GoRouter` 持有一个 `Navigator` 与路由栈。若在 `StatelessWidget` 的字段里
+/// 创建，热重载或父级 rebuild 会产生**新的** GoRouter 实例，导致导航栈被重置
+/// （用户会看到页面莫名跳回首页）。
+///
+/// [SpbDesktopApp] 自身几乎不会 rebuild（它是 `runApp` 的根），但
+/// [createDesktopRouter] 的调用点应保持唯一且稳定，故用 `StatefulWidget`
+/// 在 `initState` 里创建一次。
+class SpbDesktopApp extends StatefulWidget {
+  const SpbDesktopApp({super.key, this.router});
+
+  /// 可选的外部路由实例（测试用）。
+  ///
+  /// 测试需要主动导航（如验证 `/quick-capture` 可达），而 router 若在内部
+  /// 创建就无法从外部拿到。提供这个钩子比在测试里靠 `GoRouter.of(context)`
+  /// 反查更直接、也更稳定（不依赖 widget 树结构）。
+  ///
+  /// 生产为 null，由内部创建。
+  final GoRouter? router;
+
+  @override
+  State<SpbDesktopApp> createState() => _SpbDesktopAppState();
+}
+
+class _SpbDesktopAppState extends State<SpbDesktopApp> {
+  late final GoRouter _router = widget.router ?? createDesktopRouter();
+
+  /// 外部传入的 router 由传入方负责 dispose（生命周期不属于本组件）。
+  late final bool _ownsRouter = widget.router == null;
+
+  @override
+  void dispose() {
+    if (_ownsRouter) _router.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return MaterialApp.router(
       title: 'Super PartyB',
       debugShowCheckedModeBanner: false,
       theme: SpbTheme.light(),
       darkTheme: SpbTheme.dark(),
-      home: const _ScaffoldPage(),
-    );
-  }
-}
-
-class _ScaffoldPage extends StatelessWidget {
-  const _ScaffoldPage();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Super PartyB'), centerTitle: false),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('桌面端骨架已就绪', style: theme.textTheme.headlineSmall),
-              const SizedBox(height: 12),
-              Text(
-                'M0 阶段目标：验证分层架构可编译、依赖可解析、'
-                '桌面窗口能启动。\n\n'
-                '下一步接入：\n'
-                '  • OIDC PKCE 登录（经 api-gateway）\n'
-                '  • SSE 实时对话流\n'
-                '  • 多窗口 + 托盘 + 全局快捷键\n'
-                '  • 交付物同步',
-                style: theme.textTheme.bodyMedium,
-              ),
-            ],
-          ),
-        ),
-      ),
+      routerConfig: _router,
     );
   }
 }
