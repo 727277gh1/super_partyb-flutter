@@ -19,3 +19,7 @@ dependencies:
 dev_dependencies:
   lints: ^6.0.0
   test: ^1.25.0
+  # 测试用：构造真实 ChatApi（依赖 dio 类型）并 mock HTTP 响应。
+  # 声明为 dev_dependencies 而非依赖传递，避免 analyzer 报 depend_on_referenced_packages。
+  dio: ^5.7.0
+  http_mock_adapter: ^0.6.1
