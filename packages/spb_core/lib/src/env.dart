@@ -44,6 +44,41 @@ class SpbEnv {
     defaultValue: 'dev',
   );
 
+  // ==================== OIDC ====================
+  //
+  // ⚠️ 实测结论见 `docs/oidc-verification.md`：生产链路的 OIDC 由**网关托管**
+  // （`GET /auth/oidc/authorize` 生成授权 URL 并持有 code_verifier），
+  // 且 IdP 对 `redirect_uri` 做**精确匹配**，只认预注册的三个网关回调。
+  // 因此 [oidcRedirectUri] 在生产下必须是网关回调地址，**不能**改成自定义
+  // scheme 或 loopback（两者都会被 IdP 以 400 invalid_request 拒绝）。
+
+  /// OIDC issuer（IdP 基地址，含 basePath）。
+  ///
+  /// 生产：`https://app.example.com/idp`（经网关访问 IdP）。
+  static const String oidcIssuer = String.fromEnvironment(
+    'SPB_OIDC_ISSUER',
+    defaultValue: 'http://127.0.0.1:3000/idp',
+  );
+
+  /// OIDC client_id。
+  ///
+  /// 默认空串表示「未配置」——没有普适的本地默认值，必须由构建方显式注入
+  /// （`--dart-define=SPB_OIDC_CLIENT_ID=...`）。client_id 是公开值
+  /// （会出现在授权 URL 里），但仍不硬编码，以免与部署侧漂移。
+  static const String oidcClientId = String.fromEnvironment(
+    'SPB_OIDC_CLIENT_ID',
+    defaultValue: '',
+  );
+
+  /// OIDC redirect_uri。
+  ///
+  /// **必须是 IdP 已注册的值**（精确匹配，见 `docs/oidc-verification.md`）。
+  /// 生产：`https://app.example.com/auth/oidc/callback`。
+  static const String oidcRedirectUri = String.fromEnvironment(
+    'SPB_OIDC_REDIRECT_URI',
+    defaultValue: 'http://127.0.0.1:9000/auth/oidc/callback',
+  );
+
   /// 是否启用详细日志（含 HTTP 请求体、SSE 原始帧）。
   static const bool verboseLogging = bool.fromEnvironment(
     'SPB_VERBOSE_LOG',
