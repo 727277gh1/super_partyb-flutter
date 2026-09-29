@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:spb_core/spb_core.dart';
 
 // mapDioError 与 AuthInterceptor 同文件（auth_interceptor.dart）。
 import 'auth_interceptor.dart';
@@ -36,18 +37,38 @@ Dio createDio({
       },
       // 不让 dio 对 4xx/5xx 抛异常——统一在拦截器里转成 SpbError，
       // 使调用方只需 catch 一种类型。
-      validateStatus: (status) => status != null && status < 500,
+      //
+      // **例外：401 / 403 必须抛。** 否则它们到不了 `onError` 拦截器，
+      // 也就无从「刷新凭证后重放请求」；且各 API 方法得各自判状态码
+      // （`validateStatus` 放行的 4xx 不会抛，`_unwrap` 才会补判）。
+      // 把这两个码排除在外，等于把认证失败收敛到一条链路上。
+      validateStatus: (status) =>
+          status != null &&
+          status < 500 &&
+          status != 401 &&
+          status != 403,
     ),
   );
 
   dio.interceptors.addAll(interceptors);
 
   // 错误映射拦截器放在最后，保证它看到的是其余拦截器处理后的状态。
+  //
+  // ⚠️ 传入的 interceptors 里若有 `AuthInterceptor`，它已经处理过 401
+  // （刷新重放或归一化为 AuthError），这里只兜底 5xx 与网络层失败。
   dio.interceptors.add(
     InterceptorsWrapper(
       onError: (e, handler) {
         // 5xx 由 validateStatus 放行到这里（>=500 不通过校验）。
         // 统一转成 SpbError 后以 DioException 的 error 字段向上传递。
+        //
+        // 若上游拦截器已把 SpbError 放进 `e.error`，不要覆盖它
+        // （否则 AuthError 会被降级成 HttpError，上层就分不清
+        // 「该重新登录」与「该重试」了）。
+        if (e.error is SpbError) {
+          handler.next(e);
+          return;
+        }
         final mapped = mapDioError(e);
         handler.reject(
           DioException(

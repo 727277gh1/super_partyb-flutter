@@ -4,7 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
-/// 认证头注入器。
+/// 认证头注入器 + 401/403 归一化 + 刷新后重放。
 ///
 /// ## 认证模型（重要）
 ///
@@ -18,11 +18,16 @@ import 'package:spb_models/spb_models.dart';
 /// ⚠️ **绝不缓存 user_id 到持久化存储并当作身份真源**：它是网关注入的结果，
 /// 客户端侧的值只用于拼 URL 路径（`/users/:user_id/chat/*`）。
 class AuthInterceptor extends Interceptor {
-  AuthInterceptor({required this.tokenProvider, this.userHeaderOverride});
+  AuthInterceptor({
+    required this.tokenProvider,
+    this.userHeaderOverride,
+    this.onUnauthorized,
+  });
 
   /// 异步获取当前会话凭证（OIDC access token / session cookie）。
   ///
   /// 用回调而非直接持有 token：token 会过期并刷新，持有快照会用到陈旧值。
+  /// 通常由 `SessionManager.currentAccessToken` 实现（内含过期前刷新）。
   final Future<String?> Function() tokenProvider;
 
   /// 开发态直连 Go API 时手工指定的 `X-User-ID`。
@@ -30,6 +35,32 @@ class AuthInterceptor extends Interceptor {
   /// **生产必须为 null**——若生产也设置，等于允许客户端自选身份，
   /// 会绕过网关的认证。网关模式下这个头由网关覆盖写入。
   final String? userHeaderOverride;
+
+  /// 401 时的刷新回调。返回 true 表示已刷新，可重放原请求。
+  ///
+  /// 由 `SessionManager.refresh` 实现。为 null 时不做刷新，401 直接归一化为
+  /// [AuthError]。
+  final Future<bool> Function()? onUnauthorized;
+
+  /// 重放请求用的 Dio。
+  ///
+  /// ## 为什么是可变字段而非构造参数
+  ///
+  /// 它必须是**同一个** Dio（否则会丢掉连接池与其余拦截器），而本拦截器又是
+  /// 该 Dio 的构造参数之一——直接传参会形成循环。故由 `createDio` 的调用方在
+  /// 构造后立即回填（见两端 `providers.dart`）：
+  ///
+  /// ```dart
+  /// final auth = AuthInterceptor(...);
+  /// final dio = createDio(interceptors: [auth]);
+  /// auth.replayDio = dio;
+  /// ```
+  ///
+  /// 为 null 时（如单测直接构造拦截器）不重放，401 归一化为 [AuthError]。
+  Dio? replayDio;
+
+  /// 标记「已重放过一次」，防止刷新后仍 401 造成无限循环。
+  static const String _retriedKey = 'spb_auth_retried';
 
   @override
   void onRequest(
@@ -55,14 +86,82 @@ class AuthInterceptor extends Interceptor {
   }
 
   @override
-  void onError(DioException err, ErrorInterceptorHandler handler) {
+  void onError(DioException err, ErrorInterceptorHandler handler) async {
     final status = err.response?.statusCode;
+
+    // 只有 401 值得刷新：403 是「已认证但无权限」，刷新 token 也变不出权限。
     if (status == 401) {
+      final refreshed = await _tryRefreshAndReplay(err, handler);
+      if (refreshed) return;
       SpbLog.warn('收到 401，会话凭证可能已失效');
-      // 不在此处自动刷新/跳登录：拦截器不应有导航副作用（可能同时多个请求触发）。
+      // 不在此处自动跳登录：拦截器不应有导航副作用（可能同时多个请求触发）。
       // 由上层统一监听 AuthError 并跳转登录页。
     }
-    handler.next(err);
+
+    handler.next(_normalizeAuthError(err));
+  }
+
+  /// 刷新凭证并重放原请求。返回 true 表示已 resolve（调用方不应再继续处理）。
+  Future<bool> _tryRefreshAndReplay(
+    DioException err,
+    ErrorInterceptorHandler handler,
+  ) async {
+    final refresh = onUnauthorized;
+    final dio = replayDio;
+    if (refresh == null || dio == null) return false;
+    if (err.requestOptions.extra[_retriedKey] == true) return false;
+
+    bool refreshed;
+    try {
+      refreshed = await refresh();
+    } catch (e) {
+      SpbLog.warn('刷新会话凭证时异常', {'error': e.toString()});
+      return false;
+    }
+    if (!refreshed) return false;
+
+    // 重放：复制原请求并把新 token 交给 onRequest 重新注入。
+    // 打上标记避免「刷新成功但服务端仍 401」时无限循环。
+    final options = err.requestOptions
+      ..extra[_retriedKey] = true
+      // 清掉旧 Authorization，否则 onRequest 覆盖前会先带上过期值。
+      ..headers.remove('Authorization');
+
+    try {
+      final response = await dio.fetch<dynamic>(options);
+      SpbLog.debug('401 后刷新凭证并重放成功', {'path': options.path});
+      handler.resolve(response);
+      return true;
+    } on DioException catch (e) {
+      // 重放也失败：按重放响应归一化（它带着更准确的状态码）。
+      handler.next(_normalizeAuthError(e));
+      return true;
+    }
+  }
+
+  /// 把 401/403 归一化为 [AuthError]。
+  ///
+  /// ## 为什么不复用 [HttpError]
+  ///
+  /// 上层对 401 的处置是「跳登录页」而非「重试请求」。若沿用 `HttpError`，
+  /// UI 只能靠 `statusCode == 401` 判断；归一化成 [AuthError] 后，
+  /// 监听一种类型即可（见 `packages/spb_core/lib/src/errors.dart` 的说明）。
+  static DioException _normalizeAuthError(DioException err) {
+    final status = err.response?.statusCode;
+    if (status != 401 && status != 403) return err;
+
+    final mapped = AuthError(
+      status == 401 ? '会话已失效，请重新登录' : '没有权限执行该操作',
+      statusCode: status,
+      cause: err,
+    );
+    return DioException(
+      requestOptions: err.requestOptions,
+      response: err.response,
+      type: err.type,
+      error: mapped,
+      stackTrace: err.stackTrace,
+    );
   }
 }
 
@@ -87,6 +186,14 @@ SpbError mapDioError(DioException e) {
       return NetworkError('响应处理超时', cause: e, retryable: false);
     case DioExceptionType.badResponse:
       final status = e.response?.statusCode ?? 0;
+      // 401/403 是「凭证问题」而非「请求问题」：归为 AuthError 让上层能区分
+      // 「该重新登录」与「该重试」。否则 UI 会把会话过期显示成「HTTP 401」。
+      if (status == 401) {
+        return AuthError('会话已失效，请重新登录', statusCode: 401, cause: e);
+      }
+      if (status == 403) {
+        return AuthError('没有权限执行该操作', statusCode: 403, cause: e);
+      }
       return HttpError(
         status,
         'HTTP $status',

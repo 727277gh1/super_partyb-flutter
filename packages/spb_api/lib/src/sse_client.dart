@@ -207,7 +207,9 @@ class SseClient {
     } on DioException catch (e) {
       final mapped = mapDioError(e);
       // 401/403 属不可恢复：重连只会重复被拒，直接置 failed 让上层跳登录。
-      if (mapped is HttpError &&
+      // 用 [AuthError] 判定（不是 `HttpError.isUnauthorized`）：认证失败在
+      // `mapDioError` 里已统一归为 AuthError，见 `auth_interceptor.dart`。
+      if (mapped is AuthError &&
           (mapped.isUnauthorized || mapped.isForbidden)) {
         SpbLog.warn('SSE 认证失败，停止重连', {'status': mapped.statusCode});
         _setState(SseState.failed);
