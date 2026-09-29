@@ -453,11 +453,29 @@ final chatStreamControllerProvider = Provider.autoDispose
       return controller;
     });
 
-/// 无归属入口用例（悬浮输入窗用）。
+/// 无归属入口用例（悬浮输入窗用，纯文本）。
 ///
 /// 不 autoDispose：它无状态，只包一个 `ChatApi`，重建没有意义。
 final quickCaptureUseCaseProvider = Provider<QuickCaptureUseCase>((ref) {
   return QuickCaptureUseCase(ref.watch(chatApiProvider));
+});
+
+/// 无归属入口用例（**带附件**，走 mq-server 通用入站渠道）。
+///
+/// 与 [quickCaptureUseCaseProvider] 的差别：本用例支持附件（上传 → 投递两步），
+/// 但投递是异步的，拿不到 groupId。见 `QuickCaptureEnqueueUseCase` 的文档。
+final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>((
+  ref,
+) {
+  return QuickCaptureEnqueueUseCase(ref.watch(chatApiProvider));
+});
+
+/// 文件拖入能力（桌面端为真实实现，移动端注入空实现）。
+///
+/// 由 `main.dart` 的 bootstrap 覆盖：这里给默认值让测试与「忘记覆盖」的
+/// 场景退化为「不支持拖拽」而不是崩溃。
+final dragDropCapabilityProvider = Provider<DragDropCapability>((ref) {
+  return const NoopDragDropCapability();
 });
 
 // ==================== 交付物同步 ====================

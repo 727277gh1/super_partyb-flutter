@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'app.dart';
 import 'bootstrap.dart';
@@ -37,7 +38,14 @@ Future<void> main() async {
 
   runApp(
     ProviderScope(
-      overrides: [desktopCapabilitiesProvider.overrideWithValue(capabilities)],
+      overrides: [
+        desktopCapabilitiesProvider.overrideWithValue(capabilities),
+        // 拖拽能力仅在桌面端真实可用：移动端保留 Provider 默认的
+        // NoopDragDropCapability（见 providers.dart），UI 只需判 isSupported。
+        dragDropCapabilityProvider.overrideWithValue(
+          const DesktopDragDropCapability(),
+        ),
+      ],
       child: const SpbDesktopApp(),
     ),
   );

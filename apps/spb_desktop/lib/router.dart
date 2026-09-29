@@ -18,6 +18,13 @@ class SpbRoutes {
   static const settings = '/settings';
   static const quickCapture = '/quick-capture';
 
+  /// 全局悬浮输入窗（带附件）。
+  ///
+  /// 与 [quickCapture] 并存而不是取代它：两者走不同端点，返回语义不同
+  /// （见 `OverlayQuickCapturePage` 的类文档）。保留旧路由是为了不破坏
+  /// 已有的调试入口与移动端行为。
+  static const overlay = '/overlay';
+
   /// 交付物同步页。
   ///
   /// 桌面端相对 webapp 的**核心差异价值**：把交付物真文件拉到磁盘上，
@@ -151,6 +158,10 @@ List<RouteBase> buildDesktopRoutes() {
         GoRoute(
           path: 'quick-capture',
           builder: (context, state) => const _QuickCapturePage(),
+        ),
+        GoRoute(
+          path: 'overlay',
+          builder: (context, state) => const _OverlayQuickCapturePage(),
         ),
       ],
     ),
@@ -465,6 +476,44 @@ class _QuickCapturePage extends ConsumerWidget {
         if (context.mounted) context.go(SpbRoutes.chat(outcome.groupId));
       },
       onCancel: () {
+        // 独立窗口下应关窗；主窗口内的调试入口则退回列表。
+        if (context.mounted) context.go(SpbRoutes.home);
+      },
+    );
+  }
+}
+
+/// 全局悬浮输入窗（带附件）。
+///
+/// 生产环境的真实悬浮窗是**独立窗口**（`WindowSpec.quickCapture`）；
+/// 此路由用于在无多窗口能力时（或作为主窗口内的调试入口）渲染同一页面。
+///
+/// ## 为什么用 enqueue 而非 quick-capture
+///
+/// 只有 enqueue 支持附件（附件的「落用户级暂存区 → 建 turn 时搬进 workspace」
+/// 这条链路只存在于 MQ 渠道）。纯文本场景两者等价，但同一入口不应因有无附件
+/// 而改变返回语义，故统一走 enqueue。
+///
+/// ## 为什么提交成功后不导航
+///
+/// enqueue 是异步投递（worker 消费后才建 turn），本页拿不到 groupId。
+/// 结果由主窗口订阅 SSE 呈现——用户可以在主窗口看到新对话出现。
+class _OverlayQuickCapturePage extends ConsumerWidget {
+  const _OverlayQuickCapturePage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final useCase = ref.watch(quickCaptureEnqueueUseCaseProvider);
+
+    return OverlayQuickCapturePage(
+      submit: ({required input, required attachments, onUploadProgress}) =>
+          useCase.submit(
+            input: input,
+            attachments: attachments,
+            onUploadProgress: onUploadProgress,
+          ),
+      dragDrop: ref.watch(dragDropCapabilityProvider),
+      onClose: () {
         // 独立窗口下应关窗；主窗口内的调试入口则退回列表。
         if (context.mounted) context.go(SpbRoutes.home);
       },

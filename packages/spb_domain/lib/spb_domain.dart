@@ -11,6 +11,9 @@ library;
 //   ConversationItem              —— 可渲染项 sealed 家族（User/Assistant/Tool/…）
 //   QuickCaptureUseCase           —— 无归属入口提交用例（走 ChatApi.quickCapture）
 //   QuickCaptureOutcome           —— 提交结果 sealed 家族（Queued/FeedbackRecorded/Unknown）
+//   QuickCaptureEnqueueUseCase    —— 带附件的无归属入口用例（上传→投递两步，走 MQ 渠道）
+//   QuickCaptureAttachment        —— 待发送附件（字节 + 文件名，来源无关）
+//   QuickCaptureEnqueueResult     —— 部分失败语义的提交结果（delivered/uploaded/failedUploads）
 //   SyncStateStore                —— 交付物同步状态契约（key → 游标 + etag 记录）
 //   SyncState / SyncedFile        —— 同步状态值类型
 //   workspaceStateKey             —— 「全部/选中若干 group」共用的状态键
@@ -29,6 +32,7 @@ export 'src/conversation_item.dart';
 export 'src/deliverable_sync.dart';
 export 'src/deliverable_sync_usecase.dart';
 export 'src/event_reducer.dart';
+export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';

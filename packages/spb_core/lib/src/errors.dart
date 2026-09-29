@@ -105,3 +105,15 @@ final class StorageError extends SpbError {
 final class PlatformError extends SpbError {
   const PlatformError(super.message, {super.cause, super.stackTrace});
 }
+
+/// 输入不满足业务前置条件（本地校验失败，**未发起网络请求**）。
+///
+/// WHY 需要单独一个类型：它与 [HttpError] 的 4xx 看起来都是「请求不合法」，
+/// 但成因完全不同：
+///   - [ValidationError]：客户端自己就能判定（如「输入与附件都为空」），
+///     重试无意义，应直接引导用户改输入；
+///   - [HttpError] 4xx：服务端拒绝了请求，可能是契约漂移，需要看 body 排查。
+/// 混为一谈会让「空输入」这种小事在日志里看起来像服务端故障。
+final class ValidationError extends SpbError {
+  const ValidationError(super.message, {super.cause, super.stackTrace});
+}

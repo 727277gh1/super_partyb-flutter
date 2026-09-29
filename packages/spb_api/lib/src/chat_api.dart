@@ -267,6 +267,75 @@ class ChatApi {
     return QuickCaptureResult.fromJson(_asMap(res));
   }
 
+  /// `POST /me/quick-capture/attachments` —— 上传附件到通用入站暂存区。
+  ///
+  /// ## 为什么先上传再投递（两个请求）
+  ///
+  /// 入队接口只接受**元数据**（download_url），字节必须先落盘。这不是设计缺陷：
+  /// 附件可达 50 MiB，塞进消息体会让它被 json.Marshal 写进 mq-server 的 WAL，
+  /// 且 at-least-once 下每次重投都重复传输同一份字节。
+  ///
+  /// ## 为什么只传文件名/字节，不传 URL
+  ///
+  /// 服务端（PartyB）会带着自己的服务级 Bearer 去下载这个 URL。若由客户端指定
+  /// URL，就出现了一个 SSRF 面（可指向任意内网地址）。故本方法只传字节，
+  /// download_url 由服务端拼装。
+  ///
+  /// 返回 [QuickCaptureUpload]，其中 [QuickCaptureUpload.fileName] 要填进
+  /// [enqueueQuickCapture] 的 `attachments`。
+  Future<QuickCaptureUpload> uploadQuickCaptureAttachment({
+    required List<int> bytes,
+    required String filename,
+    String? contentType,
+  }) async {
+    try {
+      final form = FormData.fromMap({
+        'file': MultipartFile.fromBytes(
+          bytes,
+          filename: filename,
+          contentType: contentType == null
+              ? null
+              : DioMediaType.parse(contentType),
+        ),
+      });
+      final res = await _dio.post('/me/quick-capture/attachments', data: form);
+      return QuickCaptureUpload.fromJson(_asMap(_unwrap(res)));
+    } on DioException catch (e) {
+      throw _toSpbError(e);
+    }
+  }
+
+  /// `POST /me/quick-capture/enqueue` —— 把（可带附件的）消息投进 mq-server 队列。
+  ///
+  /// ## 与 [quickCapture] 的差别
+  ///
+  /// 语义相同（无归属入口），差别有二：
+  ///
+  /// | | `/me/quick-capture` | `/me/quick-capture/enqueue` |
+  /// |---|---|---|
+  /// | 链路 | 直接走 chatpipeline | 投进 mq-server 队列，由 worker 消费 |
+  /// | 附件 | ❌ | ✅ |
+  /// | 返回 | `group_id`（可导航） | 仅 202 受理 |
+  ///
+  /// ## 为什么不返回 group_id（调用方不能据此导航）
+  ///
+  /// 归属判定发生在 worker 侧，是**异步**的。本端点只保证「投递已受理」。
+  /// 需要立即导航的场景应用 [quickCapture]（但它不支持附件）。
+  ///
+  /// 客户端观察结果的方式是订阅 SSE（与其它异步 turn 一致）。
+  Future<void> enqueueQuickCapture({
+    String input = '',
+    List<String> attachments = const [],
+  }) async {
+    await _post(
+      '/me/quick-capture/enqueue',
+      body: {
+        'input': input,
+        if (attachments.isNotEmpty) 'attachments': attachments,
+      },
+    );
+  }
+
   // ==================== 当前用户 ====================
 
   /// `GET /api/auth/me` —— 取当前登录用户。
@@ -670,4 +739,53 @@ class CurrentUser {
 
   @override
   String toString() => 'CurrentUser($id, roles=$roles)';
+}
+
+/// `POST /me/quick-capture/attachments` 的响应。
+///
+/// 只保留客户端真正要用的字段：`file_name` 要回填进
+/// [ChatApi.enqueueQuickCapture] 的 `attachments`，其余供 UI 展示进度/预览。
+class QuickCaptureUpload {
+  const QuickCaptureUpload({
+    required this.fileName,
+    required this.downloadUrl,
+    this.size = 0,
+    this.mimeType,
+  });
+
+  /// 服务端生成的安全文件名（**不是**用户原始文件名）。
+  ///
+  /// 命名规则为 `<纳秒时间戳>_<8位随机hex>_<安全化原名>`，服务端据此校验
+  /// 归属（见 mq-server 的 looksLikeUploadName）。故客户端必须原样回传，
+  /// 不能自行拼装或改名。
+  final String fileName;
+
+  /// 服务端拼装的相对地址（`/api/v1/inbound/uploads/<file_name>`）。
+  ///
+  /// 客户端**不传**这个值给入队接口（只传 [fileName]）：若允许客户端指定
+  /// URL，服务端就会带着自己的 Bearer 去下载任意地址（SSRF 面）。
+  final String downloadUrl;
+
+  /// 字节数。
+  final int size;
+
+  /// 服务端回显的 MIME 类型（可能为空）。
+  final String? mimeType;
+
+  factory QuickCaptureUpload.fromJson(Map<String, dynamic> json) =>
+      QuickCaptureUpload(
+        fileName: (json['file_name'] ?? '').toString(),
+        downloadUrl: (json['download_url'] ?? '').toString(),
+        size: (json['size'] as num?)?.toInt() ?? 0,
+        mimeType: json['mime_type'] as String?,
+      );
+
+  /// 上传是否拿到了可用的文件名。
+  ///
+  /// 为 false 时不应把它放进 enqueue 的 attachments——服务端会 400
+  /// （附件名不能为空/不合法）。
+  bool get isValid => fileName.isNotEmpty;
+
+  @override
+  String toString() => 'QuickCaptureUpload($fileName, $size bytes)';
 }

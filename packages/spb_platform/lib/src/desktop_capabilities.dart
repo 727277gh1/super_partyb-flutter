@@ -47,9 +47,10 @@ class WindowSpec {
   final bool resizable;
   final bool show;
 
-  /// 悬浮输入窗的标准配置。
+  /// 悬浮输入窗的标准配置（**纯文本**，无附件）。
   ///
   /// 尺寸偏小且置顶，符合「一句话输入」的用途。
+  /// 带附件的版本见 [quickCaptureWithAttachments]。
   static const quickCapture = WindowSpec(
     role: WindowRole.quickCapture,
     title: '快速输入',
@@ -60,6 +61,36 @@ class WindowSpec {
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
+  );
+
+  /// 悬浮输入窗（**支持附件拖入**）的配置。
+  ///
+  /// # 为什么需要单独一个 spec 而不是把 quickCapture 改高
+  ///
+  /// [quickCapture] 的高度（132）是按「一行输入 + 一行提示」算出来的，
+  /// 且该尺寸被 `quick_capture_page_test.dart` 断言为「输入框必须单行」。
+  /// 带附件的窗口需要额外容纳：
+  ///   - 附件 chip 行（至少一行，约 32px）
+  ///   - 多行输入（最多 4 行，约 96px）
+  /// 直接改 quickCapture 会让那条断言失效，也会让不需要附件的场景白白占屏幕。
+  ///
+  /// # 尺寸取值的依据
+  ///
+  /// 高 320：一行 chip（32）+ 四行输入（约 96）+ 状态行（20）+ 按钮行（36）
+  /// + 内边距（约 40）+ 余量。留余量是因为字体/DPI 缩放会让实际高度浮动
+  /// （Flutter 的逻辑像素在不同 DPI 下对应的物理高度不同）。
+  /// 高 360 允许窗口被用户拖高一点；宽 720 让附件 chip 能并排放下两个。
+  static const quickCaptureWithAttachments = WindowSpec(
+    role: WindowRole.quickCapture,
+    title: '快速输入',
+    width: 720,
+    height: 360,
+    minWidth: 560,
+    minHeight: 240,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    // 允许用户拖高：附件多时 chip 会换行，固定高度会把输入框挤没。
+    resizable: true,
   );
 
   /// 设置窗配置（单实例，固定尺寸）。

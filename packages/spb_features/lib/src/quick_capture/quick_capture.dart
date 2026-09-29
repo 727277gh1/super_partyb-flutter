@@ -5,4 +5,5 @@
 /// [QuickCapturePage] 与 `QuickCaptureSubmit` 的说明。
 library;
 
+export 'overlay_quick_capture_page.dart';
 export 'quick_capture_page.dart';
