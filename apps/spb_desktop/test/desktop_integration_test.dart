@@ -357,6 +357,28 @@ void main() {
       expect(router.state.uri.path, SpbRoutes.settings);
     });
 
+    testWidgets('hideWindow(quickCapture) 会还原窗口（否则主界面挤在小置顶窗里）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+      expect(caps.isOverlayModeActive, isTrue);
+
+      caps.hideCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.home);
+      expect(
+        caps.isOverlayModeActive,
+        isFalse,
+        reason: '只导航不还原的话，窗口会一直保持 720x360 置顶且再也放不大',
+      );
+    });
+
     testWidgets('hideWindow(quickCapture) 回到主界面', (tester) async {
       final caps = _WiringCapabilities();
       final router = _testRouter(initialLocation: SpbRoutes.overlay);

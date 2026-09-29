@@ -188,8 +188,14 @@ class DesktopIntegration {
   ///
   /// 单窗口下，隐藏覆盖式页面（设置/悬浮窗）= 回到主界面。
   /// 主窗口本身不隐藏——那会让应用看起来退出了。
-  void _onHideWindow(WindowRole role) {
+  Future<void> _onHideWindow(WindowRole role) async {
     if (role == WindowRole.main) return;
+    // ## 为什么必须还原窗口
+    //
+    // 隐藏悬浮窗若只导航回主界面，窗口会**保持** 720×360 置顶——用户看到的
+    // 是主界面挤在一个小置顶窗里，且再也放不大（除非重启）。
+    // 这条路径与 `leaveOverlay` 是两回事，别漏。
+    await _exitOverlayWindow();
     if (_router.state.uri.path == SpbRoutes.home) return;
     _router.go(SpbRoutes.home);
   }
