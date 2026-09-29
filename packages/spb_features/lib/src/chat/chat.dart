@@ -3,9 +3,15 @@
 /// ## 分层职责
 ///
 /// 本目录只做**渲染与交互**：消费 `spb_domain` 的归约结果（`ConversationItem`），
-/// 调 `spb_domain` 的控制器/用例发送。**不含**归约逻辑、不含 HTTP 调用
-/// （除 [GroupListPage] 直接调 `ChatApi.listGroups`——那是纯列表拉取，
-/// 没有领域规则可放）。
+/// 调 `spb_domain` 的控制器/用例发送。**不含**归约逻辑。
+///
+/// HTTP 调用只有两处，都是**薄适配**（没有可复用的领域规则）：
+/// - [GroupListPage] 直接调 `ChatApi.listGroups`（纯列表拉取）；
+/// - [GroupManagementUseCase] 把 [GroupAction] 翻译成 `ChatApi` 的四个写端点。
+///
+/// 后者放在本包而非 `spb_domain` 的原因：它是**两个 app 共用的 UI 级适配**
+/// （响应形状归一化 + 错误分类），且 `spb_features` 已经依赖 `spb_api`。
+/// 真正的领域规则（如「失败项不写状态」）仍在 `spb_domain`。
 ///
 /// ## 设计令牌
 ///
@@ -17,8 +23,11 @@ export 'assistant_message_bubble.dart';
 export 'confirmation_card.dart';
 export 'conversation_page.dart';
 export 'follow_up_chips.dart';
+export 'group_management.dart';
 export 'group_list_page.dart';
 export 'message_composer.dart';
+export 'pending_messages_bar.dart';
+export 'search_page.dart';
 export 'thought_tile.dart';
 export 'tool_call_tile.dart';
 export 'user_message_bubble.dart';

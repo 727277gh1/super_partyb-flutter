@@ -1,0 +1,919 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'package:spb_core/spb_core.dart';
+import 'package:spb_design/spb_design.dart';
+import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
+import 'package:spb_platform/spb_platform.dart';
+
+/// 弹出目录选择器。返回 null = 用户取消。
+typedef PickSettingsDirectory = Future<String?> Function();
+
+/// 读取已保存的同步设置。
+typedef LoadSyncSettings = Future<SyncSettings> Function();
+
+/// 保存同步设置（**一次性提交全部字段**）。
+///
+/// ## 为什么是「整份提交」而不是「逐字段 setter」
+///
+/// 「换目录必须重置同步状态」要求目录写入与状态清空**在同一事务**里完成。
+/// 若暴露成 `setLocalRoot` / `setScope` / `setIncludeMedia` 三个 setter，调用方
+/// 就得自己保证「先改目录再清状态」，而漏掉一步就会出现「目录已改、状态没清」
+/// → 「换目录后同步显示成功，但新目录是空的」。
+///
+/// 收成一个入口后，事务边界由实现方（app 装配层）决定，页面无从破坏它。
+typedef SaveSyncSettings = Future<void> Function(SyncSettings settings);
+
+/// 读取可勾选的对话列表（同步范围用）。
+typedef LoadSyncGroups = Future<List<ChatGroup>> Function();
+
+/// 扫描本地同步目录（清理与统计用）。
+typedef ScanLocalGroups = Future<List<LocalGroupStats>> Function();
+
+/// 执行清理计划。
+typedef ExecutePrune = Future<PruneOutcome> Function(PrunePlan plan);
+
+/// 「全部删除」在清理策略对话框里的哨兵值。
+///
+/// 用哨兵而非第二个布尔变量：三个选项因此共用同一个 `RadioGroup<int>`，
+/// 选中状态只有一处真源，不会出现「天数与全部同时选中」的矛盾态。
+const int _pruneAllSentinel = -1;
+
+/// 设置页。
+///
+/// ## 页面职责边界
+///
+/// - **只负责**渲染与表单交互：目录、范围、过滤、清理、本地统计；
+/// - **不负责**持久化、网络、磁盘——全部由注入的回调完成。
+///
+/// 这一分工与 [LoginPage] / [SyncPage] 一致：页面因此可以在无数据库、无网络、
+/// 无平台插件的 widget test 里完整验证。
+///
+/// ## 表单语义：改动先留在内存，保存才落盘
+///
+/// 用户可能连着改好几项（换目录 + 关媒体 + 调上限），期望它们**一起生效**。
+/// 若每项即时落盘，用户改到一半退出就会留下混合状态（新目录 + 旧范围），
+/// 而其中「目录」这一项还牵扯到状态重置事务。故本页维护一份 draft
+/// （[_draft]），只有点「保存」才调 [saveSettings]。
+///
+/// 「选目录」按钮同样只回填 draft——用户可能选错了想换一个，那时不该已经
+/// 把旧目录的状态清掉。
+///
+/// ## 桌面能力项的显示条件
+///
+/// 托盘 / 全局快捷键是桌面专属。移动端注入 [NoopDesktopCapabilities]
+/// （`isSupported == false`），此时**不展示**这些项——展示一堆点了没反应的
+/// 开关比不展示更糟。快捷键盘绑定文案取 [HotkeyBinding.quickCapture] 的
+/// `label`，避免把 `Alt+Space` 硬编码在页面里（改绑定时只需改一处）。
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({
+    super.key,
+    required this.loadSettings,
+    required this.saveSettings,
+    required this.loadGroups,
+    required this.scanGroups,
+    required this.executePrune,
+    required this.pickDirectory,
+    required this.capabilities,
+    this.onOpenSync,
+    this.title = '设置',
+  });
+
+  final LoadSyncSettings loadSettings;
+  final SaveSyncSettings saveSettings;
+  final LoadSyncGroups loadGroups;
+  final ScanLocalGroups scanGroups;
+  final ExecutePrune executePrune;
+  final PickSettingsDirectory pickDirectory;
+
+  /// 平台能力（决定是否展示托盘/快捷键项）。
+  final DesktopCapabilities capabilities;
+
+  /// 打开「交付物同步」页。
+  ///
+  /// 本页只做**配置**，真正跑同步的是独立的同步页（它有进度与结果展示，
+  /// 而配置是低频动作、同步是高频动作，合在一页会让用户每次同步都要滚过
+  /// 一堆表单）。null 表示不提供入口（该页面此时只能配置）。
+  final VoidCallback? onOpenSync;
+
+  final String title;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  /// 表单草稿（编辑中，未落盘）。
+  SyncSettings? _draft;
+
+  /// 已落盘的设置（用于判断「有未保存改动」）。
+  SyncSettings? _saved;
+
+  /// 可勾选的对话（懒加载：只有展开「勾选若干」时才拉）。
+  List<ChatGroup>? _groups;
+  bool _loadingGroups = false;
+  String? _groupsError;
+
+  /// 本地统计。
+  LocalSyncStats? _stats;
+  bool _loadingStats = false;
+
+  bool _loading = true;
+  bool _saving = false;
+  bool _pruning = false;
+  String? _error;
+
+  /// 「已保存」提示是否可见。
+  bool _savedHint = false;
+
+  /// 单文件上限输入框（MB）。用 TextEditingController 才能保留用户输入的
+  /// 中间态（如清空后重新输入），而受控于 draft 会把它立刻改写掉。
+  final _maxSizeController = TextEditingController();
+
+  bool get _dirty {
+    final d = _draft;
+    final s = _saved;
+    if (d == null || s == null) return false;
+    return d != s;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _maxSizeController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final settings = await widget.loadSettings();
+      if (!mounted) return;
+      setState(() {
+        _draft = settings;
+        _saved = settings;
+        _loading = false;
+        _syncMaxSizeField(settings);
+      });
+      // 统计与对话列表是次要信息：不阻塞首屏（分别单独加载）。
+      _loadStats();
+      if (!settings.scope.allGroups) _loadGroups();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '读取设置失败：$e';
+      });
+    }
+  }
+
+  void _syncMaxSizeField(SyncSettings s) {
+    final mb = s.filter.maxFileSize ~/ (1024 * 1024);
+    _maxSizeController.text = '$mb';
+  }
+
+  Future<void> _loadGroups() async {
+    if (_loadingGroups || _groups != null) return;
+    setState(() {
+      _loadingGroups = true;
+      _groupsError = null;
+    });
+    try {
+      final groups = await widget.loadGroups();
+      if (!mounted) return;
+      setState(() {
+        _groups = groups;
+        _loadingGroups = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingGroups = false;
+        _groupsError = '读取对话列表失败：$e';
+      });
+    }
+  }
+
+  Future<void> _loadStats() async {
+    final root = _draft?.localRoot;
+    if (root == null || root.trim().isEmpty) {
+      setState(() => _stats = LocalSyncStats.empty);
+      return;
+    }
+    setState(() => _loadingStats = true);
+    try {
+      final groups = await widget.scanGroups();
+      if (!mounted) return;
+      setState(() {
+        _stats = groups.isEmpty
+            ? LocalSyncStats.empty
+            : LocalSyncStats(
+                groupCount: groups.length,
+                fileCount: groups.fold(0, (s, g) => s + g.fileCount),
+                totalBytes: groups.fold(0, (s, g) => s + g.totalBytes),
+              );
+        _loadingStats = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      SpbLog.warn('统计本地同步目录失败', {'error': e.toString()});
+      setState(() {
+        _stats = LocalSyncStats.empty;
+        _loadingStats = false;
+      });
+    }
+  }
+
+  /// 选择目录：**只回填 draft**，不落盘、不动同步状态。
+  Future<void> _pickDirectory() async {
+    final draft = _draft;
+    if (draft == null) return;
+
+    String? picked;
+    try {
+      picked = await widget.pickDirectory();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '无法打开目录选择器：$e');
+      return;
+    }
+    if (!mounted) return;
+    // null = 用户取消：保持原目录不变（同 SyncPage 的语义）。
+    if (picked == null) return;
+
+    setState(() {
+      _draft = draft.copyWith(localRoot: picked);
+      _savedHint = false;
+      // 目录变了 → 旧统计描述的是旧目录，清掉等保存后重算。
+      _stats = null;
+    });
+  }
+
+  void _setScopeAll(bool all) {
+    final draft = _draft;
+    if (draft == null) return;
+    setState(() {
+      _draft = draft.copyWith(scope: draft.scope.copyWith(allGroups: all));
+      _savedHint = false;
+    });
+    // 展开勾选列表时才拉对话（避免默认「全部」也白拉一页）。
+    if (!all) _loadGroups();
+  }
+
+  void _toggleGroup(String groupId, bool selected) {
+    final draft = _draft;
+    if (draft == null) return;
+    final ids = List<String>.of(draft.scope.groupIds);
+    if (selected) {
+      ids.add(groupId);
+    } else {
+      ids.remove(groupId);
+    }
+    setState(() {
+      _draft = draft.copyWith(scope: draft.scope.copyWith(groupIds: ids));
+      _savedHint = false;
+    });
+  }
+
+  void _setIncludeMedia(bool value) {
+    final draft = _draft;
+    if (draft == null) return;
+    setState(() {
+      _draft = draft.copyWith(
+        filter: draft.filter.copyWith(includeMedia: value),
+      );
+      _savedHint = false;
+    });
+  }
+
+  void _setMaxSizeFromField(String raw) {
+    final draft = _draft;
+    if (draft == null) return;
+    final mb = int.tryParse(raw.trim());
+    // 空/非法输入：不改 draft（保存时会由 [_commitMaxSize] 用原值兜底），
+    // 也不报错——用户还在输入中。
+    if (mb == null || mb < 0) return;
+    setState(() {
+      _draft = draft.copyWith(
+        filter: draft.filter.copyWith(maxFileSize: mb * 1024 * 1024),
+      );
+      _savedHint = false;
+    });
+  }
+
+  void _setSinceDays(int? days) {
+    final draft = _draft;
+    if (draft == null) return;
+    setState(() {
+      _draft = draft.copyWith(
+        sinceDays: days,
+        clearSinceDays: days == null,
+      );
+      _savedHint = false;
+    });
+  }
+
+  Future<void> _save() async {
+    final draft = _draft;
+    if (draft == null || _saving) return;
+
+    setState(() {
+      _saving = true;
+      _error = null;
+      _savedHint = false;
+    });
+
+    try {
+      await widget.saveSettings(draft);
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _saved = draft;
+        _savedHint = true;
+      });
+      // 保存后重算统计：目录可能变了（旧统计已失效）。
+      _loadStats();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = '保存失败：$e';
+      });
+    }
+  }
+
+  /// 清理本地目录：选策略 → 预览计划 → 确认 → 执行。
+  Future<void> _prune() async {
+    final draft = _draft;
+    if (draft == null || _pruning) return;
+    if (!draft.hasLocalRoot) {
+      setState(() => _error = '请先选择同步目录');
+      return;
+    }
+
+    final policy = await _askPrunePolicy();
+    if (policy == null || !mounted) return; // 用户取消
+
+    setState(() => _error = null);
+
+    // ## 为什么「扫描 + 预览 + 确认」期间**不**显示进度
+    //
+    // 这段是同步的（扫描本地目录 + 纯函数算计划），耗时在毫秒级；而确认对话框
+    // 会一直等着用户点，此时转圈既没有信息量，又会让界面看起来「还在忙」。
+    // 进度只应该覆盖**真正在执行删除**的那一段。
+    try {
+      final groups = await widget.scanGroups();
+      if (!mounted) return;
+
+      // 计划是纯函数（domain），页面直接算——它只做「哪些有资格删」的规则，
+      // 不碰磁盘。
+      final plan = buildPrunePlan(groups: groups, policy: policy);
+      if (!mounted) return;
+
+      if (plan.isEmpty) {
+        setState(() => _error = '没有符合条件的历史数据需要清理');
+        return;
+      }
+
+      // 删除前必须确认，且文案含具体数量与体积。
+      final confirmed = await _confirmPrune(plan);
+      if (!mounted || confirmed != true) return;
+
+      setState(() => _pruning = true);
+      final outcome = await widget.executePrune(plan);
+      if (!mounted) return;
+      setState(() {
+        _pruning = false;
+        if (outcome.hasFailures) {
+          final first = outcome.failed.entries.first;
+          _error =
+              '清理完成：删除 ${outcome.deleted} 个，'
+              '${outcome.failed.length} 个失败（${first.key}：${first.value}）';
+        } else {
+          _savedHint = true;
+        }
+      });
+      _loadStats();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _pruning = false;
+        _error = '清理失败：$e';
+      });
+    }
+  }
+
+  /// 询问清理策略。
+  ///
+  /// ## 为什么用一个 [RadioGroup] 而不是三个 `groupValue`
+  ///
+  /// `RadioListTile.groupValue` / `onChanged` 在 Flutter 3.32 起已弃用，改由
+  /// 祖先 [RadioGroup] 统一持有选中值与回调。用弃用 API 会留下 analyzer 噪音，
+  /// 且未来版本会移除。
+  ///
+  /// 「全部删除」用哨兵值 [_pruneAllSentinel] 表达，这样三个选项共用一个
+  /// `RadioGroup<int>`（而不是「天数」与「全部」两个不同类型的选择）。
+  Future<PrunePolicy?> _askPrunePolicy() {
+    var choice = 30;
+    return showDialog<PrunePolicy>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('清理本地文件'),
+          content: RadioGroup<int>(
+            groupValue: choice,
+            onChanged: (v) => setDialogState(() => choice = v ?? 30),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const RadioListTile<int>(
+                  key: ValueKey('settings-prune-7d'),
+                  value: 7,
+                  title: Text('删除超过 7 天未更新的对话目录'),
+                ),
+                const RadioListTile<int>(
+                  key: ValueKey('settings-prune-30d'),
+                  value: 30,
+                  title: Text('删除超过 30 天未更新的对话目录'),
+                ),
+                const RadioListTile<int>(
+                  key: ValueKey('settings-prune-all'),
+                  value: _pruneAllSentinel,
+                  title: Text('全部删除'),
+                ),
+                const SizedBox(height: SpbSpacing.sm),
+                Text(
+                  '只清理 group_id 形状的目录，你自己的文件不会被删除。'
+                  '云端副本不受影响，清理后可用「立即同步」重新拉取。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const ValueKey('settings-prune-next'),
+              onPressed: () => Navigator.of(context).pop(
+                // days = 0 是**显式「全部可删」**语义（见 PruneOlderThanDays）。
+                PruneOlderThanDays(
+                  days: choice == _pruneAllSentinel ? 0 : choice,
+                  nowUnix: nowUnix(),
+                ),
+              ),
+              child: const Text('下一步'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<bool?> _confirmPrune(PrunePlan plan) => showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('确认清理'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(plan.summarize()),
+          const SizedBox(height: SpbSpacing.sm),
+          Text(
+            '此操作不可撤销（云端副本仍在）。',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('settings-prune-confirm'),
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: [
+          if (_dirty)
+            TextButton(
+              key: const ValueKey('settings-save'),
+              onPressed: _saving ? null : _save,
+              child: Text(_saving ? '保存中…' : '保存'),
+            ),
+        ],
+      ),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+
+    final draft = _draft;
+    if (draft == null) {
+      return Center(
+        child: Padding(
+          padding: SpbSpacing.pagePadding,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_error ?? '读取设置失败'),
+              const SizedBox(height: SpbSpacing.lg),
+              FilledButton.tonal(onPressed: _load, child: const Text('重试')),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ListView(
+      padding: SpbSpacing.pagePadding,
+      children: [
+        if (widget.onOpenSync != null) ...[
+          Card(
+            margin: EdgeInsets.zero,
+            child: ListTile(
+              key: const ValueKey('settings-sync-entry'),
+              leading: const Icon(Icons.cloud_download_outlined),
+              title: const Text('立即同步交付物'),
+              subtitle: const Text('查看本轮下载结果'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: widget.onOpenSync,
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.lg),
+        ],
+        _SectionTitle('同步目录'),
+        _DirectoryCard(
+          localRoot: draft.localRoot,
+          onPick: _pickDirectory,
+        ),
+        const SizedBox(height: SpbSpacing.lg),
+
+        _SectionTitle('同步范围'),
+        Card(
+          margin: EdgeInsets.zero,
+          child: Column(
+            children: [
+              SwitchListTile(
+                key: const ValueKey('settings-scope-all'),
+                value: draft.scope.allGroups,
+                onChanged: _setScopeAll,
+                title: const Text('全部对话'),
+                subtitle: const Text('同步该账号下所有对话的交付物'),
+              ),
+              if (!draft.scope.allGroups) _buildGroupPicker(draft),
+            ],
+          ),
+        ),
+        const SizedBox(height: SpbSpacing.lg),
+
+        _SectionTitle('过滤与范围'),
+        Card(
+          margin: EdgeInsets.zero,
+          child: Column(
+            children: [
+              SwitchListTile(
+                key: const ValueKey('settings-include-media'),
+                value: draft.filter.includeMedia,
+                onChanged: _setIncludeMedia,
+                title: const Text('同步图片与音视频'),
+                subtitle: const Text('默认关闭：生产环境中媒体占交付物体积的绝大多数'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                title: const Text('单文件上限'),
+                subtitle: const Text('超过此大小的文件跳过；0 表示不限'),
+                trailing: SizedBox(
+                  width: 96,
+                  child: TextField(
+                    key: const ValueKey('settings-max-file-size'),
+                    controller: _maxSizeController,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    textAlign: TextAlign.end,
+                    onChanged: _setMaxSizeFromField,
+                    decoration: const InputDecoration(
+                      suffixText: 'MB',
+                      isDense: true,
+                    ),
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                title: const Text('拉取范围'),
+                subtitle: const Text('只同步最近变动过的交付物；「不限」会拉全部历史'),
+                trailing: DropdownButton<int?>(
+                  key: const ValueKey('settings-since-days'),
+                  value: draft.sinceDays,
+                  onChanged: _setSinceDays,
+                  items: const [
+                    DropdownMenuItem(value: null, child: Text('不限')),
+                    DropdownMenuItem(value: 7, child: Text('近 7 天')),
+                    DropdownMenuItem(value: 30, child: Text('近 30 天')),
+                    DropdownMenuItem(value: 90, child: Text('近 90 天')),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: SpbSpacing.lg),
+
+        _SectionTitle('本地数据'),
+        _StatsCard(
+          stats: _stats,
+          loading: _loadingStats,
+          pruning: _pruning,
+          canPrune: draft.hasLocalRoot,
+          onPrune: _prune,
+        ),
+
+        // 桌面能力项：移动端（isSupported == false）整段不展示。
+        if (widget.capabilities.isSupported) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          _SectionTitle('桌面集成'),
+          Card(
+            key: const ValueKey('settings-capabilities'),
+            margin: EdgeInsets.zero,
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.keyboard_outlined),
+                  title: const Text('悬浮输入窗快捷键'),
+                  subtitle: Text(HotkeyBinding.quickCapture.label),
+                ),
+                const Divider(height: 1),
+                const ListTile(
+                  leading: Icon(Icons.notifications_none_outlined),
+                  title: Text('系统托盘'),
+                  subtitle: Text('待接入（M0 验证项）'),
+                  enabled: false,
+                ),
+              ],
+            ),
+          ),
+        ],
+
+        if (_error != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          _Banner(message: _error!, danger: true),
+        ],
+        if (_savedHint && !_dirty) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          _Banner(
+            key: const ValueKey('settings-saved'),
+            message: '设置已保存',
+            danger: false,
+          ),
+        ],
+        const SizedBox(height: SpbSpacing.xl),
+      ],
+    );
+  }
+
+  Widget _buildGroupPicker(SyncSettings draft) {
+    if (_loadingGroups) {
+      return const Padding(
+        padding: EdgeInsets.all(SpbSpacing.lg),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (_groupsError != null) {
+      return ListTile(
+        title: Text(_groupsError!),
+        trailing: TextButton(onPressed: _loadGroups, child: const Text('重试')),
+      );
+    }
+    final groups = _groups ?? const <ChatGroup>[];
+    if (groups.isEmpty) {
+      return const ListTile(title: Text('没有可选的对话'));
+    }
+
+    return Column(
+      children: [
+        const Divider(height: 1),
+        for (final g in groups)
+          CheckboxListTile(
+            key: ValueKey('settings-group-${g.id}'),
+            value: draft.scope.groupIds.contains(g.id),
+            onChanged: (v) => _toggleGroup(g.id, v ?? false),
+            title: Text(g.title, overflow: TextOverflow.ellipsis),
+            subtitle: g.isArchived ? const Text('已归档') : null,
+            dense: true,
+          ),
+      ],
+    );
+  }
+}
+
+/// 分节标题。
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
+    child: Text(
+      text,
+      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+        color: Theme.of(context).colorScheme.primary,
+      ),
+    ),
+  );
+}
+
+/// 同步目录卡片。
+class _DirectoryCard extends StatelessWidget {
+  const _DirectoryCard({required this.localRoot, required this.onPick});
+
+  final String? localRoot;
+  final VoidCallback onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final hasRoot = localRoot != null && localRoot!.trim().isNotEmpty;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Row(
+          children: [
+            Icon(
+              hasRoot ? Icons.folder_outlined : Icons.folder_off_outlined,
+              color: hasRoot ? scheme.primary : scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    hasRoot ? localRoot! : '尚未选择（点右侧按钮选择）',
+                    key: const ValueKey('settings-local-root'),
+                    style: textTheme.bodyMedium?.copyWith(
+                      color: hasRoot ? null : scheme.onSurfaceVariant,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 2,
+                  ),
+                  const SizedBox(height: SpbSpacing.xxs),
+                  Text(
+                    // 「换目录会重置同步记录」必须写在用户能看到的地方：
+                    // 否则他会以为同步出错了（明明同步过，怎么又要重下）。
+                    '更换目录会重置同步记录（已下载的文件不会自动迁移）',
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            TextButton(
+              key: const ValueKey('settings-pick-directory'),
+              onPressed: onPick,
+              child: const Text('选择目录'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 本地统计 + 清理入口。
+class _StatsCard extends StatelessWidget {
+  const _StatsCard({
+    required this.stats,
+    required this.loading,
+    required this.pruning,
+    required this.canPrune,
+    required this.onPrune,
+  });
+
+  final LocalSyncStats? stats;
+  final bool loading;
+  final bool pruning;
+  final bool canPrune;
+  final VoidCallback onPrune;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final s = stats;
+
+    return Card(
+      key: const ValueKey('settings-stats'),
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: SpbSpacing.sm),
+                child: LinearProgressIndicator(),
+              )
+            else if (s == null || s.isEmpty)
+              Text('本地还没有同步过数据', style: textTheme.bodyMedium)
+            else
+              Wrap(
+                spacing: SpbSpacing.lg,
+                runSpacing: SpbSpacing.sm,
+                children: [
+                  Text('${s.groupCount} 个对话目录', style: textTheme.bodyMedium),
+                  Text('${s.fileCount} 个文件', style: textTheme.bodyMedium),
+                  Text(humanBytes(s.totalBytes), style: textTheme.bodyMedium),
+                ],
+              ),
+            const SizedBox(height: SpbSpacing.md),
+            OutlinedButton.icon(
+              key: const ValueKey('settings-prune'),
+              onPressed: (!canPrune || pruning) ? null : onPrune,
+              icon: pruning
+                  ? const SizedBox(
+                      width: SpbSpacing.lg,
+                      height: SpbSpacing.lg,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.cleaning_services_outlined),
+              label: Text(pruning ? '清理中…' : '清理本地文件'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 提示条（错误 / 成功）。
+class _Banner extends StatelessWidget {
+  const _Banner({super.key, required this.message, required this.danger});
+
+  final String message;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      key: danger ? const ValueKey('settings-error') : null,
+      padding: SpbSpacing.cardPadding,
+      decoration: BoxDecoration(
+        color: danger ? scheme.errorContainer : scheme.tertiaryContainer,
+        borderRadius: SpbRadius.cardAll,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            danger ? Icons.error_outline : Icons.check_circle_outline,
+            color: danger ? scheme.onErrorContainer : scheme.onTertiaryContainer,
+          ),
+          const SizedBox(width: SpbSpacing.sm),
+          Expanded(
+            child: Text(
+              message,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: danger
+                    ? scheme.onErrorContainer
+                    : scheme.onTertiaryContainer,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
