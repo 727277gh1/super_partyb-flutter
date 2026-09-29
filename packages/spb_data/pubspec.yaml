@@ -15,11 +15,15 @@ dependencies:
   spb_core:
   spb_models:
   spb_domain:
+  spb_api:
   drift: ^2.28.0
   sqlite3_flutter_libs: ^0.5.28
   path_provider: ^2.1.4
   path: ^1.9.0
   shared_preferences: ^2.3.3
+  # 会话凭证的加密存储（Keychain / Keystore / libsecret）。
+  # 与两个 app 声明的版本保持一致，避免同一工作区解析出两份。
+  flutter_secure_storage: ^9.2.2
 
 dev_dependencies:
   flutter_test:
@@ -27,3 +31,7 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   build_runner: ^2.4.13
   drift_dev: ^2.28.0
+  # 测试用：替换 flutter_secure_storage 的 MethodChannel 后端，
+  # 使「写入/读取 round-trip」能在无平台通道的 flutter test 里跑。
+  plugin_platform_interface: ^2.1.8
+  flutter_secure_storage_platform_interface: ^1.1.2

@@ -7,9 +7,15 @@ build/
 .flutter-plugins-dependencies
 
 # 生成物（build_runner 产出）
+#
+# ⚠️ 例外必须写成 `!**/lib/**/*.g.dart`（带 `**/` 前缀）。
+# gitignore 的模式若含斜杠则相对 .gitignore 所在目录锚定，
+# `!lib/**/*.g.dart` 只能匹配**根目录**下的 lib/，对
+# `packages/spb_data/lib/src/database.g.dart` 这种嵌套路径无效——
+# 而本仓库是 melos 工作区，所有包都在 packages/*/lib/ 下。
 *.g.dart
 *.freezed.dart
-!lib/**/*.g.dart
+!**/lib/**/*.g.dart
 
 # 依赖
 pubspec.lock

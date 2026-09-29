@@ -4,4 +4,7 @@
 /// `lib/src/` 下的实现细节不对外暴露。
 library;
 
-// 后续在此 export 公共 API。
+export 'src/database.dart';
+export 'src/preferences_store.dart';
+export 'src/secure_token_store.dart';
+export 'src/sync_state_store.dart';
