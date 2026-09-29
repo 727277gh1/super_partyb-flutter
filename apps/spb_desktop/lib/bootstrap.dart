@@ -27,6 +27,10 @@ Future<DesktopCapabilities> bootstrapDesktop(
     //   [ ] 悬浮窗 Alt+Space 全局唤起（含失焦自动隐藏）
     //   [ ] 托盘菜单点击回调
     //   [ ] Linux 下需要 libsecret / appindicator 运行时依赖
+    //
+    // 注：目录选择（`pickDirectory`）**已接入真实实现**，见
+    // [_PlatformDesktopCapabilities.pickDirectory]——它是同步功能的前置能力，
+    // 不等 M0 的多窗口验证。
     final caps = _PlatformDesktopCapabilities();
     await caps.initialize();
     return caps;
@@ -40,9 +44,12 @@ Future<DesktopCapabilities> bootstrapDesktop(
 
 /// 桌面端实现骨架。
 ///
-/// 方法体待 M0 阶段用真实插件填充；当前所有方法静默成功，
+/// 窗口/托盘/快捷键方法体待 M0 阶段用真实插件填充；当前静默成功，
 /// 保证应用能启动、UI 能渲染。
 class _PlatformDesktopCapabilities implements DesktopCapabilities {
+  /// 目录选择器（已接入真实实现，与 M0 待办无关）。
+  static const _picker = FileSelectorDirectoryPicker();
+
   bool _initialized = false;
 
   @override
@@ -89,6 +96,9 @@ class _PlatformDesktopCapabilities implements DesktopCapabilities {
 
   @override
   Future<void> setTrayTooltip(String tooltip) async {}
+
+  @override
+  Future<String?> pickDirectory({String? title}) => _picker.pick(title: title);
 
   @override
   Future<void> dispose() async {}

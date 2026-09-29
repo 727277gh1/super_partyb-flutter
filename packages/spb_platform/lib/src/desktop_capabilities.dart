@@ -119,6 +119,23 @@ abstract interface class DesktopCapabilities {
   /// 更新托盘提示文本（如显示未读数）。
   Future<void> setTrayTooltip(String tooltip);
 
+  /// 弹出系统目录选择对话框，返回用户选择的绝对路径。
+  ///
+  /// 返回 null 表示**用户取消**（不是错误，调用方不应报错）；
+  /// 平台不支持时同样返回 null（见 [isSupported]）。
+  ///
+  /// ## 为什么不抛异常
+  ///
+  /// 「用户点了取消」与「这个平台没有目录选择器」都是**预期内**的结果，
+  /// 而异常语义是「出错了」。若取消走异常，调用方就得在 catch 里区分
+  /// 「取消」与「真失败」——而 catch 块天然适合处理意外情况。
+  ///
+  /// ## 为什么返回路径字符串而不是 `Directory`
+  ///
+  /// 本包是平台能力层，而 `dart:io` 的 `Directory` 在 web 上不可用。
+  /// 返回字符串让上层（含 web 构建）无需为「拿到一个目录」引入 `dart:io`。
+  Future<String?> pickDirectory({String? title});
+
   /// 释放资源。
   Future<void> dispose();
 }
@@ -239,6 +256,12 @@ class NoopDesktopCapabilities implements DesktopCapabilities {
 
   @override
   Future<void> setTrayTooltip(String tooltip) async {}
+
+  @override
+  Future<String?> pickDirectory({String? title}) async {
+    SpbLog.debug('pickDirectory 在当前平台不可用', {'title': title});
+    return null;
+  }
 
   @override
   Future<void> dispose() async {}
