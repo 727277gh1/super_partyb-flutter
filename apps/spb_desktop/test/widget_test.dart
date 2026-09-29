@@ -335,6 +335,19 @@ void main() {
     expect(find.byKey(const ValueKey('quick-capture-submit')), findsOneWidget);
   });
 
+  testWidgets('/overlay 可导航且渲染带附件的悬浮输入窗', (tester) async {
+    // 与 /quick-capture 同一理由：该页面提交才发请求，打开时不产生网络流量。
+    final h = await pumpApp(tester);
+
+    h.router.go(SpbRoutes.overlay);
+    await tester.pumpAndSettle();
+
+    // 附件入口与多行输入是它与旧页面的可见差异。
+    expect(find.byKey(const ValueKey('overlay-input')), findsOneWidget);
+    expect(find.byKey(const ValueKey('overlay-attach')), findsOneWidget);
+    expect(find.text('Enter 提交 · Shift+Enter 换行 · Esc 清空'), findsOneWidget);
+  });
+
   testWidgets('/settings 渲染完整设置页（含同步入口与各配置项）', (tester) async {
     final h = await pumpApp(tester);
 

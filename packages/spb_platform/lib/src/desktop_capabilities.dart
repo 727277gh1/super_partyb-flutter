@@ -171,6 +171,87 @@ abstract interface class DesktopCapabilities {
   Future<void> dispose();
 }
 
+/// 「窗口显示/隐藏」的可接线能力。
+///
+/// ## 为什么单独一个接口，而不是加进 [DesktopCapabilities]
+///
+/// [DesktopCapabilities] 的语义是「**能力**」（能做什么），本接口的语义是
+/// 「**接线点**」（把事件抛给谁）。两者生命周期不同：
+///
+/// - 能力实现分桌面（真实）与移动端（[NoopDesktopCapabilities]）；
+/// - 接线点只有**能真正接收事件**的实现才需要，Noop 与测试桩都不需要。
+///
+/// 若把回调塞进 [DesktopCapabilities]，所有实现（含 3 个测试桩）都被迫实现
+/// 一对它们毫无意义的字段，且「测试桩忘记赋值 → 回调为 null → 静默不导航」
+/// 这类问题只会在运行时暴露。
+///
+/// ## 为什么用「设置字段」而不是「注册监听器」
+///
+/// 只有**一个**消费者（`DesktopIntegration`），不需要多播。字段语义更简单：
+/// 后设置的覆盖先前的，`null` 表示不接线（应用退出时）。
+abstract interface class WindowDisplayTarget {
+  /// 显示某角色窗口的请求。实现方应**同步**触发（调用方不等待结果）。
+  ///
+  /// 设为 null 表示摘除接线。
+  set onShowWindow(void Function(WindowRole role)? callback);
+
+  /// 隐藏某角色窗口的请求。
+  set onHideWindow(void Function(WindowRole role)? callback);
+}
+
+/// 托盘菜单的可接线能力。
+///
+/// 与 [WindowDisplayTarget] 同一理由：托盘菜单项是**纯数据**
+/// （[TrayMenuItem] 不含闭包），回调需要在推送菜单后单独注册。这个「注册」
+/// 动作是接线点，不是能力，故单独成接口。
+///
+/// 见 `DesktopIntegration` 的说明：必须先 [setTrayMenu] 再 [registerTrayAction]。
+abstract interface class TrayActionTarget {
+  /// 推送托盘菜单（纯数据）。
+  Future<void> setTrayMenu(List<TrayMenuItem> items);
+
+  /// 注册某个菜单项的点击回调。
+  ///
+  /// **必须在 [setTrayMenu] 之后调用**：前者会清空回调表（菜单整体替换，
+  /// 旧 id 失效）。
+  ///
+  /// ## 为什么是 `void Function()` 而不是 `VoidCallback`
+  ///
+  /// 本文件只依赖 `spb_core`，没有 import `package:flutter`。用原生函数类型
+  /// 可以避免为一个类型别名（`VoidCallback` 就是 `void Function()`）给这个
+  /// 契约文件引入 Flutter 依赖——让「能力接口」保持与 UI 框架无关。
+  void registerTrayAction(String id, void Function() action);
+
+  /// 托盘是否**确认可用**（图标已成功创建）。
+  ///
+  /// 用于决定「关闭主窗口是隐藏到托盘还是退出」——见 `DesktopIntegration`。
+  bool get trayAvailable;
+
+  /// 是否在关闭主窗口时隐藏到托盘。
+  void setHideOnClose(bool value);
+}
+
+/// 「真正退出应用」的能力。
+///
+/// ## 为什么不放进 [DesktopCapabilities]
+///
+/// [DesktopCapabilities.dispose] 的语义是「释放资源」（应用已在退出流程中），
+/// 而 `quit` 是「**发起**退出」（摘监听器 → 注销快捷键 → 销毁托盘 → 结束进程）。
+/// 两者前置条件不同：`dispose` 可以在任何时候调用，`quit` 只能由用户动作触发。
+///
+/// ## 为什么需要它
+///
+/// 桌面端的默认行为是「关窗 = 隐藏到托盘」（保留后台同步）。因此必须有另一条
+/// **明确的**退出路径，否则用户无法真正结束应用——只能杀进程。托盘菜单的
+/// 「退出」项就是这条路。
+///
+/// 没有托盘时（Linux 无 appindicator 等）不启用「关窗即隐藏」，
+/// 此时关闭主窗口即退出，本能力不被调用。
+abstract interface class PlatformDesktopQuit {
+  /// 摘除监听器、注销快捷键、销毁托盘图标，然后结束进程。
+  Future<void> quit();
+}
+
 /// 快捷键绑定。
 class HotkeyBinding {
   const HotkeyBinding({

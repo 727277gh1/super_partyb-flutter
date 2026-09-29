@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
 
+import 'desktop_integration.dart';
 import 'providers.dart';
 import 'router.dart';
 
@@ -52,8 +53,35 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
   /// 外部传入的 router 由传入方负责 dispose（生命周期不属于本组件）。
   late final bool _ownsRouter = widget.router == null;
 
+  /// 桌面能力与路由/托盘的接线。null 表示本平台不支持（移动端/测试环境）。
+  ///
+  /// ## 为什么不是 `late final` 带条件赋值
+  ///
+  /// `late final X?` 若某条分支不赋值，**读取时抛 LateInitializationError**
+  /// （不是返回 null）——`dispose` 里读它会让「移动端卸载」变成崩溃。
+  /// 用普通可空字段，初值就是 null。
+  ///
+  /// ## 为什么在 `initState` 里 attach（而不是 `build`）
+  ///
+  /// `attach` 会设置平台回调并推送托盘菜单——这是副作用，每次 rebuild 都做
+  /// 会反复重建托盘菜单。`attach` 自身幂等，但放在 `initState` 更明确。
+  DesktopIntegration? _integration;
+
+  @override
+  void initState() {
+    super.initState();
+    // 移动端的能力是 NoopDesktopCapabilities，attach 会自行跳过。
+    // 但移动端连 spb_desktop 都不该走，故这里只在桌面端接线。
+    final caps = ref.read(desktopCapabilitiesProvider);
+    if (caps.isSupported) {
+      _integration = DesktopIntegration(capabilities: caps, router: _router)
+        ..attach();
+    }
+  }
+
   @override
   void dispose() {
+    _integration?.detach();
     if (_ownsRouter) _router.dispose();
     super.dispose();
   }

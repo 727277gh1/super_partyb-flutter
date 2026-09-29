@@ -344,13 +344,33 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 
 **所有方法静默降级**（记日志 + 返回 false/null），不抛异常。UI 用 `isSupported` 决定是否展示「托盘/全局快捷键」等设置项。
 
-### 6.5 多窗口（M0 未验证项）
+### 6.5 多窗口：**已验证不可行**（M0 结论）
 
-桌面端需 3 窗口：主窗 + 设置窗 + `Alt+Space` 悬浮输入窗。
+桌面端原计划 3 窗口：主窗 + 设置窗 + `Alt+Space` 悬浮输入窗。
 
-⚠️ **`flutter config --list` 显示 `enable-windowing: (Not set) (Unavailable)`** —— Flutter 官方多窗口支持尚未稳定。当前依赖 `window_manager` 插件自行管理多窗口。
+❌ **`window_manager` 做不到多窗口**（2026-09 实测，推翻了本节的原始假设）。依据：
 
-**这是 M0 头号验证目标**。若多窗口不可行，需回到决策（备选：单窗口 + 内嵌浮层模拟悬浮窗）。
+1. 该插件 0.5.2 的**公开 API 里没有任何创建窗口的方法**——`setSize`/`setAlwaysOnTop`/
+   `show`/`hide` 全部作用于唯一窗口。
+2. Linux 原生侧 `window_manager_plugin.cc:32` 的 `get_window()` 实现是
+   `gtk_widget_get_toplevel(view)`：从一个 `FlView` 反查其顶层 `GtkWindow`。
+   **一个 engine 只有一个 view，故只能有一个窗口。**
+3. `windowManager.getId()` 存在但**无配套 `createWindow`**：它是给 Flutter 未来多窗口
+   API 预留的，当前无法用于「再开一个窗」。
+4. Flutter 官方多窗口（`flutter config --enable-windowing`）在 3.47.5 仍是
+   `(Not set) (Unavailable)`。
+
+**采纳的备选方案：单窗口 + 内嵌浮层**（即原文备选之一）。`settings` / `quickCapture`
+不是独立窗口，而是主窗口内的**路由页面**（`/settings`、`/overlay`）。
+`PlatformDesktopCapabilities.showWindow(role)` 通过 `WindowDisplayTarget` 回调把
+「显示某角色」抛给 `DesktopIntegration`，由后者映射成 `router.go(path)`。
+
+**两个已知差异**（不是 bug，记录以免重复排查）：
+
+1. **悬浮窗跟随主窗口**：主窗口最小化时悬浮窗一并不可见。真正的独立置顶窗需等
+   Flutter 多窗口稳定，或改用原生嵌入。
+2. **`alwaysOnTop` / `skipTaskbar` 对悬浮窗无效**：这两个是窗口级属性，单窗口下
+   无法只对「页面」生效。
 
 ### 6.6 桌面端相对 Tauri 的净损失
 
@@ -362,6 +382,46 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 | 安装包体积 | ~10 MB | ~26 MB |
 
 Windows 交叉编译不可行的根因：`my_app.exe` 是 **MSVC 编译的 C++ runner**，Linux 无 MSVC。Flutter 官方 [issue #110585](https://github.com/flutter/flutter/issues/110585) 开放 3 年未实现。详见 §8。
+
+### 6.7 无归属入口：两条路径（quick-capture vs enqueue）
+
+桌面端有两类「没有对话 UI 的入口」，**走不同端点，返回语义不同**：
+
+| | `QuickCapturePage` | `OverlayQuickCapturePage` |
+|---|---|---|
+| 端点 | `POST /me/quick-capture` | `POST /me/quick-capture/enqueue` |
+| 附件 | ❌ | ✅ |
+| 返回 | **同步**返回归属 `group_id`（可导航） | **异步**投递，只有 `{id, provider}` |
+| 落点 | `router_preferences` | 同左（worker 消费后写） |
+| 路由 | `/quick-capture` | `/overlay` |
+
+**附件只能走 enqueue**：附件的「落用户级暂存区 → 建 turn 时搬进 workspace」
+这条链路只存在于 MQ 渠道（`mq-server` 的通用入站口）。
+
+**提交链路**（客户端**不得**持有 mq-server 的 `api_token`，那是服务级凭据）：
+
+```
+Flutter → POST /me/quick-capture/attachments  → PartyB Go API → mq-server /api/v1/inbound/uploads
+Flutter → POST /me/quick-capture/enqueue      → PartyB Go API → mq-server /api/v1/inbound/enqueue
+                                                   ↑ 服务级 Bearer 在这里注入
+```
+
+**两个安全约束**（改动时不要绕过）：
+
+1. **身份取自网关注入的 session**，请求体里的 `user_id`/`group_id`/`agent_id` 一律忽略。
+2. **附件只接受文件名，不接受 URL**——消费侧会带服务级 Bearer 去下载它，
+   允许客户端指定 URL 就是个 SSRF 面。
+
+**enqueue 提交后不导航**：投递是异步的，本页拿不到 `groupId`。结果由主窗口订阅 SSE 呈现。
+
+### 6.8 剪贴板文件粘贴（待实现）
+
+`readClipboardFiles()`（`spb_platform/lib/src/overlay_files.dart`）已定义契约与降级路径，
+但**各平台的原生侧尚未实现**（`MethodChannel('com.atjog.spb/clipboard_files')`）。
+
+- 当前行为：channel 未注册 → `MissingPluginException` → 静默返回空（**不影响文本粘贴**）。
+- 缺失影响：用户截图后无法直接 `Ctrl+V` 到悬浮窗，需先存盘再拖入。
+- 实现位置：`apps/spb_desktop/{linux,windows,macos}/` 的原生侧。
 
 ---
 
@@ -558,11 +618,13 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] `dart analyze` 全绿
 - [x] Linux release 构建成功（26 MB，自包含）
 - [x] 核心代码：错误类型 / 日志 / 契约模型 / SSE 客户端 / 事件归约
-- [ ] **多窗口可行性**（`window_manager` 三窗口）← **头号风险**
+- [x] ~~多窗口可行性~~ → **已验证不可行**，改用单窗口 + 内嵌浮层（见 §6.5）
+- [x] 托盘 + 全局快捷键（`bootstrap.dart` 已接 `window_manager`/`tray_manager`/`hotkey_manager`）
 - [ ] **OIDC PKCE 打通**（需确认 IdP 支持 PKCE + 自定义 scheme redirect）
-- [ ] 托盘 + 全局快捷键
+- [ ] 剪贴板文件读取的原生实现（`readClipboardFiles` 目前静默降级，见 §6.7）
 
-> 任一验证失败 → 回到决策，评估是否退回 Tauri 或改方案。
+> M0 的窗口/托盘/快捷键验证已完成（多窗口失败，已按备选方案落地）。
+> 仍未验证的项见「已知问题」表。
 
 ### M1+：功能实现
 
@@ -595,7 +657,8 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 |---|---|---|
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |
 | Windows/macOS 需额外 runner | 待决策 | `super_partyb` issue #31 |
-| 多窗口可行性未验证 | M0 阻塞项 | §6.5 |
+| ~~多窗口可行性~~ | ✅ 已验证：**不可行**，改用单窗口 + 内嵌浮层 | §6.5 |
+| 剪贴板文件粘贴无原生实现 | 待实现 | §6.7 |
 | IdP 是否支持 PKCE + 自定义 scheme | M0 阻塞项 | §10 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 
