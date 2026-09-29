@@ -21,6 +21,7 @@ class DroppedFile {
   // ignore_for_file: prefer_initializing_formals
   DroppedFile._({
     required this.name,
+    required this.path,
     required Future<int> Function() length,
     required Future<List<int>> Function() readBytes,
   }) : _length = length,
@@ -28,6 +29,17 @@ class DroppedFile {
 
   /// 文件名（含扩展名，不含路径）。
   final String name;
+
+  /// 本地绝对路径；内存来源（剪贴板/字节）为 null。
+  ///
+  /// ## 为什么要暴露它
+  ///
+  /// 有路径时上传层可以从磁盘**流式**读取，内存里不出现第二份副本。若只
+  /// 暴露 `readBytes()`，调用方就只能先把整个文件读进内存——50 MiB 的文件
+  /// 在用户等待的同步上传路径上会存两份。
+  ///
+  /// 与 [readBytes] 同一约定：路径可能在拖入后被删除/移动，读取时才报错。
+  final String? path;
 
   final Future<int> Function() _length;
   final Future<List<int>> Function() _readBytes;
@@ -44,6 +56,9 @@ class DroppedFile {
   static DroppedFile fromXFile(XFile file) {
     return DroppedFile._(
       name: _basename(file.name.isEmpty ? file.path : file.name),
+      // XFile.path 对磁盘来源是绝对路径；对「内存构造」的 XFile 是空串。
+      // 空串归一成 null，否则上传层会拿空路径去打开文件。
+      path: file.path.isEmpty ? null : file.path,
       length: file.length,
       readBytes: file.readAsBytes,
     );
@@ -66,6 +81,8 @@ class DroppedFile {
     final copy = List<int>.unmodifiable(bytes);
     return DroppedFile._(
       name: _basename(name),
+      // 字节来源没有路径：上传层会回退到把字节交给 multipart。
+      path: null,
       length: () async => copy.length,
       readBytes: () async => copy,
     );

@@ -195,9 +195,25 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     });
 
     try {
-      // 读字节发生在提交时（见 DroppedFile 的说明：拖拽事件里读会卡 UI）。
+      // 附件直接带**路径**交给上传层（不在这里读字节）。
+      //
+      // ## 为什么不再预先 readBytes
+      //
+      // 早期实现把每个文件先读成字节再上传，于是 50 MiB 的附件在内存里存两份
+      // （本层的 List<int> + 传输层的 multipart 缓冲），而上传发生在用户等待的
+      // 同步路径上；多附件时还要同时持有全部字节。带路径后由 Dio 从磁盘流式
+      // 读取，内存占用降到定长缓冲区。
+      //
+      // 剪贴板粘贴是唯一没有路径的来源（字节本就在内存里），回退到 bytes。
       final attachments = <QuickCaptureAttachment>[];
       for (final f in files) {
+        final path = f.path;
+        if (path != null) {
+          attachments.add(
+            QuickCaptureAttachment(path: path, filename: f.name),
+          );
+          continue;
+        }
         try {
           final bytes = await f.readBytes();
           attachments.add(

@@ -283,21 +283,52 @@ class ChatApi {
   ///
   /// 返回 [QuickCaptureUpload]，其中 [QuickCaptureUpload.fileName] 要填进
   /// [enqueueQuickCapture] 的 `attachments`。
+  ///
+  /// ## 为什么同时接受 [path] 与 [bytes]（而不是只留一个）
+  ///
+  /// 两个来源的物理限制不同：
+  ///
+  ///   - 拖拽/文件选择给到的是**磁盘上的路径**（[path]）。走这条路时用
+  ///     [MultipartFile.fromFile]，Dio 从磁盘流式读取——50 MiB 的文件不会在
+  ///     内存里出现第二份副本。
+  ///   - 剪贴板粘贴给到的是**内存里的字节**（[bytes]），根本没有路径可传。
+  ///
+  /// 两者都接受后，调用方无需为「粘贴的图」先写一个临时文件。
+  ///
+  /// ## 为什么优先用 [path]
+  ///
+  /// [bytes] 那条路要把整个文件先读进内存（调用方读 + 本层 multipart 缓冲），
+  /// 而桌面端最常见的附件来源恰好是有路径的文件。故有路径时必须走路径。
   Future<QuickCaptureUpload> uploadQuickCaptureAttachment({
-    required List<int> bytes,
+    List<int>? bytes,
+    String? path,
     required String filename,
     String? contentType,
   }) async {
+    // Why 用运行时抛错而不是 assert：assert 只在 debug 构建里生效，release
+    // 下会被完全剔除。若调用方两个都没传，bytes! 会抛一个空指针错误——错误
+    // 信息指向 bytes 而不是「你没传参数」，排障成本高。
+    if ((bytes == null) == (path == null)) {
+      throw ArgumentError(
+        'uploadQuickCaptureAttachment 必须且只能给 bytes 或 path 之一',
+      );
+    }
     try {
-      final form = FormData.fromMap({
-        'file': MultipartFile.fromBytes(
-          bytes,
-          filename: filename,
-          contentType: contentType == null
-              ? null
-              : DioMediaType.parse(contentType),
-        ),
-      });
+      final mediaType = contentType == null
+          ? null
+          : DioMediaType.parse(contentType);
+      final part = path != null
+          ? await MultipartFile.fromFile(
+              path,
+              filename: filename,
+              contentType: mediaType,
+            )
+          : MultipartFile.fromBytes(
+              bytes!,
+              filename: filename,
+              contentType: mediaType,
+            );
+      final form = FormData.fromMap({'file': part});
       final res = await _dio.post('/me/quick-capture/attachments', data: form);
       return QuickCaptureUpload.fromJson(_asMap(_unwrap(res)));
     } on DioException catch (e) {

@@ -191,17 +191,33 @@ void main() {
   });
 
   group('附件展示', () {
-    test('displaySize 按量级给出可读字符串', () {
+    test('字节来源可从 bytes 得到长度（UI 用它展示大小）', () {
+      const att = QuickCaptureAttachment(bytes: [1, 2, 3], filename: 'a');
+      expect(att.bytes!.length, 3);
+      expect(att.path, isNull);
+    });
+
+    test('路径来源不携带字节（保证上传层走流式）', () {
+      const att = QuickCaptureAttachment(path: '/tmp/a.png', filename: 'a.png');
+      expect(att.bytes, isNull);
+      expect(att.path, '/tmp/a.png');
+    });
+
+    test('同时给 bytes 与 path 被拒绝（避免两套来源歧义）', () {
       expect(
-        const QuickCaptureAttachment(bytes: [1, 2, 3], filename: 'a').displaySize,
-        '3 B',
+        () => QuickCaptureAttachment(
+          bytes: const [1],
+          path: '/tmp/a.png',
+          filename: 'a.png',
+        ),
+        throwsA(isA<AssertionError>()),
       );
+    });
+
+    test('两者都不给被拒绝', () {
       expect(
-        QuickCaptureAttachment(
-          bytes: List.filled(2048, 0),
-          filename: 'b',
-        ).displaySize,
-        '2.0 KB',
+        () => QuickCaptureAttachment(filename: 'a.png'),
+        throwsA(isA<AssertionError>()),
       );
     });
   });

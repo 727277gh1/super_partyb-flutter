@@ -31,3 +31,6 @@ dev_dependencies:
   # 必须显式声明，否则 analyzer 报 depend_on_referenced_packages。
   dio: ^5.7.0
   http_mock_adapter: ^0.6.1
+  # 测试用：构造带磁盘路径的 DroppedFile（只有 XFile 才有 path）。
+  # 必须显式声明，否则 analyzer 报 depend_on_referenced_packages。
+  cross_file: ^0.3.5+5

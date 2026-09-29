@@ -16,17 +16,33 @@ import 'package:spb_core/spb_core.dart';
 /// 进度上报由调用方通过 [QuickCaptureEnqueueUseCase.submit] 的可选回调自行维护。
 class QuickCaptureAttachment {
   const QuickCaptureAttachment({
-    required this.bytes,
+    this.bytes,
+    this.path,
     required this.filename,
     this.contentType,
-  });
+  }) : assert(
+         (bytes == null) != (path == null),
+         'QuickCaptureAttachment 必须且只能给 bytes 或 path 之一',
+       );
 
-  /// 文件内容。
+  /// 文件内容（仅在**没有**本地路径时提供）。
   ///
   /// 用 `List<int>` 而不是 `Uint8List`：本包不依赖 `dart:typed_data` 之外的
   /// 任何东西，而 `List<int>` 是所有来源（`File.readAsBytes`、剪贴板、
   /// 拖拽 API）的公共超集，无需在边界处转换。
-  final List<int> bytes;
+  final List<int>? bytes;
+
+  /// 本地文件路径（有则优先，传输层从磁盘流式读取）。
+  ///
+  /// ## 为什么需要它（只有 bytes 不够）
+  ///
+  /// 桌面端附件的常见来源是拖拽/文件选择，两者都拿得到磁盘路径。若强制先
+  /// `readAsBytes`，一个 50 MiB 的文件会在内存里存两份（调用方一份 +
+  /// multipart 缓冲一份），而上传发生在**用户等待的同步路径**上。
+  ///
+  /// 剪贴板粘贴是唯一拿不到路径的来源（字节本就在内存里），那条路仍用
+  /// [bytes]。
+  final String? path;
 
   /// 原始文件名（服务端会安全化后使用）。
   final String filename;
@@ -34,16 +50,8 @@ class QuickCaptureAttachment {
   /// MIME 类型。为空时由服务端按扩展名/内容推断。
   final String? contentType;
 
-  /// 人类可读的大小（UI 展示用）。
-  String get displaySize {
-    final n = bytes.length;
-    if (n < 1024) return '$n B';
-    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
-    return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
-  }
-
   @override
-  String toString() => 'QuickCaptureAttachment($filename, $displaySize)';
+  String toString() => 'QuickCaptureAttachment($filename)';
 }
 
 /// 提交结果。
@@ -171,6 +179,7 @@ class QuickCaptureEnqueueUseCase {
       try {
         final up = await _api.uploadQuickCaptureAttachment(
           bytes: att.bytes,
+          path: att.path,
           filename: att.filename,
           contentType: att.contentType,
         );
