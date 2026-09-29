@@ -128,13 +128,12 @@ class QuickCaptureFailedUpload {
 ///
 /// ## 为什么上传与投递在一个用例里（而不是让调用方各调一次）
 ///
-/// 两步之间有一份**必须由调用方维护的中间状态**：上传得到的 `fileName` 要原样
-/// 带进投递。若让 UI 自己串联，很容易出现「上传成功但忘了带 fileName」或
-/// 「把 download_url 传进去」这类错误——后者更危险，因为服务端会 400（客户端
-/// 不许指定 URL，防 SSRF），而 UI 可能把它当成网络错误重试。
+/// 两步之间有一份**必须由调用方维护的中间状态**：上传得到的 `fileId` 要原样
+/// 带进投递。若让 UI 自己串联，很容易出现「上传成功但忘了带 fileId」或
+/// 「把展示用的文件名当成句柄传进去」这类错误。
 ///
-/// 封进用例后，这条约束由类型保证：调用方拿不到 `downloadUrl` 之外的用法，
-/// 也无从自行拼装投递请求。
+/// 封进用例后，这条约束由类型保证：投递只接受 [QuickCaptureUpload.fileId]，
+/// 调用方无从自行拼装投递请求。
 ///
 /// ## 部分失败的处理
 ///
@@ -184,16 +183,16 @@ class QuickCaptureEnqueueUseCase {
           contentType: att.contentType,
         );
         if (!up.isValid) {
-          // 服务端返回了 2xx 但缺 file_name：契约漂移。当作该附件失败，
-          // 而不是把一个空文件名带进投递（那会 400 且错误信息指向附件名，
+          // 服务端返回了 2xx 但缺 file_id：契约漂移。当作该附件失败，
+          // 而不是把一个空值带进投递（那会 400 且错误信息指向附件标识，
           // 排查时很难联想到是响应解析问题）。
-          SpbLog.warn('quick capture 附件上传响应缺 file_name', {
+          SpbLog.warn('quick capture 附件上传响应缺 file_id', {
             'filename': att.filename,
           });
           failed.add(
             QuickCaptureFailedUpload(
               filename: att.filename,
-              reason: '服务端未返回文件名',
+              reason: '服务端未返回文件标识',
             ),
           );
           continue;
@@ -232,7 +231,7 @@ class QuickCaptureEnqueueUseCase {
     try {
       await _api.enqueueQuickCapture(
         input: text,
-        attachments: uploaded.map((u) => u.fileName).toList(),
+        attachments: uploaded.map((u) => u.fileId).toList(),
       );
     } on SpbError catch (e) {
       // ⚠️ 投递失败时**不能**把 uploaded 当作「已发送」——附件确实落在服务端

@@ -275,13 +275,13 @@ class ChatApi {
   /// 附件可达 50 MiB，塞进消息体会让它被 json.Marshal 写进 mq-server 的 WAL，
   /// 且 at-least-once 下每次重投都重复传输同一份字节。
   ///
-  /// ## 为什么只传文件名/字节，不传 URL
+  /// ## 为什么只传字节，不传 URL
   ///
-  /// 服务端（PartyB）会带着自己的服务级 Bearer 去下载这个 URL。若由客户端指定
-  /// URL，就出现了一个 SSRF 面（可指向任意内网地址）。故本方法只传字节，
-  /// download_url 由服务端拼装。
+  /// 服务端（PartyB）会带着自己的服务级凭证去访问它。若由客户端指定 URL，
+  /// 就出现了一个 SSRF 面（可指向任意内网地址）。故本方法只传字节，
+  /// 由服务端上传 UFS 并返回 file_id。
   ///
-  /// 返回 [QuickCaptureUpload]，其中 [QuickCaptureUpload.fileName] 要填进
+  /// 返回 [QuickCaptureUpload]，其中 [QuickCaptureUpload.fileId] 要填进
   /// [enqueueQuickCapture] 的 `attachments`。
   ///
   /// ## 为什么同时接受 [path] 与 [bytes]（而不是只留一个）
@@ -774,28 +774,31 @@ class CurrentUser {
 
 /// `POST /me/quick-capture/attachments` 的响应。
 ///
-/// 只保留客户端真正要用的字段：`file_name` 要回填进
+/// 只保留客户端真正要用的字段：`file_id` 要回填进
 /// [ChatApi.enqueueQuickCapture] 的 `attachments`，其余供 UI 展示进度/预览。
 class QuickCaptureUpload {
   const QuickCaptureUpload({
-    required this.fileName,
-    required this.downloadUrl,
+    required this.fileId,
+    this.fileName,
     this.size = 0,
     this.mimeType,
   });
 
-  /// 服务端生成的安全文件名（**不是**用户原始文件名）。
+  /// 服务端在 UFS 侧生成的文件 ID。
   ///
-  /// 命名规则为 `<纳秒时间戳>_<8位随机hex>_<安全化原名>`，服务端据此校验
-  /// 归属（见 mq-server 的 looksLikeUploadName）。故客户端必须原样回传，
-  /// 不能自行拼装或改名。
-  final String fileName;
+  /// ## 为什么是 file_id 而不是文件名
+  ///
+  /// 附件字节现在直传 UFS（不再先落 mq-server），服务端用 UFS 返回的 ID
+  /// 作为句柄。客户端必须原样回传——它不是「文件名」，不能自行拼装或改名。
+  ///
+  /// 消费侧会带着服务级凭证用它去 UFS 取字节；若允许客户端指定 URL，
+  /// 就成了一个 SSRF 面（可指向任意内网地址）。
+  final String fileId;
 
-  /// 服务端拼装的相对地址（`/api/v1/inbound/uploads/<file_name>`）。
+  /// 服务端回显的文件名（仅用于 UI 展示，**不**用于投递）。
   ///
-  /// 客户端**不传**这个值给入队接口（只传 [fileName]）：若允许客户端指定
-  /// URL，服务端就会带着自己的 Bearer 去下载任意地址（SSRF 面）。
-  final String downloadUrl;
+  /// 可为空：该值只作展示，缺失不影响链路。
+  final String? fileName;
 
   /// 字节数。
   final int size;
@@ -805,18 +808,18 @@ class QuickCaptureUpload {
 
   factory QuickCaptureUpload.fromJson(Map<String, dynamic> json) =>
       QuickCaptureUpload(
-        fileName: (json['file_name'] ?? '').toString(),
-        downloadUrl: (json['download_url'] ?? '').toString(),
+        fileId: (json['file_id'] ?? '').toString(),
+        fileName: json['file_name'] as String?,
         size: (json['size'] as num?)?.toInt() ?? 0,
         mimeType: json['mime_type'] as String?,
       );
 
-  /// 上传是否拿到了可用的文件名。
+  /// 上传是否拿到了可用的 file_id。
   ///
   /// 为 false 时不应把它放进 enqueue 的 attachments——服务端会 400
-  /// （附件名不能为空/不合法）。
-  bool get isValid => fileName.isNotEmpty;
+  /// （附件 file_id 不能为空/不合法）。
+  bool get isValid => fileId.isNotEmpty;
 
   @override
-  String toString() => 'QuickCaptureUpload($fileName, $size bytes)';
+  String toString() => 'QuickCaptureUpload($fileId, $size bytes)';
 }

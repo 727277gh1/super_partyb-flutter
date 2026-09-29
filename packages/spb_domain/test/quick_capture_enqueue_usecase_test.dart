@@ -10,16 +10,16 @@ import 'package:test/test.dart';
 /// ## 这个测试防的是什么
 ///
 /// 该用例编排了**两步**（上传附件 → 投递消息），而两步之间有一份调用方看不见的
-/// 中间状态：上传返回的 `fileName` 必须原样带进投递。三类错误都「不报错但行为错」：
+/// 中间状态：上传返回的 `fileId` 必须原样带进投递。三类错误都「不报错但行为错」：
 ///
-/// 1. **把 download_url 当 fileName 传** → 服务端 400（客户端不许指定 URL，防
-///    SSRF），UI 可能当成网络错误重试；
+/// 1. **投递里带错字段**（例如把展示用的文件名当句柄传）→ 服务端 400 或找不到
+///    附件，UI 可能当成网络错误重试；
 /// 2. **上传成功但投递失败**，却把 uploaded 非空当作「已发送」→ 用户以为消息
 ///    发出去了，实际永远不会被处理（静默丢消息）；
 /// 3. **部分附件失败就整条不发** → 用户拖 3 个文件、其中 1 个超限，结果整条
 ///    消息发不出去，还得自己找出是哪一个。
 ///
-/// 故这里逐条钉住：只传 fileName、delivered 与 uploaded 解耦、部分失败不阻断。
+/// 故这里逐条钉住：投递只带 fileId、delivered 与 uploaded 解耦、部分失败不阻断。
 void main() {
   late Dio dio;
   late DioAdapter adapter;
@@ -35,15 +35,15 @@ void main() {
 
   /// 挂载附件上传 mock。
   void mockUpload(
-    ({String fileName, String downloadUrl}) result, {
+    ({String fileId, String fileName}) result, {
     int statusCode = 201,
     String? failFor,
   }) {
     adapter.onPost(
       '/me/quick-capture/attachments',
       (server) => server.reply(statusCode, {
+        'file_id': result.fileId,
         'file_name': result.fileName,
-        'download_url': result.downloadUrl,
         'size': 3,
         'mime_type': 'image/png',
       }),
@@ -63,12 +63,9 @@ void main() {
   QuickCaptureAttachment png(String name) =>
       QuickCaptureAttachment(bytes: const [1, 2, 3], filename: name);
 
-  group('只传 fileName，不传 URL', () {
-    test('入队请求体的 attachments 是服务端文件名', () async {
-      mockUpload((
-        fileName: '1790_aaaaaaaa_shot.png',
-        downloadUrl: '/api/v1/inbound/uploads/1790_aaaaaaaa_shot.png',
-      ));
+  group('只传 fileId（UFS 句柄）', () {
+    test('入队请求体的 attachments 是 file_id', () async {
+      mockUpload((fileId: 'file_aaaaaaaa', fileName: 'shot.png'));
       mockEnqueue();
 
       final r = await useCase.submit(
@@ -78,18 +75,15 @@ void main() {
 
       expect(r.delivered, isTrue);
       expect(r.uploaded, hasLength(1));
-      expect(r.uploaded.first.fileName, '1790_aaaaaaaa_shot.png');
-      // download_url 只作展示/诊断，绝不能出现在投递里。
-      expect(r.uploaded.first.downloadUrl, contains('/api/v1/inbound/uploads/'));
+      expect(r.uploaded.first.fileId, 'file_aaaaaaaa');
+      // fileName 只作展示，不参与投递。
+      expect(r.uploaded.first.fileName, 'shot.png');
     });
   });
 
   group('投递失败与 uploaded 解耦', () {
     test('上传成功但投递失败 → delivered=false 且 uploaded 非空', () async {
-      mockUpload((
-        fileName: '1790_bbbbbbbb_a.png',
-        downloadUrl: '/api/v1/inbound/uploads/1790_bbbbbbbb_a.png',
-      ));
+      mockUpload((fileId: 'file_bbbbbbbb', fileName: 'a.png'));
       mockEnqueue(statusCode: 502);
 
       final r = await useCase.submit(
@@ -109,10 +103,7 @@ void main() {
       // 第一次调用成功，第二次失败——用 DioAdapter 的队列语义不好表达，
       // 故这里改成「两个附件都成功」的正向用例 + 下面的单独失败用例，
       // 避免依赖 adapter 的调用顺序细节。
-      mockUpload((
-        fileName: '1790_cccccccc_ok.png',
-        downloadUrl: '/api/v1/inbound/uploads/1790_cccccccc_ok.png',
-      ));
+      mockUpload((fileId: 'file_cccccccc', fileName: 'ok.png'));
       mockEnqueue();
 
       final r = await useCase.submit(
@@ -125,7 +116,7 @@ void main() {
       expect(r.uploaded, hasLength(1));
     });
 
-    test('上传返回 2xx 但缺 file_name → 该附件记为失败，不投递空名', () async {
+    test('上传返回 2xx 但缺 file_id → 该附件记为失败，不投递空值', () async {
       adapter.onPost(
         '/me/quick-capture/attachments',
         (server) => server.reply(201, {'size': 3}),
@@ -142,7 +133,7 @@ void main() {
       expect(r.delivered, isTrue);
       expect(r.uploaded, isEmpty);
       expect(r.failedUploads, hasLength(1));
-      expect(r.failedUploads.first.reason, contains('文件名'));
+      expect(r.failedUploads.first.reason, contains('文件标识'));
     });
 
     test('全部附件失败且无文本 → 不投递（避免发空消息）', () async {
@@ -172,10 +163,7 @@ void main() {
 
   group('进度回调', () {
     test('按附件数量回调，含收尾的 (total,total)', () async {
-      mockUpload((
-        fileName: '1790_dddddddd_a.png',
-        downloadUrl: '/api/v1/inbound/uploads/1790_dddddddd_a.png',
-      ));
+      mockUpload((fileId: 'file_dddddddd', fileName: 'a.png'));
       mockEnqueue();
 
       final calls = <(int, int)>[];
