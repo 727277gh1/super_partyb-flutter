@@ -75,9 +75,13 @@ class QuickCaptureEnqueueResult {
   ///
   /// ## 为什么这个字段是必须的
   ///
-  /// 上传成功但投递失败时，附件已经落在服务端暂存区（会按 TTL 清理），而消息
+  /// 上传成功但投递失败时，附件已经落在服务端（UFS 的 /inbound/ 暂存区），而消息
   /// **没有**发出去。若调用方只看 [uploaded] 非空就认为「发出去了」，用户会以为
   /// 消息已发送而实际永远不会被处理——静默丢消息。
+  ///
+  /// ⚠️ 这种情况下的服务端残留**没有 TTL 保证**：附件直传 UFS 后（见
+  /// commit `72f10aca`），不再经 mq-server 的引用回收，而 UFS 侧的清理是默认
+  /// 关闭的粗粒度 TTL。详见 super_partyb issue #36。
   ///
   /// 反之若 [delivered] 为 true，即使 [failedUploads] 非空，消息也确实发出了
   /// （只是少带了几个附件），调用方应清空输入框并提示哪些附件没成功。
@@ -235,7 +239,7 @@ class QuickCaptureEnqueueUseCase {
       );
     } on SpbError catch (e) {
       // ⚠️ 投递失败时**不能**把 uploaded 当作「已发送」——附件确实落在服务端
-      // 暂存区了（会按 TTL 清理），但消息没有进队列。见 delivered 的说明。
+      // 暂存区了（但**不保证**会被自动清理，见 delivered 的说明），消息没有进队列。
       SpbLog.warn('quick capture 投递失败', {'error': e.message});
       return QuickCaptureEnqueueResult(
         delivered: false,
