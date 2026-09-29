@@ -13,6 +13,9 @@ dependencies:
   flutter:
     sdk: flutter
   spb_core:
+  # FileSink 契约（spb_domain 的 FileSink）——依赖方向 platform → domain
+  # 是允许的（见 AGENTS.md 的依赖图）；反向（domain → platform）被分层检查禁止。
+  spb_domain:
   window_manager: ^0.5.0
   tray_manager: ^0.5.0
   hotkey_manager: ^0.2.3

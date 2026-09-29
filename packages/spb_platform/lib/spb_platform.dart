@@ -9,6 +9,14 @@
 /// 而不是靠 `if (Platform.isAndroid)` 散落各处。
 library;
 
+///   DesktopCapabilities        —— 平台能力接口（窗口/托盘/快捷键/目录选择）
+///   NoopDesktopCapabilities     —— 移动端/不支持平台的空实现
+///   LocalFileSink               —— 原子写入 + 路径穿越防御的落盘实现
+///   scanLocalGroups / scanLocalStats —— 本地同步目录扫描（只认 group_id 形状）
+///   executePrunePlan            —— 按计划清理本地目录（删除前重新校验）
 export 'src/desktop_capabilities.dart';
+export 'src/directory_picker.dart';
+export 'src/file_sink.dart';
+export 'src/local_prune.dart';
 export 'src/tray.dart';
 export 'src/window_manager.dart';
