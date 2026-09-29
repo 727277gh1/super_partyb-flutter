@@ -152,7 +152,7 @@ void main() {
   Future<void> pumpPage(
     WidgetTester tester, {
     String? title = '测试对话',
-    void Function(String, String)? onResolveConfirmation,
+    void Function(String, String, String)? onResolveConfirmation,
     Future<void> Function(String)? onSend,
   }) async {
     await tester.pumpWidget(
@@ -252,12 +252,12 @@ void main() {
       // 这是本页最容易错的一处：ConfirmationItem.id 是**事件 id**，而 resolve
       // 端点要的是 chat_confirmations.id（payload.confirmation_id）。
       // 传错会 404 且不报错（0 行受影响），表现为「点了按钮没反应」。
-      final calls = <(String, String)>[];
+      final calls = <(String, String, String)>[];
       mockTimeline();
       await startController(tester);
       await pumpPage(
         tester,
-        onResolveConfirmation: (id, opt) => calls.add((id, opt)),
+        onResolveConfirmation: (gid, id, opt) => calls.add((gid, id, opt)),
       );
 
       await pushEvent(
@@ -279,17 +279,18 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(calls, hasLength(1));
-      expect(calls.single.$1, 'conf_row_xyz', reason: '必须是卡行 id，不是 evt_abc');
-      expect(calls.single.$2, '继续');
+      expect(calls.single.$1, 'grp_1', reason: 'groupId 用于拼 resolve 路径');
+      expect(calls.single.$2, 'conf_row_xyz', reason: '必须是卡行 id，不是 evt_abc');
+      expect(calls.single.$3, '继续');
     });
 
     testWidgets('事件未携带 confirmation_id 时按钮禁用（不退化用事件 id）', (tester) async {
-      final calls = <(String, String)>[];
+      final calls = <(String, String, String)>[];
       mockTimeline();
       await startController(tester);
       await pumpPage(
         tester,
-        onResolveConfirmation: (id, opt) => calls.add((id, opt)),
+        onResolveConfirmation: (gid, id, opt) => calls.add((gid, id, opt)),
       );
 
       await pushEvent(

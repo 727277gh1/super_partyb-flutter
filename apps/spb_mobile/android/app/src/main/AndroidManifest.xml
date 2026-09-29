@@ -24,6 +24,25 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!--
+              OIDC 授权回调（自定义 scheme）。
+
+              ⚠️ 与 `lib/auth_deeplink.dart` 的 OidcCallbackUri 常量必须一致：
+              scheme=partyb, host=oidc, pathPrefix=/callback。
+              三处（此处、iOS 的 Info.plist、Dart 常量）任一不一致都会表现为
+              「登录后应用毫无反应」，而不是报错。
+
+              ⚠️ 当前 IdP 尚未注册该 redirect_uri（实测返回 400，见
+              docs/mobile-oidc-deeplink.md）。此 intent-filter 是**目标形态**的
+              注册，不影响其他功能（未注册的 scheme 只会让系统把链接交给
+              本应用，而本应用会按 matches() 过滤掉非 OIDC 的链接）。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>
+            </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

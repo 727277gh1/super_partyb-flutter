@@ -167,6 +167,60 @@ void main() {
     });
   });
 
+  group('undoMessage 走 inbox 撤销契约', () {
+    test('POST /users/:uid/chat/messages/:id/undo', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/messages/inbox_01HZ/undo',
+        (server) => server.reply(200, {
+          'message_id': 'inbox_01HZ',
+          'status': 'withdrawn',
+        }),
+        data: null,
+      );
+
+      await api.undoMessage('usr_1', 'inbox_01HZ');
+      // 能走到这里说明路径与 mock 匹配（未匹配会抛 AssertionError）。
+    });
+
+    test('409 映射成 HttpError(isConflict)，供上层识别为「已处理」', () async {
+      // ## 这个测试防的是什么
+      //
+      // 服务端 `WithdrawChatInboxMessage` 把 WHERE 限定在 status='pending'：
+      // 影响行数为 0 且消息存在 → 409。这是**预期内的业务结果**（消息已被
+      // dispatcher 合并成 turn），不是故障。上层据此提示「已处理，无法撤销」
+      // 而不是「撤销失败」——后者会让用户以为它还会被执行，于是反复点。
+      //
+      // 若这里把 409 抛成别的类型（或吞掉），上层就只能靠魔法数字判断。
+      adapter.onPost(
+        '/users/usr_1/chat/messages/inbox_done/undo',
+        (server) => server.reply(409, {'error': '消息当前状态为 committed，无法撤销'}),
+        data: null,
+      );
+
+      await expectLater(
+        () => api.undoMessage('usr_1', 'inbox_done'),
+        throwsA(
+          isA<HttpError>()
+              .having((e) => e.statusCode, 'statusCode', 409)
+              .having((e) => e.isConflict, 'isConflict', isTrue),
+        ),
+      );
+    });
+
+    test('404（消息不存在）映射成 HttpError(isNotFound)', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/messages/nope/undo',
+        (server) => server.reply(404, {'error': '消息不存在'}),
+        data: null,
+      );
+
+      await expectLater(
+        () => api.undoMessage('usr_1', 'nope'),
+        throwsA(isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue)),
+      );
+    });
+  });
+
   group('ChatInboxMessage 状态机', () {
     test('committed 带 turn_id，且不再是 pending', () {
       final m = ChatInboxMessage.fromJson(
@@ -459,7 +513,10 @@ void main() {
       await api.me();
     });
 
-    test('401 时抛 AuthError（会话失效可被发现）', () async {
+    test('401 时抛 AuthError（会话失效可被发现，而非 HttpError）', () async {
+      // 401 归一化为 AuthError 而非 HttpError：上层据此**跳登录页**而不是
+      // 重试请求。若沿用 HttpError，UI 只能靠 `statusCode == 401` 判断，
+      // 容易漏掉一条分支。
       adapter.onGet(
         '/api/auth/me',
         (server) => server.reply(401, {'error': 'unauthorized'}),
@@ -468,7 +525,25 @@ void main() {
       await expectLater(
         api.me(),
         throwsA(
-          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 401),
+          isA<AuthError>()
+              .having((e) => e.statusCode, 'statusCode', 401)
+              .having((e) => e.isUnauthorized, 'isUnauthorized', isTrue),
+        ),
+      );
+    });
+
+    test('403 时抛 AuthError（已认证但无权限）', () async {
+      adapter.onGet(
+        '/api/auth/me',
+        (server) => server.reply(403, {'error': 'forbidden'}),
+      );
+
+      await expectLater(
+        api.me(),
+        throwsA(
+          isA<AuthError>()
+              .having((e) => e.statusCode, 'statusCode', 403)
+              .having((e) => e.isForbidden, 'isForbidden', isTrue),
         ),
       );
     });
@@ -482,7 +557,7 @@ void main() {
     });
   });
 
-  group('resolveConfirmation：路径无 group_id、请求体键是 action', () {
+  group('resolveConfirmation：路径含 group_id、请求体键是 action', () {
     Map<String, dynamic>? capturedBody;
 
     setUp(() {
@@ -505,44 +580,187 @@ void main() {
       // JSON 绑定忽略且**不报错**（action 取默认值 "resolved"），
       // 因为 resolved_action 无下游消费者，这个错误完全无声。
       adapter.onPost(
-        '/chat/confirmations/cf_1/resolve',
+        '/api/chat/groups/grp_1/confirmations/cf_1/resolve',
         (server) => server.reply(200, {'resolved': true}),
         data: Matchers.any,
       );
 
-      await api.resolveConfirmation('cf_1', action: 'approve');
+      await api.resolveConfirmation('grp_1', 'cf_1', action: 'approve');
 
       expect(capturedBody, isNotNull);
       expect(capturedBody!['action'], 'approve');
       expect(capturedBody!.containsKey('decision'), isFalse);
     });
 
-    test('路径是 /chat/confirmations/:id/resolve（不带 group_id）', () async {
-      // 带 group_id 的那个端点（/chat/groups/:gid/confirmations/:id/resolve）
-      // 是列表 + 动作语义，不是「解决某张卡」。DioAdapter 默认
-      // failOnMissingMock=true，故路径写错本用例会直接失败。
+    test('路径是 /api/chat/groups/:gid/confirmations/:id/resolve（issue #1）', () async {
+      // 真实路由表（在 super_partyb/apps/go-api 内枚举 r.Routes()）：
+      //   ROUTE GET    /chat/confirmations
+      //   ROUTE GET    /api/chat/groups/:group_id/confirmations
+      //   ROUTE POST   /api/chat/groups/:group_id/confirmations/:confirmation_id/resolve
+      // 即「/chat/confirmations 下只有 GET 列表」，三个写端点全在 /api 下带 group_id。
+      // 挂载点：ext_routes.go:39 的 registerConfirmRoutes(
+      //   api.Group("/chat/groups/:group_id/confirmations"), db)，
+      // 而 api 是 router.go 里 `apiv1 := r.Group("/api")`。
+      //
+      // 用完整 URL 断言而非只靠 DioAdapter：DioAdapter 默认
+      // failOnMissingMock=true，路径写错本用例会直接失败。
+      final requested = <String>[];
+      dio.interceptors.insert(
+        0,
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            requested.add(options.uri.toString());
+            handler.next(options);
+          },
+        ),
+      );
+
       adapter.onPost(
-        '/chat/confirmations/cf_2/resolve',
+        '/api/chat/groups/grp_2/confirmations/cf_2/resolve',
         (server) => server.reply(200, {'resolved': true}),
         data: Matchers.any,
       );
 
-      await api.resolveConfirmation('cf_2', action: 'reject', comment: '不合适');
+      await api.resolveConfirmation(
+        'grp_2',
+        'cf_2',
+        action: 'reject',
+        comment: '不合适',
+      );
 
+      expect(
+        requested.single,
+        'https://api.test/pba/api/chat/groups/grp_2/confirmations/cf_2/resolve',
+      );
       expect(capturedBody!['action'], 'reject');
       expect(capturedBody!['comment'], '不合适');
     });
 
     test('comment 为 null 时不发送该键', () async {
       adapter.onPost(
-        '/chat/confirmations/cf_3/resolve',
+        '/api/chat/groups/grp_1/confirmations/cf_3/resolve',
         (server) => server.reply(200, {'resolved': true}),
         data: Matchers.any,
       );
 
-      await api.resolveConfirmation('cf_3', action: 'continue');
+      await api.resolveConfirmation('grp_1', 'cf_3', action: 'continue');
 
       expect(capturedBody!.containsKey('comment'), isFalse);
+    });
+  });
+  group('search 走 turn 摘要契约（不是 ChatEvent）', () {
+    /// `search` 的真实输出形状（`internal/server/chat_stream.go` 的 `search`）。
+    ///
+    /// ## 这个测试防的是什么
+    ///
+    /// 端点名 `GET /users/:uid/chat/search` 挂在 `/chat/*` 下、又由
+    /// `chat_stream.go` 实现，极易被当成「事件流的一部分」。但服务端返回的是
+    /// **turn 摘要**——`{turn_id, group_id, group_title, input_text, created_at,
+    /// agent_id}`，**没有** `event_id` / `event_type`。
+    ///
+    /// 而 `ChatEvent.fromJson` 对缺失的必需字段做显式校验并抛 `FormatException`
+    /// （见 `chat_event.dart` 的 `_str2` + 显式 throw）。故一旦误用 ChatEvent，
+    /// **每一次搜索都会失败**，且错误信息只提「缺少 eventId/eventType」，
+    /// 不会指出是端点契约搞错了。
+    ///
+    /// 故这里不只断言「解析成功」，还**显式断言 ChatEvent.fromJson 会抛**，
+    /// 把这个陷阱钉成可执行的回归。
+    Map<String, dynamic> searchHitShape({
+      String turnId = 'turn_01HZ',
+      String groupId = 'grp_1',
+      String groupTitle = '报错排查',
+      String inputText = '帮我看一下这个报错',
+      String createdAt = '2024-03-05T08:09:10Z',
+      Object? agentId = 'agt_1',
+    }) => {
+      'turn_id': turnId,
+      'group_id': groupId,
+      'group_title': groupTitle,
+      'input_text': inputText,
+      'created_at': createdAt,
+      'agent_id': agentId,
+    };
+
+    test('用真实形状解析不抛异常且字段正确', () async {
+      adapter.onGet(
+        '/users/usr_1/chat/search',
+        (server) => server.reply(200, {
+          'items': [searchHitShape()],
+          'count': 1,
+        }),
+        queryParameters: {'q': '报错'},
+      );
+
+      final hits = await api.search('usr_1', query: '报错');
+
+      expect(hits, hasLength(1));
+      final hit = hits.single;
+      expect(hit.turnId, 'turn_01HZ');
+      expect(hit.groupId, 'grp_1');
+      expect(hit.groupTitle, '报错排查');
+      expect(hit.inputText, '帮我看一下这个报错');
+      expect(hit.createdAt?.toUtc().hour, 8);
+      expect(hit.agentId, 'agt_1');
+    });
+
+    test('该形状喂给 ChatEvent.fromJson 会抛 FormatException（钉住契约差异）', () {
+      expect(
+        () => ChatEvent.fromJson(searchHitShape()),
+        throwsA(isA<FormatException>()),
+        reason: '搜索返回 turn 摘要而非事件；误用 ChatEvent 会让每次搜索都失败',
+      );
+    });
+
+    test('group_title 缺失（归档 group 取不到标题）→ 空串且兜底展示', () async {
+      // 服务端用 ListChatGroupsByUser(status: "active") 建标题表，
+      // 归档或超出 500 条的 group 取不到标题，map 查不到 → 写入 Go 零值 ""。
+      adapter.onGet(
+        '/users/usr_1/chat/search',
+        (server) => server.reply(200, {
+          'items': [searchHitShape(groupTitle: '')],
+        }),
+        queryParameters: {'q': 'x'},
+      );
+
+      final hit = (await api.search('usr_1', query: 'x')).single;
+
+      expect(hit.groupTitle, '');
+      expect(hit.displayTitle, '（未命名对话）');
+    });
+
+    test('agent_id 为 null（turn 无 targets）不抛异常', () async {
+      adapter.onGet(
+        '/users/usr_1/chat/search',
+        (server) => server.reply(200, {
+          'items': [searchHitShape(agentId: null)],
+        }),
+        queryParameters: {'q': 'x'},
+      );
+
+      final hit = (await api.search('usr_1', query: 'x')).single;
+
+      expect(hit.agentId, isNull);
+    });
+
+    test('空结果返回空列表（服务端 q 为空时也走这条）', () async {
+      adapter.onGet(
+        '/users/usr_1/chat/search',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[], 'count': 0}),
+        queryParameters: {'q': 'nohit'},
+      );
+
+      expect(await api.search('usr_1', query: 'nohit'), isEmpty);
+    });
+
+    test('limit 透传（服务端默认 20 / 上限 50）', () async {
+      adapter.onGet(
+        '/users/usr_1/chat/search',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        queryParameters: {'q': 'x', 'limit': 5},
+      );
+
+      // 不传 limit 时该键不应出现（否则与上面的 mock 不匹配而报错）。
+      await api.search('usr_1', query: 'x', limit: 5);
     });
   });
 }

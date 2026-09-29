@@ -8,6 +8,27 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Spb Mobile</string>
+	<!--
+	  OIDC 授权回调（自定义 scheme）。
+
+	  与 android/app/src/main/AndroidManifest.xml 的 <data android:scheme>
+	  以及 lib/auth_deeplink.dart 的 OidcCallbackUri 常量必须一致。
+	  iOS 侧没有 host/pathPrefix 的等价声明，只声明 scheme，具体 host/path
+	  由 Dart 侧 OidcCallbackUri.matches() 校验。
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.atjog.spb.oidc</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>partyb</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

@@ -1,10 +1,21 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_features/spb_features.dart';
 import 'package:spb_platform/spb_platform.dart';
+
+import 'auth_deeplink.dart';
 
 /// 移动端没有桌面能力，恒为空实现。
 ///
@@ -41,30 +52,95 @@ final devUserHeaderOverrideProvider = Provider<String?>((ref) {
 
 /// 会话凭证提供者（OIDC access token）。
 ///
-/// ## 当前为何恒为 null
+/// ## 认证形态（实测依据：`docs/oidc-verification.md`）
 ///
-/// 认证尚未接入（OIDC PKCE 是 M1 事项）。移动端走系统浏览器 + 自定义 scheme
-/// 回跳，拿到 token 后存 `flutter_secure_storage`；在接入之前这里返回 null，
-/// 请求以匿名身份发出，服务端返回 401 由上层处理。
+/// 生产链路由 **api-gateway 托管 OIDC**：会话是网关下发的 HttpOnly Cookie，
+/// 客户端不解析 JWT、不申请 API Key。本 Provider 提供的 Bearer token 用于
+/// **直连 IdP 换到的 token**（以及本地开发）。两者不冲突：网关同时接受
+/// `Authorization: Bearer` 与 Cookie。
+///
+/// 用回调而非直接返回字符串：[AuthInterceptor] 每次请求都会调用它，
+/// 持有快照会用到陈旧 token。
 final sessionTokenProvider = Provider<Future<String?> Function()>((ref) {
-  return () async => null;
+  final manager = ref.watch(sessionManagerProvider);
+  return manager.currentAccessToken;
+});
+
+/// 会话凭证存储（Keychain / Keystore）。
+final tokenStoreProvider = Provider<TokenStore>((ref) {
+  return SecureTokenStore();
+});
+
+/// OIDC 配置（编译期注入，见 `SpbEnv.oidcIssuer` 等）。
+///
+/// ⚠️ `redirectUri` **覆盖**为 [OidcCallbackUri.redirectUri]
+/// （`partyb://oidc/callback`），而不是 `SpbEnv.oidcRedirectUri`
+/// （默认是网关回调）。理由：网关把 `redirect_uri` 硬编码为自己的地址
+/// （实测见 `docs/oidc-verification.md` §1.2），用它的话回调永远落在网关、
+/// 客户端拿不到 code。移动端要拿 code 必须声明自己的回调地址。
+///
+/// `clientSecret` 传 null：生产不在客户端内嵌密钥（这也意味着当前 IdP 的
+/// 非 public client 形态下换不到 token，见 `docs/mobile-oidc-deeplink.md`）。
+final oidcConfigProvider = Provider<OidcConfig>((ref) {
+  return OidcConfig.fromEnv().copyWithRedirectUri(OidcCallbackUri.redirectUri);
+});
+
+/// OIDC 客户端（刷新凭证用）。
+final oidcClientProvider = Provider<OidcClient>((ref) {
+  return OidcClient(config: ref.watch(oidcConfigProvider));
+});
+
+/// 会话管理器：负责「拿到可用 token」与「过期前刷新（并发去重）」。
+final sessionManagerProvider = Provider<SessionManager>((ref) {
+  final store = ref.watch(tokenStoreProvider);
+  final oidc = ref.watch(oidcClientProvider);
+
+  return SessionManager(
+    store: store,
+    refresher: (current) async {
+      final refreshToken = current.refreshToken;
+      if (refreshToken == null || refreshToken.isEmpty) return null;
+
+      final tokens = await oidc.refresh(refreshToken: refreshToken);
+      final expiresIn = tokens.expiresIn;
+      return StoredTokens(
+        accessToken: tokens.accessToken,
+        // 保留旧 refresh_token 由 SessionManager 负责（新响应常不下发）。
+        refreshToken: tokens.refreshToken ?? refreshToken,
+        expiresAt: expiresIn == null
+            ? null
+            : DateTime.now().toUtc().add(Duration(seconds: expiresIn)),
+        tokenType: tokens.tokenType,
+        scope: tokens.scope,
+      );
+    },
+  );
 });
 
 /// 全局 Dio 实例（单例）。
 final dioProvider = Provider<Dio>((ref) {
   final tokenProvider = ref.watch(sessionTokenProvider);
   final override = ref.watch(devUserHeaderOverrideProvider);
+  final manager = ref.watch(sessionManagerProvider);
 
-  return createDio(
-    baseUrl: SpbEnv.apiBaseUrl,
-    interceptors: [
-      AuthInterceptor(
-        tokenProvider: tokenProvider,
-        // 生产为 null（见 devUserHeaderOverrideProvider 的说明）。
-        userHeaderOverride: override,
-      ),
-    ],
+  final auth = AuthInterceptor(
+    tokenProvider: tokenProvider,
+    // 生产为 null（见 devUserHeaderOverrideProvider 的说明）。
+    userHeaderOverride: override,
+    // 401 时刷新凭证并重放原请求；无法刷新则归一化为 AuthError。
+    onUnauthorized: () async {
+      final refreshed = await manager.refresh();
+      return refreshed != null;
+    },
   );
+
+  final dio = createDio(
+    baseUrl: SpbEnv.apiBaseUrl,
+    interceptors: [auth],
+  );
+  // 回填重放用的 Dio：必须是同一个实例（否则丢掉连接池与其余拦截器）。
+  auth.replayDio = dio;
+  return dio;
 });
 
 /// Chat API 客户端。
@@ -72,11 +148,261 @@ final chatApiProvider = Provider<ChatApi>((ref) {
   return ChatApi(ref.watch(dioProvider));
 });
 
+// ==================== 对话管理（改名 / 归档 / 删除）====================
+
+/// 对话管理用例。
+final groupManagementUseCaseProvider = Provider<GroupManagementUseCase>((ref) {
+  return GroupManagementUseCase(ref.watch(chatApiProvider));
+});
+
+/// 对话管理动作的执行入口（供 `GroupListPage.onGroupAction` 注入）。
+///
+/// ## 为什么在这里把异常翻译成 [GroupActionRejected]
+///
+/// `SpbError.message` 是**给开发者看的**（`HttpError` 的消息就是 `"HTTP 403"`），
+/// 直接显示给用户等于没说。翻译需要判断错误类型并给出可操作的提示——这属于
+/// 「本端如何呈现」的决策，放在 app 装配层，而不是 domain（domain 只负责
+/// 「哪个错误算业务拒绝」）。
+///
+/// 页面仍会接住漏网的 `SpbError`（如翻译函数自己出问题），故这是纵深防御而非
+/// 唯一防线。
+final groupActionProvider = Provider<GroupActionHandler>((ref) {
+      final useCase = ref.watch(groupManagementUseCaseProvider);
+      return (group, action) async {
+        try {
+          return await useCase.execute(group, action);
+        } on SpbError catch (e) {
+          SpbLog.warn('对话管理动作失败', {
+            'groupId': group.id,
+            'action': action.runtimeType.toString(),
+            'error': e.toString(),
+          });
+          return GroupActionRejected(_describeGroupActionError(e));
+        }
+      };
+    });
+
+/// 把 [SpbError] 翻译成用户能看懂的一句话。
+String _describeGroupActionError(SpbError error) {
+  // 401 由 AuthInterceptor 归一化成 AuthError（见 spb_api）。
+  if (error is AuthError && error.isUnauthorized) {
+    return '登录已过期，请重新登录';
+  }
+  if (error is AuthError && error.isForbidden) {
+    return '没有权限修改这个对话';
+  }
+  if (error is HttpError) {
+    if (error.isForbidden) return '没有权限修改这个对话';
+    if (error.isRateLimited) return '操作太频繁，请稍后再试';
+    if (error.isServerError) return '服务端暂时不可用，请稍后重试';
+    if (error.isConflict) return '该对话正在被修改，请刷新后重试';
+  }
+  if (error is NetworkError) return '网络连接失败，请检查网络后重试';
+  if (error is ParseError) return '服务端返回了无法识别的数据';
+  return error.message;
+}
+
 /// SSE 客户端（单例）。
 ///
-/// 不 autoDispose：SSE 是 user 级订阅，切换 group 不重连。
+/// ## 不 autoDispose：切 group 不重连
+///
+/// SSE 是 user 级订阅，若随页面销毁重建，每次进对话都要重新建连 + 回放，
+/// 白白多一次往返。
+///
+/// ## 所有权约定（重要）：本 provider 拥有 [SseClient] 的 dispose
+///
+/// `ChatStreamController` 是 `autoDispose`（页面退出即释放），但**它不得关闭
+/// 这里创建的 SseClient**——那会让「离开一次对话页」变成「永久失去实时流」
+/// （关闭后所有帧被静默丢弃）。故：
+///
+/// - 控制器只在 `dispose()` 里取消自己的订阅（见 `ChatStreamController.dispose`）；
+/// - SseClient 的释放**只由本 provider** 在自身销毁时负责（`ref.onDispose`）。
+///
+/// 新增任何持有长连接的 provider 时照此约定：**谁创建，谁 dispose**。
 final sseClientProvider = Provider<SseClient>((ref) {
-  return SseClient(dio: ref.watch(dioProvider), baseUrl: SpbEnv.apiBaseUrl);
+  final client = SseClient(
+    dio: ref.watch(dioProvider),
+    baseUrl: SpbEnv.apiBaseUrl,
+  );
+  ref.onDispose(client.dispose);
+  return client;
+});
+
+// ==================== 认证 ====================
+
+/// 发起登录的动作。
+///
+/// 打开系统浏览器走 IdP 授权码流程（自定义 scheme 回跳），实现见
+/// `auth_deeplink.dart` 的 [mobileSignIn]。
+///
+/// ⚠️ **当前无法闭环**：IdP 未注册 `partyb://oidc/callback`
+/// （授权端点直接 400），且该 client 非 public client（无 client_secret
+/// 换不到 token）。两者都需在 IdP 侧新增一个移动端 public client，属跨仓库
+/// 的生产配置变更。本实现已按目标形态写好，服务端就绪后即可工作；
+/// 详见 `docs/mobile-oidc-deeplink.md`。
+final signInActionProvider = Provider<Future<String?> Function()>((ref) {
+  final config = ref.watch(oidcConfigProvider);
+  final store = ref.watch(pendingAuthStoreProvider);
+  return () => mobileSignIn(
+    config: config,
+    store: store,
+    launch: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+  );
+});
+
+/// 待验证登录请求（`state` + PKCE verifier）的存放处。
+final pendingAuthStoreProvider = Provider<PendingAuthRequestStore>((ref) {
+  return InMemoryPendingAuthStore();
+});
+
+/// OIDC 回调接收器（监听自定义 scheme 回跳并把 code 换成会话）。
+///
+/// 在 `main.dart` 启动时调 `start()`。它把收到的 code 交给
+/// `OidcClient.exchangeCode` 换成 token、写入安全存储，然后把认证状态推进到
+/// 已登录。
+final authDeepLinkReceiverProvider = Provider<AuthDeepLinkReceiver>((ref) {
+  final receiver = AuthDeepLinkReceiver(
+    source: ref.watch(deepLinkSourceProvider),
+    pendingState: ref.read(pendingAuthStoreProvider).consume,
+    onCode: (code, pkce) async {
+      try {
+        final tokens = await ref.read(oidcClientProvider).exchangeCode(
+          code: code,
+          pkce: pkce,
+        );
+        await ref.read(tokenStoreProvider).write(
+          StoredTokens(
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            expiresAt: tokens.expiresIn == null
+                ? null
+                : DateTime.now().toUtc().add(
+                    Duration(seconds: tokens.expiresIn!),
+                  ),
+            tokenType: tokens.tokenType,
+            scope: tokens.scope,
+          ),
+        );
+        ref.read(authStateProvider.notifier).signedIn();
+        return null;
+      } on SpbError catch (e) {
+        return e.message;
+      } catch (e) {
+        return '登录失败：$e';
+      }
+    },
+    onError: (message) {
+      // 把失败原因显示在登录页（它 watch 的就是 authStateProvider）。
+      ref.read(authStateProvider.notifier).markUnauthenticated(message);
+    },
+  );
+  ref.onDispose(receiver.dispose);
+  return receiver;
+});
+
+/// 深链来源（生产为 `app_links` 插件；测试可覆盖）。
+final deepLinkSourceProvider = Provider<DeepLinkSource>((ref) {
+  return AppLinksDeepLinkSource();
+});
+
+/// 认证状态（登录页与路由守卫共享）。
+final authStateProvider = NotifierProvider<AuthStateNotifier, AuthState>(
+  AuthStateNotifier.new,
+);
+
+/// 认证状态控制器（与桌面端同构，见桌面 `providers.dart` 的详细说明）。
+class AuthStateNotifier extends Notifier<AuthState> {
+  @override
+  AuthState build() {
+    unawaited(restore());
+    return AuthState.unknown;
+  }
+
+  /// 从安全存储恢复登录态。
+  Future<void> restore() async {
+    final manager = ref.read(sessionManagerProvider);
+    try {
+      final token = await manager.currentAccessToken();
+      if (token == null) {
+        final leftover = await ref.read(tokenStoreProvider).read();
+        if (leftover != null) await manager.logout();
+        state = AuthState.unauthenticated;
+        return;
+      }
+      state = AuthState.authenticated;
+    } on SpbError catch (e) {
+      SpbLog.warn('恢复登录态失败', {'error': e.toString()});
+      state = AuthState.failed(e.message);
+    }
+  }
+
+  /// 发起登录。返回失败原因（null 表示已成功发起）。
+  Future<String?> signIn() async {
+    final signIn = ref.read(signInActionProvider);
+    String? error;
+    try {
+      error = await signIn();
+    } on SpbError catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '无法发起登录：$e';
+    }
+
+    if (error != null) {
+      state = AuthState.failed(error);
+      return error;
+    }
+    state = AuthState(status: AuthStatus.unknown, message: null);
+    return null;
+  }
+
+  /// 凭证已落盘（回调收到 token 后调用）。
+  void signedIn() => state = AuthState.authenticated;
+
+  /// 登出：清凭证并切到未登录。
+  Future<void> signOut() async {
+    await ref.read(sessionManagerProvider).logout();
+    state = AuthState.unauthenticated;
+  }
+
+  /// 标记会话失效（如收到 [AuthError]）。**不清凭证**。
+  void markUnauthenticated(String? message) {
+    state = message == null
+        ? AuthState.unauthenticated
+        : AuthState.failed(message);
+  }
+}
+
+/// 认证动作集合。
+final authControllerProvider = Provider<AuthActions>((ref) {
+  return AuthActions(
+    signIn: () => ref.read(authStateProvider.notifier).signIn(),
+    signOut: () => ref.read(authStateProvider.notifier).signOut(),
+  );
+});
+
+/// 认证动作集合。
+class AuthActions {
+  const AuthActions({required this.signIn, required this.signOut});
+
+  final Future<String?> Function() signIn;
+  final Future<void> Function() signOut;
+}
+
+/// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。
+///
+/// 见桌面 `providers.dart` 的详细说明（为什么必须有它）。
+class AuthRefreshNotifier extends ChangeNotifier {
+  AuthRefreshNotifier(Ref ref) {
+    ref.listen(authStateProvider, (previous, next) {
+      if (previous?.status != next.status) notifyListeners();
+    });
+  }
+}
+
+/// [AuthRefreshNotifier] 的 Provider。
+final authRefreshListenableProvider = Provider<Listenable>((ref) {
+  return AuthRefreshNotifier(ref);
 });
 
 // ==================== 用户身份 ====================
@@ -96,30 +422,406 @@ final currentUserIdProvider = FutureProvider<String>((ref) async {
   return me.id;
 });
 
+/// 搜索消息内容（供 [SearchPage] 注入）。
+///
+/// ## 为什么在这里解析 userId
+///
+/// `ChatApi.search` 需要 userId，而页面不该知道「我是谁」是怎么来的（见
+/// `SearchChat` 的说明）。在这里 `await currentUserIdProvider.future` 拿到
+/// 真实 id 再发请求——**不做空串兜底**：`/users//chat/search` 会得到一个
+/// 语义不明的 404，而报错信息完全指不出原因是「userId 没解析出来」
+/// （与 issue #2 同源的陷阱）。
+final searchChatProvider = Provider<SearchChat>((ref) {
+  return (String query, {int? limit}) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    return ref.read(chatApiProvider).search(userId, query: query, limit: limit);
+  };
+});
+
 // ==================== 对话流 ====================
 
-/// 对话流控制器。
+/// 对话流控制器（按 userId 参数化）。
+///
+/// ## 为什么是 `family` 而不是内部取 userId（issue #2）
+///
+/// 原先在 provider 内部读 `currentUserIdProvider` 的 `.value` 并以空串兜底——
+/// `currentUserIdProvider`
+/// `.value` 为 null，于是空串兜底生效，构造出 `userId == ''` 的控制器，
+/// SSE 连到 `/users//chat/stream`。
+///
+/// 用 `family` 把 userId 变成**必填的 String 参数**后，「userId 未就绪」在类型上
+/// 无法表达——调用方必须先 `await` 到真实 id 才能拿到 provider（见 router.dart）。
 ///
 /// ## 移动端为何更要 autoDispose
 ///
 /// 它持有长连接 SSE。移动端离开页面后连接仍开着会**持续耗电与流量**
 /// （系统可能因此限制后台网络），故页面退出即释放。
 ///
-/// `onDispose` 里必须调 `dispose()`：它负责取消帧订阅、关闭 SSE 与三个
+/// `onDispose` 里必须调 `dispose()`：它负责取消帧订阅并关闭三个
 /// StreamController。Riverpod 只丢弃 Provider 实例，不会清理内部资源。
-final chatStreamControllerProvider = Provider.autoDispose<ChatStreamController>(
-  (ref) {
-    final controller = ChatStreamController(
-      sse: ref.watch(sseClientProvider),
-      api: ref.watch(chatApiProvider),
-      userId: ref.watch(currentUserIdProvider).value ?? '',
-    );
-    ref.onDispose(controller.dispose);
-    return controller;
-  },
-);
+final chatStreamControllerProvider = Provider.autoDispose
+    .family<ChatStreamController, String>((ref, userId) {
+      final controller = ChatStreamController(
+        sse: ref.watch(sseClientProvider),
+        api: ref.watch(chatApiProvider),
+        userId: userId,
+      );
+      ref.onDispose(controller.dispose);
+      return controller;
+    });
 
 /// 无归属入口用例（悬浮输入窗用）。
 final quickCaptureUseCaseProvider = Provider<QuickCaptureUseCase>((ref) {
   return QuickCaptureUseCase(ref.watch(chatApiProvider));
 });
+
+// ==================== 交付物同步 ====================
+//
+// 移动端同样具备同步能力（把交付物拉到手机存储），但**没有目录选择器**：
+// Android/iOS 的应用沙箱目录由系统分配，用户不选路径。故：
+// - 目录固定为应用支持目录下的 `deliverables/`；
+// - 同步页的「选择目录」按钮会被隐藏（页面读 `pickDirectory` 返回 null
+//   即视为「无目录选择能力」，UI 上仍可用）。
+//
+// 设置页（含同步范围/媒体开关）在移动端的接入属后续任务；本轮先把 provider
+// 与同步页接线补齐，使两端行为一致。
+
+/// UFS API 客户端。
+final ufsApiProvider = Provider<UfsApi>((ref) {
+  return UfsApi(ref.watch(ufsDioProvider));
+});
+
+/// UFS 专用 Dio（baseUrl 与 PartyB API 不同，见桌面端同名 Provider 的说明）。
+final ufsDioProvider = Provider<Dio>((ref) {
+  final tokenProvider = ref.watch(sessionTokenProvider);
+  final override = ref.watch(devUserHeaderOverrideProvider);
+  final manager = ref.watch(sessionManagerProvider);
+
+  final auth = AuthInterceptor(
+    tokenProvider: tokenProvider,
+    userHeaderOverride: override,
+    onUnauthorized: () async {
+      final refreshed = await manager.refresh();
+      return refreshed != null;
+    },
+  );
+
+  final dio = createDio(baseUrl: SpbEnv.ufsBaseUrl, interceptors: [auth]);
+  auth.replayDio = dio;
+  return dio;
+});
+
+/// 本地同步数据库。
+///
+/// 用 `path_provider` 的应用支持目录（移动端唯一可写的持久位置）：
+/// 同步状态必须**跨启动持久**，否则每次启动都退化成全量同步。
+///
+/// 路径是异步拿到的，故用 `openAppDatabaseLazy`（首次查询时才解析）。
+final appDatabaseProvider = Provider<AppDatabase>((ref) {
+  final db = openAppDatabaseLazy(() async {
+    final dir = await getApplicationSupportDirectory();
+    return File(p.join(dir.path, 'sync.db'));
+  });
+  ref.onDispose(db.close);
+  return db;
+});
+
+/// 同步状态存储（具体类型，理由见桌面端同名 Provider）。
+final syncStateStoreProvider = Provider<DriftSyncStateStore>((ref) {
+  return DriftSyncStateStore(ref.watch(appDatabaseProvider));
+});
+
+/// 本地偏好存储。
+final preferencesStoreProvider = Provider<PreferencesStore>((ref) {
+  return PreferencesStore(ref.watch(appDatabaseProvider));
+});
+
+/// 同步目录：移动端**固定**为应用支持目录下的 `deliverables/`。
+///
+/// ## 为什么不用数据库里的绑定值
+///
+/// 那个绑定是给「用户可选目录」的桌面端用的。移动端没有目录选择器，
+/// 用户选不了，故目录恒定；若去读绑定表反而会出现「表为空 → 未选目录 →
+/// 同步报错」的假故障。
+final syncLocalRootProvider = FutureProvider<String?>((ref) async {
+  final dir = await getApplicationSupportDirectory();
+  return p.join(dir.path, 'deliverables');
+});
+
+/// 目录选择器：移动端**没有**该能力，恒返回 null（用户取消）。
+///
+/// 返回 null 而非抛异常：同步页把 null 当「用户取消」处理，于是按钮点了
+/// 没有副作用——比抛异常后弹一个用户无法解决的错误要好。
+final pickDirectoryProvider = Provider<PickSyncDirectory>((ref) {
+  return ({String? title}) async => null;
+});
+
+/// 偏好键（与桌面端保持一致，便于将来跨端迁移偏好）。
+const String includeMediaPrefKey = 'sync.include_media';
+const String maxFileSizePrefKey = 'sync.max_file_size';
+
+/// 偏好键：同步范围（JSON，见 `SyncScopeConfig.encode`）。
+const String scopePrefKey = 'sync.scope';
+
+/// 偏好键：拉取范围（天）。缺省 = 不限历史。
+const String sinceDaysPrefKey = 'sync.since_days';
+
+/// 同步过滤配置。
+final syncFilterConfigProvider = FutureProvider<SyncFilterConfig>((ref) async {
+  final prefs = ref.watch(preferencesStoreProvider);
+  return SyncFilterConfig(
+    includeMedia: await prefs.getBool(
+      includeMediaPrefKey,
+      defaultValue: false,
+    ),
+    maxFileSize: await prefs.getInt(
+      maxFileSizePrefKey,
+      defaultValue: defaultMaxFileSize,
+    ),
+  );
+});
+
+/// 触发一轮同步。
+final runSyncActionProvider = Provider<RunSyncAction>((ref) {
+  return () async {
+    // 每次都重新读设置（同桌面端：用户可能刚改了范围/过滤）。
+    final settings = await ref.read(loadSyncSettingsProvider)();
+
+    final root = settings.localRoot;
+    if (root == null || root.trim().isEmpty) {
+      throw const PlatformError('未找到可用的同步目录');
+    }
+
+    final scope = settings.scope.toScope();
+    final ufs = ref.read(ufsApiProvider);
+    final useCase = DeliverableSyncUseCase(
+      ufs: ufs,
+      stateStore: ref.read(syncStateStoreProvider),
+      sink: LocalFileSink(root),
+      downloader: UfsFileDownloader(ufs),
+    );
+
+    return useCase.run(
+      scope: scope,
+      filter: settings.filter,
+      sinceDays: settings.sinceDays,
+    );
+  };
+});
+
+/// 保存同步目录。
+///
+/// 移动端目录是系统分配的，用户改不了，故这是**空操作**（返回 false =
+/// 未发生重置）。保留同名 Provider 是为了让同步页的 `onLocalRootChanged`
+/// 回调在两端都能无条件接线，不必在页面里判平台。
+final saveLocalRootActionProvider =
+    Provider<Future<bool> Function(String?)>((ref) {
+      return (String? root) async => false;
+    });
+
+// ==================== 设置页 ====================
+
+/// 读取完整的同步设置（表单的初值）。
+///
+/// 与桌面端的差异：目录**不是**从数据库绑定读，而是恒定的沙箱路径
+/// （移动端没有目录选择器）。见 [syncLocalRootProvider]。
+final loadSyncSettingsProvider = Provider<LoadSyncSettings>((ref) {
+  return () async {
+    final prefs = ref.read(preferencesStoreProvider);
+    final root = await ref.read(syncLocalRootProvider.future);
+
+    return SyncSettings(
+      localRoot: root,
+      scope: SyncScopeConfig.decode(await prefs.getString(scopePrefKey)),
+      filter: SyncFilterConfig(
+        includeMedia: await prefs.getBool(
+          includeMediaPrefKey,
+          defaultValue: false,
+        ),
+        maxFileSize: await prefs.getInt(
+          maxFileSizePrefKey,
+          defaultValue: defaultMaxFileSize,
+        ),
+      ),
+      sinceDays: await _readSinceDays(prefs),
+    );
+  };
+});
+
+/// 保存同步设置（**整份提交**）。
+///
+/// 移动端**不写目录**：目录是系统分配的，写了也不会生效（下次读仍从
+/// `path_provider` 取）。其余字段正常落盘。
+final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
+  return (SyncSettings settings) async {
+    final prefs = ref.read(preferencesStoreProvider);
+
+    await prefs.setString(scopePrefKey, settings.scope.encode());
+    await prefs.setBool(
+      includeMediaPrefKey,
+      value: settings.filter.includeMedia,
+    );
+    await prefs.setInt(
+      maxFileSizePrefKey,
+      value: settings.filter.maxFileSize,
+    );
+
+    final days = settings.sinceDays;
+    if (days == null || days <= 0) {
+      await prefs.remove(sinceDaysPrefKey);
+    } else {
+      await prefs.setInt(sinceDaysPrefKey, value: days);
+    }
+
+    ref.invalidate(syncFilterConfigProvider);
+  };
+});
+
+/// 读取可勾选的对话列表（同步范围用）。
+final loadSyncGroupsProvider = Provider<LoadSyncGroups>((ref) {
+  return () async {
+    final api = ref.read(chatApiProvider);
+    return api.listGroups(limit: 200);
+  };
+});
+
+/// 扫描本地同步目录（清理与统计用）。
+final scanLocalGroupsProvider = Provider<ScanLocalGroups>((ref) {
+  return () async {
+    final root = await ref.read(syncLocalRootProvider.future);
+    if (root == null || root.trim().isEmpty) return const [];
+    return scanLocalGroups(root);
+  };
+});
+
+/// 执行清理计划。
+final executePruneProvider = Provider<ExecutePrune>((ref) {
+  return (PrunePlan plan) async {
+    final root = await ref.read(syncLocalRootProvider.future);
+    if (root == null || root.trim().isEmpty) {
+      throw const PlatformError('未找到可用的同步目录');
+    }
+    return executePrunePlan(localRoot: root, plan: plan);
+  };
+});
+
+// ==================== 小程序工作台（miniapp BFF）====================
+//
+// 与桌面端不同：**只有移动端**接这组端点（它是为小程序/移动端做的投影层）。
+//
+// 页面全部依赖注入（见 `miniapp.dart` 的说明），故这里只做「把 MiniappApi
+// 的方法绑成页面要的回调」，不含业务规则。
+
+/// 小程序 BFF 客户端。
+///
+/// 与 [chatApiProvider] 共用同一个 [dioProvider]（同一 baseUrl + 同一认证
+/// 拦截器），只是端点前缀不同（`/chat/miniapp/*` 也在 PartyB API 下）。
+final miniappApiProvider = Provider<MiniappApi>((ref) {
+  return MiniappApi(ref.watch(dioProvider));
+});
+
+/// 工作列表（供 [WorksPage] 注入）。
+final loadMiniappWorksProvider = Provider<LoadMiniappWorks>((ref) {
+  final api = ref.watch(miniappApiProvider);
+  return ({String status = 'active', int? cursor}) =>
+      api.listWorks(status: status, cursor: cursor);
+});
+
+/// 工作详情（供 [WorkDetailPage] 注入）。
+///
+/// 用 `family` 把 workId 变成必填参数——workId 未就绪在类型上无法表达，
+/// 避免出现 `/works//` 这种语义不明的 404（与 issue #2 同源的陷阱）。
+final loadMiniappWorkDetailProvider =
+    Provider.family<LoadWorkDetail, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return () => api.getWork(workId);
+    });
+
+/// 工作事件。
+///
+/// ⚠️ 返回的是 `MiniappWorkEvent`（数据库原始行），**不是** `ChatEvent`——
+/// 用 `ChatEvent.fromJson` 解析会抛 `FormatException`（键名是 `id` 不是
+/// `eventId`）。详见该类文档。
+final loadMiniappWorkEventsProvider =
+    Provider.family<LoadWorkEvents, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return () => api.workEvents(workId);
+    });
+
+/// 产物列表。
+final loadMiniappArtifactsProvider =
+    Provider.family<LoadWorkArtifacts, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return () => api.listArtifacts(workId);
+    });
+
+/// 下载产物字节。
+final downloadMiniappArtifactProvider =
+    Provider.family<DownloadArtifact, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return (artifactId) => api.downloadArtifact(workId, artifactId);
+    });
+
+/// 保存下载到的字节到应用沙箱，返回落地路径。
+///
+/// ## 为什么写入 `deliverables/miniapp/`
+///
+/// 与交付物同步的目录（`syncLocalRootProvider` 的 `deliverables/`）分开：
+/// 同步目录的内容由同步游标管理（会被清理计划删除），而这里是用户**主动**
+/// 下载的产物——混在一起会让清理把用户手动下载的文件也删掉。
+final saveMiniappArtifactProvider = Provider<SaveArtifactBytes>((ref) {
+  return (String filename, List<int> bytes) async {
+    final dir = await getApplicationSupportDirectory();
+    final target = Directory(p.join(dir.path, 'deliverables', 'miniapp'));
+    if (!await target.exists()) {
+      await target.create(recursive: true);
+    }
+    // 只取 basename：服务端的 name 可能是路径（事件投影取的是 basename，
+    // 但上传来源的 entry.Name 不保证），拼进来会造成路径穿越。
+    final safeName = p.basename(filename.isEmpty ? 'artifact' : filename);
+    final file = File(p.join(target.path, safeName));
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  };
+});
+
+/// 发送工作消息。
+final sendMiniappMessageProvider =
+    Provider.family<SendWorkMessage, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return (input) => api.sendMessage(workId, input: input);
+    });
+
+/// 完成工作。
+final completeMiniappWorkProvider =
+    Provider.family<CompleteWork, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return () => api.completeWork(workId);
+    });
+
+/// 停止工作。
+final stopMiniappWorkProvider =
+    Provider.family<StopWork, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return () => api.stopWork(workId);
+    });
+
+/// 解决确认卡（**不带** group_id 的路径，与 webapp 那套不同）。
+final resolveMiniappConfirmationProvider =
+    Provider<ResolveMiniappConfirmation>((ref) {
+      final api = ref.watch(miniappApiProvider);
+      return (confirmationId, action) =>
+          api.resolveConfirmation(confirmationId, action: action);
+    });
+
+/// 读取 `since_days`：缺失、非法、`<= 0` 都视为「不限」。
+Future<int?> _readSinceDays(PreferencesStore prefs) async {
+  final raw = await prefs.getString(sinceDaysPrefKey);
+  if (raw == null) return null;
+  final parsed = int.tryParse(raw);
+  if (parsed == null) {
+    SpbLog.warn('since_days 偏好不是合法整数，按「不限」处理', {'value': raw});
+    return null;
+  }
+  return parsed > 0 ? parsed : null;
+}

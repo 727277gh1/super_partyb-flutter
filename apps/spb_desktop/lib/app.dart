@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
 
+import 'providers.dart';
 import 'router.dart';
 
 /// 应用根组件。
@@ -10,16 +12,21 @@ import 'router.dart';
 /// 路由表由 [createDesktopRouter] 提供；页面本身在 `spb_features`。
 /// 本文件只负责「装配」：主题 + 路由 + 标题。
 ///
-/// ## 为什么 router 在 build 里创建（而不是 `late final` 字段）
+/// ## 为什么 router 在 `initState` 里创建（而不是 `build` 里）
 ///
-/// `GoRouter` 持有一个 `Navigator` 与路由栈。若在 `StatelessWidget` 的字段里
-/// 创建，热重载或父级 rebuild 会产生**新的** GoRouter 实例，导致导航栈被重置
-/// （用户会看到页面莫名跳回首页）。
+/// `GoRouter` 持有一个 `Navigator` 与路由栈。若在 `build` 里创建，热重载或
+/// 父级 rebuild 会产生**新的** GoRouter 实例，导致导航栈被重置（用户会看到
+/// 页面莫名跳回首页）。
 ///
 /// [SpbDesktopApp] 自身几乎不会 rebuild（它是 `runApp` 的根），但
 /// [createDesktopRouter] 的调用点应保持唯一且稳定，故用 `StatefulWidget`
 /// 在 `initState` 里创建一次。
-class SpbDesktopApp extends StatefulWidget {
+///
+/// ## 为什么是 `ConsumerStatefulWidget`
+///
+/// 路由需要 `refreshListenable`（认证状态变化时重跑重定向守卫，见
+/// `providers.dart` 的 [AuthRefreshNotifier]），而它来自 Riverpod 容器。
+class SpbDesktopApp extends ConsumerStatefulWidget {
   const SpbDesktopApp({super.key, this.router});
 
   /// 可选的外部路由实例（测试用）。
@@ -32,11 +39,15 @@ class SpbDesktopApp extends StatefulWidget {
   final GoRouter? router;
 
   @override
-  State<SpbDesktopApp> createState() => _SpbDesktopAppState();
+  ConsumerState<SpbDesktopApp> createState() => _SpbDesktopAppState();
 }
 
-class _SpbDesktopAppState extends State<SpbDesktopApp> {
-  late final GoRouter _router = widget.router ?? createDesktopRouter();
+class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
+  late final GoRouter _router =
+      widget.router ??
+      createDesktopRouter(
+        refreshListenable: ref.read(authRefreshListenableProvider),
+      );
 
   /// 外部传入的 router 由传入方负责 dispose（生命周期不属于本组件）。
   late final bool _ownsRouter = widget.router == null;

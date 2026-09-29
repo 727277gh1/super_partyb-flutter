@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 
 import 'providers.dart';
@@ -17,10 +18,27 @@ class SpbRoutes {
   static const settings = '/settings';
   static const quickCapture = '/quick-capture';
 
+  /// 交付物同步页。
+  ///
+  /// 桌面端相对 webapp 的**核心差异价值**：把交付物真文件拉到磁盘上，
+  /// 可用系统程序打开、可离线查看。
+  static const sync = '/settings/sync';
+
+  /// 登录页。
+  ///
+  /// ## 为什么用常量而不是内联字符串
+  ///
+  /// 路由守卫（`redirect`）与路由表必须用**同一个**字面量，否则守卫会把
+  /// 用户重定向到一个不存在的路径，go_router 会抛「no routes for location」。
+  static const login = '/login';
+
   /// 对话时间线路径。
   static String chat(String groupId) => '/chat/$groupId';
 
   static const chatPattern = '/chat/:groupId';
+
+  /// 搜索页（搜消息正文，不是对话标题）。
+  static const search = '/search';
 }
 
 /// 桌面端路由表。
@@ -35,11 +53,64 @@ class SpbRoutes {
 /// ## 对话页为什么走 path 参数而不是 query
 ///
 /// `/chat/:groupId` 让 URL 可分享、可深链，也让「返回上一个对话」有历史语义。
-GoRouter createDesktopRouter() {
+GoRouter createDesktopRouter({Listenable? refreshListenable}) {
   return GoRouter(
     initialLocation: SpbRoutes.home,
     routes: buildDesktopRoutes(),
+    redirect: buildAuthRedirect(),
+    refreshListenable: refreshListenable,
   );
+}
+
+/// 未认证重定向守卫。
+///
+/// ## 为什么用 `redirect` 而不是在每个页面里判断
+///
+/// 把守卫放在路由层，意味着「未认证」这件事**只有一个判定点**。若散在各页面
+/// 里判断，新增页面时总会漏掉一处，表现为「未登录也能进某个页面，然后在里面
+/// 报一堆 401」。
+///
+/// ## 为什么要跳过 [AuthStatus.unknown]
+///
+/// 读取凭证是异步的（安全存储要走平台通道）。启动瞬间状态是 [AuthStatus.unknown]：
+/// 此时若重定向到登录页，已登录用户会看到登录页闪一下；若放行，未登录用户
+/// 会先看到主界面再被踢走。故 unknown 时**不重定向**，由 `refreshListenable`
+/// 在判定完成后再次触发本守卫。
+///
+/// [authState] 为 null 表示**未接入认证**（如未 override provider 的旧测试）：
+/// 此时一律放行，避免把「还没接认证」变成「所有人都进不去」。
+GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
+  return (context, state) {
+    final auth = authState?.call() ?? _authStateFromContext(context);
+    if (auth == null || auth.status == AuthStatus.unknown) return null;
+
+    final goingToLogin = state.matchedLocation == SpbRoutes.login;
+
+    if (auth.isUnauthenticated) {
+      if (goingToLogin) return null;
+      // 记住原本要去的页面，登录成功后回跳（go_router 的 `from` 约定）。
+      return '${SpbRoutes.login}?from=${Uri.encodeComponent(state.matchedLocation)}';
+    }
+
+    // 已认证时不必停在登录页。
+    if (goingToLogin) return SpbRoutes.home;
+    return null;
+  };
+}
+
+/// 从 `BuildContext` 读认证状态。
+///
+/// 用 `ProviderScope.containerOf(context, listen: false)` 而非在守卫签名里
+/// 拿 `ref`：go_router 的 `redirect` 签名只有 `(context, state)`，没有 ref。
+/// 用 `listen: false` 是必要的——守卫不在 build 阶段，依赖订阅会抛异常。
+AuthState? _authStateFromContext(BuildContext context) {
+  try {
+    final container = ProviderScope.containerOf(context, listen: false);
+    return container.read(authStateProvider);
+  } catch (_) {
+    // 没有 ProviderScope（如单测直接构造 GoRouter）→ 视为未接入认证。
+    return null;
+  }
 }
 
 /// 桌面端路由表（不含 `GoRouter` 实例）。
@@ -48,6 +119,10 @@ GoRouter createDesktopRouter() {
 /// 并在 pumpWidget 前拿到实例以主动导航）。
 List<RouteBase> buildDesktopRoutes() {
   return [
+    GoRoute(
+      path: SpbRoutes.login,
+      builder: (context, state) => const _LoginPage(),
+    ),
     GoRoute(
       path: SpbRoutes.home,
       builder: (context, state) => const _HomePage(),
@@ -60,8 +135,18 @@ List<RouteBase> buildDesktopRoutes() {
           },
         ),
         GoRoute(
+          path: 'search',
+          builder: (context, state) => const _SearchPage(),
+        ),
+        GoRoute(
           path: 'settings',
           builder: (context, state) => const _SettingsPage(),
+          routes: [
+            GoRoute(
+              path: 'sync',
+              builder: (context, state) => const _SyncPage(),
+            ),
+          ],
         ),
         GoRoute(
           path: 'quick-capture',
@@ -72,7 +157,24 @@ List<RouteBase> buildDesktopRoutes() {
   ];
 }
 
+/// 登录页（接线到认证用例）。
+class _LoginPage extends ConsumerWidget {
+  const _LoginPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return LoginPage(
+      state: ref.watch(authStateProvider),
+      onSignIn: () => ref.read(authControllerProvider).signIn(),
+    );
+  }
+}
+
 /// 首页：对话列表。
+///
+/// 管理动作（改名/归档/删除）交给 `groupActionProvider`：它把领域用例的异常
+/// 翻译成用户能看懂的一句话（见 provider 说明）。页面自己只负责收集意图与
+/// 把权威结果反映到列表上。
 class _HomePage extends ConsumerWidget {
   const _HomePage();
 
@@ -82,6 +184,24 @@ class _HomePage extends ConsumerWidget {
     return GroupListPage(
       api: api,
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
+      onGroupAction: ref.watch(groupActionProvider),
+      onSearch: () => context.go(SpbRoutes.search),
+    );
+  }
+}
+
+/// 搜索页（接线到注入的搜索实现）。
+///
+/// 点击命中项跳转到该消息所属的对话——这是搜索的核心用途：找到「那句话」
+/// 然后回到它的上下文里继续。
+class _SearchPage extends ConsumerWidget {
+  const _SearchPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SearchPage(
+      search: ref.watch(searchChatProvider),
+      onOpenHit: (hit) => context.go(SpbRoutes.chat(hit.groupId)),
     );
   }
 }
@@ -100,47 +220,128 @@ class _ChatPage extends ConsumerStatefulWidget {
 }
 
 class _ChatPageState extends ConsumerState<_ChatPage> {
-  /// 已聚焦的 group，避免重复调用 `switchGroup`（它会清空缓冲重新回填，
-  /// 在每次 rebuild 里调用会导致列表反复闪烁）。
+  /// 已解析的 userId。为 null 表示 `GET /api/auth/me` 尚未返回。
+  ///
+  /// ## 为什么必须显式持有它（issue #2）
+  ///
+  /// 控制器 provider 是 `family`，构造它需要**真实的** userId。若在 userId 未就绪
+  /// 时就构造，会得到连 `/users//chat/stream` 的控制器，且后续 provider 重建出
+  /// 正确实例时，旧实例的 `start()` 已经跑过——新实例永远不被 start。
+  /// 故 build 在 userId 就绪前只渲染加载态。
+  String? _userId;
+
+  /// 是否正在解析 userId（防重复请求：`initState` 与 `didUpdateWidget` 都可能触发）。
+  bool _resolvingUser = false;
+
+  /// 已聚焦的 `userId:groupId`，避免重复 start。
+  ///
+  /// ## 为什么去重键要含 userId 而非只用 groupId
+  ///
+  /// 只用 groupId 时，若 userId 从「未就绪」变成「已就绪」（或未来切换账号），
+  /// 键不变 → 去重拦住 → **新 userId 的控制器永不被 start**（这正是 issue #2
+  /// 描述的那个时序）。带上 userId 后，userId 一变就是一次新的聚焦。
   String? _focused;
+
+  /// 已建立 SSE 连接的 userId。
+  ///
+  /// ## 为什么需要它（切 group 不重连）
+  ///
+  /// SSE 是 **user 级订阅**：同一 userId 下换 group 只需换聚焦目标，连接本身
+  /// 应复用。而 `SseClient.connect()` 会把 `_lastEventId` 置 null（游标清零），
+  /// 于是「切对话就重连」会**丢掉续接能力**——断线重连时无法带 cursor 回放，
+  /// 只能整段重拉。
+  ///
+  /// 故：首次聚焦该 userId 用 `start()`（建连），此后用 `switchGroup()`
+  /// （只清缓冲 + 重新回填，不重连）。
+  String? _connectedUserId;
 
   @override
   void initState() {
     super.initState();
-    // 在首帧后聚焦：`ref.watch` 在 initState 里不可用，
-    // 而 `ref.read` 可以在 initState 里用，但此时控制器尚未被 watch 过。
-    WidgetsBinding.instance.addPostFrameCallback((_) => _focus());
+    // 在首帧后解析：`ref.watch` 在 initState 里不可用。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _resolveUserAndFocus());
   }
 
   @override
   void didUpdateWidget(_ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.groupId != widget.groupId) _focus();
+    if (oldWidget.groupId != widget.groupId) _resolveUserAndFocus();
   }
 
-  Future<void> _focus() async {
-    if (!mounted || _focused == widget.groupId) return;
-    _focused = widget.groupId;
-    await ref.read(chatStreamControllerProvider).start(groupId: widget.groupId);
+  /// 先解析 userId，再聚焦到当前 group。
+  Future<void> _resolveUserAndFocus() async {
+    if (!mounted || _resolvingUser) return;
+    _resolvingUser = true;
+    try {
+      // 必须先 await 到真实 id：`currentUserIdProvider` 首次读取必然 pending，
+      // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
+      final userId = await ref.read(currentUserIdProvider.future);
+      if (!mounted) return;
+      setState(() => _userId = userId);
+      await _focus(userId);
+    } on SpbError catch (e) {
+      // 取身份失败（未登录 / 网络不可达）：保持加载态并记录。
+      // 不构造空 userId 的控制器——那只会发出畸形请求。
+      SpbLog.warn('解析当前用户失败，对话页停留在加载态', {'error': e.toString()});
+    } finally {
+      _resolvingUser = false;
+    }
+  }
+
+  Future<void> _focus(String userId) async {
+    final key = '$userId:${widget.groupId}';
+    if (!mounted || _focused == key) return;
+    _focused = key;
+
+    final controller = ref.read(chatStreamControllerProvider(userId));
+    if (_connectedUserId == userId) {
+      // 同一 userId 内切 group：复用已有连接（不调 connect，游标保留）。
+      await controller.switchGroup(widget.groupId);
+    } else {
+      // 首次聚焦：建立 SSE 连接。
+      await controller.start(groupId: widget.groupId);
+      _connectedUserId = userId;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final controller = ref.watch(chatStreamControllerProvider);
+    final userId = _userId;
+    // userId 未就绪：不构造控制器（`family` 需要非空 id），显示加载态。
+    if (userId == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('对话')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    final controller = ref.watch(chatStreamControllerProvider(userId));
     final api = ref.watch(chatApiProvider);
 
     return ConversationPage(
       controller: controller,
       title: '对话',
-      onResolveConfirmation: (confirmationId, option) {
+      // 待处理收件箱消息（可撤销）。
+      //
+      // 撤销需要 userId，而页面不该知道 userId 从哪来——故在这里闭包捕获
+      // （本 State 已经解析出了真实 userId，见 _resolveUserAndFocus）。
+      loadPending: () => api.pendingMessages(userId, groupId: widget.groupId),
+      undoPending: (messageId) => api.undoMessage(userId, messageId),
+      // 切换 group 时重新加载：Flutter 会复用本页 State，
+      // 不靠这个键就会一直显示上一个 group 的待处理消息。
+      pendingReloadKey: widget.groupId,
+      onResolveConfirmation: (groupId, confirmationId, option) {
         // 动作文案 → 服务端 action。
         //
+        // 真实路径：POST /api/chat/groups/:group_id/confirmations/:id/resolve
+        // （挂载点 ext_routes.go:39 的 registerConfirmRoutes + router.go 的 /api 组）。
         // 服务端 `misc.go:resolve` 绑定 `{action, comment}`，且把 action 写进
         // `resolved_action`；status 固定为 `resolved`（见 `chat_confirmations`
         // 的 CHECK 约束：pending|resolved|expired|cancelled）。
         // 故这里必须传**动作**而非 `resolved` 这类状态词。
         api
             .resolveConfirmation(
+              groupId,
               confirmationId,
               action: _optionToAction(option),
             )
@@ -165,15 +366,80 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   };
 }
 
-/// 设置页（占位）。
-class _SettingsPage extends StatelessWidget {
+/// 交付物同步页（接线到同步用例）。
+///
+/// ## 与设置页的分工
+///
+/// - **设置页**（`/settings`）：配置同步目录、范围、过滤、清理；
+/// - **同步页**（`/settings/sync`）：只做「立即同步」并展示本轮结果。
+///
+/// 分开的理由：同步是**高频动作**（每次想看最新交付物就点一次），而配置是
+/// 低频动作。合在一页会让用户每次同步都要滚过一堆表单。
+///
+/// ## 页面不依赖平台插件
+///
+/// 目录选择与同步执行都通过 Provider 注入（`pickDirectoryProvider` /
+/// `runSyncActionProvider`），故本页在 widget test 里可以完整验证，
+/// 而真实实现（`file_selector` / UFS HTTP）只在生产装配里出现。
+class _SyncPage extends ConsumerWidget {
+  const _SyncPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 初始目录：读数据库绑定。读取是异步的，未就绪时传 null（页面显示
+    // 「尚未选择」），就绪后由 watch 触发重建。
+    //
+    // 用 `.value`（riverpod 3 里它是可空的，未就绪/出错时为 null）：
+    // 「尚未选过目录」与「还没读出来」都表现为 null，而页面对两者的处理
+    // 完全相同（显示「尚未选择」），故不需要额外区分。
+    final localRoot = ref.watch(syncLocalRootProvider).value;
+
+    return SyncPage(
+      initialLocalRoot: localRoot,
+      pickDirectory: ref.watch(pickDirectoryProvider),
+      runSync: ref.watch(runSyncActionProvider),
+      onLocalRootChanged: (root) {
+        // 保存目录（换目录会在同一事务里清空同步状态，见 provider 说明）。
+        ref.read(saveLocalRootActionProvider)(root).catchError((Object e) {
+          SpbLog.warn('保存同步目录失败', {'error': e.toString()});
+          return false;
+        });
+      },
+    );
+  }
+}
+
+/// 设置页（接线到注入的设置读写与平台能力）。
+///
+/// ## 页面不依赖数据库 / 网络 / 平台插件
+///
+/// 全部通过 Provider 注入：读取/保存设置、目录选择、对话列表、本地扫描与
+/// 清理。故本页在 widget test 里可以完整验证，真实实现只在生产装配里出现。
+///
+/// ## 为什么用 `ConsumerWidget` 就够了
+///
+/// 异步加载由 `SettingsPage` 自己管（它的 `initState` 里拉一次设置，加载完
+/// 重建自己）。外层只做一次同步的 Provider 读取，因此不需要在这里持有状态
+/// ——若在这里 `watch` 一个 FutureProvider 再重建，反而会在每次设置变化时
+/// 丢掉页面内部的表单草稿。
+class _SettingsPage extends ConsumerWidget {
   const _SettingsPage();
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
-      body: const Center(child: Text('设置项待接入（同步目录 / 范围 / 媒体开关）')),
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SettingsPage(
+      loadSettings: ref.watch(loadSyncSettingsProvider),
+      saveSettings: ref.watch(saveSyncSettingsProvider),
+      loadGroups: ref.watch(loadSyncGroupsProvider),
+      scanGroups: ref.watch(scanLocalGroupsProvider),
+      executePrune: ref.watch(executePruneProvider),
+      pickDirectory: () async {
+        final caps = ref.read(desktopCapabilitiesProvider);
+        return caps.pickDirectory(title: '选择交付物同步目录');
+      },
+      capabilities: ref.watch(desktopCapabilitiesProvider),
+      // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
+      onOpenSync: () => context.go(SpbRoutes.sync),
     );
   }
 }

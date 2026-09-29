@@ -284,10 +284,32 @@ class ChatApi {
     return CurrentUser.fromJson(_asMap(res));
   }
 
-  /// `GET /users/:user_id/chat/search?q=`
-  Future<List<ChatEvent>> search(String userId, {required String query}) async {
-    final res = await _get('/users/$userId/chat/search', query: {'q': query});
-    return unwrapItems(res, ChatEvent.fromJson);
+  /// `GET /users/:user_id/chat/search?q=&limit=`
+  ///
+  /// ## 返回的是 turn 摘要，**不是** `ChatEvent`
+  ///
+  /// 服务端（`chat_stream.go` 的 `search`）返回的是
+  /// `{turn_id, group_id, group_title, input_text, created_at, agent_id}`，
+  /// **没有** `event_id` / `event_type`。用 `ChatEvent.fromJson` 解析每一项都会
+  /// 抛 `FormatException`（该方法对缺失的必需字段做显式校验）。
+  ///
+  /// 这个陷阱的来源是端点名：它挂在 `/chat/*` 下、又由 `chat_stream.go` 实现，
+  /// 很容易让人以为返回事件流的一部分。
+  ///
+  /// ## limit 的语义
+  ///
+  /// 服务端 `parseLimit(c.Query("limit"), 20, 50)`：默认 20、上限 50。传超过 50
+  /// 会被夹到 50（不会报错），故客户端不必自己夹。
+  Future<List<ChatSearchHit>> search(
+    String userId, {
+    required String query,
+    int? limit,
+  }) async {
+    final res = await _get(
+      '/users/$userId/chat/search',
+      query: {'q': query, if (limit != null) 'limit': limit},
+    );
+    return unwrapItems(res, ChatSearchHit.fromJson);
   }
 
   /// `POST /users/:user_id/chat/routing-preview`
@@ -327,19 +349,32 @@ class ChatApi {
     return unwrapItems(res, (m) => m);
   }
 
-  /// `POST /chat/confirmations/:confirmation_id/resolve`
+  /// `POST /api/chat/groups/:group_id/confirmations/:confirmation_id/resolve`
   ///
-  /// ## 路径与请求体都容易写错（两个坑）
+  /// ## 路径必须带 group_id（issue #1：写错会静默 404）
   ///
-  /// **坑 1：路径没有 group_id。** 直觉会写成
-  /// `/chat/groups/:gid/confirmations/:id/resolve`（那个端点确实存在，见
-  /// `misc.go` 的 `registerConfirmRoutes`），但它的 handler 是**列表 + 动作**
-  /// 语义（`{action, comment}`，把 action 直接写进 status），不是「解决某张卡」。
-  /// webapp 用的是全局路径 `/chat/confirmations/:id/resolve`（`misc.go` 的
-  /// `resolve`），故此处对齐 webapp。
+  /// 真实路由表（在 `super_partyb/apps/go-api` 内枚举 `r.Routes()` 得到）：
   ///
-  /// **坑 2：请求体键是 `action` 而非 `decision`。** 服务端
-  /// `misc.go:resolve` 绑定的结构体是 `{Action, Comment}`，用 `decision` 会
+  /// ```
+  /// ROUTE  GET    /chat/confirmations
+  /// ROUTE  GET    /api/chat/groups/:group_id/confirmations
+  /// ROUTE  POST   /api/chat/groups/:group_id/confirmations/:confirmation_id/resolve
+  /// ROUTE  POST   /api/chat/groups/:group_id/confirmations/:confirmation_id/confirm
+  /// ROUTE  POST   /api/chat/groups/:group_id/confirmations/:confirmation_id/reject
+  /// ```
+  ///
+  /// **`/chat/confirmations` 下只有 GET 列表**；三个写端点全在
+  /// `/api/chat/groups/:gid/confirmations/` 下。挂载点：
+  /// `ext_routes.go:39` 的 `registerConfirmRoutes(api.Group("/chat/groups/:group_id/confirmations"), db)`，
+  /// 而 `api` 是 `router.go` 里的 `apiv1 := r.Group("/api")`。
+  ///
+  /// 历史教训：曾一度改成不带 group_id 的全局路径（依据是 webapp 的调用路径），
+  /// 但**webapp 那条路径同样 404**。判断「哪个路径对」
+  /// 不能靠读前端调用方（它可能与后端漂移），必须枚举真实路由表。
+  ///
+  /// ## 请求体键是 `action` 而非 `decision`
+  ///
+  /// 服务端 `misc.go:resolve` 绑定的结构体是 `{Action, Comment}`，用 `decision` 会
   /// 被 JSON 绑定忽略（不报错）→ `action` 取默认值 `"resolved"`。
   /// 因为 `resolved_action` 当前无下游消费者，这个错误**不会报错也不会崩溃**，
   /// 只是把用户选的动作静默丢掉。
@@ -347,11 +382,12 @@ class ChatApi {
   /// [confirmationId] 必须是**卡行 id**（`chat_confirmations.id`），不是事件 id
   /// ——见 `ConfirmationItem.confirmationId` 的说明。
   Future<void> resolveConfirmation(
+    String groupId,
     String confirmationId, {
     required String action,
     String? comment,
   }) => _post(
-    '/chat/confirmations/$confirmationId/resolve',
+    '/api/chat/groups/$groupId/confirmations/$confirmationId/resolve',
     body: {'action': action, if (comment != null) 'comment': comment},
   );
 

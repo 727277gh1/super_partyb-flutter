@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
 
+import 'providers.dart';
 import 'router.dart';
 
 /// 移动端应用根组件。
@@ -14,7 +16,12 @@ import 'router.dart';
 /// `GoRouter` 持有 `Navigator` 与路由栈。若在 `build` 里创建，父级 rebuild
 /// 会换成新实例、导航栈被重置（用户会看到页面莫名跳回列表）。本组件是
 /// `runApp` 的根、几乎不 rebuild，但把创建点固定一次仍是必要的。
-class SpbMobileApp extends StatefulWidget {
+///
+/// ## 为什么是 `ConsumerStatefulWidget`
+///
+/// 路由需要 `refreshListenable`（认证状态变化时重跑重定向守卫），而它来自
+/// Riverpod 容器。
+class SpbMobileApp extends ConsumerStatefulWidget {
   const SpbMobileApp({super.key, this.router});
 
   /// 可选的外部路由实例（测试用）。
@@ -24,11 +31,15 @@ class SpbMobileApp extends StatefulWidget {
   final GoRouter? router;
 
   @override
-  State<SpbMobileApp> createState() => _SpbMobileAppState();
+  ConsumerState<SpbMobileApp> createState() => _SpbMobileAppState();
 }
 
-class _SpbMobileAppState extends State<SpbMobileApp> {
-  late final GoRouter _router = widget.router ?? createMobileRouter();
+class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
+  late final GoRouter _router =
+      widget.router ??
+      createMobileRouter(
+        refreshListenable: ref.read(authRefreshListenableProvider),
+      );
 
   /// 外部传入的 router 由传入方负责 dispose。
   late final bool _ownsRouter = widget.router == null;

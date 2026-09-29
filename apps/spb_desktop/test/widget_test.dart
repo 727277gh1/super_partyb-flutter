@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,7 +7,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
+import 'package:drift/native.dart';
+
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_data/spb_data.dart';
+import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'package:spb_desktop/app.dart';
@@ -22,11 +30,70 @@ import 'package:spb_desktop/router.dart';
 /// 用例注册的 mock 永远不会被使用（表现为请求真实发出、测试超时 10 分钟）。
 /// 故 adapter 必须在 pumpApp 内部创建并交回用例。
 class TestHarness {
-  TestHarness({required this.dio, required this.adapter, required this.router});
+  TestHarness({
+    required this.dio,
+    required this.adapter,
+    required this.router,
+    required this.container,
+  });
 
   final Dio dio;
   final DioAdapter adapter;
   final GoRouter router;
+
+  /// Riverpod 容器（显式创建，见 [pumpApp] 的说明）。
+  final ProviderContainer container;
+}
+
+/// 假的 [SseClient]：记录收到的 path，不连网、不重试。
+///
+/// ## 为什么必须注入它
+///
+/// 进入 `/chat/:groupId` 会挂载 `ConversationPage`，其控制器调
+/// `SseClient.connect` 发真实长连接请求。测试环境下这必然失败，而真实现会
+/// **按指数退避安排重连定时器**，测试结束时留下 pending Timer，flutter_test
+/// 直接报「A Timer is still pending even after the widget tree was disposed」。
+///
+/// 用真 SseClient + mock adapter 解决不了：SSE 走 `ResponseType.stream`，
+/// `DioAdapter` 不模拟流式响应，仍会落到失败/重试路径。
+class _FakeSseClient extends SseClient {
+  _FakeSseClient()
+    : super(dio: Dio(), baseUrl: 'https://fake.invalid', maxRetries: 0);
+
+  final framesController = StreamController<SseFrame>.broadcast();
+  final statesController = StreamController<SseState>.broadcast();
+
+  /// `connect` 收到的全部 path（按调用顺序）。
+  ///
+  /// 这是 issue #2 的观测点：修复前这里是 `/users//chat/stream`（空 userId），
+  /// 修复后必须是 `/users/<真实 id>/chat/stream`。
+  final connectedPaths = <String>[];
+
+  @override
+  Stream<SseFrame> get frames => framesController.stream;
+
+  @override
+  Stream<SseState> get states => statesController.stream;
+
+  @override
+  SseState get state => SseState.connected;
+
+  @override
+  Future<void> connect({required String path}) async {
+    connectedPaths.add(path);
+  }
+
+  @override
+  Future<void> resume() async {}
+
+  @override
+  void recordEventId(String eventId) {}
+
+  @override
+  Future<void> dispose() async {
+    await framesController.close();
+    await statesController.close();
+  }
 }
 
 /// 启动测试用 app，注入全部 fake provider（**禁止真实网络**）。
@@ -46,13 +113,54 @@ class TestHarness {
 /// 首页（`GroupListPage`）挂载即发请求。若不 mock，会留下未结算的 Timer，
 /// flutter_test 直接报「A Timer is still pending even after the widget tree
 /// was disposed」。
+///
+/// ## 为什么用 `UncontrolledProviderScope` + 显式 container
+///
+/// 路由的 `refreshListenable`（认证状态变化时重跑守卫）来自 Riverpod 容器，
+/// 而它必须在 `pumpWidget` **之前**就存在才能传给 `GoRouter`。若用
+/// `ProviderScope`（内部自建容器），测试拿不到容器也就拿不到 listenable，
+/// 于是「凭证恢复完成 → 重跑守卫」这条链路永远不会被触发——表现为
+/// 「未登录用户停在首页」。故显式建容器再交给 `UncontrolledProviderScope`。
 Future<TestHarness> pumpApp(
   WidgetTester tester, {
   String initialLocation = SpbRoutes.home,
   bool mockGroups = true,
+  SseClient? sseClient,
+  TokenStore? tokenStore,
+  Future<String?> Function()? signInAction,
+  void Function(DioAdapter adapter)? beforePump,
+  /// 目录选择器（同步页用）。默认「用户取消」。
+  PickSyncDirectory? pickDirectory,
+  /// 同步动作（同步页用）。默认返回空报告。
+  RunSyncAction? runSync,
+  /// 同步目录初始值（同步页用）。默认未选。
+  String? syncLocalRoot,
+  /// 设置页注入点：读取设置。默认「未选目录 + 全部范围」。
+  LoadSyncSettings? loadSyncSettings,
+  /// 设置页注入点：保存设置。
+  SaveSyncSettings? saveSyncSettings,
+  /// 设置页注入点：对话列表（同步范围勾选用）。
+  LoadSyncGroups? loadSyncGroups,
+  /// 设置页注入点：本地扫描（清理与统计用）。
+  ScanLocalGroups? scanLocalGroups,
+  /// 设置页注入点：执行清理。
+  ExecutePrune? executePrune,
+  /// 平台能力。默认空实现（不展示桌面集成项）。
+  DesktopCapabilities? capabilities,
+  /// 搜索实现（搜索页用）。默认返回空结果。
+  SearchChat? searchChat,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
+
+  // 供用例在 pumpWidget **之前**注册 mock。
+  //
+  // ## 为什么需要这个钩子
+  //
+  // 若在 `pumpApp` 返回后才注册 mock，则任何在**首帧**触发的请求
+  // （如对话页 postFrameCallback 里的 `/api/auth/me`）已经以未 mock 状态发出，
+  // 得到 NetworkError 后页面永远停在加载态——表现为「mock 明明注册了却不命中」。
+  beforePump?.call(adapter);
 
   if (mockGroups) {
     adapter.onGet(
@@ -62,21 +170,82 @@ Future<TestHarness> pumpApp(
     );
   }
 
+  final container = ProviderContainer(
+    overrides: [
+      desktopCapabilitiesProvider.overrideWithValue(
+        capabilities ?? const NoopDesktopCapabilities(),
+      ),
+      dioProvider.overrideWithValue(dio),
+      // 默认注入「已登录」的内存存储：
+      //
+      // 否则 `authStateProvider.restore()` 会读真实的 `SecureTokenStore`
+      // （走 flutter_secure_storage 平台通道，测试环境必然抛
+      // MissingPluginException），得到「未登录」后被守卫重定向到 /login
+      // ——那么所有期望「首页渲染对话列表」的用例都会失败，而失败原因
+      // 与被测行为无关。需要测未登录的用例显式传空存储。
+      tokenStoreProvider.overrideWithValue(
+        tokenStore ?? InMemoryTokenStore(_freshTokens()),
+      ),
+      // 真实实现要开系统浏览器，测试里换成可控的假实现。
+      signInActionProvider.overrideWithValue(signInAction ?? () async => null),
+      if (sseClient != null) sseClientProvider.overrideWithValue(sseClient),
+      // 内存库：真实的 appDatabaseProvider 会在 ~/.local/share 下建文件，
+      // 让测试污染开发者的同步状态（且用例之间互相干扰）。
+      appDatabaseProvider.overrideWith((ref) {
+        final db = AppDatabase(NativeDatabase.memory());
+        ref.onDispose(db.close);
+        return db;
+      }),
+      // 同步页的两个注入点：默认「取消 + 空报告」，需要断言的用例显式传。
+      pickDirectoryProvider.overrideWithValue(
+        pickDirectory ?? ({String? title}) async => null,
+      ),
+      runSyncActionProvider.overrideWithValue(runSync ?? () async => SyncReport()),
+      // 设置页的注入点：全部换成可控假实现（真实的会读库/走网络/扫磁盘）。
+      loadSyncSettingsProvider.overrideWithValue(
+        loadSyncSettings ??
+            () async => SyncSettings(localRoot: syncLocalRoot),
+      ),
+      saveSyncSettingsProvider.overrideWithValue(
+        saveSyncSettings ?? (_) async {},
+      ),
+      loadSyncGroupsProvider.overrideWithValue(
+        loadSyncGroups ?? () async => const [],
+      ),
+      scanLocalGroupsProvider.overrideWithValue(
+        scanLocalGroups ?? () async => const [],
+      ),
+      executePruneProvider.overrideWithValue(
+        executePrune ??
+            (_) async => const PruneOutcome(deleted: 0, failed: {}),
+      ),
+      // 搜索页的注入点：真实实现要 /api/auth/me + 网络，测试里换成假实现。
+      searchChatProvider.overrideWithValue(
+        searchChat ?? (query, {int? limit}) async => const [],
+      ),
+      // 初始目录：写进内存库的绑定表，让 syncLocalRootProvider 读得到。
+      if (syncLocalRoot != null)
+        syncLocalRootProvider.overrideWith((ref) async => syncLocalRoot),
+    ],
+  );
+  addTearDown(container.dispose);
+
   // 路由必须在 pumpWidget 前建好，测试才能主动导航。
+  //
+  // 带上**与生产一致**的认证守卫与 refreshListenable：这样
+  // 「未认证被重定向到 /login」与「凭证恢复后重跑守卫」在测试里真跑，
+  // 而不是测一个与生产不同的路由表。
   final router = GoRouter(
     initialLocation: initialLocation,
     routes: buildDesktopRoutes(),
+    redirect: buildAuthRedirect(),
+    refreshListenable: container.read(authRefreshListenableProvider),
   );
   addTearDown(router.dispose);
 
   await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        desktopCapabilitiesProvider.overrideWithValue(
-          const NoopDesktopCapabilities(),
-        ),
-        dioProvider.overrideWithValue(dio),
-      ],
+    UncontrolledProviderScope(
+      container: container,
       child: SpbDesktopApp(router: router),
     ),
   );
@@ -84,9 +253,21 @@ Future<TestHarness> pumpApp(
   // packages/spb_features/test/chat/group_list_page_test.dart 的说明）。
   await tester.pump();
   await tester.pump(const Duration(seconds: 2));
+  await tester.pumpAndSettle();
 
-  return TestHarness(dio: dio, adapter: adapter, router: router);
+  return TestHarness(
+    dio: dio,
+    adapter: adapter,
+    router: router,
+    container: container,
+  );
 }
+
+/// 一份「不会过期」的凭证（测试用）。
+StoredTokens _freshTokens() => StoredTokens(
+  accessToken: 'at_test',
+  expiresAt: DateTime.now().toUtc().add(const Duration(days: 1)),
+);
 
 void main() {
   testWidgets('首页渲染对话列表（用 mock 数据，无真实网络）', (tester) async {
@@ -109,16 +290,28 @@ void main() {
       queryParameters: {'limit': 30, 'offset': 0},
     );
 
-    final router = GoRouter(routes: buildDesktopRoutes());
+    final router = GoRouter(
+      routes: buildDesktopRoutes(),
+      redirect: buildAuthRedirect(),
+    );
     addTearDown(router.dispose);
+    final container = ProviderContainer(
+      overrides: [
+        desktopCapabilitiesProvider.overrideWithValue(
+          const NoopDesktopCapabilities(),
+        ),
+        dioProvider.overrideWithValue(dio),
+        // 注入已登录凭证，否则守卫会把首页重定向到 /login。
+        tokenStoreProvider.overrideWithValue(
+          InMemoryTokenStore(_freshTokens()),
+        ),
+        signInActionProvider.overrideWithValue(() async => null),
+      ],
+    );
+    addTearDown(container.dispose);
     await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          desktopCapabilitiesProvider.overrideWithValue(
-            const NoopDesktopCapabilities(),
-          ),
-          dioProvider.overrideWithValue(dio),
-        ],
+      UncontrolledProviderScope(
+        container: container,
         child: SpbDesktopApp(router: router),
       ),
     );
@@ -142,23 +335,364 @@ void main() {
     expect(find.byKey(const ValueKey('quick-capture-submit')), findsOneWidget);
   });
 
-  testWidgets('/settings 可导航（占位页）', (tester) async {
+  testWidgets('/settings 渲染完整设置页（含同步入口与各配置项）', (tester) async {
     final h = await pumpApp(tester);
 
     h.router.go(SpbRoutes.settings);
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('设置项待接入'), findsOneWidget);
+    expect(find.text('设置'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-sync-entry')),
+      findsOneWidget,
+      reason: '桌面端的核心差异价值是交付物同步，必须有入口',
+    );
+    // 占位页时代只有「待接入」文案；现在是可操作的配置项。
+    expect(find.byKey(const ValueKey('settings-pick-directory')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-scope-all')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-include-media')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-max-file-size')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('settings-since-days')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-prune')), findsOneWidget);
+  });
+
+  testWidgets('设置页展示从注入读到的目录', (tester) async {
+    final h = await pumpApp(tester, syncLocalRoot: '/home/u/out');
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    expect(find.text('/home/u/out'), findsOneWidget);
+  });
+
+  testWidgets('设置页保存走注入的 saveSyncSettings（整份提交）', (tester) async {
+    SyncSettings? saved;
+    final h = await pumpApp(
+      tester,
+      syncLocalRoot: '/home/u/out',
+      saveSyncSettings: (s) async => saved = s,
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-include-media')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(saved, isNotNull);
+    expect(saved!.filter.includeMedia, isTrue);
+    expect(saved!.localRoot, '/home/u/out');
+  });
+
+  testWidgets('桌面端（真实能力）展示桌面集成项', (tester) async {
+    // ## 为什么要把测试窗口调高
+    //
+    // 设置页是 ListView，**惰性构建**：屏幕外的条目在 widget 树里根本不存在，
+    // `find.byKey` 找不到。桌面集成区块排在最后一个分节，默认 800×600 的
+    // 测试窗口下必然在屏幕外。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    // 桌面端注入的是 isSupported=true 的能力实现，故应展示托盘/快捷键区块。
+    final h = await pumpApp(
+      tester,
+      capabilities: _FakeDesktopCapabilities(),
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('settings-capabilities')),
+      findsOneWidget,
+    );
+    // 移动端不展示这一段（见 spb_features 的设置页用例）。
+    expect(find.text('系统托盘'), findsOneWidget);
+  });
+
+  testWidgets('从设置页进入 /settings/sync 并渲染同步页', (tester) async {
+    final h = await pumpApp(tester);
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-sync-entry')));
+    await tester.pumpAndSettle();
+
+    expect(h.router.state.matchedLocation, SpbRoutes.sync);
+    expect(find.text('交付物同步'), findsWidgets);
+    expect(find.byKey(const ValueKey('sync-pick-directory')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync-start-button')), findsOneWidget);
+  });
+
+  testWidgets('对话列表有搜索入口，点击进入 /search', (tester) async {
+    final h = await pumpApp(tester);
+
+    expect(
+      find.byKey(const ValueKey('group-list-search')),
+      findsOneWidget,
+      reason: '搜索是对话列表的常规能力，没有入口等于没实现',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-search')));
+    await tester.pumpAndSettle();
+
+    expect(h.router.state.matchedLocation, SpbRoutes.search);
+    expect(find.byKey(const ValueKey('search-field')), findsOneWidget);
+  });
+
+  testWidgets('搜索页点击命中项跳到该消息所属对话', (tester) async {
+    final h = await pumpApp(
+      tester,
+      mockGroups: false,
+      // 跳转目标对话页会建 SSE。不注入假实现的话，真实 SseClient 在 mock
+      // 地址上连不上会**排一个重连 Timer**，测试结束时留下未结算的 Timer 报
+      // 「A Timer is still pending even after the widget tree was disposed」
+      // （见本文件里 issue #2 用例的同一处说明）。
+      sseClient: _FakeSseClient(),
+      beforePump: (adapter) {
+        // 跳转目标对话页会发 /api/auth/me 与 timeline（与 issue #2 用例同）。
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_42/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_42', 'limit': 20},
+        );
+      },
+      searchChat: (query, {int? limit}) async => [
+        ChatSearchHit.fromJson({
+          'turn_id': 't1',
+          'group_id': 'grp_42',
+          'group_title': '报错排查',
+          'input_text': '帮我看一下这个报错',
+          'created_at': '2024-03-05T08:09:10Z',
+          'agent_id': 'agt_1',
+        }),
+      ],
+    );
+
+    h.router.go(SpbRoutes.search);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const ValueKey('search-field')), '报错');
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+
+    expect(find.text('报错排查'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('search-hit-t1')));
+
+    // ⚠️ 不能 pumpAndSettle：跳转目标是对话页，它挂载后进入加载态，而
+    // CircularProgressIndicator 是**无限动画**——pumpAndSettle 会一直等到超时
+    // （见本文件里 issue #2 用例的同一处说明）。用显式 pump 推进假时钟。
+    //
+    // 多 pump 几轮：对话页挂载后由 postFrameCallback 依次发出
+    // `/api/auth/me`、timeline、`messages/pending`，每个请求的 mock 响应都在
+    // 一个 Timer 里 resolve。只 pump 一轮会让后发出的请求留下未结算的 Timer
+    // （报「A Timer is still pending even after the widget tree was disposed」）。
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      h.router.state.matchedLocation,
+      SpbRoutes.chat('grp_42'),
+      reason: '搜索的用途是「找到那句话然后回到它的上下文」',
+    );
+  });
+
+  testWidgets('同步页展示注入的初始目录（从数据库绑定读入）', (tester) async {
+    final h = await pumpApp(tester, syncLocalRoot: '/home/u/deliverables');
+
+    h.router.go(SpbRoutes.sync);
+    await tester.pumpAndSettle();
+
+    expect(find.text('/home/u/deliverables'), findsOneWidget);
+  });
+
+  testWidgets('同步页点「立即同步」调用注入的 runSync 并展示结果', (tester) async {
+    var calls = 0;
+    final h = await pumpApp(
+      tester,
+      syncLocalRoot: '/home/u/deliverables',
+      runSync: () async {
+        calls++;
+        return SyncReport(
+          downloaded: 4,
+          skipped: {SyncSkipReason.mediaExcluded: 2},
+          failed: const [SyncFailure('a.md', '下载失败：超时')],
+        );
+      },
+    );
+
+    h.router.go(SpbRoutes.sync);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('sync-start-button')));
+    await tester.pumpAndSettle();
+
+    expect(calls, 1);
+    expect(find.byKey(const ValueKey('sync-report')), findsOneWidget);
+    expect(find.text('4 个'), findsOneWidget);
+    expect(find.textContaining('a.md'), findsOneWidget);
+  });
+
+  testWidgets('同步页选择目录后写入数据库绑定（换目录清状态）', (tester) async {
+    // 端到端验证「目录变更 → bindLocalRoot 落库」这条链路，
+    // 而不只是「页面上显示了新路径」。
+    final h = await pumpApp(
+      tester,
+      pickDirectory: ({String? title}) async => '/home/u/new-root',
+    );
+
+    h.router.go(SpbRoutes.sync);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('sync-pick-directory')));
+    await tester.pumpAndSettle();
+
+    final store = h.container.read(syncStateStoreProvider);
+    expect(await store.boundLocalRoot(), '/home/u/new-root');
+  });
+
+  group('未认证重定向（登录页 + /login 路由）', () {
+    testWidgets('未认证访问 / 被重定向到 /login', (tester) async {
+      // 回归防线：路由守卫必须真的生效。若守卫没接上，未登录用户会看到
+      // 首页，然后在里面报一堆 401——比直接给登录页差得多。
+      final h = await pumpApp(
+        tester,
+        tokenStore: InMemoryTokenStore(),
+        mockGroups: false,
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+      expect(find.byKey(const ValueKey('login-sso-button')), findsOneWidget);
+      expect(find.text('使用 SSO 登录'), findsOneWidget);
+    });
+
+    testWidgets('未认证深链 /chat/grp_1 也被重定向到 /login', (tester) async {
+      // 深链是容易被漏掉的入口：用户从通知/书签直接进来，若守卫只拦首页，
+      // 这条路径就会绕过认证。
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_1'),
+        tokenStore: InMemoryTokenStore(),
+        mockGroups: false,
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+      expect(find.byKey(const ValueKey('login-sso-button')), findsOneWidget);
+    });
+
+    testWidgets('重定向时带上原目标路径（from 参数，登录后可回跳）', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.settings,
+        tokenStore: InMemoryTokenStore(),
+        mockGroups: false,
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+      expect(
+        h.router.state.uri.queryParameters['from'],
+        SpbRoutes.settings,
+        reason: '登录后应能回到用户原本想去的页面',
+      );
+    });
+
+    testWidgets('已认证时访问 /login 被送回首页', (tester) async {
+      // 否则已登录用户点开一个旧的登录链接会停在登录页，看起来像「被登出了」。
+      final h = await pumpApp(tester, initialLocation: SpbRoutes.login);
+
+      expect(h.router.state.matchedLocation, SpbRoutes.home);
+      expect(find.byKey(const ValueKey('login-sso-button')), findsNothing);
+    });
+
+    testWidgets('登录页点击 SSO 按钮调用注入的 signInAction', (tester) async {
+      var calls = 0;
+      await pumpApp(
+        tester,
+        tokenStore: InMemoryTokenStore(),
+        mockGroups: false,
+        signInAction: () async {
+          calls++;
+          return null;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-sso-button')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('signInAction 返回错误时登录页显示该错误', (tester) async {
+      await pumpApp(
+        tester,
+        tokenStore: InMemoryTokenStore(),
+        mockGroups: false,
+        signInAction: () async => 'OIDC client_id 未配置',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-sso-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.text('OIDC client_id 未配置'), findsOneWidget);
+    });
+
+    testWidgets('登录成功后守卫放行首页（状态从 unknown 推进到 authenticated）', (
+      tester,
+    ) async {
+      // 端到端验证「凭证落盘 → 守卫放行」这条链路，而不只是「路由表里有 /login」。
+      final store = InMemoryTokenStore();
+      final h = await pumpApp(tester, tokenStore: store, mockGroups: false);
+
+      expect(find.byKey(const ValueKey('login-sso-button')), findsOneWidget);
+
+      // 模拟外部回调把 token 落盘（真实场景由浏览器回调后的处理流程完成）。
+      await store.write(_freshTokens());
+      h.container.read(authStateProvider.notifier).signedIn();
+      await tester.pumpAndSettle();
+
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '状态应变为已登录',
+      );
+    });
   });
 
   testWidgets('注入的 desktopCapabilitiesProvider 生效（空实现）', (tester) async {
-    await pumpApp(tester);
+    final h = await pumpApp(tester);
 
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(SpbDesktopApp)),
-    );
     expect(
-      container.read(desktopCapabilitiesProvider),
+      h.container.read(desktopCapabilitiesProvider),
       isA<NoopDesktopCapabilities>(),
     );
   });
@@ -168,12 +702,125 @@ void main() {
   ) async {
     // 这条断言防的是「默认值不小心写成非 null」——那等于允许客户端自选身份
     // （任何拿到打包产物的人都能把 X-User-ID 改成别人的 id）。
-    await pumpApp(tester);
+    final h = await pumpApp(tester);
 
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(SpbDesktopApp)),
+    expect(h.container.read(devUserHeaderOverrideProvider), isNull);
+  });
+
+  testWidgets('进入对话页用真实 userId 建 SSE（issue #2：不得是 /users//chat/stream）', (
+    tester,
+  ) async {
+    // 回归防线：修复前 `_focus()` 在 `/api/auth/me` 返回前就读
+    // `currentUserIdProvider.value`（必然 null）→ 拼出 `/users//chat/stream`，
+    // 且 provider 重建出的新实例永远不被 start。
+    //
+    // mock 必须在 pumpWidget 前注册：`/api/auth/me` 是首帧 postFrameCallback
+    // 就发出的请求（见 beforePump 的说明）。
+    final sse = _FakeSseClient();
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      mockGroups: false,
+      sseClient: sse,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+      },
     );
-    expect(container.read(devUserHeaderOverrideProvider), isNull);
+
+    // 不用 pumpAndSettle：加载态里的 CircularProgressIndicator 是无限动画，
+    // pumpAndSettle 会一直等到超时。用显式 pump 推进假时钟即可。
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(sse.connectedPaths, isNotEmpty, reason: '必须建立 SSE 连接');
+    expect(
+      sse.connectedPaths.single,
+      '/users/usr_REAL/chat/stream',
+      reason: 'userId 必须来自 /api/auth/me，而不是空串',
+    );
+  });
+
+  testWidgets('同一 userId 下跨两个 group 只建一次 SSE（切 group 走 switchGroup）', (
+    tester,
+  ) async {
+    // 回归防线：若切对话仍走 `start()`，`SseClient.connect()` 会把续接游标
+    // 置 null（丢 cursor 回放能力），且每次切对话都多一次建连往返。
+    final sse = _FakeSseClient();
+    final h = await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_1'),
+      mockGroups: false,
+      sseClient: sse,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        for (final gid in ['grp_1', 'grp_2']) {
+          adapter.onGet(
+            '/chat/groups/$gid/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': gid, 'limit': 20},
+        );
+        }
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    expect(sse.connectedPaths, hasLength(1), reason: '首次进入建立连接');
+
+    // 切到另一个 group（同一路由模式，不同 path 参数）。
+    h.router.go(SpbRoutes.chat('grp_2'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      sse.connectedPaths,
+      hasLength(1),
+      reason: 'SSE 是 user 级订阅，切 group 不得重连',
+    );
   });
 
   testWidgets('currentUserProvider 走 mock 的 /api/auth/me', (tester) async {
@@ -191,11 +838,8 @@ void main() {
       }),
     );
 
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(SpbDesktopApp)),
-    );
     // 触发请求并推进假时钟。
-    final future = container.read(currentUserProvider.future);
+    final future = h.container.read(currentUserProvider.future);
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
 
@@ -203,4 +847,43 @@ void main() {
     expect(user.id, 'usr_1');
     expect(user.isAdmin, isFalse);
   });
+}
+
+/// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。
+class _FakeDesktopCapabilities implements DesktopCapabilities {
+  @override
+  bool get isSupported => true;
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<void> showWindow(WindowRole role) async {}
+
+  @override
+  Future<void> hideWindow(WindowRole role) async {}
+
+  @override
+  Future<bool> registerHotkey(String id, HotkeyBinding binding) async => true;
+
+  @override
+  Future<void> unregisterHotkey(String id) async {}
+
+  @override
+  Future<bool> isLaunchAtStartupEnabled() async => false;
+
+  @override
+  Future<void> setLaunchAtStartup(bool enabled) async {}
+
+  @override
+  Future<void> setTrayMenu(List<TrayMenuItem> items) async {}
+
+  @override
+  Future<void> setTrayTooltip(String tooltip) async {}
+
+  @override
+  Future<String?> pickDirectory({String? title}) async => null;
+
+  @override
+  Future<void> dispose() async {}
 }

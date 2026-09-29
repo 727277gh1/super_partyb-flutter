@@ -12,6 +12,7 @@ import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'follow_up_chips.dart';
 import 'message_composer.dart';
+import 'pending_messages_bar.dart';
 import 'thought_tile.dart';
 import 'tool_call_tile.dart';
 import 'user_message_bubble.dart';
@@ -38,6 +39,9 @@ class ConversationPage extends StatefulWidget {
     this.title,
     this.onResolveConfirmation,
     this.onSend,
+    this.loadPending,
+    this.undoPending,
+    this.pendingReloadKey,
     this.emptyHint = '还没有对话，输入消息开始吧',
   });
 
@@ -46,10 +50,16 @@ class ConversationPage extends StatefulWidget {
   /// AppBar 标题。null 时不显示 AppBar。
   final String? title;
 
-  /// 确认卡选项回调。参数为（卡行 id, 选项文案）。
+  /// 确认卡选项回调。参数为（group id, 卡行 id, 选项文案）。
+  ///
+  /// ## 为什么必须带 groupId（issue #1）
+  ///
+  /// 真实写端点是 `POST /api/chat/groups/:group_id/confirmations/:id/resolve`
+  /// ——路径里必须有 group_id。只传 confirmationId 无法拼出该路径，
+  /// 调用方只能报 404（且是静默的）。
   ///
   /// 为 null 时确认卡按钮禁用。
-  final void Function(String confirmationId, String option)?
+  final void Function(String groupId, String confirmationId, String option)?
   onResolveConfirmation;
 
   /// 自定义发送逻辑。为 null 时用 `controller.send(input: text)`。
@@ -57,6 +67,26 @@ class ConversationPage extends StatefulWidget {
   /// 之所以可覆盖：悬浮窗等入口走 `QuickCaptureUseCase`（无归属），
   /// 而本页是「已知 group」的常规发送。
   final Future<void> Function(String text)? onSend;
+
+  /// 加载当前 group 的待处理收件箱消息。
+  ///
+  /// ## 为什么是「加载 + 撤销」两个回调，而不是收一个 `ChatApi`
+  ///
+  /// 撤销需要 **userId**（`POST /users/:uid/chat/messages/:id/undo`），而页面
+  /// 不该知道 userId 从哪来（那要走 `/api/auth/me`，两端时机不同）。注入后
+  /// 本页在 widget test 里可以完整验证（含 409 分支），不需要 HTTP mock。
+  ///
+  /// 为 null 时不展示待处理栏（保持「只读时间线」用法）。
+  final LoadPendingMessages? loadPending;
+
+  /// 撤销一条待处理消息（参数是 `ChatInboxMessage.id`，不是 turn id）。
+  final UndoPendingMessage? undoPending;
+
+  /// 变化时重新加载待处理消息（传 groupId）。
+  ///
+  /// 见 [PendingMessagesBar.reloadKey]：切换 group 时 State 会被复用，
+  /// 不靠这个键就会一直显示上一个 group 的待处理消息。
+  final String? pendingReloadKey;
 
   final String emptyHint;
 
@@ -198,13 +228,17 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
-  Future<void> _handleResolve(String confirmationId, String option) async {
+  Future<void> _handleResolve(
+    String groupId,
+    String confirmationId,
+    String option,
+  ) async {
     final callback = widget.onResolveConfirmation;
     if (callback == null || _resolving.contains(confirmationId)) return;
 
     setState(() => _resolving.add(confirmationId));
     try {
-      callback(confirmationId, option);
+      callback(groupId, confirmationId, option);
     } finally {
       if (mounted) setState(() => _resolving.remove(confirmationId));
     }
@@ -237,6 +271,14 @@ class _ConversationPageState extends State<ConversationPage> {
                 ? _EmptyHint(text: widget.emptyHint)
                 : _buildTimeline(),
           ),
+          // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
+          // 的那条」，语义上与输入区相邻而非与时间线相邻。
+          if (widget.loadPending != null && widget.undoPending != null)
+            PendingMessagesBar(
+              load: widget.loadPending!,
+              undo: widget.undoPending!,
+              reloadKey: widget.pendingReloadKey ?? '',
+            ),
           MessageComposer(onSubmit: _handleSubmit),
         ],
       ),
@@ -301,7 +343,11 @@ class _ConversationPageState extends State<ConversationPage> {
       // 用卡行 id 而非 item.id（事件 id）——见 ConfirmationItem.confirmationId。
       // 未携带 confirmation_id 的异常事件禁用按钮，不退化用事件 id 去试。
       onResolve: item.canResolve
-          ? (option) => _handleResolve(item.confirmationId, option)
+          ? (option) => _handleResolve(
+              item.groupId,
+              item.confirmationId,
+              option,
+            )
           : null,
     ),
     FollowUpSuggestionItem(:final suggestions) => FollowUpChips(
