@@ -406,6 +406,35 @@ void main() {
       expect(card.resolved, isFalse);
     });
 
+    test('confirmation_required 带上 groupId（resolve 路径需要它，issue #1）', () {
+      // 真实写端点：POST /api/chat/groups/:group_id/confirmations/:id/resolve
+      // 只凭 confirmation_id 拼不出该路径，故归约时必须把事件里的 group 带上。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.confirmationRequired,
+          groupId: 'grp_abc',
+          payload: {
+            'question': '继续吗？',
+            'confirmation_id': 'cf_row_1',
+          },
+        ),
+      ]);
+
+      final card = r.items.single as ConfirmationItem;
+      expect(card.groupId, 'grp_abc');
+      expect(card.confirmationId, 'cf_row_1');
+      expect(card.canResolve, isTrue);
+    });
+
+    test('缺 confirmation_id 或 groupId 时 canResolve 为 false', () {
+      // 两个 id 都必须齐备：缺 group_id 拼不出真实路径，缺 confirmation_id
+      // 服务端 0 行受影响。
+      final r = EventReducer.reduce([
+        ev(EventTypes.confirmationRequired, payload: {'question': '只有 question'}),
+      ]);
+      expect((r.items.single as ConfirmationItem).canResolve, isFalse);
+    });
+
     test('confirmation_resolved 把对应卡片标为已解决', () {
       final r = EventReducer.reduce([
         ev(
@@ -438,6 +467,8 @@ void main() {
       expect(r.items, hasLength(1));
       final card = r.items.single as ConfirmationItem;
       expect(card.resolved, isTrue);
+      // 标记已解决后仍必须保留 groupId（resolve 路径需要它）。
+      expect(card.groupId, 'grp_1');
       // 卡片本身保留在时间线上（呈现「确认已失效」而非凭空消失）。
       expect(card.question, '继续吗？');
     });

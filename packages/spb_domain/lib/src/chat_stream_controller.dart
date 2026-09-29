@@ -25,7 +25,16 @@ class ChatStreamController {
     required SseClient sse,
     required ChatApi api,
     required this.userId,
-  }) : _sse = sse,
+  }) : assert(
+         userId != '',
+         // WHY 断言而非静默容忍：空 userId 会拼出 `/users//chat/stream` 这种
+         // 畸形路径——请求会发出去、服务端返回 404/空订阅，而客户端看不出
+         // 异常（issue #2）。这类错误必须在 debug 下立刻炸掉，而不是变成一个
+         // 「能跑但收不到任何事件」的静默故障。
+         'userId 不得为空：SSE 路径为 /users/:user_id/chat/stream，'
+         '空值会拼出 /users//chat/stream（见 issue #2）',
+       ),
+       _sse = sse,
        _api = api;
 
   final SseClient _sse;
@@ -70,6 +79,13 @@ class ChatStreamController {
     if (groupId != null) {
       await _backfill(groupId);
     }
+
+    // 回填完立即推送：`_backfill` 只改 `_buffer`，自身不 emit（issue #3）。
+    //
+    // WHY 放在 `connect` **之前**：先把历史渲染出来，再建连接。
+    // 若连接失败（网络不可达 / 认证失败），用户至少能看到已有历史，
+    // 而不是一片空白——否则「连不上」与「没有消息」在界面上无法区分。
+    _emit();
 
     _frameSub ??= _sse.frames.listen(_onFrame, onError: _onStreamError);
     _stateSub ??= _sse.states.listen((s) {
@@ -262,12 +278,26 @@ class ChatStreamController {
   /// 重连（用户手动点「重试」时调用）。
   Future<void> reconnect() => _sse.resume();
 
+  /// 释放本控制器自己的资源。
+  ///
+  /// ## 不释放 [SseClient]（重要）
+  ///
+  /// SSE 是 **user 级订阅**：一个进程内只有一条连接，跨所有对话共享
+  /// （见 [switchGroup] 与 `sseClientProvider`）。它的生命周期属于**持有它的
+  /// provider**，不属于任何一次对话页。
+  ///
+  /// 早期实现里这里曾调用共享连接的 dispose，后果是：离开一次对话页就把共享
+  /// 连接永久关闭（`SseClient.dispose` 置 `_closedByUser = true` 并关闭两个
+  /// StreamController），之后所有对话的 `connect()` 虽然仍会发 HTTP 请求，
+  /// 但**所有帧都被静默丢弃**（`_pushFrame`/`_setState` 在关闭后直接 return）
+  /// ——表现为「看起来连上了，其实一条事件都没有」。
+  ///
+  /// 故这里只取消**自己的**订阅并关闭**自己的**三个 StreamController。
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
     await _frameSub?.cancel();
     await _stateSub?.cancel();
-    await _sse.dispose();
     await _itemsController.close();
     await _errorController.close();
     await _stateController.close();

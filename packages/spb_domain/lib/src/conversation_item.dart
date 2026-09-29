@@ -155,6 +155,7 @@ final class ConfirmationItem extends ConversationItem {
     this.options = const [],
     this.resolved = false,
     this.confirmationId = '',
+    this.groupId = '',
   });
 
   final String question;
@@ -176,8 +177,22 @@ final class ConfirmationItem extends ConversationItem {
   /// 不要退而用 [id] 去试。
   final String confirmationId;
 
+  /// 该确认卡所属的 group（来自事件的 `group_id`）。
+  ///
+  /// ## 为什么必须带上它（issue #1）
+  ///
+  /// 真实写端点是 `POST /api/chat/groups/:group_id/confirmations/:id/resolve`
+  /// ——**路径里必须有 group_id**（`ext_routes.go:39` 把 handler 挂在
+  /// `/api` 组下的 `chat/groups/:group_id/confirmations`）。
+  /// 只凭 `confirmation_id` 无法拼出该路径，故归约时把事件里的 group 带上。
+  final String groupId;
+
   /// 是否可调用 resolve 端点。
-  bool get canResolve => confirmationId.isNotEmpty && !resolved;
+  ///
+  /// 两个 id 都必须齐备：缺 group_id 拼不出真实路径，缺 confirmation_id 服务端
+  /// 0 行受影响。
+  bool get canResolve =>
+      confirmationId.isNotEmpty && groupId.isNotEmpty && !resolved;
 }
 
 /// 后续提问建议（`follow_up_suggested`）。

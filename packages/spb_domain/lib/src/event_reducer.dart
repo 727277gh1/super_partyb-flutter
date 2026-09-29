@@ -268,6 +268,10 @@ class EventReducer {
               // `EnsureConfirmationCard` 并作为 `confirmation_id` 放进 payload。
               // 用 ev.eventId 调 resolve 会 404（0 行受影响，无报错）。
               confirmationId: ev.payload?['confirmation_id']?.toString() ?? '',
+              // group_id 必须带上：真实 resolve 路径是
+              // /api/chat/groups/:group_id/confirmations/:id/resolve（issue #1）。
+              // SSE 是 user 级订阅，事件自带的 groupId 就是该卡所属对话。
+              groupId: ev.groupId,
             ),
           );
 
@@ -331,10 +335,12 @@ class EventReducer {
         question: it.question,
         options: it.options,
         resolved: true,
-        // 必须带上卡行 id：标记已解决只是渲染状态，而 resolve 调用需要它。
+        // 必须带上卡行 id 与 groupId：标记已解决只是渲染状态，而 resolve 调用
+        // 两者都需要（路径含 group_id，见 issue #1）。
         // 若此处丢失，同一 turn 上「先解决的卡」会退化为不可 resolve 的项
         // （例如重绘后 UI 需要重新读取该卡）。
         confirmationId: it.confirmationId,
+        groupId: it.groupId,
       );
       return;
     }

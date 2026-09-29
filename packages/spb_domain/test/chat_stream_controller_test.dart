@@ -35,6 +35,13 @@ class FakeSseClient extends SseClient {
   int resumeCount = 0;
   bool disposed = false;
 
+  /// 当前游标（模拟 `SseClient._lastEventId`）。
+  ///
+  /// 真实 `connect()` 会把它置 null（断线重连的游标清零语义），此处必须同构：
+  /// 否则「切 group 不得重连」这条不变式在假实现上无从观测。
+  @override
+  String? lastEventId;
+
   @override
   Stream<SseFrame> get frames => framesController.stream;
 
@@ -47,6 +54,8 @@ class FakeSseClient extends SseClient {
   @override
   Future<void> connect({required String path}) async {
     connectedPaths.add(path);
+    // 同真实实现：connect 重置续接游标。
+    lastEventId = null;
   }
 
   @override
@@ -57,6 +66,7 @@ class FakeSseClient extends SseClient {
   @override
   void recordEventId(String eventId) {
     recordedEventIds.add(eventId);
+    lastEventId = eventId;
   }
 
   @override
@@ -288,6 +298,45 @@ void main() {
       await c.dispose();
     });
 
+    test('start() 回填后推送 items（issue #3：冷启动不得空白）', () async {
+      // 回归防线：`_backfill` 只写 `_buffer`，若 `start()` 漏掉 `_emit()`，
+      // `items` 流一次都不推，UI 落在空态分支。
+      //
+      // 现有「start() 先回填 timeline 再连接」用例断言的是 `snapshot`（直接重算
+      // buffer），**不经过流**，故这条路径此前完全没有覆盖。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline(
+        events: [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'hist_1',
+            payload: {'input': '历史用户消息'},
+          ),
+          sseEvent(
+            EventTypes.message,
+            id: 'hist_2',
+            payload: {'text': '历史回答'},
+            globalSeq: 2,
+          ),
+        ],
+      );
+
+      // 必须先订阅：`items` 是 broadcast 流，start() 之后再订阅会错过发射。
+      final emissions = <List<ConversationItem>>[];
+      final sub = c.items.listen(emissions.add);
+
+      await c.start(groupId: 'grp_1');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(emissions, isNotEmpty, reason: 'start() 必须推送 items');
+      expect(emissions.first, hasLength(2), reason: '首个发射即应含全部回填历史');
+      expect((emissions.first[0] as UserMessageItem).text, '历史用户消息');
+      expect((emissions.first[1] as AssistantMessageItem).text, '历史回答');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
     test('transient 增量推进渲染但不推进游标', () async {
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
       mockTimeline();
@@ -435,6 +484,49 @@ void main() {
 
       await c.dispose();
     });
+
+    test('switchGroup 不重连且不丢续接游标（start 才会重置 cursor）', () async {
+      // 回归防线：切对话若走 `start()`，`SseClient.connect()` 会把
+      // `_lastEventId` 置 null——断线重连时无法带 cursor 回放，只能整段重拉。
+      // 故同一 userId 内切 group 必须走 `switchGroup()`（不调 connect）。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.start(groupId: 'grp_1');
+      expect(sse.connectedPaths, hasLength(1));
+
+      // 推一条落库事件推进游标。
+      sse.push(
+        EventTypes.message,
+        sseEvent(
+          EventTypes.message,
+          id: 'evt_cursor_1',
+          payload: {'text': '推进游标'},
+          globalSeq: 2,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(sse.lastEventId, 'evt_cursor_1');
+
+      await c.switchGroup('grp_2');
+
+      expect(sse.connectedPaths, hasLength(1), reason: '切 group 不得重连');
+      expect(
+        sse.lastEventId,
+        'evt_cursor_1',
+        reason: '续接游标必须保留（connect 才会清零）',
+      );
+
+      await c.dispose();
+    });
   });
 
   group('生命周期', () {
@@ -445,11 +537,61 @@ void main() {
       await c.dispose();
     });
 
-    test('dispose 关闭 SSE 与全部流，且重复调用安全', () async {
+    test('dispose 不关闭共享 SSE，且重复调用安全', () async {
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
       await c.dispose();
-      expect(sse.disposed, isTrue);
+      // ⚠️ 关键不变式：SSE 是跨对话共享的单例，其 dispose 归 provider 所有。
+      // 控制器关闭它会导至「离开一次对话页 = 永久失去实时流」。
+      expect(
+        sse.disposed,
+        isFalse,
+        reason: '控制器不得释放不属于它的共享 SseClient',
+      );
       await c.dispose(); // 不应抛异常
+    });
+
+    test('共享 SseClient：第一个 controller dispose 后第二个仍能收到帧', () async {
+      // 回归防线：早期 `dispose()` 里有 `await _sse.dispose()`，
+      // 它置 `_closedByUser = true` 并关闭两个 StreamController。
+      // 后果是同一进程内第二次进入对话时，`connect()` 仍会发 HTTP 请求，
+      // 但**所有帧被静默丢弃**（_pushFrame / _setState 在关闭后直接 return）。
+      final first = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await first.start(groupId: 'grp_1');
+      await first.dispose();
+
+      expect(sse.disposed, isFalse, reason: '共享连接必须仍然活着');
+
+      // 第二个控制器复用同一个 SseClient（模拟用户再次进入对话页）。
+      final second = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await second.start(groupId: 'grp_1');
+
+      final emissions = <List<ConversationItem>>[];
+      final sub = second.items.listen(emissions.add);
+
+      sse.push(
+        EventTypes.message,
+        sseEvent(
+          EventTypes.message,
+          payload: {'text': '第二个控制器收到的回复'},
+          globalSeq: 2,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        emissions,
+        isNotEmpty,
+        reason: '第二个控制器必须仍能收到帧（否则是「连上了但一条事件都没有」）',
+      );
+      expect(
+        (second.snapshot.single as AssistantMessageItem).text,
+        '第二个控制器收到的回复',
+      );
+
+      await sub.cancel();
+      await second.dispose();
     });
 
     test('connectionState 转发 SseClient 的状态流（需先 start 才会订阅）', () async {
