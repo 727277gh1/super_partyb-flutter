@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'providers.dart';
 
@@ -483,6 +486,22 @@ class _QuickCapturePage extends ConsumerWidget {
   }
 }
 
+/// 退出悬浮窗形态（若当前处于该形态）。
+///
+/// 见 `_OverlayQuickCapturePage` 的说明：能力接口自己持有唯一真相
+/// （`isOverlayModeActive`），故这里无需在 UI 侧另存状态。
+void _exitOverlayWindow(WidgetRef ref) {
+  final caps = ref.read(desktopCapabilitiesProvider);
+  if (caps is OverlayWindowController) {
+    final overlay = caps as OverlayWindowController;
+    if (overlay.isOverlayModeActive) {
+      // 不 await：调用方正在关窗导航，等待会让界面卡住一帧；
+      // 还原失败已在能力层内部记日志。
+      unawaited(overlay.exitOverlayMode());
+    }
+  }
+}
+
 /// 全局悬浮输入窗（带附件）。
 ///
 /// 生产环境的真实悬浮窗是**独立窗口**（`WindowSpec.quickCapture`）；
@@ -514,7 +533,18 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
           ),
       dragDrop: ref.watch(dragDropCapabilityProvider),
       onClose: () {
-        // 独立窗口下应关窗；主窗口内的调试入口则退回列表。
+        // ## 为什么这里直接调能力接口，而不是经 DesktopIntegration
+        //
+        // 悬浮模式把窗口改成了 720×360 置顶（见 `OverlayWindowController`）。
+        // 这条路径（Esc 清空后关窗 / 提交成功）**不经过** `showWindow`，故不会
+        // 被 DesktopIntegration 自动还原——不还原的话窗口会一直保持悬浮尺寸
+        // 置顶，用户回到主界面后窗口再也放不大。
+        //
+        // 走能力接口而非 DesktopIntegration 的原因：后者由 `app.dart` 创建，
+        // 而本文件被 `app.dart` import——互相引用会形成 import 环。能力接口
+        // 本就通过 Provider 可达，且 `isOverlayModeActive` 是唯一真相，
+        // 重复调用安全（未进入时是空操作）。
+        _exitOverlayWindow(ref);
         if (context.mounted) context.go(SpbRoutes.home);
       },
     );

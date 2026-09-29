@@ -13,7 +13,11 @@ import 'package:spb_platform/spb_platform.dart';
 /// Noop 不实现 [WindowDisplayTarget]/[TrayActionTarget]（它没有事件可抛），
 /// 故 `attach` 会跳过。本桩存在的意义正是验证「实现了接线接口时会发生什么」。
 class _WiringCapabilities
-    implements DesktopCapabilities, WindowDisplayTarget, TrayActionTarget {
+    implements
+        DesktopCapabilities,
+        WindowDisplayTarget,
+        TrayActionTarget,
+        OverlayWindowController {
   @override
   bool get isSupported => true;
 
@@ -46,6 +50,34 @@ class _WiringCapabilities
 
   @override
   void setHideOnClose(bool value) => hideOnClose = value;
+
+  // ---- OverlayWindowController ----
+  final enteredSpecs = <WindowSpec>[];
+  int exitCalls = 0;
+
+  /// 手动指定「进入是否成功」。
+  bool enterSucceeds = true;
+
+  bool _overlayActive = false;
+
+  @override
+  bool get isOverlayModeActive => _overlayActive;
+
+  @override
+  Future<bool> enterOverlayMode(WindowSpec spec) async {
+    if (_overlayActive) return true;
+    enteredSpecs.add(spec);
+    if (!enterSucceeds) return false;
+    _overlayActive = true;
+    return true;
+  }
+
+  @override
+  Future<void> exitOverlayMode() async {
+    if (!_overlayActive) return;
+    _overlayActive = false;
+    exitCalls++;
+  }
 
   // ---- 被托盘菜单触发的动作 ----
   final shown = <WindowRole>[];
@@ -336,6 +368,132 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(router.state.uri.path, SpbRoutes.home);
+    });
+  });
+
+  group('悬浮窗形态切换', () {
+    testWidgets('显示悬浮窗 → 进入悬浮形态（用带附件的规格）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      expect(caps.enteredSpecs, hasLength(1));
+      // 必须是**带附件**的规格：纯文本规格只有 132px 高，装不下附件 chip。
+      expect(
+        caps.enteredSpecs.single.role,
+        WindowRole.quickCapture,
+      );
+      expect(caps.enteredSpecs.single.height, greaterThan(200));
+      expect(caps.isOverlayModeActive, isTrue);
+    });
+
+    testWidgets('重复显示悬浮窗 → 只进入一次（不重复保存窗口快照）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+      // 第二次：已在该路由，导航会跳过；窗口形态也不该重复进入。
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      expect(
+        caps.enteredSpecs,
+        hasLength(1),
+        reason: '重复进入会把悬浮态本身当成「原状态」，退出时还原成小窗口',
+      );
+    });
+
+    testWidgets('从悬浮窗切到设置 → 还原窗口（否则设置页挤在 720x360）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+      expect(caps.isOverlayModeActive, isTrue);
+
+      caps.showCallback!(WindowRole.settings);
+      await tester.pumpAndSettle();
+
+      expect(caps.isOverlayModeActive, isFalse);
+      expect(caps.exitCalls, 1);
+      expect(router.state.uri.path, SpbRoutes.settings);
+    });
+
+    testWidgets('从悬浮窗切到主界面 → 也还原窗口', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      caps.showCallback!(WindowRole.main);
+      await tester.pumpAndSettle();
+
+      expect(caps.isOverlayModeActive, isFalse);
+      expect(router.state.uri.path, SpbRoutes.home);
+    });
+
+    testWidgets('进入悬浮形态失败 → 仍导航，但记警告', (tester) async {
+      final caps = _WiringCapabilities()..enterSucceeds = false;
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      // 窗口没切成，但页面必须显示（否则用户按 Alt+Space 毫无反应）。
+      expect(router.state.uri.path, SpbRoutes.overlay);
+    });
+
+    testWidgets('leaveOverlay 在未进入时是空操作（Esc 与提交都会调）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      final integration = DesktopIntegration(
+        capabilities: caps,
+        router: router,
+      )..attach();
+
+      // 从未进入悬浮模式就调用（如用户直接访问 /overlay 调试入口）。
+      await integration.leaveOverlay();
+      expect(caps.exitCalls, 0);
+    });
+
+    testWidgets('leaveOverlay 能还原（供悬浮窗页面提交/Esc 时调用）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      final integration = DesktopIntegration(
+        capabilities: caps,
+        router: router,
+      )..attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+      expect(caps.isOverlayModeActive, isTrue);
+
+      await integration.leaveOverlay();
+
+      expect(caps.isOverlayModeActive, isFalse);
+      expect(caps.exitCalls, 1);
     });
   });
 

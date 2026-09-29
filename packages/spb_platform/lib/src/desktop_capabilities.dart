@@ -252,6 +252,49 @@ abstract interface class PlatformDesktopQuit {
   Future<void> quit();
 }
 
+/// 悬浮输入窗的「窗口形态」切换能力。
+///
+/// ## 为什么需要它（而不是「再开一个窗口」）
+///
+/// `window_manager` 做不到多窗口（见 `bootstrap.dart` 的类文档），但悬浮窗的
+/// **置顶**是核心需求——否则用户按 `Alt+Space` 打完字，窗口被其他程序遮住。
+///
+/// 故采用「主窗口临时变身」：进入悬浮模式时把当前窗口改成小尺寸 + 置顶 +
+/// 隐藏任务栏，退出时还原。这样在单窗口约束下仍能拿到真正的 `alwaysOnTop`
+/// （那是**窗口级**属性，只对「页面」设置是无效的）。
+///
+/// ## 为什么单独成接口
+///
+/// 与 [WindowDisplayTarget] 同一理由：这是**接线/控制点**，不是「平台有没有
+/// 这个能力」。Noop 实现与测试桩不需要它。
+abstract interface class OverlayWindowController {
+  /// 进入悬浮输入窗形态。
+  ///
+  /// 实现方应**先保存当前几何与窗口标志**，供 [exitOverlayMode] 还原。
+  /// 重复调用应幂等（第二次不重复保存，否则会把悬浮态本身当成「原状态」）。
+  ///
+  /// 返回是否成功进入（平台不支持或无窗口时返回 false）。
+  Future<bool> enterOverlayMode(WindowSpec spec);
+
+  /// 退出悬浮输入窗形态，还原进入前的几何与窗口标志。
+  ///
+  /// 未进入过时调用应为空操作（不抛异常）——`Esc` 与「提交成功」两条路径都会
+  /// 调它，可能重复触发。
+  Future<void> exitOverlayMode();
+
+  /// 当前是否处于悬浮输入窗形态。
+  ///
+  /// ## 为什么必须有这个 getter
+  ///
+  /// 调用方（`DesktopIntegration`）需要知道「现在要不要还原窗口」。若它在自己
+  /// 那边存一个 `bool _overlayActive`，就有**两份状态**：悬浮窗页面自己调
+  /// `exitOverlayMode()` 还原后，调用方那份仍是 true，于是下次按 `Alt+Space`
+  /// 会以为「已在悬浮模式」而跳过进入——窗口不再置顶，且无任何报错。
+  ///
+  /// 让实现方持有唯一真相，调用方每次问它。
+  bool get isOverlayModeActive;
+}
+
 /// 快捷键绑定。
 class HotkeyBinding {
   const HotkeyBinding({

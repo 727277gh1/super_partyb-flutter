@@ -344,11 +344,11 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 
 **所有方法静默降级**（记日志 + 返回 false/null），不抛异常。UI 用 `isSupported` 决定是否展示「托盘/全局快捷键」等设置项。
 
-### 6.5 多窗口：**已验证不可行**（M0 结论）
+### 6.5 多窗口：`window_manager` 不行，但可另选插件（M0 结论）
 
 桌面端原计划 3 窗口：主窗 + 设置窗 + `Alt+Space` 悬浮输入窗。
 
-❌ **`window_manager` 做不到多窗口**（2026-09 实测，推翻了本节的原始假设）。依据：
+#### ❌ `window_manager` 做不到多窗口
 
 1. 该插件 0.5.2 的**公开 API 里没有任何创建窗口的方法**——`setSize`/`setAlwaysOnTop`/
    `show`/`hide` 全部作用于唯一窗口。
@@ -360,17 +360,35 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 4. Flutter 官方多窗口（`flutter config --enable-windowing`）在 3.47.5 仍是
    `(Not set) (Unavailable)`。
 
-**采纳的备选方案：单窗口 + 内嵌浮层**（即原文备选之一）。`settings` / `quickCapture`
-不是独立窗口，而是主窗口内的**路由页面**（`/settings`、`/overlay`）。
-`PlatformDesktopCapabilities.showWindow(role)` 通过 `WindowDisplayTarget` 回调把
-「显示某角色」抛给 `DesktopIntegration`，由后者映射成 `router.go(path)`。
+#### ✅ 真多窗口存在（但本仓库当前不用）
 
-**两个已知差异**（不是 bug，记录以免重复排查）：
+`desktop_multi_window` **有真实的 Linux 实现**：`linux/multi_window_manager.cc:102`
+直接 `fl_view_new` + 独立 `FlDartProject`，每个窗口是**独立 engine**。
 
-1. **悬浮窗跟随主窗口**：主窗口最小化时悬浮窗一并不可见。真正的独立置顶窗需等
-   Flutter 多窗口稳定，或改用原生嵌入。
-2. **`alwaysOnTop` / `skipTaskbar` 对悬浮窗无效**：这两个是窗口级属性，单窗口下
-   无法只对「页面」生效。
+未采用它的原因（成本，不是能力）：
+
+- 需额外的 Dart 入口点（`fl_dart_project_set_dart_entrypoint_arguments` 传入的
+  `"multi_window"`），`main()` 要按窗口类型分支；
+- **每个窗口是独立 isolate**，Riverpod 容器、认证状态、`Dio` 客户端都不共享——
+  悬浮窗得自己恢复凭证、自建 API 客户端；
+- 插件 0.3.1 直接操作 `GtkWindow` 并手动断开 engine 的 delete-event 信号
+  （见 `multi_window_manager.cc` 的 `g_signal_handler_disconnect`），对
+  Flutter 引擎版本较敏感。
+
+#### 当前方案：主窗口「临时变身」悬浮窗
+
+在**单窗口**约束下拿到真正的置顶悬浮输入：按 `Alt+Space` 时
+
+1. 保存当前窗口几何（`getBounds`）；
+2. 改尺寸为主 `quickCaptureWithAttachments` 规格、`alwaysOnTop=true`、
+   `skipTaskbar=true`、居中；
+3. 导航到 `/overlay`。
+
+提交或 `Esc` 后恢复几何与窗口标志，回到主界面。见
+`PlatformDesktopCapabilities.enterOverlayMode` / `exitOverlayMode`。
+
+**已知差异**：悬浮期间主窗口被「顶替」（看不到背后的对话）。对「快速记一笔」
+这个用途可接受，但若将来需要「悬浮窗与主窗同屏」，就得换 `desktop_multi_window`。
 
 ### 6.6 桌面端相对 Tauri 的净损失
 
@@ -618,7 +636,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] `dart analyze` 全绿
 - [x] Linux release 构建成功（26 MB，自包含）
 - [x] 核心代码：错误类型 / 日志 / 契约模型 / SSE 客户端 / 事件归约
-- [x] ~~多窗口可行性~~ → **已验证不可行**，改用单窗口 + 内嵌浮层（见 §6.5）
+- [x] ~~多窗口可行性~~ → `window_manager` **做不到**；改用「主窗口临时变身」（见 §6.5）
 - [x] 托盘 + 全局快捷键（`bootstrap.dart` 已接 `window_manager`/`tray_manager`/`hotkey_manager`）
 - [ ] **OIDC PKCE 打通**（需确认 IdP 支持 PKCE + 自定义 scheme redirect）
 - [ ] 剪贴板文件读取的原生实现（`readClipboardFiles` 目前静默降级，见 §6.7）
@@ -657,7 +675,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 |---|---|---|
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |
 | Windows/macOS 需额外 runner | 待决策 | `super_partyb` issue #31 |
-| ~~多窗口可行性~~ | ✅ 已验证：**不可行**，改用单窗口 + 内嵌浮层 | §6.5 |
+| ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | 剪贴板文件粘贴无原生实现 | 待实现 | §6.7 |
 | IdP 是否支持 PKCE + 自定义 scheme | M0 阻塞项 | §10 |
 | 契约同步靠人工 | 可接受 | §6.2 |

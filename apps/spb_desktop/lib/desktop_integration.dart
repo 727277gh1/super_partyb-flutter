@@ -102,7 +102,13 @@ class DesktopIntegration {
   }
 
   /// 把「显示某角色的窗口」映射成路由导航。
-  void _navigateToRole(WindowRole role) {
+  ///
+  /// ## 悬浮窗为什么不能只导航
+  ///
+  /// `alwaysOnTop` 是**窗口级**属性，只改路由拿不到置顶效果——用户打完字抬头
+  /// 一看，窗口被别的程序遮住了。故显示悬浮窗要额外把窗口切成悬浮形态
+  /// （见 [OverlayWindowController]）。设置窗没有这个需求（它就是普通页面）。
+  Future<void> _navigateToRole(WindowRole role) async {
     final target = switch (role) {
       WindowRole.main => SpbRoutes.home,
       WindowRole.settings => SpbRoutes.settings,
@@ -116,6 +122,16 @@ class DesktopIntegration {
       return;
     }
 
+    // 切换前先处理窗口形态：进入悬浮模式要在**导航前**完成，否则会先看到
+    // 全尺寸的主窗口闪一下再缩成悬浮窗。
+    if (role == WindowRole.quickCapture) {
+      await _enterOverlayWindow();
+    } else {
+      // 从悬浮窗切到其他页面：还原窗口（否则设置页会挤在 720×360 里）。
+      // 未处于悬浮模式时是空操作。
+      await _exitOverlayWindow();
+    }
+
     SpbLog.debug('桌面能力触发导航', {
       'role': role.name,
       'path': target,
@@ -123,6 +139,51 @@ class DesktopIntegration {
     _router.go(target);
   }
 
+  /// 取悬浮窗形态控制器（不支持时为 null）。
+  ///
+  /// ## 为什么不缓存成字段
+  ///
+  /// 本类可能被长期持有（应用生命周期），而能力实现在测试里会被替换。
+  /// 每次从 `_capabilities` 取，保证与当前实现一致。
+  OverlayWindowController? get _overlay {
+    final caps = _capabilities;
+    // 显式 cast：Dart 的类型提升对**独立接口**不生效（`OverlayWindowController`
+    // 不是 `DesktopCapabilities` 的子类型，即使实现类同时 implements 两者）。
+    return caps is OverlayWindowController
+        ? caps as OverlayWindowController
+        : null;
+  }
+
+  Future<void> _enterOverlayWindow() async {
+    final overlay = _overlay;
+    if (overlay == null) {
+      // 平台不支持窗口形态切换（移动端/测试桩）：退化为「只是导航」。
+      SpbLog.debug('平台不支持悬浮窗形态切换，仅导航');
+      return;
+    }
+    // 幂等判断交给实现方（它有唯一真相，见 isOverlayModeActive 的文档）。
+    if (overlay.isOverlayModeActive) return;
+
+    final ok = await overlay.enterOverlayMode(
+      WindowSpec.quickCaptureWithAttachments,
+    );
+    if (!ok) SpbLog.warn('悬浮窗形态切换失败，窗口可能未置顶');
+  }
+
+  Future<void> _exitOverlayWindow() async {
+    final overlay = _overlay;
+    if (overlay == null || !overlay.isOverlayModeActive) return;
+    await overlay.exitOverlayMode();
+  }
+
+  /// 退出悬浮模式（供悬浮窗页面在提交/取消时调用）。
+  ///
+  /// ## 为什么页面要显式调它
+  ///
+  /// `Esc` 清空后关窗、提交成功后关窗——这两条路径都**不经过**
+  /// `showWindow`，故不会被 [_navigateToRole] 自动还原。若不显式调用，
+  /// 窗口会一直保持 720×360 置顶，用户回到主界面后窗口再也放不大。
+  Future<void> leaveOverlay() => _exitOverlayWindow();
   /// 隐藏某角色的「窗口」。
   ///
   /// 单窗口下，隐藏覆盖式页面（设置/悬浮窗）= 回到主界面。

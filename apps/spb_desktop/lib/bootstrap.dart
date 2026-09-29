@@ -85,7 +85,8 @@ class PlatformDesktopCapabilities
         DesktopCapabilities,
         WindowDisplayTarget,
         TrayActionTarget,
-        PlatformDesktopQuit {
+        PlatformDesktopQuit,
+        OverlayWindowController {
   PlatformDesktopCapabilities({
     this.trayIconAsset = 'assets/tray_icon.png',
   });
@@ -599,6 +600,100 @@ class PlatformDesktopCapabilities
     } catch (e) {
       SpbLog.warn('获取显示器信息失败', {'error': '$e'});
       return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 悬浮输入窗形态（主窗口临时变身）
+  // ---------------------------------------------------------------------------
+
+  /// 进入悬浮模式前的窗口快照。null 表示当前不在悬浮模式。
+  ///
+  /// ## 为什么用 null 表示「不在悬浮模式」而不是一个 bool
+  ///
+  /// 快照本身就是「是否已保存」的证据：有快照 = 处于悬浮模式。用单独的 bool
+  /// 会多一个可能与快照不一致的状态（bool=true 但快照为 null → 还原时无数据）。
+  WindowGeometry? _preOverlayBounds;
+  bool _preOverlayAlwaysOnTop = false;
+  bool _preOverlaySkipTaskbar = false;
+  bool _preOverlayResizable = true;
+
+  @override
+  Future<bool> enterOverlayMode(WindowSpec spec) async {
+    // 幂等：已在悬浮模式时不重复保存（否则会把悬浮态当成「原状态」，
+    // 退出时还原成小窗口，用户再也回不到主界面尺寸）。
+    if (_preOverlayBounds != null) return true;
+
+    try {
+      final bounds = await windowManager.getBounds();
+      _preOverlayBounds = WindowGeometry(
+        role: WindowRole.main,
+        x: bounds.left,
+        y: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+      );
+      _preOverlayAlwaysOnTop = await windowManager.isAlwaysOnTop();
+      _preOverlaySkipTaskbar = await windowManager.isSkipTaskbar();
+      _preOverlayResizable = await windowManager.isResizable();
+
+      // 顺序：先放宽最小尺寸，否则 setSize 会被旧的 min 钳住。
+      // 主窗口 min 是 860×600，而悬浮窗只有 720×360——不先放宽就永远设不小。
+      await windowManager.setMinimumSize(const Size(1, 1));
+      await windowManager.setSize(Size(spec.width, spec.height));
+      await windowManager.setResizable(spec.resizable);
+      await windowManager.setAlwaysOnTop(spec.alwaysOnTop);
+      await windowManager.setSkipTaskbar(spec.skipTaskbar);
+
+      // 定位到鼠标所在显示器（多屏场景），失败则居中。
+      final geometry = await computeQuickCaptureGeometry(spec);
+      if (geometry != null) {
+        await windowManager.setPosition(
+          Offset(geometry.x, geometry.y),
+        );
+      } else {
+        await windowManager.center();
+      }
+
+      await windowManager.show();
+      await windowManager.focus();
+      SpbLog.info('进入悬浮输入窗模式', {
+        'size': '${spec.width.toInt()}x${spec.height.toInt()}',
+      });
+      return true;
+    } catch (e) {
+      // 失败时清掉快照，避免 exitOverlayMode 用一个不完整的快照去还原。
+      _preOverlayBounds = null;
+      SpbLog.warn('进入悬浮输入窗模式失败', {'error': '$e'});
+      return false;
+    }
+  }
+
+  @override
+  bool get isOverlayModeActive => _preOverlayBounds != null;
+
+  @override
+  Future<void> exitOverlayMode() async {
+    final bounds = _preOverlayBounds;
+    if (bounds == null) return; // 未进入过：空操作（可能被重复调用）。
+
+    _preOverlayBounds = null;
+    try {
+      await windowManager.setAlwaysOnTop(_preOverlayAlwaysOnTop);
+      await windowManager.setSkipTaskbar(_preOverlaySkipTaskbar);
+      await windowManager.setResizable(_preOverlayResizable);
+      await windowManager.setBounds(
+        Rect.fromLTWH(bounds.x, bounds.y, bounds.width, bounds.height),
+      );
+      // 还原最小尺寸（主窗口 spec 的值），否则用户可以把窗口拖到 1×1。
+      await windowManager.setMinimumSize(
+        Size(WindowSpec.main.minWidth, WindowSpec.main.minHeight),
+      );
+      await windowManager.show();
+      await windowManager.focus();
+      SpbLog.info('退出悬浮输入窗模式');
+    } catch (e) {
+      SpbLog.warn('退出悬浮输入窗模式失败', {'error': '$e'});
     }
   }
 
