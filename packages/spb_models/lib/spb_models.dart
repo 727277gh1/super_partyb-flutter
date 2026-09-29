@@ -10,10 +10,16 @@ library;
 //   ChatInboxMessage                —— 收件箱消息（pending 接口的真实返回）
 //   ChatTurn                        —— 对话轮次
 //   ListResponse / CursorPage / StreamCursor —— 分页与 SSE 续接游标
+//   ChatSearchHit                —— 搜索命中项（turn 摘要，**不是** ChatEvent）
+//   UfsFileEntry / UfsFilePage   —— UFS 文件条目与分页响应（交付物同步用）
+//   Miniapp*                     —— 小程序工作台 BFF 契约（work/artifact/confirmation/通知）
 export 'src/chat_event.dart';
 export 'src/chat_group.dart';
 // `show` 显式声明公共类型名，避免该模块未来新增内部辅助类时被动泄漏到公共 API。
 export 'src/chat_inbox_message.dart' show ChatInboxMessage;
+export 'src/chat_search_hit.dart';
 export 'src/chat_turn.dart';
 export 'src/event_types.dart';
+export 'src/miniapp.dart';
 export 'src/pagination.dart';
+export 'src/ufs_file_entry.dart';
