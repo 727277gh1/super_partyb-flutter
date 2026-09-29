@@ -3,10 +3,18 @@ import 'package:spb_models/spb_models.dart';
 import 'package:test/test.dart';
 
 /// 内存下载桩：记录调用，按 fileId 返回内容/304/错误。
+///
+/// [notModifiedIds] 默认无条件返回 304（用于验证引擎对 304 的处理）。
+/// 若打开 [conditionalOnly]，则只在本轮**确实带了** `If-None-Match` 时返回 304
+/// —— 那才是真实服务端的行为，用于验证「引擎该不该带 etag」这类判据。
 class _StubDownloader implements FileDownloader {
-  _StubDownloader({this.notModifiedIds = const {}});
+  _StubDownloader({this.notModifiedIds = const {}, this.conditionalOnly = false});
 
   final Set<String> notModifiedIds;
+
+  /// true = 只在带条件头时返回 304（模拟真实服务端）。
+  final bool conditionalOnly;
+
   final calls = <(String, String?)>[];
   final errors = <String, String>{};
 
@@ -15,7 +23,10 @@ class _StubDownloader implements FileDownloader {
     calls.add((fileId, ifNoneMatch));
     final err = errors[fileId];
     if (err != null) throw Exception(err);
-    if (notModifiedIds.contains(fileId)) {
+    final should304 =
+        notModifiedIds.contains(fileId) &&
+        (!conditionalOnly || (ifNoneMatch != null && ifNoneMatch.isNotEmpty));
+    if (should304) {
       return const SyncDownloadResult.notModified();
     }
     return SyncDownloadResult.downloaded([1, 2, 3, 4, 5]);
@@ -23,11 +34,20 @@ class _StubDownloader implements FileDownloader {
 }
 
 /// 内存落盘桩：记录写入/删除，可注入失败。
+///
+/// [exists] 默认按「`written` 里有没有」回答，另外可用 [preExisting] 模拟
+/// 「状态里有记录但磁盘上没有 / 上有」这两种真实场景。
 class _StubSink implements FileSink {
+  _StubSink({Set<String>? preExisting})
+    : preExisting = preExisting ?? const <String>{};
+
   final written = <String, List<int>>{};
   final deleted = <String>[];
   final failWrite = <String>{};
   final failDelete = <String>{};
+
+  /// 额外视为「磁盘上已存在」的路径（模拟上次同步留下的文件）。
+  final Set<String> preExisting;
 
   @override
   Future<void> write(String relPath, List<int> bytes) async {
@@ -39,7 +59,12 @@ class _StubSink implements FileSink {
   Future<void> delete(String relPath) async {
     if (failDelete.contains(relPath)) throw Exception('权限不足');
     deleted.add(relPath);
+    written.remove(relPath);
   }
+
+  @override
+  Future<bool> exists(String relPath) async =>
+      written.containsKey(relPath) || preExisting.contains(relPath);
 }
 
 /// 内存状态库（`SyncStateStore` 的最小实现，用于范围/目录变更语义）。
@@ -840,7 +865,8 @@ void main() {
     });
 
     test('本地已有副本时带 If-None-Match（省流量）', () async {
-      final sink = _StubSink();
+      // 「本地有副本」= 磁盘上真有文件（preExisting），**不是**「状态里有记录」。
+      final sink = _StubSink(preExisting: {'a.md'});
       final downloader = _StubDownloader();
       final engine = SyncEngine(downloader: downloader, sink: sink);
 
@@ -857,8 +883,50 @@ void main() {
       expect(downloader.calls.single.$2, 'W/"1"');
     });
 
+    test('状态里有记录但本地文件已被删 → 必须发无条件请求，文件重新落盘', () async {
+      // ## 回归测试（真实 bug）
+      //
+      // 原实现用 `state.contains(relPath)` 决定是否带 If-None-Match，而它表达的是
+      // 「曾经同步过」而非「磁盘上现在有」。用户手动删掉文件（或清理只删文件、
+      // 没清状态）后，引擎仍带 etag → 服务端 304 → 当作「未变更」跳过写入 →
+      // **文件永远回不来**，报告却显示「未变更 1 个」。
+      //
+      // 对齐 Tauri 端 `sync/engine.rs` 的 `target.exists()` 判据。
+      final sink = _StubSink(); // 磁盘上没有文件
+      // 模拟真实服务端：只有带了 If-None-Match 才会回 304。
+      final downloader = _StubDownloader(
+        notModifiedIds: {'id-a.md'},
+        conditionalOnly: true,
+      );
+      final engine = SyncEngine(downloader: downloader, sink: sink);
+
+      final result = await engine.run(
+        remote: [_remote('a.md', etag: 'W/"1"', size: 10)],
+        // 状态里的 etag 与远端一致（看起来「已同步」），但文件不在磁盘上
+        state: _stateWith({
+          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
+        }),
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(
+        downloader.calls.single.$2,
+        isNull,
+        reason: '本地无副本时必须发无条件请求，否则 304 会把文件判成「未变更」',
+      );
+      expect(
+        result.report.downloaded,
+        1,
+        reason: '文件应被真正重新写入，而不是记成「未变更」',
+      );
+      expect(sink.written.containsKey('a.md'), isTrue);
+    });
+
     test('计划为空时不产生任何写入（定时同步不刷无意义磁盘 IO）', () async {
-      final sink = _StubSink();
+      // 「无事可做」的前提是**磁盘上真有文件**：状态与远端一致**且**本地副本存在。
+      // 只满足前者时本轮会重新下载（那正是「本地文件被删后必须能自愈」的行为）。
+      final sink = _StubSink(preExisting: {'a.md'});
       final downloader = _StubDownloader();
       final engine = SyncEngine(downloader: downloader, sink: sink);
 

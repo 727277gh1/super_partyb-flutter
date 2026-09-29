@@ -215,8 +215,50 @@ void main() {
     });
   });
 
-  group('LocalFileSink 删除', () {
-    test('删除已存在的文件', () async {
+  group('LocalFileSink 存在性探测', () {
+    test('刚写入的文件存在，未写入的不存在', () async {
+      final sink = LocalFileSink(root.path);
+      await sink.write('a.md', [1]);
+      expect(await sink.exists('a.md'), isTrue);
+      expect(await sink.exists('b.md'), isFalse);
+    });
+
+    test('文件被手动删除后返回 false（这是同步自愈的前提）', () async {
+      // 同步引擎靠它决定要不要发 If-None-Match。若这里误报 true，
+      // 用户删掉文件后就再也拿不回来了（见 spb_domain 的 FileSink.exists）。
+      final sink = LocalFileSink(root.path);
+      await sink.write('a.md', [1]);
+      File('${root.path}/a.md').deleteSync();
+      expect(await sink.exists('a.md'), isFalse);
+    });
+
+    test('目录不算「文件存在」', () async {
+      final sink = LocalFileSink(root.path);
+      await sink.write('reports/a.md', [1]);
+      expect(await sink.exists('reports'), isFalse);
+    });
+
+    test('路径逃逸时抛错（不静默当成「不存在」）', () async {
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.exists('../outside/x.md'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('软链指向外部时抛错', () async {
+      File('${outside.path}/victim.txt').writeAsStringSync('keep');
+      Link('${root.path}/link').createSync(outside.path);
+
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.exists('link/victim.txt'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+  });
+
+  group('LocalFileSink 删除', () {    test('删除已存在的文件', () async {
       final sink = LocalFileSink(root.path);
       await sink.write('a.md', [1]);
       await sink.delete('a.md');

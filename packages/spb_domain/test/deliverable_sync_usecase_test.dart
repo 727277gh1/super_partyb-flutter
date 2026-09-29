@@ -9,12 +9,19 @@ import 'package:test/test.dart';
 class _Sink implements FileSink {
   final written = <String, List<int>>{};
 
+  /// 模拟上次同步留下的本地副本（[exists] 为真）。
+  final preExisting = <String>{};
+
   @override
   Future<void> write(String relPath, List<int> bytes) async =>
       written[relPath] = bytes;
 
   @override
   Future<void> delete(String relPath) async => written.remove(relPath);
+
+  @override
+  Future<bool> exists(String relPath) async =>
+      written.containsKey(relPath) || preExisting.contains(relPath);
 }
 
 /// 内存状态库。
@@ -289,6 +296,87 @@ void main() {
       final result = await d.download('id-x', ifNoneMatch: 'W/"1"');
       expect(result.notModified, isTrue);
       expect(result.bytes, isNull);
+    });
+
+    test('状态里有记录但本地文件已被删 → 走无条件请求，文件重新落盘', () async {
+      // ## 端到端回归（真实 bug）
+      //
+      // 原实现只看 `state.contains(relPath)`（「曾经同步过」），不看磁盘。
+      // 用户手动删掉文件后，引擎仍带 If-None-Match → 服务端 304 → 判为
+      // 「未变更」跳过写入 → 文件永远回不来，报告却显示成功。
+      //
+      // 本用例走完整链路（UfsApi + 分页 + 引擎 + 状态落盘），只 mock HTTP。
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/g1/a.md')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': root,
+          'include_deleted': 'true',
+          'updated_since': '2026-04-01T00:00:00Z',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      // 预置状态：etag 与远端一致（看起来「已同步」），但磁盘上没有文件。
+      store.data[workspaceStateKey] = SyncState(
+        cursor: '2026-04-01T00:00:00Z',
+        files: const {
+          'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3),
+        },
+      );
+      expect(sink.preExisting, isEmpty, reason: '磁盘上确实没有这个文件');
+
+      final report = await useCase.run(
+        scope: const SyncWorkspaceScope(),
+        filter: const SyncFilterConfig(),
+      );
+
+      expect(
+        downloader.calls.single.$2,
+        isNull,
+        reason: '本地无副本时必须发无条件请求，否则 304 会把文件判成「未变更」',
+      );
+      expect(report.downloaded, 1);
+      expect(sink.written.containsKey('g1/a.md'), isTrue);
+    });
+
+    test('本地确有副本时才带 If-None-Match（省流量）', () async {
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/g1/a.md', etag: 'W/"2"')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': root,
+          'include_deleted': 'true',
+          'updated_since': '2026-04-01T00:00:00Z',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      // 状态里 etag 较旧 → 会下载；磁盘上真有文件 → 应带条件头。
+      store.data[workspaceStateKey] = SyncState(
+        cursor: '2026-04-01T00:00:00Z',
+        files: const {
+          'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3),
+        },
+      );
+      sink.preExisting.add('g1/a.md');
+
+      await useCase.run(
+        scope: const SyncWorkspaceScope(),
+        filter: const SyncFilterConfig(),
+      );
+
+      expect(downloader.calls.single.$2, 'W/"2"');
     });
   });
 }

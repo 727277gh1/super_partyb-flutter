@@ -205,4 +205,21 @@ class LocalFileSink implements FileSink {
       throw StorageError('删除失败：$relPath（${e.message}）', cause: e);
     }
   }
+
+  /// 磁盘上是否真实存在该文件。
+  ///
+  /// ## 为什么不能拿状态表代替它
+  ///
+  /// 同步引擎用它决定要不要发 `If-None-Match`（见 `spb_domain` 的
+  /// [FileSink.exists]）。若用「状态里有记录」代替，「用户手动删了文件」就会
+  /// 让引擎带着 etag 去问服务端 → 304 → 跳过写入 → **文件永远回不来**。
+  ///
+  /// 这里先 `resolveWithinRoot` 再判存在：路径穿越的输入应当在这里就被拒掉，
+  /// 而不是先落到磁盘上再判（`resolveWithinRoot` 对不存在路径也有效，故顺序
+  /// 不影响结果，只影响「非法路径会不会被当成『不存在』而静默放行」）。
+  @override
+  Future<bool> exists(String relPath) async {
+    final target = await resolveWithinRoot(localRoot, relPath);
+    return File(target).exists();
+  }
 }

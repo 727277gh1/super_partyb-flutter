@@ -14,6 +14,7 @@
 /// 与 `apps/desktop/src-tauri/src/sync/{plan,filter,engine,path}.rs`。
 library;
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
 import 'sync_path.dart';
@@ -331,11 +332,21 @@ class SyncPlan {
 /// 增量清单每轮都会重复返回「updated_at 恰好等于游标」的文件（服务端是
 /// `>=` 比较），它们靠 etag 命中被跳过。这是**正常且高频**的情况，若计入
 /// `skipped`，摘要里会长期显示一个无意义的「跳过 N 个」。
+///
+/// ## [presentLocally]：状态里「记过」≠ 磁盘上「现在有」
+///
+/// 调用方若有磁盘访问能力，**必须**传入本地真实存在的相对路径集合。否则
+/// 「用户手动删了文件 / 清理只删文件没清状态」的场景下，该文件会被 etag 比对
+/// 判为「未变更」而**永远不再落盘**（同步报告还显示成功）。
+///
+/// 默认值 null 表示「调用方无磁盘信息」——此时行为退化为仅看状态，即修复前的
+/// 语义。**生产路径（[SyncEngine]）总是传入真实集合**，见其 `run`。
 SyncPlan buildSyncPlan({
   required List<UfsFileEntry> remote,
   required SyncState state,
   required SyncScope scope,
   required SyncFilterConfig filter,
+  Set<String>? presentLocally,
 }) {
   final downloads = <SyncAction>[];
   final deletes = <SyncAction>[];
@@ -373,7 +384,11 @@ SyncPlan buildSyncPlan({
       continue;
     }
 
-    if (state.isUnchanged(relPath, etag: file.etag, size: file.size)) {
+    if (state.isUnchanged(relPath, etag: file.etag, size: file.size) &&
+        // 状态里「记过」不等于磁盘上「现在有」：文件可能已被用户手动删掉，
+        // 或清理时只删了文件没清状态。此时必须安排重新下载，否则它会永远
+        // 缺席（见 buildSyncPlan 的 presentLocally 说明）。
+        (presentLocally == null || presentLocally.contains(relPath))) {
       continue; // 已是最新：静默跳过（见函数文档）
     }
 
@@ -414,6 +429,30 @@ abstract interface class FileSink {
 
   /// 删除本地文件。文件本就不存在视为成功（用户可能已手动删掉）。
   Future<void> delete(String relPath);
+
+  /// 本地**磁盘上**是否真实存在该文件。
+  ///
+  /// ## 为什么必须区分它与 `SyncState.contains(relPath)`
+  ///
+  /// 两者回答的是不同问题：
+  ///
+  /// | 判据 | 含义 |
+  /// |---|---|
+  /// | `state.contains(relPath)` | 「**曾经**同步过这个路径」 |
+  /// | `sink.exists(relPath)` | 「**现在**磁盘上有这个文件」 |
+  ///
+  /// [SyncEngine] 用它决定要不要发条件请求（`If-None-Match`），而条件请求的
+  /// 语义是「我手上已有一份该 ETag 的副本」。**状态里有记录不等于手上有副本**：
+  /// 用户可能手动删掉了文件、或清理只删了文件而没清状态。此时若仍带 etag，
+  /// 服务端返回 304 → 引擎当作「未变更」跳过写入 → **文件永远回不来**，
+  /// 而报告显示「未变更 1 个」。
+  ///
+  /// 对齐 Tauri 端 `sync/engine.rs` 的 `target.exists()` 判据。
+  ///
+  /// 实现应尽量不抛异常（无法判断时返回 false —— 那只会导致一次多余的无条件
+  /// 下载，是安全的一侧）；但若抛出（如路径逃逸），[SyncEngine] 会把它记为
+  /// 该文件的失败项并**不写状态**，同样是安全的一侧。
+  Future<bool> exists(String relPath);
 }
 
 /// 下载抽象。
@@ -429,8 +468,8 @@ abstract interface class FileDownloader {
   /// 跳过写入——文件永远不会落盘，报告却显示成功。这个 bug 曾在 Tauri 端真实
   /// 发生（首次同步 0 个文件落盘却报「未变更 9 个」）。
   ///
-  /// 因此 [SyncEngine] 只在 `state.contains(relPath)` 时才传 etag，
-  /// 实现层不必重复判断。
+  /// 因此 [SyncEngine] 只在「状态里有记录**且** [FileSink.exists] 为真」时才传
+  /// etag，实现层不必重复判断。
   Future<SyncDownloadResult> download(String fileId, {String? ifNoneMatch});
 }
 
@@ -538,6 +577,12 @@ class SyncRunResult {
 /// ## 为什么「计划为空」要提前返回
 ///
 /// 定时同步场景下，无事可做时若仍写一次状态，会产生大量无意义的磁盘写入。
+///
+/// ## 为什么先探磁盘再算计划
+///
+/// 见 [SyncEngine.run] 里 `presentLocally` 的说明：状态里的 etag 记录只说明
+/// 「上次同步过」，不说明「磁盘上现在还有」。不探磁盘就会在「用户手动删了文件」
+/// 之后永远不再下载它。
 class SyncEngine {
   const SyncEngine({
     required this.downloader,
@@ -557,11 +602,42 @@ class SyncEngine {
     required SyncScope scope,
     required SyncFilterConfig filter,
   }) async {
+    // 先问磁盘「现在真有哪些文件」，再算计划。
+    //
+    // ## 为什么必须在**计划之前**做
+    //
+    // etag 比对（`state.isUnchanged`）只说明「上次同步过、内容没变」，不代表
+    // 磁盘上现在还有这个文件。用户可能手动删掉了它，或清理只删了文件没清状态。
+    // 若只看状态，这些文件会被判为「未变更」而跳过——**永远不再落盘**，
+    // 而同步报告显示成功（对齐 Tauri 端 `sync/engine.rs` 的 `target.exists()`）。
+    //
+    // ## 为什么只探**状态里记过**的路径
+    //
+    // 同步目录可能很大（生产实测 5666 个文件）。只探状态里已有的路径，
+    // 数量与状态条目同阶，而不是与整个目录同阶。
+    //
+    // ## 探测失败按「不存在」处理（安全的一侧）
+    //
+    // `exists` 抛异常（如路径逃逸）时记 debug 并视为「本地没有」：后果只是多一次
+    // 无条件下载，比「文件永远缺席」好得多。
+    final presentLocally = <String>{};
+    for (final relPath in state.files.keys) {
+      try {
+        if (await sink.exists(relPath)) presentLocally.add(relPath);
+      } catch (e) {
+        SpbLog.debug('探测本地副本失败，按「不存在」处理', {
+          'relPath': relPath,
+          'error': e.toString(),
+        });
+      }
+    }
+
     final plan = buildSyncPlan(
       remote: remote,
       state: state,
       scope: scope,
       filter: filter,
+      presentLocally: presentLocally,
     );
 
     if (plan.isEmpty) {
@@ -599,7 +675,18 @@ class SyncEngine {
           try {
             // 只在本地**确实有副本**时才发条件请求（见 FileDownloader.download
             // 的文档：否则首次同步会被 304 骗成「未变更」，文件永不落盘）。
-            final conditionalEtag = next.contains(relPath) ? etag : null;
+            //
+            // 两个条件缺一不可：
+            // - `next.contains` —— 曾经同步过（有 etag 可比）；
+            // - `presentLocally` —— 磁盘上**现在**真有这个文件（由上面的探测得出）。
+            //
+            // 只看前者会在「用户手动删了文件 / 清理只删文件没清状态」时把文件
+            // 判成「未变更」而跳过写入，文件**永远回不来**（对齐 Tauri 端
+            // `sync/engine.rs` 的 `target.exists()`）。
+            final conditionalEtag =
+                (next.contains(relPath) && presentLocally.contains(relPath))
+                ? etag
+                : null;
             final result = await downloader.download(
               fileId,
               ifNoneMatch: conditionalEtag,
