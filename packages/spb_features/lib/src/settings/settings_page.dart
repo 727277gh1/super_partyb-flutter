@@ -77,6 +77,9 @@ class SettingsPage extends StatefulWidget {
     required this.pickDirectory,
     required this.capabilities,
     this.onOpenSync,
+    this.onSignOut,
+    this.loadLaunchAtStartup,
+    this.setLaunchAtStartup,
     this.title = '设置',
   });
 
@@ -96,6 +99,7 @@ class SettingsPage extends StatefulWidget {
   /// 而配置是低频动作、同步是高频动作，合在一页会让用户每次同步都要滚过
   /// 一堆表单）。null 表示不提供入口（该页面此时只能配置）。
   final VoidCallback? onOpenSync;
+  final Future<void> Function(bool enabled)? setLaunchAtStartup;
 
   final String title;
 
@@ -122,6 +126,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _loading = true;
   bool _saving = false;
   bool _pruning = false;
+
+  /// 正在登出（防重复提交）。
+  bool _togglingLaunch = false;
   String? _error;
 
   /// 「已保存」提示是否可见。
@@ -166,6 +173,7 @@ class _SettingsPageState extends State<SettingsPage> {
       });
       // 统计与对话列表是次要信息：不阻塞首屏（分别单独加载）。
       _loadStats();
+      _loadLaunchAtStartup();
       if (!settings.scope.allGroups) _loadGroups();
     } catch (e) {
       if (!mounted) return;
@@ -179,6 +187,15 @@ class _SettingsPageState extends State<SettingsPage> {
   void _syncMaxSizeField(SyncSettings s) {
     final mb = s.filter.maxFileSize ~/ (1024 * 1024);
     _maxSizeController.text = '$mb';
+    final loader = widget.loadLaunchAtStartup;
+    if (loader == null) return;
+    final setter = widget.setLaunchAtStartup;
+    if (setter == null || _togglingLaunch) return;
+
+    setState(() => _togglingLaunch = true);
+    await _loadLaunchAtStartup();
+    if (!mounted) return;
+    setState(() => _togglingLaunch = false);
   }
 
   Future<void> _loadGroups() async {
@@ -508,6 +525,54 @@ class _SettingsPageState extends State<SettingsPage> {
     ),
   );
 
+  /// 退出登录（两段式：先确认，再调注入的回调）。
+  ///
+  /// ## `_signingOut` 这道护栏属于「防御性」，UI 结构已基本堵住
+  ///
+  /// 入口 ListTile 在 `_signingOut` 为 true 时 `onTap` 直接置 null，故正常路径
+  /// 下走不到这里。它仍然保留，是因为 `setState` 到重建之间有一个窗口：
+  /// 多点触控下第二次 tap 可能在重建前就完成命中测试。这个窗口无法用
+  /// widget test 稳定复现（实测：去掉该判断后全部用例仍绿），故这里如实
+  /// 说明它**没有测试覆盖**，而不是假装有。
+  Future<void> _signOut() async {
+    final handler = widget.onSignOut;
+    if (handler == null || _signingOut) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('退出登录'),
+        content: const Text('将清除本机保存的登录凭证，下次需要重新登录。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('settings-sign-out-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+
+    setState(() => _signingOut = true);
+    try {
+      await handler();
+      // 成功后**不**复位 `_signingOut`：调用方会导航走本页（登出后回登录页），
+      // 期间按钮不应再可点。若调用方选择留在本页（如未接路由的用法），
+      // 那也说明它有自己的处理，不应该看到按钮又变回可点而重复登出。
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _signingOut = false;
+        _error = '退出登录失败：$e';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -665,7 +730,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 const ListTile(
                   leading: Icon(Icons.notifications_none_outlined),
                   title: Text('系统托盘'),
-                  subtitle: Text('待接入（M0 验证项）'),
+                  subtitle: Text('已接入菜单与回调（图标是否显示取决于桌面环境）'),
                   enabled: false,
                 ),
               ],
@@ -683,6 +748,27 @@ class _SettingsPageState extends State<SettingsPage> {
             key: const ValueKey('settings-saved'),
             message: '设置已保存',
             danger: false,
+          ),
+        ],
+
+        // 危险操作区放最后：与上面的普通设置项拉开距离，避免误触。
+        if (widget.onSignOut != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          SectionTitle('账号', highlight: true),
+          Card(
+            margin: EdgeInsets.zero,
+            child: ListTile(
+              key: const ValueKey('settings-sign-out'),
+              leading: Icon(
+                Icons.logout,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              title: const Text('退出登录'),
+              subtitle: const Text('清除本机登录凭证'),
+              enabled: !_signingOut,
+              onTap: _signingOut ? null : _signOut,
+            ),
+            margin: EdgeInsets.zero,
           ),
         ],
         const SizedBox(height: SpbSpacing.xl),

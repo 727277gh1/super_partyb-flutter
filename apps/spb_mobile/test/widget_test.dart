@@ -942,4 +942,75 @@ void main() {
     );
   });
 
+  testWidgets('设置页退出登录：确认后清凭证并回登录页', (tester) async {
+    // 端到端验证「点退出 → 清凭证 → 状态变未登录 → 回到登录页」。
+    //
+    // 用 `InMemoryTokenStore.clearCount` 作观测点：它证明**凭证真的被清了**，
+    // 而不只是路由跳走了（后者可能是别的原因导致的重定向）。
+    // 设置页是 ListView，**惰性构建**：屏幕外的条目在树里根本不存在，
+    // 而「退出登录」在最底部。默认 800×600 下必然在屏幕外 → find 不到。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final store = InMemoryTokenStore(_freshTokens());
+    final h = await pumpApp(tester, tokenStore: store, mockGroups: false);
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    // 前置条件：确实处于已登录态。少了这一句，整条用例可能**空洞通过**
+    // ——若从未登录过，登出照样清凭证、照样回登录页，断言全中但没有意义。
+    expect(
+      h.container.read(authStateProvider).isAuthenticated,
+      isTrue,
+      reason: '前置条件：必须先处于已登录态，否则本用例空洞通过',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('settings-sign-out')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-sign-out-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(store.clearCount, 1, reason: '必须真的清掉本地凭证');
+    expect(
+      h.container.read(authStateProvider).isAuthenticated,
+      isFalse,
+      reason: '状态必须变为未登录',
+    );
+    expect(
+      h.router.state.matchedLocation,
+      SpbRoutes.login,
+      reason: '登出后必须回到登录页',
+    );
+  });
+
+  testWidgets('设置页退出登录：取消则保留凭证且留在设置页', (tester) async {
+    // 同上：底部条目需要更高的测试窗口才会被构建。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final store = InMemoryTokenStore(_freshTokens());
+    final h = await pumpApp(tester, tokenStore: store, mockGroups: false);
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-sign-out')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    expect(store.clearCount, 0, reason: '取消绝不能清凭证');
+    expect(h.container.read(authStateProvider).isAuthenticated, isTrue);
+    expect(h.router.state.matchedLocation, SpbRoutes.settings);
+  });
+
 }

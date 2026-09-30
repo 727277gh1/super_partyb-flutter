@@ -521,6 +521,21 @@ class _SettingsPage extends ConsumerWidget {
       capabilities: ref.watch(desktopCapabilitiesProvider),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
+      // 退出登录：清凭证 → 回登录页。
+      //
+      // ## 显式 `go(login)` 是「双保险」，路由守卫已能兜住
+      //
+      // `signOut()` 把 `authState` 置为 `unauthenticated` 后，路由的
+      // `refreshListenable` 会重跑守卫并把当前页重定向到登录页。实测：
+      // **删掉这一行，测试依然全绿**（守卫确实会重定向）。
+      //
+      // 仍然保留它，是为了把「登出后去哪」这个意图写在调用点，而不是依赖
+      // 守卫的实现细节（它按什么判定、在哪些页面生效）。代价是一行代码，
+      // 收益是读代码时不必跳去守卫才能确认去向。`context.mounted` 检查让它在
+      // 页面已被移除时安静跳过，此时守卫接手。
+      //
+      // 用 `context.mounted` 而非 `State.mounted`：这里是 `ConsumerWidget`
+      // 的 `build` 闭包，捕获的是 `BuildContext` 而非 State。
       loadLaunchAtStartup: () =>
       setLaunchAtStartup: (enabled) =>
     );

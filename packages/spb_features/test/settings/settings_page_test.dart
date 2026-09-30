@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_core/spb_core.dart';
@@ -37,6 +39,9 @@ void main() {
     Future<PruneOutcome> Function(PrunePlan)? onPrune,
     Future<String?> Function()? pickDirectory,
     Future<SyncSettings> Function()? loadSettings,
+    Future<void> Function()? onSignOut,
+    Future<bool> Function()? loadLaunchAtStartup,
+    Future<void> Function(bool)? setLaunchAtStartup,
   }) async {
     // ## 为什么要把测试窗口调高
     //
@@ -66,6 +71,9 @@ void main() {
               (_) async => const PruneOutcome(deleted: 0, failed: {}),
           pickDirectory: pickDirectory ?? () async => null,
           capabilities: capabilities ?? const NoopDesktopCapabilities(),
+          onSignOut: onSignOut,
+          loadLaunchAtStartup: loadLaunchAtStartup,
+          setLaunchAtStartup: setLaunchAtStartup,
         ),
       ),
     );
@@ -615,6 +623,104 @@ void main() {
       );
     });
   });
+
+  group('设置页：退出登录', () {
+    testWidgets('未注入 onSignOut 时不展示入口（无认证的用法）', (tester) async {
+      await pumpSettings(tester);
+      expect(find.byKey(const ValueKey('settings-sign-out')), findsNothing);
+    });
+
+    testWidgets('点击需二次确认：取消则不清会话', (tester) async {
+      var calls = 0;
+      await pumpSettings(tester, onSignOut: () async => calls++);
+
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out')));
+      await tester.pumpAndSettle();
+
+      // 确认框出现，但还没调用。
+      expect(
+        find.byKey(const ValueKey('settings-sign-out-confirm')),
+        findsOneWidget,
+      );
+      expect(calls, 0, reason: '打开确认框本身不得清会话');
+
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      expect(calls, 0, reason: '取消后绝不能清会话（登出代价是重走 OIDC 登录）');
+      expect(
+        find.byKey(const ValueKey('settings-sign-out-confirm')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('确认后调用注入的 onSignOut 恰好一次', (tester) async {
+      var calls = 0;
+      await pumpSettings(tester, onSignOut: () async => calls++);
+
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('登出失败时展示原因，且入口重新可点（可重试）', (tester) async {
+      var calls = 0;
+      await pumpSettings(
+        tester,
+        onSignOut: () async {
+          calls++;
+          throw StateError('网络断了');
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+      expect(find.textContaining('退出登录失败'), findsOneWidget);
+
+      // 失败后必须能再试：否则用户被卡在「登不出去」的状态里。
+      final tile = tester.widget<ListTile>(
+        find.byKey(const ValueKey('settings-sign-out')),
+      );
+      expect(tile.enabled, isTrue);
+      expect(tile.onTap, isNotNull);
+    });
+
+    testWidgets('提交中禁用入口（防重复登出）', (tester) async {
+      // 用 Completer 把回调挂起，模拟「请求在途」。
+      final gate = Completer<void>();
+      await pumpSettings(tester, onSignOut: () => gate.future);
+
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-sign-out-confirm')));
+      await tester.pump();
+
+      final tile = tester.widget<ListTile>(
+        find.byKey(const ValueKey('settings-sign-out')),
+      );
+      expect(tile.enabled, isFalse, reason: '在途期间不得再点（避免重复清会话）');
+      expect(tile.onTap, isNull);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      // 成功之后**仍然**禁用：调用方会导航走本页（登出后回登录页），
+      // 若在这里复位，用户会在跳转前的那一帧看到按钮又变回可点，
+      // 点下去就是第二次登出。
+      final after = tester.widget<ListTile>(
+        find.byKey(const ValueKey('settings-sign-out')),
+      );
+      expect(after.enabled, isFalse, reason: '登出成功后不得复位为可点');
+      expect(after.onTap, isNull);
+    });
+  });
 }
 
 /// 桌面能力桩（`isSupported == true` 以触发桌面专属区块）。
@@ -652,6 +758,7 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   @override
   Future<String?> pickDirectory({String? title}) async => null;
 
+  @override
   @override
   Future<void> dispose() async {}
 }

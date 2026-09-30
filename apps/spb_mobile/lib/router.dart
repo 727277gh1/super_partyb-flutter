@@ -301,6 +301,10 @@ class _SettingsTab extends ConsumerWidget {
       pickDirectory: ref.watch(pickDirectoryProvider),
       capabilities: ref.watch(desktopCapabilitiesProvider),
       onOpenSync: () => context.go(SpbRoutes.sync),
+      onSignOut: () async {
+        await ref.read(authControllerProvider).signOut();
+        if (context.mounted) context.go(SpbRoutes.login);
+      },
     );
   }
 }
