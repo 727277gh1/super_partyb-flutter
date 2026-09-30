@@ -174,6 +174,10 @@ Future<TestHarness> pumpApp(
 
   /// 搜索实现（搜索页用）。默认返回空结果。
   SearchChat? searchChat,
+
+  /// UFS API（交付物侧边栏用）。默认不 override：侧边栏默认不展开，
+  /// 用不到的用例不应被它拖慢。
+  UfsApi? ufsApi,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -255,6 +259,7 @@ Future<TestHarness> pumpApp(
       searchChatProvider.overrideWithValue(
         searchChat ?? (query, {int? limit}) async => const [],
       ),
+      if (ufsApi != null) ufsApiProvider.overrideWithValue(ufsApi),
       // 初始目录：写进内存库的绑定表，让 syncLocalRootProvider 读得到。
       if (syncLocalRoot != null)
         syncLocalRootProvider.overrideWith((ref) async => syncLocalRoot),
@@ -300,6 +305,45 @@ StoredTokens _freshTokens() => StoredTokens(
   accessToken: 'at_test',
   expiresAt: DateTime.now().toUtc().add(const Duration(days: 1)),
 );
+
+/// `UfsApi` 的内存桩：记录 `listFiles` 调用并返回可配条目。
+///
+/// 用子类重写而不是 mock 框架：`UfsApi` 的方法都是虚方法，重写 `listFiles`
+/// 即可，无需引入 mockito 依赖，也不依赖 dio。
+class _FakeUfsApi extends UfsApi {
+  _FakeUfsApi() : super(Dio());
+
+  List<UfsFileEntry> entries = const [];
+
+  /// `listFiles` 收到的 `pathPrefix`（按调用顺序）。
+  final listCalls = <String?>[];
+
+  @override
+  Future<UfsFilePage> listFiles({
+    String? pathPrefix,
+    String? updatedSince,
+    bool includeDeleted = false,
+    List<String> excludePrefix = const [],
+    int page = 1,
+    int pageSize = 20,
+    String ownerType = 'user',
+  }) async {
+    listCalls.add(pathPrefix);
+    return UfsFilePage(items: entries, total: entries.length);
+  }
+}
+
+/// 构造一条 UFS 条目（路径按 group workspace 前缀拼）。
+UfsFileEntry _ufsFile(String gid, String rel, {String? id}) =>
+    UfsFileEntry.fromJson({
+      'id': id ?? 'uf-$rel',
+      'path': '/workspace/groups/$gid/$rel/',
+      'size': 1024,
+      'name': rel.split('/').last,
+      'mime_type': 'text/markdown',
+      'is_directory': false,
+      'updated_at': '2026-01-01T00:00:00Z',
+    });
 
 void main() {
   testWidgets('首页渲染对话列表（用 mock 数据，无真实网络）', (tester) async {
@@ -870,6 +914,98 @@ void main() {
       hasLength(1),
       reason: 'SSE 是 user 级订阅，切 group 不得重连',
     );
+  });
+
+  group('交付物侧边栏（桌面端接线）', () {
+    /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
+    /// 以观察侧边栏的取数。
+    Future<_FakeUfsApi> openChat(
+      WidgetTester tester,
+      SseClient sse, {
+      String groupId = 'grp_x',
+    }) async {
+      final ufs = _FakeUfsApi();
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat(groupId),
+        mockGroups: false,
+        sseClient: sse,
+        ufsApi: ufs,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/$groupId/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': groupId, 'limit': 20},
+          );
+        },
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      return ufs;
+    }
+
+    testWidgets('默认不展开：开关存在但侧边栏不可见，未取数', (tester) async {
+      final sse = _FakeSseClient();
+      final ufs = await openChat(tester, sse);
+
+      // AppBar 里有交付物侧边栏开关。
+      final toggle = find.byKey(const ValueKey('toggle-deliverables'));
+      expect(toggle, findsOneWidget);
+
+      // 未取数：侧边栏默认折叠，autoDispose provider 不该被读。
+      expect(ufs.listCalls, isEmpty);
+      // 侧边栏标题也不在。
+      expect(find.text('交付物'), findsNothing);
+    });
+
+    testWidgets('点开关展开侧边栏，按 group 前缀取数并渲染文件', (tester) async {
+      final sse = _FakeSseClient();
+      final ufs = await openChat(tester, sse);
+      ufs.entries = [_ufsFile('grp_x', 'README.md')];
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      // 取数时用 group workspace 前缀。
+      expect(ufs.listCalls, contains('/workspace/groups/grp_x'));
+      // 文件名出现在侧边栏。
+      expect(find.text('README.md'), findsOneWidget);
+      expect(find.text('交付物'), findsOneWidget);
+    });
+
+    testWidgets('再点开关收起侧边栏', (tester) async {
+      final sse = _FakeSseClient();
+      await openChat(tester, sse);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      expect(find.text('交付物'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      expect(find.text('交付物'), findsNothing);
+    });
   });
 
   testWidgets('currentUserProvider 走 mock 的 /api/auth/me', (tester) async {

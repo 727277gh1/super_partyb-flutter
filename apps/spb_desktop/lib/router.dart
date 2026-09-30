@@ -299,10 +299,9 @@ class _HomePage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
     // 角标数量：拉取失败静默为 0（不阻断对话列表）。
-    final pendingCount = ref.watch(pendingConfirmationCountProvider).maybeWhen(
-        data: (n) => n,
-        orElse: () => 0,
-      );
+    final pendingCount = ref
+        .watch(pendingConfirmationCountProvider)
+        .maybeWhen(data: (n) => n, orElse: () => 0);
     return GroupListPage(
       api: api,
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
@@ -450,11 +449,37 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// （只清缓冲 + 重新回填，不重连）。
   String? _connectedUserId;
 
+  /// 交付物侧边栏是否展开。
+  bool _showDeliverables = false;
+
+  /// 交付物刷新令牌：自增 int。
+  ///
+  /// 由本 State 监听 controller.items：出现新的 `AgentFileItem`（agent 产出了
+  /// 文件）时 bump。面板只比较令牌是否变化，不依赖 controller——故面板可在
+  /// 无头环境用内存桩完整验证。
+  int _deliverablesReloadToken = 0;
+
+  /// controller.items 的订阅（dispose 时释放）。
+  StreamSubscription<List<ConversationItem>>? _itemsSub;
+
+  /// 上次见过的 `AgentFileItem` id 集合：用于判定「新出现」。
+  ///
+  /// 以「上次见过的 id 集合」为基线，每次 items 更新里若出现不在基线的文件 id，
+  /// 就 bump 令牌。比「只看 items.length 增长」更准：历史回填、去重、软删都会
+  /// 让长度变化但不代表新文件。
+  Set<String> _seenFileItemIds = {};
+
   @override
   void initState() {
     super.initState();
     // 在首帧后解析：`ref.watch` 在 initState 里不可用。
     WidgetsBinding.instance.addPostFrameCallback((_) => _resolveUserAndFocus());
+  }
+
+  @override
+  void dispose() {
+    _itemsSub?.cancel();
+    super.dispose();
   }
 
   @override
@@ -489,6 +514,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     _focused = key;
 
     final controller = ref.read(chatStreamControllerProvider(userId));
+    // 聚焦新 group 时重置「见过的文件 id」基线：切对话不应把旧对话里看到的
+    // 文件当作「新出现」去刷新新对话的面板。
+    _seenFileItemIds = {};
+    if (_itemsSub == null) {
+      // 只订阅一次（controller 是 user 级单例，切 group 复用同一实例）：
+      // 监听 items 流，出现新的 AgentFileItem 时 bump 交付物刷新令牌。
+      _itemsSub = controller.items.listen(_onItemsChanged);
+      // 立即同步一次当前快照，避免错过订阅前已存在的文件。
+      _onItemsChanged(controller.snapshot);
+    }
     if (_connectedUserId == userId) {
       // 同一 userId 内切 group：复用已有连接（不调 connect，游标保留）。
       await controller.switchGroup(widget.groupId);
@@ -513,9 +548,25 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final controller = ref.watch(chatStreamControllerProvider(userId));
     final api = ref.watch(chatApiProvider);
 
-    return ConversationPage(
+    // 桌面端：对话页 + 可折叠交付物侧边栏。移动端（spb_mobile）不传 actions
+    // 也不包 Row，保持原样（见 AGENTS.md §6.4）。
+    final conversation = ConversationPage(
       controller: controller,
       title: '对话',
+      // 交付物侧边栏开关（仅桌面端渲染本页）。
+      actions: [
+        IconButton(
+          key: const ValueKey('toggle-deliverables'),
+          icon: Icon(
+            _showDeliverables
+                ? Icons.view_sidebar
+                : Icons.view_sidebar_outlined,
+          ),
+          tooltip: _showDeliverables ? '隐藏交付物' : '显示交付物',
+          onPressed: () =>
+              setState(() => _showDeliverables = !_showDeliverables),
+        ),
+      ],
       // 待处理收件箱消息（可撤销）。
       //
       // 撤销需要 userId，而页面不该知道 userId 从哪来——故在这里闭包捕获
@@ -592,6 +643,61 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             });
       },
     );
+
+    if (!_showDeliverables) return conversation;
+
+    return Row(
+      children: [
+        Expanded(child: conversation),
+        // 侧边栏宽度固定：交付物树是窄列表，定宽比自适应更可预测
+        // （自适应会随文件名长度抽动，阅读时很干扰）。
+        const VerticalDivider(width: 1, thickness: 1),
+        SizedBox(
+          width: 320,
+          child: GroupDeliverablesPanel(
+            // groupId 变化时面板自行清空本地路径并重拉（见其类文档）。
+            groupId: widget.groupId,
+            // 用 provider 取数：注入的是**不带参数的取数函数**，
+            // groupId 已由面板自己传入。
+            loadFiles: () =>
+                ref.read(groupDeliverablesProvider(widget.groupId).future),
+            onDownload: (file) => ref.read(downloadDeliverableProvider)(file),
+            onOpen: (path) => ref.read(openDeliverableProvider)(path),
+            onReveal: (path) => ref.read(revealDeliverableProvider)(path),
+            // SSE 推送新文件时 bump（见 _onItemsChanged）。
+            reloadToken: _deliverablesReloadToken,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 监听 controller.items：出现新的 `AgentFileItem` 时 bump 交付物刷新令牌。
+  ///
+  /// ## 为什么用「见过 id 集合」而不是 items.length
+  ///
+  /// 长度增长不代表有新文件：向上翻历史回填会让长度增加，去重会减少，
+  /// 软删会让文件消失。以「上次见过的文件 id」为基线，只在新 id 出现时刷新。
+  ///
+  /// ## 为什么只 bump 令牌，不直接调 provider
+  ///
+  /// 面板可能未展开（`groupDeliverablesProvider` 是 autoDispose，无人监听时
+  /// 本就不该取数）。bump 令牌是无副作用的；展开后首帧会拉到最新。
+  void _onItemsChanged(List<ConversationItem> items) {
+    final ids = <String>{};
+    for (final item in items) {
+      if (item is AgentFileItem && !item.isDeleted) {
+        final id = item.ufsFileId;
+        if (id != null && id.isNotEmpty) ids.add(id);
+      }
+    }
+    // 首次建立基线：不 bump（避免刚打开页面就多拉一次——首帧本就要拉）。
+    final isFirstSync = _seenFileItemIds.isEmpty;
+    final hasNew = ids.difference(_seenFileItemIds).isNotEmpty;
+    _seenFileItemIds = ids;
+    if (!isFirstSync && hasNew && mounted) {
+      setState(() => _deliverablesReloadToken++);
+    }
   }
 
   /// 下载 agent 文件产物到本地并反馈落地路径。
@@ -614,7 +720,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     if (!await target.exists()) {
       await target.create(recursive: true);
     }
-    final safeName = p.basename(file.fileName.isEmpty ? 'agent-file' : file.fileName);
+    final safeName = p.basename(
+      file.fileName.isEmpty ? 'agent-file' : file.fileName,
+    );
     await File(p.join(target.path, safeName))
         .writeAsBytes(res.bytes!, flush: true);
   }
