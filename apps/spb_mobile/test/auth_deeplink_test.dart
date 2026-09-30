@@ -67,10 +67,7 @@ void main() {
         isFalse,
       );
       // 只 scheme 对、path 错。
-      expect(
-        OidcCallbackUri.matches(Uri.parse('partyb://oidc/evil')),
-        isFalse,
-      );
+      expect(OidcCallbackUri.matches(Uri.parse('partyb://oidc/evil')), isFalse);
       // scheme 错。
       expect(
         OidcCallbackUri.matches(Uri.parse('https://oidc/callback')),
@@ -377,8 +374,7 @@ void main() {
         store: store,
         launch: (url) async => true,
         stateGenerator: () => 'st_fixed',
-        pkceGenerator: () =>
-            const PkcePair(verifier: 'v_abc', challenge: 'ch'),
+        pkceGenerator: () => const PkcePair(verifier: 'v_abc', challenge: 'ch'),
       );
 
       final pending = store.consume();
@@ -416,8 +412,7 @@ void main() {
         store: store,
         launch: (url) async => false,
         stateGenerator: () => 'st_fixed',
-        pkceGenerator: () =>
-            const PkcePair(verifier: 'v_abc', challenge: 'ch'),
+        pkceGenerator: () => const PkcePair(verifier: 'v_abc', challenge: 'ch'),
       );
 
       expect(error, isNotNull);
@@ -432,8 +427,7 @@ void main() {
         store: store,
         launch: (url) async => throw StateError('no browser'),
         stateGenerator: () => 'st_fixed',
-        pkceGenerator: () =>
-            const PkcePair(verifier: 'v_abc', challenge: 'ch'),
+        pkceGenerator: () => const PkcePair(verifier: 'v_abc', challenge: 'ch'),
       );
 
       expect(error, contains('无法打开浏览器'));

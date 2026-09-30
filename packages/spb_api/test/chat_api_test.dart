@@ -216,7 +216,9 @@ void main() {
 
       await expectLater(
         () => api.undoMessage('usr_1', 'nope'),
-        throwsA(isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue)),
+        throwsA(
+          isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue),
+        ),
       );
     });
   });
@@ -745,7 +747,8 @@ void main() {
     test('空结果返回空列表（服务端 q 为空时也走这条）', () async {
       adapter.onGet(
         '/users/usr_1/chat/search',
-        (server) => server.reply(200, {'items': <Map<String, dynamic>>[], 'count': 0}),
+        (server) =>
+            server.reply(200, {'items': <Map<String, dynamic>>[], 'count': 0}),
         queryParameters: {'q': 'nohit'},
       );
 

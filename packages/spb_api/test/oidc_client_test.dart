@@ -43,11 +43,7 @@ void main() {
       //   128 characters.
       for (final len in [43, 64, 128]) {
         final v = OidcPkce.generateVerifier(length: len);
-        expect(
-          v.length,
-          len,
-          reason: '请求 $len 长度就必须得到 $len',
-        );
+        expect(v.length, len, reason: '请求 $len 长度就必须得到 $len');
         expect(
           OidcPkce.isValidVerifier(v),
           isTrue,
@@ -189,7 +185,10 @@ void main() {
     test('issuer 末尾斜杠被归一化（不拼出 //oauth2/authorize）', () {
       final c = config(issuer: 'https://app.example.com/idp/');
       expect(c.normalizedIssuer, 'https://app.example.com/idp');
-      expect(c.authorizeEndpoint, 'https://app.example.com/idp/oauth2/authorize');
+      expect(
+        c.authorizeEndpoint,
+        'https://app.example.com/idp/oauth2/authorize',
+      );
       expect(c.authorizeEndpoint, isNot(contains('//oauth2')));
     });
 
@@ -224,7 +223,10 @@ void main() {
       // redirect_uri，回调固定为网关配置值，故客户端只提供 state 与站内回跳。
       final c = config(issuer: 'https://app.example.com/idp');
       final url = c.authorizeUrl(state: 'st_1');
-      expect(url.toString(), 'https://app.example.com/auth/oidc/authorize?state=st_1');
+      expect(
+        url.toString(),
+        'https://app.example.com/auth/oidc/authorize?state=st_1',
+      );
     });
 
     test('不带 redirect_uri（带了也会被网关忽略，留着会误导）', () {
@@ -300,7 +302,9 @@ void main() {
       // 「用户点了取消」不该被显示成网络错误。
       try {
         OidcPkce.parseCallback(
-          Uri.parse('https://x/cb?error=access_denied&error_description=%E7%94%A8%E6%88%B7%E6%8B%92%E7%BB%9D'),
+          Uri.parse(
+            'https://x/cb?error=access_denied&error_description=%E7%94%A8%E6%88%B7%E6%8B%92%E7%BB%9D',
+          ),
           expectedState: 'st_1',
         );
         fail('应当抛出 AuthError');
@@ -450,7 +454,10 @@ void main() {
         data: Matchers.any,
       );
 
-      await OidcClient(config: config(), dio: dio).refresh(refreshToken: 'rt_1');
+      await OidcClient(
+        config: config(),
+        dio: dio,
+      ).refresh(refreshToken: 'rt_1');
       expect(hadAuthHeader, isFalse);
     });
 
@@ -467,10 +474,10 @@ void main() {
       );
 
       try {
-        await OidcClient(config: config(), dio: dio).exchangeCode(
-          code: 'bad',
-          pkce: OidcPkce.generatePair(),
-        );
+        await OidcClient(
+          config: config(),
+          dio: dio,
+        ).exchangeCode(code: 'bad', pkce: OidcPkce.generatePair());
         fail('应当抛出 AuthError');
       } on AuthError catch (e) {
         expect(e.message, contains('invalid_grant'));

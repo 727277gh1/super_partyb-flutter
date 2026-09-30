@@ -132,9 +132,7 @@ class DeliverableSyncUseCase {
       if (page > _maxPages) {
         // 用 [ParseError] 而非 [SpbError]：后者是 sealed（隐式 abstract），
         // 不能在库外实例化。语义上这确实是「服务端响应不符合契约」。
-        throw ParseError(
-          '交付物列表分页超过 $_maxPages 页，已中止（疑似服务端 total 异常）',
-        );
+        throw ParseError('交付物列表分页超过 $_maxPages 页，已中止（疑似服务端 total 异常）');
       }
     }
 

@@ -80,9 +80,7 @@ class DesktopIntegration {
     // window_manager。按具体类判（`caps is PlatformDesktopCapabilities`）会让
     // 这段逻辑只能在真机上验证。
     if (caps is! WindowDisplayTarget || caps is! TrayActionTarget) {
-      SpbLog.debug('桌面能力不支持接线，跳过路由/托盘', {
-        'type': caps.runtimeType.toString(),
-      });
+      SpbLog.debug('桌面能力不支持接线，跳过路由/托盘', {'type': caps.runtimeType.toString()});
       return;
     }
 
@@ -132,10 +130,7 @@ class DesktopIntegration {
       await _exitOverlayWindow();
     }
 
-    SpbLog.debug('桌面能力触发导航', {
-      'role': role.name,
-      'path': target,
-    });
+    SpbLog.debug('桌面能力触发导航', {'role': role.name, 'path': target});
     _router.go(target);
   }
 
@@ -184,6 +179,7 @@ class DesktopIntegration {
   /// `showWindow`，故不会被 [_navigateToRole] 自动还原。若不显式调用，
   /// 窗口会一直保持 720×360 置顶，用户回到主界面后窗口再也放不大。
   Future<void> leaveOverlay() => _exitOverlayWindow();
+
   /// 隐藏某角色的「窗口」。
   ///
   /// 单窗口下，隐藏覆盖式页面（设置/悬浮窗）= 回到主界面。
@@ -209,10 +205,7 @@ class DesktopIntegration {
   ///
   /// 必须先 `setTrayMenu` 再 `registerTrayAction`：前者会清空回调表
   /// （菜单整体替换，旧 id 失效），见 `registerTrayAction` 的文档。
-  void _installTrayMenu(
-    TrayActionTarget tray,
-    DesktopCapabilities caps,
-  ) {
+  void _installTrayMenu(TrayActionTarget tray, DesktopCapabilities caps) {
     final items = [
       const TrayMenuItem(id: TrayActionIds.show, label: '显示主窗口'),
       const TrayMenuItem(

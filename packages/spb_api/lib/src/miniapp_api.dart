@@ -125,10 +125,7 @@ class MiniappApi {
   }) async {
     final res = await _post(
       '/chat/miniapp/works/$workId/messages',
-      body: {
-        'input': input,
-        if (fileIds.isNotEmpty) 'file_ids': fileIds,
-      },
+      body: {'input': input, if (fileIds.isNotEmpty) 'file_ids': fileIds},
     );
     final map = _asMap(res);
     return MiniappDispatchResult.fromJson({
@@ -206,9 +203,7 @@ class MiniappApi {
   /// 归属校验：`ufsFileBelongsToWork` 失败时返回 **404**（不是 403）——服务端
   /// 刻意不区分「不存在」与「不属于本 work」，避免存在性探针。
   Future<MiniappArtifact> getArtifact(String workId, String artifactId) async {
-    final res = await _get(
-      '/chat/miniapp/works/$workId/artifacts/$artifactId',
-    );
+    final res = await _get('/chat/miniapp/works/$workId/artifacts/$artifactId');
     return MiniappArtifact.fromJson(_asMap(_asMap(res)['artifact']));
   }
 
@@ -226,10 +221,7 @@ class MiniappApi {
   ///
   /// 本端点不处理 `If-None-Match`，故没有「未变更」语义——每次都传完整字节。
   /// 返回值就是字节列表，不需要 `UfsDownload` 那种结果对象。
-  Future<List<int>> downloadArtifact(
-    String workId,
-    String artifactId,
-  ) async {
+  Future<List<int>> downloadArtifact(String workId, String artifactId) async {
     try {
       final res = await _dio.get<List<int>>(
         '/chat/miniapp/works/$workId/artifacts/$artifactId/download',
@@ -351,7 +343,8 @@ class MiniappApi {
   ///
   /// 数据库不可用时服务端返回 **503**（不是 500），故调用方应把 503 当
   /// 「暂时不可用」而非「永久失败」。
-  Future<List<MiniappNotificationSubscription>> listNotificationSubscriptions() async {
+  Future<List<MiniappNotificationSubscription>>
+  listNotificationSubscriptions() async {
     final res = await _get('/chat/miniapp/notifications/subscriptions');
     return _unwrapList(res, MiniappNotificationSubscription.fromJson);
   }

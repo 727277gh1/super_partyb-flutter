@@ -135,10 +135,7 @@ final dioProvider = Provider<Dio>((ref) {
     },
   );
 
-  final dio = createDio(
-    baseUrl: SpbEnv.apiBaseUrl,
-    interceptors: [auth],
-  );
+  final dio = createDio(baseUrl: SpbEnv.apiBaseUrl, interceptors: [auth]);
   // 回填重放用的 Dio：必须是同一个实例（否则丢掉连接池与其余拦截器），
   // 而它又是本拦截器的构造参数之一，只能构造后回填。
   auth.replayDio = dio;
@@ -169,20 +166,20 @@ final groupManagementUseCaseProvider = Provider<GroupManagementUseCase>((ref) {
 /// 页面仍会接住漏网的 `SpbError`（如翻译函数自己出问题），故这是纵深防御而非
 /// 唯一防线。
 final groupActionProvider = Provider<GroupActionHandler>((ref) {
-      final useCase = ref.watch(groupManagementUseCaseProvider);
-      return (group, action) async {
-        try {
-          return await useCase.execute(group, action);
-        } on SpbError catch (e) {
-          SpbLog.warn('对话管理动作失败', {
-            'groupId': group.id,
-            'action': action.runtimeType.toString(),
-            'error': e.toString(),
-          });
-          return GroupActionRejected(_describeGroupActionError(e));
-        }
-      };
-    });
+  final useCase = ref.watch(groupManagementUseCaseProvider);
+  return (group, action) async {
+    try {
+      return await useCase.execute(group, action);
+    } on SpbError catch (e) {
+      SpbLog.warn('对话管理动作失败', {
+        'groupId': group.id,
+        'action': action.runtimeType.toString(),
+        'error': e.toString(),
+      });
+      return GroupActionRejected(_describeGroupActionError(e));
+    }
+  };
+});
 
 /// 把 [SpbError] 翻译成用户能看懂的一句话。
 String _describeGroupActionError(SpbError error) {
@@ -464,11 +461,11 @@ final quickCaptureUseCaseProvider = Provider<QuickCaptureUseCase>((ref) {
 ///
 /// 与 [quickCaptureUseCaseProvider] 的差别：本用例支持附件（上传 → 投递两步），
 /// 但投递是异步的，拿不到 groupId。见 `QuickCaptureEnqueueUseCase` 的文档。
-final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>((
-  ref,
-) {
-  return QuickCaptureEnqueueUseCase(ref.watch(chatApiProvider));
-});
+final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>(
+  (ref) {
+    return QuickCaptureEnqueueUseCase(ref.watch(chatApiProvider));
+  },
+);
 
 /// 文件拖入能力（桌面端为真实实现，移动端注入空实现）。
 ///
@@ -602,10 +599,7 @@ final pickDirectoryProvider = Provider<PickSyncDirectory>((ref) {
 final syncFilterConfigProvider = FutureProvider<SyncFilterConfig>((ref) async {
   final prefs = ref.watch(preferencesStoreProvider);
   return SyncFilterConfig(
-    includeMedia: await prefs.getBool(
-      includeMediaPrefKey,
-      defaultValue: false,
-    ),
+    includeMedia: await prefs.getBool(includeMediaPrefKey, defaultValue: false),
     maxFileSize: await prefs.getInt(
       maxFileSizePrefKey,
       defaultValue: defaultMaxFileSize,
@@ -677,17 +671,18 @@ final runSyncActionProvider = Provider<RunSyncAction>((ref) {
 /// 保存同步目录（换目录时**在同一事务里**清空同步状态）。
 ///
 /// 返回是否发生了状态重置（true = 目录变更）。
-final saveLocalRootActionProvider =
-    Provider<Future<bool> Function(String?)>((ref) {
-      return (String? root) async {
-        final store = ref.read(syncStateStoreProvider);
-        // bindLocalRoot：目录变了 → 清空全部状态（**同一事务**）。
-        final reset = await store.bindLocalRoot(root);
-        // 让依赖它的 provider 重新读取（目录已变）。
-        ref.invalidate(syncLocalRootProvider);
-        return reset;
-      };
-    });
+final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
+  ref,
+) {
+  return (String? root) async {
+    final store = ref.read(syncStateStoreProvider);
+    // bindLocalRoot：目录变了 → 清空全部状态（**同一事务**）。
+    final reset = await store.bindLocalRoot(root);
+    // 让依赖它的 provider 重新读取（目录已变）。
+    ref.invalidate(syncLocalRootProvider);
+    return reset;
+  };
+});
 
 // ==================== 设置页 ====================
 
@@ -741,10 +736,7 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
       includeMediaPrefKey,
       value: settings.filter.includeMedia,
     );
-    await prefs.setInt(
-      maxFileSizePrefKey,
-      value: settings.filter.maxFileSize,
-    );
+    await prefs.setInt(maxFileSizePrefKey, value: settings.filter.maxFileSize);
 
     final days = settings.sinceDays;
     if (days == null || days <= 0) {

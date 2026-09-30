@@ -85,10 +85,7 @@ void main() {
   Future<void> pumpPage(WidgetTester tester) async {
     await tester.pumpWidget(
       MaterialApp(
-        home: WorksPage(
-          loadWorks: load,
-          onOpenWork: opened.add,
-        ),
+        home: WorksPage(loadWorks: load, onOpenWork: opened.add),
       ),
     );
     await tester.pump();
@@ -134,9 +131,7 @@ void main() {
     final gate = Completer<MiniappWorkPage>();
     useStub((_, _) => gate.future);
 
-    await tester.pumpWidget(
-      MaterialApp(home: WorksPage(loadWorks: load)),
-    );
+    await tester.pumpWidget(MaterialApp(home: WorksPage(loadWorks: load)));
     await tester.pump();
 
     expect(find.byKey(const ValueKey('miniapp-works-loading')), findsOneWidget);
@@ -184,10 +179,7 @@ void main() {
     expect(calls, [('active', null)]);
 
     // 触发滚动加载更多。
-    await tester.drag(
-      find.byType(ListView),
-      const Offset(0, -600),
-    );
+    await tester.drag(find.byType(ListView), const Offset(0, -600));
     await tester.pump();
     await tester.pump();
 
@@ -214,10 +206,7 @@ void main() {
         );
       }
       // 第二页里 w2 是重复项（窗口移动的典型表现）。
-      return MiniappWorkPage(
-        items: [work('w2'), work('w3')],
-        nextCursor: '4',
-      );
+      return MiniappWorkPage(items: [work('w2'), work('w3')], nextCursor: '4');
     });
 
     await pumpPage(tester);
@@ -302,10 +291,7 @@ void main() {
     useSmallViewport(tester);
     useStub((status, cursor) async {
       if (cursor == null) {
-        return MiniappWorkPage(
-          items: [work('w1')],
-          nextCursor: '1',
-        );
+        return MiniappWorkPage(items: [work('w1')], nextCursor: '1');
       }
       throw const NetworkError('连接超时');
     });
@@ -318,14 +304,20 @@ void main() {
     // 已加载的条目必须还在（下一页失败不该让用户丢掉正在看的内容）。
     expect(find.byKey(const ValueKey('miniapp-work-w1')), findsOneWidget);
     expect(find.textContaining('加载更多失败'), findsOneWidget);
-    expect(find.byKey(const ValueKey('miniapp-works-more-retry')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('miniapp-works-more-retry')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('切换状态过滤重新加载并重置分页', (tester) async {
     useStub((status, cursor) async {
       if (status == 'all') {
         return MiniappWorkPage(
-          items: [work('w1'), work('archived1', status: 'archived')],
+          items: [
+            work('w1'),
+            work('archived1', status: 'archived'),
+          ],
         );
       }
       return MiniappWorkPage(items: [work('w1')]);
@@ -334,9 +326,7 @@ void main() {
     await pumpPage(tester);
     expect(calls, [('active', null)]);
 
-    await tester.tap(
-      find.byKey(const ValueKey('miniapp-works-status-filter')),
-    );
+    await tester.tap(find.byKey(const ValueKey('miniapp-works-status-filter')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('全部（含已归档）').last);
     await tester.pump();
@@ -351,9 +341,7 @@ void main() {
   });
 
   testWidgets('点条目回调 onOpenWork（work.id 即 group id）', (tester) async {
-    useStub(
-      (_, _) async => MiniappWorkPage(items: [work('grp_abc')]),
-    );
+    useStub((_, _) async => MiniappWorkPage(items: [work('grp_abc')]));
     await pumpPage(tester);
 
     await tester.tap(find.byKey(const ValueKey('miniapp-work-grp_abc')));
@@ -365,9 +353,7 @@ void main() {
   testWidgets('onOpenWork 为 null 时条目不可点击（只读用法）', (tester) async {
     useStub((_, _) async => MiniappWorkPage(items: [work('w1')]));
 
-    await tester.pumpWidget(
-      MaterialApp(home: WorksPage(loadWorks: load)),
-    );
+    await tester.pumpWidget(MaterialApp(home: WorksPage(loadWorks: load)));
     await tester.pump();
     await tester.pump();
 

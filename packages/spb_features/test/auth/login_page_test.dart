@@ -86,7 +86,8 @@ void main() {
     testWidgets('onSignIn 返回错误串时显示该错误', (tester) async {
       await pumpLogin(
         tester,
-        onSignIn: () async => 'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）',
+        onSignIn: () async =>
+            'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）',
       );
 
       await tester.tap(find.byKey(const ValueKey('login-sso-button')));

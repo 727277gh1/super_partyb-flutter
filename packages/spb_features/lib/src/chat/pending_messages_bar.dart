@@ -225,9 +225,8 @@ class _PendingMessagesBarState extends State<PendingMessagesBar> {
               Text(
                 '${widget.title}（${_messages.length}）',
                 key: const ValueKey('pending-messages-title'),
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: scheme.onSecondaryContainer,
-                ),
+                style: Theme.of(context).textTheme.labelMedium
+                    ?.copyWith(color: scheme.onSecondaryContainer),
               ),
               const Spacer(),
               // 刷新入口：dispatcher 消费后本栏不会自动感知，给用户一个手动的。

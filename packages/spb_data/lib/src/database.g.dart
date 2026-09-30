@@ -1458,16 +1458,14 @@ class $$SyncBindingsTableTableManager
               $$SyncBindingsTableOrderingComposer($db: db, $table: table),
           createComputedFieldComposer: () =>
               $$SyncBindingsTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback:
-              ({
-                Value<int> id = const Value.absent(),
-                Value<String?> localRoot = const Value.absent(),
-              }) => SyncBindingsCompanion(id: id, localRoot: localRoot),
-          createCompanionCallback:
-              ({
-                Value<int> id = const Value.absent(),
-                Value<String?> localRoot = const Value.absent(),
-              }) => SyncBindingsCompanion.insert(id: id, localRoot: localRoot),
+          updateCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String?> localRoot = const Value.absent(),
+          }) => SyncBindingsCompanion(id: id, localRoot: localRoot),
+          createCompanionCallback: ({
+            Value<int> id = const Value.absent(),
+            Value<String?> localRoot = const Value.absent(),
+          }) => SyncBindingsCompanion.insert(id: id, localRoot: localRoot),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
               .toList(),
@@ -1591,12 +1589,11 @@ class $$PreferencesTableTableManager
               $$PreferencesTableOrderingComposer($db: db, $table: table),
           createComputedFieldComposer: () =>
               $$PreferencesTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback:
-              ({
-                Value<String> key = const Value.absent(),
-                Value<String> value = const Value.absent(),
-                Value<int> rowid = const Value.absent(),
-              }) => PreferencesCompanion(key: key, value: value, rowid: rowid),
+          updateCompanionCallback: ({
+            Value<String> key = const Value.absent(),
+            Value<String> value = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) => PreferencesCompanion(key: key, value: value, rowid: rowid),
           createCompanionCallback:
               ({
                 required String key,

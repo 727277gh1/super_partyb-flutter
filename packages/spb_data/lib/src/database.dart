@@ -144,10 +144,7 @@ AppDatabase openAppDatabaseAt(File file) {
     } on FileSystemException catch (e) {
       // 建目录失败（权限/只读文件系统）：不在这里抛——让它在下游以
       // 「打开失败」的形式暴露，错误信息更贴近实际根因。
-      SpbLog.warn('创建数据库目录失败', {
-        'dir': dir.path,
-        'error': e.toString(),
-      });
+      SpbLog.warn('创建数据库目录失败', {'dir': dir.path, 'error': e.toString()});
     }
   }
   return AppDatabase(
@@ -173,10 +170,7 @@ AppDatabase openAppDatabaseLazy(Future<File> Function() resolve) {
         try {
           dir.createSync(recursive: true);
         } on FileSystemException catch (e) {
-          SpbLog.warn('创建数据库目录失败', {
-            'dir': dir.path,
-            'error': e.toString(),
-          });
+          SpbLog.warn('创建数据库目录失败', {'dir': dir.path, 'error': e.toString()});
         }
       }
       return NativeDatabase.createInBackground(file);

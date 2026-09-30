@@ -23,8 +23,10 @@ typedef DownloadArtifact = Future<List<int>> Function(String artifactId);
 /// 由 app 装配层实现（移动端写入应用沙箱，桌面端弹保存对话框）。
 /// 页面不碰文件系统——否则 `spb_features` 会为这一个页面引入平台依赖，
 /// 且 widget test 无法验证。
-typedef SaveArtifactBytes =
-    Future<String> Function(String filename, List<int> bytes);
+typedef SaveArtifactBytes = Future<String> Function(
+  String filename,
+  List<int> bytes,
+);
 
 /// 发送消息（`POST /chat/miniapp/works/:id/messages`）。
 ///
@@ -42,8 +44,10 @@ typedef StopWork = Future<MiniappWorkDetail> Function();
 ///
 /// 404 表示「非本人 / 已处理 / 已过期」，服务端刻意统一成一个响应以避免
 /// 存在性探针——调用方应把 404 当「这张卡不用再显示了」而非错误。
-typedef ResolveMiniappConfirmation =
-    Future<void> Function(String confirmationId, String action);
+typedef ResolveMiniappConfirmation = Future<void> Function(
+  String confirmationId,
+  String action,
+);
 
 /// 工作详情页（小程序工作台）。
 ///
@@ -500,10 +504,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
       top: false,
       child: Padding(
         padding: const EdgeInsets.all(SpbSpacing.md),
-        child: _MessageInput(
-          enabled: !_acting,
-          onSubmit: _send,
-        ),
+        child: _MessageInput(enabled: !_acting, onSubmit: _send),
       ),
     );
   }
@@ -635,13 +636,13 @@ class _ConfirmationCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              card.title,
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
+            Text(card.title, style: Theme.of(context).textTheme.titleSmall),
             if (card.description != null && card.description!.isNotEmpty) ...[
               const SizedBox(height: SpbSpacing.xs),
-              Text(card.description!, style: Theme.of(context).textTheme.bodySmall),
+              Text(
+                card.description!,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ],
             if (card.requiredInputs.isNotEmpty) ...[
               const SizedBox(height: SpbSpacing.xs),
@@ -659,18 +660,14 @@ class _ConfirmationCard extends StatelessWidget {
                   // 推荐项用实心按钮，其余描边——减少误点。
                   o.recommended
                       ? FilledButton(
-                          key: ValueKey(
-                            'miniapp-confirm-${card.id}-${o.key}',
-                          ),
+                          key: ValueKey('miniapp-confirm-${card.id}-${o.key}'),
                           onPressed: busy || resolved
                               ? null
                               : () => onResolve(o.key),
                           child: Text(o.label),
                         )
                       : OutlinedButton(
-                          key: ValueKey(
-                            'miniapp-confirm-${card.id}-${o.key}',
-                          ),
+                          key: ValueKey('miniapp-confirm-${card.id}-${o.key}'),
                           onPressed: busy || resolved
                               ? null
                               : () => onResolve(o.key),
@@ -703,15 +700,12 @@ class _ArtifactTile extends StatelessWidget {
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        switch (artifact.type) {
-          'image' => Icons.image_outlined,
-          'prototype' => Icons.web_outlined,
-          'document' => Icons.description_outlined,
-          _ => Icons.insert_drive_file_outlined,
-        },
-        size: SpbSpacing.lg,
-      ),
+      leading: Icon(switch (artifact.type) {
+        'image' => Icons.image_outlined,
+        'prototype' => Icons.web_outlined,
+        'document' => Icons.description_outlined,
+        _ => Icons.insert_drive_file_outlined,
+      }, size: SpbSpacing.lg),
       title: Text(
         artifact.name.isEmpty ? artifact.id : artifact.name,
         maxLines: 1,

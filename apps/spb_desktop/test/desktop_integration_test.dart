@@ -141,8 +141,7 @@ class _PlainCapabilities implements DesktopCapabilities {
 /// 真实 router 的页面会发网络请求、读 Provider，把「导航是否发生」这件事
 /// 埋在无关的失败里。用空壳页面后，断言可以纯粹针对**路径**。
 GoRouter _testRouter({String initialLocation = SpbRoutes.home}) {
-  Widget stub(String label) =>
-      Scaffold(body: Center(child: Text(label)));
+  Widget stub(String label) => Scaffold(body: Center(child: Text(label)));
 
   return GoRouter(
     initialLocation: initialLocation,
@@ -326,9 +325,7 @@ void main() {
         router: countingRouter,
       ).attach();
 
-      await tester.pumpWidget(
-        MaterialApp.router(routerConfig: countingRouter),
-      );
+      await tester.pumpWidget(MaterialApp.router(routerConfig: countingRouter));
       await tester.pumpAndSettle();
       final buildsAfterFirstFrame = builds;
 
@@ -337,11 +334,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(countingRouter.state.uri.path, SpbRoutes.overlay);
-      expect(
-        builds,
-        buildsAfterFirstFrame,
-        reason: '同路径重复 go 会重建页面并清空输入草稿',
-      );
+      expect(builds, buildsAfterFirstFrame, reason: '同路径重复 go 会重建页面并清空输入草稿');
     });
 
     testWidgets('hideWindow(main) 不导航（主窗口不该被隐藏）', (tester) async {
@@ -406,10 +399,7 @@ void main() {
 
       expect(caps.enteredSpecs, hasLength(1));
       // 必须是**带附件**的规格：纯文本规格只有 132px 高，装不下附件 chip。
-      expect(
-        caps.enteredSpecs.single.role,
-        WindowRole.quickCapture,
-      );
+      expect(caps.enteredSpecs.single.role, WindowRole.quickCapture);
       expect(caps.enteredSpecs.single.height, greaterThan(200));
       expect(caps.isOverlayModeActive, isTrue);
     });
@@ -488,10 +478,8 @@ void main() {
       final caps = _WiringCapabilities();
       final router = _testRouter();
       addTearDown(router.dispose);
-      final integration = DesktopIntegration(
-        capabilities: caps,
-        router: router,
-      )..attach();
+      final integration = DesktopIntegration(capabilities: caps, router: router)
+        ..attach();
 
       // 从未进入悬浮模式就调用（如用户直接访问 /overlay 调试入口）。
       await integration.leaveOverlay();
@@ -502,10 +490,8 @@ void main() {
       final caps = _WiringCapabilities();
       final router = _testRouter();
       addTearDown(router.dispose);
-      final integration = DesktopIntegration(
-        capabilities: caps,
-        router: router,
-      )..attach();
+      final integration = DesktopIntegration(capabilities: caps, router: router)
+        ..attach();
 
       await tester.pumpWidget(MaterialApp.router(routerConfig: router));
       caps.showCallback!(WindowRole.quickCapture);

@@ -12,8 +12,10 @@ import 'package:spb_models/spb_models.dart';
 ///
 /// `cursor` 是 **offset**（服务端 `parseOffset`），故类型是 `int?` 而不是
 /// `String?`——从签名上挡住「当成不透明游标」的误用。
-typedef LoadMiniappWorks =
-    Future<MiniappWorkPage> Function({String status, int? cursor});
+typedef LoadMiniappWorks = Future<MiniappWorkPage> Function({
+  String status,
+  int? cursor,
+});
 
 /// 打开某个工作（进入详情页）。
 typedef OpenMiniappWork = void Function(MiniappWork work);
@@ -103,10 +105,7 @@ class _WorksPageState extends State<WorksPage> {
     });
 
     try {
-      final page = await widget.loadWorks(
-        status: _status,
-        cursor: _cursor,
-      );
+      final page = await widget.loadWorks(status: _status, cursor: _cursor);
       if (!mounted) return;
 
       var added = 0;
@@ -199,10 +198,7 @@ class _WorksPageState extends State<WorksPage> {
                 color: Theme.of(context).colorScheme.error,
               ),
               const SizedBox(height: SpbSpacing.sm),
-              Text(
-                '加载工作列表失败：${_error!.message}',
-                textAlign: TextAlign.center,
-              ),
+              Text('加载工作列表失败：${_error!.message}', textAlign: TextAlign.center),
               const SizedBox(height: SpbSpacing.md),
               FilledButton(
                 key: const ValueKey('miniapp-works-retry'),

@@ -15,8 +15,10 @@ import 'package:spb_models/spb_models.dart';
 /// （那要走 `GET /api/auth/me`，且不同端的解析时机不同）。
 ///
 /// 注入后页面在 widget test 里可以完整验证，不需要起 HTTP mock。
-typedef SearchChat =
-    Future<List<ChatSearchHit>> Function(String query, {int? limit});
+typedef SearchChat = Future<List<ChatSearchHit>> Function(
+  String query, {
+  int? limit,
+});
 
 /// 搜索页：输入关键字 → 展示命中片段 → 点击跳转。
 ///
@@ -212,9 +214,7 @@ class _SearchPageState extends State<SearchPage> {
           key: ValueKey('search-hit-${hit.turnId}'),
           hit: hit,
           query: _lastQuery,
-          onTap: widget.onOpenHit == null
-              ? null
-              : () => widget.onOpenHit!(hit),
+          onTap: widget.onOpenHit == null ? null : () => widget.onOpenHit!(hit),
         );
       },
     );
@@ -378,9 +378,8 @@ class _EmptyState extends StatelessWidget {
             Text(
               searched ? '没有找到「$query」' : '输入关键字搜索消息内容',
               textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ],
         ),

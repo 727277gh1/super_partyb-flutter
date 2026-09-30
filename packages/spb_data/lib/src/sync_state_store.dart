@@ -34,19 +34,14 @@ class DriftSyncStateStore implements SyncStateStore {
 
       return SyncState(
         cursor: cursorRows.isEmpty ? null : cursorRows.first.cursor,
-        files: {
-          for (final row in fileRows) row.relPath: row.toDomain(),
-        },
+        files: {for (final row in fileRows) row.relPath: row.toDomain()},
       );
     } on SpbError {
       rethrow;
     } catch (e) {
       // 读失败（库损坏 / 磁盘错误）按「首次同步」处理，而不是让整个同步功能
       // 不可用——与 Tauri 端 `load` 在解析失败时返回默认值一致。
-      SpbLog.warn('读取同步状态失败，按首次同步处理', {
-        'key': key,
-        'error': e.toString(),
-      });
+      SpbLog.warn('读取同步状态失败，按首次同步处理', {'key': key, 'error': e.toString()});
       return SyncState.empty;
     }
   }

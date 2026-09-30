@@ -413,10 +413,7 @@ void main() {
         ev(
           EventTypes.confirmationRequired,
           groupId: 'grp_abc',
-          payload: {
-            'question': '继续吗？',
-            'confirmation_id': 'cf_row_1',
-          },
+          payload: {'question': '继续吗？', 'confirmation_id': 'cf_row_1'},
         ),
       ]);
 
@@ -430,7 +427,10 @@ void main() {
       // 两个 id 都必须齐备：缺 group_id 拼不出真实路径，缺 confirmation_id
       // 服务端 0 行受影响。
       final r = EventReducer.reduce([
-        ev(EventTypes.confirmationRequired, payload: {'question': '只有 question'}),
+        ev(
+          EventTypes.confirmationRequired,
+          payload: {'question': '只有 question'},
+        ),
       ]);
       expect((r.items.single as ConfirmationItem).canResolve, isFalse);
     });

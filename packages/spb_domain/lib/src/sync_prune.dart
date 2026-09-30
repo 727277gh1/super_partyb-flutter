@@ -138,8 +138,7 @@ class PrunePlan {
   bool get isEmpty => candidates.isEmpty;
 
   /// 待删除总字节数。
-  int get totalBytes =>
-      candidates.fold(0, (sum, c) => sum + c.totalBytes);
+  int get totalBytes => candidates.fold(0, (sum, c) => sum + c.totalBytes);
 
   /// 待删除总文件数。
   int get totalFiles => candidates.fold(0, (sum, c) => sum + c.fileCount);
@@ -180,9 +179,7 @@ PrunePlan buildPrunePlan({
               groupId: g.groupId,
               fileCount: g.fileCount,
               totalBytes: g.totalBytes,
-              reason: g.newestMtime == null
-                  ? '空目录'
-                  : '超过 $days 天未更新',
+              reason: g.newestMtime == null ? '空目录' : '超过 $days 天未更新',
             ),
           );
         } else {

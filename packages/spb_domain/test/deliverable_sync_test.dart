@@ -8,7 +8,10 @@ import 'package:test/test.dart';
 /// 若打开 [conditionalOnly]，则只在本轮**确实带了** `If-None-Match` 时返回 304
 /// —— 那才是真实服务端的行为，用于验证「引擎该不该带 etag」这类判据。
 class _StubDownloader implements FileDownloader {
-  _StubDownloader({this.notModifiedIds = const {}, this.conditionalOnly = false});
+  _StubDownloader({
+    this.notModifiedIds = const {},
+    this.conditionalOnly = false,
+  });
 
   final Set<String> notModifiedIds;
 
@@ -19,7 +22,10 @@ class _StubDownloader implements FileDownloader {
   final errors = <String, String>{};
 
   @override
-  Future<SyncDownloadResult> download(String fileId, {String? ifNoneMatch}) async {
+  Future<SyncDownloadResult> download(
+    String fileId, {
+    String? ifNoneMatch,
+  }) async {
     calls.add((fileId, ifNoneMatch));
     final err = errors[fileId];
     if (err != null) throw Exception(err);
@@ -138,9 +144,7 @@ void main() {
     test('etag 相同则跳过（未变更不计入 skipped，避免摘要噪音）', () {
       final plan = buildSyncPlan(
         remote: [_remote('a.md', etag: 'W/"1"', size: 10)],
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -151,9 +155,7 @@ void main() {
     test('etag 变即重新下载，即使 size 相同（改一个字不改 size）', () {
       final plan = buildSyncPlan(
         remote: [_remote('a.md', etag: 'W/"2"', size: 10)],
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -164,9 +166,7 @@ void main() {
       // 服务端 etag 缺失
       final plan = buildSyncPlan(
         remote: [_remote('a.md', etag: null, size: 10)],
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -175,9 +175,7 @@ void main() {
       // size 不同 → 变更
       final plan2 = buildSyncPlan(
         remote: [_remote('a.md', etag: null, size: 11)],
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -208,10 +206,7 @@ void main() {
         '2026-03-01T00:00:00Z',
       );
       // 相等也不动（避免无意义的写库）
-      expect(
-        identical(s.advanceCursor('2026-03-01T00:00:00Z'), s),
-        isTrue,
-      );
+      expect(identical(s.advanceCursor('2026-03-01T00:00:00Z'), s), isTrue);
       // null / 空串不推进（无 updated_at 的条目不该污染水位线）
       expect(s.advanceCursor(null).cursor, '2026-03-01T00:00:00Z');
       expect(s.advanceCursor('').cursor, '2026-03-01T00:00:00Z');
@@ -306,9 +301,7 @@ void main() {
     test('deleted_at 非空且本地有副本 → 安排删除', () {
       final plan = buildSyncPlan(
         remote: [_remote('a.md', deleted: true)],
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -677,11 +670,8 @@ void main() {
       final store = _MemoryStateStore();
       await store.save(
         workspaceStateKey,
-        SyncState(cursor: '2026-03-01T00:00:00Z').markSynced(
-          'g1/a.md',
-          etag: 'W/"1"',
-          size: 10,
-        ),
+        SyncState(cursor: '2026-03-01T00:00:00Z')
+            .markSynced('g1/a.md', etag: 'W/"1"', size: 10),
       );
 
       final reset = await applyLocalRootChange(
@@ -873,9 +863,7 @@ void main() {
       await engine.run(
         remote: [_remote('a.md', etag: 'W/"1"', size: 10)],
         // 状态里有记录但 etag 不同 → 会下载，且本地「有副本」
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"0"', size: 9),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"0"', size: 9)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -903,9 +891,7 @@ void main() {
       final result = await engine.run(
         remote: [_remote('a.md', etag: 'W/"1"', size: 10)],
         // 状态里的 etag 与远端一致（看起来「已同步」），但文件不在磁盘上
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -915,11 +901,7 @@ void main() {
         isNull,
         reason: '本地无副本时必须发无条件请求，否则 304 会把文件判成「未变更」',
       );
-      expect(
-        result.report.downloaded,
-        1,
-        reason: '文件应被真正重新写入，而不是记成「未变更」',
-      );
+      expect(result.report.downloaded, 1, reason: '文件应被真正重新写入，而不是记成「未变更」');
       expect(sink.written.containsKey('a.md'), isTrue);
     });
 
@@ -932,9 +914,7 @@ void main() {
 
       final result = await engine.run(
         remote: [_remote('a.md', etag: 'W/"1"', size: 10)],
-        state: _stateWith({
-          'a.md': const SyncedFile(etag: 'W/"1"', size: 10),
-        }),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"1"', size: 10)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );
@@ -974,10 +954,7 @@ void main() {
         groupRelativePath('/workspace/groups/g1/reports/a/b.md/', 'g1'),
         'reports/a/b.md',
       );
-      expect(
-        groupRelativePath('/workspace/groups/g1/a.md///', 'g1'),
-        'a.md',
-      );
+      expect(groupRelativePath('/workspace/groups/g1/a.md///', 'g1'), 'a.md');
     });
 
     test('拒绝父目录逃逸 / 当前目录段 / 空段（含深层）', () {
@@ -986,11 +963,17 @@ void main() {
       expect(groupRelativePath('/workspace/groups/g1/a//b', 'g1'), isNull);
       expect(groupRelativePath('/workspace/groups/g1/a/../../x', 'g1'), isNull);
       // 剥尾斜杠不能变成绕过校验的捷径
-      expect(groupRelativePath('/workspace/groups/g1/../secret/', 'g1'), isNull);
+      expect(
+        groupRelativePath('/workspace/groups/g1/../secret/', 'g1'),
+        isNull,
+      );
     });
 
     test('拒绝 Windows 分隔符与 NUL（绕过段级校验的两种方式）', () {
-      expect(groupRelativePath('/workspace/groups/g1/a\\..\\..\\x', 'g1'), isNull);
+      expect(
+        groupRelativePath('/workspace/groups/g1/a\\..\\..\\x', 'g1'),
+        isNull,
+      );
       expect(groupRelativePath('/workspace/groups/g1/a\u0000b', 'g1'), isNull);
     });
 

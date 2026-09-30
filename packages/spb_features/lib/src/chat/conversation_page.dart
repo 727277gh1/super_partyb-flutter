@@ -343,11 +343,8 @@ class _ConversationPageState extends State<ConversationPage> {
       // 用卡行 id 而非 item.id（事件 id）——见 ConfirmationItem.confirmationId。
       // 未携带 confirmation_id 的异常事件禁用按钮，不退化用事件 id 去试。
       onResolve: item.canResolve
-          ? (option) => _handleResolve(
-              item.groupId,
-              item.confirmationId,
-              option,
-            )
+          ? (option) =>
+                _handleResolve(item.groupId, item.confirmationId, option)
           : null,
     ),
     FollowUpSuggestionItem(:final suggestions) => FollowUpChips(

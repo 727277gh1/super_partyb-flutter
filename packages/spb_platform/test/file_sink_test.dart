@@ -258,7 +258,8 @@ void main() {
     });
   });
 
-  group('LocalFileSink 删除', () {    test('删除已存在的文件', () async {
+  group('LocalFileSink 删除', () {
+    test('删除已存在的文件', () async {
       final sink = LocalFileSink(root.path);
       await sink.write('a.md', [1]);
       await sink.delete('a.md');
@@ -280,7 +281,8 @@ void main() {
     });
 
     test('删除软链指向外部的文件被拒（不会删掉外部文件）', () async {
-      final victim = File('${outside.path}/victim.txt')..writeAsStringSync('keep');
+      final victim = File('${outside.path}/victim.txt')
+        ..writeAsStringSync('keep');
       Link('${root.path}/link').createSync(outside.path);
 
       final sink = LocalFileSink(root.path);

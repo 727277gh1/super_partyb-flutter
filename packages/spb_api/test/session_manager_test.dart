@@ -18,14 +18,12 @@ import 'package:test/test.dart';
 ///
 /// 故这里断言「N 个并发调用只触发 1 次刷新」，把去重钉成回归。
 void main() {
-  StoredTokens expired({
-    String access = 'at_old',
-    String? refresh = 'rt_1',
-  }) => StoredTokens(
-    accessToken: access,
-    refreshToken: refresh,
-    expiresAt: DateTime.utc(2020, 1, 1),
-  );
+  StoredTokens expired({String access = 'at_old', String? refresh = 'rt_1'}) =>
+      StoredTokens(
+        accessToken: access,
+        refreshToken: refresh,
+        expiresAt: DateTime.utc(2020, 1, 1),
+      );
 
   StoredTokens fresh({String access = 'at_new', String? refresh}) =>
       StoredTokens(
@@ -210,10 +208,7 @@ void main() {
 
     test('刷新返回 null 时不写存储', () async {
       final store = InMemoryTokenStore(expired());
-      final m = SessionManager(
-        store: store,
-        refresher: (_) async => null,
-      );
+      final m = SessionManager(store: store, refresher: (_) async => null);
 
       expect(await m.refresh(), isNull);
       expect(store.writeCount, 0);
@@ -347,11 +342,10 @@ void main() {
       expect(res.statusCode, 200);
       expect(scripted.calls, 2, reason: '原请求 + 一次重放');
       expect(refreshes, 1, reason: '只刷新一次');
-      expect(
-        scripted.seenAuth,
-        ['Bearer stale', 'Bearer fresh'],
-        reason: '重放必须带上刷新后的 token，而不是旧的',
-      );
+      expect(scripted.seenAuth, [
+        'Bearer stale',
+        'Bearer fresh',
+      ], reason: '重放必须带上刷新后的 token，而不是旧的');
     });
 
     test('刷新失败时归一化为 AuthError（不重放）', () async {
@@ -450,7 +444,9 @@ class _ScriptedAdapter implements HttpClientAdapter {
     return ResponseBody.fromString(
       '{"ok":true}',
       200,
-      headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
     );
   }
 
@@ -472,7 +468,9 @@ class _Always401Adapter implements HttpClientAdapter {
     return ResponseBody.fromString(
       '{"error":"unauthorized"}',
       401,
-      headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
     );
   }
 

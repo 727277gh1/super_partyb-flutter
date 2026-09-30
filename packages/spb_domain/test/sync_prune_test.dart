@@ -59,7 +59,13 @@ void main() {
     });
 
     test('排除常见开发目录名', () {
-      for (final name in ['.git', 'node_modules', 'README.md', 'src', 'build']) {
+      for (final name in [
+        '.git',
+        'node_modules',
+        'README.md',
+        'src',
+        'build',
+      ]) {
         expect(isGroupId(name), isFalse, reason: '$name 不该进入删除候选');
       }
     });
@@ -163,10 +169,18 @@ void main() {
       const now = 1781771217;
       final plan = buildPrunePlan(
         groups: [
-          stats(gidA, fileCount: 3, totalBytes: 5 * 1024 * 1024,
-              newestMtime: now - 40 * 86400),
-          stats(gidB, fileCount: 2, totalBytes: 1024,
-              newestMtime: now - 50 * 86400),
+          stats(
+            gidA,
+            fileCount: 3,
+            totalBytes: 5 * 1024 * 1024,
+            newestMtime: now - 40 * 86400,
+          ),
+          stats(
+            gidB,
+            fileCount: 2,
+            totalBytes: 1024,
+            newestMtime: now - 50 * 86400,
+          ),
         ],
         policy: const PruneOlderThanDays(days: 30, nowUnix: now),
       );
@@ -198,7 +212,11 @@ void main() {
         policy: const PruneOlderThanDays(days: 30, nowUnix: now),
       );
 
-      expect(plan.candidates.map((c) => c.groupId).toList(), [gidC, gidA, gidB]);
+      expect(plan.candidates.map((c) => c.groupId).toList(), [
+        gidC,
+        gidA,
+        gidB,
+      ]);
     });
   });
 

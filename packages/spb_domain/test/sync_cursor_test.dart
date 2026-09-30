@@ -48,11 +48,7 @@ void main() {
       for (var i = 1; i < times.length; i++) {
         final a = unixToRfc3339(times[i - 1]);
         final b = unixToRfc3339(times[i]);
-        expect(
-          a.compareTo(b) < 0,
-          isTrue,
-          reason: '$a 应排在 $b 之前（字典序）',
-        );
+        expect(a.compareTo(b) < 0, isTrue, reason: '$a 应排在 $b 之前（字典序）');
       }
     });
   });
@@ -64,8 +60,8 @@ void main() {
     });
 
     test('减去整天数', () {
-      final now = DateTime.utc(2026, 6, 18, 8, 0, 0).millisecondsSinceEpoch ~/
-          1000;
+      final now =
+          DateTime.utc(2026, 6, 18, 8, 0, 0).millisecondsSinceEpoch ~/ 1000;
       expect(cutoffDaysAgo(now, 1), '2026-06-17T08:00:00Z');
       expect(cutoffDaysAgo(now, 30), '2026-05-19T08:00:00Z');
     });
@@ -83,8 +79,10 @@ void main() {
     test('无游标、无 since_days → null（首次全量）', () {
       // 关键：首次若发增量请求，服务端只返回近期变化，本地漏掉全部历史
       // 交付物，而用户以为同步完成了。
-      expect(effectiveCursor(saved: null, sinceDays: null, nowUnix: now),
-          isNull);
+      expect(
+        effectiveCursor(saved: null, sinceDays: null, nowUnix: now),
+        isNull,
+      );
     });
 
     test('无游标、有 since_days → 用下限（用户明确要求跳过历史）', () {
@@ -104,10 +102,7 @@ void main() {
       // 游标 06-10 晚于「近 7 天」下限 06-11？不——06-10 < 06-11，故这里
       // 用 06-15 作游标（晚于下限）。
       const saved = '2026-06-15T00:00:00Z';
-      expect(
-        effectiveCursor(saved: saved, sinceDays: 7, nowUnix: now),
-        saved,
-      );
+      expect(effectiveCursor(saved: saved, sinceDays: 7, nowUnix: now), saved);
     });
 
     test('下限比游标更晚 → 用下限（用户刚把 since_days 调小）', () {
@@ -123,10 +118,7 @@ void main() {
       // 若把 0 解释成 cutoffDaysAgo(now, 0) == now，则 updated_since=now，
       // 什么都同步不到。UI 上「0」与「不限」是同一个选项，行为必须一致。
       const saved = '2026-01-01T00:00:00Z';
-      expect(
-        effectiveCursor(saved: saved, sinceDays: 0, nowUnix: now),
-        saved,
-      );
+      expect(effectiveCursor(saved: saved, sinceDays: 0, nowUnix: now), saved);
       expect(
         effectiveCursor(saved: null, sinceDays: 0, nowUnix: now),
         isNull,

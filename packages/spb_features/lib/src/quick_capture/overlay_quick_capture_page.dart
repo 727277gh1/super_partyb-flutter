@@ -18,12 +18,11 @@ import 'package:spb_platform/spb_platform.dart';
 ///
 /// 与 [QuickCapturePage] 同一约束：这是无归属入口，用类型把「调用方不指定
 /// 归属」钉死。见 [QuickCaptureSubmit] 的说明。
-typedef OverlaySubmit =
-    Future<QuickCaptureEnqueueResult> Function({
-      required String input,
-      required List<QuickCaptureAttachment> attachments,
-      void Function(int done, int total)? onUploadProgress,
-    });
+typedef OverlaySubmit = Future<QuickCaptureEnqueueResult> Function({
+  required String input,
+  required List<QuickCaptureAttachment> attachments,
+  void Function(int done, int total)? onUploadProgress,
+});
 
 /// 单个附件的上限（字节）。
 ///
@@ -163,8 +162,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   void _onTextChanged() => setState(() {});
 
   bool get _canSubmit =>
-      !_busy &&
-      (_controller.text.trim().isNotEmpty || _attachments.isNotEmpty);
+      !_busy && (_controller.text.trim().isNotEmpty || _attachments.isNotEmpty);
 
   /// 是否有附件超限（超限时禁止提交并给出明确提示）。
   bool get _hasOversizedAttachment =>
@@ -174,10 +172,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     if (!_canSubmit) return;
     if (_hasOversizedAttachment) {
       setState(() {
-        _hint = const _Hint(
-          '有附件超过 50 MB 或已不可读，请先移除',
-          _HintKind.warn,
-        );
+        _hint = const _Hint('有附件超过 50 MB 或已不可读，请先移除', _HintKind.warn);
       });
       return;
     }
@@ -209,9 +204,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
       for (final f in files) {
         final path = f.path;
         if (path != null) {
-          attachments.add(
-            QuickCaptureAttachment(path: path, filename: f.name),
-          );
+          attachments.add(QuickCaptureAttachment(path: path, filename: f.name));
           continue;
         }
         try {
@@ -262,10 +255,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
         setState(() {
           _busy = false;
           _uploadProgress = null;
-          _hint = _Hint(
-            result.error?.message ?? '提交失败',
-            _HintKind.error,
-          );
+          _hint = _Hint(result.error?.message ?? '提交失败', _HintKind.error);
         });
       }
     } on SpbError catch (e) {
@@ -566,9 +556,8 @@ class _AttachmentChip extends StatelessWidget {
           const SizedBox(width: SpbSpacing.xs),
           Text(
             size,
-            style: Theme.of(
-              context,
-            ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+            style: Theme.of(context).textTheme.labelSmall
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
           if (onRemove != null) ...[
             const SizedBox(width: SpbSpacing.xs),

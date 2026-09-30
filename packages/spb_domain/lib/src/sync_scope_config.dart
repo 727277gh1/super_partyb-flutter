@@ -90,10 +90,8 @@ class SyncScopeConfig {
   ///
   /// 编码放在 domain 而非各 app：这是**领域类型的持久化格式**，两个 app
   /// 各写一份会漂移（一端加了字段，另一端读不出来却静默退回默认值）。
-  String encode() => jsonEncode({
-    'all_groups': allGroups,
-    'group_ids': groupIds,
-  });
+  String encode() =>
+      jsonEncode({'all_groups': allGroups, 'group_ids': groupIds});
 
   /// 从持久化字符串解析；`null`/空串/损坏一律退回「全部」。
   ///
@@ -155,7 +153,6 @@ class SyncScopeConfig {
   int get hashCode => Object.hash(allGroups, Object.hashAll(groupIds));
 
   @override
-  String toString() => allGroups
-      ? 'SyncScopeConfig(all)'
-      : 'SyncScopeConfig(groups: $groupIds)';
+  String toString() =>
+      allGroups ? 'SyncScopeConfig(all)' : 'SyncScopeConfig(groups: $groupIds)';
 }

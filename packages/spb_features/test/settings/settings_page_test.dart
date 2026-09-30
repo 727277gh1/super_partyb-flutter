@@ -95,10 +95,7 @@ void main() {
 
     testWidgets('切换媒体开关后出现保存按钮，但未保存前不落盘', (tester) async {
       var saves = 0;
-      await pumpSettings(
-        tester,
-        onSave: (_) async => saves++,
-      );
+      await pumpSettings(tester, onSave: (_) async => saves++);
 
       await tester.tap(find.byKey(const ValueKey('settings-include-media')));
       await tester.pumpAndSettle();
@@ -113,10 +110,7 @@ void main() {
 
     testWidgets('点保存把整份设置一次性提交', (tester) async {
       SyncSettings? saved;
-      await pumpSettings(
-        tester,
-        onSave: (s) async => saved = s,
-      );
+      await pumpSettings(tester, onSave: (s) async => saved = s);
 
       await tester.tap(find.byKey(const ValueKey('settings-include-media')));
       await tester.pumpAndSettle();
@@ -124,11 +118,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(saved, isNotNull);
-      expect(
-        saved!.filter.includeMedia,
-        isTrue,
-        reason: '保存的应是用户刚改的值',
-      );
+      expect(saved!.filter.includeMedia, isTrue, reason: '保存的应是用户刚改的值');
       expect(
         find.byKey(const ValueKey('settings-saved')),
         findsOneWidget,

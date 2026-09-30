@@ -216,7 +216,11 @@ void main() {
       await expectLater(
         api.listFiles(),
         throwsA(
-          isA<HttpError>().having((e) => e.isServerError, 'isServerError', isTrue),
+          isA<HttpError>().having(
+            (e) => e.isServerError,
+            'isServerError',
+            isTrue,
+          ),
         ),
       );
     });
@@ -257,7 +261,9 @@ void main() {
         (server) => server.reply(
           304,
           Uint8List(0),
-          headers: {'etag': ['W/"abc123"']},
+          headers: {
+            'etag': ['W/"abc123"'],
+          },
         ),
       );
 
@@ -275,7 +281,9 @@ void main() {
         (server) => server.reply(
           200,
           Uint8List.fromList([1]),
-          headers: {'etag': ['W/"new"']},
+          headers: {
+            'etag': ['W/"new"'],
+          },
         ),
       );
 
@@ -292,7 +300,9 @@ void main() {
         (server) => server.reply(
           200,
           Uint8List.fromList([1]),
-          headers: {'etag': ['W/"x"']},
+          headers: {
+            'etag': ['W/"x"'],
+          },
         ),
       );
 
@@ -323,7 +333,9 @@ void main() {
         (server) => server.reply(
           200,
           Uint8List.fromList([1]),
-          headers: {'etag': ['W/"a-b"']},
+          headers: {
+            'etag': ['W/"a-b"'],
+          },
         ),
       );
 
@@ -350,10 +362,7 @@ void main() {
         (server) => server.reply(404, {'error': '文件不存在'}),
       );
 
-      await expectLater(
-        api.getFile('nope'),
-        throwsA(isA<HttpError>()),
-      );
+      await expectLater(api.getFile('nope'), throwsA(isA<HttpError>()));
     });
   });
 }

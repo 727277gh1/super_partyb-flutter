@@ -81,7 +81,10 @@ void main() {
         ),
       );
 
-      final result = await useCase.execute(chatGroup(), const RenameGroup('新标题'));
+      final result = await useCase.execute(
+        chatGroup(),
+        const RenameGroup('新标题'),
+      );
 
       expect(result, isA<GroupActionApplied>());
       final applied = result as GroupActionApplied;
@@ -139,10 +142,8 @@ void main() {
     test('取消归档后 status 回到 active', () async {
       adapter.onPost(
         '/chat/groups/grp_1/unarchive',
-        (server) => server.reply(200, {
-          'group': groupJson(),
-          'status': 'active',
-        }),
+        (server) =>
+            server.reply(200, {'group': groupJson(), 'status': 'active'}),
         data: null,
       );
       adapter.onGet(

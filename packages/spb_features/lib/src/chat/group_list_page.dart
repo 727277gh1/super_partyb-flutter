@@ -337,12 +337,7 @@ class _GroupListPageState extends State<GroupListPage> {
 /// 两者都打开同一个菜单。**不用**滑动（`Dismissible`）直接删：删除不可恢复，
 /// 滑动太容易误触，且无法承载「改名/归档」这类同级动作。
 class _GroupTile extends StatelessWidget {
-  const _GroupTile({
-    super.key,
-    required this.group,
-    this.onTap,
-    this.onAction,
-  });
+  const _GroupTile({super.key, required this.group, this.onTap, this.onAction});
 
   final ChatGroup group;
   final VoidCallback? onTap;
@@ -501,8 +496,7 @@ class _GroupTile extends StatelessWidget {
     // 需要同时拿到右键的**指针位置**（菜单要出现在鼠标处），而
     // ListTile 的 onLongPress 不带位置参数。
     return GestureDetector(
-      onLongPressStart: (details) =>
-          _openMenu(context, details.globalPosition),
+      onLongPressStart: (details) => _openMenu(context, details.globalPosition),
       onSecondaryTapDown: (details) =>
           _openMenu(context, details.globalPosition),
       // 让 ListTile 自己处理点击：GestureDetector 的 opaque 会吃掉手势，

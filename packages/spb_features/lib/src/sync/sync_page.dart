@@ -308,7 +308,9 @@ class _ReportCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  failed.isEmpty ? Icons.check_circle_outline : Icons.warning_amber_outlined,
+                  failed.isEmpty
+                      ? Icons.check_circle_outline
+                      : Icons.warning_amber_outlined,
                   color: failed.isEmpty ? scheme.tertiary : scheme.error,
                 ),
                 const SizedBox(width: SpbSpacing.sm),
@@ -411,10 +413,7 @@ class _Stat extends StatelessWidget {
       children: [
         Text(label, style: textTheme.bodySmall?.copyWith(color: color)),
         const SizedBox(width: SpbSpacing.xs),
-        Text(
-          '$value 个',
-          style: textTheme.titleSmall?.copyWith(color: color),
-        ),
+        Text('$value 个', style: textTheme.titleSmall?.copyWith(color: color)),
       ],
     );
   }
@@ -444,9 +443,8 @@ class _ErrorBanner extends StatelessWidget {
           Expanded(
             child: Text(
               message,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: scheme.onErrorContainer,
-              ),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(color: scheme.onErrorContainer),
             ),
           ),
         ],

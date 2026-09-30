@@ -37,24 +37,23 @@ class AuthState {
 
   static const unknown = AuthState();
   static const authenticated = AuthState(status: AuthStatus.authenticated);
-  static const unauthenticated = AuthState(
-    status: AuthStatus.unauthenticated,
-  );
+  static const unauthenticated = AuthState(status: AuthStatus.unauthenticated);
 
   bool get isAuthenticated => status == AuthStatus.authenticated;
   bool get isUnauthenticated => status == AuthStatus.unauthenticated;
 
   /// 带错误消息的未认证状态。
-  factory AuthState.failed(String message) => AuthState(
-    status: AuthStatus.unauthenticated,
-    message: message,
-  );
+  factory AuthState.failed(String message) =>
+      AuthState(status: AuthStatus.unauthenticated, message: message);
 
-  AuthState copyWith({AuthStatus? status, String? message, bool clearMessage = false}) =>
-      AuthState(
-        status: status ?? this.status,
-        message: clearMessage ? null : (message ?? this.message),
-      );
+  AuthState copyWith({
+    AuthStatus? status,
+    String? message,
+    bool clearMessage = false,
+  }) => AuthState(
+    status: status ?? this.status,
+    message: clearMessage ? null : (message ?? this.message),
+  );
 
   @override
   String toString() =>

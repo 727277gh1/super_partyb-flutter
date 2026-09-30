@@ -106,7 +106,10 @@ void main() {
       adapter.onGet(
         '/api/files',
         (server) => server.reply(200, {
-          'items': [_file('/workspace/groups/g1/a.md'), _file('/workspace/groups/g1/b.md')],
+          'items': [
+            _file('/workspace/groups/g1/a.md'),
+            _file('/workspace/groups/g1/b.md'),
+          ],
           'total': 3,
         }),
         queryParameters: {
@@ -159,7 +162,10 @@ void main() {
       adapter.onGet(
         '/api/files',
         (server) => server.reply(200, {
-          'items': [_file('/workspace/groups/g1/a.md'), _file('/workspace/groups/g1/b.md')],
+          'items': [
+            _file('/workspace/groups/g1/a.md'),
+            _file('/workspace/groups/g1/b.md'),
+          ],
           'total': 2,
         }),
         queryParameters: {
@@ -325,9 +331,7 @@ void main() {
       // 预置状态：etag 与远端一致（看起来「已同步」），但磁盘上没有文件。
       store.data[workspaceStateKey] = SyncState(
         cursor: '2026-04-01T00:00:00Z',
-        files: const {
-          'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3),
-        },
+        files: const {'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3)},
       );
       expect(sink.preExisting, isEmpty, reason: '磁盘上确实没有这个文件');
 
@@ -365,9 +369,7 @@ void main() {
       // 状态里 etag 较旧 → 会下载；磁盘上真有文件 → 应带条件头。
       store.data[workspaceStateKey] = SyncState(
         cursor: '2026-04-01T00:00:00Z',
-        files: const {
-          'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3),
-        },
+        files: const {'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3)},
       );
       sink.preExisting.add('g1/a.md');
 

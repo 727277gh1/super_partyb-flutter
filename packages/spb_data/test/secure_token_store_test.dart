@@ -119,9 +119,7 @@ void main() {
 
     test('expiresAt 存的是 UTC 绝对时刻（不受本地时区影响）', () async {
       final expires = DateTime.utc(2030, 1, 2, 3, 4, 5);
-      await store.write(
-        StoredTokens(accessToken: 'at', expiresAt: expires),
-      );
+      await store.write(StoredTokens(accessToken: 'at', expiresAt: expires));
 
       // 直接看落盘内容：必须是 UTC ISO8601 且带 Z。
       final raw = backend.data[SecureTokenStore.storageKey]!;

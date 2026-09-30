@@ -314,10 +314,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final draft = _draft;
     if (draft == null) return;
     setState(() {
-      _draft = draft.copyWith(
-        sinceDays: days,
-        clearSinceDays: days == null,
-      );
+      _draft = draft.copyWith(sinceDays: days, clearSinceDays: days == null);
       _savedHint = false;
     });
   }
@@ -567,10 +564,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: SpbSpacing.lg),
         ],
         _SectionTitle('同步目录'),
-        _DirectoryCard(
-          localRoot: draft.localRoot,
-          onPick: _pickDirectory,
-        ),
+        _DirectoryCard(localRoot: draft.localRoot, onPick: _pickDirectory),
         const SizedBox(height: SpbSpacing.lg),
 
         _SectionTitle('同步范围'),
@@ -742,9 +736,8 @@ class _SectionTitle extends StatelessWidget {
     padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
     child: Text(
       text,
-      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-        color: Theme.of(context).colorScheme.primary,
-      ),
+      style: Theme.of(context).textTheme.labelLarge
+          ?.copyWith(color: Theme.of(context).colorScheme.primary),
     ),
   );
 }
@@ -899,7 +892,9 @@ class _Banner extends StatelessWidget {
         children: [
           Icon(
             danger ? Icons.error_outline : Icons.check_circle_outline,
-            color: danger ? scheme.onErrorContainer : scheme.onTertiaryContainer,
+            color: danger
+                ? scheme.onErrorContainer
+                : scheme.onTertiaryContainer,
           ),
           const SizedBox(width: SpbSpacing.sm),
           Expanded(

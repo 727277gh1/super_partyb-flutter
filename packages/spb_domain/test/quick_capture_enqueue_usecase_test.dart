@@ -86,10 +86,7 @@ void main() {
       mockUpload((fileId: 'file_bbbbbbbb', fileName: 'a.png'));
       mockEnqueue(statusCode: 502);
 
-      final r = await useCase.submit(
-        input: 'x',
-        attachments: [png('a.png')],
-      );
+      final r = await useCase.submit(input: 'x', attachments: [png('a.png')]);
 
       // 关键：附件确实上传了（在服务端暂存区），但消息**没有**发出去。
       expect(r.delivered, isFalse);

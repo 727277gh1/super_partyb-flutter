@@ -70,7 +70,9 @@ class OidcCallbackUri {
     required String expectedState,
   }) {
     if (!matches(uri)) {
-      throw AuthError('不是本应用的 OIDC 回调地址：${uri.scheme}://${uri.host}${uri.path}');
+      throw AuthError(
+        '不是本应用的 OIDC 回调地址：${uri.scheme}://${uri.host}${uri.path}',
+      );
     }
     return OidcPkce.parseCallback(uri, expectedState: expectedState);
   }

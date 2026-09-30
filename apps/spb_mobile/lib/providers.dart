@@ -134,10 +134,7 @@ final dioProvider = Provider<Dio>((ref) {
     },
   );
 
-  final dio = createDio(
-    baseUrl: SpbEnv.apiBaseUrl,
-    interceptors: [auth],
-  );
+  final dio = createDio(baseUrl: SpbEnv.apiBaseUrl, interceptors: [auth]);
   // 回填重放用的 Dio：必须是同一个实例（否则丢掉连接池与其余拦截器）。
   auth.replayDio = dio;
   return dio;
@@ -167,20 +164,20 @@ final groupManagementUseCaseProvider = Provider<GroupManagementUseCase>((ref) {
 /// 页面仍会接住漏网的 `SpbError`（如翻译函数自己出问题），故这是纵深防御而非
 /// 唯一防线。
 final groupActionProvider = Provider<GroupActionHandler>((ref) {
-      final useCase = ref.watch(groupManagementUseCaseProvider);
-      return (group, action) async {
-        try {
-          return await useCase.execute(group, action);
-        } on SpbError catch (e) {
-          SpbLog.warn('对话管理动作失败', {
-            'groupId': group.id,
-            'action': action.runtimeType.toString(),
-            'error': e.toString(),
-          });
-          return GroupActionRejected(_describeGroupActionError(e));
-        }
-      };
-    });
+  final useCase = ref.watch(groupManagementUseCaseProvider);
+  return (group, action) async {
+    try {
+      return await useCase.execute(group, action);
+    } on SpbError catch (e) {
+      SpbLog.warn('对话管理动作失败', {
+        'groupId': group.id,
+        'action': action.runtimeType.toString(),
+        'error': e.toString(),
+      });
+      return GroupActionRejected(_describeGroupActionError(e));
+    }
+  };
+});
 
 /// 把 [SpbError] 翻译成用户能看懂的一句话。
 String _describeGroupActionError(SpbError error) {
@@ -266,23 +263,24 @@ final authDeepLinkReceiverProvider = Provider<AuthDeepLinkReceiver>((ref) {
     pendingState: ref.read(pendingAuthStoreProvider).consume,
     onCode: (code, pkce) async {
       try {
-        final tokens = await ref.read(oidcClientProvider).exchangeCode(
-          code: code,
-          pkce: pkce,
-        );
-        await ref.read(tokenStoreProvider).write(
-          StoredTokens(
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
-            expiresAt: tokens.expiresIn == null
-                ? null
-                : DateTime.now().toUtc().add(
-                    Duration(seconds: tokens.expiresIn!),
-                  ),
-            tokenType: tokens.tokenType,
-            scope: tokens.scope,
-          ),
-        );
+        final tokens = await ref
+            .read(oidcClientProvider)
+            .exchangeCode(code: code, pkce: pkce);
+        await ref
+            .read(tokenStoreProvider)
+            .write(
+              StoredTokens(
+                accessToken: tokens.accessToken,
+                refreshToken: tokens.refreshToken,
+                expiresAt: tokens.expiresIn == null
+                    ? null
+                    : DateTime.now().toUtc().add(
+                        Duration(seconds: tokens.expiresIn!),
+                      ),
+                tokenType: tokens.tokenType,
+                scope: tokens.scope,
+              ),
+            );
         ref.read(authStateProvider.notifier).signedIn();
         return null;
       } on SpbError catch (e) {
@@ -570,10 +568,7 @@ const String sinceDaysPrefKey = 'sync.since_days';
 final syncFilterConfigProvider = FutureProvider<SyncFilterConfig>((ref) async {
   final prefs = ref.watch(preferencesStoreProvider);
   return SyncFilterConfig(
-    includeMedia: await prefs.getBool(
-      includeMediaPrefKey,
-      defaultValue: false,
-    ),
+    includeMedia: await prefs.getBool(includeMediaPrefKey, defaultValue: false),
     maxFileSize: await prefs.getInt(
       maxFileSizePrefKey,
       defaultValue: defaultMaxFileSize,
@@ -614,10 +609,11 @@ final runSyncActionProvider = Provider<RunSyncAction>((ref) {
 /// 移动端目录是系统分配的，用户改不了，故这是**空操作**（返回 false =
 /// 未发生重置）。保留同名 Provider 是为了让同步页的 `onLocalRootChanged`
 /// 回调在两端都能无条件接线，不必在页面里判平台。
-final saveLocalRootActionProvider =
-    Provider<Future<bool> Function(String?)>((ref) {
-      return (String? root) async => false;
-    });
+final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
+  ref,
+) {
+  return (String? root) async => false;
+});
 
 // ==================== 设置页 ====================
 
@@ -661,10 +657,7 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
       includeMediaPrefKey,
       value: settings.filter.includeMedia,
     );
-    await prefs.setInt(
-      maxFileSizePrefKey,
-      value: settings.filter.maxFileSize,
-    );
+    await prefs.setInt(maxFileSizePrefKey, value: settings.filter.maxFileSize);
 
     final days = settings.sinceDays;
     if (days == null || days <= 0) {
@@ -731,29 +724,34 @@ final loadMiniappWorksProvider = Provider<LoadMiniappWorks>((ref) {
 ///
 /// 用 `family` 把 workId 变成必填参数——workId 未就绪在类型上无法表达，
 /// 避免出现 `/works//` 这种语义不明的 404（与 issue #2 同源的陷阱）。
-final loadMiniappWorkDetailProvider =
-    Provider.family<LoadWorkDetail, String>((ref, workId) {
-      final api = ref.watch(miniappApiProvider);
-      return () => api.getWork(workId);
-    });
+final loadMiniappWorkDetailProvider = Provider.family<LoadWorkDetail, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.getWork(workId);
+});
 
 /// 工作事件。
 ///
 /// ⚠️ 返回的是 `MiniappWorkEvent`（数据库原始行），**不是** `ChatEvent`——
 /// 用 `ChatEvent.fromJson` 解析会抛 `FormatException`（键名是 `id` 不是
 /// `eventId`）。详见该类文档。
-final loadMiniappWorkEventsProvider =
-    Provider.family<LoadWorkEvents, String>((ref, workId) {
-      final api = ref.watch(miniappApiProvider);
-      return () => api.workEvents(workId);
-    });
+final loadMiniappWorkEventsProvider = Provider.family<LoadWorkEvents, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.workEvents(workId);
+});
 
 /// 产物列表。
-final loadMiniappArtifactsProvider =
-    Provider.family<LoadWorkArtifacts, String>((ref, workId) {
-      final api = ref.watch(miniappApiProvider);
-      return () => api.listArtifacts(workId);
-    });
+final loadMiniappArtifactsProvider = Provider.family<LoadWorkArtifacts, String>(
+  (ref, workId) {
+    final api = ref.watch(miniappApiProvider);
+    return () => api.listArtifacts(workId);
+  },
+);
 
 /// 下载产物字节。
 final downloadMiniappArtifactProvider =
@@ -786,33 +784,40 @@ final saveMiniappArtifactProvider = Provider<SaveArtifactBytes>((ref) {
 });
 
 /// 发送工作消息。
-final sendMiniappMessageProvider =
-    Provider.family<SendWorkMessage, String>((ref, workId) {
-      final api = ref.watch(miniappApiProvider);
-      return (input) => api.sendMessage(workId, input: input);
-    });
+final sendMiniappMessageProvider = Provider.family<SendWorkMessage, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return (input) => api.sendMessage(workId, input: input);
+});
 
 /// 完成工作。
-final completeMiniappWorkProvider =
-    Provider.family<CompleteWork, String>((ref, workId) {
-      final api = ref.watch(miniappApiProvider);
-      return () => api.completeWork(workId);
-    });
+final completeMiniappWorkProvider = Provider.family<CompleteWork, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.completeWork(workId);
+});
 
 /// 停止工作。
-final stopMiniappWorkProvider =
-    Provider.family<StopWork, String>((ref, workId) {
-      final api = ref.watch(miniappApiProvider);
-      return () => api.stopWork(workId);
-    });
+final stopMiniappWorkProvider = Provider.family<StopWork, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.stopWork(workId);
+});
 
 /// 解决确认卡（**不带** group_id 的路径，与 webapp 那套不同）。
-final resolveMiniappConfirmationProvider =
-    Provider<ResolveMiniappConfirmation>((ref) {
-      final api = ref.watch(miniappApiProvider);
-      return (confirmationId, action) =>
-          api.resolveConfirmation(confirmationId, action: action);
-    });
+final resolveMiniappConfirmationProvider = Provider<ResolveMiniappConfirmation>(
+  (ref) {
+    final api = ref.watch(miniappApiProvider);
+    return (confirmationId, action) =>
+        api.resolveConfirmation(confirmationId, action: action);
+  },
+);
 
 /// 读取 `since_days`：缺失、非法、`<= 0` 都视为「不限」。
 Future<int?> _readSinceDays(PreferencesStore prefs) async {

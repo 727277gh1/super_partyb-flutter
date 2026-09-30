@@ -107,7 +107,10 @@ class QuickCaptureEnqueueResult {
 
 /// 一个上传失败的附件。
 class QuickCaptureFailedUpload {
-  const QuickCaptureFailedUpload({required this.filename, required this.reason});
+  const QuickCaptureFailedUpload({
+    required this.filename,
+    required this.reason,
+  });
 
   final String filename;
   final String reason;
@@ -209,10 +212,7 @@ class QuickCaptureEnqueueUseCase {
           'error': e.message,
         });
         failed.add(
-          QuickCaptureFailedUpload(
-            filename: att.filename,
-            reason: e.message,
-          ),
+          QuickCaptureFailedUpload(filename: att.filename, reason: e.message),
         );
       }
     }

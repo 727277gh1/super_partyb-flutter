@@ -235,11 +235,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('group-rename-confirm')));
       await tester.pumpAndSettle();
 
-      expect(
-        calls,
-        isEmpty,
-        reason: '空标题服务端会 400，本地直接拦掉，别让用户看到无意义的失败',
-      );
+      expect(calls, isEmpty, reason: '空标题服务端会 400，本地直接拦掉，别让用户看到无意义的失败');
     });
 
     testWidgets('重命名：标题未改动不发请求', (tester) async {
@@ -356,9 +352,7 @@ void main() {
 
     testWidgets('失败（GroupActionRejected）→ 展示服务端给的原因', (tester) async {
       mockGroups([groupJson(id: 'g1', title: '要删的')]);
-      useRecorder(
-        respond: (_, _) => const GroupActionRejected('没有权限删除这个对话'),
-      );
+      useRecorder(respond: (_, _) => const GroupActionRejected('没有权限删除这个对话'));
       await pumpPage(tester, onGroupAction: handler);
 
       await openMenu(tester, '要删的');

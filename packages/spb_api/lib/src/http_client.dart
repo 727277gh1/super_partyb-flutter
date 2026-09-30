@@ -43,10 +43,7 @@ Dio createDio({
       // （`validateStatus` 放行的 4xx 不会抛，`_unwrap` 才会补判）。
       // 把这两个码排除在外，等于把认证失败收敛到一条链路上。
       validateStatus: (status) =>
-          status != null &&
-          status < 500 &&
-          status != 401 &&
-          status != 403,
+          status != null && status < 500 && status != 401 && status != 403,
     ),
   );
 

@@ -53,9 +53,8 @@ void main() {
     });
 
     test('单 group 模式用传入的 groupId', () {
-      final scope = const SyncScopeConfig(
-        allGroups: false,
-      ).toScope(groupId: 'g7');
+      final scope = const SyncScopeConfig(allGroups: false)
+          .toScope(groupId: 'g7');
       expect(scope, isA<SyncGroupScope>());
       expect((scope as SyncGroupScope).groupId, 'g7');
     });
@@ -87,11 +86,7 @@ void main() {
       const c = SyncScopeConfig(allGroups: false, groupIds: ['g1']);
       final back = c.copyWith(allGroups: true);
       expect(back.allGroups, isTrue);
-      expect(
-        back.groupIds,
-        ['g1'],
-        reason: '来回切一次就丢勾选，用户会以为设置没保存',
-      );
+      expect(back.groupIds, ['g1'], reason: '来回切一次就丢勾选，用户会以为设置没保存');
     });
 
     test('勾选项去重但保持顺序', () {

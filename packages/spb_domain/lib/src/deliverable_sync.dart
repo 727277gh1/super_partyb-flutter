@@ -20,7 +20,6 @@ import 'package:spb_models/spb_models.dart';
 import 'sync_path.dart';
 import 'sync_state.dart';
 
-
 /// 状态键：单 group 用 groupId，workspace 类范围用 [workspaceStateKey]。
 ///
 /// ## 为什么「全部」与「选中若干」必须共用同一个键
@@ -213,8 +212,7 @@ class SyncGroupScope extends SyncScope {
   final String groupId;
 
   @override
-  String? relativePath(String ufsPath) =>
-      groupRelativePath(ufsPath, groupId);
+  String? relativePath(String ufsPath) => groupRelativePath(ufsPath, groupId);
 }
 
 /// 整个 workspace：保留 `{groupId}/` 作为第一段。
@@ -308,8 +306,7 @@ class SyncPlan {
 
   bool get isEmpty => actions.isEmpty;
 
-  int get downloadCount =>
-      actions.whereType<SyncDownload>().length;
+  int get downloadCount => actions.whereType<SyncDownload>().length;
 
   int get deleteCount => actions.whereType<SyncDelete>().length;
 
@@ -475,9 +472,7 @@ abstract interface class FileDownloader {
 
 /// 下载结果。
 class SyncDownloadResult {
-  const SyncDownloadResult.notModified()
-    : bytes = null,
-      notModified = true;
+  const SyncDownloadResult.notModified() : bytes = null, notModified = true;
 
   const SyncDownloadResult.downloaded(List<int> this.bytes)
     : notModified = false;
@@ -584,10 +579,7 @@ class SyncRunResult {
 /// 「上次同步过」，不说明「磁盘上现在还有」。不探磁盘就会在「用户手动删了文件」
 /// 之后永远不再下载它。
 class SyncEngine {
-  const SyncEngine({
-    required this.downloader,
-    required this.sink,
-  });
+  const SyncEngine({required this.downloader, required this.sink});
 
   final FileDownloader downloader;
   final FileSink sink;

@@ -180,45 +180,48 @@ void main() {
       expect(work.displayStatus, 'weird_new_state');
     });
 
-    test('POST /chat/miniapp/works 请求体键为 goal/input/template_id/file_ids', () async {
-      adapter.onPost(
-        '/chat/miniapp/works',
-        (server) => server.reply(201, {
-          'work': {
-            'id': 'w1',
-            'title': '新会话',
-            'status': 'queued',
-            'status_label': '排队中',
-            'progress': {'total': 0, 'completed': 0, 'percent': 0},
-            'can_send_message': true,
-            'can_stop': false,
-            'can_complete': true,
-            'steps': <Object>[],
-            'artifacts': <Object>[],
-            'recent_events': <Object>[],
-            'pending_confirmations': <Object>[],
+    test(
+      'POST /chat/miniapp/works 请求体键为 goal/input/template_id/file_ids',
+      () async {
+        adapter.onPost(
+          '/chat/miniapp/works',
+          (server) => server.reply(201, {
+            'work': {
+              'id': 'w1',
+              'title': '新会话',
+              'status': 'queued',
+              'status_label': '排队中',
+              'progress': {'total': 0, 'completed': 0, 'percent': 0},
+              'can_send_message': true,
+              'can_stop': false,
+              'can_complete': true,
+              'steps': <Object>[],
+              'artifacts': <Object>[],
+              'recent_events': <Object>[],
+              'pending_confirmations': <Object>[],
+            },
+            'dispatch': {'turn_id': 't1', 'agent_id': 'agt_1'},
+          }),
+          data: {
+            'goal': '做个报表',
+            'input': '开始吧',
+            'template_id': 'tpl_1',
+            'file_ids': ['f1'],
           },
-          'dispatch': {'turn_id': 't1', 'agent_id': 'agt_1'},
-        }),
-        data: {
-          'goal': '做个报表',
-          'input': '开始吧',
-          'template_id': 'tpl_1',
-          'file_ids': ['f1'],
-        },
-      );
+        );
 
-      final res = await api.createWork(
-        goal: '做个报表',
-        input: '开始吧',
-        templateId: 'tpl_1',
-        fileIds: ['f1'],
-      );
+        final res = await api.createWork(
+          goal: '做个报表',
+          input: '开始吧',
+          templateId: 'tpl_1',
+          fileIds: ['f1'],
+        );
 
-      expect(res.workId, 'w1');
-      expect(res.dispatch?.turnId, 't1');
-      expect(res.dispatch?.isQueued, isTrue);
-    });
+        expect(res.workId, 'w1');
+        expect(res.dispatch?.turnId, 't1');
+        expect(res.dispatch?.isQueued, isTrue);
+      },
+    );
 
     test('POST /chat/miniapp/works 不带 input 时 dispatch 为 null', () async {
       adapter.onPost(
@@ -254,8 +257,18 @@ void main() {
             'status_label': '运行中',
             'progress': {'total': 3, 'completed': 1, 'percent': 33},
             'steps': [
-              {'id': 's1', 'title': '抓数据', 'status': 'completed', 'order_index': 1},
-              {'id': 's2', 'title': '生成', 'status': 'running', 'order_index': 2},
+              {
+                'id': 's1',
+                'title': '抓数据',
+                'status': 'completed',
+                'order_index': 1,
+              },
+              {
+                'id': 's2',
+                'title': '生成',
+                'status': 'running',
+                'order_index': 2,
+              },
             ],
             'latest_result': {'title': '最新结果', 'content': '已完成抓取'},
             'pending_confirmations': [confirmationShape()],
@@ -313,7 +326,11 @@ void main() {
         '/chat/miniapp/works/w1/messages',
         (server) => server.reply(201, {
           'work_id': 'w1',
-          'dispatch': {'turn_id': 't9', 'agent_id': 'agt_1', 'route_source': 'fastpath'},
+          'dispatch': {
+            'turn_id': 't9',
+            'agent_id': 'agt_1',
+            'route_source': 'fastpath',
+          },
         }),
         data: {
           'input': '再补充一点',
@@ -546,7 +563,9 @@ void main() {
 
       await expectLater(
         () => api.getArtifact('w1', 'other'),
-        throwsA(isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue)),
+        throwsA(
+          isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue),
+        ),
       );
     });
 
@@ -642,7 +661,9 @@ void main() {
 
       await expectLater(
         () => api.resolveConfirmation('c1', action: 'approve'),
-        throwsA(isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue)),
+        throwsA(
+          isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue),
+        ),
       );
     });
   });

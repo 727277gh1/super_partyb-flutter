@@ -102,8 +102,10 @@ final class GroupActionRejected extends GroupActionResult {
 /// 名字相同的结构化类型在 Dart 里**不会**互相报错，只会静默不兼容。
 ///
 /// 有名字后，签名只有一处定义，其余位置引用这个名字。
-typedef GroupActionHandler =
-    Future<GroupActionResult> Function(ChatGroup group, GroupAction action);
+typedef GroupActionHandler = Future<GroupActionResult> Function(
+  ChatGroup group,
+  GroupAction action,
+);
 
 /// 对话管理用例：把 [GroupAction] 翻译成 `ChatApi` 调用并归一化结果。
 ///
@@ -123,10 +125,7 @@ class GroupManagementUseCase {
   ///
   /// 抛出 [SpbError] 表示网络/解析失败；返回 [GroupActionRejected] 表示服务端
   /// 明确拒绝。
-  Future<GroupActionResult> execute(
-    ChatGroup group,
-    GroupAction action,
-  ) async {
+  Future<GroupActionResult> execute(ChatGroup group, GroupAction action) async {
     try {
       switch (action) {
         case RenameGroup(:final title):

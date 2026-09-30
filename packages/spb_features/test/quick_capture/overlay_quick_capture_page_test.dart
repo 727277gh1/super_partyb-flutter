@@ -35,7 +35,10 @@ class _FakeSubmit {
     required List<QuickCaptureAttachment> attachments,
     void Function(int done, int total)? onUploadProgress,
   }) async {
-    calls.add((input: input, names: attachments.map((a) => a.filename).toList()));
+    calls.add((
+      input: input,
+      names: attachments.map((a) => a.filename).toList(),
+    ));
     _captured.add(List.of(attachments));
     onUploadProgress?.call(attachments.length, attachments.length);
     return result;
@@ -115,8 +118,11 @@ void main() {
       });
       await tester.pumpAndSettle();
 
-      expect(find.text('report.pdf'), findsOneWidget,
-          reason: '附件应出现在列表里（说明 length() 读取成功）');
+      expect(
+        find.text('report.pdf'),
+        findsOneWidget,
+        reason: '附件应出现在列表里（说明 length() 读取成功）',
+      );
 
       await tester.enterText(find.byKey(const Key('overlay-input')), 'hi');
       await tester.tap(find.byKey(const Key('overlay-submit')));
@@ -124,21 +130,15 @@ void main() {
 
       expect(submit.calls, hasLength(1));
       final att = submit.attachmentsOf(0).single;
-      expect(
-        att.path,
-        real.path,
-        reason: '有路径时必须带 path，否则上传层无法流式读取',
-      );
-      expect(
-        att.bytes,
-        isNull,
-        reason: '有路径时不该预读字节（50 MiB 会在内存里存两份）',
-      );
+      expect(att.path, real.path, reason: '有路径时必须带 path，否则上传层无法流式读取');
+      expect(att.bytes, isNull, reason: '有路径时不该预读字节（50 MiB 会在内存里存两份）');
     });
 
     testWidgets('无路径的附件（剪贴板）→ 回退到带 bytes', (tester) async {
       await tester.pumpWidget(build());
-      dragDrop.captured!([_file('pasted.png', const [9, 9, 9])]);
+      dragDrop.captured!([
+        _file('pasted.png', const [9, 9, 9]),
+      ]);
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byKey(const Key('overlay-input')), 'hi');
@@ -251,7 +251,10 @@ void main() {
 
       dragDrop.captured!([_file('a.txt')]);
       await tester.pumpAndSettle();
-      await tester.enterText(find.byKey(const ValueKey('overlay-input')), '重要的话');
+      await tester.enterText(
+        find.byKey(const ValueKey('overlay-input')),
+        '重要的话',
+      );
       await tester.pump();
 
       await tester.tap(find.byKey(const ValueKey('overlay-submit')));
@@ -302,7 +305,10 @@ void main() {
       var closed = false;
       await tester.pumpWidget(build(onClose: () => closed = true));
 
-      await tester.enterText(find.byKey(const ValueKey('overlay-input')), 'abc');
+      await tester.enterText(
+        find.byKey(const ValueKey('overlay-input')),
+        'abc',
+      );
       await tester.pump();
 
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);

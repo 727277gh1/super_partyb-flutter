@@ -108,11 +108,7 @@ void main() {
 
       final groups = await scanLocalGroups(root.path);
 
-      expect(
-        groups,
-        isEmpty,
-        reason: '软链不是真实目录，必须跳过（它的体积是目录外的）',
-      );
+      expect(groups, isEmpty, reason: '软链不是真实目录，必须跳过（它的体积是目录外的）');
       // 目标必须完好。
       expect(File('${victim.path}/secret.txt').existsSync(), isTrue);
     });
@@ -120,8 +116,7 @@ void main() {
     test('统计不跟随内部软链（避免统计到目录外）', () async {
       final g = makeGroup(gidA, files: ['a.md']);
       final victim = Directory('${outside.path}/big')..createSync();
-      File('${victim.path}/big.bin')
-          .writeAsBytesSync(List.filled(10000, 0));
+      File('${victim.path}/big.bin').writeAsBytesSync(List.filled(10000, 0));
       Link('${g.path}/link-to-big').createSync(victim.path);
 
       final groups = await scanLocalGroups(root.path);

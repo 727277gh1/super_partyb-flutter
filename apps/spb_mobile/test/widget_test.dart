@@ -97,18 +97,25 @@ Future<TestHarness> pumpApp(
   TokenStore? tokenStore,
   Future<String?> Function()? signInAction,
   void Function(DioAdapter adapter)? beforePump,
+
   /// 目录选择器（移动端恒为「取消」，用例可覆盖以验证注入生效）。
   PickSyncDirectory? pickDirectory,
+
   /// 同步动作。
   RunSyncAction? runSync,
+
   /// 设置页注入点：读取设置。默认「固定目录 + 全部范围」。
   LoadSyncSettings? loadSyncSettings,
+
   /// 设置页注入点：保存设置。
   SaveSyncSettings? saveSyncSettings,
+
   /// 设置页注入点：对话列表。
   LoadSyncGroups? loadSyncGroups,
+
   /// 设置页注入点：本地扫描。
   ScanLocalGroups? scanLocalGroups,
+
   /// 设置页注入点：执行清理。
   ExecutePrune? executePrune,
 }) async {
@@ -169,7 +176,9 @@ Future<TestHarness> pumpApp(
       pickDirectoryProvider.overrideWithValue(
         pickDirectory ?? ({String? title}) async => null,
       ),
-      runSyncActionProvider.overrideWithValue(runSync ?? () async => SyncReport()),
+      runSyncActionProvider.overrideWithValue(
+        runSync ?? () async => SyncReport(),
+      ),
       // 设置页的注入点（真实实现会读库/走网络/扫磁盘）。
       loadSyncSettingsProvider.overrideWithValue(
         loadSyncSettings ??
@@ -185,8 +194,7 @@ Future<TestHarness> pumpApp(
         scanLocalGroups ?? () async => const [],
       ),
       executePruneProvider.overrideWithValue(
-        executePrune ??
-            (_) async => const PruneOutcome(deleted: 0, failed: {}),
+        executePrune ?? (_) async => const PruneOutcome(deleted: 0, failed: {}),
       ),
     ],
   );
@@ -408,7 +416,9 @@ void main() {
       );
     });
 
-    testWidgets('/miniapp/works 与 /miniapp/works/:workId 不互相抢匹配', (tester) async {
+    testWidgets('/miniapp/works 与 /miniapp/works/:workId 不互相抢匹配', (
+      tester,
+    ) async {
       // ## 这个测试防的是什么
       //
       // 两条路径段数不同（2 段 vs 3 段），故当前实现下不会歧义——**实测**
@@ -493,10 +503,7 @@ void main() {
 
   testWidgets('移动端设置页保存走注入的 saveSyncSettings', (tester) async {
     SyncSettings? saved;
-    final h = await pumpApp(
-      tester,
-      saveSyncSettings: (s) async => saved = s,
-    );
+    final h = await pumpApp(tester, saveSyncSettings: (s) async => saved = s);
 
     h.router.go(SpbRoutes.settings);
     await tester.pumpAndSettle();
@@ -581,7 +588,8 @@ void main() {
         tester,
         tokenStore: InMemoryTokenStore(),
         mockGroups: false,
-        signInAction: () async => 'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）',
+        signInAction: () async =>
+            'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）',
       );
 
       await tester.tap(find.byKey(const ValueKey('login-sso-button')));

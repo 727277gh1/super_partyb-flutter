@@ -87,9 +87,7 @@ class PlatformDesktopCapabilities
         TrayActionTarget,
         PlatformDesktopQuit,
         OverlayWindowController {
-  PlatformDesktopCapabilities({
-    this.trayIconAsset = 'assets/tray_icon.png',
-  });
+  PlatformDesktopCapabilities({this.trayIconAsset = 'assets/tray_icon.png'});
 
   /// 托盘图标资源路径（相对 `flutter_assets`）。
   final String trayIconAsset;
@@ -203,10 +201,9 @@ class PlatformDesktopCapabilities
     if (!ok) {
       // 不抛异常：`Alt+Space` 在 GNOME/Windows 常被系统占用，属于**预期内**
       // 的失败。设置页应据此提示用户改绑（见 HotkeyBinding.quickCapture 文档）。
-      SpbLog.warn(
-        '全局快捷键注册失败，可能被系统或其他应用占用',
-        {'binding': HotkeyBinding.quickCapture.label},
-      );
+      SpbLog.warn('全局快捷键注册失败，可能被系统或其他应用占用', {
+        'binding': HotkeyBinding.quickCapture.label,
+      });
     }
   }
 
@@ -243,19 +240,14 @@ class PlatformDesktopCapabilities
   /// 故显式拒绝并记日志，而不是默默做错事。
   Future<void> applyWindowSpec(WindowSpec spec) async {
     if (spec.role != WindowRole.main) {
-      SpbLog.debug(
-        '忽略非主窗口的 WindowSpec（单窗口模型）',
-        {'role': spec.role.name},
-      );
+      SpbLog.debug('忽略非主窗口的 WindowSpec（单窗口模型）', {'role': spec.role.name});
       return;
     }
     try {
       await windowManager.setTitle(spec.title);
       // 先设最小尺寸再设尺寸：反过来时，若目标尺寸小于**当前**的最小尺寸，
       // 窗口管理器会把 setSize 钳到最小值，最终尺寸偏小。
-      await windowManager.setMinimumSize(
-        Size(spec.minWidth, spec.minHeight),
-      );
+      await windowManager.setMinimumSize(Size(spec.minWidth, spec.minHeight));
       await windowManager.setSize(Size(spec.width, spec.height));
       await windowManager.setResizable(spec.resizable);
       if (spec.alwaysOnTop) await windowManager.setAlwaysOnTop(true);
@@ -578,9 +570,7 @@ class PlatformDesktopCapabilities
   ///
   /// 返回 null 表示无法获取显示器信息（无 DISPLAY / 权限问题），
   /// 调用方应回退到默认位置。
-  Future<WindowGeometry?> computeQuickCaptureGeometry(
-    WindowSpec spec,
-  ) async {
+  Future<WindowGeometry?> computeQuickCaptureGeometry(WindowSpec spec) async {
     try {
       final display = await screenRetriever.getPrimaryDisplay();
       final size = display.size;
@@ -648,9 +638,7 @@ class PlatformDesktopCapabilities
       // 定位到鼠标所在显示器（多屏场景），失败则居中。
       final geometry = await computeQuickCaptureGeometry(spec);
       if (geometry != null) {
-        await windowManager.setPosition(
-          Offset(geometry.x, geometry.y),
-        );
+        await windowManager.setPosition(Offset(geometry.x, geometry.y));
       } else {
         await windowManager.center();
       }

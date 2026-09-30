@@ -80,7 +80,10 @@ void main() {
     'created_at': '2024-03-05T08:09:11Z',
   };
 
-  Map<String, dynamic> eventRowJson({String id = 'e1', String type = 'message'}) => {
+  Map<String, dynamic> eventRowJson({
+    String id = 'e1',
+    String type = 'message',
+  }) => {
     'id': id,
     'turnId': 't1',
     'groupId': 'w1',
@@ -250,7 +253,10 @@ void main() {
 
     expect(find.byKey(const ValueKey('miniapp-work-complete')), findsNothing);
     expect(find.byKey(const ValueKey('miniapp-work-stop')), findsNothing);
-    expect(find.byKey(const ValueKey('miniapp-work-message-field')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('miniapp-work-message-field')),
+      findsNothing,
+    );
   });
 
   testWidgets('加载失败展示错误与重试，且不清空为空白页', (tester) async {
@@ -401,9 +407,7 @@ void main() {
     expect(find.text('需要确认风险操作'), findsOneWidget);
     expect(find.text('将删除 3 个文件'), findsOneWidget);
 
-    await tester.tap(
-      find.byKey(const ValueKey('miniapp-confirm-c1-approve')),
-    );
+    await tester.tap(find.byKey(const ValueKey('miniapp-confirm-c1-approve')));
     await tester.pump();
     await tester.pump();
 
@@ -421,9 +425,7 @@ void main() {
     );
     await pumpPage(tester);
 
-    await tester.tap(
-      find.byKey(const ValueKey('miniapp-confirm-c1-approve')),
-    );
+    await tester.tap(find.byKey(const ValueKey('miniapp-confirm-c1-approve')));
     await tester.pump();
     await tester.pump();
 
@@ -436,9 +438,7 @@ void main() {
   });
 
   testWidgets('产物下载走 downloadArtifact + saveArtifact 并提示落地路径', (tester) async {
-    setUpStubs(
-      onSave: (name, bytes) async => '/home/u/deliverables/$name',
-    );
+    setUpStubs(onSave: (name, bytes) async => '/home/u/deliverables/$name');
     artifacts = [MiniappArtifact.fromJson(artifactJson())];
 
     await pumpPage(tester);
@@ -451,15 +451,16 @@ void main() {
     await tester.pump();
 
     expect(savedPaths, ['/home/u/deliverables/report.md']);
-    expect(find.textContaining('/home/u/deliverables/report.md'), findsOneWidget);
+    expect(
+      find.textContaining('/home/u/deliverables/report.md'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('产物下载失败提示原因（合成 id 查不到是常态，不是功能坏了）', (tester) async {
     // 事件投影出的产物 id 可能是服务端合成的 "<group_id>:<relative_path>"，
     // 这种 id UFS 查不到 → 404。属于常态，不该当成功能故障。
-    setUpStubs(
-      onDownload: (_) async => throw const HttpError(404, 'HTTP 404'),
-    );
+    setUpStubs(onDownload: (_) async => throw const HttpError(404, 'HTTP 404'));
     artifacts = [MiniappArtifact.fromJson(artifactJson())];
 
     await pumpPage(tester);
@@ -488,7 +489,12 @@ void main() {
       detailValue: MiniappWorkDetail.fromJson(
         detailJson(
           steps: [
-            {'id': 's1', 'title': '抓数据', 'status': 'completed', 'order_index': 1},
+            {
+              'id': 's1',
+              'title': '抓数据',
+              'status': 'completed',
+              'order_index': 1,
+            },
             {'id': 's2', 'title': '生成', 'status': 'running', 'order_index': 2},
           ],
         ),

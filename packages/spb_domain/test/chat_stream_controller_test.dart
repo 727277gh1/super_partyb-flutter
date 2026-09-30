@@ -519,11 +519,7 @@ void main() {
       await c.switchGroup('grp_2');
 
       expect(sse.connectedPaths, hasLength(1), reason: '切 group 不得重连');
-      expect(
-        sse.lastEventId,
-        'evt_cursor_1',
-        reason: '续接游标必须保留（connect 才会清零）',
-      );
+      expect(sse.lastEventId, 'evt_cursor_1', reason: '续接游标必须保留（connect 才会清零）');
 
       await c.dispose();
     });
@@ -542,11 +538,7 @@ void main() {
       await c.dispose();
       // ⚠️ 关键不变式：SSE 是跨对话共享的单例，其 dispose 归 provider 所有。
       // 控制器关闭它会导至「离开一次对话页 = 永久失去实时流」。
-      expect(
-        sse.disposed,
-        isFalse,
-        reason: '控制器不得释放不属于它的共享 SseClient',
-      );
+      expect(sse.disposed, isFalse, reason: '控制器不得释放不属于它的共享 SseClient');
       await c.dispose(); // 不应抛异常
     });
 
@@ -580,11 +572,7 @@ void main() {
       );
       await Future<void>.delayed(Duration.zero);
 
-      expect(
-        emissions,
-        isNotEmpty,
-        reason: '第二个控制器必须仍能收到帧（否则是「连上了但一条事件都没有」）',
-      );
+      expect(emissions, isNotEmpty, reason: '第二个控制器必须仍能收到帧（否则是「连上了但一条事件都没有」）');
       expect(
         (second.snapshot.single as AssistantMessageItem).text,
         '第二个控制器收到的回复',

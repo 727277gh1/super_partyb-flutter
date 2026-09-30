@@ -127,10 +127,7 @@ class AuthDeepLinkReceiver {
   Future<void> _handle(Uri uri) async {
     if (!OidcCallbackUri.matches(uri)) {
       // 不是本应用的 OIDC 回调：静默忽略。
-      SpbLog.debug('忽略非 OIDC 深链', {
-        'scheme': uri.scheme,
-        'host': uri.host,
-      });
+      SpbLog.debug('忽略非 OIDC 深链', {'scheme': uri.scheme, 'host': uri.host});
       return;
     }
 

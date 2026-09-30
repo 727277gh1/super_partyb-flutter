@@ -49,7 +49,10 @@ void main() {
       expect(back.files, hasLength(2));
       expect(back.files['grp_1/reports/a.md']?.etag, 'W/"1"');
       expect(back.files['grp_1/reports/a.md']?.size, 100);
-      expect(back.files['grp_1/reports/a.md']?.updatedAt, '2026-03-01T00:00:00Z');
+      expect(
+        back.files['grp_1/reports/a.md']?.updatedAt,
+        '2026-03-01T00:00:00Z',
+      );
       // etag 为 null 也要原样读回 null（不能变成空串，否则 is_unchanged
       // 的「任一侧缺 etag」分支永远走不到）。
       expect(back.files['grp_1/reports/b.md']?.etag, isNull);
@@ -283,7 +286,10 @@ void main() {
       final prefs = PreferencesStore(db);
 
       // 媒体默认关（生产实测图片占 94.5% 体积）。
-      expect(await prefs.getBool('include_media', defaultValue: false), isFalse);
+      expect(
+        await prefs.getBool('include_media', defaultValue: false),
+        isFalse,
+      );
       await prefs.setBool('include_media', value: true);
       expect(await prefs.getBool('include_media', defaultValue: false), isTrue);
       await prefs.setBool('include_media', value: false);
@@ -306,7 +312,10 @@ void main() {
       final prefs = PreferencesStore(db);
 
       await prefs.setString('include_media', 'not-a-bool');
-      expect(await prefs.getBool('include_media', defaultValue: false), isFalse);
+      expect(
+        await prefs.getBool('include_media', defaultValue: false),
+        isFalse,
+      );
 
       await prefs.setString('since_days', 'abc');
       expect(await prefs.getInt('since_days', defaultValue: 30), 30);

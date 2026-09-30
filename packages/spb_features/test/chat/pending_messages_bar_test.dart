@@ -100,9 +100,7 @@ void main() {
 
   group('待处理消息：撤销', () {
     testWidgets('展示待处理消息正文与 agent_type', (tester) async {
-      useStubs(
-        messages: () => [msg('inbox_1', input: '帮我看一下这个报错')],
-      );
+      useStubs(messages: () => [msg('inbox_1', input: '帮我看一下这个报错')]);
       await pumpBar(tester);
 
       expect(find.text('帮我看一下这个报错'), findsOneWidget);
@@ -125,11 +123,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(
-        undoIds,
-        ['inbox_42'],
-        reason: '撤销操作的是收件箱记录 id；turn 一旦生成就无法撤销',
-      );
+      expect(undoIds, ['inbox_42'], reason: '撤销操作的是收件箱记录 id；turn 一旦生成就无法撤销');
     });
 
     testWidgets('撤销成功后该条从列表移除', (tester) async {

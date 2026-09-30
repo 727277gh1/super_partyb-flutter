@@ -228,7 +228,9 @@ class OidcPkce {
     Map<String, String> extraParams = const {},
   }) {
     if (config.clientId.isEmpty) {
-      throw const AuthError('OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）');
+      throw const AuthError(
+        'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）',
+      );
     }
     if (config.redirectUri.isEmpty) {
       throw const AuthError('OIDC redirect_uri 未配置');
@@ -367,10 +369,7 @@ class OidcClient {
   ///
   /// 打开它即可开始登录；网关自己生成并持有 PKCE 参数，客户端不参与。
   Uri authorizeUrl({required String state, String? postLoginRedirect}) =>
-      config.authorizeUrl(
-        state: state,
-        postLoginRedirect: postLoginRedirect,
-      );
+      config.authorizeUrl(state: state, postLoginRedirect: postLoginRedirect);
 
   /// 生成一对 PKCE 参数（仅「直连 IdP」路径需要）。
   PkcePair generatePkce({int length = 64, Random? random}) =>
@@ -419,7 +418,9 @@ class OidcClient {
 
   Future<OidcTokens> _tokenRequest(Map<String, String> form) async {
     if (config.clientId.isEmpty) {
-      throw const AuthError('OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）');
+      throw const AuthError(
+        'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）',
+      );
     }
 
     final headers = <String, Object?>{};

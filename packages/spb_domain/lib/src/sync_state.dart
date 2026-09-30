@@ -114,7 +114,8 @@ class SyncState {
   );
 
   /// 移除记录（文件已在远端删除或本地清理）。
-  SyncState forget(String relPath) => copyWith(files: {...files}..remove(relPath));
+  SyncState forget(String relPath) =>
+      copyWith(files: {...files}..remove(relPath));
 
   /// 推进游标（**只前进，不回退**）。
   ///
@@ -166,8 +167,7 @@ class SyncState {
 
   /// 诊断用（**不含文件内容**，只给条数）。
   @override
-  String toString() =>
-      'SyncState(cursor: $cursor, files: ${files.length} 条)';
+  String toString() => 'SyncState(cursor: $cursor, files: ${files.length} 条)';
 }
 
 /// 状态键：**全部 group** 与 **选中若干 group** 共用。

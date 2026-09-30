@@ -129,24 +129,34 @@ Future<TestHarness> pumpApp(
   TokenStore? tokenStore,
   Future<String?> Function()? signInAction,
   void Function(DioAdapter adapter)? beforePump,
+
   /// 目录选择器（同步页用）。默认「用户取消」。
   PickSyncDirectory? pickDirectory,
+
   /// 同步动作（同步页用）。默认返回空报告。
   RunSyncAction? runSync,
+
   /// 同步目录初始值（同步页用）。默认未选。
   String? syncLocalRoot,
+
   /// 设置页注入点：读取设置。默认「未选目录 + 全部范围」。
   LoadSyncSettings? loadSyncSettings,
+
   /// 设置页注入点：保存设置。
   SaveSyncSettings? saveSyncSettings,
+
   /// 设置页注入点：对话列表（同步范围勾选用）。
   LoadSyncGroups? loadSyncGroups,
+
   /// 设置页注入点：本地扫描（清理与统计用）。
   ScanLocalGroups? scanLocalGroups,
+
   /// 设置页注入点：执行清理。
   ExecutePrune? executePrune,
+
   /// 平台能力。默认空实现（不展示桌面集成项）。
   DesktopCapabilities? capabilities,
+
   /// 搜索实现（搜索页用）。默认返回空结果。
   SearchChat? searchChat,
 }) async {
@@ -200,11 +210,12 @@ Future<TestHarness> pumpApp(
       pickDirectoryProvider.overrideWithValue(
         pickDirectory ?? ({String? title}) async => null,
       ),
-      runSyncActionProvider.overrideWithValue(runSync ?? () async => SyncReport()),
+      runSyncActionProvider.overrideWithValue(
+        runSync ?? () async => SyncReport(),
+      ),
       // 设置页的注入点：全部换成可控假实现（真实的会读库/走网络/扫磁盘）。
       loadSyncSettingsProvider.overrideWithValue(
-        loadSyncSettings ??
-            () async => SyncSettings(localRoot: syncLocalRoot),
+        loadSyncSettings ?? () async => SyncSettings(localRoot: syncLocalRoot),
       ),
       saveSyncSettingsProvider.overrideWithValue(
         saveSyncSettings ?? (_) async {},
@@ -216,8 +227,7 @@ Future<TestHarness> pumpApp(
         scanLocalGroups ?? () async => const [],
       ),
       executePruneProvider.overrideWithValue(
-        executePrune ??
-            (_) async => const PruneOutcome(deleted: 0, failed: {}),
+        executePrune ?? (_) async => const PruneOutcome(deleted: 0, failed: {}),
       ),
       // 搜索页的注入点：真实实现要 /api/auth/me + 网络，测试里换成假实现。
       searchChatProvider.overrideWithValue(
@@ -361,9 +371,15 @@ void main() {
       reason: '桌面端的核心差异价值是交付物同步，必须有入口',
     );
     // 占位页时代只有「待接入」文案；现在是可操作的配置项。
-    expect(find.byKey(const ValueKey('settings-pick-directory')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-pick-directory')),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('settings-scope-all')), findsOneWidget);
-    expect(find.byKey(const ValueKey('settings-include-media')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-include-media')),
+      findsOneWidget,
+    );
     expect(
       find.byKey(const ValueKey('settings-max-file-size')),
       findsOneWidget,
@@ -416,18 +432,12 @@ void main() {
     });
 
     // 桌面端注入的是 isSupported=true 的能力实现，故应展示托盘/快捷键区块。
-    final h = await pumpApp(
-      tester,
-      capabilities: _FakeDesktopCapabilities(),
-    );
+    final h = await pumpApp(tester, capabilities: _FakeDesktopCapabilities());
 
     h.router.go(SpbRoutes.settings);
     await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey('settings-capabilities')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const ValueKey('settings-capabilities')), findsOneWidget);
     // 移动端不展示这一段（见 spb_features 的设置页用例）。
     expect(find.text('系统托盘'), findsOneWidget);
   });
@@ -679,9 +689,7 @@ void main() {
       expect(find.text('OIDC client_id 未配置'), findsOneWidget);
     });
 
-    testWidgets('登录成功后守卫放行首页（状态从 unknown 推进到 authenticated）', (
-      tester,
-    ) async {
+    testWidgets('登录成功后守卫放行首页（状态从 unknown 推进到 authenticated）', (tester) async {
       // 端到端验证「凭证落盘 → 守卫放行」这条链路，而不只是「路由表里有 /login」。
       final store = InMemoryTokenStore();
       final h = await pumpApp(tester, tokenStore: store, mockGroups: false);
@@ -811,11 +819,11 @@ void main() {
             }),
             queryParameters: {'limit': 200},
           );
-        adapter.onGet(
-          '/users/usr_REAL/chat/messages/pending',
-          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-          queryParameters: {'group_id': gid, 'limit': 20},
-        );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': gid, 'limit': 20},
+          );
         }
       },
     );

@@ -69,11 +69,7 @@ int nowUnix() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 /// 对齐 Tauri 端 `cutoff` 只在 `days > 0` 时生效。把 `0` 解释成「下限 = 此刻」
 /// 会让 `updated_since = now`，进而**什么都同步不到**——而 UI 上「0」与「不限」
 /// 是同一个选项，两者行为必须一致。
-String? effectiveCursor({
-  String? saved,
-  int? sinceDays,
-  required int nowUnix,
-}) {
+String? effectiveCursor({String? saved, int? sinceDays, required int nowUnix}) {
   final days = sinceDays;
   final floor = (days != null && days > 0)
       ? cutoffDaysAgo(nowUnix, days)

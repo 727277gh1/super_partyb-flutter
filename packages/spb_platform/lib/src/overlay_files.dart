@@ -63,12 +63,7 @@ Future<List<DroppedFile>> readClipboardFiles() async {
       final name = (item['name'] ?? '').toString();
       final bytes = item['bytes'];
       if (name.isEmpty || bytes is! List) continue;
-      out.add(
-        DroppedFile.fromBytes(
-          name: name,
-          bytes: bytes.cast<int>(),
-        ),
-      );
+      out.add(DroppedFile.fromBytes(name: name, bytes: bytes.cast<int>()));
     }
     return out;
   } on MissingPluginException {

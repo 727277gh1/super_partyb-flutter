@@ -128,8 +128,7 @@ class InMemoryTokenStore implements TokenStore {
 ///
 /// 返回 null 表示**无法刷新**（无 refresh token / 服务端拒绝），
 /// 此时调用方应引导重新登录。
-typedef TokenRefresher =
-    Future<StoredTokens?> Function(StoredTokens current);
+typedef TokenRefresher = Future<StoredTokens?> Function(StoredTokens current);
 
 /// 会话凭证管理器：负责「拿到可用 token」与「过期前刷新」。
 ///

@@ -46,7 +46,8 @@ void main() {
     search = (query, {int? limit}) async {
       queries.add(query);
       if (raw != null) return raw(query);
-      final items = hits?.call(query) ?? [ChatSearchHit.fromJson(hitJson(turnId: 't1'))];
+      final items =
+          hits?.call(query) ?? [ChatSearchHit.fromJson(hitJson(turnId: 't1'))];
       return items;
     };
   }
@@ -98,11 +99,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
 
-      expect(
-        queries,
-        ['报错排'],
-        reason: '逐字符发请求会对无法走索引的 LIKE 查询打多次全表扫描',
-      );
+      expect(queries, ['报错排'], reason: '逐字符发请求会对无法走索引的 LIKE 查询打多次全表扫描');
     });
 
     testWidgets('停顿超过防抖时长才发请求', (tester) async {
@@ -206,12 +203,8 @@ void main() {
     testWidgets('多条命中都展示（同一对话可能命中多句）', (tester) async {
       useSearch(
         hits: (_) => [
-          ChatSearchHit.fromJson(
-            hitJson(turnId: 't1', inputText: '第一处报错'),
-          ),
-          ChatSearchHit.fromJson(
-            hitJson(turnId: 't2', inputText: '第二处报错'),
-          ),
+          ChatSearchHit.fromJson(hitJson(turnId: 't1', inputText: '第一处报错')),
+          ChatSearchHit.fromJson(hitJson(turnId: 't2', inputText: '第二处报错')),
         ],
       );
       await pumpPage(tester);
@@ -360,9 +353,7 @@ void main() {
     testWidgets('命中片段按查询词高亮（大小写不敏感，与服务端 LIKE 一致）', (tester) async {
       useSearch(
         hits: (_) => [
-          ChatSearchHit.fromJson(
-            hitJson(turnId: 't1', inputText: 'todo 事项待办'),
-          ),
+          ChatSearchHit.fromJson(hitJson(turnId: 't1', inputText: 'todo 事项待办')),
         ],
       );
       await pumpPage(tester);
@@ -371,16 +362,19 @@ void main() {
 
       // 高亮用 TextSpan 实现，故检查富文本里存在带高亮样式的片段。
       final richText = tester.widget<Text>(
-        find.byWidgetPredicate(
-          (w) => w is Text && w.textSpan != null && w.textSpan is TextSpan,
-        ).first,
+        find
+            .byWidgetPredicate(
+              (w) => w is Text && w.textSpan != null && w.textSpan is TextSpan,
+            )
+            .first,
       );
       final spans = (richText.textSpan! as TextSpan).children!.cast<TextSpan>();
       final highlighted = spans.where((s) => s.style?.backgroundColor != null);
       expect(
         highlighted,
         isNotEmpty,
-        reason: 'SQLite LIKE 对 ASCII 大小写不敏感，客户端高亮必须一致，'
+        reason:
+            'SQLite LIKE 对 ASCII 大小写不敏感，客户端高亮必须一致，'
             '否则会出现「命中了但没有任何高亮」',
       );
       expect(highlighted.single.text, 'todo');
@@ -389,9 +383,7 @@ void main() {
     testWidgets('查询词含正则元字符时不抛异常（不做正则匹配）', (tester) async {
       useSearch(
         hits: (_) => [
-          ChatSearchHit.fromJson(
-            hitJson(turnId: 't1', inputText: 'a.b*c(d'),
-          ),
+          ChatSearchHit.fromJson(hitJson(turnId: 't1', inputText: 'a.b*c(d')),
         ],
       );
       await pumpPage(tester);
