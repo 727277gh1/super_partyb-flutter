@@ -396,6 +396,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       //
       // 用 `ref.read` 而非 `ref.watch`：这是**动作**不是数据依赖，用 watch 会在
       // 每次连接状态变化时重建本 widget。
+      onReconnect: () =>
+          ref.read(chatStreamControllerProvider(userId)).reconnect(),
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 动作文案 → 服务端 action。
         //

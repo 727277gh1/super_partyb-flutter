@@ -85,6 +85,9 @@ class _FakeSseClient extends SseClient {
   }
 
   /// `resume` 被调用的次数。
+  int resumeCount = 0;
+
+  /// 是否已经 `connect` 过（同真实 `SseClient._path != null`）。
   bool _hasPath = false;
 
   /// 复刻真实 `resume()` 的 `if (_path == null) return;` 早退。
@@ -93,7 +96,10 @@ class _FakeSseClient extends SseClient {
   /// 见用例注释）；但 fake 仍应与真实实现同构——否则将来 `resume` 增加前置条件
   /// 时，测试会给出与生产不符的结论。
   @override
-  Future<void> resume() async {}
+  Future<void> resume() async {
+    if (!_hasPath) return;
+    resumeCount++;
+  }
 
   @override
   void recordEventId(String eventId) {}
@@ -880,6 +886,71 @@ void main() {
     expect(user.isAdmin, isFalse);
   });
 
+  testWidgets('对话页重连：router 注入 onReconnect 且把重连送到 SseClient', (tester) async {
+    // 只验证 **router 的接线**：注入的 onReconnect 必须真的把重连请求送到
+    // SseClient（`resumeCount` 从 0 变 1）。
+    //
+    // ## 这条用例抓不住什么（已实测，勿误信）
+    //
+    // 它**抓不住**「family 键写错成 groupId」：`sseClientProvider` 是跨对话共享
+    // 的单例，`reconnect()` 最终就是 `_sse.resume()`，而共享 client 上确实有
+    // `_path`——换哪个 family 条目都能连通。故这里不宣称覆盖该场景；键的正确性
+    // 靠「注入点与 `ref.watch` 在同一 build 里取自同一变量」来保证（见 router 注释）。
+    final sse = _FakeSseClient();
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      mockGroups: false,
+      sseClient: sse,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(sse.connectedPaths, [
+      '/users/usr_REAL/chat/stream',
+    ], reason: '前置条件：必须先真的连上');
+
+    final page = tester.widget<ConversationPage>(find.byType(ConversationPage));
+    expect(
+      page.onReconnect,
+      isNotNull,
+      reason: 'router 必须注入 onReconnect，否则指示器永远不可点',
+    );
+
+    page.onReconnect!();
+    await tester.pump();
+
+    expect(sse.resumeCount, 1, reason: '重连请求必须真的到达 SseClient');
+  });
   testWidgets('对话列表新建入口：POST /chat/groups 后进入新对话', (tester) async {
     final h = await pumpApp(
       tester,

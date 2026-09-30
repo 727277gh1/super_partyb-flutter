@@ -158,6 +158,7 @@ void main() {
     Future<void> Function(String)? onCancelTurn,
     Future<bool> Function()? onLoadOlder,
     String? historyKey,
+    VoidCallback? onReconnect,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -169,6 +170,7 @@ void main() {
           onCancelTurn: onCancelTurn,
           onLoadOlder: onLoadOlder,
           historyKey: historyKey,
+          onReconnect: onReconnect,
         ),
       ),
     );
@@ -874,4 +876,93 @@ void main() {
     });
   });
 
+  group('ConversationPage 重连', () {
+    final indicator = find.byKey(
+      const ValueKey('conversation-connection-indicator'),
+    );
+
+    testWidgets('断线态点击指示器触发一次 onReconnect', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(tester, onReconnect: () => calls++);
+
+      await pushConnectionState(tester, SseState.failed);
+      expect(indicator, findsOneWidget);
+
+      await tester.tap(indicator);
+      await tester.pump();
+
+      expect(calls, 1, reason: '点击一次必须只回调一次');
+    });
+
+    testWidgets('重连中（reconnecting）也可点', (tester) async {
+      // 退避最长可到 maxBackoff，用户不该被迫干等计时器。
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(tester, onReconnect: () => calls++);
+
+      await pushConnectionState(tester, SseState.reconnecting);
+      await tester.tap(indicator);
+      await tester.pump();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('已连接态点击不触发（不渲染手势）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(tester, onReconnect: () => calls++);
+
+      await pushConnectionState(tester, SseState.connected);
+      // 已连接态下指示器是纯展示：不存在可点的 InkWell。
+      expect(
+        find.descendant(of: indicator, matching: find.byType(InkWell)),
+        findsNothing,
+      );
+
+      await tester.tap(indicator, warnIfMissed: false);
+      await tester.pump();
+
+      expect(calls, 0, reason: '已连接时误触不得触发重连（会丢弃正在传输的帧）');
+    });
+
+    testWidgets('未注入 onReconnect 时纯展示（任何状态都不可点）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushConnectionState(tester, SseState.failed);
+      expect(indicator, findsOneWidget);
+      expect(
+        find.descendant(of: indicator, matching: find.byType(InkWell)),
+        findsNothing,
+      );
+
+      // 没有回调，点了也不应抛异常。
+      await tester.tap(indicator, warnIfMissed: false);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('图标内边距在可点/不可点之间保持一致（AppBar 不抖动）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onReconnect: () {});
+
+      await pushConnectionState(tester, SseState.connected);
+      final connectedSize = tester.getSize(indicator);
+
+      await pushConnectionState(tester, SseState.failed);
+      final failedSize = tester.getSize(indicator);
+
+      expect(
+        failedSize,
+        connectedSize,
+        reason: '状态切换不得改变指示器尺寸，否则 AppBar 内容会左右跳动',
+      );
+    });
+  });
 }

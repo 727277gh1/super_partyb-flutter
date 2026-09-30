@@ -41,6 +41,7 @@ class ConversationPage extends StatefulWidget {
     this.onSend,
     this.onCancelTurn,
     this.onLoadOlder,
+    this.onReconnect,
     this.historyKey,
     this.loadPending,
     this.undoPending,
@@ -469,8 +470,10 @@ class _ConversationPageState extends State<ConversationPage> {
                 StreamBuilder<SseState>(
                   stream: widget.controller.connectionState,
                   initialData: widget.controller.currentState,
-                  builder: (context, snapshot) =>
-                      _ConnectionIndicator(state: snapshot.data),
+                  builder: (context, snapshot) => _ConnectionIndicator(
+                    state: snapshot.data,
+                    onReconnect: widget.onReconnect,
+                  ),
                 ),
                 const SizedBox(width: SpbSpacing.sm),
               ],
@@ -569,10 +572,28 @@ class _ConversationPageState extends State<ConversationPage> {
 }
 
 /// 连接状态指示（AppBar 右侧）。
+///
+/// 非已连接态时变为可点的「重连」入口；已连接态是纯展示。
 class _ConnectionIndicator extends StatelessWidget {
-  const _ConnectionIndicator({required this.state});
+  const _ConnectionIndicator({required this.state, this.onReconnect});
 
   final SseState? state;
+
+  /// 手动重连回调。为 null（或已连接）时不可点。
+  final VoidCallback? onReconnect;
+
+  /// 是否渲染点击手势。
+  ///
+  /// ## 为什么已连接态必须**不渲染**手势，而不是渲染一个 `onTap: null`
+  ///
+  /// 指示器就在 AppBar 右侧、紧邻常用区域。已连接时它每秒都会重绘（心跳虽不进
+  /// 业务流，但状态流会在重连时变动），一个仍然存在的 `InkWell` 会：
+  /// 1. 在水波纹与 `Semantics` 上把图标宣告成「可点」，而它其实什么都不做；
+  /// 2. 在触屏上把「误碰一下」变成一次无意义的重连（重连会 teardown 当前流，
+  ///    正在传输的帧会被丢掉）。
+  ///
+  /// 故这里按状态换 widget 树，而不是给同一个树换个空回调。
+  bool get _clickable => onReconnect != null && state != SseState.connected;
 
   @override
   Widget build(BuildContext context) {
@@ -593,8 +614,15 @@ class _ConnectionIndicator extends StatelessWidget {
     );
 
     return Tooltip(
-      message: tooltip,
-      child: Icon(icon, size: SpbSpacing.lg, color: color),
+      key: const ValueKey('conversation-connection-indicator'),
+      message: _clickable ? '$tooltip（点击重连）' : tooltip,
+      child: _clickable
+          ? InkWell(
+              onTap: onReconnect,
+              customBorder: const CircleBorder(),
+              child: iconWidget,
+            )
+          : iconWidget,
     );
   }
 }
