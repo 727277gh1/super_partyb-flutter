@@ -79,6 +79,7 @@ class SettingsPage extends StatefulWidget {
     required this.capabilities,
     this.onOpenSync,
     this.onSignOut,
+    this.onOpenDirectory,
     this.loadLaunchAtStartup,
     this.setLaunchAtStartup,
     this.title = '设置',
@@ -91,6 +92,15 @@ class SettingsPage extends StatefulWidget {
   final ExecutePrune executePrune;
   final PickSettingsDirectory pickDirectory;
 
+  /// 在文件管理器中打开同步目录（桌面端）。null = 不展示入口（移动端无目录概念）。
+  final Future<bool> Function(String path)? onOpenDirectory;
+
+  /// 打开「我的最近轮次」。null = 不展示入口。
+  ///
+  /// ## 为什么放设置页而非对话列表 AppBar
+  ///
+  /// 对话列表 AppBar 已有 4 个图标（新建/待确认/搜索/工作台），再加会拥挤。
+  /// 本项是低频的「回顾」动作，放设置页更合适。
   /// 平台能力（决定是否展示托盘/快捷键项）。
   final DesktopCapabilities capabilities;
 
@@ -704,8 +714,26 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: SpbSpacing.lg),
         ],
-        _SectionTitle('同步目录'),
-        _DirectoryCard(localRoot: draft.localRoot, onPick: _pickDirectory),
+        SectionTitle('同步目录', highlight: true),
+        _DirectoryCard(
+          localRoot: draft.localRoot,
+          onPick: _pickDirectory,
+          onOpenDirectory: widget.onOpenDirectory == null ||
+                  draft.localRoot == null ||
+                  draft.localRoot!.isEmpty
+              ? null
+              : () async {
+                  final ok = await widget.onOpenDirectory!(draft.localRoot!);
+                  if (!mounted) return;
+                  if (!ok) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('无法打开目录，请检查路径是否存在'),
+                      ),
+                    );
+                  }
+                },
+        ),
         const SizedBox(height: SpbSpacing.lg),
 
         SectionTitle('同步范围', highlight: true),
@@ -913,10 +941,17 @@ class _SettingsPageState extends State<SettingsPage> {
 
 /// 同步目录卡片。
 class _DirectoryCard extends StatelessWidget {
-  const _DirectoryCard({required this.localRoot, required this.onPick});
+  const _DirectoryCard({
+    required this.localRoot,
+    required this.onPick,
+    this.onOpenDirectory,
+  });
 
   final String? localRoot;
   final VoidCallback onPick;
+
+  /// 打开目录回调（null = 不展示「打开目录」按钮）。桌面端注入。
+  final Future<void> Function()? onOpenDirectory;
 
   @override
   Widget build(BuildContext context) {
@@ -966,6 +1001,13 @@ class _DirectoryCard extends StatelessWidget {
               onPressed: onPick,
               child: const Text('选择目录'),
             ),
+            if (onOpenDirectory != null)
+              TextButton.icon(
+                key: const ValueKey('settings-open-directory'),
+                onPressed: onOpenDirectory,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('打开目录'),
+              ),
           ],
         ),
       ),

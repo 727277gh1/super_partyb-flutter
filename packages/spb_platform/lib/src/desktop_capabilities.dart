@@ -167,6 +167,17 @@ abstract interface class DesktopCapabilities {
   /// 返回字符串让上层（含 web 构建）无需为「拿到一个目录」引入 `dart:io`。
   Future<String?> pickDirectory({String? title});
 
+  /// 在系统文件管理器中打开本地目录（对齐 Tauri 的 `reveal_sync_dir`）。
+  //
+  // 调用方传入**绝对路径**。实现应先校验目录存在（不存在返回 false，避免
+  // 启动一个打开空路径的文件管理器让用户以为应用坏了），再按平台 spawn
+  // （Linux `xdg-open`、macOS `open`、Windows `explorer`）。
+  //
+  // 返回 true 表示成功启动了文件管理器；false 表示不支持、目录不存在或
+  // spawn 失败。**不抛异常**——对齐本接口既有的静默降级哲学：上层只在
+  // false 时提示用户一次，不写 try/catch。
+  Future<bool> revealPath(String path);
+
   /// 释放资源。
   Future<void> dispose();
 }
@@ -416,6 +427,12 @@ class NoopDesktopCapabilities implements DesktopCapabilities {
   Future<String?> pickDirectory({String? title}) async {
     SpbLog.debug('pickDirectory 在当前平台不可用', {'title': title});
     return null;
+  }
+
+  @override
+  Future<bool> revealPath(String path) async {
+    SpbLog.debug('revealPath 在当前平台不可用', {'path': path});
+    return false;
   }
 
   @override

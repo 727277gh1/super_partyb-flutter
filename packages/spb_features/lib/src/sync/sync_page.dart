@@ -43,6 +43,7 @@ class SyncPage extends StatefulWidget {
     required this.runSync,
     this.initialLocalRoot,
     this.onLocalRootChanged,
+    this.onOpenDirectory,
     this.title = '交付物同步',
   });
 
@@ -63,6 +64,10 @@ class SyncPage extends StatefulWidget {
   /// （否则会出现「目录已改、状态没清」→ 新目录同步显示成功却是空的）。
   /// 页面不持有存储，故只能把变更交出去，由装配层在同一事务里完成。
   final ValueChanged<String?>? onLocalRootChanged;
+
+  /// 在文件管理器中打开当前同步目录（桌面端）。null = 不展示该入口
+  /// （移动端无目录概念）。
+  final Future<bool> Function(String path)? onOpenDirectory;
 
   final String title;
 
@@ -134,6 +139,21 @@ class _SyncPageState extends State<SyncPage> {
     widget.onLocalRootChanged?.call(picked);
   }
 
+  /// 在系统文件管理器中打开当前同步目录。失败时用 SnackBar 提示
+  /// （不静默失败——用户点了没反应会以为应用卡住）。
+  Future<void> _handleOpenDirectory() async {
+    final path = _localRoot;
+    final cb = widget.onOpenDirectory;
+    if (path == null || path.isEmpty || cb == null) return;
+    final ok = await cb(path);
+    if (!mounted) return;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法打开目录，请检查路径是否存在')),
+      );
+    }
+  }
+
   Future<void> _handleSync() async {
     if (_busy) return;
 
@@ -185,6 +205,20 @@ class _SyncPageState extends State<SyncPage> {
             picking: _picking,
             onPick: _handlePick,
           ),
+          if (widget.onOpenDirectory != null &&
+              _localRoot != null &&
+              _localRoot!.isNotEmpty) ...[
+            const SizedBox(height: SpbSpacing.sm),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                key: const ValueKey('sync-open-directory'),
+                onPressed: _handleOpenDirectory,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('打开目录'),
+              ),
+            ),
+          ],
           const SizedBox(height: SpbSpacing.lg),
           FilledButton.icon(
             key: const ValueKey('sync-start-button'),

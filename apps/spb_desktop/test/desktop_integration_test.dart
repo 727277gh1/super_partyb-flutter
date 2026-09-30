@@ -102,6 +102,9 @@ class _WiringCapabilities
   Future<void> setTrayTooltip(String tooltip) async {}
   @override
   Future<String?> pickDirectory({String? title}) async => null;
+
+  @override
+  Future<bool> revealPath(String path) async => false;
   @override
   Future<void> dispose() async {}
 }
@@ -130,6 +133,9 @@ class _PlainCapabilities implements DesktopCapabilities {
   Future<void> setTrayTooltip(String tooltip) async {}
   @override
   Future<String?> pickDirectory({String? title}) async => null;
+
+  @override
+  Future<bool> revealPath(String path) async => false;
   @override
   Future<void> dispose() async {}
 }

@@ -558,6 +558,51 @@ class PlatformDesktopCapabilities
       FileSelectorDirectoryPicker().pick(title: title);
 
   // ---------------------------------------------------------------------------
+  // 在文件管理器中打开目录（对齐 Tauri 的 reveal_sync_dir）
+  // ---------------------------------------------------------------------------
+
+  @override
+  Future<bool> revealPath(String path) async {
+    // 先校验目录存在（对齐 Tauri 的「同步目录已不存在」检查）：避免 xdg-open
+    // 打开一个不存在的路径而用户以为是应用坏了。
+    try {
+      if (!await Directory(path).exists()) {
+        SpbLog.warn('revealPath 目录不存在', {'path': path});
+        return false;
+      }
+    } on Object catch (e) {
+      SpbLog.warn('revealPath 校验目录失败', {'path': path, 'error': '$e'});
+      return false;
+    }
+    try {
+      ProcessResult result;
+      // 按平台 spawn（本机仅验证 Linux；Windows/macOS 分支写了但无运行环境验证，
+      // 见 AGENTS.md §8）。
+      if (Platform.isLinux) {
+        result = await Process.run('xdg-open', [path]);
+      } else if (Platform.isMacOS) {
+        result = await Process.run('open', [path]);
+      } else if (Platform.isWindows) {
+        result = await Process.run('explorer', [path]);
+      } else {
+        SpbLog.warn('revealPath 当前平台不支持', {'path': path});
+        return false;
+      }
+      if (result.exitCode != 0) {
+        SpbLog.warn(
+          'revealPath spawn 返回非 0',
+          {'path': path, 'exit': result.exitCode},
+        );
+        return false;
+      }
+      return true;
+    } on Object catch (e) {
+      SpbLog.warn('revealPath spawn 异常', {'path': path, 'error': '$e'});
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // 多显示器定位（悬浮窗用）
   // ---------------------------------------------------------------------------
 

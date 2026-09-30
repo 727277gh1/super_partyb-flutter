@@ -1654,6 +1654,8 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   Future<String?> pickDirectory({String? title}) async => null;
 
   @override
+  Future<bool> revealPath(String path) async => false;
+
   @override
   Future<void> dispose() async {}
 }

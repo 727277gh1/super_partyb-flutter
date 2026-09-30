@@ -630,6 +630,7 @@ class _SyncPage extends ConsumerWidget {
       initialLocalRoot: localRoot,
       pickDirectory: ref.watch(pickDirectoryProvider),
       runSync: ref.watch(runSyncActionProvider),
+      onOpenDirectory: (path) =>
           ref.read(desktopCapabilitiesProvider).revealPath(path),
       onLocalRootChanged: (root) {
         // 保存目录（换目录会在同一事务里清空同步状态，见 provider 说明）。
@@ -671,6 +672,7 @@ class _SettingsPage extends ConsumerWidget {
         return caps.pickDirectory(title: '选择交付物同步目录');
       },
       capabilities: ref.watch(desktopCapabilitiesProvider),
+      onOpenDirectory: (path) =>
           ref.read(desktopCapabilitiesProvider).revealPath(path),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
