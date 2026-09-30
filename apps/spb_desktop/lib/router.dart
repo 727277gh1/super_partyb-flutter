@@ -449,8 +449,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// （只清缓冲 + 重新回填，不重连）。
   String? _connectedUserId;
 
-  /// 交付物侧边栏是否展开。
-  bool _showDeliverables = false;
+  /// 侧边栏是否展开。
+  bool _showSidebar = false;
 
   /// 交付物刷新令牌：自增 int。
   ///
@@ -461,6 +461,25 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   /// controller.items 的订阅（dispose 时释放）。
   StreamSubscription<List<ConversationItem>>? _itemsSub;
+
+  /// controller.gateDecisions 的订阅（与 items 平行，见领域层说明）。
+  StreamSubscription<List<GateDecision>>? _gateSub;
+
+  /// 最近一次归约出的对话项快照。
+  ///
+  /// ## 为什么在 State 里存一份而不是每次 build 读 controller.snapshot
+  ///
+  /// 待办面板（按 turn 分组）与工具调用面板都需要这份数据，而 `snapshot`
+  /// 是同步 getter——在 build 里读它不会建立依赖，items 变化时**不会**触发
+  /// 重建（Flutter 无法感知）。存在 State 里 + 订阅流推送时 setState，
+  /// 才是正确的响应式接线。
+  List<ConversationItem> _items = const [];
+
+  /// 最近一次归约出的 gate 决策快照（同上）。
+  List<GateDecision> _gateDecisions = const [];
+
+  /// 正在提交的确认卡行 id（供待办面板防重复点 + 显示 spinner）。
+  final _resolvingConfirmations = <String>{};
 
   /// 上次见过的 `AgentFileItem` id 集合：用于判定「新出现」。
   ///
@@ -479,6 +498,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   @override
   void dispose() {
     _itemsSub?.cancel();
+    _gateSub?.cancel();
     super.dispose();
   }
 
@@ -524,6 +544,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 立即同步一次当前快照，避免错过订阅前已存在的文件。
       _onItemsChanged(controller.snapshot);
     }
+    if (_gateSub == null) {
+      // gate 决策走独立流（见领域层 GateDecision 类文档）。
+      _gateSub = controller.gateDecisions.listen(_onGateDecisionsChanged);
+      _onGateDecisionsChanged(controller.gateDecisionsSnapshot);
+    }
     if (_connectedUserId == userId) {
       // 同一 userId 内切 group：复用已有连接（不调 connect，游标保留）。
       await controller.switchGroup(widget.groupId);
@@ -548,23 +573,20 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final controller = ref.watch(chatStreamControllerProvider(userId));
     final api = ref.watch(chatApiProvider);
 
-    // 桌面端：对话页 + 可折叠交付物侧边栏。移动端（spb_mobile）不传 actions
-    // 也不包 Row，保持原样（见 AGENTS.md §6.4）。
+    // 桌面端：对话页 + 可折叠侧边栏（交付物 / 待办 / 诊断）。移动端
+    // （spb_mobile）不传 actions 也不包 Row，保持原样（见 AGENTS.md §6.4）。
     final conversation = ConversationPage(
       controller: controller,
       title: '对话',
-      // 交付物侧边栏开关（仅桌面端渲染本页）。
+      // 侧边栏开关（仅桌面端渲染本页）。
       actions: [
         IconButton(
           key: const ValueKey('toggle-deliverables'),
           icon: Icon(
-            _showDeliverables
-                ? Icons.view_sidebar
-                : Icons.view_sidebar_outlined,
+            _showSidebar ? Icons.view_sidebar : Icons.view_sidebar_outlined,
           ),
-          tooltip: _showDeliverables ? '隐藏交付物' : '显示交付物',
-          onPressed: () =>
-              setState(() => _showDeliverables = !_showDeliverables),
+          tooltip: _showSidebar ? '隐藏侧边栏' : '显示侧边栏',
+          onPressed: () => setState(() => _showSidebar = !_showSidebar),
         ),
       ],
       // 待处理收件箱消息（可撤销）。
@@ -620,59 +642,133 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         openInBrowser(url)
             .catchError((Object e) => SpbLog.warn('打开链接失败', {'error': '$e'})),
       ),
-      onResolveConfirmation: (groupId, confirmationId, option) {
-        // 动作文案 → 服务端 action。
-        //
-        // 真实路径：POST /api/chat/groups/:group_id/confirmations/:id/resolve
-        // （挂载点 ext_routes.go:39 的 registerConfirmRoutes + router.go 的 /api 组）。
-        // 服务端 `misc.go:resolve` 绑定 `{action, comment}`，且把 action 写进
-        // `resolved_action`；status 固定为 `resolved`（见 `chat_confirmations`
-        // 的 CHECK 约束：pending|resolved|expired|cancelled）。
-        // 故这里必须传**动作**而非 `resolved` 这类状态词。
-        api
-            .resolveConfirmation(
-              groupId,
-              confirmationId,
-              action: _optionToAction(option),
-            )
-            .catchError((Object e) {
-              // 不重抛：确认失败不应让页面崩，用户可再点一次。
-              // 真正的失败提示由 ConversationPage 的 SnackBar 覆盖发送路径，
-              // 确认路径此处仅记录。
-              debugPrint('确认提交失败: $e');
-            });
-      },
+      onResolveConfirmation: _resolveConfirmation,
     );
 
-    if (!_showDeliverables) return conversation;
+    if (!_showSidebar) return conversation;
+
+    // 待办面板按 turn 聚合待确认卡。groupItemsByTurn 是纯函数（领域层），
+    // 分组逻辑与侧边栏渲染解耦。
+    final turns = groupItemsByTurn(_items);
 
     return Row(
       children: [
         Expanded(child: conversation),
-        // 侧边栏宽度固定：交付物树是窄列表，定宽比自适应更可预测
+        // 侧边栏宽度固定：交付物树/待办列表都是窄列表，定宽比自适应更可预测
         // （自适应会随文件名长度抽动，阅读时很干扰）。
         const VerticalDivider(width: 1, thickness: 1),
         SizedBox(
           width: 320,
-          child: GroupDeliverablesPanel(
-            // groupId 变化时面板自行清空本地路径并重拉（见其类文档）。
-            groupId: widget.groupId,
-            // 用 provider 取数：注入的是**不带参数的取数函数**，
-            // groupId 已由面板自己传入。
-            loadFiles: () =>
-                ref.read(groupDeliverablesProvider(widget.groupId).future),
-            onDownload: (file) => ref.read(downloadDeliverableProvider)(file),
-            onOpen: (path) => ref.read(openDeliverableProvider)(path),
-            onReveal: (path) => ref.read(revealDeliverableProvider)(path),
-            // SSE 推送新文件时 bump（见 _onItemsChanged）。
-            reloadToken: _deliverablesReloadToken,
+          child: ChatSidebar(
+            onClose: () => setState(() => _showSidebar = false),
+            tabs: [
+              ChatSidebarTab(
+                label: '交付物',
+                icon: Icons.folder_outlined,
+                content: GroupDeliverablesPanel(
+                  // groupId 变化时面板自行清空本地路径并重拉（见其类文档）。
+                  groupId: widget.groupId,
+                  // tab 标签已显示「交付物」，面板内不再重复标题（仅保留刷新按钮 +
+                  // 文件计数这个工具条），避免与 tab 标签在视觉上紧邻重复。
+                  title: '',
+                  // 用 provider 取数：注入的是**不带参数的取数函数**，
+                  // groupId 已由面板自己传入。
+                  loadFiles: () => ref.read(
+                    groupDeliverablesProvider(widget.groupId).future,
+                  ),
+                  onDownload: (file) =>
+                      ref.read(downloadDeliverableProvider)(file),
+                  onOpen: (path) => ref.read(openDeliverableProvider)(path),
+                  onReveal: (path) => ref.read(revealDeliverableProvider)(path),
+                  // SSE 推送新文件时 bump（见 _onItemsChanged）。
+                  reloadToken: _deliverablesReloadToken,
+                ),
+              ),
+              ChatSidebarTab(
+                label: '待办',
+                icon: Icons.checklist_outlined,
+                // 徽标 = 未解决确认卡数量（用户一眼看出有多少事要处理）。
+                badge: turns.fold(
+                  0,
+                  (sum, t) => sum + t.pendingConfirmations.length,
+                ),
+                content: GroupTodosPanel(
+                  turns: turns,
+                  onResolveConfirmation: _resolveConfirmation,
+                  resolvingIds: _resolvingConfirmations,
+                  // 切 group 时清空折叠状态（旧对话的展开位置对新对话无意义）。
+                  reloadKey: widget.groupId,
+                  // tab 标签已命名「待办」，不重复面板标题。
+                  showHeader: false,
+                ),
+              ),
+              ChatSidebarTab(
+                label: '诊断',
+                icon: Icons.insights_outlined,
+                content: GroupGatePanel(
+                  decisions: _gateDecisions,
+                  // tab 标签已命名「诊断」，不重复面板标题。
+                  showHeader: false,
+                ),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
 
-  /// 监听 controller.items：出现新的 `AgentFileItem` 时 bump 交付物刷新令牌。
+  /// 提交确认卡选择（内联卡与待办面板共用）。
+  ///
+  /// ## 为什么要记 busy 集合
+  ///
+  /// 同一张卡在两处可点（时间线内联 + 侧边栏待办）。若只靠按钮自身禁用，
+  /// 两处的 busy 状态互不相知，用户可以在侧边栏点一下、又回时间线再点一下。
+  /// busy 集合按 confirmationId 去重，两处共享。
+  ///
+  /// 动作文案 → 服务端 action 的映射见 [_optionToAction]。
+  void _resolveConfirmation(
+    String groupId,
+    String confirmationId,
+    String option,
+  ) {
+    if (_resolvingConfirmations.contains(confirmationId)) return;
+    setState(() => _resolvingConfirmations.add(confirmationId));
+    // 动作文案 → 服务端 action。
+    //
+    // 真实路径：POST /api/chat/groups/:group_id/confirmations/:id/resolve
+    // （挂载点 ext_routes.go:39 的 registerConfirmRoutes + router.go 的 /api 组）。
+    // 服务端 `misc.go:resolve` 绑定 `{action, comment}`，且把 action 写进
+    // `resolved_action`；status 固定为 `resolved`（见 `chat_confirmations`
+    // 的 CHECK 约束：pending|resolved|expired|cancelled）。
+    // 故这里必须传**动作**而非 `resolved` 这类状态词。
+    ref
+        .read(chatApiProvider)
+        .resolveConfirmation(
+          groupId,
+          confirmationId,
+          action: _optionToAction(option),
+        )
+        .whenComplete(() {
+          // 成功与失败都解锁：失败时应允许重试（不重抛、不弹错误打断阅读，
+          // 与内联路径的既有行为一致）。
+          if (mounted) {
+            setState(() => _resolvingConfirmations.remove(confirmationId));
+          }
+        })
+        .catchError((Object e) {
+          debugPrint('确认提交失败: $e');
+        });
+  }
+
+  /// 监听 controller.gateDecisions：更新诊断面板数据。
+  void _onGateDecisionsChanged(List<GateDecision> decisions) {
+    if (!mounted) return;
+    setState(() => _gateDecisions = decisions);
+  }
+
+  /// 监听 controller.items：更新待办面板数据，并在出现新的 `AgentFileItem`
+  /// 时 bump 交付物刷新令牌。
   ///
   /// ## 为什么用「见过 id 集合」而不是 items.length
   ///
@@ -695,9 +791,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final isFirstSync = _seenFileItemIds.isEmpty;
     final hasNew = ids.difference(_seenFileItemIds).isNotEmpty;
     _seenFileItemIds = ids;
-    if (!isFirstSync && hasNew && mounted) {
-      setState(() => _deliverablesReloadToken++);
-    }
+
+    if (!mounted) return;
+    // 同一次 setState 里同时更新待办面板的数据与交付物刷新令牌：
+    // items 流推送时两者都要变，分开 setState 会多一次重建。
+    setState(() {
+      _items = items;
+      if (!isFirstSync && hasNew) _deliverablesReloadToken++;
+    });
   }
 
   /// 下载 agent 文件产物到本地并反馈落地路径。

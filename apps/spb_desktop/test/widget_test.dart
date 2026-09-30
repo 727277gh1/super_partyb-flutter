@@ -916,7 +916,7 @@ void main() {
     );
   });
 
-  group('交付物侧边栏（桌面端接线）', () {
+  group('侧边栏（桌面端接线：交付物 / 待办 / 诊断）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。
     Future<_FakeUfsApi> openChat(
@@ -969,13 +969,13 @@ void main() {
       final sse = _FakeSseClient();
       final ufs = await openChat(tester, sse);
 
-      // AppBar 里有交付物侧边栏开关。
+      // AppBar 里有侧边栏开关。
       final toggle = find.byKey(const ValueKey('toggle-deliverables'));
       expect(toggle, findsOneWidget);
 
       // 未取数：侧边栏默认折叠，autoDispose provider 不该被读。
       expect(ufs.listCalls, isEmpty);
-      // 侧边栏标题也不在。
+      // 侧边栏 tab 也不在。
       expect(find.text('交付物'), findsNothing);
     });
 
@@ -1005,6 +1005,56 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
       await tester.pumpAndSettle();
       expect(find.text('交付物'), findsNothing);
+    });
+
+    testWidgets('展开后三个 tab 齐全（交付物 / 待办 / 诊断）', (tester) async {
+      final sse = _FakeSseClient();
+      await openChat(tester, sse);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
+      expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
+      expect(find.byKey(const ValueKey('sidebar-tab-诊断')), findsOneWidget);
+    });
+
+    testWidgets('无待确认项时待办 tab 显示空提示，且不带徽标', (tester) async {
+      final sse = _FakeSseClient();
+      await openChat(tester, sse);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      // 无待办 → 无徽标（badge 0 不渲染）。
+      expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
+      expect(find.text('0'), findsNothing);
+    });
+
+    testWidgets('切到诊断 tab 显示 gate 面板空态（无决策时不报错）', (tester) async {
+      final sse = _FakeSseClient();
+      await openChat(tester, sse);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('sidebar-tab-诊断')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('gate-empty')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('收起按钮（侧边栏头部）也能关闭侧边栏', (tester) async {
+      final sse = _FakeSseClient();
+      await openChat(tester, sse);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('sidebar-close')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsNothing);
     });
   });
 
