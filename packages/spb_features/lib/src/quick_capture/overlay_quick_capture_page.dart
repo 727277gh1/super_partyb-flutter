@@ -76,7 +76,7 @@ class OverlayQuickCapturePage extends StatefulWidget {
     required this.submit,
     required this.dragDrop,
     this.onClose,
-    this.hintText = '说点什么…（可拖入文件）',
+    this.hintText,
     this.autofocus = true,
   });
 
@@ -84,12 +84,18 @@ class OverlayQuickCapturePage extends StatefulWidget {
   final OverlaySubmit submit;
 
   /// 拖拽能力（移动端注入 [NoopDragDropCapability]）。
+  ///
+  /// 本页用 `isSupported` 决定**提示文案**：不支持的平台不说「可拖入文件」。
+  /// 这不是纯文案问题——手机上写着「可拖入文件」而实际上没有拖拽，用户会
+  /// 试着拖、发现没反应，然后不知道该点哪里。附件功能本身两条路径都可用
+  /// （拖拽 / 文件选择按钮），所以只是提示需要跟着能力走。
   final DragDropCapability dragDrop;
 
   /// 关闭窗口的回调（Esc 空输入、提交成功后）。
   final VoidCallback? onClose;
 
-  final String hintText;
+  /// 输入框提示语。null 表示按平台能力自动选（支持拖拽时提到拖入）。
+  final String? hintText;
 
   /// 是否自动聚焦。悬浮窗应自动聚焦（唤起即可打字）。
   final bool autofocus;
@@ -139,7 +145,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   ///
   /// 用内联提示而非 SnackBar：本窗口很矮，SnackBar 会盖住输入框，且它带自动
   /// 消失计时（widget test 里需要 pumpAndSettle 等待，容易引入时序脆弱性）。
-  _Hint? _hint;
+  Hint? _hint;
 
   /// 上传进度（已完成数 / 总数）。null 表示当前不在上传阶段。
   (int, int)? _uploadProgress;
@@ -161,6 +167,14 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
 
   void _onTextChanged() => setState(() {});
 
+  /// 输入框提示语（未显式指定时按平台能力选）。
+  ///
+  /// 「可拖入文件」只在真的支持拖拽时才出现：手机上写着这句而实际没有
+  /// 拖拽，用户会试着拖、发现没反应。
+  String get _hintText =>
+      widget.hintText ??
+      (widget.dragDrop.isSupported ? '说点什么…（可拖入文件）' : '说点什么…');
+
   bool get _canSubmit =>
       !_busy && (_controller.text.trim().isNotEmpty || _attachments.isNotEmpty);
 
@@ -172,7 +186,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     if (!_canSubmit) return;
     if (_hasOversizedAttachment) {
       setState(() {
-        _hint = const _Hint('有附件超过 50 MB 或已不可读，请先移除', _HintKind.warn);
+        _hint = const Hint('有附件超过 50 MB 或已不可读，请先移除', HintKind.warn);
       });
       return;
     }
@@ -240,10 +254,10 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
           // 部分附件失败时**不关窗**：让用户看到哪几个没发成功，
           // 否则消息发出去了但少带文件，用户完全无从察觉。
           _hint = result.hasFailedUploads
-              ? _Hint(
+              ? Hint(
                   '已发送，但 ${result.failedUploads.length} 个附件失败：'
                   '${result.failedUploads.map((f) => f.filename).join('、')}',
-                  _HintKind.warn,
+                  HintKind.warn,
                 )
               : null;
         });
@@ -255,7 +269,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
         setState(() {
           _busy = false;
           _uploadProgress = null;
-          _hint = _Hint(result.error?.message ?? '提交失败', _HintKind.error);
+          _hint = Hint(result.error?.message ?? '提交失败', HintKind.error);
         });
       }
     } on SpbError catch (e) {
@@ -263,7 +277,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
       setState(() {
         _busy = false;
         _uploadProgress = null;
-        _hint = _Hint('提交失败：${e.message}', _HintKind.error);
+        _hint = Hint('提交失败：${e.message}', HintKind.error);
       });
     }
   }
@@ -399,7 +413,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
                   keyboardType: TextInputType.multiline,
                   textInputAction: TextInputAction.newline,
                   decoration: InputDecoration(
-                    hintText: widget.hintText,
+                    hintText: _hintText,
                     prefixIcon: const Icon(Icons.bolt_outlined),
                     suffixIcon: _buildSuffixIcon(),
                   ),
@@ -427,7 +441,8 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     }
     return IconButton(
       key: const ValueKey('overlay-attach'),
-      tooltip: '添加文件（也可直接拖入）',
+      // 不支持拖拽的平台不提「拖入」（见 [_hintText]）。
+      tooltip: widget.dragDrop.isSupported ? '添加文件（也可直接拖入）' : '添加文件',
       onPressed: _canSubmit || !_busy ? _pickFiles : null,
       icon: const Icon(Icons.attach_file, size: SpbSpacing.lg),
     );

@@ -338,5 +338,49 @@ void main() {
 
       expect(submit.calls.single.input, 'hi');
     });
+
+    testWidgets('不支持拖拽时不提「拖入」（手机上写着可拖入会误导）', (tester) async {
+      // 移动端走这条路：没有拖拽，但有系统文件选择器。提示文案必须跟着能力走
+      // ——写着「可拖入文件」而实际拖不动，用户会去试拖、发现没反应，然后
+      // 不知道该点哪里。
+      dragDrop = _FakeDragDrop(supported: false);
+      await tester.pumpWidget(build());
+
+      expect(find.textContaining('拖入'), findsNothing);
+      expect(find.text('说点什么…'), findsOneWidget);
+
+      // 但附件入口必须仍在（它走文件选择器，与拖拽是两条独立路径）。
+      expect(find.byKey(const ValueKey('overlay-attach')), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('overlay-attach')))
+            .tooltip,
+        '添加文件',
+      );
+    });
+
+    testWidgets('支持拖拽时保留「可拖入文件」提示（桌面端）', (tester) async {
+      // 反向断言：不能为了移动端把桌面端的提示也一起删掉。
+      dragDrop = _FakeDragDrop(supported: true);
+      await tester.pumpWidget(build());
+
+      expect(find.text('说点什么…（可拖入文件）'), findsOneWidget);
+    });
+
+    testWidgets('显式传入 hintText 时优先于平台推导', (tester) async {
+      dragDrop = _FakeDragDrop(supported: true);
+      await tester.pumpWidget(
+        _host(
+          OverlayQuickCapturePage(
+            submit: submit.call,
+            dragDrop: dragDrop,
+            hintText: '自定义提示',
+          ),
+        ),
+      );
+
+      expect(find.text('自定义提示'), findsOneWidget);
+      expect(find.textContaining('可拖入文件'), findsNothing);
+    });
   });
 }

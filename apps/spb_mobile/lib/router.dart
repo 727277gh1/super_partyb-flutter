@@ -20,6 +20,13 @@ class SpbRoutes {
   static const settings = '/settings';
   static const quickCapture = '/quick-capture';
 
+  /// 带附件的无归属输入窗。
+  ///
+  /// 与 [quickCapture] 并存而不是取代它：两者走不同端点，返回语义不同
+  /// （前者同步返回归属可导航、无附件；本路由异步投递、支持附件）。
+  /// 见 `OverlayQuickCapturePage` 的类文档。
+  static const overlay = '/overlay';
+
   /// 小程序工作台：工作列表。
   ///
   /// 挂在 shell **之外**（整屏页，无底部标签栏），沿用 [quickCapture] 的先例。
@@ -205,6 +212,11 @@ List<RouteBase> buildMobileRoutes() {
     GoRoute(
       path: SpbRoutes.quickCapture,
       builder: (context, state) => const _QuickCapturePage(),
+    ),
+    // 带附件的无归属输入窗。同样挂在 shell 之外（整屏临时页）。
+    GoRoute(
+      path: SpbRoutes.overlay,
+      builder: (context, state) => const _OverlayQuickCapturePage(),
     ),
     // 小程序工作台同样在 shell **之外**：工作列表与详情都是整屏页（详情页
     // 底部有消息输入框，再叠一层标签栏会挤掉内容）。沿用 [SpbRoutes.quickCapture]
@@ -634,6 +646,48 @@ class _QuickCapturePage extends ConsumerWidget {
         if (context.mounted) context.go(SpbRoutes.chat(outcome.groupId));
       },
       onCancel: () {
+        if (context.mounted) context.go(SpbRoutes.conversations);
+      },
+    );
+  }
+}
+
+/// 带附件的无归属输入窗。
+///
+/// ## 移动端为何也接入它
+///
+/// 移动端**没有**拖拽，但有系统文件选择器（`pickFilesForOverlay()` 走
+/// `file_selector`，Android/iOS 均已实现），故「带附件提交」在手机上同样
+/// 成立——而且手机上「拍照/选图再问」比桌面端更常见。
+///
+/// ## 为什么注入 `NoopDragDropCapability`
+///
+/// 不伪造拖拽能力：`desktop_drop` 在 Android/iOS 上不支持拖入，假装支持会
+/// 让用户看到一个永远不触发的拖拽提示。空实现下页面**只少一个拖拽区**，
+/// 「添加文件」按钮与附件列表完全照常（见 `OverlayQuickCapturePage` 的
+/// `_pickFiles`）。
+///
+/// ## 为什么提交成功后不导航
+///
+/// enqueue 是异步投递（worker 消费后才建 turn），本页拿不到 groupId。
+/// 与桌面端一致：结果由对话列表订阅 SSE 呈现。导航到「对话」列表让用户
+/// 能立刻看到新对话出现。
+class _OverlayQuickCapturePage extends ConsumerWidget {
+  const _OverlayQuickCapturePage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final useCase = ref.watch(quickCaptureEnqueueUseCaseProvider);
+
+    return OverlayQuickCapturePage(
+      submit: ({required input, required attachments, onUploadProgress}) =>
+          useCase.submit(
+            input: input,
+            attachments: attachments,
+            onUploadProgress: onUploadProgress,
+          ),
+      dragDrop: ref.watch(dragDropCapabilityProvider),
+      onClose: () {
         if (context.mounted) context.go(SpbRoutes.conversations);
       },
     );

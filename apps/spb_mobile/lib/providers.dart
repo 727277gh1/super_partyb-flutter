@@ -13,6 +13,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
@@ -469,8 +470,44 @@ final chatStreamControllerProvider = Provider.autoDispose
     });
 
 /// 无归属入口用例（悬浮输入窗用）。
+///
+/// 纯文本、同步返回归属，故提交后可以导航到目标对话。带附件的场景用
+/// [quickCaptureEnqueueUseCaseProvider]（异步投递，拿不到 groupId）。
 final quickCaptureUseCaseProvider = Provider<QuickCaptureUseCase>((ref) {
   return QuickCaptureUseCase(ref.watch(chatApiProvider));
+});
+
+/// 带附件的无归属入口用例（悬浮输入窗用）。
+///
+/// ## 与 [quickCaptureUseCaseProvider] 的关系
+///
+/// 走 `/me/quick-capture/enqueue`（异步投递，**支持附件**），而后者走
+/// `/me/quick-capture`（同步返回归属，无附件）。两条链路都保留：纯文本场景
+/// 下前者能直接导航到服务端判定的对话，体验更好。
+///
+/// ## 为什么不需要 userId
+///
+/// 与桌面端一致：`/me/*` 是用户级端点，服务端从网关注入的会话里解析身份，
+/// 不接受路径参数。故这里不读 `currentUserIdProvider`——那会平白引入一个
+/// 异步依赖（userId 未就绪时本 provider 就无法构造，而它本不依赖 userId）。
+final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>(
+  (ref) {
+    return QuickCaptureEnqueueUseCase(ref.watch(chatApiProvider));
+  },
+);
+
+/// 文件拖入能力（移动端恒为空实现：触屏没有「拖入」这个交互）。
+///
+/// ## 为什么移动端也保留这个 provider（而不是在路由里直接传常量）
+///
+/// [OverlayQuickCapturePage] 要求一个非空的能力对象。移动端注入空实现后，
+/// 页面上的「添加文件」按钮**仍然可用**——它走 `pickFilesForOverlay()`
+/// （系统文件选择器），与拖拽是两条独立路径（见 `overlay_files.dart`）。
+/// 空实现只影响「拖拽区」的存在，不影响附件功能。
+///
+/// 移动端不覆盖成真实实现：`desktop_drop` 在 Android/iOS 上不支持拖入。
+final dragDropCapabilityProvider = Provider<DragDropCapability>((ref) {
+  return const NoopDragDropCapability();
 });
 
 // ==================== 交付物同步 ====================

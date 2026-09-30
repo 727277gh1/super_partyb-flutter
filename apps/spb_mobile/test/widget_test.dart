@@ -319,6 +319,32 @@ void main() {
     expect(find.byKey(const ValueKey('quick-capture-submit')), findsOneWidget);
     // 悬浮窗在 shell 之外：不应带底部标签栏（它是整屏临时页）。
     expect(find.byType(NavigationBar), findsNothing, reason: '悬浮输入窗不应占据标签分支');
+  });
+
+  group('带附件的悬浮输入窗（/overlay）', () {
+    /// 造一个真实存在的临时文件并 mock 系统文件选择器返回它。
+    ///
+    /// ## 为什么要用**真实文件**而不是 `DroppedFile.fromBytes`
+    ///
+    /// 本组要验证的是「文件选择器 → 附件列表 → 提交带 file_id」这条**移动端
+    /// 特有**的链路（手机没有拖拽）。文件选择器只能返回磁盘路径，而
+    /// `_addFiles` 会读 `length()`——文件不存在会被标记 size=-1 并禁用提交。
+    /// 用字节来源就绕过了「路径从哪来」这个正是被测的环节。
+    ({Directory dir, File file}) makeTempFile(String name) {
+      final dir = Directory.systemTemp.createTempSync('mobile-overlay');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final file = File('${dir.path}/$name')
+        ..writeAsBytesSync(List.filled(32, 7));
+      return (dir: dir, file: file);
+    }
+
+    /// mock `file_selector` 的通道，让它返回 [paths]。
+    ///
+    /// 通道名与 method 取自 `file_selector_platform_interface` 的
+    /// `MethodChannelFileSelector`（`plugins.flutter.io/file_selector` +
+    /// `openFile`）。移动端无原生侧，不 mock 的话会抛
+    /// MissingPluginException 并被 `pickFilesForOverlay` 静默吞成空列表——
+    /// 用例会以「没添加任何附件」的形式失败，而看不出根因。
     void mockFileSelector(WidgetTester tester, List<String> paths) {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         const MethodChannel('plugins.flutter.io/file_selector'),
@@ -332,6 +358,112 @@ void main() {
       });
     }
 
+    testWidgets('/overlay 渲染带附件的输入窗（附件入口可用，不带标签栏）', (tester) async {
+      final h = await pumpApp(tester);
+
+      h.router.go(SpbRoutes.overlay);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('overlay-input')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('overlay-attach')),
+        findsOneWidget,
+        reason: '移动端无拖拽，但有系统文件选择器——这个入口必须存在',
+      );
+      // 移动端注入 NoopDragDropCapability（不伪造拖拽），故不展示拖拽区。
+      // 但附件功能不受影响：按钮走 pickFilesForOverlay。
+      expect(find.textContaining('拖入'), findsNothing);
+      expect(find.byType(NavigationBar), findsNothing, reason: '整屏临时页不应占据标签分支');
+    });
+
+    testWidgets('点「添加文件」→ 选中的文件进入待发列表', (tester) async {
+      final tmp = makeTempFile('报告.pdf');
+      mockFileSelector(tester, [tmp.file.path]);
+      final h = await pumpApp(tester);
+
+      h.router.go(SpbRoutes.overlay);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('overlay-attach')));
+      // ⚠️ 必须 runAsync：`_addFiles` 里的 `f.length()` 是真实文件 I/O，
+      // 而 testWidgets 跑在 fake async 里，真实 I/O 的 Future 不会被推进。
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('报告.pdf'),
+        findsOneWidget,
+        reason: '选中的文件必须出现在附件列表（说明文件选择器接线生效）',
+      );
+    });
+
+    testWidgets('带附件提交 → 上传得 file_id 后入队（wire 契约 file_id 必填）', (tester) async {
+      final tmp = makeTempFile('截图.png');
+      mockFileSelector(tester, [tmp.file.path]);
+
+      // 捕获入队请求体：断言带的是 **file_id**（服务端生成的句柄），
+      // 而不是展示用的文件名——后者是历史上出过的错（见 use case 类文档）。
+      Map<String, dynamic>? enqueueBody;
+
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onPost(
+            '/me/quick-capture/attachments',
+            (server) => server.reply(201, {
+              'file_id': 'ufs_file_abc',
+              'file_name': '截图.png',
+              'size': 32,
+              'mime_type': 'image/png',
+            }),
+            data: Matchers.any,
+          );
+          adapter.onPost(
+            '/me/quick-capture/enqueue',
+            (server) => server.reply(202, {'accepted': true}),
+            data: Matchers.any,
+          );
+        },
+      );
+      h.dio.interceptors.insert(
+        0,
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            if (options.path.endsWith('/me/quick-capture/enqueue')) {
+              enqueueBody = options.data is Map
+                  ? Map<String, dynamic>.from(options.data as Map)
+                  : null;
+            }
+            handler.next(options);
+          },
+        ),
+      );
+
+      h.router.go(SpbRoutes.overlay);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('overlay-attach')));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+
+      // 只有附件、无文本，也应可提交。
+      await tester.tap(find.byKey(const ValueKey('overlay-submit')));
+      // ⚠️ 必须 runAsync：提交走 `MultipartFile.fromFile`，从磁盘**真实读**
+      // 文件；fake async 不会推进这类 I/O，pumpAndSettle 会一直等到超时。
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(enqueueBody, isNotNull, reason: '提交必须真的发出入队请求（否则附件上传了却没投递）');
+      expect(enqueueBody!['attachments'], [
+        'ufs_file_abc',
+      ], reason: '附件必须用服务端返回的 file_id 作句柄，而不是文件名或路径');
+    });
   });
 
   group('小程序工作台路由（/miniapp/*，整屏页在 shell 之外）', () {
