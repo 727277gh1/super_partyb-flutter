@@ -478,6 +478,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 最近一次归约出的 gate 决策快照（同上）。
   List<GateDecision> _gateDecisions = const [];
 
+  /// 最近一次归约出的工具调用快照（平铺、非按 turn 分组）。
+  ///
+  /// 诊断 tab 的「工具调用」区是平铺视图（对齐 webapp 的 WorkbenchToolCallsPanel），
+  /// 不需要按 turn 分组——故直接从 `_items` 提取 ToolCallItem。
+  List<ToolCallItem> _toolCalls = const [];
+
   /// 正在提交的确认卡行 id（供待办面板防重复点 + 显示 spinner）。
   final _resolvingConfirmations = <String>{};
 
@@ -705,10 +711,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
               ChatSidebarTab(
                 label: '诊断',
                 icon: Icons.insights_outlined,
-                content: GroupGatePanel(
+                content: GroupDebugPanel(
+                  toolCalls: _toolCalls,
                   decisions: _gateDecisions,
-                  // tab 标签已命名「诊断」，不重复面板标题。
-                  showHeader: false,
                 ),
               ),
             ],
@@ -797,6 +802,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     // items 流推送时两者都要变，分开 setState 会多一次重建。
     setState(() {
       _items = items;
+      _toolCalls = items.whereType<ToolCallItem>().toList(growable: false);
       if (!isFirstSync && hasNew) _deliverablesReloadToken++;
     });
   }

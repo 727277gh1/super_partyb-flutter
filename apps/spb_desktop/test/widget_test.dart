@@ -1031,7 +1031,7 @@ void main() {
       expect(find.text('0'), findsNothing);
     });
 
-    testWidgets('切到诊断 tab 显示 gate 面板空态（无决策时不报错）', (tester) async {
+    testWidgets('切到诊断 tab 显示工具调用 + gate 面板（两者空态）', (tester) async {
       final sse = _FakeSseClient();
       await openChat(tester, sse);
 
@@ -1040,6 +1040,9 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('sidebar-tab-诊断')));
       await tester.pumpAndSettle();
 
+      // 诊断 tab = 工具调用 + gate 决策上下分栏（对齐 webapp 的 debug tab）。
+      expect(find.byKey(const ValueKey('debug-panel')), findsOneWidget);
+      expect(find.byKey(const ValueKey('toolcalls-empty')), findsOneWidget);
       expect(find.byKey(const ValueKey('gate-empty')), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
