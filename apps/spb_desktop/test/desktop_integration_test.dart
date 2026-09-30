@@ -106,6 +106,8 @@ class _WiringCapabilities
   @override
   Future<bool> revealPath(String path) async => false;
   @override
+  Future<bool> openFile(String path) async => false;
+  @override
   Future<void> dispose() async {}
 }
 
@@ -136,6 +138,8 @@ class _PlainCapabilities implements DesktopCapabilities {
 
   @override
   Future<bool> revealPath(String path) async => false;
+  @override
+  Future<bool> openFile(String path) async => false;
   @override
   Future<void> dispose() async {}
 }

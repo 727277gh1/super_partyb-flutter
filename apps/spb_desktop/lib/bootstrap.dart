@@ -574,6 +574,39 @@ class PlatformDesktopCapabilities
       SpbLog.warn('revealPath 校验目录失败', {'path': path, 'error': '$e'});
       return false;
     }
+    return _spawnSystemOpen(path, what: '目录');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 用系统默认程序打开文件
+  // ---------------------------------------------------------------------------
+
+  @override
+  Future<bool> openFile(String path) async {
+    // 校验**文件**存在（不是目录）——与 revealPath 的区别见接口文档：
+    // 不存在的路径 spawn 一个系统程序只会让用户以为应用坏了。
+    try {
+      if (!await File(path).exists()) {
+        SpbLog.warn('openFile 文件不存在', {'path': path});
+        return false;
+      }
+    } on Object catch (e) {
+      SpbLog.warn('openFile 校验文件失败', {'path': path, 'error': '$e'});
+      return false;
+    }
+    return _spawnSystemOpen(path, what: '文件');
+  }
+
+  /// 按平台 spawn 系统「打开」命令。
+  ///
+  /// ## 为什么 [revealPath] 与 [openFile] 能共用这一条 spawn 路径
+  ///
+  /// 在 Linux/macOS 上，「用默认程序打开文件」与「在文件管理器中打开目录」
+  /// 走的是**同一个**命令（`xdg-open` / `open`）——系统按目标类型分派。
+  /// 两者的差别在**校验**（目录 vs 文件）与**调用意图**，不在 spawn 方式。
+  /// 故抽出本函数，避免复制三份平台分支（本机只能验证 Linux 分支，复制
+  /// 未验证的分支更容易漂移）。
+  Future<bool> _spawnSystemOpen(String path, {required String what}) async {
     try {
       ProcessResult result;
       // 按平台 spawn（本机仅验证 Linux；Windows/macOS 分支写了但无运行环境验证，
@@ -585,19 +618,19 @@ class PlatformDesktopCapabilities
       } else if (Platform.isWindows) {
         result = await Process.run('explorer', [path]);
       } else {
-        SpbLog.warn('revealPath 当前平台不支持', {'path': path});
+        SpbLog.warn('当前平台不支持打开路径', {'path': path});
         return false;
       }
       if (result.exitCode != 0) {
-        SpbLog.warn(
-          'revealPath spawn 返回非 0',
-          {'path': path, 'exit': result.exitCode},
-        );
+        SpbLog.warn('打开$what spawn 返回非 0', {
+          'path': path,
+          'exit': result.exitCode,
+        });
         return false;
       }
       return true;
     } on Object catch (e) {
-      SpbLog.warn('revealPath spawn 异常', {'path': path, 'error': '$e'});
+      SpbLog.warn('打开$what spawn 异常', {'path': path, 'error': '$e'});
       return false;
     }
   }

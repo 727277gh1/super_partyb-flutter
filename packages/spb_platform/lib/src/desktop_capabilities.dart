@@ -178,6 +178,30 @@ abstract interface class DesktopCapabilities {
   // false 时提示用户一次，不写 try/catch。
   Future<bool> revealPath(String path);
 
+  /// 用系统默认程序打开**文件**（非目录）。
+  ///
+  /// ## 为什么与 [revealPath] 分开两个方法而不是合一个
+  ///
+  /// 两者语义不同、目标类型不同，且各有明确的调用场景：
+  /// - [revealPath]：在文件管理器里**定位**条目（用户想找文件在哪）；
+  /// - [openFile]：用默认程序**打开**文件（用户想看内容）。
+  ///
+  /// 合成一个「按类型自动决定行为」的方法会把「我要定位还是打开」这个**意图**
+  /// 从调用点抹掉——调用方本想打开一个文件，却因传入了目录路径而被定位，
+  /// 或反之。分开后调用点表达的就是它的真实意图。
+  ///
+  /// 这也与 webapp 的两个独立命令（`open_local_file` / `reveal_local_file`）
+  /// 对齐。
+  ///
+  /// ## 为什么校验的是「文件存在」而不是「目录存在」
+  ///
+  /// 同 [revealPath] 的谨慎：不存在的路径 spawn 一个系统程序只会让用户以为
+  /// 应用坏了。故先校验（[File] 而非 [Directory]），再 spawn。
+  ///
+  /// 返回 true 表示成功发起；false 表示不支持、文件不存在或 spawn 失败。
+  /// **不抛异常**（同 [revealPath]）。
+  Future<bool> openFile(String path);
+
   /// 释放资源。
   Future<void> dispose();
 }
@@ -432,6 +456,12 @@ class NoopDesktopCapabilities implements DesktopCapabilities {
   @override
   Future<bool> revealPath(String path) async {
     SpbLog.debug('revealPath 在当前平台不可用', {'path': path});
+    return false;
+  }
+
+  @override
+  Future<bool> openFile(String path) async {
+    SpbLog.debug('openFile 在当前平台不可用', {'path': path});
     return false;
   }
 

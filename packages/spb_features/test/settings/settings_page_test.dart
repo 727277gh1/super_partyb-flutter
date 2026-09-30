@@ -899,6 +899,8 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
 
   @override
   Future<bool> revealPath(String path) async => false;
+  @override
+  Future<bool> openFile(String path) async => false;
 
   @override
   Future<void> dispose() async {}
