@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_platform/spb_platform.dart';
 
@@ -149,6 +153,10 @@ List<RouteBase> buildDesktopRoutes() {
           builder: (context, state) => const _SearchPage(),
         ),
         GoRoute(
+        ),
+        GoRoute(
+        ),
+        GoRoute(
           path: 'settings',
           builder: (context, state) => const _SettingsPage(),
           routes: [
@@ -189,17 +197,26 @@ class _LoginPage extends ConsumerWidget {
 /// 管理动作（改名/归档/删除）交给 `groupActionProvider`：它把领域用例的异常
 /// 翻译成用户能看懂的一句话（见 provider 说明）。页面自己只负责收集意图与
 /// 把权威结果反映到列表上。
+///
+/// ## 新建对话为什么直接调 `api.createGroup` 而不另设 provider
+///
+/// `groupActionProvider` 之所以存在，是因为管理动作有**多种结果语义**
+/// （应用成功 / 服务端业务拒绝），需要一个 `GroupActionResult` 来承载。新建只有
+/// 一种结果：拿到 [ChatGroup] 或抛错。为它单建一个 provider 只会多一层
+/// 间接调用，不会带来任何翻译能力（错误文案由页面统一展示 `e.message`）。
 class _HomePage extends ConsumerWidget {
   const _HomePage();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
+    // 角标数量：拉取失败静默为 0（不阻断对话列表）。
     return GroupListPage(
       api: api,
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       onSearch: () => context.go(SpbRoutes.search),
+      onCreateGroup: (title) => api.createGroup(title: title),
     );
   }
 }
@@ -216,6 +233,9 @@ class _SearchPage extends ConsumerWidget {
     return SearchPage(
       search: ref.watch(searchChatProvider),
       onOpenHit: (hit) => context.go(SpbRoutes.chat(hit.groupId)),
+      groupTitleOf: (gid) => _titles[gid],
+      onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
+      onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
 }
@@ -367,6 +387,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             });
       },
     );
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return;
+    final ufs = ref.read(ufsApiProvider);
+    final res = await ufs.download(fileId);
+    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return;
+    final dir = await getApplicationSupportDirectory();
+    final target = Directory(p.join(dir.path, 'downloads', 'agent'));
+    if (!await target.exists()) {
+      await target.create(recursive: true);
+    }
+    final safeName = p.basename(file.fileName.isEmpty ? 'agent-file' : file.fileName);
+    await File(p.join(target.path, safeName))
+        .writeAsBytes(res.bytes!, flush: true);
   }
 
   /// 选项文案映射为服务端 action。
@@ -454,6 +487,8 @@ class _SettingsPage extends ConsumerWidget {
       capabilities: ref.watch(desktopCapabilitiesProvider),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
+      loadLaunchAtStartup: () =>
+      setLaunchAtStartup: (enabled) =>
     );
   }
 }

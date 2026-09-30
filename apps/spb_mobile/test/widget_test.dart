@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -48,8 +50,8 @@ class _FakeSseClient extends SseClient {
   @override
   SseState get state => SseState.connected;
 
-  @override
-  Future<void> connect({required String path}) async {}
+  /// `connect` 收到的全部 path（按调用顺序）。
+  final connectedPaths = <String>[];
 
   @override
   Future<void> resume() async {}
@@ -300,6 +302,19 @@ void main() {
     expect(find.byKey(const ValueKey('quick-capture-submit')), findsOneWidget);
     // 悬浮窗在 shell 之外：不应带底部标签栏（它是整屏临时页）。
     expect(find.byType(NavigationBar), findsNothing, reason: '悬浮输入窗不应占据标签分支');
+    void mockFileSelector(WidgetTester tester, List<String> paths) {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/file_selector'),
+        (call) async => call.method == 'openFile' ? paths : null,
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/file_selector'),
+          null,
+        );
+      });
+    }
+
   });
 
   group('小程序工作台路由（/miniapp/*，整屏页在 shell 之外）', () {
@@ -458,6 +473,83 @@ void main() {
 
       expect(h.router.state.matchedLocation, SpbRoutes.works);
     });
+  });
+
+  testWidgets('对话列表新建入口：POST /chat/groups 后进入新对话', (tester) async {
+    final h = await pumpApp(
+      tester,
+      sseClient: _FakeSseClient(),
+      beforePump: (adapter) {
+        // `data` 精确匹配请求体：同时验证「标题确实发出去了」——
+        // 只断言导航会漏掉「回调拿了标题却没用」的缺陷。
+        adapter.onPost(
+          '/chat/groups',
+          (server) => server.reply(201, {
+            'id': 'g_new',
+            'user_id': 'usr_REAL',
+            'title': '新对话',
+            'status': 'active',
+            'created_at': '2024-03-05T08:00:00Z',
+            'updated_at': '2024-03-05T08:09:10Z',
+          }),
+          data: {'title': '新对话'},
+        );
+        // 跳转目标对话页会发这些请求（与 StatefulShellRoute 用例同）。
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/g_new/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'g_new', 'limit': 20},
+        );
+      },
+    );
+
+    expect(
+      find.byKey(const ValueKey('group-list-create')),
+      findsOneWidget,
+      reason: '移动端同样需要开新对话的入口',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '新对话',
+    );
+    // 必须 pump 一帧让确认按钮解除禁用（见 GroupListPage 测试里的说明）。
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
+
+    // 不能 pumpAndSettle：对话页的加载态是无限动画。
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      h.router.state.matchedLocation,
+      SpbRoutes.chat('g_new'),
+      reason: '建完对话应当直接进入它，而不是留在列表页',
+    );
   });
 
   testWidgets('切到设置标签渲染完整设置页', (tester) async {
@@ -689,4 +781,5 @@ void main() {
 
     expect(h.container.read(devUserHeaderOverrideProvider), isNull);
   });
+
 }

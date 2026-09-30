@@ -81,8 +81,17 @@ class _FakeSseClient extends SseClient {
   @override
   Future<void> connect({required String path}) async {
     connectedPaths.add(path);
+    _hasPath = true;
   }
 
+  /// `resume` 被调用的次数。
+  bool _hasPath = false;
+
+  /// 复刻真实 `resume()` 的 `if (_path == null) return;` 早退。
+  ///
+  /// 本用例**不**依赖它来抓「family 键写错」（那件事靠共享 SseClient 兜住了，
+  /// 见用例注释）；但 fake 仍应与真实实现同构——否则将来 `resume` 增加前置条件
+  /// 时，测试会给出与生产不符的结论。
   @override
   Future<void> resume() async {}
 
@@ -298,6 +307,8 @@ void main() {
         ],
       }),
       queryParameters: {'limit': 30, 'offset': 0},
+      (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+      queryParameters: {'status': 'pending', 'limit': 50},
     );
 
     final router = GoRouter(
@@ -868,6 +879,78 @@ void main() {
     expect(user.id, 'usr_1');
     expect(user.isAdmin, isFalse);
   });
+
+  testWidgets('对话列表新建入口：POST /chat/groups 后进入新对话', (tester) async {
+    final h = await pumpApp(
+      tester,
+      sseClient: _FakeSseClient(),
+      beforePump: (adapter) {
+        // 用 `data` 精确匹配请求体：这样能同时验证「标题确实发出去了」
+        // ——只断言导航会漏掉「回调拿了标题却没用」的缺陷。
+        adapter.onPost(
+          '/chat/groups',
+          (server) => server.reply(201, {
+            'id': 'g_new',
+            'user_id': 'usr_REAL',
+            'title': '新对话',
+            'status': 'active',
+            'created_at': '2024-03-05T08:00:00Z',
+            'updated_at': '2024-03-05T08:09:10Z',
+          }),
+          data: {'title': '新对话'},
+        );
+        // 跳转目标对话页会发这些请求（与「搜索跳转」用例同）。
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/g_new/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'g_new', 'limit': 20},
+        );
+      },
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '新对话',
+    );
+    // 必须 pump 一帧让确认按钮解除禁用（见 GroupListPage 测试里的说明）。
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
+
+    // 不能 pumpAndSettle：对话页的加载态是无限动画（同搜索跳转用例）。
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      h.router.state.matchedLocation,
+      SpbRoutes.chat('g_new'),
+      reason: '建完对话应当直接进入它，而不是留在列表页',
+    );
+  });
+
 }
 
 /// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。
@@ -905,6 +988,7 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   @override
   Future<String?> pickDirectory({String? title}) async => null;
 
+  @override
   @override
   Future<void> dispose() async {}
 }

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 
@@ -61,6 +62,7 @@ void main() {
   Future<void> pumpPage(
     WidgetTester tester, {
     void Function(ChatGroup)? onOpenGroup,
+    Future<ChatGroup> Function(String)? onCreateGroup,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -68,12 +70,19 @@ void main() {
         home: GroupListPage(
           api: api,
           onOpenGroup: onOpenGroup,
+          onCreateGroup: onCreateGroup,
           pageSize: pageSize,
         ),
       ),
     );
     await settleIo(tester);
   }
+
+  /// 一份服务端 `POST /chat/groups` 的响应体（`groupToDict` 的形状）。
+  Map<String, dynamic> createdJson({
+    String id = 'g_new',
+    String title = '新对话',
+  }) => groupJson(id: id, title: title);
 
   testWidgets('渲染对话列表（标题 + 相对时间）', (tester) async {
     mockPage(
@@ -163,6 +172,164 @@ void main() {
     await settleIo(tester);
 
     expect(find.text('第二页的对话'), findsOneWidget);
+  });
+
+  testWidgets('新建对话：输入标题后回调收到 trim 后的标题', (tester) async {
+    final titles = <String>[];
+    mockPage(
+      offset: 0,
+      items: [groupJson(id: 'g1', title: '已有的')],
+    );
+    await pumpPage(
+      tester,
+      onCreateGroup: (title) async {
+        titles.add(title);
+        return ChatGroup.fromJson(createdJson(title: title));
+      },
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '  新对话  ',
+    );
+    // ⚠️ 必须 pump 一帧再点确认：确认按钮的可用性由 `ValueListenableBuilder`
+    // 监听输入框决定，而 `tester.enterText` **不推进帧**（它只调
+    // `testTextInput.enterText` + `idle()`），此时树上的按钮还是「初始为空」
+    // 那个**禁用**实例，`tap` 会静默失效（实测：不 pump 则回调一次都不发）。
+    // 真实使用中每帧都在推进，故这不是实现缺陷。
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(titles, hasLength(1));
+    expect(titles.single, '新对话', reason: '首尾空白要去掉，否则列表里会出现看不见的前导空格');
+  });
+
+  testWidgets('新建对话：成功后把新对话插到列表最前并进入该对话', (tester) async {
+    final opened = <ChatGroup>[];
+    mockPage(
+      offset: 0,
+      items: [groupJson(id: 'g1', title: '已有的')],
+    );
+    await pumpPage(
+      tester,
+      onOpenGroup: opened.add,
+      onCreateGroup: (title) async =>
+          ChatGroup.fromJson(createdJson(id: 'g_new', title: title)),
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '刚建的',
+    );
+    // 先 pump 一帧让确认按钮解除禁用（理由见「trim 后的标题」用例）。
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
+    await tester.pumpAndSettle();
+
+    // 列表里能看到新项（不必等下拉刷新）。
+    expect(find.text('刚建的'), findsOneWidget);
+    // 直接进入该对话——建完还停在列表页会让用户多一步。
+    expect(opened, hasLength(1));
+    expect(opened.single.id, 'g_new');
+  });
+
+  testWidgets('新建对话：取消不发请求', (tester) async {
+    var called = 0;
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(
+      tester,
+      onCreateGroup: (title) async {
+        called++;
+        return ChatGroup.fromJson(createdJson());
+      },
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    expect(called, 0, reason: '取消是明确的「什么都不做」');
+  });
+
+  testWidgets('新建对话：空标题时确认按钮禁用（连空格也算空）', (tester) async {
+    var called = 0;
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(
+      tester,
+      onCreateGroup: (title) async {
+        called++;
+        return ChatGroup.fromJson(createdJson());
+      },
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+
+    FilledButton confirmButton() => tester.widget<FilledButton>(
+      find.byKey(const ValueKey('group-create-confirm')),
+    );
+
+    // 初始为空 → 禁用。
+    expect(confirmButton().onPressed, isNull);
+
+    // 纯空格同样禁用：服务端会拒绝空标题，本地拦掉省一次必然失败的往返。
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '   ',
+    );
+    await tester.pump();
+    expect(confirmButton().onPressed, isNull);
+
+    // 填入真实标题后恢复可点。
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '有名字了',
+    );
+    await tester.pump();
+    expect(confirmButton().onPressed, isNotNull);
+
+    expect(called, 0, reason: '全程没有点下确认，不应产生任何请求');
+  });
+
+  testWidgets('新建对话：失败时提示且不进入对话', (tester) async {
+    final opened = <ChatGroup>[];
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(
+      tester,
+      onOpenGroup: opened.add,
+      onCreateGroup: (title) async => throw const NetworkError('网络请求失败'),
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('group-create-field')),
+      '会失败的',
+    );
+    // 先 pump 一帧让确认按钮解除禁用（理由见「trim 后的标题」用例）。
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('创建失败'), findsOneWidget);
+    expect(opened, isEmpty, reason: '没建成就跳走会让用户以为成功了，然后看到一个不存在的对话');
+  });
+
+  testWidgets('未注入 onCreateGroup 时不展示新建入口', (tester) async {
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(tester);
+
+    expect(
+      find.byKey(const ValueKey('group-list-create')),
+      findsNothing,
+      reason: '入口存在但点了没反应，比没有入口更糟（同 onSearch / onOpenWorks 约定）',
+    );
   });
 
   testWidgets('offset 分页去重：重复返回同一 id 不产生重复项', (tester) async {

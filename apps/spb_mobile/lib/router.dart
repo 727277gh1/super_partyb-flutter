@@ -1,8 +1,13 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 
 import 'providers.dart';
@@ -228,12 +233,18 @@ class _AppShell extends StatelessWidget {
 ///
 /// 管理动作（改名/归档/删除）交给 `groupActionProvider`（异常 → 用户可读提示
 /// 的翻译在那里）。长按条目打开菜单。
+///
+/// 新建对话直接调 `api.createGroup`：它只有「拿到 ChatGroup 或抛错」一种结果，
+/// 没有 `groupActionProvider` 那种多结果语义需要归一化。导航复用 `onOpenGroup`
+/// （见桌面端同一处的说明）。
 class _ConversationsTab extends ConsumerWidget {
   const _ConversationsTab();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
+    final pendingCount = ref
+        .maybeWhen(data: (n) => n, orElse: () => 0);
     return GroupListPage(
       api: api,
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
@@ -241,6 +252,10 @@ class _ConversationsTab extends ConsumerWidget {
       onSearch: () => context.go(SpbRoutes.search),
       // 工作台（小程序 BFF）只有移动端接——它是为小程序/移动端做的投影层。
       onOpenWorks: () => context.push(SpbRoutes.works),
+      // 不需要 userId：身份来自网关注入的 `X-User-ID`，请求体里没有 user_id。
+      onCreateGroup: (title) => api.createGroup(title: title),
+      groupTitleOf: (gid) => _titles[gid],
+      onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
 }
@@ -258,6 +273,7 @@ class _SearchPage extends ConsumerWidget {
     return SearchPage(
       search: ref.watch(searchChatProvider),
       onOpenHit: (hit) => context.push(SpbRoutes.chat(hit.groupId)),
+      onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
 }
@@ -451,6 +467,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             .catchError((Object e) => debugPrint('确认提交失败: $e'));
       },
     );
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return;
+    final ufs = ref.read(ufsApiProvider);
+    final res = await ufs.download(fileId);
+    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return;
+    final dir = await getApplicationSupportDirectory();
+    final target = Directory(p.join(dir.path, 'downloads', 'agent'));
+    if (!await target.exists()) {
+      await target.create(recursive: true);
+    }
+    final safeName = p.basename(file.fileName.isEmpty ? 'agent-file' : file.fileName);
+    await File(p.join(target.path, safeName))
+        .writeAsBytes(res.bytes!, flush: true);
   }
 
   static String _optionToAction(String option) => switch (option) {
@@ -472,6 +501,13 @@ class _WorksPage extends ConsumerWidget {
     return WorksPage(
       loadWorks: ref.watch(loadMiniappWorksProvider),
       onOpenWork: (work) => context.push(SpbRoutes.work(work.id)),
+      // 新建后直接进详情：新工作的标题是占位符「新会话」，列表里一堆同名条目
+      // 看不出哪个是自己刚建的；进详情才能看到状态与进度。
+      //
+      // ## 为什么在这里导航，而不是在 WorksPage 内部
+      //
+      // 导航目标是装配层的事（与 `onOpenWork` 同一约定）。且本页拿到的是
+      // `workId` 而非完整的 `MiniappWork`，页面内部造不出来。
     );
   }
 }

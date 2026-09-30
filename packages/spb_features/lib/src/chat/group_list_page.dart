@@ -33,6 +33,7 @@ class GroupListPage extends StatefulWidget {
     this.onGroupAction,
     this.onSearch,
     this.onOpenWorks,
+    this.onCreateGroup,
     this.pageSize = 30,
   });
 
@@ -40,6 +41,18 @@ class GroupListPage extends StatefulWidget {
 
   /// 点击某个对话时的回调。
   final void Function(ChatGroup group)? onOpenGroup;
+
+  /// 新建对话：入参是用户在对话框里输入的标题，返回值是服务端创建的**权威**
+  /// [ChatGroup]。
+  ///
+  /// ## 为什么页面不自己调 `ChatApi.createGroup`
+  ///
+  /// 与 [onGroupAction] 同一理由：页面只收集意图（对话框里的标题），请求与错误
+  /// 翻译归调用方。页面拿返回值做两件事——插到列表最前、交给 [onOpenGroup]
+  /// 导航进该对话。
+  ///
+  /// 为 null 时**不展示**新建入口：入口存在但点了没反应，比没有入口更糟。
+  final Future<ChatGroup> Function(String title)? onCreateGroup;
 
   /// 执行管理动作（改名/归档/取消归档/删除）。
   ///
@@ -84,6 +97,12 @@ class _GroupListPageState extends State<GroupListPage> {
   bool _loading = false;
   bool _hasMore = true;
   SpbError? _error;
+
+  /// 正在创建对话（避免重复提交）。
+  ///
+  /// 与 [_busyGroupId] 同理：创建是一次往返请求，期间再点一次 `+` 会建出两个
+  /// 对话，而用户只会看到一个（第二个被导航覆盖）。这里把按钮禁用掉。
+  bool _creating = false;
 
   /// 正在执行管理动作的 group id。
   ///
@@ -161,6 +180,51 @@ class _GroupListPageState extends State<GroupListPage> {
     await _loadMore();
   }
 
+  /// 收集标题并创建对话，成功后进入该对话。
+  Future<void> _createGroup() async {
+    final handler = widget.onCreateGroup;
+    if (handler == null || _creating) return;
+
+    final title = await showDialog<String>(
+      context: context,
+      builder: (_) => const _CreateGroupDialog(),
+    );
+    final trimmed = title?.trim();
+    // 空标题服务端会拒绝（且「建一个没名字的对话」几乎不可能是用户意图）。
+    // 对话框已在空输入时禁用确认按钮，这里是兜底（如输入全是空格）。
+    if (trimmed == null || trimmed.isEmpty) return;
+    if (!mounted) return;
+
+    setState(() => _creating = true);
+    ChatGroup? created;
+    try {
+      created = await handler(trimmed);
+    } on SpbError catch (e) {
+      // 网络/解析失败只提示、不崩溃（与 [_handleAction] 的容错策略一致）。
+      //
+      // 展示的是 `SpbError.message` 原文，**未经 app 层翻译**——与
+      // [_handleAction] 不同：那条路径的错误文案由调用方通过
+      // `GroupActionRejected(_describeGroupActionError(e))` 预先整理成人话，
+      // 而本回调的签名（返回 [ChatGroup] / 抛错）没有承载文案的位置。
+      // 对新建而言实际会出现的失败是网络中断与服务端 5xx，`message` 已足以定位；
+      // 若将来需要与服务端错误体对齐文案，应统一两个 app 各自私有的
+      // `_describeGroupActionError`，而不是在这里再分叉一份。
+      if (mounted) _showMessage('创建失败：${e.message}', isError: true);
+    } finally {
+      if (mounted) setState(() => _creating = false);
+    }
+    if (!mounted || created == null) return;
+
+    // 插到列表最前：服务端按 updated_at 倒序，刚创建的必然在最前。
+    // 经 _seenIds 登记，与 offset 分页去重保持同一套判据。
+    setState(() {
+      if (_seenIds.add(created!.id)) _groups.insert(0, created);
+    });
+
+    // 导航交给调用方（页面不碰路由）。
+    widget.onOpenGroup?.call(created);
+  }
+
   /// 收集意图并交给调用方，然后按权威结果更新本地列表。
   Future<void> _handleAction(ChatGroup group, GroupAction action) async {
     final handler = widget.onGroupAction;
@@ -221,6 +285,14 @@ class _GroupListPageState extends State<GroupListPage> {
       appBar: AppBar(
         title: const Text('对话'),
         actions: [
+          if (widget.onCreateGroup != null)
+            IconButton(
+              key: const ValueKey('group-list-create'),
+              icon: const Icon(Icons.add),
+              tooltip: '新建对话',
+              // 创建往返期间禁用：否则连点会建出两个对话。
+              onPressed: _creating ? null : _createGroup,
+            ),
           if (widget.onSearch != null)
             IconButton(
               key: const ValueKey('group-list-search'),
@@ -574,6 +646,67 @@ class _RenameDialogState extends State<_RenameDialog> {
           key: const ValueKey('group-rename-confirm'),
           onPressed: () => Navigator.of(context).pop(_controller.text),
           child: const Text('保存'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 新建对话对话框。
+///
+/// ## 为什么与 [_RenameDialog] 分开而不是加一个 `mode`
+///
+/// 两者只在「标题/按钮文案」上相似，行为要求不同：重命名时原标题已存在，空值
+/// 只需「不改动」；新建时输入框**初始为空**，若沿用「关掉对话框再丢弃」的做法，
+/// 用户在空输入下点确认会看到对话框莫名消失且毫无反馈。故这里用
+/// [ValueListenableBuilder] 在空输入时**禁用**确认按钮，把非法状态挡在提交前。
+///
+/// 仍是 StatefulWidget 的理由与 [_RenameDialog] 相同：对话框有退场动画，
+/// 期间 `TextField` 仍在树上读 controller，交给 State 管理 dispose 时序才安全。
+class _CreateGroupDialog extends StatefulWidget {
+  const _CreateGroupDialog();
+
+  @override
+  State<_CreateGroupDialog> createState() => _CreateGroupDialogState();
+}
+
+class _CreateGroupDialogState extends State<_CreateGroupDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const ValueKey('group-create-dialog'),
+      title: const Text('新建对话'),
+      content: TextField(
+        key: const ValueKey('group-create-field'),
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: '标题'),
+        onSubmitted: (v) => Navigator.of(context).pop(v),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        // 用 trim 后的空判定，而不是 `isEmpty`：全空格同样应被禁用
+        // （服务端会拒绝空标题，本地拦掉省一次必然失败的往返）。
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _controller,
+          builder: (context, value, _) => FilledButton(
+            key: const ValueKey('group-create-confirm'),
+            onPressed: value.text.trim().isEmpty
+                ? null
+                : () => Navigator.of(context).pop(_controller.text),
+            child: const Text('创建'),
+          ),
         ),
       ],
     );
