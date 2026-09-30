@@ -1,35 +1,60 @@
 import 'package:flutter/material.dart';
 
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:spb_design/spb_design.dart';
 
-/// Agent 回复气泡（左对齐）。
+/// Agent 回复气泡（左对齐），用 [GptMarkdown] 渲染 Markdown。
 ///
-/// ## 流式光标
+/// ## 流式
 ///
-/// [isStreaming] 为 true 时在文本末尾显示一个闪烁光标。归约层保证
-/// `AssistantMessageItem.isStreaming` 只在「该段仍在接收增量」时为 true，
-/// 权威帧到达后置 false。
+/// [isStreaming] 为 true 时启用逐字 reveal 动画（`fade`），由 `gpt_markdown`
+/// 内部驱动：settled 前缀缓存、只重建变化中的尾部，故长回复的单帧成本不随
+/// 回复增长。`isStreaming` 置 false 时残余文本 fast-forward 收尾。
 ///
-/// 光标用 [SelectableText] 无法内联（无法在文本流中间插 widget），故此处用
-/// `Text.rich` + 一个 `WidgetSpan` 承载光标。这带来一个取舍：**流式中的文本
-/// 不可选择**，而完成后的文本可选择。这是刻意的——流式文本每几十毫秒变一次，
-/// 允许选择只会让用户抓到一半就失效。
+/// reveal 动画本身就是「仍在生成」的视觉信号，取代了旧版手工拼接的闪烁光标
+/// （`SelectableText` 无法在文本流中间内联 widget，`GptMarkdown` 同理；与其
+/// 把光标单独摆一行，不如交给库内置的 reveal）。
+///
+/// ## 选择
+///
+/// 完成后（`isStreaming == false`）用 [SelectionArea] 包裹以支持选择；流式中
+/// 尾部每帧重建、选择锚点不稳，故**不**包 [SelectionArea]。这与旧版「流式
+/// 不可选、完成后可选」的取舍一致。
+///
+/// ## 数学 / 链接
+///
+/// 默认 `$...$` **不**当 LaTeX（`useDollarSignsForLatex` 留 false）——agent
+/// 回复里 `$HOME` 这类 shell 变量远比公式常见，误判代价更高。`\(...\)` /
+/// `\[...\]` 仍按数学渲染（解析失败自动回退为原文本）。
+///
+/// 链接默认**不**打开：打开 URL 属平台 IO，应由 app 层注入 [onLinkTap]
+/// （与 [onDownloadAgentFile] 同一原则：页面只收集意图）。为 null 时链接
+/// 照常渲染样式，但不响应点击。
 class AssistantMessageBubble extends StatelessWidget {
   const AssistantMessageBubble({
     super.key,
     required this.text,
     this.isStreaming = false,
+    this.onLinkTap,
   });
 
   final String text;
+
+  /// 该段是否仍在接收增量。true 时启用 reveal 动画。
   final bool isStreaming;
+
+  /// 链接点击回调。null 时链接不响应点击（仅样式）。
+  ///
+  /// 签名与 `GptMarkdown.onLinkTap` 一致：`(url, title)`。
+  final void Function(String url, String title)? onLinkTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final dir = Directionality.of(context);
 
-    // 空文本 + 流式中：显示「思考中」占位，避免出现一个 0 高度气泡
+    // 空文本 + 流式中：显示「正在生成」占位，避免出现一个 0 高度气泡
     // （用户会以为卡住）。
     if (text.isEmpty && isStreaming) {
       return Padding(
@@ -52,9 +77,25 @@ class AssistantMessageBubble extends StatelessWidget {
       );
     }
 
-    final body = Text(
+    final md = GptMarkdown(
       text,
+      // 流式逐字淡入；非流式时 reveal 引擎直接 snap 到末尾，无动画、无 ticker。
+      animation: GptMarkdownAnimation.fade,
+      // 块级元素（表格 / 代码围栏 / 公式）淡入。**不用** growIn——它会改变
+      // 布局高度，与 `conversation_page` 的「跟随底部」逻辑打架（见其
+      // `_followBottom` 注释：流式期间 maxScrollExtent 惰性估算，块高度
+      // 抖动会让跟随断续）。
+      blockAnimation: GptMarkdownBlockAnimation.fadeIn,
+      isStreaming: isStreaming,
+      // 桌面端更快收尾：reveal 不应明显落后于 token 流。引擎在落后超过
+      // ~0.4s 时会自动提速追赶，这里只是抬高基线。
+      charactersPerSecond: 600,
+      textDirection: dir,
       style: textTheme.bodyMedium?.copyWith(color: scheme.onSurface),
+      styleSheet: _styleSheet(scheme),
+      onLinkTap: onLinkTap == null
+          ? null
+          : (url, title) => onLinkTap!(url, title),
     );
 
     return Align(
@@ -65,67 +106,44 @@ class AssistantMessageBubble extends StatelessWidget {
           color: scheme.surfaceContainerHighest,
           borderRadius: SpbRadius.bubbleAll,
         ),
-        child: isStreaming
-            ? Text.rich(
-                TextSpan(
-                  text: text,
-                  children: [
-                    WidgetSpan(
-                      alignment: PlaceholderAlignment.middle,
-                      child: _StreamingCursor(
-                        // 稳定 key：测试与无障碍定位用。
-                        key: const ValueKey('assistant-streaming-cursor'),
-                        color: scheme.primary,
-                      ),
-                    ),
-                  ],
-                ),
-                style: textTheme.bodyMedium?.copyWith(color: scheme.onSurface),
-              )
-            : body,
+        child: isStreaming ? md : SelectionArea(child: md),
       ),
     );
   }
-}
 
-/// 流式光标：一个缓慢淡入淡出的方块。
-class _StreamingCursor extends StatefulWidget {
-  const _StreamingCursor({super.key, required this.color});
-
-  final Color color;
-
-  @override
-  State<_StreamingCursor> createState() => _StreamingCursorState();
-}
-
-class _StreamingCursorState extends State<_StreamingCursor>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    // 800ms 一个完整循环（淡入 + 淡出），比 SpbDuration 系列慢——
-    // 光标是「背景呼吸」而非交互反馈，太快会抢注意力。
-    duration: const Duration(milliseconds: 800),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _controller,
-      child: Container(
-        width: SpbSpacing.sm,
-        height: SpbSpacing.lg,
-        margin: const EdgeInsets.only(left: SpbSpacing.xxs),
-        decoration: BoxDecoration(
-          color: widget.color,
-          borderRadius: const BorderRadius.all(Radius.circular(SpbRadius.xs)),
+  /// 用本仓库设计令牌微调 Markdown 各元素的呈现。
+  ///
+  /// 只覆盖**外观**（圆角 / 间距 / 颜色取自 ColorScheme），结构交给库默认。
+  /// 字段留空即回退到库默认值，故追加样式不会改动未提及的元素。
+  static GptMarkdownStyleSheet _styleSheet(ColorScheme scheme) =>
+      GptMarkdownStyleSheet(
+        // 代码块：比气泡底色再沉一档，并收敛圆角到设计令牌。
+        codeBlock: CodeBlockStyle(
+          backgroundColor: scheme.surfaceContainerHigh,
+          borderColor: scheme.outlineVariant,
+          borderRadius: const Radius.circular(SpbRadius.sm),
         ),
-      ),
-    );
-  }
+        // 行内 `code`：与代码块同色系，保持视觉一致。
+        inlineCode: InlineCodeStyle(
+          backgroundColor: scheme.surfaceContainerHigh,
+          borderColor: scheme.outlineVariant,
+          borderRadius: const Radius.circular(SpbRadius.xs),
+        ),
+        // 引用条：用 outline 而非默认的 onSurfaceVariant，与卡片边框同语义。
+        blockQuote: BlockQuoteStyle(
+          barColor: scheme.outline,
+          backgroundColor: scheme.surfaceContainerHigh,
+        ),
+        // 表格：单元格内边距与卡片对齐。
+        table: TableStyle(
+          borderColor: scheme.outlineVariant,
+          cellPadding: const EdgeInsets.symmetric(
+            horizontal: SpbSpacing.sm,
+            vertical: SpbSpacing.xs,
+          ),
+          headerBackground: scheme.surfaceContainerHigh,
+        ),
+        // 链接：用 primary 色显式标出（默认取 theme.linkColor，桌面端未配置）。
+        link: LinkStyle(color: scheme.primary),
+      );
 }

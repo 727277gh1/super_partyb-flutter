@@ -44,6 +44,7 @@ class ConversationPage extends StatefulWidget {
     this.onLoadOlder,
     this.onReconnect,
     this.onDownloadAgentFile,
+    this.onOpenLink,
     this.historyKey,
     this.loadPending,
     this.undoPending,
@@ -78,6 +79,12 @@ class ConversationPage extends StatefulWidget {
   ///
   /// 页面不直接依赖 `spb_api`：真实下载（`UfsApi.download` + 落盘）由 app 层注入。
   final Future<void> Function(AgentFileItem file)? onDownloadAgentFile;
+
+  /// 打开 Markdown 回复里的链接。null 时链接不响应点击（仅保留样式）。
+  ///
+  /// 与 [onDownloadAgentFile] 同理：打开 URL 属平台 IO（Linux 走 `xdg-open`，
+  /// 移动端走 `url_launcher`），页面只收集意图，由 app 层注入。
+  final void Function(String url, String title)? onOpenLink;
 
   /// 停止正在生成的轮次（入参是 [ConversationItem.turnId]）。
   ///
@@ -549,7 +556,11 @@ class _ConversationPageState extends State<ConversationPage> {
   Widget _buildItem(ConversationItem item) => switch (item) {
     UserMessageItem(:final text) => UserMessageBubble(text: text),
     AssistantMessageItem(:final text, :final isStreaming) =>
-      AssistantMessageBubble(text: text, isStreaming: isStreaming),
+      AssistantMessageBubble(
+        text: text,
+        isStreaming: isStreaming,
+        onLinkTap: widget.onOpenLink,
+      ),
     ThoughtItem(:final text, :final isStreaming) => ThoughtTile(
       text: text,
       isStreaming: isStreaming,

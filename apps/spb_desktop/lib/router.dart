@@ -14,6 +14,8 @@ import 'package:spb_platform/spb_platform.dart';
 
 import 'providers.dart';
 
+import 'auth_browser.dart';
+
 /// 路由路径常量。
 ///
 /// WHY 集中定义：`context.go(...)` 与路由表两处必须一致，散落的字符串字面量
@@ -558,6 +560,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onReconnect: () =>
           ref.read(chatStreamControllerProvider(userId)).reconnect(),
       onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
+      // 打开 Markdown 回复里的链接。
+      //
+      // 走与 OIDC 登录同一个入口（`openInBrowser`，Linux 用 `xdg-open`），
+      // 不另引 `url_launcher`——理由见 `auth_browser.dart` 的注释。
+      // 失败只记日志：链接点不开不该弹错误打断阅读。
+      onOpenLink: (url, _) => unawaited(
+        openInBrowser(url)
+            .catchError((Object e) => SpbLog.warn('打开链接失败', {'error': '$e'})),
+      ),
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 动作文案 → 服务端 action。
         //

@@ -22,6 +22,15 @@ dependencies:
   spb_platform:
   flutter_riverpod: ^3.0.0
   go_router: ^16.0.0
+  # Agent 回复的 Markdown 渲染。
+  #
+  # WHY 选它而不是 flutter_markdown_plus：本客户端的主战场是**流式**回复，
+  # 归约层已维护 (完整文本, isStreaming) 这一对状态，与本包 API 同构。
+  # 它的 settled 前缀缓存使每帧只重建变化中的尾部（官方实测 7.7kB 回复：
+  # 全量重建 ~14ms vs 尾部重建 ~1.3ms，且不随回复变长而增长），并能正确处理
+  # 未闭合的 `**` / 代码围栏（flutter_markdown_plus 每次全量重解析会闪烁/误渲染）。
+  # 另：原官方包 flutter_markdown 已于 2025-05 停止维护。
+  gpt_markdown: ^1.3.0
 
 dev_dependencies:
   flutter_test:

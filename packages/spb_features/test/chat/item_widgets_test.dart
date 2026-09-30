@@ -1,11 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 
 import 'package:spb_features/spb_features.dart';
 
 /// 包一层 MaterialApp（组件依赖 Theme 与 Directionality）。
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
+
+/// 收集子树里所有文本节点的纯文本，拼接后返回。
+///
+/// 用于断言 Markdown 是否被真正解析：渲染后的纯文本不应残留 `**` / 反引号
+/// 等语法标记。不能直接用 `find.text`——加粗/行内代码等内联结构会被合并进
+/// 同一个富文本段落，不存在独立的 `Text` widget 承载「重点」二字。
+String _renderedPlainText(WidgetTester tester) {
+  final buf = StringBuffer();
+  for (final el in tester.allElements) {
+    final w = el.widget;
+    if (w is RichText) {
+      buf.write(w.text.toPlainText());
+    }
+  }
+  return buf.toString();
+}
 
 void main() {
   group('MessageComposer 键盘行为', () {
@@ -143,12 +160,30 @@ void main() {
   });
 
   group('AssistantMessageBubble', () {
-    testWidgets('渲染文本', (tester) async {
+    testWidgets('渲染 Markdown 文本', (tester) async {
+      // 非流式：reveal 关闭，文档整段渲染。
       await tester.pumpWidget(
         _host(const AssistantMessageBubble(text: '助手的回复')),
       );
+      await tester.pumpAndSettle();
 
       expect(find.text('助手的回复'), findsOneWidget);
+    });
+
+    testWidgets('渲染 Markdown 语法（加粗不再出现字面 **）', (tester) async {
+      await tester.pumpWidget(
+        _host(const AssistantMessageBubble(text: '**重点** 与 `code`')),
+      );
+      await tester.pumpAndSettle();
+
+      // 取所有可渲染文本节点的纯文本，拼起来检查。
+      final rendered = _renderedPlainText(tester);
+      // Markdown 语法不应原样残留：无 `**`、无反引号。
+      expect(rendered, isNot(contains('**')));
+      expect(rendered, isNot(contains('`')));
+      // 内容本身仍可见。
+      expect(rendered, contains('重点'));
+      expect(rendered, contains('code'));
     });
 
     testWidgets('流式且文本为空时显示「正在生成」占位', (tester) async {
@@ -164,24 +199,28 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
 
-    testWidgets('流式中显示光标（WidgetSpan），非流式用纯文本', (tester) async {
+    testWidgets('流式透传 isStreaming 给渲染器，完成后用 SelectionArea 包裹', (tester) async {
       await tester.pumpWidget(
         _host(const AssistantMessageBubble(text: '半句话', isStreaming: true)),
       );
-      // 流式：文本 + 一个 WidgetSpan 光标。
-      // 用稳定 key 定位，不用 FadeTransition 类型——MaterialApp 自身也会
-      // 注入多个 FadeTransition（路由过渡），按类型断言会误判。
-      expect(
-        find.byKey(const ValueKey('assistant-streaming-cursor')),
-        findsOneWidget,
-      );
+      await tester.pump();
 
+      // 流式：Markdown 渲染器收到 isStreaming=true，且不包 SelectionArea
+      //（尾部每帧重建，选择不稳定——见气泡类文档）。
+      final streaming = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
+      expect(streaming.isStreaming, isTrue);
+      expect(find.byType(SelectionArea), findsNothing);
+
+      // 完成后：isStreaming=false，且整段被 SelectionArea 包裹（可选择）。
       await tester.pumpWidget(_host(const AssistantMessageBubble(text: '半句话')));
-      // 非流式：无光标。
-      expect(
-        find.byKey(const ValueKey('assistant-streaming-cursor')),
-        findsNothing,
-      );
+      await tester.pumpAndSettle();
+
+      final settled = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
+      expect(settled.isStreaming, isFalse);
+      expect(find.byType(SelectionArea), findsOneWidget);
+
+      // 收尾，避免 pending timer/ticker 警告。
+      await tester.pumpWidget(const SizedBox.shrink());
     });
   });
 

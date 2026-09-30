@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:io';
+
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -621,6 +624,21 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onReconnect: () =>
           ref.read(chatStreamControllerProvider(userId)).reconnect(),
       onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
+      // 打开 Markdown 回复里的链接。失败只记日志（点不开不该打断阅读）。
+      //
+      // 用 `unawaited` 而非 `await`：回调签名是 void（发起即返回），
+      // 且失败已在内部消化。
+      onOpenLink: (url, _) {
+        unawaited(
+          launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication)
+              .then((ok) {
+                if (!ok) SpbLog.warn('打开链接返回 false', {'url': url});
+              })
+              .catchError((Object e) {
+                SpbLog.warn('打开链接失败', {'url': url, 'error': '$e'});
+              }),
+        );
+      },
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 真实路径：POST /api/chat/groups/:group_id/confirmations/:id/resolve
         // （挂载点 ext_routes.go:39）。服务端 `misc.go:resolve` 绑定
