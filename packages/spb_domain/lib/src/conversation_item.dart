@@ -206,3 +206,17 @@ final class FollowUpSuggestionItem extends ConversationItem {
 
   final List<String> suggestions;
 }
+
+/// Agent 产出的文件（`agent.file.*`）。
+///
+/// ## 为什么 [id] 用归一化的相对路径，而非 eventId
+///
+/// 同一文件的 created → modified → deleted 是**多条事件**，但应收敛成**一张卡**。
+/// 若用 eventId 作 id，每条事件各成一项，用户会看到同一文件出现 2–3 次。
+/// 用归一化路径（`'/'` 归一、首尾去斜杠、`\\` 转正斜杠）作身份键，
+/// 归约时原地更新同一张卡。
+///
+/// ## 为什么 deleted 不删卡而是置 [action]=deleted
+///
+/// 用户应看到「这个文件被删了」（卡片置灰、禁用下载），而不是它凭空消失——
+/// 后者会让人怀疑「文件到底生成了没有」。对齐 webapp `mergeFileEventLifecycle`。

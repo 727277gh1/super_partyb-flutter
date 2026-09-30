@@ -297,6 +297,11 @@ class EventReducer {
             );
           }
 
+        case EventTypes.agentFileCreated:
+        case EventTypes.agentFileModified:
+        case EventTypes.agentFileDeleted:
+          _mergeAgentFile(items, ev);
+
         default:
           // heartbeat / queue_state / gate_* / tts_* / goal_* 等控制事件
           // 不进入对话列表。它们由专门的状态层消费（如连接指示器、TTS 播放器）。
@@ -386,6 +391,29 @@ class EventReducer {
   static List<String> _stringList(Object? v) {
     if (v is! List) return const [];
     return v.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
+  }
+  static String _basename(String identity) {
+    if (identity.isEmpty) return '';
+    final i = identity.lastIndexOf('/');
+    return i >= 0 ? identity.substring(i + 1) : identity;
+  }
+
+  /// 取最近一张。
+  static int? _indexOfAgentFile(List<ConversationItem> items, String identity) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      final it = items[i];
+      if (it is AgentFileItem && it.id == identity) return i;
+    }
+    return null;
+  }
+
+  /// 归一化相对路径（对齐 webapp `normalizeRelPath`）。
+  static String _normalizeRelPath(String path) {
+    return path
+        .replaceAll('\\', '/')
+        .replaceAll(RegExp(r'/+'), '/')
+        .replaceFirst(RegExp(r'^/+'), '')
+        .replaceFirst(RegExp(r'/+$'), '');
   }
 }
 

@@ -541,6 +541,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 每次连接状态变化时重建本 widget。
       onReconnect: () =>
           ref.read(chatStreamControllerProvider(userId)).reconnect(),
+      onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 真实路径：POST /api/chat/groups/:group_id/confirmations/:id/resolve
         // （挂载点 ext_routes.go:39）。服务端 `misc.go:resolve` 绑定
@@ -556,6 +557,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             .catchError((Object e) => debugPrint('确认提交失败: $e'));
       },
     );
+  }
+
+  /// 下载 agent 文件产物到本地（复用桌面端的语义，详见桌面 router）。
+  Future<void> _downloadAgentFile(AgentFileItem file, String userId) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return;
     final ufs = ref.read(ufsApiProvider);

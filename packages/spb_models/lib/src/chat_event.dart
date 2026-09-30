@@ -66,7 +66,13 @@ class ChatEvent {
   bool get isKnown => EventTypes.all.contains(eventType);
 
   /// 是否应进入对话时间线渲染。
-  bool get isTimelineVisible => EventTypes.timelineVisible.contains(eventType);
+  //
+  // 除本集合外，`agent.file.*` 走前缀匹配（见 [EventTypes.timelineVisible]
+  // 的说明）：服务端可能新增 `agent.file.renamed` 之类，穷举枚举会让新类型
+  // 静默被丢弃。
+  bool get isTimelineVisible =>
+      EventTypes.timelineVisible.contains(eventType) ||
+      eventType.startsWith(EventTypes.agentFilePrefix);
 
   /// 是否为流式增量帧（应追加而非替换）。
   ///
@@ -147,6 +153,80 @@ class ChatEvent {
         .where((s) => s.isNotEmpty)
         .toList(growable: false);
   }
+
+  // ---------- agent.file.* 访问器 ----------
+  //
+  // 字段名**已用生产真实 payload 实测**（非推测）：服务端 payload 是
+  // `map[string]any`，字段名漂移不会被编译期发现，故这里的每个键都有
+  // 生产样本佐证。
+  //
+  // 生产样本（created）：
+  //   {"relative_path":"QWEN.md","metadata":{"relative_path":"QWEN.md"},
+  //    "mime_type":"text/markdown; charset=utf-8","size_bytes":3585,
+  //    "ufs_file_id":"4fa522bc-...","target_path":"/workspace/.../QWEN.md"}
+  // 删除事件**没有** metadata / ufs_file_id / size_bytes。
+
+  /// 文件相对路径（`agent.file.*`）。
+  //
+  // 优先顶层 `relative_path`：实测删除事件无 `metadata`，但顶层 `relative_path`
+  // 总在（生产 2927/2927 条）。`metadata.relative_path` 作为兼容回退——历史上
+  // 两者只在「无 metadata」场景下不一致（即删除事件），顶层优先即正确。
+  String get relativePath =>
+      _str('relative_path') ??
+      _metadataStr('relative_path') ??
+      _str('target_path') ??
+      _str('path') ??
+      _str('name') ??
+      '';
+
+  /// UFS 文件 id（`agent.file.created`/`modified`）。
+  ///
+  /// 删除事件**没有**此字段（生产库 11/11 条均缺），返回 null；调用方据此
+  /// 禁用下载入口（UFS 已软删）。
+  String? get ufsFileId => _str('ufs_file_id');
+
+  /// MIME 类型（`agent.file.*`）。删除事件返回 `application/octet-stream`。
+  String? get mimeType => _str('mime_type');
+
+  /// 文件字节大小（`agent.file.created`/`modified`）。删除事件返回 null。
+  int? get sizeBytes => _intField('size_bytes');
+
+  /// 用户可见展示名：`nice_name` 优先，否则路径 basename。
+  //
+  // 生产实测：`nice_name` 字段**从未出现**（0/2927 条），但保留它是因为
+  // webapp `agentFileDisplayName` 也读它，且服务端模型随时可能填。
+  String get displayName {
+    final nice = _str('nice_name');
+    if (nice != null && nice.trim().isNotEmpty) return nice;
+    final p = relativePath;
+    if (p.isEmpty) return '';
+    final norm = p.replaceAll('\\', '/');
+    final i = norm.lastIndexOf('/');
+    return i >= 0 ? norm.substring(i + 1) : norm;
+  }
+
+  /// 文件动作（从事件类型推导）：`created` / `modified` / `deleted`。
+  //
+  /// 非 `agent.file.*` 事件返回 null。
+  String? get agentFileAction {
+    if (!eventType.startsWith(EventTypes.agentFilePrefix)) return null;
+    final rest = eventType.substring(EventTypes.agentFilePrefix.length);
+    if (rest == 'created' || rest == 'modified' || rest == 'deleted') {
+      return rest;
+    }
+    return null;
+  }
+
+  String? _metadataStr(String key) {
+    final md = payload?['metadata'];
+    if (md is Map) {
+      final v = md[key];
+      return v is String ? v : null;
+    }
+    return null;
+  }
+
+  int? _intField(String key) => _int(payload?[key]);
 
   // ---------- 内部辅助 ----------
 

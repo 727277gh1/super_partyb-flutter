@@ -8,6 +8,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 
+import 'agent_file_card.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'follow_up_chips.dart';
@@ -42,6 +43,7 @@ class ConversationPage extends StatefulWidget {
     this.onCancelTurn,
     this.onLoadOlder,
     this.onReconnect,
+    this.onDownloadAgentFile,
     this.historyKey,
     this.loadPending,
     this.undoPending,
@@ -75,6 +77,17 @@ class ConversationPage extends StatefulWidget {
   /// 下载 agent 文件产物的回调。null 时下载按钮禁用。
   ///
   /// 页面不直接依赖 `spb_api`：真实下载（`UfsApi.download` + 落盘）由 app 层注入。
+  final Future<void> Function(AgentFileItem file)? onDownloadAgentFile;
+
+  /// 停止正在生成的轮次（入参是 [ConversationItem.turnId]）。
+  ///
+  /// ## 为什么用注入而不是直接调 `ChatApi.cancelTurn`
+  ///
+  /// 与 [onResolveConfirmation] 同理：本页只收集意图（用户点了停止），请求与
+  /// 错误翻译归调用方。页面不持有 `ChatApi`，故 widget test 里无需 HTTP mock
+  /// 就能验证「什么条件下可点、点了传什么 turnId」。
+  ///
+  /// 为 null 时**不展示**停止按钮（保持「只读时间线」用法）。
   final Future<void> Function(String turnId)? onCancelTurn;
 
   /// 向上翻页：加载更早的历史。
@@ -568,6 +581,10 @@ class _ConversationPageState extends State<ConversationPage> {
     ),
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
     ErrorItem(:final message) => _ErrorNotice(message: message),
+    AgentFileItem() => AgentFileCard(
+      file: item,
+      onDownload: widget.onDownloadAgentFile,
+    ),
   };
 }
 

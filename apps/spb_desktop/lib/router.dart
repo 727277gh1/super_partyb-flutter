@@ -474,6 +474,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 每次连接状态变化时重建本 widget。
       onReconnect: () =>
           ref.read(chatStreamControllerProvider(userId)).reconnect(),
+      onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 动作文案 → 服务端 action。
         //
@@ -497,6 +498,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             });
       },
     );
+  }
+
+  /// 下载 agent 文件产物到本地并反馈落地路径。
+  //
+  // 走 `UfsApi.download`（`GET /api/files/{file_id}/download`）。落地目录用
+  // 应用支持目录下的 `downloads/agent/`——与交付物同步目录隔离（同步目录
+  // 会被清理计划动，用户手动下载的不能被带上）。
+  //
+  // 这里的下载是「拉取 + 落盘」的最小可用实现：不弹系统文件选择框（桌面
+  // 端的保存对话框需要 `desktop_drop`/原生插件，本轮不在范围内），直接落到
+  // 固定目录并以 basename 命名（防御路径穿越）。
+  Future<void> _downloadAgentFile(AgentFileItem file, String userId) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return;
     final ufs = ref.read(ufsApiProvider);

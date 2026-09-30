@@ -68,6 +68,11 @@ class EventTypes {
   static const scheduleCreated = 'schedule_created';
   static const groupMetadataUpdated = 'group_metadata_updated';
 
+  static const agentFilePrefix = 'agent.file.';
+  static const agentFileCreated = 'agent.file.created';
+  static const agentFileModified = 'agent.file.modified';
+  static const agentFileDeleted = 'agent.file.deleted';
+
   /// goal / task 变更通知（不落库，仅广播）。
   static const goalUpdated = 'goal_updated';
 
@@ -124,9 +129,16 @@ class EventTypes {
     confirmationExpired,
     groupTitleUpdated,
     pigoSessionMissing,
+    // agent.file.* 不列入：见 [timelineVisible] 的前缀匹配说明。
   };
 
   /// 渲染进对话时间线的事件类型（其余为控制/诊断事件，不直接展示）。
+  //
+  // ⚠️ **`agent.file.*` 走前缀匹配而非列入本集合**：服务端可能新增
+  // `agent.file.renamed` 之类，穷举枚举会让新类型静默落到 default 分支被
+  // 丢弃（正是本次修复前 2927 条事件被吞的根因）。`ChatEvent.isTimelineVisible`
+  // 除判定本集合外，还判定 `eventType.startsWith(agentFilePrefix)`——
+  // 故本集合不含任何 `agent.file.*`，避免「既在集合里又被前缀覆盖」的冗余。
   static const Set<String> timelineVisible = {
     userMessage,
     start,
