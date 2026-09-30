@@ -49,10 +49,20 @@ class ConversationPage extends StatefulWidget {
     this.loadPending,
     this.undoPending,
     this.pendingReloadKey,
+    this.actions,
     this.emptyHint = '还没有对话，输入消息开始吧',
   });
 
   final ChatStreamController controller;
+
+  /// AppBar 右侧追加的操作（不覆盖连接指示等内置项）。
+  ///
+  /// ## 为什么提供这个插槽而不要求调用方自建 Scaffold
+  ///
+  /// 桌面端要在 AppBar 放「交付物侧边栏开关」，但它不属于对话页的固有部件
+  /// （移动端没有侧边栏）。提供一个**只在尾部追加**的插槽，移动端不传即可，
+  /// 无需各平台自建一整套 Scaffold。
+  final List<Widget>? actions;
 
   /// AppBar 标题。null 时不显示 AppBar。
   final String? title;
@@ -487,6 +497,9 @@ class _ConversationPageState extends State<ConversationPage> {
                   ),
                   const SizedBox(width: SpbSpacing.xs),
                 ],
+                // 调用方追加的操作（如桌面端的交付物侧边栏开关），
+                // 放在连接指示**之前**：连接状态是全局性的，固定在最右侧。
+                ...?widget.actions,
                 StreamBuilder<SseState>(
                   stream: widget.controller.connectionState,
                   initialData: widget.controller.currentState,
