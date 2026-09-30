@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 选择同步目录。返回 null 表示**用户取消**（不是错误）。
 typedef PickSyncDirectory = Future<String?> Function();
@@ -206,7 +207,7 @@ class _SyncPageState extends State<SyncPage> {
           ),
           if (_error != null) ...[
             const SizedBox(height: SpbSpacing.lg),
-            _ErrorBanner(message: _error!),
+            ErrorBanner(key: const ValueKey('sync-error'), message: _error!),
           ],
           if (_report != null) ...[
             const SizedBox(height: SpbSpacing.lg),
@@ -420,35 +421,3 @@ class _Stat extends StatelessWidget {
 }
 
 /// 错误提示条。
-class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      key: const ValueKey('sync-error'),
-      padding: SpbSpacing.cardPadding,
-      decoration: BoxDecoration(
-        color: scheme.errorContainer,
-        borderRadius: SpbRadius.cardAll,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.error_outline, color: scheme.onErrorContainer),
-          const SizedBox(width: SpbSpacing.sm),
-          Expanded(
-            child: Text(
-              message,
-              style: Theme.of(context).textTheme.bodyMedium
-                  ?.copyWith(color: scheme.onErrorContainer),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

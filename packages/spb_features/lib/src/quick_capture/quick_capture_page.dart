@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 悬浮输入窗的提交回调。
 ///
@@ -90,7 +91,7 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
   /// 用内联提示而非 SnackBar：本窗口只有 132px 高，SnackBar 会盖住输入框，
   /// 且它带自动消失计时（widget test 里需要 pumpAndSettle 等待，容易引入
   /// 时序脆弱性）。内联提示是确定性的。
-  _Hint? _hint;
+  Hint? _hint;
 
   @override
   void initState() {
@@ -140,7 +141,7 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
           _controller.clear();
           setState(() {
             _busy = false;
-            _hint = const _Hint('已记录归属反馈', _HintKind.info);
+            _hint = const Hint('已记录归属反馈', HintKind.info);
           });
 
         case QuickCaptureUnknown(:final status):
@@ -149,7 +150,7 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
           _controller.clear();
           setState(() {
             _busy = false;
-            _hint = _Hint('已提交（未识别的状态：$status）', _HintKind.warn);
+            _hint = Hint('已提交（未识别的状态：$status）', HintKind.warn);
           });
       }
     } on SpbError catch (e) {
@@ -157,7 +158,7 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
       // 失败时**保留输入**：用户多半想重试同一句话，清空会让他重打一遍。
       setState(() {
         _busy = false;
-        _hint = _Hint('提交失败：${e.message}', _HintKind.error);
+        _hint = Hint('提交失败：${e.message}', HintKind.error);
       });
     }
   }
@@ -245,7 +246,7 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
                     color: scheme.onSurfaceVariant,
                   ),
                 )
-              : _HintLine(hint: _hint!),
+              : HintLine(hint: _hint!),
         ),
         const SizedBox(width: SpbSpacing.sm),
         TextButton(
@@ -258,50 +259,6 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
           key: const ValueKey('quick-capture-submit'),
           onPressed: _canSubmit ? _handleSubmit : null,
           child: const Text('发送'),
-        ),
-      ],
-    );
-  }
-}
-
-/// 提示的语义级别（决定图标与配色）。
-enum _HintKind { info, warn, error }
-
-/// 一次性提示内容。
-class _Hint {
-  const _Hint(this.text, this.kind);
-
-  final String text;
-  final _HintKind kind;
-}
-
-/// 内联提示行。
-class _HintLine extends StatelessWidget {
-  const _HintLine({required this.hint});
-
-  final _Hint hint;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-
-    final (IconData icon, Color color) = switch (hint.kind) {
-      _HintKind.info => (Icons.check_circle_outline, scheme.tertiary),
-      _HintKind.warn => (Icons.info_outline, scheme.secondary),
-      _HintKind.error => (Icons.error_outline, scheme.error),
-    };
-
-    return Row(
-      children: [
-        Icon(icon, size: SpbSpacing.lg, color: color),
-        const SizedBox(width: SpbSpacing.xs),
-        Expanded(
-          child: Text(
-            hint.text,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.bodySmall?.copyWith(color: color),
-          ),
         ),
       ],
     );

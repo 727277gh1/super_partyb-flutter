@@ -4,6 +4,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 加载工作详情（`GET /chat/miniapp/works/:id`）。
 typedef LoadWorkDetail = Future<MiniappWorkDetail> Function();
@@ -454,7 +455,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   _header(detail),
                   if (detail.steps.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    _SectionTitle('步骤'),
+                    SectionTitle('步骤'),
                     for (final s in detail.steps) _StepTile(step: s),
                   ],
                   if (detail.pendingConfirmations.isNotEmpty) ...[
@@ -471,7 +472,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   ],
                   if (_artifacts.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    _SectionTitle('产物'),
+                    SectionTitle('产物'),
                     for (final a in _artifacts)
                       _ArtifactTile(
                         key: ValueKey('miniapp-artifact-${a.id}'),
@@ -482,7 +483,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   ],
                   if (_events.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    _SectionTitle('事件'),
+                    SectionTitle('事件'),
                     for (final e in _events)
                       _EventTile(
                         key: ValueKey('miniapp-event-${e.id}'),
@@ -667,18 +668,6 @@ class _MessageInputState extends State<_MessageInput> {
       ],
     );
   }
-}
-
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
-    child: Text(text, style: Theme.of(context).textTheme.titleSmall),
-  );
 }
 
 class _StepTile extends StatelessWidget {

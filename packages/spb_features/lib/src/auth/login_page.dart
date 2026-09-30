@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 import 'auth_state.dart';
 
@@ -199,7 +200,10 @@ class _LoginPageState extends State<LoginPage> {
                 ),
                 const SizedBox(height: SpbSpacing.xl),
                 if (error != null) ...[
-                  _ErrorBanner(message: error),
+                  ErrorBanner(
+                    key: const ValueKey('login-error'),
+                    message: error,
+                  ),
                   const SizedBox(height: SpbSpacing.lg),
                 ],
                 FilledButton.icon(
@@ -288,35 +292,3 @@ class _LoginPageState extends State<LoginPage> {
 }
 
 /// 错误提示条。
-class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      key: const ValueKey('login-error'),
-      padding: SpbSpacing.cardPadding,
-      decoration: BoxDecoration(
-        color: scheme.errorContainer,
-        borderRadius: SpbRadius.cardAll,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.error_outline, color: scheme.onErrorContainer),
-          const SizedBox(width: SpbSpacing.sm),
-          Expanded(
-            child: Text(
-              message,
-              style: Theme.of(context).textTheme.bodyMedium
-                  ?.copyWith(color: scheme.onErrorContainer),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

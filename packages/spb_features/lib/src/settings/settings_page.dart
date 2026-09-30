@@ -6,6 +6,7 @@ import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 弹出目录选择器。返回 null = 用户取消。
 typedef PickSettingsDirectory = Future<String?> Function();
@@ -707,7 +708,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _DirectoryCard(localRoot: draft.localRoot, onPick: _pickDirectory),
         const SizedBox(height: SpbSpacing.lg),
 
-        _SectionTitle('同步范围'),
+        SectionTitle('同步范围', highlight: true),
         Card(
           margin: EdgeInsets.zero,
           child: Column(
@@ -725,7 +726,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: SpbSpacing.lg),
 
-        _SectionTitle('过滤与范围'),
+        SectionTitle('过滤与范围', highlight: true),
         Card(
           margin: EdgeInsets.zero,
           child: Column(
@@ -778,7 +779,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: SpbSpacing.lg),
 
-        _SectionTitle('本地数据'),
+        SectionTitle('本地数据', highlight: true),
         _StatsCard(
           stats: _stats,
           loading: _loadingStats,
@@ -790,7 +791,7 @@ class _SettingsPageState extends State<SettingsPage> {
         // 桌面能力项：移动端（isSupported == false）整段不展示。
         if (widget.capabilities.isSupported) ...[
           const SizedBox(height: SpbSpacing.lg),
-          _SectionTitle('桌面集成'),
+          SectionTitle('桌面集成', highlight: true),
           Card(
             key: const ValueKey('settings-capabilities'),
             margin: EdgeInsets.zero,
@@ -909,21 +910,6 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 /// 分节标题。
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
-    child: Text(
-      text,
-      style: Theme.of(context).textTheme.labelLarge
-          ?.copyWith(color: Theme.of(context).colorScheme.primary),
-    ),
-  );
-}
 
 /// 同步目录卡片。
 class _DirectoryCard extends StatelessWidget {

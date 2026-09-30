@@ -5,6 +5,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_platform/spb_platform.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 全局悬浮输入窗（overlay quick capture）的提交回调。
 ///
@@ -495,7 +496,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   }
 
   Widget _buildStatusLine(ColorScheme scheme, TextTheme textTheme) {
-    if (_hint != null) return _HintLine(hint: _hint!);
+    if (_hint != null) return HintLine(hint: _hint!);
 
     final progress = _uploadProgress;
     if (progress != null && progress.$2 > 0 && progress.$1 < progress.$2) {
@@ -583,50 +584,6 @@ class _AttachmentChip extends StatelessWidget {
           ],
         ],
       ),
-    );
-  }
-}
-
-/// 提示的语义级别（决定图标与配色）。
-enum _HintKind { info, warn, error }
-
-/// 一次性提示内容。
-class _Hint {
-  const _Hint(this.text, this.kind);
-
-  final String text;
-  final _HintKind kind;
-}
-
-/// 内联提示行。
-class _HintLine extends StatelessWidget {
-  const _HintLine({required this.hint});
-
-  final _Hint hint;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-
-    final (IconData icon, Color color) = switch (hint.kind) {
-      _HintKind.info => (Icons.check_circle_outline, scheme.tertiary),
-      _HintKind.warn => (Icons.info_outline, scheme.secondary),
-      _HintKind.error => (Icons.error_outline, scheme.error),
-    };
-
-    return Row(
-      children: [
-        Icon(icon, size: SpbSpacing.lg, color: color),
-        const SizedBox(width: SpbSpacing.xs),
-        Expanded(
-          child: Text(
-            hint.text,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.bodySmall?.copyWith(color: color),
-          ),
-        ),
-      ],
     );
   }
 }
