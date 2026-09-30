@@ -7,6 +7,7 @@ import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
 import 'event_reducer.dart';
+import 'gate_decision.dart';
 
 /// 对话流控制器：把 SSE 帧流 + timeline 回填统一成一条对话项流。
 ///
@@ -45,6 +46,8 @@ class ChatStreamController {
   String? _groupId;
 
   final _itemsController = StreamController<List<ConversationItem>>.broadcast();
+  final _gateDecisionsController =
+      StreamController<List<GateDecision>>.broadcast();
   final _errorController = StreamController<SpbError>.broadcast();
   final _stateController = StreamController<SseState>.broadcast();
 
@@ -57,11 +60,21 @@ class ChatStreamController {
   bool _loadingOlder = false;
 
   /// 归约后的对话项流（每次事件到达推送全量列表）。
-  ///
-  /// WHY 推全量而非增量：对话列表通常几百项，全量重建成本远低于维护增量合并
-  /// 的复杂度；且 Flutter 列表 diff 依赖稳定 id，全量重建 + key 复用效率足够。
-  /// 若将来列表规模显著增长，再改为增量 patch。
+  //
+  // WHY 推全量而非增量：对话列表通常几百项，全量重建成本远低于维护增量合并
+  // 的复杂度；且 Flutter 列表 diff 依赖稳定 id，全量重建 + key 复用效率足够。
+  // 若将来列表规模显著增长，再改为增量 patch。
   Stream<List<ConversationItem>> get items => _itemsController.stream;
+
+  /// Gate 决策流（与 [items] 平行，由同一次归约产出）。
+  //
+  // ## 为什么单独一条流而不是塞进 [items]
+  //
+  // Gate 决策是控制流诊断信息，不进时间线（见 [GateDecision] 类文档）。
+  // 若放进 [items]，所有现有消费者（时间线渲染、侧边栏待办面板）都要
+  // 自己过滤它，漏一处就是噪声。单独一条流让诊断面板只订阅自己关心的数据。
+  Stream<List<GateDecision>> get gateDecisions =>
+      _gateDecisionsController.stream;
 
   Stream<SpbError> get errors => _errorController.stream;
 
@@ -70,7 +83,22 @@ class ChatStreamController {
   SseState get currentState => _sse.state;
 
   /// 当前对话项快照（供 UI 首次渲染，避免等待下一次推送）。
-  List<ConversationItem> get snapshot => EventReducer.reduce(_buffer).items;
+  List<ConversationItem> get snapshot => _reduction.items;
+
+  /// 当前 Gate 决策快照。
+  List<GateDecision> get gateDecisionsSnapshot => _reduction.gateDecisions;
+
+  /// 归约缓冲区（缓存最近一次 [_emit] 的结果，避免在 `snapshot` /
+  /// `gateDecisionsSnapshot` 上各自重算）。
+  //
+  // [_emit] 在每次缓冲变更后调用，刷新缓存。两个 getter 直接读它，
+  // 不再各自调 `EventReducer.reduce`（归约几百条事件不是零成本）。
+  ReductionResult? _cachedReduction;
+
+  ReductionResult get _reduction {
+    // 若 emit 还没跑过（构造后未 start），现场算一次。
+    return _cachedReduction ??= EventReducer.reduce(_buffer);
+  }
 
   /// 开始：回填历史 → 建立 SSE 连接。
   ///
@@ -341,8 +369,11 @@ class ChatStreamController {
 
   void _emit() {
     if (_itemsController.isClosed) return;
-    final result = EventReducer.reduce(_buffer);
-    _itemsController.add(result.items);
+    _cachedReduction = EventReducer.reduce(_buffer);
+    _itemsController.add(_cachedReduction!.items);
+    if (!_gateDecisionsController.isClosed) {
+      _gateDecisionsController.add(_cachedReduction!.gateDecisions);
+    }
   }
 
   /// 发送消息（经完整前置链）。
@@ -402,6 +433,7 @@ class ChatStreamController {
     await _frameSub?.cancel();
     await _stateSub?.cancel();
     await _itemsController.close();
+    await _gateDecisionsController.close();
     await _errorController.close();
     await _stateController.close();
   }

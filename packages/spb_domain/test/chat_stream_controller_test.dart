@@ -525,6 +525,114 @@ void main() {
     });
   });
 
+  group('gate 决策通道', () {
+    test('gateDecisionsSnapshot 含 adaptive_decision（不再静默丢弃）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.adaptiveDecision,
+        sseEvent(
+          EventTypes.adaptiveDecision,
+          id: 'gate_1',
+          payload: {
+            'action': 'auto_continue',
+            'gate_source': 'llm_gate',
+            'confidence': 0.9,
+            'reason': '任务未完成',
+          },
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.gateDecisionsSnapshot, hasLength(1));
+      final d = c.gateDecisionsSnapshot.single;
+      expect(d.kind, GateDecisionKind.autoContinue);
+      expect(d.source, GateSourceKind.llmGate);
+      expect(d.confidence, 0.9);
+
+      await c.dispose();
+    });
+
+    test('gate 决策不进 items（时间线只放用户可见内容）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.adaptiveDecision,
+        sseEvent(
+          EventTypes.adaptiveDecision,
+          id: 'gate_1',
+          payload: {'action': 'auto_continue', 'gate_source': 'fastpath'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty, reason: 'gate 决策是诊断信息，不进时间线');
+      expect(c.gateDecisionsSnapshot, hasLength(1));
+
+      await c.dispose();
+    });
+
+    test('gateDecisions 流在事件到达时推送', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <List<GateDecision>>[];
+      final sub = c.gateDecisions.listen(pushed.add);
+
+      sse.push(
+        EventTypes.goalGateDecision,
+        sseEvent(
+          EventTypes.goalGateDecision,
+          id: 'gate_goal_1',
+          payload: {'goal_achieved': true, 'source': 'tasks_completed'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, isNotEmpty);
+      expect(pushed.last.single.kind, GateDecisionKind.goalCompleted);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('切 group 后 gate 决策被清空（不泄漏上一个对话的决策）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.start(groupId: 'grp_1');
+      sse.push(
+        EventTypes.adaptiveDecision,
+        sseEvent(
+          EventTypes.adaptiveDecision,
+          id: 'gate_1',
+          payload: {'action': 'stop', 'gate_source': 'llm_gate'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(c.gateDecisionsSnapshot, hasLength(1));
+
+      await c.switchGroup('grp_2');
+
+      expect(c.gateDecisionsSnapshot, isEmpty, reason: '切对话后旧对话的 gate 决策不得残留');
+
+      await c.dispose();
+    });
+  });
+
   group('生命周期', () {
     test('reconnect 委托给 SseClient.resume', () async {
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
