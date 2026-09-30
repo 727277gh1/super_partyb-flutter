@@ -597,6 +597,11 @@ class _WorksPage extends ConsumerWidget {
       //
       // 导航目标是装配层的事（与 `onOpenWork` 同一约定）。且本页拿到的是
       // `workId` 而非完整的 `MiniappWork`，页面内部造不出来。
+      onCreateWork: () async {
+        final workId = await ref.read(createMiniappWorkProvider)();
+        if (context.mounted) context.push(SpbRoutes.work(workId));
+        return workId;
+      },
     );
   }
 }
@@ -627,6 +632,7 @@ class _WorkDetailPage extends ConsumerWidget {
       complete: ref.watch(completeMiniappWorkProvider(workId)),
       stop: ref.watch(stopMiniappWorkProvider(workId)),
       resolveConfirmation: ref.watch(resolveMiniappConfirmationProvider),
+      onUploadFile: ref.watch(uploadMiniappFileProvider(workId)),
     );
   }
 }

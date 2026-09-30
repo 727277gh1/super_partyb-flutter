@@ -378,4 +378,73 @@ void main() {
 
     expect(find.text('brand_new'), findsOneWidget);
   });
+
+  group('工作台：新建工作', () {
+    testWidgets('未注入 onCreateWork 时不展示新建按钮（只读用法）', (tester) async {
+      useStub((_, _) async => const MiniappWorkPage(items: []));
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('miniapp-works-create')),
+        findsNothing,
+        reason: '没注入实现却展示按钮，点下去什么也不会发生',
+      );
+    });
+
+    testWidgets('点新建 → 调用 onCreateWork 并刷新列表', (tester) async {
+      // 断言「刷新」而不只是「回调被调」：不刷新的话用户看到的是旧列表，
+      // 会以为新建没生效而反复点（服务端会建出一堆空工作）。
+      useStub((_, _) async => MiniappWorkPage(items: [work('w1')]));
+      var created = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: WorksPage(
+            loadWorks: load,
+            onOpenWork: opened.add,
+            onCreateWork: () async {
+              created++;
+              return 'w_new';
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      final before = calls.length;
+
+      await tester.tap(find.byKey(const ValueKey('miniapp-works-create')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(created, 1, reason: '新建必须真的调 onCreateWork');
+      expect(
+        calls.length,
+        greaterThan(before),
+        reason: '新建后必须刷新列表，否则用户看不到刚建的工作',
+      );
+    });
+
+    testWidgets('新建失败展示提示且不抛异常', (tester) async {
+      useStub((_, _) async => const MiniappWorkPage(items: []));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: WorksPage(
+            loadWorks: load,
+            onCreateWork: () async => throw const HttpError(503, '服务不可用'),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('miniapp-works-create')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('新建工作失败'), findsOneWidget);
+      expect(tester.takeException(), isNull, reason: '失败必须被捕获，不能让页面崩');
+    });
+  });
 }

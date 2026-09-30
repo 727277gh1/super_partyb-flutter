@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 /// 加载工作详情（`GET /chat/miniapp/works/:id`）。
 typedef LoadWorkDetail = Future<MiniappWorkDetail> Function();
@@ -49,6 +50,25 @@ typedef ResolveMiniappConfirmation = Future<void> Function(
   String action,
 );
 
+/// 上传文件到工作（`POST /chat/miniapp/works/:id/files`）。
+///
+/// ## 为什么参数是「文件名 + 字节」而不是 `DroppedFile`
+///
+/// `MiniappApi.uploadFile` 只接受字节（服务端 `c.FormFile("file")`），没有
+/// 从磁盘流式读的余地。若把 `DroppedFile` 传下去，实现层仍要先 `readBytes()`，
+/// 只是把同一件事推远一层。这里明确：**页面负责读取字节**（它有 busy 状态
+/// 可以反馈），注入点只收结果。
+///
+/// ## 为什么返回 `void` 而不是上传后的 artifact
+///
+/// 上传成功后本页会 `_reload()`（与 `_send` 同一做法）：服务端会重新投影
+/// 产物列表，而本地拼接的 artifact 可能与服务端的 `id` 口径不一致（事件
+/// 投影的 id 可能是合成的 `"<group_id>:<relative_path>"`）。重新拉取才一致。
+typedef UploadWorkFile = Future<void> Function({
+  required String filename,
+  required List<int> bytes,
+});
+
 /// 工作详情页（小程序工作台）。
 ///
 /// ## 能力位由服务端下发，页面不自己推状态
@@ -82,6 +102,7 @@ class WorkDetailPage extends StatefulWidget {
     required this.complete,
     required this.stop,
     required this.resolveConfirmation,
+    this.onUploadFile,
     this.title = '工作详情',
   });
 
@@ -94,6 +115,12 @@ class WorkDetailPage extends StatefulWidget {
   final CompleteWork complete;
   final StopWork stop;
   final ResolveMiniappConfirmation resolveConfirmation;
+
+  /// 上传附件到本工作。为 null 时不展示上传按钮（只读用法）。
+  ///
+  /// 文件选择走 `spb_platform` 的 `pickFilesForOverlay()`（页面不直接依赖
+  /// `file_selector` 插件，见分层规则）。
+  final UploadWorkFile? onUploadFile;
 
   final String title;
 
@@ -115,6 +142,9 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
   /// 只禁用触发它的那个控件。
   bool _acting = false;
   final _downloading = <String>{};
+
+  /// 正在上传附件（与 [_acting] 分开：上传有自己的耗时与提示文案）。
+  bool _uploading = false;
 
   /// 已解决的确认卡 id（本地标记，避免重复点击）。
   ///
@@ -266,6 +296,60 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
         }
       });
 
+  /// 选择并上传附件。
+  ///
+  /// ## 为什么选择与上传在同一个动作里
+  ///
+  /// 服务端只有「上传」这一个端点（没有「先登记再上传」的两步）。选中后立即
+  /// 上传，用户不必再点一次「开始上传」——少一个可遗忘的步骤。
+  ///
+  /// ## 多选时为什么逐个上传而不是并发
+  ///
+  /// 服务端按顺序写 workspace（同名会触发冲突策略），并发上传同一目录会让
+  /// 冲突判定互相竞争。逐个上传的代价可接受（用户看得见进度），换来行为可预期。
+  Future<void> _upload() async {
+    final upload = widget.onUploadFile;
+    if (upload == null || _uploading) return;
+
+    // 文件选择器：走 spb_platform（页面不直接 import 插件）。
+    // 返回空 = 用户取消 / 平台不支持，两者都是预期内结果，不是错误。
+    final picked = await pickFilesForOverlay();
+    if (picked.isEmpty || !mounted) return;
+
+    setState(() => _uploading = true);
+    var done = 0;
+    final failures = <String>[];
+    try {
+      for (final f in picked) {
+        try {
+          final bytes = await f.readBytes();
+          await upload(filename: f.name, bytes: bytes);
+          done++;
+        } on SpbError catch (e) {
+          // 单个文件失败不阻断整批：与 quick capture 的「部分失败」语义一致。
+          failures.add('${f.name}：${e.message}');
+        } on Object catch (e) {
+          // readBytes 可能抛（文件在选中后被删除/无权限）——那是本地错误，
+          // 不是 SpbError，但同样只影响这一个文件。
+          failures.add('${f.name}：读取失败');
+          SpbLog.warn('读取待上传文件失败', {'name': f.name, 'error': '$e'});
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+
+    if (!mounted) return;
+    if (failures.isEmpty) {
+      _snack('已上传 $done 个文件');
+    } else {
+      _snack('已上传 $done 个，${failures.length} 个失败：${failures.join('；')}');
+    }
+    // 无论成败都重拉：成功时列表多出产物；部分失败时也可能已有部分落盘，
+    // 重拉能让用户看到真实状态，而不是我们猜的。
+    await _reload();
+  }
+
   Future<void> _download(MiniappArtifact artifact) async {
     if (_downloading.contains(artifact.id)) return;
     setState(() => _downloading.add(artifact.id));
@@ -337,6 +421,20 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
       appBar: AppBar(
         title: Text(detail.title.isEmpty ? widget.title : detail.title),
         actions: [
+          // 上传附件：只在注入了实现时展示（只读用法不显示）。
+          if (widget.onUploadFile != null)
+            IconButton(
+              key: const ValueKey('miniapp-work-upload'),
+              tooltip: '上传附件',
+              icon: _uploading
+                  ? const SizedBox(
+                      width: SpbSpacing.lg,
+                      height: SpbSpacing.lg,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.upload_file),
+              onPressed: _uploading ? null : _upload,
+            ),
           IconButton(
             key: const ValueKey('miniapp-work-refresh'),
             tooltip: '刷新',

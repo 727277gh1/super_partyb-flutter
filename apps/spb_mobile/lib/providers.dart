@@ -757,6 +757,43 @@ final loadMiniappWorksProvider = Provider<LoadMiniappWorks>((ref) {
       api.listWorks(status: status, cursor: cursor);
 });
 
+/// 新建工作（供 [WorksPage] 注入）。
+///
+/// ## 为什么不传 templateId / goal
+///
+/// 服务端两者都是可选的（`internal/server/miniapp.go` 的 `createWork`：`goal`
+/// 留空写 NULL，`template_id` 直接进 metadata，均无 `binding:"required"`）。
+/// Taro 参考实现也是 `client.createWork({})`。传空参即建一个空工作，标题由
+/// 服务端置占位符「新会话」，首轮后 Title Gate 生成语义标题。
+///
+/// 返回值是 `workId`（= group id），供调用方导航到详情。
+final createMiniappWorkProvider = Provider<CreateMiniappWork>((ref) {
+  final api = ref.watch(miniappApiProvider);
+  return () async {
+    final result = await api.createWork();
+    return result.workId;
+  };
+});
+
+/// 上传附件到指定工作（供 [WorkDetailPage] 注入）。
+///
+/// 用 `family` 把 workId 变成必填参数：与其余 miniapp 注入点同一约定，避免
+/// 出现 `/works//files` 这种语义不明的 404。
+///
+/// ## 为什么丢弃返回的 artifact
+///
+/// 页面在上传后统一 `_reload()`（见 `UploadWorkFile` 的说明）：服务端重新
+/// 投影的产物列表才是权威口径，本地拼一个可能与事件投影的 id 口径不一致。
+final uploadMiniappFileProvider = Provider.family<UploadWorkFile, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return ({required String filename, required List<int> bytes}) async {
+    await api.uploadFile(workId, bytes: bytes, filename: filename);
+  };
+});
+
 /// 工作详情（供 [WorkDetailPage] 注入）。
 ///
 /// 用 `family` 把 workId 变成必填参数——workId 未就绪在类型上无法表达，

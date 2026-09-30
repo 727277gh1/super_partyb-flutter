@@ -20,6 +20,22 @@ typedef LoadMiniappWorks = Future<MiniappWorkPage> Function({
 /// 打开某个工作（进入详情页）。
 typedef OpenMiniappWork = void Function(MiniappWork work);
 
+/// 新建工作（`POST /chat/miniapp/works`）。返回新工作的 id（= group id）。
+///
+/// ## 为什么没有 `templateId` 参数
+///
+/// 服务端 `template_id` 是**可选**的（`internal/server/miniapp.go` 的
+/// `createWork` 把它直接写进 `metadata`，**没有** `binding:"required"`）。
+/// Taro 参考实现也是 `client.createWork({})` 空参调用（见
+/// `apps/miniapp/src/pages/work-list/work-list.tsx` 的 `createNewWork`）。
+/// 故不需要模板选择器——若将来服务端要求模板，这里会以 400 暴露出来。
+///
+/// `goal` 同样可选：服务端留空（NULL）而非写占位符（写占位符会让会话设置
+/// 面板把占位符当已配置目标回显）。
+///
+/// 返回值供调用方导航到新工作；本页不导航（见 [_WorksPageState._create]）。
+typedef CreateMiniappWork = Future<String> Function();
+
 /// 工作列表页（小程序工作台）。
 ///
 /// ## 分页是 offset，但**返回值的名字叫 `next_cursor`**
@@ -42,6 +58,7 @@ class WorksPage extends StatefulWidget {
     super.key,
     required this.loadWorks,
     this.onOpenWork,
+    this.onCreateWork,
     this.pageSize = 20,
     this.title = '工作台',
   });
@@ -50,6 +67,11 @@ class WorksPage extends StatefulWidget {
 
   /// 为 null 时条目不可点击（保持「只读预览」用法）。
   final OpenMiniappWork? onOpenWork;
+
+  /// 新建工作。为 null 时不展示「新建」按钮（只读用法）。
+  ///
+  /// 创建成功后由本页负责刷新列表，并（若 [onOpenWork] 非空）导航到新工作。
+  final CreateMiniappWork? onCreateWork;
 
   final int pageSize;
   final String title;
@@ -73,6 +95,12 @@ class _WorksPageState extends State<WorksPage> {
 
   /// 当前状态过滤（`active` / `all`）。
   String _status = 'active';
+
+  /// 正在新建工作（防重复提交）。
+  ///
+  /// 与 [_loading] 分开：新建不应该让整个列表变成加载态（用户还在看旧内容），
+  /// 只禁用触发它的那个按钮。
+  bool _creating = false;
 
   @override
   void initState() {
@@ -152,6 +180,45 @@ class _WorksPageState extends State<WorksPage> {
     await _reload();
   }
 
+  /// 新建工作。
+  ///
+  /// ## 为什么不新起轮询等「工作就绪」
+  ///
+  /// 服务端 `createWork` 是同步的（建组 + 可选派发首条消息后返回完整
+  /// work detail），没有「创建中」这个中间态。故直接刷新列表即可。
+  ///
+  /// ## 为什么不在这里导航到新工作
+  ///
+  /// 导航目标（push / go / 是否带其他参数）是装配层的事，与 [onOpenWork]
+  /// 同一约定。且新工作的标题是占位符「新会话」（服务端刻意如此：Title Gate
+  /// 靠识别占位符才会在首轮后生成语义标题），本页拿到的只是一个 id，造不出
+  /// 完整的 `MiniappWork`。故由调用方在闭包里自行导航。
+  Future<void> _create() async {
+    final create = widget.onCreateWork;
+    if (create == null || _creating) return;
+
+    setState(() => _creating = true);
+    try {
+      await create();
+      if (!mounted) return;
+      // 刷新放在调用方导航之后（若调用方导航了，本页已不在树上，mounted 为
+      // false 时直接返回）。不刷新的话，用户返回列表时看到的仍是旧数据。
+      await _reload();
+    } on SpbError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('新建工作失败：${e.message}'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+    } finally {
+      if (mounted) setState(() => _creating = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -159,6 +226,20 @@ class _WorksPageState extends State<WorksPage> {
       appBar: AppBar(
         title: Text(widget.title),
         actions: [
+          // 新建：只在注入了实现时展示（只读用法不显示）。
+          if (widget.onCreateWork != null)
+            IconButton(
+              key: const ValueKey('miniapp-works-create'),
+              tooltip: '新建工作',
+              icon: _creating
+                  ? const SizedBox(
+                      width: SpbSpacing.lg,
+                      height: SpbSpacing.lg,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.add),
+              onPressed: _creating ? null : _create,
+            ),
           // 状态过滤：`all` 才会列出已归档（完成/停止的工作会归档）。
           PopupMenuButton<String>(
             key: const ValueKey('miniapp-works-status-filter'),
