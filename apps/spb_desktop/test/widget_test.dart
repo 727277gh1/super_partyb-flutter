@@ -1279,6 +1279,153 @@ void main() {
     });
   });
 
+  group('托盘提示接线', () {
+    testWidgets('启动时推送一次托盘提示（否则永远是托盘库的默认值）', (tester) async {
+      final caps = _FakeDesktopCapabilities();
+      await pumpApp(tester, capabilities: caps);
+
+      expect(
+        caps.trayTooltips,
+        isNotEmpty,
+        reason:
+            '不推的话托盘一直显示托盘库默认值，而「未配置同步目录」'
+            '这条信息恰恰在用户还没同步时最有用',
+      );
+      expect(caps.trayTooltips.first, contains('Super PartyB'));
+    });
+
+    testWidgets('未配置同步目录时提示如实说明', (tester) async {
+      final caps = _FakeDesktopCapabilities();
+      await pumpApp(tester, capabilities: caps);
+
+      expect(
+        caps.trayTooltips.first,
+        contains('未配置同步目录'),
+        reason: '用户不知道「为什么同步没动静」，提示要直接说出来',
+      );
+    });
+
+    testWidgets('同步开始与结束分别推送提示（在途 → 空闲）', (tester) async {
+      // 端到端验证「同步在途 → 托盘提示」这条链路：光有 TrayState 类不够，
+      // 必须真的被推送到托盘。
+      //
+      // ## 为什么直接驱动 notifier，而不真的跑一轮同步
+      //
+      // 真同步要打 UFS + 写盘（那是 sync 页测试的事）。这里只验证**订阅**
+      // 是否接上——驱动 `syncInFlightProvider` 等价于同步开始/结束那一刻。
+      //
+      // ⚠️ 不要用 Completer 之类「不结束的 Future」来卡住状态：一旦上面的
+      // 断言先失败，那个 Future 永远不结算，测试框架会一直等到超时
+      // （实测一次变异跑 15 分钟）。
+      final caps = _FakeDesktopCapabilities();
+      final h = await pumpApp(
+        tester,
+        capabilities: caps,
+        syncLocalRoot: '/out',
+      );
+      final before = caps.trayTooltips.length;
+
+      h.container.read(syncInFlightProvider.notifier).set(true);
+      await tester.pump();
+      expect(
+        caps.trayTooltips.length,
+        greaterThan(before),
+        reason: '在途状态变化必须触发推送',
+      );
+      expect(
+        caps.trayTooltips.last,
+        contains('同步中'),
+        reason: '提示要反映当下状态，而不是历史结果',
+      );
+
+      h.container.read(syncInFlightProvider.notifier).set(false);
+      await tester.pump();
+      expect(
+        caps.trayTooltips.last,
+        isNot(contains('同步中')),
+        reason: '同步结束后必须回到空闲——永久显示「同步中…」比没提示更糟',
+      );
+    });
+
+    testWidgets('同步结束后回到空闲态（订阅确实接在同步在途上）', (tester) async {
+      // 去重逻辑本身由 tray_tooltip_test.dart 单测覆盖；这里只验证**接线**
+      // 确实把同步在途状态连到了托盘上。
+      final caps = _FakeDesktopCapabilities();
+      final h = await pumpApp(
+        tester,
+        capabilities: caps,
+        syncLocalRoot: '/out',
+      );
+      final before = caps.trayTooltips.length;
+
+      h.container.read(syncInFlightProvider.notifier).set(true);
+      await tester.pump();
+      expect(caps.trayTooltips.length, greaterThan(before));
+
+      h.container.read(syncInFlightProvider.notifier).set(false);
+      await tester.pump();
+      expect(caps.trayTooltips.last, isNot(contains('同步中')));
+    });
+  });
+
+  group('开机自启设置项', () {
+    /// 把测试窗口调高。
+    ///
+    /// 设置页是惰性 `ListView`，屏幕外的条目在树里根本不存在；开机自启位于
+    /// **最底部**的桌面集成区块，默认 800×600 下必然在屏幕外。
+    void useTallWindow(WidgetTester tester) {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+    }
+
+    testWidgets('桌面端展示开关，初值来自能力实现', (tester) async {
+      useTallWindow(tester);
+      final caps = _FakeDesktopCapabilities()..launchAtStartupEnabled = true;
+      final h = await pumpApp(tester, capabilities: caps);
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      expect(tile.value, isTrue);
+    });
+
+    testWidgets('切换开关调用能力的 setLaunchAtStartup', (tester) async {
+      useTallWindow(tester);
+      final caps = _FakeDesktopCapabilities();
+      final h = await pumpApp(tester, capabilities: caps);
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(caps.launchAtStartupCalls, [true]);
+    });
+
+    testWidgets('移动端（Noop 能力）不展示开机自启开关', (tester) async {
+      // Noop 能力的 isSupported == false → 桌面集成整段不渲染。
+      final h = await pumpApp(tester);
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+        findsNothing,
+      );
+    });
+  });
+
   group('导入会话（粘贴凭证 → 落盘 → 请求带 Bearer）', () {
     testWidgets('导入合法会话后状态变为已登录', (tester) async {
       // 端到端验证桌面端登录闭环：这是全仓库最高价值的缺口——SSO 在系统浏览器
@@ -1446,6 +1593,18 @@ void main() {
 
 /// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。
 class _FakeDesktopCapabilities implements DesktopCapabilities {
+  /// 收到的托盘提示（按推送顺序）。
+  ///
+  /// 用列表而非单个值：托盘提示的**推送时机与去重**本身就是被测行为
+  /// （如「同步结束后必须推回空闲态」）。
+  final List<String> trayTooltips = [];
+
+  /// 收到的开机自启设置调用。
+  final List<bool> launchAtStartupCalls = [];
+
+  /// `isLaunchAtStartupEnabled` 的返回值（用例可改以验证初值来源）。
+  bool launchAtStartupEnabled = false;
+
   @override
   bool get isSupported => true;
 
@@ -1465,16 +1624,20 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   Future<void> unregisterHotkey(String id) async {}
 
   @override
-  Future<bool> isLaunchAtStartupEnabled() async => false;
+  Future<bool> isLaunchAtStartupEnabled() async => launchAtStartupEnabled;
 
   @override
-  Future<void> setLaunchAtStartup(bool enabled) async {}
+  Future<void> setLaunchAtStartup(bool enabled) async {
+    launchAtStartupCalls.add(enabled);
+  }
 
   @override
   Future<void> setTrayMenu(List<TrayMenuItem> items) async {}
 
   @override
-  Future<void> setTrayTooltip(String tooltip) async {}
+  Future<void> setTrayTooltip(String tooltip) async {
+    trayTooltips.add(tooltip);
+  }
 
   @override
   Future<String?> pickDirectory({String? title}) async => null;

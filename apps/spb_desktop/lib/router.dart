@@ -555,6 +555,7 @@ class _SyncPage extends ConsumerWidget {
       initialLocalRoot: localRoot,
       pickDirectory: ref.watch(pickDirectoryProvider),
       runSync: ref.watch(runSyncActionProvider),
+          ref.read(desktopCapabilitiesProvider).revealPath(path),
       onLocalRootChanged: (root) {
         // 保存目录（换目录会在同一事务里清空同步状态，见 provider 说明）。
         ref.read(saveLocalRootActionProvider)(root).catchError((Object e) {
@@ -595,6 +596,7 @@ class _SettingsPage extends ConsumerWidget {
         return caps.pickDirectory(title: '选择交付物同步目录');
       },
       capabilities: ref.watch(desktopCapabilitiesProvider),
+          ref.read(desktopCapabilitiesProvider).revealPath(path),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
       // 退出登录：清凭证 → 回登录页。
@@ -612,8 +614,15 @@ class _SettingsPage extends ConsumerWidget {
       //
       // 用 `context.mounted` 而非 `State.mounted`：这里是 `ConsumerWidget`
       // 的 `build` 闭包，捕获的是 `BuildContext` 而非 State。
+      onSignOut: () async {
+        await ref.read(authControllerProvider).signOut();
+        if (context.mounted) context.go(SpbRoutes.login);
+      },
+      // 开机自启：桌面专属。移动端不传（注入 null → 不渲染该项）。
       loadLaunchAtStartup: () =>
+          ref.read(desktopCapabilitiesProvider).isLaunchAtStartupEnabled(),
       setLaunchAtStartup: (enabled) =>
+          ref.read(desktopCapabilitiesProvider).setLaunchAtStartup(enabled),
     );
   }
 }

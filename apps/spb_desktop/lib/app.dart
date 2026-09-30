@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'desktop_integration.dart';
 import 'providers.dart';
 import 'router.dart';
+import 'tray_tooltip.dart';
 
 /// 应用根组件。
 ///
@@ -67,6 +69,12 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
   /// 会反复重建托盘菜单。`attach` 自身幂等，但放在 `initState` 更明确。
   DesktopIntegration? _integration;
 
+  /// 托盘提示的接线。null 表示本平台不支持（移动端/测试环境）。
+  TrayTooltipController? _trayTooltip;
+
+  /// 托盘提示的订阅（同步在途状态变化时重推）。
+  ProviderSubscription<bool>? _syncInFlightSub;
+
   @override
   void initState() {
     super.initState();
@@ -76,11 +84,48 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     if (caps.isSupported) {
       _integration = DesktopIntegration(capabilities: caps, router: _router)
         ..attach();
+      _installTrayTooltip(caps);
     }
+  }
+
+  /// 接线托盘提示：把「同步状态」反映到托盘上。
+  ///
+  /// ## 为什么订阅「同步在途」而不是「同步结果」
+  ///
+  /// 提示文本要反映**当下**状态（同步中 / 空闲）。同步结束后必须回到
+  /// 「空闲」——一个永久显示「同步中…」的托盘提示比没有提示更糟（用户会
+  /// 以为卡住了）。`syncInFlightProvider` 在 `finally` 里复位，正好覆盖
+  /// 成功与失败两条路径。
+  ///
+  /// ## 为什么在 `initState` 里订阅而不是在 `build` 里 `ref.listen`
+  ///
+  /// `ref.listen` 只能在 `build` 阶段调用（Riverpod 的约束）。本组件的
+  /// `build` 在 `initState` 之后才跑，但订阅若放 `build` 里会**每次 rebuild
+  /// 重复注册**（虽然 Riverpod 会去重，但语义上「订阅生命周期 = 组件生命
+  /// 周期」用 `listenManual` 表达更准确，且能显式 dispose）。
+  void _installTrayTooltip(DesktopCapabilities caps) {
+    final controller = TrayTooltipController(
+      capabilities: caps,
+      // 目录来自 provider（可能在设置页被改），故每次读最新值而不是快照。
+      syncConfigured: () =>
+          ref.read(syncLocalRootProvider).value?.trim().isNotEmpty ?? false,
+      syncing: () => ref.read(syncInFlightProvider),
+    );
+    _trayTooltip = controller;
+
+    // 先推一次当前状态：否则托盘会一直显示托盘库的默认值，直到用户第一次
+    // 同步——而「未配置同步目录」这个信息恰恰在用户还没同步时最有用。
+    controller.push();
+
+    _syncInFlightSub = ref.listenManual<bool>(syncInFlightProvider, (_, _) {
+      controller.push();
+    });
   }
 
   @override
   void dispose() {
+    _syncInFlightSub?.close();
+    _trayTooltip?.dispose();
     _integration?.detach();
     if (_ownsRouter) _router.dispose();
     super.dispose();

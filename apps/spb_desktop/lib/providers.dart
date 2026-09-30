@@ -686,13 +686,20 @@ const String sinceDaysPrefKey = 'sync.since_days';
 /// 绑定旧目录的实例。
 final runSyncActionProvider = Provider<RunSyncAction>((ref) {
   return () async {
-    // 每次都重新读设置：用户可能刚在设置页改了目录/范围/过滤就点同步。
-    // 捕获构造时的旧值会让同步按旧配置跑，而 UI 显示的是新配置。
-    final settings = await ref.read(loadSyncSettingsProvider)();
-
-    final root = settings.localRoot;
-    if (root == null || root.trim().isEmpty) {
-      throw const PlatformError('请先选择同步目录');
+    // 标记「同步在途」，供托盘提示显示「同步中…」。
+    //
+    // ## 为什么状态放在 Provider 里而不是页面的 State 里
+    //
+    // 托盘提示是**应用级**的，它看不到同步页的 State；而同步可能由设置页、
+    // 同步页或将来其他入口发起。把「在途」放在一处，所有入口自动生效。
+    //
+    // `finally` 保证异常路径也会复位：否则一次失败会让托盘永远显示
+    // 「同步中…」，用户会以为同步卡死。
+    ref.read(syncInFlightProvider.notifier).set(true);
+    try {
+      return await _runSync(ref);
+    } finally {
+      ref.read(syncInFlightProvider.notifier).set(false);
     }
   };
 });
@@ -701,6 +708,11 @@ final runSyncActionProvider = Provider<RunSyncAction>((ref) {
 ///
 /// 用 `NotifierProvider<bool>` 而非 `StateProvider`：后者在 Riverpod 3 已
 /// 移入 `legacy.dart`（见 [authStateProvider] 的说明）。
+final syncInFlightProvider = NotifierProvider<SyncInFlightNotifier, bool>(
+  SyncInFlightNotifier.new,
+);
+
+/// 同步在途状态。
 class SyncInFlightNotifier extends Notifier<bool> {
   @override
   bool build() => false;

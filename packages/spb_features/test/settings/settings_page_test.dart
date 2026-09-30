@@ -624,6 +624,145 @@ void main() {
     });
   });
 
+  group('设置页：开机自启', () {
+    // ## 为什么每个用例都要传 `capabilities`
+    //
+    // 桌面集成整段由 `capabilities.isSupported` 把守（移动端不展示），而
+    // 测试默认注入 `NoopDesktopCapabilities`（isSupported == false）——
+    // 不传的话整个区块都不渲染，`find` 全部落空。
+    testWidgets('未注入 loadLaunchAtStartup 时不展示该项（移动端）', (tester) async {
+      // 不用 capabilities.isSupported 判断：Noop 能力的
+      // isLaunchAtStartupEnabled 恒返回 false，会渲染成一个看起来「已关闭」
+      // 却点不动的开关——展示骗人的开关比不展示更糟。
+      await pumpSettings(tester, capabilities: _FakeDesktopCapabilities());
+
+      expect(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('开关初值来自 loadLaunchAtStartup（true）', (tester) async {
+      await pumpSettings(
+        tester,
+        capabilities: _FakeDesktopCapabilities(),
+        loadLaunchAtStartup: () async => true,
+      );
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      expect(tile.value, isTrue);
+    });
+
+    testWidgets('开关初值来自 loadLaunchAtStartup（false）', (tester) async {
+      await pumpSettings(
+        tester,
+        capabilities: _FakeDesktopCapabilities(),
+        loadLaunchAtStartup: () async => false,
+      );
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      expect(tile.value, isFalse);
+      expect(tile.onChanged, isNotNull, reason: '读到了状态就该可切换');
+    });
+
+    testWidgets('切换开关调用 setLaunchAtStartup 并带上新值', (tester) async {
+      final received = <bool>[];
+      await pumpSettings(
+        tester,
+        capabilities: _FakeDesktopCapabilities(),
+        loadLaunchAtStartup: () async => false,
+        setLaunchAtStartup: (v) async => received.add(v),
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(received, [true]);
+    });
+
+    testWidgets('写完后重读状态：平台接受时开关跟随平台值', (tester) async {
+      // ## 为什么必须有这一条（而不是只测「拒绝时弹回」）
+      //
+      // 「平台拒绝」场景下，无论是否重读，开关都显示 false——测不出重读有
+      // 没有发生。要证明重读存在，必须让**平台值与旧值不同**：平台接受写入
+      // 后，开关应当跟随平台变为 true。
+      //
+      // 若去掉重读，`_launchAtStartup` 会一直停留在旧值 false，开关看起来
+      // 「点了没反应」——用户会以为设置没生效，反复点。
+      var enabled = false;
+      await pumpSettings(
+        tester,
+        capabilities: _FakeDesktopCapabilities(),
+        loadLaunchAtStartup: () async => enabled,
+        // 模拟平台真的写进去了。
+        setLaunchAtStartup: (v) async => enabled = v,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      await tester.pumpAndSettle();
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      expect(tile.value, isTrue, reason: '平台已写入，开关必须跟随——否则用户以为点了没反应');
+    });
+
+    testWidgets('写完后重读状态：平台拒绝写入时开关弹回（不显示假的成功）', (tester) async {
+      // 平台可能拒绝写自启项（Flatpak 沙箱、只读 autostart 目录），而能力层
+      // 的 setLaunchAtStartup 内部降级为「记日志 + 不抛」，无法回报成败。
+      // 重读让 UI 反映平台事实。
+      var enabled = false;
+      await pumpSettings(
+        tester,
+        capabilities: _FakeDesktopCapabilities(),
+        loadLaunchAtStartup: () async => enabled,
+        // 模拟「写不进去」：调用成功但状态没变。
+        setLaunchAtStartup: (v) async {},
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      await tester.pumpAndSettle();
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      expect(tile.value, isFalse, reason: '平台没写进去，开关必须弹回——否则用户以为设置成功了');
+    });
+
+    testWidgets('读不到状态（抛异常）时禁用开关，不假装「已关闭」', (tester) async {
+      await pumpSettings(
+        tester,
+        capabilities: _FakeDesktopCapabilities(),
+        loadLaunchAtStartup: () async => throw StateError('无 autostart 目录'),
+        setLaunchAtStartup: (v) async {},
+      );
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-launch-at-startup')),
+      );
+      expect(tile.onChanged, isNull, reason: '状态未知时不得让用户以为能切——那会给出一个假的成功感');
+    });
+
+    testWidgets('不再展示过时的「待接入（M0 验证项）」文案', (tester) async {
+      // 托盘其实已在 desktop_integration.dart 的 _installTrayMenu 接线完成，
+      // 旧文案是事实错误。
+      await pumpSettings(tester, capabilities: _FakeDesktopCapabilities());
+
+      expect(find.textContaining('待接入'), findsNothing);
+      expect(find.textContaining('系统托盘'), findsOneWidget);
+    });
+  });
+
   group('设置页：退出登录', () {
     testWidgets('未注入 onSignOut 时不展示入口（无认证的用法）', (tester) async {
       await pumpSettings(tester);

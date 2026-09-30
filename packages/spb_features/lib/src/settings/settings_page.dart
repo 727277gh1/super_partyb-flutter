@@ -115,6 +115,24 @@ class SettingsPage extends StatefulWidget {
   /// `go(login)`——两种做法都在页面之外。
   ///
   /// 为 null 时不展示（保持「无认证」的用法，与其余可选注入一致）。
+  final Future<void> Function()? onSignOut;
+
+  /// 读取「开机自启」当前状态。
+  ///
+  /// 为 null 时**不展示**该项（移动端注入 null）。不用
+  /// `capabilities.isSupported` 判断：能力接口上的
+  /// `isLaunchAtStartupEnabled` 在移动端恒返回 false，那会让开关看起来
+  /// 「已关闭」而实际点不动——展示一个骗人的开关比不展示更糟。
+  final Future<bool> Function()? loadLaunchAtStartup;
+
+  /// 设置「开机自启」。
+  ///
+  /// ## 为什么返回值是 void 而不是 bool
+  ///
+  /// 平台可能拒绝写入自启项（Flatpak 沙箱、只读的 autostart 目录）。
+  /// 能力实现内部已降级为「记日志 + 不抛」，故这里无法如实回报成功与否。
+  /// 页面采取的做法是：调用后**重新读取**真实状态，让开关回到平台的事实值
+  /// ——比显示一个乐观的勾选更诚实。
   final Future<void> Function(bool enabled)? setLaunchAtStartup;
 
   final String title;
@@ -144,6 +162,12 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _pruning = false;
 
   /// 正在登出（防重复提交）。
+  bool _signingOut = false;
+
+  /// 开机自启的当前状态。null = 尚未读到（或未接入）。
+  bool? _launchAtStartup;
+
+  /// 自启开关是否在途（防重复切换 + 禁用控件）。
   bool _togglingLaunch = false;
   String? _error;
 
@@ -203,12 +227,47 @@ class _SettingsPageState extends State<SettingsPage> {
   void _syncMaxSizeField(SyncSettings s) {
     final mb = s.filter.maxFileSize ~/ (1024 * 1024);
     _maxSizeController.text = '$mb';
+  }
+
+  /// 读取开机自启状态。
+  ///
+  /// 与首屏设置分开放：读它要走平台通道（可能因无 autostart 目录而慢或失败），
+  /// 不该拖慢设置页的首次渲染。
+  Future<void> _loadLaunchAtStartup() async {
     final loader = widget.loadLaunchAtStartup;
     if (loader == null) return;
+    try {
+      final enabled = await loader();
+      if (!mounted) return;
+      setState(() => _launchAtStartup = enabled);
+    } catch (e) {
+      // 读不到就不显示该项的确定值：保持 null（渲染为禁用 + 「读取中」），
+      // 而不是假装「已关闭」——后者会让用户以为自启确实关着。
+      SpbLog.warn('读取开机自启状态失败', {'error': e.toString()});
+      if (!mounted) return;
+      setState(() => _launchAtStartup = null);
+    }
+  }
+
+  /// 切换开机自启。
+  ///
+  /// ## 为什么写完后要重新读一次
+  ///
+  /// 平台可能拒绝写入（Flatpak 沙箱、只读的 autostart 目录），而能力层的
+  /// `setLaunchAtStartup` 内部降级为「记日志 + 不抛」，无法回报成功与否。
+  /// 重读让开关回到**平台的事实值**：写失败时它会自己弹回去，用户立刻看到
+  /// 「这个开关在这个环境下不生效」，而不是以为设置成功了。
+  Future<void> _toggleLaunchAtStartup(bool enabled) async {
     final setter = widget.setLaunchAtStartup;
     if (setter == null || _togglingLaunch) return;
 
     setState(() => _togglingLaunch = true);
+    try {
+      await setter(enabled);
+    } catch (e) {
+      if (mounted) setState(() => _error = '设置开机自启失败：$e');
+    }
+    // 无论成功失败都重读：让 UI 反映平台事实，而不是我们的期望。
     await _loadLaunchAtStartup();
     if (!mounted) return;
     setState(() => _togglingLaunch = false);
@@ -743,12 +802,34 @@ class _SettingsPageState extends State<SettingsPage> {
                   subtitle: Text(HotkeyBinding.quickCapture.label),
                 ),
                 const Divider(height: 1),
+                // 托盘**已接线**（`desktop_integration.dart` 的
+                // `_installTrayMenu` 推送菜单、注册显示/快速输入/退出回调），
+                // 但「托盘图标是否真的出现在用户的桌面环境里」取决于
+                // appindicator 支持——那只能真机验证。故文案区分这两件事：
+                // 说「已接入菜单与回调」，而不是含糊的「未完成」（后者是
+                // 事实错误，会让用户以为托盘根本没做）。
                 const ListTile(
                   leading: Icon(Icons.notifications_none_outlined),
                   title: Text('系统托盘'),
                   subtitle: Text('已接入菜单与回调（图标是否显示取决于桌面环境）'),
                   enabled: false,
                 ),
+                if (widget.loadLaunchAtStartup != null) ...[
+                  const Divider(height: 1),
+                  SwitchListTile(
+                    key: const ValueKey('settings-launch-at-startup'),
+                    // SwitchListTile 的左侧图标参数叫 secondary（不是 leading）。
+                    secondary: const Icon(Icons.power_settings_new_outlined),
+                    title: const Text('开机自启'),
+                    subtitle: const Text('登录系统后自动在托盘启动'),
+                    // 读不到状态（null）时禁用：宁可显示「未知」也不显示
+                    // 一个可能是假的「已关闭」。
+                    value: _launchAtStartup ?? false,
+                    onChanged: (_launchAtStartup == null || _togglingLaunch)
+                        ? null
+                        : _toggleLaunchAtStartup,
+                  ),
+                ],
               ],
             ),
           ),
