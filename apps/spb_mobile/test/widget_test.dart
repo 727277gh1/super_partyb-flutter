@@ -159,6 +159,12 @@ Future<TestHarness> pumpApp(
       queryParameters: {'limit': 30, 'offset': 0},
     );
   }
+  // 待确认角标 provider 在首页首帧即拉取，与 mockGroups 无关。
+  adapter.onGet(
+    '/chat/confirmations',
+    (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+    queryParameters: {'status': 'pending', 'limit': 50},
+  );
 
   // ## 为什么用 `UncontrolledProviderScope` + 显式 container
   //
@@ -271,6 +277,12 @@ void main() {
         ],
       }),
       queryParameters: {'limit': 30, 'offset': 0},
+    );
+    // 对话列表页的待确认角标 provider 首帧即拉取。
+    adapter.onGet(
+      '/chat/confirmations',
+      (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+      queryParameters: {'status': 'pending', 'limit': 50},
     );
 
     final router = GoRouter(
@@ -577,6 +589,226 @@ void main() {
       expect(
         find.byKey(const ValueKey('miniapp-work-detail-page')),
         findsOneWidget,
+      );
+    });
+
+    testWidgets('工作台新建：POST /chat/miniapp/works 后进入新工作详情', (tester) async {
+      // 端到端验证 router 把「点新建」接到了真实端点，且拿到返回的 workId 导航。
+      Map<String, dynamic>? createBody;
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/miniapp/works',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'status': 'active', 'limit': 20},
+          );
+          adapter.onPost(
+            '/chat/miniapp/works',
+            (server) => server.reply(201, {
+              'work': {
+                'id': 'grp_new',
+                'title': '新会话',
+                'status': 'running',
+                'status_label': '运行中',
+                'progress': {'total': 0, 'completed': 0, 'percent': 0},
+                'steps': <Map<String, dynamic>>[],
+                'pending_confirmations': <Map<String, dynamic>>[],
+                'artifacts': <Map<String, dynamic>>[],
+                'recent_events': <Map<String, dynamic>>[],
+                'can_send_message': true,
+                'can_stop': true,
+                'can_complete': true,
+              },
+              'dispatch': null,
+            }),
+            data: Matchers.any,
+          );
+          adapter.onGet(
+            '/chat/miniapp/works/grp_new',
+            (server) => server.reply(200, {
+              'work': {
+                'id': 'grp_new',
+                'title': '新会话',
+                'status': 'running',
+                'status_label': '运行中',
+                'progress': {'total': 0, 'completed': 0, 'percent': 0},
+                'steps': <Map<String, dynamic>>[],
+                'pending_confirmations': <Map<String, dynamic>>[],
+                'artifacts': <Map<String, dynamic>>[],
+                'recent_events': <Map<String, dynamic>>[],
+                'can_send_message': true,
+                'can_stop': true,
+                'can_complete': true,
+              },
+            }),
+          );
+          adapter.onGet(
+            '/chat/miniapp/works/grp_new/events',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'limit': 100},
+          );
+          adapter.onGet(
+            '/chat/miniapp/works/grp_new/artifacts',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          );
+        },
+      );
+      h.dio.interceptors.insert(
+        0,
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            if (options.path.endsWith('/chat/miniapp/works') &&
+                options.method == 'POST') {
+              createBody = options.data is Map
+                  ? Map<String, dynamic>.from(options.data as Map)
+                  : null;
+            }
+            handler.next(options);
+          },
+        ),
+      );
+
+      h.router.go(SpbRoutes.works);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      await tester.tap(find.byKey(const ValueKey('miniapp-works-create')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(createBody, isNotNull, reason: '必须真的发出新建请求');
+      expect(
+        createBody!.containsKey('template_id'),
+        isFalse,
+        reason: '服务端 template_id 可选；传空会让 metadata 里多一个无意义的空值',
+      );
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.work('grp_new'),
+        reason: '新建后应进入新工作详情（新工作标题是占位符，列表里分不出来）',
+      );
+    });
+
+    testWidgets('工作详情上传：multipart 打到 /works/:id/files，字段名为 file', (
+      tester,
+    ) async {
+      // 断言真实请求形状：服务端 `c.FormFile("file")`，字段名不对会 400
+      // 「缺少 file」。这是「上传按钮存在」之外的实质验证。
+      final tmp = Directory.systemTemp.createTempSync('mobile-work-upload');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      final file = File('${tmp.path}/报告.pdf')
+        ..writeAsBytesSync(const [1, 2, 3, 4]);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/file_selector'),
+        (call) async => call.method == 'openFile' ? [file.path] : null,
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/file_selector'),
+          null,
+        );
+      });
+
+      String? uploadPath;
+      Object? uploadBody;
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          // ⚠️ 三个 GET 必须也 mock：详情页并发拉 detail/events/artifacts，
+          // 任一失败就进错误分支（那棵树里**没有**上传按钮），
+          // 于是 `tap` 找不到目标、上传链路根本不会触发。
+          adapter.onGet(
+            '/chat/miniapp/works/grp_up',
+            (server) => server.reply(200, {
+              'work': {
+                'id': 'grp_up',
+                'title': '上传用工作',
+                'status': 'running',
+                'status_label': '运行中',
+                'progress': {'total': 0, 'completed': 0, 'percent': 0},
+                'steps': <Map<String, dynamic>>[],
+                'pending_confirmations': <Map<String, dynamic>>[],
+                'artifacts': <Map<String, dynamic>>[],
+                'recent_events': <Map<String, dynamic>>[],
+                'can_send_message': true,
+                'can_stop': true,
+                'can_complete': true,
+              },
+            }),
+          );
+          adapter.onGet(
+            '/chat/miniapp/works/grp_up/events',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'limit': 100},
+          );
+          adapter.onGet(
+            '/chat/miniapp/works/grp_up/artifacts',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          );
+          adapter.onPost(
+            '/chat/miniapp/works/grp_up/files',
+            (server) => server.reply(201, {
+              'work_id': 'grp_up',
+              'artifact': {
+                'id': 'a1',
+                'work_id': 'grp_up',
+                'name': '报告.pdf',
+                'type': 'document',
+                'mime_type': 'application/pdf',
+                'size_bytes': 4,
+                'preview_mode': '',
+              },
+              'upload': {'relative_path': '报告.pdf'},
+            }),
+            data: Matchers.any,
+          );
+        },
+      );
+      h.dio.interceptors.insert(
+        0,
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            if (options.path.contains('/files')) {
+              uploadPath = options.path;
+              uploadBody = options.data;
+            }
+            handler.next(options);
+          },
+        ),
+      );
+
+      h.router.go(SpbRoutes.work('grp_up'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      // ⚠️ 整条链路必须在**一个** runAsync 里：平台通道与文件 I/O 只在真实
+      // 时区完成；把 tap 留在 FakeAsync 时区会让 await 永远不推进
+      // （实测 uploadPath 恒为 null，且页面不报错）。
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const ValueKey('miniapp-work-upload')));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      });
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(
+        uploadPath,
+        contains('/chat/miniapp/works/grp_up/files'),
+        reason: 'workId 必须来自路由参数（family 键写错会打到别的 work）',
+      );
+      expect(
+        uploadBody,
+        isA<FormData>(),
+        reason: '必须是 multipart（服务端 c.FormFile 读 multipart 表单）',
+      );
+      final form = uploadBody! as FormData;
+      expect(
+        form.files.map((e) => e.key),
+        contains('file'),
+        reason: '字段名必须叫 file，否则服务端 400「缺少 file」',
       );
     });
 

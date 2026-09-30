@@ -54,6 +54,8 @@ class SpbRoutes {
   /// 挂在「对话」标签的导航栈下（与 [chat] 同级），故从搜索结果跳到对话后
   /// 按返回键回到搜索结果，再返回回到列表——符合移动端的栈语义。
   static const search = '/search';
+
+  /// 跨 group 待确认收件箱（与 search 同挂在「对话」标签下）。
 }
 
 /// 移动端路由表。
@@ -187,6 +189,11 @@ List<RouteBase> buildMobileRoutes() {
                   path: 'search',
                   builder: (context, state) => const _SearchPage(),
                 ),
+                GoRoute(
+                  path: 'confirmations',
+                  builder: (context, state) =>
+                      const _PendingConfirmationsPage(),
+                ),
               ],
             ),
           ],
@@ -297,18 +304,59 @@ class _ConversationsTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
     final pendingCount = ref
+        .watch(pendingConfirmationCountProvider)
         .maybeWhen(data: (n) => n, orElse: () => 0);
     return GroupListPage(
       api: api,
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       onSearch: () => context.go(SpbRoutes.search),
+      onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
+      pendingConfirmationCount: pendingCount,
       // 工作台（小程序 BFF）只有移动端接——它是为小程序/移动端做的投影层。
       onOpenWorks: () => context.push(SpbRoutes.works),
       // 不需要 userId：身份来自网关注入的 `X-User-ID`，请求体里没有 user_id。
       onCreateGroup: (title) => api.createGroup(title: title),
+    );
+  }
+}
+
+/// 跨 group 待确认收件箱（移动端，语义同桌面端 `_PendingConfirmationsPage`）。
+class _PendingConfirmationsPage extends ConsumerStatefulWidget {
+  const _PendingConfirmationsPage();
+
+  @override
+  ConsumerState<_PendingConfirmationsPage> createState() =>
+      _PendingConfirmationsPageState();
+}
+
+class _PendingConfirmationsPageState
+    extends ConsumerState<_PendingConfirmationsPage> {
+  final _titles = <String, String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final api = ref.watch(chatApiProvider);
+    return PendingConfirmationsPage(
+      fetch: () async {
+        final items = await api.listConfirmationsTyped(status: 'pending');
+        await Future.wait(
+          items.map((c) async {
+            if (_titles.containsKey(c.groupId)) return;
+            try {
+              final g = await api.getGroup(c.groupId);
+              _titles[c.groupId] = g.title;
+            } on Object catch (_) {}
+          }),
+        );
+        ref.invalidate(pendingConfirmationCountProvider);
+        return items;
+      },
       groupTitleOf: (gid) => _titles[gid],
       onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
+      onResolve: (c, action) async {
+        await api.resolveConfirmation(c.groupId, c.id, action: action);
+      },
     );
   }
 }

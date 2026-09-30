@@ -443,6 +443,19 @@ class ChatApi {
     return unwrapItems(res, (m) => m);
   }
 
+  /// [listConfirmations] 的强类型版本（推荐调用方使用）。
+  //
+  // 不修改 [listConfirmations] 的签名（避免破坏既有测试），而是在外层做一层
+  // `ChatConfirmation.fromJson` 转换。字段名漂移会在解析时得到 null 而非
+  // 静默拿到错误值，调用方也能拿到编译期字段访问。
+  Future<List<ChatConfirmation>> listConfirmationsTyped({
+    String? status,
+    int limit = 50,
+  }) async {
+    final raw = await listConfirmations(status: status, limit: limit);
+    return raw.map(ChatConfirmation.fromJson).toList(growable: false);
+  }
+
   /// `GET /chat/groups/:group_id/confirmations`
   Future<List<Map<String, dynamic>>> groupConfirmations(String groupId) async {
     final res = await _get('/chat/groups/$groupId/confirmations');

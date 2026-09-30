@@ -437,6 +437,24 @@ final searchChatProvider = Provider<SearchChat>((ref) {
   };
 });
 
+// ==================== 跨 group 待确认收件箱 ====================
+
+/// 待确认列表（首拉）。
+final pendingConfirmationsProvider =
+    FutureProvider<List<ChatConfirmation>>((ref) async {
+  return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
+});
+
+/// 当前待确认数量（供对话列表页角标）。
+final pendingConfirmationCountProvider = FutureProvider<int>((ref) async {
+  try {
+    final items = await ref.watch(pendingConfirmationsProvider.future);
+    return items.length;
+  } on Object catch (_) {
+    return 0;
+  }
+});
+
 // ==================== 对话流 ====================
 
 /// 对话流控制器（按 userId 参数化）。

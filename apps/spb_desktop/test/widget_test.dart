@@ -194,6 +194,13 @@ Future<TestHarness> pumpApp(
       queryParameters: {'limit': 30, 'offset': 0},
     );
   }
+  // 待确认角标 provider 在首页首帧即拉取，与 mockGroups 无关（即使列表不 mock，
+  // 角标 provider 仍会触发）。无条件 mock 以免留下未结算 Timer。
+  adapter.onGet(
+    '/chat/confirmations',
+    (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+    queryParameters: {'status': 'pending', 'limit': 50},
+  );
 
   final container = ProviderContainer(
     overrides: [
@@ -313,6 +320,10 @@ void main() {
         ],
       }),
       queryParameters: {'limit': 30, 'offset': 0},
+    );
+    // 待确认角标 provider 首帧即拉取。
+    adapter.onGet(
+      '/chat/confirmations',
       (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
       queryParameters: {'status': 'pending', 'limit': 50},
     );

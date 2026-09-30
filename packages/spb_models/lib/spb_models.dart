@@ -13,6 +13,7 @@ library;
 //   ChatSearchHit                —— 搜索命中项（turn 摘要，**不是** ChatEvent）
 //   UfsFileEntry / UfsFilePage   —— UFS 文件条目与分页响应（交付物同步用）
 //   Miniapp*                     —— 小程序工作台 BFF 契约（work/artifact/confirmation/通知）
+export 'src/chat_confirmation.dart';
 export 'src/chat_event.dart';
 export 'src/chat_group.dart';
 // `show` 显式声明公共类型名，避免该模块未来新增内部辅助类时被动泄漏到公共 API。

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_core/spb_core.dart';
@@ -528,5 +530,186 @@ void main() {
     gate.complete(const MiniappDispatchResult(turnId: 't1'));
     await tester.pump();
     await tester.pump();
+  });
+
+  group('工作台：上传附件', () {
+    /// 造一个真实存在的临时文件并 mock 系统文件选择器返回它。
+    ///
+    /// ## 为什么用真实文件
+    ///
+    /// 页面对每个选中文件调 `readBytes()`；不存在的文件会抛，测试会以
+    /// 「上传失败」形式失败，而根因是 fixture 而不是被测逻辑。
+    ({Directory dir, File file}) makeTempFile(
+      WidgetTester tester,
+      String name,
+    ) {
+      final dir = Directory.systemTemp.createTempSync('work-upload');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final file = File('${dir.path}/$name')
+        ..writeAsBytesSync(const [1, 2, 3, 4]);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/file_selector'),
+        (call) async => call.method == 'openFile' ? [file.path] : null,
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/file_selector'),
+          null,
+        );
+      });
+      return (dir: dir, file: file);
+    }
+
+    /// 挂载带上传注入的页面，返回捕获到的上传调用。
+    Future<List<({String filename, List<int> bytes})>> pumpWithUpload(
+      WidgetTester tester, {
+      Future<void> Function({
+        required String filename,
+        required List<int> bytes,
+      })?
+      upload,
+      Future<List<MiniappArtifact>> Function()? loadArtifacts,
+    }) async {
+      final uploads = <({String filename, List<int> bytes})>[];
+      useTallViewport(tester);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: WorkDetailPage(
+            loadDetail: () => stubDetail(),
+            loadEvents: () async => events,
+            loadArtifacts: loadArtifacts ?? () async => artifacts,
+            downloadArtifact: (id) => stubDownload(id),
+            saveArtifact: (name, bytes) => stubSave(name, bytes),
+            sendMessage: (input) => stubSend(input),
+            complete: () => stubComplete(),
+            stop: () => stubStop(),
+            resolveConfirmation: (id, action) => stubResolve(id, action),
+            onUploadFile:
+                upload ??
+                ({required filename, required bytes}) async {
+                  uploads.add((filename: filename, bytes: bytes));
+                },
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      return uploads;
+    }
+
+    /// 点上传并等待整条链路完成。
+    ///
+    /// ## 为什么整条链路必须在**一个** `runAsync` 里
+    ///
+    /// `_upload` 依次做三件跨时区的事：调平台通道（`file_selector`）→
+    /// `readBytes()`（真实文件 I/O）→ 调注入点。测试默认跑在 FakeAsync 时区，
+    /// 平台通道与文件 I/O 都只会在**真实**时区里完成。
+    ///
+    /// 若只把「等一会儿」包进 runAsync（而 `tap` 留在外面），`_upload` 的续体
+    /// 是在 FakeAsync 时区注册的，它 await 的平台通道 Future 永远不会被推进——
+    /// 实测 `uploadCalls` 恒为 0，且页面不报任何错，看起来像「按钮点了没反应」。
+    ///
+    /// 也不能用 `pumpAndSettle` 收尾：上传期间按钮位置是
+    /// `CircularProgressIndicator`（无限动画），settle 永远等不到「无动画」。
+    Future<void> tapUpload(WidgetTester tester) async {
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const ValueKey('miniapp-work-upload')));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('未注入 onUploadFile 时不展示上传按钮（只读用法）', (tester) async {
+      setUpStubs();
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('miniapp-work-upload')),
+        findsNothing,
+        reason: '没注入实现却展示按钮，点下去什么也不会发生',
+      );
+    });
+
+    testWidgets('点上传 → 选中的文件透传给 onUploadFile（文件名 + 字节）', (tester) async {
+      setUpStubs();
+      final tmp = makeTempFile(tester, '报告.pdf');
+      final uploads = await pumpWithUpload(tester);
+
+      await tapUpload(tester);
+
+      expect(uploads, hasLength(1));
+      expect(
+        uploads.single.filename,
+        '报告.pdf',
+        reason: '文件名要原样传（服务端用它做安全化后落盘）',
+      );
+      expect(uploads.single.bytes, const [
+        1,
+        2,
+        3,
+        4,
+      ], reason: '字节必须真的读出来，而不是传个空数组');
+      expect(tmp.file.existsSync(), isTrue);
+    });
+
+    testWidgets('用户取消选择（返回空）时不调用上传', (tester) async {
+      setUpStubs();
+      // mock 返回空列表 = 用户取消。
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/file_selector'),
+        (call) async => <String>[],
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/file_selector'),
+          null,
+        );
+      });
+      final uploads = await pumpWithUpload(tester);
+
+      await tapUpload(tester);
+
+      expect(uploads, isEmpty, reason: '取消不是错误，不该发出一个空文件的上传');
+    });
+
+    testWidgets('上传成功后重拉列表（产物由服务端投影，不本地拼接）', (tester) async {
+      setUpStubs();
+      makeTempFile(tester, 'a.txt');
+      var artifactLoads = 0;
+      final uploads = await pumpWithUpload(
+        tester,
+        loadArtifacts: () async {
+          artifactLoads++;
+          return const [];
+        },
+      );
+      final before = artifactLoads;
+
+      await tapUpload(tester);
+
+      expect(uploads, hasLength(1));
+      expect(
+        artifactLoads,
+        greaterThan(before),
+        reason: '不重拉的话用户看不到刚上传的文件，会以为上传失败',
+      );
+    });
+
+    testWidgets('单个文件上传失败不阻断整批，且提示哪几个失败', (tester) async {
+      setUpStubs();
+      makeTempFile(tester, 'bad.txt');
+      final uploads = await pumpWithUpload(
+        tester,
+        upload: ({required filename, required bytes}) async =>
+            throw const HttpError(413, '文件过大'),
+      );
+
+      await tapUpload(tester);
+
+      expect(find.textContaining('bad.txt'), findsWidgets);
+      expect(tester.takeException(), isNull, reason: '失败必须被捕获，不能让页面崩');
+      expect(uploads, isEmpty);
+    });
   });
 }

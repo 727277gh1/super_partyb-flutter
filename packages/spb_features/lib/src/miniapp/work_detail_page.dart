@@ -460,7 +460,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   ],
                   if (detail.pendingConfirmations.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    _SectionTitle('待确认'),
+                    SectionTitle('待确认'),
                     for (final c in detail.pendingConfirmations)
                       _ConfirmationCard(
                         key: ValueKey('miniapp-confirmation-${c.id}'),

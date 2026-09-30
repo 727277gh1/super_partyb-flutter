@@ -463,6 +463,28 @@ final searchChatProvider = Provider<SearchChat>((ref) {
   };
 });
 
+// ==================== 跨 group 待确认收件箱 ====================
+//
+// `GET /chat/confirmations` 身份来自网关注入的 `X-User-ID`（不需客户端传
+// userId）。用 FutureProvider 缓存首拉结果，并提供一个刷新入口。
+
+/// 待确认列表（首拉）。页面注入 `fetch` 时读它，刷新时调 `refresh`。
+final pendingConfirmationsProvider =
+    FutureProvider<List<ChatConfirmation>>((ref) async {
+  return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
+});
+
+/// 当前待确认数量（供对话列表页角标）。
+final pendingConfirmationCountProvider = FutureProvider<int>((ref) async {
+  try {
+    final items = await ref.watch(pendingConfirmationsProvider.future);
+    return items.length;
+  } on Object catch (_) {
+    // 拉取失败不阻断对话列表渲染：角标静默为 0。
+    return 0;
+  }
+});
+
 // ==================== 对话流 ====================
 
 /// 对话流控制器（按 userId 参数化）。

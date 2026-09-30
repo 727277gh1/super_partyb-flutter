@@ -29,6 +29,7 @@ export 'group_list_page.dart';
 export 'my_turns_page.dart';
 export 'message_composer.dart';
 export 'pending_messages_bar.dart';
+export 'pending_confirmations_page.dart';
 export 'search_page.dart';
 export 'thought_tile.dart';
 export 'tool_call_tile.dart';

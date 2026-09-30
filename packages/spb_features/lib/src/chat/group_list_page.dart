@@ -34,6 +34,8 @@ class GroupListPage extends StatefulWidget {
     this.onSearch,
     this.onOpenWorks,
     this.onCreateGroup,
+    this.pendingConfirmationCount = 0,
+    this.onOpenConfirmations,
     this.pageSize = 30,
   });
 
@@ -80,6 +82,14 @@ class GroupListPage extends StatefulWidget {
   /// 为 null 时**不展示**入口。仅移动端接线——桌面端不做小程序投影层
   /// （那是为小程序/移动端准备的 BFF）。
   final VoidCallback? onOpenWorks;
+
+  /// 跨 group 的待确认数量（角标）。> 0 时显示角标。
+  final int pendingConfirmationCount;
+
+  /// 打开待确认收件箱页。
+  ///
+  /// 为 null 时不展示入口（但 [pendingConfirmationCount] 仍可驱动角标）。
+  final VoidCallback? onOpenConfirmations;
 
   final int pageSize;
 
@@ -292,6 +302,17 @@ class _GroupListPageState extends State<GroupListPage> {
               tooltip: '新建对话',
               // 创建往返期间禁用：否则连点会建出两个对话。
               onPressed: _creating ? null : _createGroup,
+            ),
+          if (widget.onOpenConfirmations != null)
+            IconButton(
+              key: const ValueKey('group-list-confirmations'),
+              icon: Badge(
+                isLabelVisible: widget.pendingConfirmationCount > 0,
+                label: Text('${widget.pendingConfirmationCount}'),
+                child: const Icon(Icons.pending_actions),
+              ),
+              tooltip: '待确认',
+              onPressed: widget.onOpenConfirmations,
             ),
           if (widget.onSearch != null)
             IconButton(

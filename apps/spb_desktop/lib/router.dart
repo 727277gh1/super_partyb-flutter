@@ -53,6 +53,8 @@ class SpbRoutes {
 
   /// 搜索页（搜消息正文，不是对话标题）。
   static const search = '/search';
+
+  /// 跨 group 待确认收件箱。
 }
 
 /// 桌面端路由表。
@@ -222,6 +224,8 @@ List<RouteBase> buildDesktopRoutes() {
           builder: (context, state) => const _SearchPage(),
         ),
         GoRoute(
+          path: 'confirmations',
+          builder: (context, state) => const _PendingConfirmationsPage(),
         ),
         GoRoute(
         ),
@@ -287,11 +291,24 @@ class _HomePage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
     // 角标数量：拉取失败静默为 0（不阻断对话列表）。
+    final pendingCount = ref.watch(pendingConfirmationCountProvider).maybeWhen(
+        data: (n) => n,
+        orElse: () => 0,
+      );
     return GroupListPage(
       api: api,
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       onSearch: () => context.go(SpbRoutes.search),
+      onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
+      pendingConfirmationCount: pendingCount,
+      // 不需要 userId：`POST /chat/groups` 的身份来自网关注入的 `X-User-ID`
+      // （服务端 `chatHandlers.userID` 优先取该头），`ChatApi.createGroup` 的
+      // 请求体里根本没有 user_id 字段。
+      //
+      // 导航不在这个闭包里做：页面创建成功后会调 `onOpenGroup`（上方已接
+      // `context.go`）——「刚建的对话」与「点击某个对话」是同一个意图，
+      // 共用一条导航路径，避免两处 `context.go` 指向同一目标。
       onCreateGroup: (title) => api.createGroup(title: title),
     );
   }
@@ -309,8 +326,53 @@ class _SearchPage extends ConsumerWidget {
     return SearchPage(
       search: ref.watch(searchChatProvider),
       onOpenHit: (hit) => context.go(SpbRoutes.chat(hit.groupId)),
+    );
+  }
+}
+
+/// 跨 group 待确认收件箱。
+//
+// 预拉取列表涉及的 group 标题（`getGroup`），拼一个 `groupId → title` 缓存供
+// `groupTitleOf` 同步查询。解决确认复用既有 `resolveConfirmation`（路径带 group_id）。
+class _PendingConfirmationsPage extends ConsumerStatefulWidget {
+  const _PendingConfirmationsPage();
+
+  @override
+  ConsumerState<_PendingConfirmationsPage> createState() =>
+      _PendingConfirmationsPageState();
+}
+
+class _PendingConfirmationsPageState
+    extends ConsumerState<_PendingConfirmationsPage> {
+  final _titles = <String, String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final api = ref.watch(chatApiProvider);
+    return PendingConfirmationsPage(
+      fetch: () async {
+        final items = await api.listConfirmationsTyped(status: 'pending');
+        // 预取涉及的 group 标题（缺失则静默，卡片展示「未知对话」）。
+        await Future.wait(
+          items.map((c) async {
+            if (_titles.containsKey(c.groupId)) return;
+            try {
+              final g = await api.getGroup(c.groupId);
+              _titles[c.groupId] = g.title;
+            } on Object catch (_) {
+              // 拉取失败不阻断列表渲染。
+            }
+          }),
+        );
+        // 刷新计数角标。
+        ref.invalidate(pendingConfirmationCountProvider);
+        return items;
+      },
       groupTitleOf: (gid) => _titles[gid],
       onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
+      onResolve: (c, action) async {
+        await api.resolveConfirmation(c.groupId, c.id, action: action);
+      },
       onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
