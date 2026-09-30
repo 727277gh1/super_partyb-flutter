@@ -165,4 +165,92 @@ void main() {
     expect(ev.isKnown, isTrue);
     expect(ev.isTimelineVisible, isTrue);
   });
+
+  group('gate 决策访问器', () {
+    /// 造一个 adaptive_decision 事件（Go 现行扁平 payload）。
+    ChatEvent adaptive(Map<String, dynamic> payload) => ChatEvent.fromJson(
+      eventToDictShape()
+        ..['event_type'] = EventTypes.adaptiveDecision
+        ..['payload'] = payload,
+    );
+
+    /// 造一个 goal_gate_decision 事件。
+    ChatEvent goalGate(Map<String, dynamic> payload) => ChatEvent.fromJson(
+      eventToDictShape()
+        ..['event_type'] = EventTypes.goalGateDecision
+        ..['payload'] = payload,
+    );
+
+    test('adaptive_decision：读 action / gate_source / confidence / reason', () {
+      final ev = adaptive({
+        'action': 'auto_continue',
+        'gate_source': 'llm_gate',
+        'confidence': 0.72,
+        'reason': '任务未完成',
+        'next_input': '继续写',
+      });
+
+      expect(ev.gateAction, 'auto_continue');
+      expect(ev.gateSource, 'llm_gate');
+      expect(ev.gateConfidence, 0.72);
+      expect(ev.gateReason, '任务未完成');
+      expect(ev.gateNextInputPreview, '继续写');
+    });
+
+    test('confidence 容忍整数与字符串（payload 是 map[string]any）', () {
+      expect(adaptive({'confidence': 1}).gateConfidence, 1.0);
+      expect(adaptive({'confidence': '0.5'}).gateConfidence, 0.5);
+      expect(adaptive({'confidence': null}).gateConfidence, isNull);
+    });
+
+    test('goal_gate_decision：读 goal_achieved / stopped / stop_reason', () {
+      final ev = goalGate({
+        'goal_achieved': false,
+        'stopped': true,
+        'stop_reason': 'task_blocked',
+        'source': 'task_blocked',
+        'decision_reason': '有任务受阻',
+      });
+
+      expect(ev.goalAchieved, isFalse);
+      expect(ev.goalStopped, isTrue);
+      expect(ev.goalStopReason, 'task_blocked');
+      // goal_gate_decision 用 `source`（adaptive 用 `gate_source`），
+      // 访问器要两者都认。
+      expect(ev.gateSource, 'task_blocked');
+      // goal gate 用 `decision_reason`（adaptive 用 `reason`）。
+      expect(ev.gateReason, '有任务受阻');
+      // goal gate 没有 action / confidence。
+      expect(ev.gateAction, isNull);
+      expect(ev.gateConfidence, isNull);
+    });
+
+    test('goal_achieved/stopped 缺失时默认为 false（不误判为真）', () {
+      final ev = goalGate({});
+      expect(ev.goalAchieved, isFalse);
+      expect(ev.goalStopped, isFalse);
+    });
+
+    test('goal_achieved 只认布尔 true，字符串 "true" 不算', () {
+      // 服务端 payload 是 map[string]any，JSON 反序列化后布尔就是布尔；
+      // 若有人把它写成字符串，应显式不认，避免把「假」当「真」。
+      final ev = goalGate({'goal_achieved': 'true'});
+      expect(ev.goalAchieved, isFalse);
+    });
+
+    test('非 gate 事件的 gate 访问器返回 null/默认值', () {
+      final ev = ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.message
+          ..['payload'] = {'text': 'hi'},
+      );
+
+      expect(ev.gateAction, isNull);
+      expect(ev.gateSource, isNull);
+      expect(ev.gateReason, isNull);
+      expect(ev.gateConfidence, isNull);
+      expect(ev.goalAchieved, isFalse);
+      expect(ev.goalStopped, isFalse);
+    });
+  });
 }

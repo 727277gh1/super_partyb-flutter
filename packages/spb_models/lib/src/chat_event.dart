@@ -217,6 +217,59 @@ class ChatEvent {
     return null;
   }
 
+  // ---------- gate 决策访问器（adaptive_decision / goal_gate_decision）----------
+  //
+  // 两类事件共用这几个访问器，键名差异已在各 getter 里归一：
+  //   - `adaptive_decision`（Go 现行，扁平 payload）：
+  //       action / confidence / reason / gate_source（见 chatgate/arbiter.go
+  //       的 emitDecisionEvent）。
+  //   - `goal_gate_decision`（任务表判定）：
+  //       goal_achieved / stopped / stop_reason / decision_reason / source /
+  //       next_input_preview（见 chatgate/goal_gate.go 的 decisionPayload）。
+  //
+  // 字段名漂移不会被编译期发现（payload 是 map[string]any），每个键都对齐过
+  // webapp 的 collectGateDecisions 与 Go 的 emitDecisionEvent。
+
+  /// gate 判定来源：`fastpath` / `llm_gate` / `retry_gate`（adaptive）
+  /// 或 `tasks_completed` / `task_blocked` / `no_tasks` / `task_error_stopped`
+  /// （goal gate）。
+  //
+  // adaptive_decision 用 `gate_source`；goal_gate_decision 用 `source`，
+  // 故先试前者再试后者。
+  String? get gateSource =>
+      _str('gate_source') ?? _str('gateSource') ?? _str('source');
+
+  /// 决策动作（`adaptive_decision.action`）。
+  //
+  /// 值域：`stop` / `auto_continue` / `auto_repeat` / `need_confirmation`
+  /// （见 chatgate/decision.go 的 actionString）。
+  /// goal_gate_decision **没有** action 字段，返回 null（决策由
+  /// [goalAchieved]/[goalStopped] 推导）。
+  String? get gateAction => _str('action');
+
+  /// 决策理由：goal gate 用 `decision_reason`，adaptive 用 `reason`。
+  String? get gateReason => _str('decision_reason') ?? _str('reason');
+
+  /// 决策置信度（仅 adaptive_decision 带；goal gate 为任务表判定，恒为 null）。
+  double? get gateConfidence => _double(payload?['confidence']);
+
+  /// 下一步输入预览（两类事件都可能带）。
+  String? get gateNextInputPreview =>
+      _str('next_input') ?? _str('next_input_preview');
+
+  /// 目标是否达成（`goal_gate_decision`）。
+  bool get goalAchieved => payload?['goal_achieved'] == true;
+
+  /// 是否「停止等人工」（`goal_gate_decision`）。
+  //
+  /// 仅 `goal_achieved=false` 且有 `stopped=true` 时为真；goal 达成或自动续跑
+  /// 时为假。**必须**与 [goalAchieved] 配合看，单凭 `goal_achieved=false`
+  /// 无法区分「续跑」与「停止」（两者都是 false）。
+  bool get goalStopped => payload?['stopped'] == true;
+
+  /// 停止原因（`goal_gate_decision` 的 `stop_reason`）。
+  String? get goalStopReason => _str('stop_reason');
+
   String? _metadataStr(String key) {
     final md = payload?['metadata'];
     if (md is Map) {
@@ -227,6 +280,14 @@ class ChatEvent {
   }
 
   int? _intField(String key) => _int(payload?[key]);
+
+  double? _double(Object? v) {
+    if (v is double) return v;
+    if (v is int) return v.toDouble();
+    if (v is num) return v.toDouble();
+    if (v is String) return double.tryParse(v);
+    return null;
+  }
 
   // ---------- 内部辅助 ----------
 
