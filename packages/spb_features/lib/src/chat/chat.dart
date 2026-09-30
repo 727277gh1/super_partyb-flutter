@@ -24,6 +24,7 @@ export 'assistant_message_bubble.dart';
 export 'confirmation_card.dart';
 export 'conversation_page.dart';
 export 'follow_up_chips.dart';
+export 'group_deliverables_panel.dart';
 export 'group_management.dart';
 export 'group_list_page.dart';
 export 'my_turns_page.dart';
