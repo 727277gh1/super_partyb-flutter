@@ -38,6 +38,8 @@ library;
 //   SyncScopeConfig               —— 同步范围**持久化形态**（允许空列表）→ toScope()
 //   SyncSettings / LocalSyncStats —— 设置页的表单聚合形态与本地统计
 //   buildPrunePlan / isGroupId    —— 本地目录清理计划（纯逻辑，可预览）
+//   buildArtifactTree / ArtifactNode —— 交付物清单 → 树（隐式目录、聚合、排序，纯逻辑）
+export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
 export 'src/conversation_item.dart';
 export 'src/deliverable_sync.dart';
