@@ -53,6 +53,9 @@ class ChatStreamController {
   StreamSubscription<SseState>? _stateSub;
   bool _disposed = false;
 
+  /// 正在执行 [loadOlder]（防止并发翻页把同一页插两次）。
+  bool _loadingOlder = false;
+
   /// 归约后的对话项流（每次事件到达推送全量列表）。
   ///
   /// WHY 推全量而非增量：对话列表通常几百项，全量重建成本远低于维护增量合并
@@ -175,6 +178,106 @@ class ChatStreamController {
       }
       // 回填失败不阻断实时流——用户仍能看到新消息。
     }
+  }
+
+  /// 向上翻页：加载比当前缓冲区更早的一页历史。
+  ///
+  /// ## 游标必须用 globalSeq（不是 seq、不是 createdAt）
+  ///
+  /// 服务端分页谓词是 `WHERE global_seq < :before_global_seq ORDER BY global_seq DESC`
+  /// （见 Go 侧 `db/queries/chat_events.sql` 的 `ListChatEventsByGroup`）。
+  /// 用 [ChatEvent.seq] 会错：它是 **per-turn** 的，每个 turn 都从 1 重来；
+  /// 用 `createdAt` 也会错——只有毫秒精度，同毫秒内的多条事件无法定序。
+  /// `global_seq` 是唯一「全局唯一且单调」的排序键。
+  ///
+  /// ## 游标为什么取「缓冲区里最小的 globalSeq」
+  ///
+  /// 首屏 [_backfill] 拉的是**最新**一页，故缓冲区里最小的 globalSeq 就是
+  /// 「已知最早的落库事件」；服务端返回的正是「比它更早的一页」。
+  ///
+  /// ## 为什么必须跳过 0 与 null
+  ///
+  /// `transient` 事件不落库、`globalSeq` 为 0；本地合成的乐观回显
+  /// （[injectLocalUserMessage]）为 null。若把 0 当作游标，请求会变成
+  /// `global_seq < 0`——**恒返回空**，而空页会被判为「没有更早的消息」，
+  /// 表现为「明明有历史却翻不上去」。
+  ///
+  /// ## 返回值
+  ///
+  /// `true` 表示「可能还有更早的，可以继续触发」；`false` 表示已到最早一条
+  /// （或本次无法翻页），调用方应停止触发。判定依据是**本页是否取满**：
+  /// 取满 [limit] 条说明可能还有下一页，不足则已到最早。
+  ///
+  /// ## 已知边界
+  ///
+  /// 缓冲区里没有任何落库事件时（典型场景是首屏 [_backfill] 失败）无从确定
+  /// 游标，此时返回 `false` 而不发请求——发一页「最新」历史只会重复首屏动作，
+  /// 与「向上翻页」语义不符。
+  ///
+  /// 并发调用时返回 `true`（乐观），避免调用方把「正在加载」误判成「已到最早」
+  /// 而永久停止翻页。
+  Future<bool> loadOlder({int limit = 50}) async {
+    final groupId = _groupId;
+    if (groupId == null || _disposed) return false;
+    if (_loadingOlder) return true;
+
+    final cursor = _minLoadedGlobalSeq();
+    if (cursor == null) return false;
+
+    _loadingOlder = true;
+    try {
+      final page = await _api.groupTimeline(
+        groupId,
+        limit: limit,
+        beforeGlobalSeq: cursor.toString(),
+      );
+      final events = page.items.toList()
+        ..sort((a, b) => (a.globalSeq ?? 0).compareTo(b.globalSeq ?? 0));
+      if (events.isEmpty) return false;
+
+      // 前插：本页全部早于缓冲区里最早的事件，故插到头部即天然有序
+      // （页内已按 globalSeq 升序排好）。
+      //
+      // 去重是防御性的：服务端游标是严格 `<`，正常情况下不会重叠；但归约层
+      // 按 eventId 建项，一旦重叠就会渲染出重复气泡。
+      final known = _buffer.map((e) => e.eventId).toSet();
+      final fresh = events.where((e) => !known.contains(e.eventId)).toList();
+      if (fresh.isEmpty) {
+        // 全部已加载过 → 游标没能前进，再触发只会拉同一页。
+        return false;
+      }
+      _buffer.insertAll(0, fresh);
+      _emit();
+      SpbLog.info('加载更早历史完成', {
+        'groupId': groupId,
+        'cursor': cursor,
+        'count': fresh.length,
+      });
+      return events.length >= limit;
+    } catch (e) {
+      SpbLog.warn('加载更早历史失败', {'error': e.toString()});
+      if (e is SpbError && !_errorController.isClosed) {
+        _errorController.add(e);
+      }
+      // 失败一律返回 false：让调用方停下，避免在滚动中疯狂重试。
+      return false;
+    } finally {
+      _loadingOlder = false;
+    }
+  }
+
+  /// 缓冲区中最小的**落库**事件 globalSeq；无有效游标时返回 null。
+  ///
+  /// 跳过 `null` 与 `<= 0`：前者是本地乐观回显，后者是 transient 事件
+  /// （不落库，服务端从不给它分配 global_seq）。
+  int? _minLoadedGlobalSeq() {
+    int? min;
+    for (final e in _buffer) {
+      final g = e.globalSeq;
+      if (g == null || g <= 0) continue;
+      if (min == null || g < min) min = g;
+    }
+    return min;
   }
 
   void _onFrame(SseFrame frame) {

@@ -41,6 +41,7 @@ class ConversationPage extends StatefulWidget {
     this.onSend,
     this.onCancelTurn,
     this.onLoadOlder,
+    this.historyKey,
     this.loadPending,
     this.undoPending,
     this.pendingReloadKey,
@@ -98,6 +99,25 @@ class ConversationPage extends StatefulWidget {
   /// test 里不需要真 SseClient 就能验证「什么状态下可点、点了几次」。
   ///
   /// 为 null 时指示器不可点（保持纯展示）。
+  final VoidCallback? onReconnect;
+
+  /// 当前对话的身份（两端都传 `groupId`）。
+  ///
+  /// ## 为什么必须显式传，而不能自己看出来
+  ///
+  /// 翻页终止标记（「已到最早一条」）的**有效范围是「一个对话」**，换了对话必须
+  /// 重置。但本页无法自行察觉切换：SSE 是 user 级订阅，切 group 走的是
+  /// `ChatStreamController.switchGroup`——**控制器实例不变**，`_ChatPage` 也未带
+  /// `key`，故 State 被复用，`didUpdateWidget` 里 `oldWidget.controller ==
+  /// widget.controller`。
+  ///
+  /// 不重置的后果：在 A 对话翻到头后切到 B，`_reachedOldest` 仍是 true，B 的
+  /// 历史永远翻不出来（且毫无报错）。
+  ///
+  /// 不复用 [pendingReloadKey]：那个参数只在待处理栏接线时才存在，而翻页与它
+  /// 无关——两者的值碰巧都是 groupId，但耦合会让「只接线待处理栏」的用法
+  /// 静默带走翻页的正确性。
+  final String? historyKey;
 
   /// 加载当前 group 的待处理收件箱消息。
   ///
@@ -150,6 +170,16 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 是否已到最早一条历史（[ConversationPage.onLoadOlder] 返回过 false）。
   ///
   /// 一旦为 true 就不再触发，避免在顶部反复发空请求。
+  bool _reachedOldest = false;
+
+  /// 正在加载更早的历史（防止滚动过程中并发发多次请求）。
+  bool _loadingOlder = false;
+
+  /// 顶部触发阈值（像素）。
+  ///
+  /// 不用 0：`ListView` 的滚动位置在快速滑动时可能一瞬间就到 0，留一点余量
+  /// 可以提前取下一页，让「滑到顶」与「内容已就位」重合而不是先看到空白。
+  static const double _loadOlderThreshold = 120;
 
   /// 「算作在底部」的阈值（像素）。
   ///
@@ -189,6 +219,12 @@ class _ConversationPageState extends State<ConversationPage> {
       _items = widget.controller.snapshot;
       _itemsSub = widget.controller.items.listen(_onItems);
     }
+    // 换了对话就要重新给翻页一次机会：`_reachedOldest` 是上一个 group 的结论，
+    // 沿用会让新对话永远翻不到历史（见 [historyKey] 的说明）。
+    if (oldWidget.historyKey != widget.historyKey ||
+        oldWidget.controller != widget.controller) {
+      _reachedOldest = false;
+    }
   }
 
   @override
@@ -214,6 +250,21 @@ class _ConversationPageState extends State<ConversationPage> {
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
+
+    // 顶部触发加载更早历史。
+    //
+    // WHY 挂在滚动监听而不是另起 Timer / ScrollNotification：本页已有唯一的滚动
+    // 监听（[_onScroll]），翻页与自动跟随共享同一个「位置已变」信号，不需要第二
+    // 套时序。
+    //
+    // ⚠️ 必须放在下面「内容不足一屏」的 early return **之前**：那种情况下
+    // `pixels == 0` 也正是「在顶部」，若在 early return 之后判断就会被跳过。
+    // （实践中影响极小：首屏 `_backfill` 一次拉 200 条，短到填不满屏幕的对话
+    // 基本意味着已全部加载。但把判断放在正确的位置不需要额外代价。）
+    if (position.pixels <= _loadOlderThreshold) {
+      unawaited(_maybeLoadOlder());
+    }
+
     // 内容不足一屏时 maxScrollExtent == 0，视为在底部。
     if (position.maxScrollExtent <= 0) {
       _following = true;
@@ -231,10 +282,40 @@ class _ConversationPageState extends State<ConversationPage> {
     // 这里借「滚动会触发通知」这一点自我修正，直到真正到底。
     if (_following) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _followBottom());
+    }
+  }
+
+  /// 到达顶部附近时加载更早的一页（带并发与终止保护）。
+  ///
+  /// 只在 [_onScroll] 里调用，而那里已确认 `_scrollController.hasClients`；
+  /// 空列表时渲染的是 [_EmptyHint] 而非 `ListView`，控制器没有 client，
+  /// 滚动通知根本不会产生。故这里不需要再判 `_items.isEmpty`。
+  ///
+  /// ## 已知边界：前插后不补偿滚动位置
+  ///
+  /// 向 `ListView` 头部插入内容会把当前可见内容整体下推（Flutter 保持
+  /// `pixels` 不变），故翻页瞬间可视位置会跳到「新插入的那一页」。
+  ///
+  /// 正确的做法是记录插入前后的 `maxScrollExtent` 差值再补偿 `pixels`，但那需要
+  /// 与自动跟随（[_following]）协调——两者同时生效时会把用户从顶部拽到底部。
+  /// 本机无 DISPLAY、无法真机验证交互，靠猜写这段补偿只会得到一个「测试全绿但
+  /// 手感不对」的实现，故先不做，待有桌面环境时按实测手感补上。
+  Future<void> _maybeLoadOlder() async {
+    final handler = widget.onLoadOlder;
+    // 两重护栏：未注入 / 已到最早 / 正在加载。
+    if (handler == null || _reachedOldest || _loadingOlder) return;
+
+    _loadingOlder = true;
+    try {
       final hasMore = await handler();
       if (!mounted) return;
       // 返回 false = 已到最早，从此不再触发。
+      if (!hasMore) setState(() => _reachedOldest = true);
+    } on SpbError catch (e) {
+      // 失败不标记 `_reachedOldest`：下次滚到顶可以重试。
+      if (mounted) _showMessage('加载更早历史失败：${e.message}');
     } finally {
+      _loadingOlder = false;
     }
   }
 

@@ -374,6 +374,28 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，
       // 页面与 router 都不应该知道它。返回值 `hasMore` 由页面用来决定是否
       // 继续触发（false = 已到最早）。
+      onLoadOlder: controller.loadOlder,
+      // 当前对话的身份：换了 group 要重置「已到最早」的翻页标记。
+      //
+      // 控制器实例在切 group 时**不变**（`switchGroup` 复用同一条 SSE），
+      // 且 `_ChatPage` 未带 key、State 被复用，故页面无法自行察觉切换，
+      // 必须显式告知。
+      historyKey: widget.groupId,
+      // 手动重连：断线/重连失败时用户不必干等退避计时器。
+      //
+      // family 的键必须是 **userId**（provider 的键就是它，SSE 是 user 级订阅，
+      // 一个 userId 一条连接）。传 groupId 会命中另一个 family 条目，创建出一个
+      // **多余的、无人监听的控制器**。
+      //
+      // 注：写错键**不会**导致「点了没反应」——`sseClientProvider` 是跨对话共享的
+      // 单例（见其文档），`reconnect()` 最终只是 `_sse.resume()`，而那个共享 client
+      // 上确实有 `_path`。故错误键只是白建一个对象，不会坏功能。仍然写对，是因为
+      // 「聚焦哪个 group、游标停在哪」都归控制器所有，重建一个空控制器来表达动作
+      // 是错的意思表达；且一旦将来控制器不再是无状态转发（例如加了本地重试计数），
+      // 这种「靠共享单例兜住」的写法就会真的出错。
+      //
+      // 用 `ref.read` 而非 `ref.watch`：这是**动作**不是数据依赖，用 watch 会在
+      // 每次连接状态变化时重建本 widget。
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 动作文案 → 服务端 action。
         //

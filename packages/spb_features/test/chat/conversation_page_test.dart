@@ -157,6 +157,7 @@ void main() {
     Future<void> Function(String)? onSend,
     Future<void> Function(String)? onCancelTurn,
     Future<bool> Function()? onLoadOlder,
+    String? historyKey,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -167,6 +168,7 @@ void main() {
           onSend: onSend,
           onCancelTurn: onCancelTurn,
           onLoadOlder: onLoadOlder,
+          historyKey: historyKey,
         ),
       ),
     );
@@ -183,6 +185,28 @@ void main() {
   }
 
   /// 直接替换页面 widget（保留 State），用于模拟「切 group」。
+  Future<void> rebuildPage(
+    WidgetTester tester, {
+    required Future<bool> Function() onLoadOlder,
+    required String historyKey,
+  }) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ConversationPage(
+          controller: controller,
+          title: '测试对话',
+          onLoadOlder: onLoadOlder,
+          historyKey: historyKey,
+        ),
+      ),
+    );
+    await tester.pump();
+  }
+
+  /// 推一个**流式中**的助手段落（增量帧 → `isStreaming: true`）。
+  ///
+  /// 用 `transient: true`：服务端的流式增量就是这么发的（`llm_executor.go`
+  /// 的 delta 只广播不落库），而归约层据此置 `isStreaming`。
   Future<void> pushStreamingMessage(
     WidgetTester tester, {
     String id = 'e_stream',
@@ -619,6 +643,234 @@ void main() {
         closeTo(position.maxScrollExtent, 1),
         reason: '在底部时新项应自动跟随',
       );
+    });
+  });
+
+  group('ConversationPage 加载更早历史', () {
+    /// 塞入 [count] 条独立消息，让列表溢出以便产生滚动。
+    ///
+    /// 用 `user_message`（每条 turnId 不同 → 独立成项）：非 transient 的
+    /// `message` 是权威帧，会被 reducer 当成同段落的替换而塌缩成一项。
+    Future<void> seedMessages(WidgetTester tester, int count) async {
+      for (var i = 0; i < count; i++) {
+        await pushEvent(
+          tester,
+          EventTypes.userMessage,
+          sseEvent(
+            'user_message',
+            id: 'u$i',
+            turnId: 'turn_$i',
+            payload: {'input': '第 $i 条'},
+            seq: i + 1,
+          ),
+        );
+      }
+      await tester.pump();
+    }
+
+    testWidgets('滚动到顶部时触发 onLoadOlder', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(
+        tester,
+        onLoadOlder: () async {
+          calls++;
+          return true; // 还有更多
+        },
+      );
+      await seedMessages(tester, 30);
+      await tester.pumpAndSettle();
+
+      expect(calls, 0, reason: '初始在底部，不应触发翻页');
+
+      // 向上拖到底（内容溢出，可滚）。
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+
+      expect(calls, greaterThan(0), reason: '滚到顶部附近必须触发翻页');
+    });
+
+    testWidgets('滚动过程中并发触发时只调一次 handler', (tester) async {
+      // 一次拖拽会产生**很多**次滚动通知，而 handler 内部是异步请求。
+      // 没有护栏就会并发发出多个翻页请求（都带同一游标 → 拉到同一页）。
+      //
+      // 这里必须让 handler **挂起**（不立即完成）：否则第一次调用就 resolve 了，
+      // 后续通知看到的是「未在加载」，护栏根本不会被触发到——那正是这条用例
+      // 存在的意义（域层的护栏会掩盖掉页面的护栏）。
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      final gate = Completer<bool>();
+      await pumpPage(
+        tester,
+        onLoadOlder: () {
+          calls++;
+          return gate.future;
+        },
+      );
+      await seedMessages(tester, 30);
+      await tester.pumpAndSettle();
+
+      // ⚠️ 这里的手势形状是**被实测逼出来的**，不能改成 `tester.drag`：
+      //
+      // 1. `tester.drag` 只产生一次滚动通知 → 护栏无从体现；
+      // 2. 光用「连续 moveBy 拖到顶」也不行——到达 `pixels == 0` 后再拖不会
+      //    产生新的滚动通知，而恰好只有最后一次通知落在阈值内，护栏同样不被
+      //    触发（实测：去掉护栏后用例仍然全绿）。
+      //
+      // 故：先拖到顶，再在阈值区间内**来回抖动**，制造多次「位置已变」信号。
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(ListView)),
+      );
+      for (var i = 0; i < 20; i++) {
+        await gesture.moveBy(const Offset(0, 400));
+        await tester.pump();
+      }
+      for (var i = 0; i < 6; i++) {
+        await gesture.moveBy(const Offset(0, 40));
+        await tester.pump();
+        await gesture.moveBy(const Offset(0, -40));
+        await tester.pump();
+      }
+      await gesture.up();
+      await tester.pump();
+
+      expect(calls, 1, reason: '挂起期间不得重复调用 handler');
+      expect(gate.isCompleted, isFalse);
+
+      gate.complete(true);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('换 group（historyKey 变化）后重置「已到最早」标记', (tester) async {
+      // 回归防线：切 group 时控制器实例不变、State 被复用，若不按 historyKey
+      // 重置，在 A 对话翻到头后切到 B 会永远翻不出历史（且毫无报错）。
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(
+        tester,
+        historyKey: 'grp_A',
+        onLoadOlder: () async {
+          calls++;
+          return false; // 已到最早
+        },
+      );
+      await seedMessages(tester, 30);
+      await tester.pumpAndSettle();
+
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+      final inA = calls;
+      expect(inA, greaterThan(0));
+
+      // 切到另一个对话：historyKey 变，标记必须重置。
+      await rebuildPage(
+        tester,
+        historyKey: 'grp_B',
+        onLoadOlder: () async {
+          calls++;
+          return true;
+        },
+      );
+      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+
+      expect(calls, greaterThan(inA), reason: '换了对话后必须重新允许翻页（否则新对话永远翻不出历史）');
+    });
+
+    testWidgets('返回 false 后不再触发（已到最早）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(
+        tester,
+        onLoadOlder: () async {
+          calls++;
+          return false; // 已到最早
+        },
+      );
+      await seedMessages(tester, 30);
+      await tester.pumpAndSettle();
+
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+      final afterFirst = calls;
+      expect(afterFirst, greaterThan(0));
+
+      // 再滚一次（回到顶部附近会再次触发滚动通知）。
+      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+
+      expect(calls, afterFirst, reason: '返回 false 之后不得再发请求（否则每次到顶都白拉一次）');
+    });
+
+    testWidgets('未注入 onLoadOlder 时不触发（只读时间线用法）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await seedMessages(tester, 30);
+      await tester.pumpAndSettle();
+
+      // 没有回调可注入，滚到顶也不应抛异常。
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('失败时提示，且仍可再次触发（不标记为已到最早）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(
+        tester,
+        onLoadOlder: () async {
+          calls++;
+          throw const NetworkError('断网了');
+        },
+      );
+      await seedMessages(tester, 30);
+      await tester.pumpAndSettle();
+
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+      expect(calls, greaterThan(0));
+      expect(find.textContaining('加载更早历史失败'), findsOneWidget);
+
+      final afterFirst = calls;
+      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.pumpAndSettle();
+
+      expect(
+        calls,
+        greaterThan(afterFirst),
+        reason: '失败后必须允许重试，否则一次网络抖动就永久失去历史',
+      );
+    });
+
+    testWidgets('空列表时不触发翻页（无锚点）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var calls = 0;
+      await pumpPage(
+        tester,
+        onLoadOlder: () async {
+          calls++;
+          return true;
+        },
+      );
+      await tester.pumpAndSettle();
+
+      // 空态渲染的是 _EmptyHint，没有 ListView 可滚。
+      expect(find.byType(ListView), findsNothing);
+      expect(calls, 0);
     });
   });
 
