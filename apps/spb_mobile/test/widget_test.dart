@@ -767,6 +767,79 @@ void main() {
     expect(find.text('还没有对话，输入消息开始吧'), findsOneWidget);
   });
 
+  testWidgets('对话页停止生成：router 把 turnId 接到 POST /chat/turns/:id/cancel', (
+    tester,
+  ) async {
+    // 只验证 **router 的接线**：直接取树上 `ConversationPage` 的回调调一下，
+    // 不依赖 SSE 事件（原因见桌面端同一用例的说明：`_focus` 用 `ref.read`、
+    // `build` 用 `ref.watch`，对 autoDispose.family 而言不是同一实例，是既有 bug）。
+    // 「何时可点、传哪个 turnId」由 spb_features 的测试覆盖。
+    final hitPaths = <String>[];
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      mockGroups: false,
+      sseClient: _FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+        // `replyCallback` 只在**请求真的到达**时被调用，因此记录的路径就是
+        // 实际发出的请求（`adapter.history` 存的是**已注册的 mock**）。
+        adapter.onPost(
+          '/chat/turns/turn_9/cancel',
+          (server) => server.replyCallback(200, (options) {
+            hitPaths.add(options.path);
+            return {'status': 'cancelled'};
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    final page = tester.widget<ConversationPage>(find.byType(ConversationPage));
+    expect(
+      page.onCancelTurn,
+      isNotNull,
+      reason: 'router 必须注入 onCancelTurn，否则页面上不会出现停止按钮',
+    );
+
+    // 必须包在 `runAsync` 里：回调内部 await 一个 dio 请求，在 FakeAsync 时区
+    // 直接 await 会死锁（dio 的 mock 响应靠真实事件循环完成）。
+    await tester.runAsync(() => page.onCancelTurn!('turn_9'));
+    await tester.pump();
+
+    expect(hitPaths, [
+      '/chat/turns/turn_9/cancel',
+    ], reason: 'turnId 必须原样透传到路径，且只发一次请求');
+  });
+
   testWidgets('移动端注入的 desktopCapabilities 是空实现', (tester) async {
     final h = await pumpApp(tester);
 

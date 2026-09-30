@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -154,6 +155,8 @@ void main() {
     String? title = '测试对话',
     void Function(String, String, String)? onResolveConfirmation,
     Future<void> Function(String)? onSend,
+    Future<void> Function(String)? onCancelTurn,
+    Future<bool> Function()? onLoadOlder,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -162,11 +165,42 @@ void main() {
           title: title,
           onResolveConfirmation: onResolveConfirmation,
           onSend: onSend,
+          onCancelTurn: onCancelTurn,
+          onLoadOlder: onLoadOlder,
         ),
       ),
     );
     await tester.pump();
   }
+
+  /// 把连接状态推成 [state]（控制器订阅 `sse.states` 后转发到自己的状态流）。
+  Future<void> pushConnectionState(WidgetTester tester, SseState state) async {
+    await tester.runAsync(() async {
+      sse.statesController.add(state);
+      await Future<void>.delayed(Duration.zero);
+    });
+    await tester.pump();
+  }
+
+  /// 直接替换页面 widget（保留 State），用于模拟「切 group」。
+  Future<void> pushStreamingMessage(
+    WidgetTester tester, {
+    String id = 'e_stream',
+    String turnId = 'turn_1',
+    String text = '正在生成',
+    int seq = 1,
+  }) => pushEvent(
+    tester,
+    EventTypes.message,
+    sseEvent(
+      'message',
+      id: id,
+      turnId: turnId,
+      payload: {'text': text},
+      transient: true,
+      seq: seq,
+    ),
+  );
 
   group('ConversationPage 时间线渲染', () {
     testWidgets('空列表显示空提示', (tester) async {
@@ -368,6 +402,160 @@ void main() {
     });
   });
 
+  group('ConversationPage 停止生成', () {
+    testWidgets('流式中可点，点击回调收到该段的 turnId', (tester) async {
+      final cancelled = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onCancelTurn: (id) async => cancelled.add(id));
+      await pushStreamingMessage(tester, turnId: 'turn_42');
+
+      final button = find.byKey(const ValueKey('conversation-cancel-turn'));
+      expect(button, findsOneWidget);
+      expect(
+        tester.widget<IconButton>(button).onPressed,
+        isNotNull,
+        reason: '正在生成时必须能停——长回复卡住时这是用户唯一的出路',
+      );
+
+      await tester.tap(button);
+      // ⚠️ 不能 pumpAndSettle：流式气泡的光标是**无限动画**，pumpAndSettle
+      // 会一直等到超时（同 apps/*/test/widget_test.dart 里的说明）。
+      await tester.pump();
+      await tester.pump();
+
+      expect(cancelled, ['turn_42']);
+    });
+
+    testWidgets('思考中（尚未吐字）也可停', (tester) async {
+      // 只认 AssistantMessageItem 会漏掉这段：长 turn 的思考段可达数十秒，
+      // 而它恰恰是最需要能停的时候。
+      final cancelled = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onCancelTurn: (id) async => cancelled.add(id));
+      await pushEvent(
+        tester,
+        EventTypes.thought,
+        sseEvent(
+          'thought',
+          id: 'e_thought',
+          turnId: 'turn_7',
+          payload: {'text': '让我想想…'},
+          transient: true,
+        ),
+      );
+
+      final button = find.byKey(const ValueKey('conversation-cancel-turn'));
+      expect(tester.widget<IconButton>(button).onPressed, isNotNull);
+
+      await tester.tap(button);
+      // 思考 tile 的流式光标同样是无限动画，不能 pumpAndSettle。
+      await tester.pump();
+      await tester.pump();
+
+      expect(cancelled, ['turn_7']);
+    });
+
+    testWidgets('无流式项时按钮存在但禁用（不隐藏，避免 AppBar 抖动）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onCancelTurn: (id) async {});
+      await pushEvent(
+        tester,
+        EventTypes.message,
+        sseEvent('message', id: 'e1', payload: {'text': '已完成'}),
+      );
+
+      final button = find.byKey(const ValueKey('conversation-cancel-turn'));
+      expect(button, findsOneWidget, reason: '选禁用而非隐藏：AppBar 宽度恒定');
+      expect(tester.widget<IconButton>(button).onPressed, isNull);
+    });
+
+    testWidgets('done 到达后按钮重新禁用', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onCancelTurn: (id) async {});
+      await pushStreamingMessage(tester);
+
+      final button = find.byKey(const ValueKey('conversation-cancel-turn'));
+      expect(tester.widget<IconButton>(button).onPressed, isNotNull);
+
+      await pushEvent(
+        tester,
+        EventTypes.done,
+        sseEvent(
+          'done',
+          id: 'e_done',
+          payload: {'status': 'completed'},
+          seq: 2,
+        ),
+      );
+
+      expect(
+        tester.widget<IconButton>(button).onPressed,
+        isNull,
+        reason: 'done 会闭合全部流式段落，此时再点只会得到 409',
+      );
+    });
+
+    testWidgets('turnId 为空时禁用（不发畸形请求）', (tester) async {
+      final cancelled = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onCancelTurn: (id) async => cancelled.add(id));
+      // 事件未携带 turnId（历史数据或异常载荷）。
+      await pushStreamingMessage(tester, turnId: '');
+
+      final button = find.byKey(const ValueKey('conversation-cancel-turn'));
+      expect(
+        tester.widget<IconButton>(button).onPressed,
+        isNull,
+        reason: '空 id 会打到 /chat/turns//cancel，得到一个语义不明的 404',
+      );
+      expect(cancelled, isEmpty);
+    });
+
+    testWidgets('失败时提示且按钮仍可点（可重试）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onCancelTurn: (id) async => throw const NetworkError('连接超时'),
+      );
+      await pushStreamingMessage(tester);
+
+      await tester.tap(find.byKey(const ValueKey('conversation-cancel-turn')));
+      // 不能 pumpAndSettle（流式光标是无限动画）；多 pump 几帧让 SnackBar 入场。
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.textContaining('停止失败'), findsOneWidget);
+      // 不清空流式标记：turn 可能仍在跑，用户应能再试一次。
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('conversation-cancel-turn')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('未注入 onCancelTurn 时不展示停止按钮', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingMessage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-cancel-turn')),
+        findsNothing,
+        reason: '只读时间线用法下不应出现点了没反应的按钮',
+      );
+    });
+  });
+
   group('ConversationPage 连接状态', () {
     testWidgets('title 为 null 时不渲染 AppBar', (tester) async {
       mockTimeline();
@@ -433,4 +621,5 @@ void main() {
       );
     });
   });
+
 }

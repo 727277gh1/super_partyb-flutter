@@ -452,6 +452,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 切换 group 时重新加载：Flutter 会复用本页 State，
       // 不靠这个键就会一直显示上一个 group 的待处理消息。
       pendingReloadKey: widget.groupId,
+      // 停止生成：`POST /chat/turns/:turn_id/cancel`。
+      // 路径里没有 user_id，身份来自网关注入的 `X-User-ID`。
+      onCancelTurn: (turnId) => api.cancelTurn(turnId),
+      // 向上翻页：加载更早历史。
+      //
+      // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，
+      // 页面与 router 都不应该知道它。返回值 `hasMore` 由页面用来决定是否
+      // 继续触发（false = 已到最早）。
       onResolveConfirmation: (groupId, confirmationId, option) {
         // 真实路径：POST /api/chat/groups/:group_id/confirmations/:id/resolve
         // （挂载点 ext_routes.go:39）。服务端 `misc.go:resolve` 绑定

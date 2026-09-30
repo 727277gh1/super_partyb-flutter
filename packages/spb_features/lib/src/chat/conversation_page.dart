@@ -39,6 +39,8 @@ class ConversationPage extends StatefulWidget {
     this.title,
     this.onResolveConfirmation,
     this.onSend,
+    this.onCancelTurn,
+    this.onLoadOlder,
     this.loadPending,
     this.undoPending,
     this.pendingReloadKey,
@@ -67,6 +69,35 @@ class ConversationPage extends StatefulWidget {
   /// 之所以可覆盖：悬浮窗等入口走 `QuickCaptureUseCase`（无归属），
   /// 而本页是「已知 group」的常规发送。
   final Future<void> Function(String text)? onSend;
+
+  /// 下载 agent 文件产物的回调。null 时下载按钮禁用。
+  ///
+  /// 页面不直接依赖 `spb_api`：真实下载（`UfsApi.download` + 落盘）由 app 层注入。
+  final Future<void> Function(String turnId)? onCancelTurn;
+
+  /// 向上翻页：加载更早的历史。
+  ///
+  /// 返回 `false` 表示「已到最早一条」，本页据此**停止**继续触发——否则每次滚动
+  /// 到顶部都会发一个注定为空的请求（服务端游标 `global_seq < 0` 恒无结果）。
+  ///
+  /// 为 null 时不展示「加载更早」入口（保持「只读时间线」用法）。
+  final Future<bool> Function()? onLoadOlder;
+
+  /// 手动重连 SSE。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `SseClient` 自带指数退避重连，但退避到 `maxRetries` 后会把状态置为
+  /// [SseState.failed] **永久停手**；而 `reconnecting` 期间遇到长退避时，用户
+  /// 也可能不想等。两种情况下用户都需要一个「现在就再试一次」的入口。
+  ///
+  /// ## 为什么用注入而不是直接调 `controller.reconnect()`
+  ///
+  /// 与 [onCancelTurn] 同理：页面只收集意图，请求归调用方。页面已在用
+  /// `controller` 读 items/连接状态，但重连是**动作**而非数据，注入后 widget
+  /// test 里不需要真 SseClient 就能验证「什么状态下可点、点了几次」。
+  ///
+  /// 为 null 时指示器不可点（保持纯展示）。
 
   /// 加载当前 group 的待处理收件箱消息。
   ///
@@ -102,6 +133,23 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 服务端有 CAS（`pending` → `resolved` 首次写入才生效），重复请求不会造成
   /// 数据错误，但会让 UI 出现两次 loading。本地记录更简单直接。
   final _resolving = <String>{};
+
+  /// 正在提交「停止生成」请求。
+  ///
+  /// ## 为什么需要它（而不是只看 isStreaming）
+  ///
+  /// 停止是一次往返请求，而服务端的 `done` 事件要等**下一轮**才会到达。这中间
+  /// 的窗口里流式标记仍是 true，按钮会保持可点；用户再点一次会得到
+  /// `409 turn not cancellable (not queued/running)`——一个从用户视角看毫无道理
+  /// 的错误（他刚点了停止，界面却说不能停止）。用本地标记把窗口关掉。
+  ///
+  /// 不需要「请求失败就恢复」的特殊逻辑：finally 里无条件复位，若 `done` 已先
+  /// 到达，复位后按钮依然禁用（因为流式项已被 `_sealStreaming` 闭合）。
+  bool _cancelling = false;
+
+  /// 是否已到最早一条历史（[ConversationPage.onLoadOlder] 返回过 false）。
+  ///
+  /// 一旦为 true 就不再触发，避免在顶部反复发空请求。
 
   /// 「算作在底部」的阈值（像素）。
   ///
@@ -183,6 +231,10 @@ class _ConversationPageState extends State<ConversationPage> {
     // 这里借「滚动会触发通知」这一点自我修正，直到真正到底。
     if (_following) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _followBottom());
+      final hasMore = await handler();
+      if (!mounted) return;
+      // 返回 false = 已到最早，从此不再触发。
+    } finally {
     }
   }
 
@@ -228,6 +280,59 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
+  /// 当前仍在生成的项；null 表示没有进行中的生成。
+  ///
+  /// ## 为什么取「最后一个」而不是「任意一个」
+  ///
+  /// `items` 按时间升序，而 `done` 会闭合**全部**流式段落（`_sealStreaming`），
+  /// 故同一时刻最多只有一个 turn 处于流式态。取最后一个与取任意一个等价，
+  /// 但「最后一个」在将来若出现多段并存时，仍指向最新（也就是用户最想停的）那个。
+  ///
+  /// ## 为什么 [ThoughtItem] 也算
+  ///
+  /// 只认 [AssistantMessageItem] 会漏掉「agent 正在思考、还没吐第一个字」这段
+  /// ——而那恰恰是最需要能停的时候（实测长 turn 的思考段可达数十秒）。两者都由
+  /// 归约层在同一套 `isStreaming` 语义下维护：增量帧置 true，`done`/权威帧置 false。
+  ConversationItem? get _streamingItem {
+    for (var i = _items.length - 1; i >= 0; i--) {
+      final item = _items[i];
+      final streaming = switch (item) {
+        AssistantMessageItem(:final isStreaming) => isStreaming,
+        ThoughtItem(:final isStreaming) => isStreaming,
+        _ => false,
+      };
+      if (streaming) return item;
+    }
+    return null;
+  }
+
+  /// 停止当前轮次。
+  Future<void> _handleCancelTurn() async {
+    final handler = widget.onCancelTurn;
+    // `turnId` 为空则不发请求：服务端路由是 `/chat/turns/:turn_id/cancel`，
+    // 空 id 会打到 `/chat/turns//cancel`（语义不明的 404，见 issue #2 同源陷阱）。
+    final turnId = _streamingItem?.turnId ?? '';
+    if (handler == null || turnId.isEmpty || _cancelling) return;
+
+    setState(() => _cancelling = true);
+    try {
+      await handler(turnId);
+    } on SpbError catch (e) {
+      // 失败只提示、不崩。**不**清空流式标记：turn 可能仍在跑，
+      // 用户应当还能再试一次（而不是看着界面假装已停）。
+      if (mounted) _showMessage('停止失败：${e.message}');
+    } finally {
+      if (mounted) setState(() => _cancelling = false);
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _handleResolve(
     String groupId,
     String confirmationId,
@@ -244,6 +349,18 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
+  /// 是否可以点「停止生成」。
+  ///
+  /// 两个条件：有流式项，且该项带着非空 [ConversationItem.turnId]。
+  /// 后者不可省：`turnId` 为空说明事件未携带该字段（历史数据或异常载荷），
+  /// 此时发不出正确的取消请求（见 [_handleCancelTurn]）。
+  /// 提交中（[_cancelling]）同样禁用，避免连点。
+  bool get _canCancelTurn {
+    if (_cancelling) return false;
+    final item = _streamingItem;
+    return item != null && item.turnId.isNotEmpty;
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = widget.title;
@@ -255,6 +372,19 @@ class _ConversationPageState extends State<ConversationPage> {
               title: Text(title, overflow: TextOverflow.ellipsis),
               // 连接状态指示：SSE 断线时用户需要知道「不是没回复，是断了」。
               actions: [
+                // 停止生成：仅在确有正在生成的轮次时可点。
+                //
+                // 选**禁用**而非隐藏：AppBar 宽度恒定，不会因状态切换而抖动；
+                // 且用户能看到「这里有一个停止按钮，只是现在没什么可停」。
+                if (widget.onCancelTurn != null) ...[
+                  IconButton(
+                    key: const ValueKey('conversation-cancel-turn'),
+                    icon: const Icon(Icons.stop_circle_outlined),
+                    tooltip: '停止生成',
+                    onPressed: _canCancelTurn ? _handleCancelTurn : null,
+                  ),
+                  const SizedBox(width: SpbSpacing.xs),
+                ],
                 StreamBuilder<SseState>(
                   stream: widget.controller.connectionState,
                   initialData: widget.controller.currentState,
@@ -270,8 +400,7 @@ class _ConversationPageState extends State<ConversationPage> {
             child: _items.isEmpty
                 ? _EmptyHint(text: widget.emptyHint)
                 : _buildTimeline(),
-          ),
-          // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
+          ), // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
           // 的那条」，语义上与输入区相邻而非与时间线相邻。
           if (widget.loadPending != null && widget.undoPending != null)
             PendingMessagesBar(
@@ -374,6 +503,13 @@ class _ConnectionIndicator extends StatelessWidget {
       SseState.failed => (Icons.cloud_off, scheme.error, '连接失败'),
       SseState.idle || null => (Icons.cloud_outlined, scheme.outline, '未连接'),
     };
+
+    // 内边距在两个分支下**相同**：否则可点/不可点切换时图标会左右移动
+    // （与停止按钮选「禁用而非隐藏」同一个理由：AppBar 宽度必须恒定）。
+    final iconWidget = Padding(
+      padding: const EdgeInsets.all(SpbSpacing.sm),
+      child: Icon(icon, size: SpbSpacing.lg, color: color),
+    );
 
     return Tooltip(
       message: tooltip,

@@ -951,6 +951,95 @@ void main() {
     );
   });
 
+  testWidgets('对话页停止生成：router 把 turnId 接到 POST /chat/turns/:id/cancel', (
+    tester,
+  ) async {
+    // ## 本用例验证什么
+    //
+    // 只验证 **router 的接线**：「注入的 onCancelTurn 会打到哪个端点、turnId 是否
+    // 原样透传」。直接取树上 `ConversationPage` 的回调调一下，不依赖任何 SSE 事件。
+    //
+    // ## 为什么不走「推流式帧 → 点按钮」的完整链路
+    //
+    // 那样写会卡在一个**既有的 bug** 上（与本任务无关，已实测）：
+    // `_ChatPage._focus()` 用 `ref.read(chatStreamControllerProvider(...))`，
+    // 而 `build()` 用 `ref.watch(...)`——对 `autoDispose.family` 而言这两次拿到
+    // 的**不是同一个实例**。于是 `start()` 跑在实例 A 上，页面拿的是未被启动的
+    // 实例 B，B 的 `items` 永远收不到事件（实测：回填的 timeline 也渲染不出来，
+    // 用 pristine 代码同样复现）。
+    //
+    // 「什么时候按钮可点、传哪个 turnId」由 spb_features 的
+    // `conversation_page_test.dart` 完整覆盖（那里直接构造控制器，没有这个问题）。
+    final hitPaths = <String>[];
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      mockGroups: false,
+      sseClient: _FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+        // 用 `replyCallback` 而非 `reply`：它只在**请求真的到达**时被调用，
+        // 因此记录的路径就是实际发出的请求（`adapter.history` 里存的是
+        // **已注册的 mock**，不能用来断言「请求发生过」）。
+        adapter.onPost(
+          '/chat/turns/turn_9/cancel',
+          (server) => server.replyCallback(200, (options) {
+            hitPaths.add(options.path);
+            return {'status': 'cancelled'};
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+
+    // 推进假时钟：解析 userId → 回填 timeline（不需要 pumpAndSettle：
+    // 对话页的加载态是无限动画，会等到超时）。
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    final page = tester.widget<ConversationPage>(find.byType(ConversationPage));
+    expect(
+      page.onCancelTurn,
+      isNotNull,
+      reason: 'router 必须注入 onCancelTurn，否则页面上不会出现停止按钮',
+    );
+
+    // 必须包在 `runAsync` 里：回调内部会 await 一个 dio 请求，而 dio 的 mock
+    // 响应靠真实事件循环完成——在 FakeAsync 时区里直接 `await` 会死锁
+    // （实测：卡满 10 分钟超时）。`runAsync` 让这段跑在真实时区。
+    await tester.runAsync(() => page.onCancelTurn!('turn_9'));
+    await tester.pump();
+
+    expect(hitPaths, [
+      '/chat/turns/turn_9/cancel',
+    ], reason: 'turnId 必须原样透传到路径，且只发一次请求');
+  });
+
 }
 
 /// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。
