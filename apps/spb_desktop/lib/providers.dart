@@ -10,9 +10,11 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_browser.dart';
+import 'auth_session_import.dart';
 
 /// 桌面能力 Provider。
 ///
@@ -316,6 +318,45 @@ class AuthStateNotifier extends Notifier<AuthState> {
   /// 凭证已落盘（回调收到 token 后调用）。
   void signedIn() => state = AuthState.authenticated;
 
+  /// 粘贴导入已有会话（桌面端登录闭环的入口）。
+  ///
+  /// ## 为什么走「落盘 + restore()」而不是直接 `state = authenticated`
+  ///
+  /// 状态必须反映**存储里真的有一份可用凭证**，而不是「用户说他粘贴了」。
+  /// `restore()` 会调 `SessionManager.currentAccessToken()`，它顺带处理了
+  /// 「token 已过期但有 refresh_token」的情形（自动刷新）。
+  ///
+  /// 直接置位会造出一个**假状态**：界面显示已登录，但每个请求都 401，
+  /// 用户完全看不出问题出在哪。复用 restore 还避免了新增状态机分支——
+  /// 「凭证可用性」的判定只有一处。
+  ///
+  /// ## 为什么失败时返回字符串而不是抛异常
+  ///
+  /// 与 [signIn] 同语义：粘贴错内容是**预期内的用户操作**，不是程序错误。
+  /// 返回值直接显示在登录页上。
+  Future<String?> importSession(String raw) async {
+    final tokens = parseSessionCredential(raw);
+    if (tokens == null) {
+      const msg = '认不出粘贴的内容，请确认包含 id_token 或 access_token';
+      state = AuthState.failed(msg);
+      return msg;
+    }
+
+    try {
+      await ref.read(tokenStoreProvider).write(tokens);
+    } on SpbError catch (e) {
+      // 安全存储写失败（如 Linux 上 keyring 不可用）：不能假装成功，
+      // 否则状态会变成「已登录」而凭证其实没落盘。
+      SpbLog.warn('导入会话时写入安全存储失败', {'error': e.toString()});
+      state = AuthState.failed(e.message);
+      return e.message;
+    }
+
+    await restore();
+    // restore 已经把失败写进 state（如写入后仍取不到可用 token）。
+    return state.isAuthenticated ? null : (state.message ?? '导入的会话不可用');
+  }
+
   /// 登出：清凭证并切到未登录。
   Future<void> signOut() async {
     await ref.read(sessionManagerProvider).logout();
@@ -339,15 +380,24 @@ final authControllerProvider = Provider<AuthActions>((ref) {
   return AuthActions(
     signIn: () => ref.read(authStateProvider.notifier).signIn(),
     signOut: () => ref.read(authStateProvider.notifier).signOut(),
+    importSession: (raw) =>
+        ref.read(authStateProvider.notifier).importSession(raw),
   );
 });
 
 /// 认证动作集合。
 class AuthActions {
-  const AuthActions({required this.signIn, required this.signOut});
+  const AuthActions({
+    required this.signIn,
+    required this.signOut,
+    required this.importSession,
+  });
 
   final Future<String?> Function() signIn;
   final Future<void> Function() signOut;
+
+  /// 粘贴导入已有会话，见 [AuthStateNotifier.importSession]。
+  final Future<String?> Function(String raw) importSession;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。
@@ -644,29 +694,61 @@ final runSyncActionProvider = Provider<RunSyncAction>((ref) {
     if (root == null || root.trim().isEmpty) {
       throw const PlatformError('请先选择同步目录');
     }
-
-    // 范围由用户配置决定（全部 / 勾选若干 / 单 group）。
-    //
-    // 单 group 模式没有 groupId（设置页不产出该配置），toScope 会抛可操作的
-    // 错误——**不退化成「全部」**，否则用户明明关掉了「全部」却会多下整个
-    // workspace（生产实测 5666 条 / 4.7 GB）。
-    final scope = settings.scope.toScope();
-
-    final ufs = ref.read(ufsApiProvider);
-    final useCase = DeliverableSyncUseCase(
-      ufs: ufs,
-      stateStore: ref.read(syncStateStoreProvider),
-      sink: LocalFileSink(root),
-      downloader: UfsFileDownloader(ufs),
-    );
-
-    return useCase.run(
-      scope: scope,
-      filter: settings.filter,
-      sinceDays: settings.sinceDays,
-    );
   };
 });
+
+/// 同步是否在途。
+///
+/// 用 `NotifierProvider<bool>` 而非 `StateProvider`：后者在 Riverpod 3 已
+/// 移入 `legacy.dart`（见 [authStateProvider] 的说明）。
+class SyncInFlightNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  /// 设置在途状态。
+  ///
+  /// 同值提前返回是**可读性冗余，不是独立防线**：Riverpod 的默认
+  /// `updateShouldNotify` 就是 `previous != next`，对 `bool` 而言同值本来
+  /// 就不通知订阅者（实测：连续三次 `set(false)` 零次通知）。保留它只是让
+  /// 「同值不通知」这个意图在调用点可见，删掉也不会坏功能。
+  void set(bool value) {
+    if (state == value) return;
+    state = value;
+  }
+}
+
+/// 一轮同步的实际执行（不含在途状态管理）。
+Future<SyncReport> _runSync(Ref ref) async {
+  // 每次都重新读设置：用户可能刚在设置页改了目录/范围/过滤就点同步。
+  // 捕获构造时的旧值会让同步按旧配置跑，而 UI 显示的是新配置。
+  final settings = await ref.read(loadSyncSettingsProvider)();
+
+  final root = settings.localRoot;
+  if (root == null || root.trim().isEmpty) {
+    throw const PlatformError('请先选择同步目录');
+  }
+
+  // 范围由用户配置决定（全部 / 勾选若干 / 单 group）。
+  //
+  // 单 group 模式没有 groupId（设置页不产出该配置），toScope 会抛可操作的
+  // 错误——**不退化成「全部」**，否则用户明明关掉了「全部」却会多下整个
+  // workspace（生产实测 5666 条 / 4.7 GB）。
+  final scope = settings.scope.toScope();
+
+  final ufs = ref.read(ufsApiProvider);
+  final useCase = DeliverableSyncUseCase(
+    ufs: ufs,
+    stateStore: ref.read(syncStateStoreProvider),
+    sink: LocalFileSink(root),
+    downloader: UfsFileDownloader(ufs),
+  );
+
+  return useCase.run(
+    scope: scope,
+    filter: settings.filter,
+    sinceDays: settings.sinceDays,
+  );
+}
 
 /// 保存同步目录（换目录时**在同一事务里**清空同步状态）。
 ///

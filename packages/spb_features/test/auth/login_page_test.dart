@@ -21,10 +21,15 @@ void main() {
     WidgetTester tester, {
     required Future<String?> Function() onSignIn,
     AuthState state = const AuthState(),
+    Future<String?> Function(String raw)? onImportSession,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
-        home: LoginPage(onSignIn: onSignIn, state: state),
+        home: LoginPage(
+          onSignIn: onSignIn,
+          state: state,
+          onImportSession: onImportSession,
+        ),
       ),
     );
     await tester.pump();
@@ -169,6 +174,198 @@ void main() {
         findsNothing,
         reason: '重试成功后不得残留上次的错误',
       );
+    });
+  });
+
+  group('登录页：粘贴导入会话', () {
+    testWidgets('未注入 onImportSession 时不展示导入入口', (tester) async {
+      // 移动端有深链回调，不需要用户手工搬运凭证。
+      await pumpLogin(tester, onSignIn: () async => null);
+
+      expect(find.byKey(const ValueKey('login-import-session')), findsNothing);
+    });
+
+    testWidgets('注入后展示入口，默认收起（SSO 是主路径）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async => null,
+      );
+
+      expect(
+        find.byKey(const ValueKey('login-import-session')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('login-import-field')),
+        findsNothing,
+        reason: '默认展开会让登录页看起来有两条对等入口，喧宾夺主',
+      );
+    });
+
+    testWidgets('展开后展示输入框与确认按钮，再点收起', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async => null,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-import-field')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('login-import-confirm')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('login-import-field')), findsNothing);
+    });
+
+    testWidgets('粘贴内容后点导入，回调收到原始文本一次', (tester) async {
+      final received = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async {
+          received.add(raw);
+          return null;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('login-import-field')),
+        'id_token=test-id-token',
+      );
+      // `enterText` 不推进帧：确认按钮的可用性不依赖输入，但 setState 后
+      // 需要一次 pump 让输入框内容反映到树里。
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(received, ['id_token=test-id-token']);
+    });
+
+    testWidgets('输入为空时不调回调，只提示（避免必然失败的请求）', (tester) async {
+      var calls = 0;
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async {
+          calls++;
+          return null;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 0, reason: '空输入不该发请求');
+      expect(find.textContaining('请先粘贴'), findsOneWidget);
+    });
+
+    testWidgets('导入失败时展示原因（与 onSignIn 同语义）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async => '认不出粘贴的内容',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('login-import-field')),
+        'garbage',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.text('认不出粘贴的内容'), findsOneWidget);
+    });
+
+    testWidgets('导入成功后清空输入框（凭证不该留在 widget 里）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async => null,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('login-import-field')),
+        'id_token=test-id-token',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pumpAndSettle();
+
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('login-import-field')),
+      );
+      expect(
+        field.controller?.text,
+        isEmpty,
+        reason: '成功后输入框里的凭证没有用处，而它本身就是敏感值',
+      );
+    });
+
+    testWidgets('导入中禁用确认按钮（防重复提交）', (tester) async {
+      final gate = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) => gate.future,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('login-import-field')),
+        'id_token=test-id-token',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pump();
+
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('login-import-confirm')),
+      );
+      expect(button.onPressed, isNull);
+      expect(find.text('正在导入…'), findsOneWidget);
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('导入抛异常时兜住并显示可读错误（不白屏）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onImportSession: (raw) async => throw StateError('keyring 不可用'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('login-import-field')),
+        'id_token=test-id-token',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.textContaining('导入失败'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 

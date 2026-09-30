@@ -257,6 +257,13 @@ class _LoginPage extends ConsumerWidget {
     return LoginPage(
       state: ref.watch(authStateProvider),
       onSignIn: () => ref.read(authControllerProvider).signIn(),
+      // 桌面端专属：SSO 在系统浏览器完成，会话 Cookie 落在浏览器里而 Flutter
+      // 进程读不到（Linux 无主流 webview 插件）。粘贴导入是登录闭环的入口。
+      //
+      // 移动端不注入：那边有深链回调（`auth_deeplink.dart`）把授权结果直接
+      // 送回进程，不需要用户手工搬运凭证。
+      onImportSession: (raw) =>
+          ref.read(authControllerProvider).importSession(raw),
     );
   }
 }

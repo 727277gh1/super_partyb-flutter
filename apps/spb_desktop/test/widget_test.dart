@@ -1279,6 +1279,169 @@ void main() {
     });
   });
 
+  group('导入会话（粘贴凭证 → 落盘 → 请求带 Bearer）', () {
+    testWidgets('导入合法会话后状态变为已登录', (tester) async {
+      // 端到端验证桌面端登录闭环：这是全仓库最高价值的缺口——SSO 在系统浏览器
+      // 完成，Flutter 读不到浏览器 Cookie，故「粘贴导入」是唯一入口。
+      final store = InMemoryTokenStore();
+      final h = await pumpApp(
+        tester,
+        tokenStore: store,
+        initialLocation: SpbRoutes.login,
+      );
+
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isFalse,
+        reason: '前置条件：导入前必须是未登录，否则本用例空洞通过',
+      );
+
+      final err = await h.container
+          .read(authControllerProvider)
+          .importSession('id_token=test-id-token; refresh_token=test-refresh');
+
+      expect(err, isNull, reason: '合法凭证不该报错');
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '导入后必须变为已登录，否则用户仍被守卫挡在登录页',
+      );
+
+      final stored = await store.read();
+      expect(stored!.accessToken, 'test-id-token');
+      expect(stored.refreshToken, 'test-refresh');
+    });
+
+    testWidgets('导入后请求头带上 Authorization: Bearer <token>', (tester) async {
+      // 这是「闭环」的最后一环：光落盘不够，请求必须真的带上凭证，
+      // 否则服务端仍然 401，用户看到的还是登录页。
+      //
+      // ## 为什么不能用 `pumpApp` 的 harness
+      //
+      // `pumpApp` 把 `dioProvider` override 成裸 dio（只挂 `DioAdapter`，
+      // **没有 AuthInterceptor**）——那套 dio 是为了让页面里的请求可被 mock。
+      // 用它断言「带 Bearer」是**空洞**的：拦截器根本不在链上（实测
+      // `Authorization` 恒为 null）。
+      //
+      // 故这里自建容器，**只** override 凭证存储，让 `dioProvider` 用生产实现
+      // （带真实 `AuthInterceptor`）。这才能证明「凭证 → 请求头」真的通。
+      final store = InMemoryTokenStore();
+      final container = ProviderContainer(
+        overrides: [tokenStoreProvider.overrideWithValue(store)],
+      );
+      addTearDown(container.dispose);
+
+      final dio = container.read(dioProvider);
+      final adapter = DioAdapter(dio: dio);
+      addTearDown(dio.close);
+
+      final seen = <String, String?>{};
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            seen['Authorization'] = options.headers['Authorization'] as String?;
+            seen['X-User-ID'] = options.headers['X-User-ID'] as String?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      // ## 必须先等启动时的 restore() 落定（这是**真实的竞态**，不是测试噪音）
+      //
+      // `AuthStateNotifier.build()` 会 `unawaited(restore())`。那一刻 store 还是
+      // 空的，于是这次 restore 会走「清理残留凭证」分支：它 await 完
+      // `currentAccessToken()` 后**再次读 store**，若此时已经不为空（比如我们
+      // 刚导入完），就判定为「残留」并调 `logout()` —— **把刚写入的凭证清掉**。
+      //
+      // 实测：不等的话 `importSession` 返回 null（成功）但 store 立刻变空。
+      // 真实使用中用户不可能在启动那一瞬完成粘贴，故影响可忽略；但测试必须
+      // 建立确定的前置状态，否则断言毫无意义。
+      await tester.runAsync(() async {
+        while (container.read(authStateProvider).status == AuthStatus.unknown) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+      });
+
+      final err = await container
+          .read(authControllerProvider)
+          .importSession('id_token=test-id-token');
+      expect(err, isNull, reason: '前置条件：导入必须成功');
+      expect(
+        (await store.read())?.accessToken,
+        'test-id-token',
+        reason: '凭证必须真的落盘，否则后面的请求头断言是空洞的',
+      );
+
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        queryParameters: {'limit': 50, 'offset': 0},
+      );
+
+      // 必须包在 `runAsync` 里：内部 await 一个 dio 请求，而 dio 的 mock
+      // 响应依赖真实 Timer——widget test 的假时钟不会推进它（实测：不包会
+      // 卡满 10 分钟超时）。仓库内既有用例已记录同一陷阱。
+      await tester.runAsync(() => container.read(chatApiProvider).listGroups());
+
+      expect(
+        seen.containsKey('Authorization'),
+        isTrue,
+        reason: '请求必须真的发出，否则下面的断言是空洞的',
+      );
+      expect(
+        seen['Authorization'],
+        'Bearer test-id-token',
+        reason: '凭证必须出现在 Authorization 头，否则服务端仍 401',
+      );
+      expect(seen['X-User-ID'], isNull, reason: '客户端不得自选身份（X-User-ID 由网关注入）');
+    });
+
+    testWidgets('认不出的内容报错且不落盘（不造无效凭证）', (tester) async {
+      final store = InMemoryTokenStore();
+      final h = await pumpApp(tester, tokenStore: store);
+
+      // 注意：不能拿「一个随便的单词」当反例——单段且无 `=` 的输入会被当作
+      // **裸 token**（那是受支持的形态）。真正的反例是「有键值对但没有可用
+      // 的 token 键」。
+      final err = await h.container
+          .read(authControllerProvider)
+          .importSession('session_id=abc; csrf=def');
+
+      expect(err, isNotNull, reason: '必须给出可操作的错误，而不是静默失败');
+      expect(
+        await store.read(),
+        isNull,
+        reason: '认不出时绝不能落盘——那会造出一个「已登录但请求全 401」的假状态',
+      );
+      expect(h.container.read(authStateProvider).isAuthenticated, isFalse);
+    });
+
+    testWidgets('登录页展示导入入口与输入框', (tester) async {
+      await pumpApp(
+        tester,
+        tokenStore: InMemoryTokenStore(),
+        initialLocation: SpbRoutes.login,
+      );
+
+      expect(
+        find.byKey(const ValueKey('login-import-session')),
+        findsOneWidget,
+        reason: '桌面端必须有这个入口，否则登录无法闭环',
+      );
+
+      // 默认收起：SSO 是主路径，导入是备选。
+      expect(find.byKey(const ValueKey('login-import-field')), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-import-field')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('login-import-confirm')),
+        findsOneWidget,
+      );
+    });
+  });
 }
 
 /// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。
