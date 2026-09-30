@@ -1,3 +1,4 @@
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:test/test.dart';
@@ -43,7 +44,7 @@ class _StubDownloader implements FileDownloader {
 ///
 /// [exists] 默认按「`written` 里有没有」回答，另外可用 [preExisting] 模拟
 /// 「状态里有记录但磁盘上没有 / 上有」这两种真实场景。
-class _StubSink implements FileSink {
+class _StubSink implements FileSink, LocalFileReader {
   _StubSink({Set<String>? preExisting})
     : preExisting = preExisting ?? const <String>{};
 
@@ -71,6 +72,17 @@ class _StubSink implements FileSink {
   @override
   Future<bool> exists(String relPath) async =>
       written.containsKey(relPath) || preExisting.contains(relPath);
+
+  /// 读取已写入的字节（回传链路用；未写入/已删除时抛错，与真实实现
+  /// `LocalFileSink.readBytes` 一致——不得返回空列表）。
+  @override
+  Future<List<int>> readBytes(String relPath) async {
+    final bytes = written[relPath];
+    if (bytes == null) {
+      throw PlatformError('本地文件不存在：$relPath');
+    }
+    return bytes;
+  }
 }
 
 /// 内存状态库（`SyncStateStore` 的最小实现，用于范围/目录变更语义）。
@@ -1047,6 +1059,81 @@ void main() {
       expect(a, b);
       expect(a.hashCode, b.hashCode);
       expect(a == SyncState.empty, isFalse);
+    });
+  });
+
+  // =========================================================================
+  group('同步状态：contentHash（脏检测基准）', () {
+    test('contentHashOf 是稳定的 SHA256 十六进制小写', () {
+      // 与 dart 的 crypto 包输出对齐：同一内容重复计算必须一致（否则脏检测
+      // 会把全部文件判成脏的）。
+      expect(contentHashOf([1, 2, 3, 4, 5]), contentHashOf([1, 2, 3, 4, 5]));
+      // 已知向量：sha256('hello') = 2cf24dba5fb0a30e26e83b2ac5b9e29e...
+      expect(contentHashOf('hello'.codeUnits),
+          '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
+    });
+
+    test('下载成功后记录含 contentHash（对实际写入字节计算）', () async {
+      final sink = _StubSink();
+      final engine = SyncEngine(downloader: _StubDownloader(), sink: sink);
+      final result = await engine.run(
+        remote: [_remote('a.md')],
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(result.state.files['a.md']!.contentHash, contentHashOf([1, 2, 3, 4, 5]));
+    });
+
+    test('304 后沿用旧 contentHash（内容未重下，本地仍是那一份）', () async {
+      final oldHash = contentHashOf([1, 2, 3, 4, 5]);
+      final sink = _StubSink(preExisting: {'a.md'});
+      final engine = SyncEngine(
+        downloader: _StubDownloader(notModifiedIds: {'id-a.md'}),
+        sink: sink,
+      );
+      final result = await engine.run(
+        remote: [_remote('a.md', etag: 'W/"2"', size: 10)],
+        state: _stateWith({
+          'a.md': SyncedFile(
+            etag: 'W/"1"',
+            size: 5,
+            contentHash: oldHash,
+          ),
+        }),
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(result.report.notModified, 1);
+      expect(sink.written, isEmpty);
+      expect(
+        result.state.files['a.md']!.contentHash,
+        oldHash,
+        reason: '304 意味着内容没重下，hash 若被清空会让脏检测永久降级',
+      );
+    });
+
+    test('旧状态（无 hash）roundtrip 不报错且保持 null', () async {
+      // 304 分支对「记录里本来就没有 hash」的条目也不得崩溃（升级前已同步的
+      // 文件都长这样）。
+      final sink = _StubSink(preExisting: {'a.md'});
+      final engine = SyncEngine(
+        downloader: _StubDownloader(notModifiedIds: {'id-a.md'}),
+        sink: sink,
+      );
+      final result = await engine.run(
+        remote: [_remote('a.md', etag: 'W/"1"', size: 10)],
+        // etag 不同 → 进下载计划（否则会被 isUnchanged 直接跳过，走不到 304
+        // 分支）；而记录里没有 contentHash（升级前同步的文件就是这样）。
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"0"', size: 5)}),
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(result.report.notModified, 1);
+      expect(result.state.files['a.md']!.contentHash, isNull);
     });
   });
 }

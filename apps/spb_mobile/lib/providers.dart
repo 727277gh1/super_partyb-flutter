@@ -670,6 +670,116 @@ final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
   return (String? root) async => false;
 });
 
+// ==================== 交付物回传 ====================
+//
+// 与桌面端同名同构（装配逻辑见桌面端 providers.dart 的说明）：把 ChatApi/UfsApi
+// 适配成回传用例的四个窄接口（适配器在 domain 共用）。差异只在目录来源——
+// 移动端是固定的沙箱路径，没有「用户重选目录」的问题。
+// 语义与设计决策见 docs/deliverable-upload-and-conflict.md。
+
+/// 上传发送器（ufs-upload）。
+final uploadSenderProvider = Provider<UploadSender>((ref) {
+  return ChatApiUploadSender(ref.watch(chatApiProvider));
+});
+
+/// quick-capture 附件链发送器（413 兜底）。
+final uploadQuickCaptureSenderProvider = Provider<QuickCaptureSender>((ref) {
+  return ChatApiQuickCaptureSender(ref.watch(chatApiProvider));
+});
+
+/// 远端 workspace 清单 + 下载（etag 预检与冲突物化用）。
+final uploadRemoteWorkspaceProvider = Provider<RemoteWorkspace>((ref) {
+  return UfsRemoteWorkspace(ref.watch(ufsApiProvider));
+});
+
+/// 通知器工厂（把当前用户 id 绑进去，见桌面端同名 Provider 的说明）。
+final uploadNotifierFactoryProvider
+    = Provider<UploadNotifier Function(String)>((ref) {
+  final api = ref.watch(chatApiProvider);
+  return (String userId) => ChatApiUploadNotifier(api, userId);
+});
+
+/// 本地文件读取器工厂（与桌面端同名；移动端目录恒定，但保留工厂形态
+/// 让两端动作 provider 逐字一致，差异只留在目录来源）。
+final uploadFileReaderFactoryProvider
+    = Provider<LocalFileReader Function(String)>((ref) {
+  return (String localRoot) => LocalFileSink(localRoot);
+});
+
+/// 回传是否在途（与桌面端同名同构；移动端无托盘，但保留状态供 UI 禁用按钮）。
+final uploadInFlightProvider = NotifierProvider<UploadInFlightNotifier, bool>(
+  UploadInFlightNotifier.new,
+);
+
+/// 回传在途状态（与桌面端同名同构）。
+class UploadInFlightNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void set(bool value) {
+    if (state == value) return;
+    state = value;
+  }
+}
+
+/// 扫描本地改动（回传第一步）。
+final scanDirtyFilesActionProvider = Provider<ScanDirtyFilesAction>((ref) {
+  return () async {
+    final settings = await ref.read(loadSyncSettingsProvider)();
+    final root = settings.localRoot;
+    if (root == null || root.trim().isEmpty) {
+      throw const PlatformError('未找到可用的同步目录');
+    }
+
+    final stateKey = syncStateKeyFor(settings.scope.toScope());
+    final state = await ref.read(syncStateStoreProvider).load(stateKey);
+
+    return scanLocalDirtyFiles(
+      reader: ref.read(uploadFileReaderFactoryProvider)(root),
+      state: state,
+      filter: settings.filter,
+      stateKey: stateKey,
+    );
+  };
+});
+
+/// 回传**选中的**本地改动（第二步）。
+///
+/// `finally` 复位在途状态（异常路径也复位，同桌面端）。
+final uploadChangesActionProvider = Provider<UploadChangesAction>((ref) {
+  return (Set<String> only) async {
+    ref.read(uploadInFlightProvider.notifier).set(true);
+    try {
+      final settings = await ref.read(loadSyncSettingsProvider)();
+      final root = settings.localRoot;
+      if (root == null || root.trim().isEmpty) {
+        throw const PlatformError('未找到可用的同步目录');
+      }
+
+      // 通知消息要 userId；解析失败（未登录/网络）就直接失败，不做空串兜底。
+      final userId = await ref.read(currentUserIdProvider.future);
+
+      final useCase = DeliverableUploadUseCase(
+        reader: ref.read(uploadFileReaderFactoryProvider)(root),
+        stateStore: ref.read(syncStateStoreProvider),
+        remote: ref.read(uploadRemoteWorkspaceProvider),
+        uploader: ref.read(uploadSenderProvider),
+        quickCapture: ref.read(uploadQuickCaptureSenderProvider),
+        notifier: ref.read(uploadNotifierFactoryProvider)(userId),
+        userId: userId,
+      );
+
+      return await useCase.run(
+        scope: settings.scope.toScope(),
+        filter: settings.filter,
+        only: only,
+      );
+    } finally {
+      ref.read(uploadInFlightProvider.notifier).set(false);
+    }
+  };
+});
+
 // ==================== 设置页 ====================
 
 /// 读取完整的同步设置（表单的初值）。

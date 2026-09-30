@@ -15,11 +15,22 @@ library;
 //   QuickCaptureAttachment        —— 待发送附件（字节 + 文件名，来源无关）
 //   QuickCaptureEnqueueResult     —— 部分失败语义的提交结果（delivered/uploaded/failedUploads）
 //   SyncStateStore                —— 交付物同步状态契约（key → 游标 + etag 记录）
-//   SyncState / SyncedFile        —— 同步状态值类型
+//   SyncState / SyncedFile        —— 同步状态值类型（含 contentHash：脏检测的比对基准）
+//   contentHashOf                 —— 内容 SHA256（下载时记录与回传前比对共用同一算法）
 //   workspaceStateKey             —— 「全部/选中若干 group」共用的状态键
 //   buildSyncPlan / SyncEngine    —— 交付物同步计划与执行（纯逻辑，可无头单测）
 //   SyncScope 家族                —— 同步范围（单 group / workspace / 选中若干）
 //   FileSink / FileDownloader     —— 落盘与下载抽象（实现由上层包提供）
+//   LocalFileReader               —— 本地文件读取抽象（回传链路，实现在上层包）
+//   uploadTargetFor / UploadTarget —— 本地相对路径 + 状态键 → 回传目标（含剥 {gid}/ 前缀）
+//   scanLocalDirtyFiles           —— 脏检测（本地内容 SHA256 vs 记录 contentHash，纯逻辑）
+//   LocalDirtyFile 等              —— 脏检测结果（脏/未变/无法检测/被过滤/读失败）
+//   precheckUpload                —— etag 预检三态（clean/conflict/remoteDeleted，纯函数）
+//   DeliverableUploadUseCase      —— 回传编排：脏列表 → 预检 → 上传/冲突物化 → 通知
+//   UploadSender 等窄接口          —— 回传用例的依赖契约（UploadSender/QuickCaptureSender/UploadNotifier/RemoteWorkspace）
+//   UploadReport / UploadItemResult —— 回传结果（每文件终态 + 摘要，供 UI 渲染）
+//   buildConflictPath             —— 冲突副本路径 _conflict/<ts>-<原名>.conflict
+//   ChatApiUploadSender 等适配器    —— 真实装配：ChatApi/UfsApi → 四个窄接口
 //   DeliverableSyncUseCase        —— 同步编排：分页拉取 → 计划 → 执行 → 存状态
 //   UfsFileDownloader             —— UfsApi → FileDownloader 适配（304 语义映射）
 //   groupRelativePath 等           —— UFS 路径 → 本地相对路径（含穿越防御）
@@ -31,6 +42,9 @@ export 'src/chat_stream_controller.dart';
 export 'src/conversation_item.dart';
 export 'src/deliverable_sync.dart';
 export 'src/deliverable_sync_usecase.dart';
+export 'src/deliverable_upload.dart';
+export 'src/deliverable_upload_adapters.dart';
+export 'src/deliverable_upload_usecase.dart';
 export 'src/event_reducer.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';

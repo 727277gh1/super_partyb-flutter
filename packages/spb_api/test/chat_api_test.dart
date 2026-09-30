@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 import 'package:spb_api/spb_api.dart';
@@ -764,6 +766,191 @@ void main() {
 
       // 不传 limit 时该键不应出现（否则与上面的 mock 不匹配而报错）。
       await api.search('usr_1', query: 'x', limit: 5);
+    });
+  });
+
+  // =========================================================================
+  group('uploadWorkspaceFile（交付物回传）', () {
+    /// ufsUpload 的真实响应形状（`workspace_sync.go` 尾部 + `fileEntryToMap`）。
+    Map<String, dynamic> ufsUploadShape({
+      String relativePath = 'reports/x.md',
+      int size = 12,
+    }) => {
+      'group_id': 'grp_1',
+      'relative_path': relativePath,
+      'file': {
+        'id': 'ufs_file_1',
+        'name': 'x.md',
+        'path': 'workspace/groups/grp_1/$relativePath',
+        'size': size,
+        'mime_type': 'text/markdown; charset=utf-8',
+        'is_directory': false,
+        'updated_at': '2026-09-30T00:00:00Z',
+        // 注意：故意不放 etag —— fileEntryToMap 不回 etag，这是契约。
+      },
+      'absolute_path': '/opt/<app>/workspace/groups/grp_1/$relativePath',
+      'size_bytes': size,
+      'sync_status': 'local_synced',
+      'needs_local_sync': false,
+    };
+
+    test('bytes 上传：URL/method/表单字段正确，响应字段解析', () async {
+      // FormDataMatcher 比较字段名/文件名/长度，不比内容 —— 兼 relative_path
+      // 字段在 fields 里，所以能断言到它；这正挡住了「忘传 relative_path」
+      // 这种 bug（服务端会回退用文件名，文件落到错误位置）。
+      adapter.onPost(
+        '/chat/groups/grp_1/workspace-sync/ufs-upload',
+        (server) => server.reply(200, ufsUploadShape()),
+        data: Matchers.formData(
+          FormData.fromMap({
+            'file': MultipartFile.fromBytes(
+              [1, 2, 3],
+              filename: 'x.md',
+              contentType: DioMediaType.parse('text/markdown'),
+            ),
+            'relative_path': 'reports/x.md',
+          }),
+        ),
+      );
+
+      final result = await api.uploadWorkspaceFile(
+        groupId: 'grp_1',
+        relativePath: 'reports/x.md',
+        bytes: [1, 2, 3],
+        filename: 'x.md',
+        contentType: 'text/markdown',
+      );
+
+      expect(result.groupId, 'grp_1');
+      expect(result.relativePath, 'reports/x.md');
+      expect(result.fileId, 'ufs_file_1');
+      expect(result.fileName, 'x.md');
+      expect(result.fileSize, 12);
+      expect(result.sizeBytes, 12);
+      expect(result.syncStatus, 'local_synced');
+      expect(result.isLocalSynced, isTrue);
+      expect(result.absolutePath, isNotNull);
+      // 响应里没有 etag（fileEntryToMap 不回），模型也刻意不提供该字段：
+      // 调用方无法据此 markSynced（写个空 etag 会让下轮预检永远判冲突）。
+      expect(result.raw.containsKey('etag'), isFalse);
+    });
+
+    test('path 上传：从磁盘流式读取（大文件不进内存第二份）', () async {
+      final tmp = await Directory.systemTemp.createTemp('spb-upload-');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      final file = File('${tmp.path}/x.md')..writeAsBytesSync([9, 9, 9]);
+
+      adapter.onPost(
+        '/chat/groups/grp_1/workspace-sync/ufs-upload',
+        (server) => server.reply(200, ufsUploadShape()),
+        data: Matchers.formData(
+          FormData.fromMap({
+            'file': await MultipartFile.fromFile(
+              file.path,
+              filename: 'x.md',
+              contentType: DioMediaType.parse('text/markdown'),
+            ),
+            'relative_path': 'reports/x.md',
+          }),
+        ),
+      );
+
+      final result = await api.uploadWorkspaceFile(
+        groupId: 'grp_1',
+        relativePath: 'reports/x.md',
+        path: file.path,
+        filename: 'x.md',
+        contentType: 'text/markdown',
+      );
+      expect(result.isLocalSynced, isTrue);
+    });
+
+    test('bytes 与 path 都不给 / 都给 → ArgumentError（严格二选一）', () async {
+      // 「都给」也拒绝：两条路一个流式读盘、一个把字节读进内存，静默选一个
+      // 会让调用方以为自己得到的是另一种语义（大文件场景下差别很大）。
+      await expectLater(
+        () => api.uploadWorkspaceFile(
+          groupId: 'grp_1',
+          relativePath: 'a.md',
+          filename: 'a.md',
+        ),
+        throwsArgumentError,
+      );
+      await expectLater(
+        () => api.uploadWorkspaceFile(
+          groupId: 'grp_1',
+          relativePath: 'a.md',
+          bytes: [1],
+          path: '/tmp/nope.md',
+          filename: 'a.md',
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test('413（超服务端上限）映射成 HttpError，错误体摘要在 body 里', () async {
+      // 回传编排靠 statusCode == 413 识别「改走 quick-capture 兑底」。
+      // validateStatus 放行 4xx，这里若不判状态码，错误体会被当成成功响应
+      // 解析成空对象，413 兑底分支永远不触发。
+      adapter.onPost(
+        '/chat/groups/grp_1/workspace-sync/ufs-upload',
+        (server) =>
+            server.reply(413, {'error': '文件超过 workspace 同步大小上限'}),
+        data: Matchers.isA<FormData>(),
+      );
+
+      await expectLater(
+        () => api.uploadWorkspaceFile(
+          groupId: 'grp_1',
+          relativePath: 'big.bin',
+          bytes: List.filled(2 * 1024 * 1024, 0),
+          filename: 'big.bin',
+        ),
+        throwsA(
+          isA<HttpError>()
+              .having((e) => e.statusCode, 'statusCode', 413)
+              .having((e) => e.body, 'body 摘要', contains('文件超过')),
+        ),
+      );
+    });
+
+    test('400（路径黑名单）与 404（/chat 前缀漏写即 404）各映射成 HttpError', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/workspace-sync/ufs-upload',
+        (server) =>
+            server.reply(400, {'error': 'workspace 路径已在系统黑名单中'}),
+        data: Matchers.isA<FormData>(),
+      );
+      await expectLater(
+        () => api.uploadWorkspaceFile(
+          groupId: 'grp_1',
+          relativePath: '_attachments/x.md',
+          bytes: [1],
+          filename: 'x.md',
+        ),
+        throwsA(
+          isA<HttpError>()
+              .having((e) => e.statusCode, 'statusCode', 400)
+              .having((e) => e.body, 'body', contains('黑名单')),
+        ),
+      );
+
+      adapter.onPost(
+        '/chat/groups/grp_2/workspace-sync/ufs-upload',
+        (server) => server.reply(404, {'error': '404 page not found'}),
+        data: Matchers.isA<FormData>(),
+      );
+      await expectLater(
+        () => api.uploadWorkspaceFile(
+          groupId: 'grp_2',
+          relativePath: 'a.md',
+          bytes: [1],
+          filename: 'a.md',
+        ),
+        throwsA(
+          isA<HttpError>().having((e) => e.isNotFound, 'isNotFound', isTrue),
+        ),
+      );
     });
   });
 }

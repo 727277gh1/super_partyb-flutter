@@ -294,6 +294,58 @@ void main() {
     });
   });
 
+  group('LocalFileSink 读取（回传链路）', () {
+    test('读回写入的字节（含 0 字节文件）', () async {
+      final sink = LocalFileSink(root.path);
+      await sink.write('reports/a.md', [1, 2, 3]);
+      expect(await sink.readBytes('reports/a.md'), [1, 2, 3]);
+
+      await sink.write('empty.md', const []);
+      expect(await sink.readBytes('empty.md'), isEmpty);
+    });
+
+    test('文件不存在时抛 PlatformError（不得返回空列表）', () async {
+      // 返回空列表会被上层当成「一个 0 字节的文件」→ 误判为「用户改动过」
+      // → 覆盖上传把远端文件写成空文件。
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.readBytes('nope.md'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('路径逃逸时抛错（不会读到同步目录之外的内容）', () async {
+      // 读逃逸比写逃逸更隐蔽：它不破坏任何东西，但会把用户目录外的文件内容
+      // 上传到 UFS（数据外泄）。
+      File('${outside.path}/secret.txt').writeAsStringSync('secret');
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.readBytes('../outside/secret.txt'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('软链指向外部时抛错', () async {
+      File('${outside.path}/secret.txt').writeAsStringSync('secret');
+      Link('${root.path}/link').createSync(outside.path);
+
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.readBytes('link/secret.txt'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('目录不是文件：读取报错而不是返回空', () async {
+      final sink = LocalFileSink(root.path);
+      await sink.write('reports/a.md', [1]);
+      await expectLater(
+        sink.readBytes('reports'),
+        throwsA(isA<SpbError>()),
+      );
+    });
+  });
+
   group('FileSelectorDirectoryPicker', () {
     test('无 DISPLAY 环境下静默返回 null（不抛异常）', () async {
       // 目录选择器依赖 GUI；CI/无头环境下必然失败。它必须降级为「取消」

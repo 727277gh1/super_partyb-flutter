@@ -45,6 +45,10 @@ class SyncedFiles extends Table {
   /// 服务端 `updated_at` 原样保留，仅用于诊断展示。
   TextColumn get updatedAt => text().nullable()();
 
+  /// 下载时对实际落盘字节算的 SHA256（十六进制小写）；null = 记录写于本列
+  /// 引入之前（升级前已同步），此时脏检测降级为「无法检测」（不算脏，不误报）。
+  TextColumn get contentHash => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {stateKey, relPath};
 }
@@ -110,13 +114,20 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (m) => m.createAll(),
-    // 版本 1 暂无迁移。将来加字段时在此按 from→to 分支处理，
-    // **不要**用 `m.createAll()` 兜底：那会丢用户已有的同步状态。
+    // 版本 1 → 2：SyncedFiles 增加 content_hash 列（下载时算的本地内容
+    // SHA256，脏检测的比对基准）。只加列不动数据：旧记录保持 null，语义是
+    // 「无法检测」，不是「未变更」。
+    onUpgrade: (m, from, to) async {
+      if (from < 2) {
+        await m.addColumn(syncedFiles, syncedFiles.contentHash);
+      }
+      // **不要**用 m.createAll() 兜底：那会重建全部表、丢用户已有的同步状态。
+    },
   );
 }
 
@@ -180,8 +191,12 @@ AppDatabase openAppDatabaseLazy(Future<File> Function() resolve) {
 
 /// 把状态值类型（[SyncedFile]）与 drift 行类型互转。
 extension SyncedFileRowMapper on SyncedFileRow {
-  SyncedFile toDomain() =>
-      SyncedFile(etag: etag, size: size, updatedAt: updatedAt);
+  SyncedFile toDomain() => SyncedFile(
+    etag: etag,
+    size: size,
+    updatedAt: updatedAt,
+    contentHash: contentHash,
+  );
 }
 
 /// 把 domain 值类型转成 drift 伴随对象。
@@ -193,5 +208,6 @@ extension SyncedFileMapper on SyncedFile {
         etag: Value(etag),
         size: size,
         updatedAt: Value(updatedAt),
+        contentHash: Value(contentHash),
       );
 }

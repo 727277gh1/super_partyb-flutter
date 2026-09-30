@@ -651,6 +651,9 @@ class _SyncPage extends ConsumerWidget {
       initialLocalRoot: localRoot,
       pickDirectory: ref.watch(pickDirectoryProvider),
       runSync: ref.watch(runSyncActionProvider),
+      // 回传是显式逐文件动作（自动同步仍单向，见 SyncPage 文档）。
+      scanDirtyFiles: ref.watch(scanDirtyFilesActionProvider),
+      uploadChanges: ref.watch(uploadChangesActionProvider),
       onOpenDirectory: (path) =>
           ref.read(desktopCapabilitiesProvider).revealPath(path),
       onLocalRootChanged: (root) {

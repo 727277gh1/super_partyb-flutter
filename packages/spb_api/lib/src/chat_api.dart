@@ -367,6 +367,91 @@ class ChatApi {
     );
   }
 
+  // ==================== 交付物回传（workspace-sync）====================
+
+  /// `POST /chat/groups/:group_id/workspace-sync/ufs-upload` —— 回传本地改动。
+  ///
+  /// 服务端一次完成两件事（`workspace_sync.go` 的 `ufsUpload`）：
+  /// UFS overwrite（新版本入 `file_versions`）+ 写 workspace 挂载目录
+  /// （`sync_status=local_synced`），agent 在下一个 turn 就能读到新内容。
+  ///
+  /// ## 端点前缀必须带 `/chat`
+  ///
+  /// 注册链：`router.go` 的 `chatRG := r.Group("/chat")` → `chat_ext.go`
+  /// 挂 `workspace-sync`。漏掉 `/chat` 会 **404**（不在任何路由树里）。
+  ///
+  /// ## [relativePath] 是**组内**相对路径
+  ///
+  /// 服务端自己拼 `workspace/groups/{groupId}/`。若把同步目录里的
+  /// `{gid}/` 前缀也传上去，文件会落到 `workspace/groups/{gid}/{gid}/...`
+  /// ——不报错，但位置不对，且下轮同步会在两个位置各出现一份。调用方
+  /// （回传编排）负责用 `uploadTargetFor` 剥前缀。
+  ///
+  /// ## 为什么同时接受 [path] 与 [bytes]（同 [uploadQuickCaptureAttachment]）
+  ///
+  /// 拖拽/文件选择来的文件有磁盘路径，`MultipartFile.fromFile` 流式读取；
+  /// 内存里的字节（如从 `LocalFileReader.readBytes` 读到的）没有路径可传。
+  /// 有路径时必须优先走路径，避免大文件在内存里多一份副本。
+  ///
+  /// ## 体积上限不做客户端预判
+  ///
+  /// 服务端按 `WorkbenchFileContextMaxBytes` 拒收（默认 1 MiB，可配），
+  /// 超限返回 **413**。客户端拿不到服务端实际生效值，故不复制这个上限，
+  /// 而是接住 413 改走 quick-capture 附件链兑底（见
+  /// `docs/deliverable-upload-and-conflict.md` §2.1③）。
+  ///
+  /// ## 响应不含 etag，不能 markSynced
+  ///
+  /// `fileEntryToMap` 不回 etag，客户端无法据此把文件标记为「已同步」。
+  /// 收口靠下一轮同步：远端 etag 已变 → 重新下载刚上传的内容 → 脏状态
+  /// 自然清除。因此 UI 只能说「已回传」，不能说「已同步」。
+  Future<WorkspaceFileUpload> uploadWorkspaceFile({
+    required String groupId,
+    required String relativePath,
+    List<int>? bytes,
+    String? path,
+    required String filename,
+    String? contentType,
+  }) async {
+    // 同 [uploadQuickCaptureAttachment]：运行时校验而非 assert（release 下
+    // assert 被剔除，两个都没传时会变成难定位的空指针）。
+    if ((bytes == null) == (path == null)) {
+      throw ArgumentError(
+        'uploadWorkspaceFile 必须且只能给 bytes 或 path 之一',
+      );
+    }
+    try {
+      final mediaType = contentType == null
+          ? null
+          : DioMediaType.parse(contentType);
+      final part = path != null
+          ? await MultipartFile.fromFile(
+              path,
+              filename: filename,
+              contentType: mediaType,
+            )
+          : MultipartFile.fromBytes(
+              bytes!,
+              filename: filename,
+              contentType: mediaType,
+            );
+      final form = FormData.fromMap({
+        'file': part,
+        'relative_path': relativePath,
+      });
+      final res = await _dio.post(
+        '/chat/groups/$groupId/workspace-sync/ufs-upload',
+        data: form,
+      );
+      // multipart 请求不能走 _post（它会把 FormData 当 JSON body 序列化前的
+      // map 处理），但 4xx 判定逻辑必须一致：validateStatus 放行 4xx，
+      // 不判会把错误体当成成功响应解析。
+      return WorkspaceFileUpload.fromJson(_asMap(_unwrap(res)));
+    } on DioException catch (e) {
+      throw _toSpbError(e);
+    }
+  }
+
   // ==================== 当前用户 ====================
 
   /// `GET /api/auth/me` —— 取当前登录用户。
@@ -870,4 +955,108 @@ class QuickCaptureUpload {
 
   @override
   String toString() => 'QuickCaptureUpload($fileId, $size bytes)';
+}
+
+/// `POST /chat/groups/:group_id/workspace-sync/ufs-upload` 的响应。
+///
+/// ## 服务端形状（`workspace_sync.go` 的 `ufsUpload` 尾部）
+///
+/// ```json
+/// {
+///   "group_id": "...",
+///   "relative_path": "reports/x.md",
+///   "file": {"id": "...", "name": "...", "path": "...", "size": 12,
+///            "mime_type": "...", "is_directory": false, "updated_at": "..."},
+///   "absolute_path": "/opt/<app>/.../workspace/groups/.../reports/x.md",
+///   "size_bytes": 12,
+///   "sync_status": "local_synced",
+///   "needs_local_sync": false
+/// }
+/// ```
+///
+/// ## ⚠️ 没有 `etag`（这是本模型刻意不提供 etag 的原因）
+///
+/// `fileEntryToMap` 不回 etag（`workspace_sync.go:711`）。调用方**不能**用本响应
+/// 去 `markSynced`——那样会把一个空的 etag 写进状态，下轮预检时本地记录 etag
+/// 为 null，于是每次都被判成 `conflict`。收口只能靠下一轮同步重新下载。
+class WorkspaceFileUpload {
+  const WorkspaceFileUpload({
+    required this.groupId,
+    required this.relativePath,
+    this.fileId,
+    this.fileName,
+    this.filePath,
+    this.fileSize = 0,
+    this.fileMimeType,
+    this.absolutePath,
+    this.sizeBytes = 0,
+    this.syncStatus,
+    this.raw = const {},
+  });
+
+  /// 服务端回显的 group（应等于请求里的 groupId）。
+  final String groupId;
+
+  /// 服务端**归一化后**的组内相对路径。
+  ///
+  /// 值得与请求值对比：服务端会走 `normalizeWorkspaceRelativePath`（去前导
+  /// 斜杠、折叠 `./` 等），若请求值非法它会**回退到用文件名**（见
+  /// `ufsUpload` 的 err 分支）——那时 [relativePath] 与请求值不同，文件其实
+  /// 落到了别处。回传编排应据此发现「我传的路径没被采纳」。
+  final String relativePath;
+
+  /// UFS 侧文件 id。
+  final String? fileId;
+
+  final String? fileName;
+
+  /// UFS materialized path（如 `workspace/groups/{gid}/reports/x.md`）。
+  final String? filePath;
+
+  /// UFS 侧文件大小（响应 `file.size`）。
+  final int fileSize;
+
+  final String? fileMimeType;
+
+  /// 服务端本地 workspace 里的绝对路径（诊断用，客户端一般不用）。
+  final String? absolutePath;
+
+  /// 本次写入的字节数（响应 `size_bytes`）。
+  final int sizeBytes;
+
+  /// 服务端同步状态，正常为 `local_synced`。
+  final String? syncStatus;
+
+  /// 原始响应，保留未建模字段以备调试。
+  final Map<String, dynamic> raw;
+
+  /// 服务端是否确认已同步到本地 workspace。
+  ///
+  /// 只认 `local_synced`：若服务端将来新增中间状态（如 `pending`），
+  /// 调用方不应把它当成完成——「已回传」的语义必须由服务端明确确认。
+  bool get isLocalSynced => syncStatus == 'local_synced';
+
+  factory WorkspaceFileUpload.fromJson(Map<String, dynamic> json) {
+    final file = json['file'] is Map
+        ? Map<String, dynamic>.from(json['file'] as Map)
+        : const <String, dynamic>{};
+    return WorkspaceFileUpload(
+      groupId: (json['group_id'] ?? '').toString(),
+      relativePath: (json['relative_path'] ?? '').toString(),
+      fileId: file['id']?.toString(),
+      fileName: file['name']?.toString(),
+      filePath: file['path']?.toString(),
+      fileSize: (file['size'] as num?)?.toInt() ?? 0,
+      fileMimeType: file['mime_type']?.toString(),
+      absolutePath: json['absolute_path']?.toString(),
+      sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
+      syncStatus: json['sync_status']?.toString(),
+      raw: json,
+    );
+  }
+
+  @override
+  String toString() =>
+      'WorkspaceFileUpload($relativePath, $sizeBytes bytes, '
+      'status=$syncStatus)';
 }

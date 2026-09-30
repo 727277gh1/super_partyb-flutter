@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:drift/drift.dart' hide isNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -57,6 +60,106 @@ void main() {
       // 的「任一侧缺 etag」分支永远走不到）。
       expect(back.files['grp_1/reports/b.md']?.etag, isNull);
       expect(back.files['grp_1/reports/b.md']?.size, 42);
+    });
+
+    test('contentHash round-trip（含 null：升级前记录 / 计算失败）', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final store = DriftSyncStateStore(db);
+
+      const hash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+      await store.save(
+        workspaceStateKey,
+        const SyncState(
+          files: {
+            'g1/with-hash.md': SyncedFile(etag: 'W/"1"', size: 5, contentHash: hash),
+            // 旧记录（本列引入前写入）：必须读回 null，而不是空串——空串会
+            // 让脏检测把它当成一个「有效的 hash」而永远判为脏。
+            'g1/no-hash.md': SyncedFile(etag: 'W/"1"', size: 5),
+          },
+        ),
+      );
+
+      final back = await store.load(workspaceStateKey);
+      expect(back.files['g1/with-hash.md']?.contentHash, hash);
+      expect(back.files['g1/no-hash.md']?.contentHash, isNull);
+      // 相等性必须把 contentHash 算进去（否则「hash 变了」会被判成同一状态）
+      expect(
+        back.files['g1/with-hash.md'],
+        isNot(const SyncedFile(etag: 'W/"1"', size: 5)),
+      );
+    });
+
+    test('v1 库升级到 v2：既有行保留，新列可读写', () async {
+      // 回归防线：onUpgrade 必须只 ALTER 加列。若用 m.createAll() 兑底会重建
+      // 表，用户已同步的 etag/游标全部丢失 → 下一轮全量重拉（生产 5666 文件）。
+      final dir = await Directory.systemTemp.createTemp('spb_data_mig');
+      addTearDown(() => dir.delete(recursive: true));
+      final file = File('${dir.path}/state.db');
+
+      // 1) 用原始 SQL 造一个 schemaVersion = 1 的库（无 content_hash 列）。
+      //
+      // 用 _V1User 把库开在版本 1 上（不跑任何迁移），再手写 v1 的建表语句与
+      // 一行既有数据。之所以不用 AppDatabase 建：它现在的 schemaVersion 是 2。
+      final raw = NativeDatabase(file);
+      await raw.ensureOpen(_V1User());
+      await raw.runCustom(
+        'CREATE TABLE sync_cursors (state_key TEXT NOT NULL, cursor TEXT NULL, '
+        'PRIMARY KEY (state_key))',
+      );
+      await raw.runCustom(
+        'CREATE TABLE synced_files (state_key TEXT NOT NULL, rel_path TEXT NOT NULL, '
+        'etag TEXT NULL, size INTEGER NOT NULL, updated_at TEXT NULL, '
+        'PRIMARY KEY (state_key, rel_path))',
+      );
+      await raw.runCustom(
+        'CREATE TABLE sync_bindings (id INTEGER NOT NULL, local_root TEXT NULL, '
+        'PRIMARY KEY (id))',
+      );
+      await raw.runCustom(
+        'CREATE TABLE preferences (key TEXT NOT NULL, value TEXT NOT NULL, '
+        'PRIMARY KEY (key))',
+      );
+      await raw.runCustom(
+        "INSERT INTO sync_cursors (state_key, cursor) "
+        "VALUES ('$workspaceStateKey', '2026-03-01T00:00:00Z')",
+      );
+      await raw.runCustom(
+        "INSERT INTO synced_files (state_key, rel_path, etag, size, updated_at) "
+        "VALUES ('$workspaceStateKey', 'g1/a.md', 'W/\"1\"', 100, "
+        "'2026-03-01T00:00:00Z')",
+      );
+      await raw.runCustom('PRAGMA user_version = 1');
+      await raw.close();
+
+      // 2) 用当前版本打开：onUpgrade 1→2 应执行 ALTER 加列。
+      final db = AppDatabase(NativeDatabase(file));
+      addTearDown(db.close);
+      final store = DriftSyncStateStore(db);
+
+      final back = await store.load(workspaceStateKey);
+      expect(back.cursor, '2026-03-01T00:00:00Z', reason: '升级不得丢游标');
+      expect(back.files, hasLength(1), reason: '升级不得丢既有文件记录');
+      expect(back.files['g1/a.md']?.etag, 'W/"1"');
+      expect(back.files['g1/a.md']?.size, 100);
+      expect(
+        back.files['g1/a.md']?.contentHash,
+        isNull,
+        reason: '旧行新列默认 null → 脏检测降级为「无法检测」，不是「未变更」',
+      );
+
+      // 3) 新列可写：升级后的库必须能存 hash。
+      await store.save(
+        workspaceStateKey,
+        back.markSynced(
+          'g1/a.md',
+          etag: 'W/"1"',
+          size: 100,
+          contentHash: 'abc123',
+        ),
+      );
+      final after = await store.load(workspaceStateKey);
+      expect(after.files['g1/a.md']?.contentHash, 'abc123');
     });
 
     test('未写入过的键返回 empty（不是抛异常）', () async {
@@ -356,4 +459,16 @@ void main() {
       expect(a == c, isFalse);
     });
   });
+}
+
+/// 把 NativeDatabase 开在 schemaVersion 1 上且不跑任何迁移（用于造 v1 库）。
+///
+/// beforeOpen 必须不碰库体；PRAGMA user_version 由 drift 在迁移结束后写回
+/// [schemaVersion]，故这里天然留下 user_version = 1。
+class _V1User implements QueryExecutorUser {
+  @override
+  int get schemaVersion => 1;
+
+  @override
+  Future<void> beforeOpen(QueryExecutor executor, OpeningDetails details) async {}
 }

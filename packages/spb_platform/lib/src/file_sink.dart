@@ -160,7 +160,11 @@ bool _isWithin(String path, String root) {
 /// 基于 `dart:io` 的 [FileSink] 实现。
 ///
 /// 每个实例绑定一个 `localRoot`（用户在设置页选择的同步目录）。
-class LocalFileSink implements FileSink {
+///
+/// 同时实现 [LocalFileReader]：回传链路需要把本地内容读出来（脏检测比对 hash、
+/// 上传前取字节），而它必须与写入共用同一套路径防御，故放在同一个类里而不是
+/// 另起一个只差防御逻辑的类。
+class LocalFileSink implements FileSink, LocalFileReader {
   const LocalFileSink(this.localRoot);
 
   final String localRoot;
@@ -221,5 +225,37 @@ class LocalFileSink implements FileSink {
   Future<bool> exists(String relPath) async {
     final target = await resolveWithinRoot(localRoot, relPath);
     return File(target).exists();
+  }
+
+  /// 读取本地文件内容（回传链路：脏检测比对 hash、上传前取字节）。
+  ///
+  /// ## 为什么必须与 [write] 用同一套路径防御
+  ///
+  /// 回传的 `relPath` 来自状态表（同步时写入的相对路径），看起来是可信的；
+  /// 但同步目录是**用户自己的目录**，里面可能有指向外部的软链。若读取不走
+  /// `resolveWithinRoot`，一个名为 `link/x.md` 的合法路径就能把同步目录之外
+  /// 的文件内容读出来并上传到 UFS——这是**数据外泄**，比写入逃逸更隐蔽。
+  ///
+  /// ## 文件不存在时必须抛错（不得返回空列表）
+  ///
+  /// 返回空列表会被上层当成「一个 0 字节的文件」，算出与记录不同的 hash，
+  /// 于是被误判为「用户改动过」→ 触发一次覆盖上传，把远端文件写成空文件。
+  /// 抛错让上层把该条目记为失败并跳过，是安全的一侧。
+  @override
+  Future<List<int>> readBytes(String relPath) async {
+    final target = await resolveWithinRoot(localRoot, relPath);
+    try {
+      return await File(target).readAsBytes();
+    } on FileSystemException catch (e) {
+      // ENOENT(2)：文件不在（用户手动删了 / 被清理）。明确报错而不是返回空，
+      // 否则上层会把「读不到」当成「内容变了」而去覆盖远端。
+      if (e.osError?.errorCode == 2) {
+        throw PlatformError('本地文件不存在：$relPath', cause: e);
+      }
+      throw StorageError('读取失败：$relPath（${e.message}）', cause: e);
+    } on PlatformError {
+      // 路径逃逸等：原样上抛（与 write 一致，语义不同，上层要能区分）。
+      rethrow;
+    }
   }
 }

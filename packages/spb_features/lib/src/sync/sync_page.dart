@@ -20,6 +20,29 @@ typedef PickSyncDirectory = Future<String?> Function();
 /// 什么也没做，属于「操作没能完成」，走异常通道让页面显示错误横幅。
 typedef RunSyncAction = Future<SyncReport> Function();
 
+/// 扫描本地改动（脏检测）。
+///
+/// 返回 [LocalDirtyScanResult]（逐文件明细 + 跳过/读取失败统计）；整轮无法进行
+/// 时抛 [SpbError]。
+///
+/// ## 为什么扫描与回传是**两个**回调而不是一个
+///
+/// 设计文档 §6 要求「上传前**逐文件可见**，不搞一键全传黑箱」。把扫描与上传
+/// 合成一个「回传」回调，UI 就只能在拿到最终报告后才能展示文件列表——那时
+/// 覆盖已经发生了。拆成两步后，列表先渲染、用户逐条勾选、再触发上传。
+///
+/// 与 [RunSyncAction] 同一分工：单文件问题在返回值里，整轮问题抛异常。
+typedef ScanDirtyFilesAction = Future<LocalDirtyScanResult> Function();
+
+/// 回传**选中的**本地改动。
+///
+/// 参数是本地相对路径集合（与状态表键完全一致）；返回 [UploadReport]
+/// （每文件终态：已回传 / 冲突已物化 / 走快速捕获 / 已跳过 / 失败原因）。
+///
+/// 参数是集合而不是「全部」：这个签名本身就在阻止「一键全传」——调用方
+/// 无法表达「我不管哪些文件，全传」这个意图。
+typedef UploadChangesAction = Future<UploadReport> Function(Set<String> only);
+
 /// 交付物同步页。
 ///
 /// ## 页面职责边界
@@ -31,16 +54,27 @@ typedef RunSyncAction = Future<SyncReport> Function();
 ///
 /// 这一分工与 [LoginPage] 一致（见 `src/auth/login_page.dart` 的说明）。
 ///
-/// ## 为什么同步是「单向」的
+/// ## 同步是「单向」的，回传是「显式」的
 ///
-/// UFS → 本地，不反向回传。反向回传会触发服务端 groupsync 的写入回路
-/// （emit `agent.file.*` → 可能引发渲染推送/重跑）。故本页没有任何「上传」
-/// 入口——不是漏了，是不该有。
+/// **自动同步**（[runSync]）永远是 UFS → 本地单向，不会上传本地改动——反向
+/// 自动同步会触发服务端 groupsync 的写入回路（emit `agent.file.*` → 可能引发
+/// 渲染推送/重跑，见 `docs/deliverable-upload-and-conflict.md` §4.1）。
+///
+/// 但用户确实可能改本地交付物（改完让 agent 接着做），所以本页另提供一条
+/// **显式**的回传通道（[scanDirtyFiles] + [uploadChanges]）：先扫描出本地
+/// 改动，用户**逐文件**勾选后才上传。两者不矛盾——一个是自动且只读，一个是
+/// 手动且逐文件确认。
+///
+/// ⚠️ 回传成功后文案只说「**已回传**」，不说「已同步」：上传响应不含 etag，
+/// 本地无法 `markSynced`，收口要等下一轮同步把新内容拉回来覆盖本地（见设计
+/// 文档 §2.1③）。说「已同步」会让用户以为本地状态已对齐，而它还没。
 class SyncPage extends StatefulWidget {
   const SyncPage({
     super.key,
     required this.pickDirectory,
     required this.runSync,
+    this.scanDirtyFiles,
+    this.uploadChanges,
     this.initialLocalRoot,
     this.onLocalRootChanged,
     this.onOpenDirectory,
@@ -52,6 +86,19 @@ class SyncPage extends StatefulWidget {
 
   /// 执行一轮同步。
   final RunSyncAction runSync;
+
+  /// 扫描本地改动。null = 不展示「回传改动」入口。
+  ///
+  /// 与 [onOpenDirectory] 同一约定：**装配层没接就不显示**，而不是显示一个
+  /// 点了没反应的按钮。
+  final ScanDirtyFilesAction? scanDirtyFiles;
+
+  /// 回传选中的本地改动。null = 不展示回传入口。
+  ///
+  /// 两个回调必须**成对**提供（只给一个的话页面会在扫描后无处可去，或在
+  /// 上传时无列表可选），故 [_SyncPageState] 以 [scanDirtyFiles] 是否为 null
+  /// 作为整个入口的开关。
+  final UploadChangesAction? uploadChanges;
 
   /// 初始同步目录（从配置读入）。null = 尚未选过。
   final String? initialLocalRoot;
@@ -90,7 +137,26 @@ class _SyncPageState extends State<SyncPage> {
   /// 整轮失败的原因（优先于 [SyncReport] 展示）。
   String? _error;
 
+  /// 本地改动扫描结果。null = 尚未扫描。
+  LocalDirtyScanResult? _dirtyScan;
+
+  /// 是否正在扫描本地改动。
+  bool _scanning = false;
+
+  /// 是否正在回传。
+  bool _uploading = false;
+
+  /// 用户勾选的待回传文件（本地相对路径）。
+  Set<String> _selected = {};
+
+  /// 上一轮回传的结果。null = 尚未回传过。
+  UploadReport? _uploadReport;
+
   bool get _busy => _picking || _syncing;
+
+  /// 回传入口是否可用（两个回调必须成对提供，见 [SyncPage.uploadChanges]）。
+  bool get _uploadEnabled =>
+      widget.scanDirtyFiles != null && widget.uploadChanges != null;
 
   @override
   void didUpdateWidget(SyncPage oldWidget) {
@@ -152,6 +218,90 @@ class _SyncPageState extends State<SyncPage> {
         const SnackBar(content: Text('无法打开目录，请检查路径是否存在')),
       );
     }
+  }
+
+  /// 扫描本地改动（回传入口第一步）。
+  ///
+  /// ## 为什么扫描不需要选目录也能发起
+  ///
+  /// 目录只是本地根路径的展示/配置，扫描回调闭包里已持有真实根（装配层从
+  /// 配置读）。这里只在**未配回调**时拦（按钮本就不会出现）。
+  Future<void> _handleScanDirty() async {
+    if (_busy || _scanning || _uploading) return;
+    final scan = widget.scanDirtyFiles;
+    if (scan == null) return;
+
+    setState(() {
+      _scanning = true;
+      _error = null;
+    });
+
+    try {
+      final result = await scan();
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        _dirtyScan = result;
+        // 新扫描覆盖旧的勾选与报告：报告描述的是上一轮的提交。
+        _selected = {for (final d in result.dirty) d.relPath};
+        _uploadReport = null;
+      });
+    } on SpbError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        _error = e.message;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _scanning = false;
+        _error = '扫描本地改动失败：$e';
+      });
+    }
+  }
+
+  /// 回传选中的文件（第二步）。
+  Future<void> _handleUpload() async {
+    if (_busy || _uploading) return;
+    final upload = widget.uploadChanges;
+    if (upload == null || _selected.isEmpty) return;
+
+    setState(() {
+      _uploading = true;
+      _error = null;
+    });
+
+    try {
+      final report = await upload(Set.of(_selected));
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        _uploadReport = report;
+      });
+    } on SpbError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        _error = e.message;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        _error = '回传失败：$e';
+      });
+    }
+  }
+
+  void _toggleSelected(String relPath, bool value) {
+    setState(() {
+      if (value) {
+        _selected.add(relPath);
+      } else {
+        _selected.remove(relPath);
+      }
+    });
   }
 
   Future<void> _handleSync() async {
@@ -234,7 +384,9 @@ class _SyncPageState extends State<SyncPage> {
           ),
           const SizedBox(height: SpbSpacing.sm),
           Text(
-            '单向同步：只把远端交付物拉到本地，不会上传本地改动。',
+            // 两句话把两条通道说清：自动同步不回传（防「我改的怎么没了」），
+            // 回传是显式动作（防用户以为必须手动同步才能让 agent 感知）。
+            '自动同步不会上传本地改动；可用「回传改动」把选中的修改显式交给 agent。',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
@@ -246,6 +398,20 @@ class _SyncPageState extends State<SyncPage> {
           if (_report != null) ...[
             const SizedBox(height: SpbSpacing.lg),
             _ReportCard(report: _report!),
+          ],
+          if (_uploadEnabled) ...[
+            const SizedBox(height: SpbSpacing.lg),
+            _UploadSection(
+              scan: _dirtyScan,
+              scanning: _scanning,
+              uploading: _uploading,
+              selected: _selected,
+              report: _uploadReport,
+              onScan: _handleScanDirty,
+              onUpload: _handleUpload,
+              onToggle: _toggleSelected,
+              disabled: _busy,
+            ),
           ],
         ],
       ),
@@ -455,3 +621,250 @@ class _Stat extends StatelessWidget {
 }
 
 /// 错误提示条。
+
+/// 回传改动区块：扫描入口 + 脏文件勾选列表 + 提交按钮 + 结果卡片。
+///
+/// ## 为什么是一个「区块」而不是散在页面里
+///
+/// 回传有**两步**（扫描 → 勾选 → 提交），每步有自己的进行中状态；散写的话
+/// 「扫描中按钮禁不禁用」「报告该不该显示」会散成六个条件分支。收进一个
+/// widget 后，[SyncPage] 的 build 只多一个 `if (_uploadEnabled)`。
+class _UploadSection extends StatelessWidget {
+  const _UploadSection({
+    required this.scan,
+    required this.scanning,
+    required this.uploading,
+    required this.selected,
+    required this.report,
+    required this.onScan,
+    required this.onUpload,
+    required this.onToggle,
+    required this.disabled,
+  });
+
+  final LocalDirtyScanResult? scan;
+  final bool scanning;
+  final bool uploading;
+  final Set<String> selected;
+  final UploadReport? report;
+  final VoidCallback onScan;
+  final VoidCallback onUpload;
+  final void Function(String relPath, bool value) onToggle;
+
+  /// 下行同步/选目录进行中时也禁用回传（同一个本地目录，避免并发读写混淆）。
+  final bool disabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Card(
+      key: const ValueKey('upload-section'),
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.upload_outlined),
+                const SizedBox(width: SpbSpacing.sm),
+                Expanded(
+                  child: Text('回传改动', style: textTheme.titleSmall),
+                ),
+                TextButton.icon(
+                  key: const ValueKey('upload-scan-button'),
+                  onPressed: disabled || scanning || uploading ? null : onScan,
+                  icon: scanning
+                      ? const SizedBox(
+                          width: SpbSpacing.md,
+                          height: SpbSpacing.md,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.search_outlined),
+                  label: Text(scanning ? '扫描中…' : '扫描改动'),
+                ),
+              ],
+            ),
+            const SizedBox(height: SpbSpacing.xxs),
+            Text(
+              // 先讲清语义再给入口：用户需要知道「扫描」只读不改任何东西。
+              '扫描会把本地内容与上次同步的记录逐文件比对，只有真正改过的文件会出现在下面。',
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            if (scan == null)
+              const SizedBox.shrink()
+            else if (scan!.isEmpty) ...[
+              const SizedBox(height: SpbSpacing.md),
+              // 空态必须显式：不说的话用户不知道扫描做完没有。
+              Text(
+                scan!.summarize(),
+                key: const ValueKey('upload-empty'),
+                style: textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: SpbSpacing.md),
+              Text(
+                // 摘要行给出「改动 N 个」与无法检测/读取失败的口径，
+                // 与下面的逐文件列表互补。
+                scan!.summarize(),
+                key: const ValueKey('upload-scan-summary'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: SpbSpacing.xs),
+              // 逐文件勾选：设计文档 §6「上传前逐文件可见，不搞一键全传黑箱」。
+              for (final d in scan!.dirty)
+                CheckboxListTile(
+                  key: ValueKey('upload-file-${d.relPath}'),
+                  value: selected.contains(d.relPath),
+                  onChanged: uploading
+                      ? null
+                      : (v) => onToggle(d.relPath, v ?? false),
+                  // dense + 控件内边距：脏文件可能几十个，默认密度太占屏。
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text(
+                    d.relPath,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                  subtitle: Text('${d.localSize} 字节'),
+                ),
+              const SizedBox(height: SpbSpacing.xs),
+              FilledButton.icon(
+                key: const ValueKey('upload-submit-button'),
+                onPressed:
+                    disabled || uploading || selected.isEmpty
+                        ? null
+                        : onUpload,
+                icon: uploading
+                    ? const SizedBox(
+                        width: SpbSpacing.md,
+                        height: SpbSpacing.md,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.send_outlined),
+                label: Text(
+                  uploading
+                      ? '回传中…'
+                      : selected.isEmpty
+                      ? '回传改动'
+                      : '回传选中的 ${selected.length} 个改动',
+                ),
+              ),
+            ],
+            if (report != null) ...[
+              const SizedBox(height: SpbSpacing.md),
+              _UploadResultCard(report: report!),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 回传结果卡片。
+///
+/// ## 为什么文案说「已回传」不说「已同步」
+///
+/// 上传响应不含 etag，本地无法 `markSynced`；本地要等下一轮同步拉回新内容
+/// 才对齐。说「已同步」会让用户以为本地状态已对齐，而它还没。
+/// （设计文档 §2.1③。）
+class _UploadResultCard extends StatelessWidget {
+  const _UploadResultCard({required this.report});
+
+  final UploadReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final failed = report.byOutcome(UploadOutcome.failed);
+    // 已上传但没能通知 agent 的条目：agent 还不知道这些文件改了，
+    // 用户需要手动在对话里说一声（或重跑回传）。
+    final notNotified = report.notifiedFailed;
+
+    return Card(
+      key: const ValueKey('upload-report'),
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  failed.isEmpty
+                      ? Icons.check_circle_outline
+                      : Icons.warning_amber_outlined,
+                  color: failed.isEmpty ? scheme.tertiary : scheme.error,
+                ),
+                const SizedBox(width: SpbSpacing.sm),
+                Expanded(child: Text('回传完成', style: textTheme.titleSmall)),
+              ],
+            ),
+            const SizedBox(height: SpbSpacing.md),
+            Text(
+              report.summarize(),
+              key: const ValueKey('upload-report-summary'),
+              style: textTheme.bodyMedium,
+            ),
+            // 逐文件终态：设计文档 §6「413 / 400 等服务端拒绝按『此文件无法
+            // 回传 + 原因』呈现，不算同步失败」——失败只属于单个文件。
+            for (final item in report.items)
+              Padding(
+                key: ValueKey('upload-result-${item.relPath}'),
+                padding: const EdgeInsets.only(top: SpbSpacing.xs),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '· ${item.relPath}：',
+                      style: textTheme.bodySmall,
+                    ),
+                    const SizedBox(width: SpbSpacing.xxs),
+                    Expanded(
+                      child: Text(
+                        // 成功条目带冲突副本路径（用户可能要去比对两份）；
+                        // 失败/跳过条目带原因。
+                        item.conflictPath != null
+                            ? '${item.outcome.description}（副本：${item.conflictPath}）'
+                            : item.reason ?? item.outcome.description,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: item.outcome == UploadOutcome.failed
+                              ? scheme.error
+                              : scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (notNotified.isNotEmpty) ...[
+              const SizedBox(height: SpbSpacing.md),
+              Text(
+                // 通知失败不回滚上传：文件已在 workspace 里，但 agent 不知道。
+                // 如实告诉用户这个差异，而不是假装一切完成。
+                '注意：${notNotified.length} 个文件已上传但未能通知 agent，'
+                '请在对话中告知或稍后重试。',
+                key: const ValueKey('upload-notify-warning'),
+                style: textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}

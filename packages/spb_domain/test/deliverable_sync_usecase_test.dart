@@ -6,7 +6,7 @@ import 'package:spb_domain/spb_domain.dart';
 import 'package:test/test.dart';
 
 /// 内存落盘桩。
-class _Sink implements FileSink {
+class _Sink implements FileSink, LocalFileReader {
   final written = <String, List<int>>{};
 
   /// 模拟上次同步留下的本地副本（[exists] 为真）。
@@ -22,6 +22,17 @@ class _Sink implements FileSink {
   @override
   Future<bool> exists(String relPath) async =>
       written.containsKey(relPath) || preExisting.contains(relPath);
+
+  /// 读取已写入的字节；preExisting 模拟的「磁盘上有但状态外」的文件无法提供
+  /// 内容（测试里不记录），同样抛错。
+  @override
+  Future<List<int>> readBytes(String relPath) async {
+    final bytes = written[relPath];
+    if (bytes == null) {
+      throw Exception('桩中无该文件内容：$relPath');
+    }
+    return bytes;
+  }
 }
 
 /// 内存状态库。

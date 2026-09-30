@@ -456,6 +456,9 @@ class _SyncPage extends ConsumerWidget {
       initialLocalRoot: localRoot,
       pickDirectory: ref.watch(pickDirectoryProvider),
       runSync: ref.watch(runSyncActionProvider),
+      // 回传是显式逐文件动作（自动同步仍单向，见 SyncPage 文档）。
+      scanDirtyFiles: ref.watch(scanDirtyFilesActionProvider),
+      uploadChanges: ref.watch(uploadChangesActionProvider),
       onLocalRootChanged: (root) {
         // 移动端目录不可改，保存是空操作（见 provider 说明）。
         ref.read(saveLocalRootActionProvider)(root).catchError((Object e) {

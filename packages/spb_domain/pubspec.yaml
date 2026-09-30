@@ -15,6 +15,9 @@ dependencies:
   collection: ^1.19.0
   meta: ^1.16.0
   uuid: ^4.5.1
+  # 脏检测基准：下载时对实际落盘字节算 SHA256（UFS etag 与内容无关，
+  # 见 docs/deliverable-upload-and-conflict.md §2.1①）。
+  crypto: ^3.0.7
 
 dev_dependencies:
   lints: ^6.0.0

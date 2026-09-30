@@ -9,14 +9,33 @@
 ///
 /// - **增量游标**：UFS 的 `updated_since` 需要上次同步的时间点，否则退化成全量；
 /// - **etag 比对**：文件内容可能变而 size 不变（改一个字），只靠 size/mtime 会
-///   漏更新；etag 是服务端权威的内容指纹；
+///   漏更新；etag 能反映「远端记录自上次同步后有没有被写过」；
+/// - **内容 hash**：判定「本地这份还是不是远端那一份」必须用下载时算的
+///   [SyncedFile.contentHash]——UFS 的 etag 是 `W/"<file_id>:<updated_at_nano>"`，
+///   与内容无关，答不了这个问题（见 docs/deliverable-upload-and-conflict.md §2.1①）；
 /// - **删除感知**：远端软删除的条目不会出现在本地磁盘上，只能靠状态表知道
 ///   「这个文件以前同步过、现在要删」。
 library;
 
+import 'package:crypto/crypto.dart' as crypto;
+
+/// 计算内容的 SHA256（十六进制小写）。
+///
+/// ## 为什么放在 domain 而不是各调用点自己算
+///
+/// 「下载时记录 hash」（[SyncedFile.contentHash]）与「回传前比对本地是否被改」
+/// 必须用**同一种**算法与编码，否则脏检测会把全部文件都判成脏的。收敛到一处，
+/// 这个不变量就不依赖调用方的自觉。
+String contentHashOf(List<int> bytes) => crypto.sha256.convert(bytes).toString();
+
 /// 单个已同步文件的记录。
 class SyncedFile {
-  const SyncedFile({this.etag, required this.size, this.updatedAt});
+  const SyncedFile({
+    this.etag,
+    required this.size,
+    this.updatedAt,
+    this.contentHash,
+  });
 
   /// 服务端内容指纹。null 表示服务端未返回（如某些 MIME），此时退化为按
   /// [size] 判断。
@@ -31,12 +50,29 @@ class SyncedFile {
   /// 会引入时区/精度改写，而它只用于展示，没有必要承担这个风险。
   final String? updatedAt;
 
+  /// **下载时**对实际落盘字节计算的 SHA256（十六进制小写）。
+  ///
+  /// ## 为什么需要它（etag 答不了这个问题）
+  ///
+  /// 脏检测要回答的是「本地这份内容还是不是远端那一份」。UFS 的 etag 是
+  /// `W/"<file_id>:<updated_at_unix_nano>"`
+  /// （`unified-file-service/internal/model/model.go` 的 `GenerateETag`），
+  /// 只随文件记录 ID 与更新时间变化，**与内容无关**，因此不能用它比对本地
+  /// 字节。
+  ///
+  /// ## null 的语义（向后兼容）
+  ///
+  /// null = 该记录写于本字段引入之前（升级前已同步的文件），或计算失败。
+  /// 此时脏检测**降级为「无法检测」**（宁可漏报也不误报）——这些文件在下次
+  /// 被重新下载后会获得 hash 并纳入检测。
+  final String? contentHash;
+
   /// 该记录是否表示「与 [etag]/[size] 描述的远端内容一致」。
   ///
   /// ## 为什么 etag 双方都存在时以 etag 为准
   ///
   /// 文件内容可能变而 size 不变（改一个字），只靠 size 会**漏更新**。
-  /// 服务端 etag 是权威内容指纹。
+  /// etag 能反映「远端记录是否被写过」，足以决定要不要重新下载。
   ///
   /// ## 为什么任一侧缺 etag 时退化为 size 比对
   ///
@@ -54,14 +90,16 @@ class SyncedFile {
       other is SyncedFile &&
       other.etag == etag &&
       other.size == size &&
-      other.updatedAt == updatedAt;
+      other.updatedAt == updatedAt &&
+      other.contentHash == contentHash;
 
   @override
-  int get hashCode => Object.hash(etag, size, updatedAt);
+  int get hashCode => Object.hash(etag, size, updatedAt, contentHash);
 
   @override
   String toString() =>
-      'SyncedFile(etag: $etag, size: $size, updatedAt: $updatedAt)';
+      'SyncedFile(etag: $etag, size: $size, updatedAt: $updatedAt, '
+      'contentHash: $contentHash)';
 }
 
 /// 一个同步状态键（state key）下的全部状态：游标 + 各文件的 etag 记录。
@@ -106,10 +144,16 @@ class SyncState {
     String? etag,
     required int size,
     String? updatedAt,
+    String? contentHash,
   }) => copyWith(
     files: {
       ...files,
-      relPath: SyncedFile(etag: etag, size: size, updatedAt: updatedAt),
+      relPath: SyncedFile(
+        etag: etag,
+        size: size,
+        updatedAt: updatedAt,
+        contentHash: contentHash,
+      ),
     },
   );
 

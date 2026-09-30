@@ -685,11 +685,15 @@ class SyncEngine {
             );
 
             if (result.notModified) {
+              // 304：内容未重下，本地磁盘上那份仍与之前一致——沿用状态里的旧
+              // contentHash（记录里可能没有：该条目写于 contentHash 引入前，
+              // 或首次同步就 304 的异常路径，此时保持 null，脏检测自然降级）。
               next = next.markSynced(
                 relPath,
                 etag: etag,
                 size: size,
                 updatedAt: updatedAt,
+                contentHash: next.files[relPath]?.contentHash,
               );
               next = next.advanceCursor(updatedAt);
               notModified++;
@@ -698,11 +702,14 @@ class SyncEngine {
               await sink.write(relPath, bytes);
               // 用**实际写入字节数**记状态：服务端 size 与实际内容不符时以本地
               // 事实为准，避免下轮误判为「未变更」。
+              // contentHash 也以实际落盘字节计算——脏检测拿它与用户日后改过的
+              // 本地内容比对（见 sync_state.dart 的 contentHashOf 说明）。
               next = next.markSynced(
                 relPath,
                 etag: etag,
                 size: bytes.length,
                 updatedAt: updatedAt,
+                contentHash: contentHashOf(bytes),
               );
               next = next.advanceCursor(updatedAt);
               downloaded++;

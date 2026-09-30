@@ -282,6 +282,17 @@ class $SyncedFilesTable extends SyncedFiles
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _contentHashMeta = const VerificationMeta(
+    'contentHash',
+  );
+  @override
+  late final GeneratedColumn<String> contentHash = GeneratedColumn<String>(
+    'content_hash',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     stateKey,
@@ -289,6 +300,7 @@ class $SyncedFilesTable extends SyncedFiles
     etag,
     size,
     updatedAt,
+    contentHash,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -338,6 +350,15 @@ class $SyncedFilesTable extends SyncedFiles
         updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
       );
     }
+    if (data.containsKey('content_hash')) {
+      context.handle(
+        _contentHashMeta,
+        contentHash.isAcceptableOrUnknown(
+          data['content_hash']!,
+          _contentHashMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -367,6 +388,10 @@ class $SyncedFilesTable extends SyncedFiles
         DriftSqlType.string,
         data['${effectivePrefix}updated_at'],
       ),
+      contentHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}content_hash'],
+      ),
     );
   }
 
@@ -390,12 +415,17 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
 
   /// 服务端 `updated_at` 原样保留，仅用于诊断展示。
   final String? updatedAt;
+
+  /// 下载时对实际落盘字节算的 SHA256（十六进制小写）；null = 记录写于本列
+  /// 引入之前（升级前已同步），此时脏检测降级为「无法检测」（不算脏，不误报）。
+  final String? contentHash;
   const SyncedFileRow({
     required this.stateKey,
     required this.relPath,
     this.etag,
     required this.size,
     this.updatedAt,
+    this.contentHash,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -409,6 +439,9 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
     if (!nullToAbsent || updatedAt != null) {
       map['updated_at'] = Variable<String>(updatedAt);
     }
+    if (!nullToAbsent || contentHash != null) {
+      map['content_hash'] = Variable<String>(contentHash);
+    }
     return map;
   }
 
@@ -421,6 +454,9 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
       updatedAt: updatedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(updatedAt),
+      contentHash: contentHash == null && nullToAbsent
+          ? const Value.absent()
+          : Value(contentHash),
     );
   }
 
@@ -435,6 +471,7 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
       etag: serializer.fromJson<String?>(json['etag']),
       size: serializer.fromJson<int>(json['size']),
       updatedAt: serializer.fromJson<String?>(json['updatedAt']),
+      contentHash: serializer.fromJson<String?>(json['contentHash']),
     );
   }
   @override
@@ -446,6 +483,7 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
       'etag': serializer.toJson<String?>(etag),
       'size': serializer.toJson<int>(size),
       'updatedAt': serializer.toJson<String?>(updatedAt),
+      'contentHash': serializer.toJson<String?>(contentHash),
     };
   }
 
@@ -455,12 +493,14 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
     Value<String?> etag = const Value.absent(),
     int? size,
     Value<String?> updatedAt = const Value.absent(),
+    Value<String?> contentHash = const Value.absent(),
   }) => SyncedFileRow(
     stateKey: stateKey ?? this.stateKey,
     relPath: relPath ?? this.relPath,
     etag: etag.present ? etag.value : this.etag,
     size: size ?? this.size,
     updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
+    contentHash: contentHash.present ? contentHash.value : this.contentHash,
   );
   SyncedFileRow copyWithCompanion(SyncedFilesCompanion data) {
     return SyncedFileRow(
@@ -469,6 +509,9 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
       etag: data.etag.present ? data.etag.value : this.etag,
       size: data.size.present ? data.size.value : this.size,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      contentHash: data.contentHash.present
+          ? data.contentHash.value
+          : this.contentHash,
     );
   }
 
@@ -479,13 +522,15 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
           ..write('relPath: $relPath, ')
           ..write('etag: $etag, ')
           ..write('size: $size, ')
-          ..write('updatedAt: $updatedAt')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('contentHash: $contentHash')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(stateKey, relPath, etag, size, updatedAt);
+  int get hashCode =>
+      Object.hash(stateKey, relPath, etag, size, updatedAt, contentHash);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -494,7 +539,8 @@ class SyncedFileRow extends DataClass implements Insertable<SyncedFileRow> {
           other.relPath == this.relPath &&
           other.etag == this.etag &&
           other.size == this.size &&
-          other.updatedAt == this.updatedAt);
+          other.updatedAt == this.updatedAt &&
+          other.contentHash == this.contentHash);
 }
 
 class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
@@ -503,6 +549,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
   final Value<String?> etag;
   final Value<int> size;
   final Value<String?> updatedAt;
+  final Value<String?> contentHash;
   final Value<int> rowid;
   const SyncedFilesCompanion({
     this.stateKey = const Value.absent(),
@@ -510,6 +557,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
     this.etag = const Value.absent(),
     this.size = const Value.absent(),
     this.updatedAt = const Value.absent(),
+    this.contentHash = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   SyncedFilesCompanion.insert({
@@ -518,6 +566,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
     this.etag = const Value.absent(),
     required int size,
     this.updatedAt = const Value.absent(),
+    this.contentHash = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : stateKey = Value(stateKey),
        relPath = Value(relPath),
@@ -528,6 +577,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
     Expression<String>? etag,
     Expression<int>? size,
     Expression<String>? updatedAt,
+    Expression<String>? contentHash,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -536,6 +586,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
       if (etag != null) 'etag': etag,
       if (size != null) 'size': size,
       if (updatedAt != null) 'updated_at': updatedAt,
+      if (contentHash != null) 'content_hash': contentHash,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -546,6 +597,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
     Value<String?>? etag,
     Value<int>? size,
     Value<String?>? updatedAt,
+    Value<String?>? contentHash,
     Value<int>? rowid,
   }) {
     return SyncedFilesCompanion(
@@ -554,6 +606,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
       etag: etag ?? this.etag,
       size: size ?? this.size,
       updatedAt: updatedAt ?? this.updatedAt,
+      contentHash: contentHash ?? this.contentHash,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -576,6 +629,9 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
     if (updatedAt.present) {
       map['updated_at'] = Variable<String>(updatedAt.value);
     }
+    if (contentHash.present) {
+      map['content_hash'] = Variable<String>(contentHash.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -590,6 +646,7 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
           ..write('etag: $etag, ')
           ..write('size: $size, ')
           ..write('updatedAt: $updatedAt, ')
+          ..write('contentHash: $contentHash, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1175,6 +1232,7 @@ typedef $$SyncedFilesTableCreateCompanionBuilder =
       Value<String?> etag,
       required int size,
       Value<String?> updatedAt,
+      Value<String?> contentHash,
       Value<int> rowid,
     });
 typedef $$SyncedFilesTableUpdateCompanionBuilder =
@@ -1184,6 +1242,7 @@ typedef $$SyncedFilesTableUpdateCompanionBuilder =
       Value<String?> etag,
       Value<int> size,
       Value<String?> updatedAt,
+      Value<String?> contentHash,
       Value<int> rowid,
     });
 
@@ -1218,6 +1277,11 @@ class $$SyncedFilesTableFilterComposer
 
   ColumnFilters<String> get updatedAt => $composableBuilder(
     column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get contentHash => $composableBuilder(
+    column: $table.contentHash,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -1255,6 +1319,11 @@ class $$SyncedFilesTableOrderingComposer
     column: $table.updatedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get contentHash => $composableBuilder(
+    column: $table.contentHash,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$SyncedFilesTableAnnotationComposer
@@ -1280,6 +1349,11 @@ class $$SyncedFilesTableAnnotationComposer
 
   GeneratedColumn<String> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get contentHash => $composableBuilder(
+    column: $table.contentHash,
+    builder: (column) => column,
+  );
 }
 
 class $$SyncedFilesTableTableManager
@@ -1318,6 +1392,7 @@ class $$SyncedFilesTableTableManager
                 Value<String?> etag = const Value.absent(),
                 Value<int> size = const Value.absent(),
                 Value<String?> updatedAt = const Value.absent(),
+                Value<String?> contentHash = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => SyncedFilesCompanion(
                 stateKey: stateKey,
@@ -1325,6 +1400,7 @@ class $$SyncedFilesTableTableManager
                 etag: etag,
                 size: size,
                 updatedAt: updatedAt,
+                contentHash: contentHash,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -1334,6 +1410,7 @@ class $$SyncedFilesTableTableManager
                 Value<String?> etag = const Value.absent(),
                 required int size,
                 Value<String?> updatedAt = const Value.absent(),
+                Value<String?> contentHash = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => SyncedFilesCompanion.insert(
                 stateKey: stateKey,
@@ -1341,6 +1418,7 @@ class $$SyncedFilesTableTableManager
                 etag: etag,
                 size: size,
                 updatedAt: updatedAt,
+                contentHash: contentHash,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -1458,14 +1536,16 @@ class $$SyncBindingsTableTableManager
               $$SyncBindingsTableOrderingComposer($db: db, $table: table),
           createComputedFieldComposer: () =>
               $$SyncBindingsTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback: ({
-            Value<int> id = const Value.absent(),
-            Value<String?> localRoot = const Value.absent(),
-          }) => SyncBindingsCompanion(id: id, localRoot: localRoot),
-          createCompanionCallback: ({
-            Value<int> id = const Value.absent(),
-            Value<String?> localRoot = const Value.absent(),
-          }) => SyncBindingsCompanion.insert(id: id, localRoot: localRoot),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String?> localRoot = const Value.absent(),
+              }) => SyncBindingsCompanion(id: id, localRoot: localRoot),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String?> localRoot = const Value.absent(),
+              }) => SyncBindingsCompanion.insert(id: id, localRoot: localRoot),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
               .toList(),
@@ -1589,11 +1669,12 @@ class $$PreferencesTableTableManager
               $$PreferencesTableOrderingComposer($db: db, $table: table),
           createComputedFieldComposer: () =>
               $$PreferencesTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback: ({
-            Value<String> key = const Value.absent(),
-            Value<String> value = const Value.absent(),
-            Value<int> rowid = const Value.absent(),
-          }) => PreferencesCompanion(key: key, value: value, rowid: rowid),
+          updateCompanionCallback:
+              ({
+                Value<String> key = const Value.absent(),
+                Value<String> value = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => PreferencesCompanion(key: key, value: value, rowid: rowid),
           createCompanionCallback:
               ({
                 required String key,

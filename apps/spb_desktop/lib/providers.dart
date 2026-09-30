@@ -800,6 +800,140 @@ final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
   };
 });
 
+// ==================== 交付物回传 ====================
+//
+// 自动同步永远是 UFS → 本地单向；回传是**显式**的本地 → agent 通道。
+// 编排在 DeliverableUploadUseCase（domain），这里只接线：把 ChatApi/UfsApi
+// 适配成四个窄接口（适配器在 domain 共用，见 deliverable_upload_adapters.dart）。
+// 语义与设计决策见 docs/deliverable-upload-and-conflict.md。
+
+/// 上传发送器（ufs-upload）。
+final uploadSenderProvider = Provider<UploadSender>((ref) {
+  return ChatApiUploadSender(ref.watch(chatApiProvider));
+});
+
+/// quick-capture 附件链发送器（413 兜底）。
+final uploadQuickCaptureSenderProvider = Provider<QuickCaptureSender>((ref) {
+  return ChatApiQuickCaptureSender(ref.watch(chatApiProvider));
+});
+
+/// 远端 workspace 清单 + 下载（etag 预检与冲突物化用）。
+final uploadRemoteWorkspaceProvider = Provider<RemoteWorkspace>((ref) {
+  return UfsRemoteWorkspace(ref.watch(ufsApiProvider));
+});
+
+/// 通知器工厂：把当前用户 id 绑进去（`/users/:uid/chat/messages` 要它）。
+///
+/// 用工厂而不是直接 Provider：userId 是**异步**解析的（`GET /api/auth/me`），
+/// 而 Riverpod 的 Provider 构建是同步的。用工厂把「等 userId」留在动作里，
+/// 失败时错误信息就是认证错误本身（可诊断），而不是一个「userId 为空」的
+/// 二手错误（与 issue #2 同源的陷阱）。
+final uploadNotifierFactoryProvider = Provider<UploadNotifier Function(String)>( (
+  ref,
+) {
+  final api = ref.watch(chatApiProvider);
+  return (String userId) => ChatApiUploadNotifier(api, userId);
+});
+
+/// 本地文件读取器工厂（回传脏检测与上传都要读用户改过的文件）。
+///
+/// ## 为什么是工厂而不是直接给一个 `LocalFileSink`
+///
+/// 本地根可能变（用户重选目录）。若在这里捕获一次，回传会把改动传到
+/// **上一个**目录（同 [runSyncActionProvider] 的说明）。工厂让调用方在
+/// 读完最新设置后再构造，根总是新鲜的。
+final uploadFileReaderFactoryProvider = Provider<LocalFileReader Function(String)>( (
+  ref,
+) {
+  return (String localRoot) => LocalFileSink(localRoot);
+});
+
+/// 回传是否在途。
+///
+/// 与 [syncInFlightProvider] 分开：两者语义不同（上行 / 下行），合并会让
+/// 「回传中」错误地显示成「同步中」（托盘提示读的是后者）。
+final uploadInFlightProvider = NotifierProvider<UploadInFlightNotifier, bool>(
+  UploadInFlightNotifier.new,
+);
+
+/// 回传在途状态（与 [SyncInFlightNotifier] 同构）。
+class UploadInFlightNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void set(bool value) {
+    if (state == value) return;
+    state = value;
+  }
+}
+
+/// 扫描本地改动（回传第一步：只读，不改任何东西）。
+///
+/// ## 为什么扫描没有在途状态
+///
+/// 纯本地只读（逐文件读字节 + 算 hash），无副作用、无网络。真正需要防重入的
+/// 是**提交**（[uploadChangesActionProvider]）——它会覆盖远端。
+final scanDirtyFilesActionProvider = Provider<ScanDirtyFilesAction>((ref) {
+  return () async {
+    // 每次都重新读设置：用户可能刚在设置页改了目录/范围/过滤。
+    final settings = await ref.read(loadSyncSettingsProvider)();
+    final root = settings.localRoot;
+    if (root == null || root.trim().isEmpty) {
+      throw const PlatformError('请先选择同步目录');
+    }
+
+    // 状态键与范围绑定：范围决定本地布局（workspace 有 `{gid}/` 前缀），
+    // 传错会把单 group 的文件按 workspace 解析（见 uploadTargetFor）。
+    final stateKey = syncStateKeyFor(settings.scope.toScope());
+    final state = await ref.read(syncStateStoreProvider).load(stateKey);
+
+    return scanLocalDirtyFiles(
+      reader: ref.read(uploadFileReaderFactoryProvider)(root),
+      state: state,
+      filter: settings.filter,
+      stateKey: stateKey,
+    );
+  };
+});
+
+/// 回传**选中的**本地改动（第二步：覆盖远端 + 通知 agent）。
+///
+/// `finally` 复位在途状态：异常路径也复位（同 [runSyncActionProvider]），
+/// 否则一次失败会让按钮永久停在「回传中…」。
+final uploadChangesActionProvider = Provider<UploadChangesAction>((ref) {
+  return (Set<String> only) async {
+    ref.read(uploadInFlightProvider.notifier).set(true);
+    try {
+      final settings = await ref.read(loadSyncSettingsProvider)();
+      final root = settings.localRoot;
+      if (root == null || root.trim().isEmpty) {
+        throw const PlatformError('请先选择同步目录');
+      }
+
+      // 通知消息要 userId；解析失败（未登录/网络）就直接失败，不做空串兜底。
+      final userId = await ref.read(currentUserIdProvider.future);
+
+      final useCase = DeliverableUploadUseCase(
+        reader: ref.read(uploadFileReaderFactoryProvider)(root),
+        stateStore: ref.read(syncStateStoreProvider),
+        remote: ref.read(uploadRemoteWorkspaceProvider),
+        uploader: ref.read(uploadSenderProvider),
+        quickCapture: ref.read(uploadQuickCaptureSenderProvider),
+        notifier: ref.read(uploadNotifierFactoryProvider)(userId),
+        userId: userId,
+      );
+
+      return await useCase.run(
+        scope: settings.scope.toScope(),
+        filter: settings.filter,
+        only: only,
+      );
+    } finally {
+      ref.read(uploadInFlightProvider.notifier).set(false);
+    }
+  };
+});
+
 // ==================== 设置页 ====================
 
 /// 读取完整的同步设置（表单的初值）。
