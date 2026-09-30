@@ -99,6 +99,22 @@ class SettingsPage extends StatefulWidget {
   /// 而配置是低频动作、同步是高频动作，合在一页会让用户每次同步都要滚过
   /// 一堆表单）。null 表示不提供入口（该页面此时只能配置）。
   final VoidCallback? onOpenSync;
+
+  /// 退出登录。
+  ///
+  /// ## 为什么必须带确认对话框
+  ///
+  /// 登出会清掉本地会话（`SessionManager.logout()` 删 token）。误触的代价不是
+  /// 「再点一下回来」，而是**重走一遗 OIDC 登录**（开浏览器、过 SSO、等回跳），
+  /// 而这个按钮又与一堆普通设置项同屏。故两段式确认。
+  ///
+  /// ## 为什么导航不在这里做
+  ///
+  /// 本页不持有路由（与 [onOpenSync] 一致）。且登出后的去向属应用级决策：
+  /// 路由守卫会在 `authState` 变为未登录时自动重定向，注入方也可以显式
+  /// `go(login)`——两种做法都在页面之外。
+  ///
+  /// 为 null 时不展示（保持「无认证」的用法，与其余可选注入一致）。
   final Future<void> Function(bool enabled)? setLaunchAtStartup;
 
   final String title;

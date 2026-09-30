@@ -1013,4 +1013,83 @@ void main() {
     expect(h.router.state.matchedLocation, SpbRoutes.settings);
   });
 
+  group('登录后回跳（消费 from 参数）', () {
+    testWidgets('未认证访问 /settings → 落在 /login?from=%2Fsettings', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.settings,
+        tokenStore: InMemoryTokenStore(),
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+      expect(
+        h.router.state.uri.queryParameters['from'],
+        SpbRoutes.settings,
+        reason: '守卫必须把原目标写进 from，否则登录后无从回跳',
+      );
+    });
+
+    testWidgets('登录完成后回跳到 from 指向的页面（而非对话列表）', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.settings,
+        tokenStore: InMemoryTokenStore(),
+      );
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+
+      h.container.read(authStateProvider.notifier).signedIn();
+      await tester.pumpAndSettle();
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.settings,
+        reason: '登录成功必须回到用户原本想去的页面',
+      );
+    });
+
+    testWidgets('已认证用户带 from=/settings 打开 /login 也回跳', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: '/login?from=%2Fsettings',
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.settings);
+    });
+
+    testWidgets('from=https://evil.com 被拒绝，落回对话列表（防开放重定向）', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: '/login?from=https%3A%2F%2Fevil.com',
+      );
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.conversations,
+        reason: '绝对 URL 必须被拒绝',
+      );
+    });
+
+    testWidgets('from=//evil.com 被拒绝，落回对话列表（协议相对 URL）', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: '/login?from=%2F%2Fevil.com',
+      );
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.conversations,
+        reason: '协议相对 URL 必须被拒绝（只判前导 / 会漏掉它）',
+      );
+    });
+
+    testWidgets('from=/login 被拒绝，落回对话列表（否则构成重定向环）', (tester) async {
+      final h = await pumpApp(tester, initialLocation: '/login?from=%2Flogin');
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.conversations,
+        reason: '回跳到登录页自身会让 go_router 检测到重定向环并抛异常',
+      );
+    });
+  });
 }

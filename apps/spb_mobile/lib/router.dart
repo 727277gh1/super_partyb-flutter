@@ -83,16 +83,57 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
     final auth = authState?.call() ?? _authStateFromContext(context);
     if (auth == null || auth.status == AuthStatus.unknown) return null;
 
-    final goingToLogin = state.matchedLocation == SpbRoutes.login;
-
-    if (auth.isUnauthenticated) {
-      if (goingToLogin) return null;
-      return '${SpbRoutes.login}?from=${Uri.encodeComponent(state.matchedLocation)}';
-    }
-
-    if (goingToLogin) return SpbRoutes.conversations;
-    return null;
+    return resolveAuthRedirect(
+      authenticated: auth.isAuthenticated,
+      matchedLocation: state.matchedLocation,
+      fromRaw: state.uri.queryParameters['from'],
+      loginRoute: SpbRoutes.login,
+      fallbackRoute: SpbRoutes.conversations,
+    );
   };
+}
+
+/// 认证守卫的**纯决策函数**（不碰 `BuildContext` / Riverpod）。
+///
+/// 与桌面端同构，实现细节与理由见桌面 `router.dart` 的同名函数。摘要：
+///
+/// - 未认证 → 带上 `from` 去登录页；
+/// - 已认证且停在登录页 → **先消费 `from`**（回跳必须由守卫统一决策，
+///   否则登录成功瞬间就被 `refreshListenable` 重跑的守卫送走）；
+/// - `from` 只接受站内路径（挡绝对 URL 与 `//host` 协议相对 URL），
+///   并拒绝回跳到登录页自身（重定向环），非法值静默回落 [fallbackRoute]。
+///
+/// 抽成纯函数是为了能被精确断言：go_router 对匹配不到的路由会静默回落，
+/// 导致「校验失效」与「校验生效」在 widget 测试里表现完全相同。
+String? resolveAuthRedirect({
+  required bool authenticated,
+  required String matchedLocation,
+  required String? fromRaw,
+  required String loginRoute,
+  required String fallbackRoute,
+}) {
+  final goingToLogin = matchedLocation == loginRoute;
+
+  if (!authenticated) {
+    if (goingToLogin) return null;
+    return '$loginRoute?from=${Uri.encodeComponent(matchedLocation)}';
+  }
+
+  if (goingToLogin) return _safeFrom(fromRaw, loginRoute) ?? fallbackRoute;
+  return null;
+}
+
+/// 校验 `from` 是否为可安全回跳的站内路径，非法返回 null。
+String? _safeFrom(String? raw, String loginRoute) {
+  // 空串其实已被下面的 `startsWith('/')` 拒绝（`''.startsWith('/') == false`），
+  // 显式判一次是为了让「空值非法」这条规则在函数开头就可见，而不必读到
+  // 第三行才推断出来。**这属于可读性冗余，不是独立防线**（实测：删掉
+  // `raw.isEmpty` 后测试全绿）。
+  if (raw == null || raw.isEmpty) return null;
+  if (!raw.startsWith('/')) return null;
+  if (raw.startsWith('//')) return null;
+  if (raw == loginRoute) return null;
+  return raw;
 }
 
 /// 从 `BuildContext` 读认证状态。

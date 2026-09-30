@@ -1181,6 +1181,104 @@ void main() {
     expect(h.container.read(authStateProvider).isAuthenticated, isTrue);
     expect(h.router.state.matchedLocation, SpbRoutes.settings);
   });
+  group('登录后回跳（消费 from 参数）', () {
+    testWidgets('未认证访问 /settings → 落在 /login?from=%2Fsettings', (tester) async {
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.settings,
+        tokenStore: InMemoryTokenStore(),
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+      expect(
+        h.router.state.uri.queryParameters['from'],
+        SpbRoutes.settings,
+        reason: '守卫必须把原目标写进 from，否则登录后无从回跳',
+      );
+    });
+
+    testWidgets('登录完成后回跳到 from 指向的页面（而非首页）', (tester) async {
+      // 端到端验证「写入的 from 真的被消费」。修复前该参数被写入却无人读取，
+      // 用户从 /settings 被踢到登录页，登录完只落到首页。
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.settings,
+        tokenStore: InMemoryTokenStore(),
+      );
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+
+      // 模拟认证完成（真实场景由 OIDC 回调流程完成）。
+      h.container.read(authStateProvider.notifier).signedIn();
+
+      // ## 为什么这里要多推一次 2 秒
+      //
+      // 回跳会挂载首页（`/settings` 是 `/` 的子路由），它的 `initState` 立刻
+      // 发 `/chat/groups`。`DioAdapter` 用**零延时 Timer** 投递响应，而
+      // `pumpAndSettle` 只推进微任务与动画，不会让零延时 Timer 到期——
+      // 于是用例结束时框架以 `!timersPending` 断言失败。报错栈完全指向网络层，
+      // 与「回跳」毫无关系，极易误导。
+      //
+      // `pumpApp` 内部对首帧做了同样的事（`pump(2s)`）；这里因为导航发生在
+      // 用例中途，必须再推一次。
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.settings,
+        reason: '登录成功必须回到用户原本想去的页面',
+      );
+    });
+
+    testWidgets('已认证用户带 from=/settings 打开 /login 也回跳（刷新/书签路径）', (tester) async {
+      // 「已认证 + 停在 /login」不只发生在「刚登录成功」那一瞬：刷新页面、
+      // 点开旧书签同样如此。回跳逻辑放在守卫里才能覆盖这些路径。
+      final h = await pumpApp(
+        tester,
+        initialLocation: '/login?from=%2Fsettings',
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.settings);
+    });
+
+    testWidgets('from=https://evil.com 被拒绝，落回首页（防开放重定向）', (tester) async {
+      // 开放重定向：诱导用户点一个看起来是本站的链接，登录完成后落到外站，
+      // 而用户刚在真正的本站输入过凭证——这正是钓鱼需要的信任转移。
+      final h = await pumpApp(
+        tester,
+        initialLocation: '/login?from=https%3A%2F%2Fevil.com',
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.home);
+    });
+
+    testWidgets('from=//evil.com 被拒绝，落回首页（协议相对 URL）', (tester) async {
+      // `//evil.com` 是协议相对 URL（RFC 3986 §4.2），解析结果同样是
+      // `https://evil.com`。只判「以 / 开头」会把它放过去，必须单独挡。
+      final h = await pumpApp(
+        tester,
+        initialLocation: '/login?from=%2F%2Fevil.com',
+      );
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.home,
+        reason: '协议相对 URL 必须被拒绝（只判前导 / 会漏掉它）',
+      );
+    });
+
+    testWidgets('from=/login 被拒绝，落回首页（否则构成重定向环）', (tester) async {
+      final h = await pumpApp(tester, initialLocation: '/login?from=%2Flogin');
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.home,
+        reason: '回跳到登录页自身会让 go_router 检测到重定向环并抛异常',
+      );
+    });
+  });
+
 }
 
 /// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。

@@ -98,18 +98,87 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
     final auth = authState?.call() ?? _authStateFromContext(context);
     if (auth == null || auth.status == AuthStatus.unknown) return null;
 
-    final goingToLogin = state.matchedLocation == SpbRoutes.login;
-
-    if (auth.isUnauthenticated) {
-      if (goingToLogin) return null;
-      // 记住原本要去的页面，登录成功后回跳（go_router 的 `from` 约定）。
-      return '${SpbRoutes.login}?from=${Uri.encodeComponent(state.matchedLocation)}';
-    }
-
-    // 已认证时不必停在登录页。
-    if (goingToLogin) return SpbRoutes.home;
-    return null;
+    return resolveAuthRedirect(
+      authenticated: auth.isAuthenticated,
+      matchedLocation: state.matchedLocation,
+      fromRaw: state.uri.queryParameters['from'],
+      loginRoute: SpbRoutes.login,
+      fallbackRoute: SpbRoutes.home,
+    );
   };
+}
+
+/// 认证守卫的**纯决策函数**（不碰 `BuildContext` / Riverpod）。
+///
+/// ## 为什么把决策抽出来单测，而不是只测路由的最终落点
+///
+/// 守卫本体要 `BuildContext` 与 Riverpod 容器，只能通过 widget 测试观察
+/// 「最终停在哪个路由」。但 go_router 对**匹配不到任何路由**的跳转目标会
+/// **静默回落**——于是「白名单校验失效，把 `https://evil.com` 放了过去」与
+/// 「校验生效，回落到首页」在 widget 测试里表现得**完全一样**（实测：删掉
+/// 校验后集成测试仍然全绿）。安全边界必须能被精确断言，故抽成本函数。
+///
+/// 返回值语义与 go_router 的 `redirect` 一致：`null` = 放行（不做重定向）。
+///
+/// ## 为什么回跳必须在守卫里做，而不是在登录页里 `context.go`
+///
+/// 登录成功那一刻 `authState` 变为 authenticated，`refreshListenable`
+/// 会重跑本守卫。若这里无条件返回首页，用户会在登录页 builder 有机会执行
+/// 之前就被送走——`from` 永远没机会生效（这正是修复前的状态：参数被写入
+/// 却无人读取）。
+///
+/// 反过来把回跳放在登录页的按钮回调里同样是错的：那会与守卫竞争（两个
+/// 重定向源抢同一次导航），且「已认证用户带着 `from` 直接打开 /login」
+/// （刷新页面、旧书签）这条路径拿不到回跳。守卫是唯一的判定点。
+///
+/// ## `from` 的校验是安全边界，不是可选健壮性
+///
+/// `from` 来自 URL query，是**完全由用户控制的输入**。若直接拿去跳转，
+/// 应用就成了开放重定向（open redirect）跳板：
+///
+/// - `from=https://evil.com` —— 绝对 URL，登录后直接落到钓鱼站；
+/// - `from=//evil.com` —— **协议相对 URL**（RFC 3986 §4.2），解析结果同样是
+///   `https://evil.com`。只判「以 `/` 开头」会把它放过去，所以必须单独挡。
+///
+/// 攻击面在于「用户被诱导点一个看起来是本站的链接」，登录完成后地址栏是
+/// 真的外站，而用户刚在真正的本站输入过凭证——这正是钓鱼需要的信任转移。
+///
+/// 另外拒绝 `from == loginRoute`：那会让「已认证访问 /login」这条分支把用户
+/// 重定向回 /login，go_router 检测到重定向环会抛异常；「回跳到登录页」本身
+/// 也没有语义。
+///
+/// 非法值一律回落到 [fallbackRoute]，**静默丢弃而不是报错**：用户只是想
+/// 登录，不该因为一个被篡改的参数而看到错误页。
+String? resolveAuthRedirect({
+  required bool authenticated,
+  required String matchedLocation,
+  required String? fromRaw,
+  required String loginRoute,
+  required String fallbackRoute,
+}) {
+  final goingToLogin = matchedLocation == loginRoute;
+
+  if (!authenticated) {
+    if (goingToLogin) return null;
+    // 记住原本要去的页面，登录成功后回跳（go_router 的 `from` 约定）。
+    return '$loginRoute?from=${Uri.encodeComponent(matchedLocation)}';
+  }
+
+  if (goingToLogin) return _safeFrom(fromRaw, loginRoute) ?? fallbackRoute;
+  return null;
+}
+
+/// 校验 `from` 是否为可安全回跳的站内路径，非法返回 null。
+///
+/// 规则见 [resolveAuthRedirect] 的说明（开放重定向防护 + 重定向环防护）。
+String? _safeFrom(String? raw, String loginRoute) {
+  if (raw == null || raw.isEmpty) return null;
+  if (!raw.startsWith('/')) return null;
+  // `//host` 是协议相对 URL，必须挡掉。
+  if (raw.startsWith('//')) return null;
+  // 回跳到登录页自身会构成重定向环。
+  if (raw == loginRoute) return null;
+  return raw;
 }
 
 /// 从 `BuildContext` 读认证状态。
