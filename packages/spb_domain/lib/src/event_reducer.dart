@@ -1,6 +1,7 @@
 import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
+import 'gate_decision.dart';
 import 'tts_audio_path.dart';
 
 /// 把服务端事件流归约成可渲染的对话项列表。
@@ -34,6 +35,12 @@ class EventReducer {
   /// 供 SSE 断线重连作 cursor（Transient 事件无有效 ID，不能用作游标）。
   static ReductionResult reduce(Iterable<ChatEvent> events) {
     final items = <ConversationItem>[];
+    // Gate 决策走独立通道（见 ReductionResult.gateDecisions 的说明）。
+    //
+    // 在同一个循环里收集，而不是事后 `collectGateDecisions(events)`：
+    // [events] 是 Iterable，可能是惰性流（如 `_buffer.map(...)`）；迭代两次
+    // 会重算或拿到不同结果。单趟保证两个输出基于同一批事件。
+    final gateDecisions = <GateDecision>[];
     var lastEventId = '';
 
     // 当前正在累积的 assistant 段落 / thought 段落。
@@ -48,6 +55,9 @@ class EventReducer {
       if (!ev.transient && ev.eventId.isNotEmpty) {
         lastEventId = ev.eventId;
       }
+
+      final gate = gateDecisionFrom(ev);
+      if (gate != null) gateDecisions.add(gate);
 
       switch (ev.eventType) {
         case EventTypes.userMessage:
@@ -304,19 +314,30 @@ class EventReducer {
           _mergeAgentFile(items, ev);
 
         default:
-          // heartbeat / queue_state / gate_* / tts_* / goal_* 等控制事件
-          // 不进入对话列表。它们由专门的状态层消费（如连接指示器、sync 状态）。
+          // heartbeat / queue_state / gate_evaluated / gate_completed /
+          // gate_error / tts_* / goal_gate_stopped / schedule_created 等控制事件
+          // 不进入对话列表，也不进 gate 决策通道。
           //
-          // ⚠️ 该分支**不**包含 `agent.file.*`（已在上方处理）。
+          // ⚠️ `adaptive_decision` / `goal_gate_decision` **不在**本分支的
+          // 「丢弃」之列：它们已在循环顶部经 `gateDecisionFrom(ev)` 收进 gate
+          // 决策通道（见 ReductionResult.gateDecisions）。这正是修复前的缺口——
+          // 常量已在 EventTypes 声明，但归约器把这两类连同上面的噪声事件一起
+          // 静默丢弃了。
+          //
+          // ⚠️ 该分支也**不**包含 `agent.file.*`（已在上方 case 处理）。
           // 在 agent 文件卡接入前，本分支曾吞掉 2927 条 agent 产物事件——
           // 原注释声称「如连接指示器、TTS 播放器」会消费，但客户端
-          // **从来没有** TTS 撕放器（`grep tts|audioPlayer` 零命中），
+          // **从来没有** TTS 播放器（`grep tts|audioPlayer` 零命中），
           // 误导性的「托底」比没有注释更糟（会让排障者以为有处理而放过泄漏）。
           break;
       }
     }
 
-    return ReductionResult(items: items, lastEventId: lastEventId);
+    return ReductionResult(
+      items: items,
+      lastEventId: lastEventId,
+      gateDecisions: gateDecisions,
+    );
   }
 
   /// 把 [turnId] 上最近一条未解决的确认卡标记为已解决。
@@ -490,19 +511,14 @@ class EventReducer {
       displayName: displayName.isEmpty ? prev.displayName : displayName,
       action: mergedAction,
       // 取最新非空（删除事件无 fileId，不冲掉创建时的 id）。
-      ufsFileId:
-          (ev.ufsFileId != null && ev.ufsFileId!.isNotEmpty)
-              ? ev.ufsFileId
-              : prev.ufsFileId,
+      ufsFileId: (ev.ufsFileId != null && ev.ufsFileId!.isNotEmpty)
+          ? ev.ufsFileId
+          : prev.ufsFileId,
       mimeType: ev.mimeType ?? prev.mimeType,
       sizeBytes: ev.sizeBytes ?? prev.sizeBytes,
       ttsKind: ttsKind ?? prev.ttsKind,
-      modifiedAt:
-          action == 'modified'
-              ? ev.createdAt
-              : prev.modifiedAt,
-      deletedAt:
-          action == 'deleted' ? ev.createdAt : prev.deletedAt,
+      modifiedAt: action == 'modified' ? ev.createdAt : prev.modifiedAt,
+      deletedAt: action == 'deleted' ? ev.createdAt : prev.deletedAt,
     );
   }
 
@@ -536,10 +552,24 @@ class EventReducer {
 
 /// 归约输出。
 class ReductionResult {
-  const ReductionResult({required this.items, required this.lastEventId});
+  const ReductionResult({
+    required this.items,
+    required this.lastEventId,
+    this.gateDecisions = const [],
+  });
 
   final List<ConversationItem> items;
 
   /// 最后一个落库事件的 ID，用作 SSE 重连 cursor。
   final String lastEventId;
+
+  /// Gate 决策（`adaptive_decision` / `goal_gate_decision`）单独通道。
+  ///
+  /// ## 为什么不在 [items] 里
+  ///
+  /// 时间线只放用户可见的对话内容（见 `ConversationItem` 类文档）。
+  /// Gate 决策是控制流诊断信息，夹在消息之间会干扰阅读，但又是
+  /// 「agent 为什么自己又跑了一轮」的关键排障依据。故走独立通道，
+  /// 由侧边栏诊断面板消费（对齐 webapp `WorkbenchGatePanel`）。
+  final List<GateDecision> gateDecisions;
 }

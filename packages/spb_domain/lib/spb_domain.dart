@@ -39,6 +39,9 @@ library;
 //   SyncSettings / LocalSyncStats —— 设置页的表单聚合形态与本地统计
 //   buildPrunePlan / isGroupId    —— 本地目录清理计划（纯逻辑，可预览）
 //   buildArtifactTree / ArtifactNode —— 交付物清单 → 树（隐式目录、聚合、排序，纯逻辑）
+//   GateDecision / GateDecisionKind / GateSourceKind —— Gate 决策（adaptive_decision / goal_gate_decision 归约输出，独立于时间线）
+//   collectGateDecisions / gateDecisionFrom —— 事件流 → Gate 决策列表（纯函数）
+//   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
 export 'src/conversation_item.dart';
@@ -48,12 +51,14 @@ export 'src/deliverable_upload.dart';
 export 'src/deliverable_upload_adapters.dart';
 export 'src/deliverable_upload_usecase.dart';
 export 'src/event_reducer.dart';
+export 'src/gate_decision.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
 export 'src/tts_audio_path.dart';
+export 'src/turn_group.dart';
 export 'src/sync_scope_config.dart';
 export 'src/sync_settings.dart';
 export 'src/sync_state.dart';
