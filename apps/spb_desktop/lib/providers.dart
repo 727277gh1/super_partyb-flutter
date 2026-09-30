@@ -13,7 +13,7 @@ import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
-import 'auth_browser.dart';
+import 'auth_loopback.dart';
 import 'auth_session_import.dart';
 
 /// 桌面能力 Provider。
@@ -231,13 +231,55 @@ final sseClientProvider = Provider<SseClient>((ref) {
 
 // ==================== 认证 ====================
 
-/// 发起登录的动作（平台相关，见 `auth_browser.dart`）。
+/// 发起登录的动作（桌面端：RFC 8252 §7.3 loopback 授权码流程）。
 ///
-/// 返回 null 表示已成功发起（等待用户在浏览器中完成）；返回字符串是失败原因。
-/// 抽成 Provider 而非直接调用，使测试能注入假实现（真实实现要开浏览器，
-/// widget test 里不可用）。
+/// ## 流程与返回值语义（与旧的「网关托管 + 粘贴导入」的区别）
+///
+/// `loopbackSignIn` 会**同步等到 token**：起本地监听 → 开系统浏览器 → 收回调
+/// → 换 token。所以这里的动作不只是「发起」，还要把 token 落盘并把状态推进到
+/// 已登录——这与移动端深链接收器的职责相同（见移动端 `onCode` 回调）。
+///
+/// 返回 null 表示登录完成；字符串是用户可见的失败原因。
+/// 抽成 Provider 而非直接调用，使测试能注入假实现。
+///
+/// ## 为什么直连 IdP 而不是网关
+///
+/// 网关把 redirect_uri 硬编码为自己的回调，客户端拿不到 code（见
+/// `auth_loopback.dart` 的说明）。要求 IdP 存在 public client
+/// （`token_endpoint_auth_method=none` + `http://127.0.0.1/callback` 注册），
+/// 见 `docs/rfc8252-loopback-signin.md`。未配置时登录页会显示导入会话入口，
+/// 粘贴导入仍是可用的降级路径。
 final signInActionProvider = Provider<Future<String?> Function()>((ref) {
-  return openGatewaySignIn;
+  return () async {
+    final result = await loopbackSignIn(config: ref.read(oidcConfigProvider));
+    final err = result.error;
+    if (err != null) return err;
+
+    // 落盘并推进状态（与移动端 onCode 相同的三步）。
+    final tokens = result.tokens!;
+    try {
+      await ref
+          .read(tokenStoreProvider)
+          .write(
+            StoredTokens(
+              accessToken: tokens.accessToken,
+              refreshToken: tokens.refreshToken,
+              expiresAt: tokens.expiresIn == null
+                  ? null
+                  : DateTime.now().toUtc().add(
+                      Duration(seconds: tokens.expiresIn!),
+                    ),
+              tokenType: tokens.tokenType,
+              scope: tokens.scope,
+            ),
+          );
+    } on SpbError catch (e) {
+      SpbLog.warn('loopback 登录后写入安全存储失败', {'error': e.toString()});
+      return e.message;
+    }
+    ref.read(authStateProvider.notifier).signedIn();
+    return null;
+  };
 });
 
 /// 认证状态（登录页与路由守卫共享）。
@@ -469,8 +511,9 @@ final searchChatProvider = Provider<SearchChat>((ref) {
 // userId）。用 FutureProvider 缓存首拉结果，并提供一个刷新入口。
 
 /// 待确认列表（首拉）。页面注入 `fetch` 时读它，刷新时调 `refresh`。
-final pendingConfirmationsProvider =
-    FutureProvider<List<ChatConfirmation>>((ref) async {
+final pendingConfirmationsProvider = FutureProvider<List<ChatConfirmation>>((
+  ref,
+) async {
   return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
 });
 
@@ -828,12 +871,12 @@ final uploadRemoteWorkspaceProvider = Provider<RemoteWorkspace>((ref) {
 /// 而 Riverpod 的 Provider 构建是同步的。用工厂把「等 userId」留在动作里，
 /// 失败时错误信息就是认证错误本身（可诊断），而不是一个「userId 为空」的
 /// 二手错误（与 issue #2 同源的陷阱）。
-final uploadNotifierFactoryProvider = Provider<UploadNotifier Function(String)>( (
-  ref,
-) {
-  final api = ref.watch(chatApiProvider);
-  return (String userId) => ChatApiUploadNotifier(api, userId);
-});
+final uploadNotifierFactoryProvider = Provider<UploadNotifier Function(String)>(
+  (ref) {
+    final api = ref.watch(chatApiProvider);
+    return (String userId) => ChatApiUploadNotifier(api, userId);
+  },
+);
 
 /// 本地文件读取器工厂（回传脏检测与上传都要读用户改过的文件）。
 ///
@@ -842,11 +885,10 @@ final uploadNotifierFactoryProvider = Provider<UploadNotifier Function(String)>(
 /// 本地根可能变（用户重选目录）。若在这里捕获一次，回传会把改动传到
 /// **上一个**目录（同 [runSyncActionProvider] 的说明）。工厂让调用方在
 /// 读完最新设置后再构造，根总是新鲜的。
-final uploadFileReaderFactoryProvider = Provider<LocalFileReader Function(String)>( (
-  ref,
-) {
-  return (String localRoot) => LocalFileSink(localRoot);
-});
+final uploadFileReaderFactoryProvider =
+    Provider<LocalFileReader Function(String)>((ref) {
+      return (String localRoot) => LocalFileSink(localRoot);
+    });
 
 /// 回传是否在途。
 ///

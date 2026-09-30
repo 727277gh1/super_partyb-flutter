@@ -596,25 +596,23 @@ void main() {
       expect(c.toString(), isNot(contains('SECRET_VALUE')));
     });
 
-    test('默认 redirect_uri 是已注册形态（不是自定义 scheme / loopback）', () {
-      // 实测：IdP 对自定义 scheme 与 loopback 都返回 400 invalid_request
-      // （见 docs/oidc-verification.md）。这里把「不许改回非法形态」钉住。
+    test('默认 redirect_uri 是 loopback 注册形态（RFC 8252 §7.3）', () {
+      // 桌面端改用 RFC 8252 §7.3 loopback 流程：编译期默认值是「不含端口的
+      // 注册值」（与 IdP 侧 oauth_clients.redirectUris 应注册的值一致）；
+      // 运行时由 copyWithRedirectUri 覆盖为带随机端口的实际回调地址。
+      // 见 apps/spb_desktop/lib/auth_loopback.dart 与
+      // docs/rfc8252-loopback-signin.md。
       final uri = Uri.parse(SpbEnv.oidcRedirectUri);
+      expect(uri.scheme, 'http', reason: 'loopback 回调用 http（不出本机）');
+      expect(uri.host, '127.0.0.1', reason: 'RFC 8252 §7.3 要求回环 IP 字面量');
       expect(
-        uri.scheme,
-        'http',
-        reason: '默认值指向本地网关回调（生产由 --dart-define 覆盖为 https）',
+        uri.hasPort,
+        isFalse,
+        reason: '注册值不含端口：端口由客户端动态选，fosite 负责通配',
       );
-      expect(
-        uri.scheme,
-        isNot('partyb'),
-        reason: '自定义 scheme 会被 IdP 拒绝（实测 400）',
-      );
-      expect(
-        uri.path,
-        endsWith('/auth/oidc/callback'),
-        reason: '必须是网关回调路径（IdP 精确匹配预注册值）',
-      );
+      expect(uri.path, '/callback');
+      // 不得回退到被 IdP 拒绝的自定义 scheme。
+      expect(uri.scheme, isNot('partyb'));
     });
   });
 }

@@ -72,11 +72,17 @@ class SpbEnv {
 
   /// OIDC redirect_uri。
   ///
-  /// **必须是 IdP 已注册的值**（精确匹配，见 `docs/oidc-verification.md`）。
-  /// 生产：`https://app.example.com/auth/oidc/callback`。
+  /// ## 桌面端：由 [OidcConfig.copyWithRedirectUri] 在登录时**覆盖**
+  ///
+  /// RFC 8252 §7.3 的 loopback 流程用**随机端口**（`port 0` 由内核分配），
+  /// 故真正的 redirect_uri 在运行时才知道，不能由编译期常量决定。这里的
+  /// 默认值只是「不含端口的注册值」——与 IdP 侧 `oauth_clients.redirectUris`
+  /// 里应当注册的值一致。
+  ///
+  /// 移动端同理：用 `partyb://oidc/callback` 覆盖（见 `oidc_callback.dart`）。
   static const String oidcRedirectUri = String.fromEnvironment(
     'SPB_OIDC_REDIRECT_URI',
-    defaultValue: 'http://127.0.0.1:9000/auth/oidc/callback',
+    defaultValue: 'http://127.0.0.1/callback',
   );
 
   /// 是否启用详细日志（含 HTTP 请求体、SSE 原始帧）。

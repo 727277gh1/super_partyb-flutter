@@ -147,6 +147,13 @@ authStateProvider.signedIn() → 路由守卫放行
 > 推荐做法：在 IdP 新增一个专用于移动端的 public client，注册
 > `partyb://oidc/callback`，`requirePkce=true`。这样与网关用的机密 client
 > 隔离，也不影响现有 Web 登录。
+>
+> **2026-09-30 更新**：IdP Go 版已支持 public client（`oauthclient.Create`
+> 接受 `tokenEndpointAuthMethod=none`，`oidc.Client.GetTokenEndpointAuthMethod`
+> 读真实列值）并强制 public client 使用 PKCE（`EnforcePKCEForPublicClients`）。
+> 桌面端已按此实现 RFC 8252 §7.3 loopback 流程（见
+> `docs/rfc8252-loopback-signin.md`）。移动端注册带 `partyb://oidc/callback`
+> 回调的 public client 后即可用同一套 `OidcClient.exchangeCode` 闭环。
 
 ### 3.1 已知的次要不一致（不阻塞，但要记住）
 

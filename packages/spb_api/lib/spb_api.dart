@@ -10,6 +10,7 @@ library;
 export 'src/auth_interceptor.dart';
 export 'src/chat_api.dart';
 export 'src/http_client.dart';
+export 'src/loopback_redirect_server.dart';
 export 'src/miniapp_api.dart';
 export 'src/oidc_callback.dart';
 export 'src/oidc_client.dart';

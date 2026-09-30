@@ -7,17 +7,26 @@ import 'auth_state.dart';
 
 /// 登录页。
 ///
-/// ## 认证形态（实测依据：`docs/oidc-verification.md`）
+/// ## 认证形态：RFC 8252 §7.3 loopback（桌面端）
 ///
-/// 生产链路由 **api-gateway 托管 OIDC**，且 IdP 对 `redirect_uri` 做
-/// **精确匹配**——只认预注册的三个网关回调，自定义 scheme 与 loopback 都被
-/// 拒绝（实测 400 `invalid_request`）。因此本页**不自己拼授权 URL、不自己换
-/// token**，只做一件事：让用户去网关的 `/auth/oidc/authorize` 完成登录。
+/// 桌面端用**系统浏览器 + 本地回环回调**完成授权码流程：
 ///
-/// 本页刻意**不依赖 `url_launcher` 等平台插件**：打开浏览器的动作由
-/// [onSignIn] 注入（app 装配层决定用系统浏览器 / 内嵌 webview / 别的机制）。
-/// 这样本页可以在无插件的 widget test 里完整验证，也避免 `spb_features`
-/// 为一个按钮引入平台依赖。
+/// 1. 客户端 bind `127.0.0.1:<随机端口>`，拿 `http://127.0.0.1:<port>/callback`
+///    作为 `redirect_uri`（直连 IdP，带 PKCE）；
+/// 2. 系统浏览器完成登录，IdP 302 回本地端口；
+/// 3. 客户端取出 code 并换 token，落盘后自动进入应用。
+///
+/// 这是 RFC 8252 §7.3 为桌面操作系统指定的重定向方式，也是 RFC 8252 §8.12
+/// 要求的「必须用外部用户代理（系统浏览器）而非内嵌 webview」的体现。
+///
+/// 本页刻意**不依赖任何平台插件**：登录动作完全由 [onSignIn] 注入
+/// （app 装配层用 `loopbackSignIn`）。这样本页可以在无插件的 widget test 里
+/// 完整验证，也避免 `spb_features` 为登录引入平台依赖。
+///
+/// ## 粘贴导入：降级路径
+///
+/// [onImportSession] 是 loopback 流程不可用时的兑底（例如 IdP 尚未注册
+/// public client、或安全存储不可用）。两者互斥且同一意图（「让我进去」）。
 ///
 /// ## 页面职责边界
 ///
@@ -217,11 +226,12 @@ class _LoginPageState extends State<LoginPage> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.login),
-                  label: Text(_busy ? '正在跳转…' : '使用 SSO 登录'),
+                  label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
                 ),
                 const SizedBox(height: SpbSpacing.md),
                 Text(
-                  '登录将在浏览器中完成，完成后返回本应用。',
+                  '登录将在系统浏览器中完成，'
+                  '完成后自动返回本应用（本地回环回调）。',
                   textAlign: TextAlign.center,
                   style: textTheme.bodySmall?.copyWith(
                     color: scheme.onSurfaceVariant,

@@ -629,7 +629,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 
 ## 10. 待办与里程碑
 
-### M0：骨架验证（**进行中**）
+### M0：骨架验证（**已完成**）
 
 - [x] 工作区搭建（Pub Workspaces + melos）
 - [x] 分层骨架（9 packages + 2 apps）
@@ -638,20 +638,20 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 核心代码：错误类型 / 日志 / 契约模型 / SSE 客户端 / 事件归约
 - [x] ~~多窗口可行性~~ → `window_manager` **做不到**；改用「主窗口临时变身」（见 §6.5）
 - [x] 托盘 + 全局快捷键（`bootstrap.dart` 已接 `window_manager`/`tray_manager`/`hotkey_manager`）
-- [ ] **OIDC PKCE 打通**（需确认 IdP 支持 PKCE + 自定义 scheme redirect）
-- [ ] 剪贴板文件读取的原生实现（`readClipboardFiles` 目前静默降级，见 §6.7）
+- [x] **OIDC 登录打通**（桌面端 RFC 8252 §7.3 loopback 授权码流程，见 `docs/rfc8252-loopback-signin.md`；粘贴导入为降级路径）
+- [x] 剪贴板文件读取的原生实现（Linux `clipboard_files` channel，见 §6.7）
 
-> M0 的窗口/托盘/快捷键验证已完成（多窗口失败，已按备选方案落地）。
-> 仍未验证的项见「已知问题」表。
+### M1+：功能实现（**大部分已完成**）
 
-### M1+：功能实现
-
-- [ ] OIDC 登录（`flutter_appauth` 或自实现 PKCE）
-- [ ] 对话列表 + SSE 实时流（`ChatStreamController` 已就绪）
-- [ ] 消息发送 + 无归属入口（悬浮窗）
-- [ ] 交付物同步（对齐 Tauri 的 `sync/runtime.rs` 语义）
-- [ ] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
-- [ ] 移动端：BFF `/chat/miniapp/*` 接入
+- [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
+- [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
+- [x] 消息发送 + 无归属入口（悬浮窗）
+- [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
+- [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
+- [x] 移动端：BFF `/chat/miniapp/*` 接入
+- [ ] 移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`，见 `docs/mobile-oidc-deeplink.md`）
+- [ ] CI 流水线（本地门禁脚本已就绪：`check_format.sh` / `check_layering.sh`）
+- [ ] Windows/macOS 出包（需对应 runner，见 §8）
 
 ### 交付物同步的既有语义（迁移自 Tauri，**必须保持**）
 
@@ -676,8 +676,9 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |
 | Windows/macOS 需额外 runner | 待决策 | `super_partyb` issue #31 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
-| 剪贴板文件粘贴无原生实现 | 待实现 | §6.7 |
-| IdP 是否支持 PKCE + 自定义 scheme | M0 阻塞项 | §10 |
+| ~~剪贴板文件粘贴无原生实现~~ | ✅ Linux 原生 channel 已实现 | §6.7 |
+| ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
+| IdP 生产未注册桌面 public client | **当前登录阻塞项**（粘贴导入可降级） | `docs/rfc8252-loopback-signin.md` §7 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 
 ---
