@@ -688,7 +688,198 @@ void main() {
       expect((r.items[1] as AssistantMessageItem).text, '好的，我看一下');
       expect((r.items[1] as AssistantMessageItem).isStreaming, isFalse);
       expect((r.items[2] as ToolCallItem).name, 'read_file');
+
       expect(r.lastEventId, 'done_7');
+    });
+  });
+
+  group('agent.file.* → AgentFileItem', () {
+    Map<String, dynamic> filePayload({
+      String rel = 'QWEN.md',
+      String? fileId = 'ufs_001',
+      String mime = 'text/markdown; charset=utf-8',
+      int size = 3585,
+    }) => {
+          'relative_path': rel,
+          'metadata': {'relative_path': rel},
+          'mime_type': mime,
+          'size_bytes': size,
+          if (fileId != null) 'ufs_file_id': fileId,
+        };
+
+    test('created 产出文件卡，字段映射正确', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(),
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as AgentFileItem;
+      expect(item.action, 'created');
+      expect(item.ufsFileId, 'ufs_001');
+      expect(item.sizeBytes, 3585);
+      expect(item.mimeType, 'text/markdown; charset=utf-8');
+      expect(item.fileName, 'QWEN.md');
+      expect(item.relativePath, 'QWEN.md');
+      expect(item.isDeleted, isFalse);
+    });
+
+    test('created → modified 合并为同一卡且 action 升级', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(),
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.agentFileModified,
+          payload: filePayload(size: 4000),
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as AgentFileItem;
+      expect(item.action, 'modified');
+      expect(item.sizeBytes, 4000);
+      expect(item.modifiedAt, isNotNull);
+      expect(item.deletedAt, isNull);
+    });
+
+    test('created → modified → deleted 合并为一张置灰卡，保留创建时的 fileId',
+        () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(),
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.agentFileModified,
+          payload: filePayload(size: 4000),
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.agentFileDeleted,
+          payload: {
+            // 删除事件实测无 ufs_file_id / size_bytes / metadata。
+            'relative_path': 'QWEN.md',
+            'mime_type': 'application/octet-stream',
+            'deleted_from_ufs': true,
+          },
+          globalSeq: 3,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as AgentFileItem;
+      expect(item.action, 'deleted');
+      expect(item.isDeleted, isTrue);
+      // 创建时的 fileId 不应被删除事件冲掉。
+      expect(item.ufsFileId, 'ufs_001');
+      expect(item.deletedAt, isNotNull);
+    });
+
+    test('created 无 fileId 被跳过（对齐 webapp）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(fileId: null),
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, isEmpty);
+    });
+
+    test('deleted 无 fileId 仍然出卡（服务端删除事件不带 fileId）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileDeleted,
+          payload: {
+            'relative_path': 'gone.md',
+            'mime_type': 'application/octet-stream',
+          },
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as AgentFileItem;
+      expect(item.isDeleted, isTrue);
+      expect(item.ufsFileId, isNull);
+    });
+
+    test('reports/tts/ 下但无合法 turn 目录（如直接放文件）回落为普通文件卡', () {
+      // `reports/tts/abc.mp3` 没有 {turn_id}/ 子目录，turn 段含 '.' 非法，
+      // parseTTSAudioPath 返回 null → ttsKind=null，渲染为普通文件卡（不丢弃）。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(
+            rel: 'reports/tts/abc.mp3',
+            mime: 'audio/mpeg',
+          ),
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as AgentFileItem;
+      expect(item.ttsKind, isNull);
+      expect(item.fileName, 'abc.mp3');
+    });
+
+    test('合法 TTS 路径设置 ttsKind（message_ → reply）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(
+            rel: 'reports/tts/c7ad0b62/message_6.mp3',
+            mime: 'audio/mpeg',
+            size: 53079,
+          ),
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as AgentFileItem;
+      expect(item.ttsKind, TtsStreamKind.reply);
+      expect(item.sizeBytes, 53079);
+    });
+
+    test('合法 TTS 路径设置 ttsKind（narration_ → narration）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload(
+            rel: 'reports/tts/turn-1/narration_turn-1_2.mp3',
+            mime: 'audio/mpeg',
+          ),
+          globalSeq: 1,
+        ),
+      ]);
+
+      final item = r.items.single as AgentFileItem;
+      expect(item.ttsKind, TtsStreamKind.narration);
+    });
+
+    test('nice_name 优先作为展示名（预留字段，生产实测从未出现）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.agentFileCreated,
+          payload: filePayload()..['nice_name'] = '我的配置笔记',
+          globalSeq: 1,
+        ),
+      ]);
+
+      final item = r.items.single as AgentFileItem;
+      expect(item.displayName, '我的配置笔记');
+      expect(item.fileName, 'QWEN.md');
     });
   });
 }

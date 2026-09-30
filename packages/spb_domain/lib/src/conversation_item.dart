@@ -1,3 +1,5 @@
+import 'tts_audio_path.dart';
+
 /// 对话中可渲染的一项（由事件归约而来）。
 ///
 /// ## 为什么需要归约层
@@ -220,3 +222,63 @@ final class FollowUpSuggestionItem extends ConversationItem {
 ///
 /// 用户应看到「这个文件被删了」（卡片置灰、禁用下载），而不是它凭空消失——
 /// 后者会让人怀疑「文件到底生成了没有」。对齐 webapp `mergeFileEventLifecycle`。
+final class AgentFileItem extends ConversationItem {
+  const AgentFileItem({
+    required super.id,
+    required super.createdAt,
+    required this.relativePath,
+    required this.fileName,
+    required this.displayName,
+    required this.action,
+    super.turnId,
+    this.ufsFileId,
+    this.mimeType,
+    this.sizeBytes,
+    this.ttsKind,
+    this.modifiedAt,
+    this.deletedAt,
+  });
+
+  /// 归一化的相对路径（作 [id] 与唯一身份）。删除事件也靠它收敛。
+  final String relativePath;
+
+  /// 真实文件名（含扩展名）：预览类型判定 / UFS 跳转依赖它，勿用 [displayName]。
+  final String fileName;
+
+  /// 用户可见展示名：`nice_name` 优先，否则等于 [fileName]。
+  final String displayName;
+
+  /// 生命周期最新状态（created/modified/deleted）。卡片徽标据此展示，
+  /// deleted 时禁用全部下载/预览入口（UFS 已软删）。
+  final String action;
+
+  /// UFS 文件 id。删除事件无此字段（null）→ 下载入口禁用。
+  final String? ufsFileId;
+
+  final String? mimeType;
+
+  /// 删除事件无此字段（null）。
+  final int? sizeBytes;
+
+  /// 若为 TTS 语音产物则为对应流种类，否则 null（普通文件卡）。
+  //
+  // 由归约器用 [parseTTSAudioPath] 计算后注入。null 表示非 TTS 产物，
+  // 渲染为普通文件卡；非 null 渲染为语音条目（[TtsStreamKind.narration] 默认折叠）。
+  final TtsStreamKind? ttsKind;
+
+  /// 同一文件的后续生命周期时间点（卡片副行展示「创建 → 更新 → 删除」）。
+  /// 首次创建时间用基类的 [createdAt]（归约时保持首次出现的时间作错锚点）。
+  final DateTime? modifiedAt;
+  final DateTime? deletedAt;
+
+  /// 是否已被删除（UFS 软删，下载入口应禁用）。
+  bool get isDeleted => action == 'deleted';
+
+  /// 是否为图片（缩略图自动内联渲染的依据）。
+  bool get isImage {
+    final mt = mimeType;
+    if (mt == null) return false;
+    return mt.toLowerCase().startsWith('image/');
+  }
+}
+

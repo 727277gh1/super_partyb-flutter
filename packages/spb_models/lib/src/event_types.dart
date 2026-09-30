@@ -68,6 +68,18 @@ class EventTypes {
   static const scheduleCreated = 'schedule_created';
   static const groupMetadataUpdated = 'group_metadata_updated';
 
+  // ---- Agent 文件产物（agent.file.*）----
+  //
+  // ⚠️ **这些事件不在 `chatbus/broker.go` 的 `Event*` 常量里**——它们由
+  // `workers/groupsync`、`workers/agentfilerender`、`tts/service.go` 各自
+  // emit。印证了顶部「broker.go 不是完整事件集」的告警：新增事件时必须
+  // 全仓 grep `agent.file.` 而非只看 broker.go。
+  //
+  // 生产实测（2927 条）：created 1821 / modified 1001 / deleted 105。
+  // 删除事件**不带 `ufs_file_id` / `size_bytes`**（生产库 11/11 条均缺），
+  // 故身份判定必须用 `relative_path`，不能用 fileId（见 reducer 的收敛逻辑）。
+
+  /// 前缀，用于前缀匹配而非穷举枚举（服务端可能新增 `agent.file.renamed`）。
   static const agentFilePrefix = 'agent.file.';
   static const agentFileCreated = 'agent.file.created';
   static const agentFileModified = 'agent.file.modified';

@@ -37,6 +37,7 @@ export 'src/quick_capture_usecase.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
+export 'src/tts_audio_path.dart';
 export 'src/sync_scope_config.dart';
 export 'src/sync_settings.dart';
 export 'src/sync_state.dart';

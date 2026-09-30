@@ -1,6 +1,7 @@
 import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
+import 'tts_audio_path.dart';
 
 /// 把服务端事件流归约成可渲染的对话项列表。
 ///
@@ -304,7 +305,13 @@ class EventReducer {
 
         default:
           // heartbeat / queue_state / gate_* / tts_* / goal_* 等控制事件
-          // 不进入对话列表。它们由专门的状态层消费（如连接指示器、TTS 播放器）。
+          // 不进入对话列表。它们由专门的状态层消费（如连接指示器、sync 状态）。
+          //
+          // ⚠️ 该分支**不**包含 `agent.file.*`（已在上方处理）。
+          // 在 agent 文件卡接入前，本分支曾吞掉 2927 条 agent 产物事件——
+          // 原注释声称「如连接指示器、TTS 播放器」会消费，但客户端
+          // **从来没有** TTS 撕放器（`grep tts|audioPlayer` 零命中），
+          // 误导性的「托底」比没有注释更糟（会让排障者以为有处理而放过泄漏）。
           break;
       }
     }
@@ -392,6 +399,116 @@ class EventReducer {
     if (v is! List) return const [];
     return v.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
   }
+
+  /// TTS 语音产物路径前缀（复用 `deliverable_sync.ttsRelPrefix` 的同一约定）。
+  //
+  // 这类文件渲染为**语音条目**（而非普通文件卡）：回复正文（reply）展开显示，
+  // 思考填充语（narration）默认折叠——全部展开会淹没对话。
+  // 详见 [parseTTSAudioPath] 与 [AgentFileItem.ttsKind]。
+  static const _ttsProductPrefix = 'reports/tts/';
+
+  /// 阶段优先级（action 取最新态）：deleted > modified > created。
+  static const _fileStageRank = {'created': 0, 'modified': 1, 'deleted': 2};
+
+  /// 合并 `agent.file.*` 事件为 [AgentFileItem]。
+  //
+  // 关键规则（对齐 webapp `chat-timeline.ts` 的 `byFile` + `fileIdentitySeen`
+  // 双集合与 `mergeFileEventLifecycle`）：
+  //
+  // 1. **身份键 = 归一化 relative_path**。删除事件历史上不带 `ufs_file_id`
+  //    （生产 11/11 条均缺），且同路径删除重建会换 id——用 id 收敛会把同一
+  //    文件拆成多张卡。
+  // 2. **created/modified 无 fileId 则跳过**（对齐 webapp：`if (!isDeleted &&
+  //    !fileId) continue`）。删除事件例外，因为它本就没有 fileId。
+  // 3. **位置锚点 = 首次出现**（items 中首次插入的位置）。后续事件原地更新
+  //    同一张卡，不跳动位置。
+  // 4. **action 取阶段更高者**（deleted > modified > created），避免乱序到达
+  //    时 action 退回 created。
+  // 5. **展示属性取最新非空**：fileId / mimeType / sizeBytes 被后续事件的非空
+  //    值覆盖，但不被空值冲掉（删除事件无 fileId，不能把创建时的 id 冲掉）。
+  // 6. **lifecycle 累积时间点**：created 锁定首次 createdAt，modified/deleted
+  //    记各自时间。
+  // 7. **TTS 产物**：渲染为语音条目（设置 [AgentFileItem.ttsKind]），
+  //    而非跳过。前缀匹配仅识别 `reports/tts/` 下的音频；parseTTSAudioPath
+  //    解析不出（如 turn_id 含非法字符）的回落为普通文件卡（ttsKind=null）。
+  static void _mergeAgentFile(List<ConversationItem> items, ChatEvent ev) {
+    final action = ev.agentFileAction;
+    if (action == null) return; // 未来新增的 agent.file.* 子类型：暂不处理
+
+    final relPath = ev.relativePath;
+    final identity = _normalizeRelPath(relPath);
+    if (identity.isEmpty) return;
+
+    // TTS 产物判定（前缀锚定开头）。解析不出 kind 则标记为语音条目；
+    // 解析不出（异常路径）回落为普通文件卡，不丢弃。
+    final TtsStreamKind? ttsKind = relPath.startsWith(_ttsProductPrefix)
+        ? parseTTSAudioPath(relPath)?.kind
+        : null;
+
+    // 删除事件无 fileId 是正常的；created/modified 无 fileId 则是异常载荷，跳过。
+    final isDeleted = action == 'deleted';
+    if (!isDeleted && (ev.ufsFileId == null || ev.ufsFileId!.isEmpty)) return;
+
+    final fileName = _basename(identity);
+    final displayName = ev.displayName.isEmpty ? fileName : ev.displayName;
+
+    final existingIdx = _indexOfAgentFile(items, identity);
+    if (existingIdx == null) {
+      // 首次出现：插入新卡。
+      items.add(
+        AgentFileItem(
+          id: identity,
+          createdAt: ev.createdAt,
+          turnId: ev.turnId,
+          relativePath: relPath,
+          fileName: fileName,
+          displayName: displayName,
+          action: action,
+          ufsFileId: ev.ufsFileId,
+          mimeType: ev.mimeType,
+          sizeBytes: ev.sizeBytes,
+          ttsKind: ttsKind,
+          modifiedAt: action == 'modified' ? ev.createdAt : null,
+          deletedAt: action == 'deleted' ? ev.createdAt : null,
+        ),
+      );
+      return;
+    }
+
+    // 原地合并：保持首次出现的位置锚点与 createdAt，更新最新态。
+    final prev = items[existingIdx] as AgentFileItem;
+    final prevRank = _fileStageRank[prev.action] ?? 0;
+    final nextRank = _fileStageRank[action] ?? 0;
+    final mergedAction = nextRank >= prevRank ? action : prev.action;
+
+    items[existingIdx] = AgentFileItem(
+      id: prev.id,
+      createdAt: prev.createdAt,
+      turnId: prev.turnId,
+      relativePath: relPath.isEmpty ? prev.relativePath : relPath,
+      fileName: fileName.isEmpty ? prev.fileName : fileName,
+      displayName: displayName.isEmpty ? prev.displayName : displayName,
+      action: mergedAction,
+      // 取最新非空（删除事件无 fileId，不冲掉创建时的 id）。
+      ufsFileId:
+          (ev.ufsFileId != null && ev.ufsFileId!.isNotEmpty)
+              ? ev.ufsFileId
+              : prev.ufsFileId,
+      mimeType: ev.mimeType ?? prev.mimeType,
+      sizeBytes: ev.sizeBytes ?? prev.sizeBytes,
+      ttsKind: ttsKind ?? prev.ttsKind,
+      modifiedAt:
+          action == 'modified'
+              ? ev.createdAt
+              : prev.modifiedAt,
+      deletedAt:
+          action == 'deleted' ? ev.createdAt : prev.deletedAt,
+    );
+  }
+
+  /// 取路径 basename（`a/b.md` → `b.md`）。与 `ChatEvent.displayName` 不同，
+  /// 这里**不读 nice_name**：[AgentFileItem.fileName] 始终是真实文件名，
+  /// 给预览类型判定 / UFS 跳转用；展示名另走 [AgentFileItem.displayName]。
   static String _basename(String identity) {
     if (identity.isEmpty) return '';
     final i = identity.lastIndexOf('/');
