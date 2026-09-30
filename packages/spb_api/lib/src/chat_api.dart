@@ -384,6 +384,41 @@ class ChatApi {
     return CurrentUser.fromJson(_asMap(res));
   }
 
+  /// `GET /me/turns` —— 跨 group 列出当前用户的最近轮次。
+  ///
+  /// ## 身份来自网关注入的 `X-User-ID`
+  ///
+  /// 路径里没有 user_id（服务端 `user_turns.go` 的 `currentUser(c)` 取网关
+  /// 注入的头），故不需要调用方传 userId。
+  ///
+  /// ## 参数
+  ///
+  /// - [limit]：返回条数（服务端默认 100、上限 200）；
+  /// - [days]：时间窗口（服务端默认 7、限制 1–90）；
+  /// - [status] / [source] / [groupId]：可选过滤。
+  ///
+  /// 走 [_get]（内部调 [_unwrap]）：`createDio` 的 `validateStatus` 放行 4xx，
+  /// 不补判会把 `404 {"error":...}` 当成功解析成空列表。
+  Future<List<ChatTurnSummary>> listMyTurns({
+    int limit = 50,
+    int? days,
+    String? status,
+    String? source,
+    String? groupId,
+  }) async {
+    final res = await _get(
+      '/me/turns',
+      query: {
+        'limit': limit,
+        if (days != null) 'days': days,
+        if (status != null) 'status': status,
+        if (source != null) 'source': source,
+        if (groupId != null) 'group_id': groupId,
+      },
+    );
+    return unwrapItems(res, ChatTurnSummary.fromJson);
+  }
+
   /// `GET /users/:user_id/chat/search?q=&limit=`
   ///
   /// ## 返回的是 turn 摘要，**不是** `ChatEvent`

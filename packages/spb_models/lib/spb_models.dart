@@ -20,6 +20,7 @@ export 'src/chat_group.dart';
 export 'src/chat_inbox_message.dart' show ChatInboxMessage;
 export 'src/chat_search_hit.dart';
 export 'src/chat_turn.dart';
+export 'src/chat_turn_summary.dart';
 export 'src/event_types.dart';
 export 'src/miniapp.dart';
 export 'src/pagination.dart';

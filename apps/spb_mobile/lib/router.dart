@@ -56,6 +56,10 @@ class SpbRoutes {
   static const search = '/search';
 
   /// 跨 group 待确认收件箱（与 search 同挂在「对话」标签下）。
+  static const confirmations = '/confirmations';
+
+  /// 我的最近轮次。
+  static const myTurns = '/my-turns';
 }
 
 /// 移动端路由表。
@@ -193,6 +197,10 @@ List<RouteBase> buildMobileRoutes() {
                   path: 'confirmations',
                   builder: (context, state) =>
                       const _PendingConfirmationsPage(),
+                ),
+                GoRoute(
+                  path: 'my-turns',
+                  builder: (context, state) => const _MyTurnsPage(),
                 ),
               ],
             ),
@@ -374,6 +382,19 @@ class _SearchPage extends ConsumerWidget {
     return SearchPage(
       search: ref.watch(searchChatProvider),
       onOpenHit: (hit) => context.push(SpbRoutes.chat(hit.groupId)),
+    );
+  }
+}
+
+/// 我的最近轮次（移动端，语义同桌面端 `_MyTurnsPage`）。
+class _MyTurnsPage extends ConsumerWidget {
+  const _MyTurnsPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final api = ref.watch(chatApiProvider);
+    return MyTurnsPage(
+      fetch: () => api.listMyTurns(),
       onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
@@ -402,6 +423,13 @@ class _SettingsTab extends ConsumerWidget {
       pickDirectory: ref.watch(pickDirectoryProvider),
       capabilities: ref.watch(desktopCapabilitiesProvider),
       onOpenSync: () => context.go(SpbRoutes.sync),
+      onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
+      // 退出登录：清凭证 → 回登录页。
+      //
+      // 显式跳转是「双保险」：`signOut()` 置为未登录后，路由守卫本身就会重定向
+      // 到登录页（实测：删掉 `context.go` 后测试依然全绿）。保留它是为了把
+      // 「登出后去哪」写在调用点，而不必跳去守卫确认。`context.mounted` 让它在
+      // 页面已移除时安静跳过。理由详见桌面端同名注释。
       onSignOut: () async {
         await ref.read(authControllerProvider).signOut();
         if (context.mounted) context.go(SpbRoutes.login);

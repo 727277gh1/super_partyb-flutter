@@ -80,6 +80,7 @@ class SettingsPage extends StatefulWidget {
     this.onOpenSync,
     this.onSignOut,
     this.onOpenDirectory,
+    this.onOpenMyTurns,
     this.loadLaunchAtStartup,
     this.setLaunchAtStartup,
     this.title = '设置',
@@ -101,6 +102,8 @@ class SettingsPage extends StatefulWidget {
   ///
   /// 对话列表 AppBar 已有 4 个图标（新建/待确认/搜索/工作台），再加会拥挤。
   /// 本项是低频的「回顾」动作，放设置页更合适。
+  final VoidCallback? onOpenMyTurns;
+
   /// 平台能力（决定是否展示托盘/快捷键项）。
   final DesktopCapabilities capabilities;
 
@@ -894,7 +897,20 @@ class _SettingsPageState extends State<SettingsPage> {
               enabled: !_signingOut,
               onTap: _signingOut ? null : _signOut,
             ),
+          ),
+        ],
+        if (widget.onOpenMyTurns != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          Card(
             margin: EdgeInsets.zero,
+            child: ListTile(
+              key: const ValueKey('settings-my-turns-entry'),
+              leading: const Icon(Icons.history_outlined),
+              title: const Text('我的最近轮次'),
+              subtitle: const Text('跨对话回顾最近让 agent 做了什么'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: widget.onOpenMyTurns,
+            ),
           ),
         ],
         const SizedBox(height: SpbSpacing.xl),

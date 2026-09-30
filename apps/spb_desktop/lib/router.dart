@@ -55,6 +55,10 @@ class SpbRoutes {
   static const search = '/search';
 
   /// 跨 group 待确认收件箱。
+  static const confirmations = '/confirmations';
+
+  /// 我的最近轮次。
+  static const myTurns = '/my-turns';
 }
 
 /// 桌面端路由表。
@@ -228,6 +232,8 @@ List<RouteBase> buildDesktopRoutes() {
           builder: (context, state) => const _PendingConfirmationsPage(),
         ),
         GoRoute(
+          path: 'my-turns',
+          builder: (context, state) => const _MyTurnsPage(),
         ),
         GoRoute(
           path: 'settings',
@@ -373,6 +379,21 @@ class _PendingConfirmationsPageState
       onResolve: (c, action) async {
         await api.resolveConfirmation(c.groupId, c.id, action: action);
       },
+    );
+  }
+}
+
+/// 我的最近轮次。
+//
+// 身份来自网关注入的 `X-User-ID`（`/me/turns` 路径里没有 user_id）。
+class _MyTurnsPage extends ConsumerWidget {
+  const _MyTurnsPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final api = ref.watch(chatApiProvider);
+    return MyTurnsPage(
+      fetch: () => api.listMyTurns(),
       onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
@@ -674,6 +695,7 @@ class _SettingsPage extends ConsumerWidget {
       capabilities: ref.watch(desktopCapabilitiesProvider),
       onOpenDirectory: (path) =>
           ref.read(desktopCapabilitiesProvider).revealPath(path),
+      onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
       // 退出登录：清凭证 → 回登录页。
