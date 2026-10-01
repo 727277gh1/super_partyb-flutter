@@ -1,0 +1,203 @@
+# CI 流水线
+#
+# ## 平台矩阵的成本约束（私有仓库 Free 计划 2,000 Linux 分钟/月）
+#
+# | 平台 | 配额倍数 | 单次约 | 占比（月 20 次） |
+# |---|---|---|---|
+# | linux | 1× | ~7 min | 7% |
+# | android | 1× | ~15 min | 15% |
+# | windows | 2× | ~12 min | 25% |
+#
+# 三端全在免费额度内（约 47%）。macOS 是 10×（会超额），不出包——
+# 需要时再单独加（带 `workflow_dispatch` 手动触发）。
+#
+# ## 为什么 Windows 固定 windows-2022
+#
+# `windows-latest` 正迁往 VS 2026。Flutter 3.47.5 虽已适配，但要**可复现**
+# 就得锁 runner 版本（VS 版本、SDK 版本都会随 latest 漂移）。
+#
+# ## 为什么 Linux job 要装 GTK 开发库
+#
+# `flutter build linux` 需要 clang/cmake/ninja + libgtk-3-dev 编译 C++ runner。
+# 只跑 analyze/test 的 job 不需要（dart/flutter test 不编译原生侧），
+# 故拆成两个 job：quality（快，全部包）+ build-linux（真出包，验证可构建）。
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.5'
+
+jobs:
+  # ── 质量门禁：全包 analyze / format / layering / test ──────────────
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # Pub Workspaces：根目录一次 pub get 即解析全部成员（单一 lockfile）。
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Format check
+        run: bash tools/check_format.sh
+
+      - name: Layering check
+        run: bash tools/check_layering.sh
+
+      - name: Analyze
+        run: dart analyze --fatal-infos .
+
+      # 纯 Dart 包（spb_core/models/api/domain）用 dart test（无 Flutter 引擎，
+      # 秒级启动）；含 UI 的包必须 flutter test。逐包跑而不是根目录一把梭：
+      # 根目录的 `dart test` 不会进 Flutter 包，`flutter test` 又要求逐包执行。
+      #
+      # 跳过没有 test/ 的包（spb_core / spb_design 当前无测试）：
+      # 直接对空目录跑 `dart test` 会挂住等输入（不是干净的非零退出），
+      # 会把整个 job 拖到超时。将来往这些包里加测试无需回来改本文件。
+      - name: Test pure Dart packages
+        run: |
+          for pkg in spb_core spb_models spb_api spb_domain; do
+            [ -d "packages/$pkg/test" ] || continue
+            echo "=== $pkg ==="
+            (cd "packages/$pkg" && dart test)
+          done
+
+      - name: Test Flutter packages
+        run: |
+          for pkg in spb_data spb_design spb_ui spb_platform spb_features; do
+            [ -d "packages/$pkg/test" ] || continue
+            echo "=== $pkg ==="
+            (cd "packages/$pkg" && flutter test)
+          done
+
+      - name: Test apps
+        run: |
+          for app in spb_desktop spb_mobile; do
+            [ -d "apps/$app/test" ] || continue
+            echo "=== $app ==="
+            (cd "apps/$app" && flutter test)
+          done
+
+  # ── Linux 桌面端出包（验证可构建 + 自包含）────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 编译 C++ runner 的最低需求（AGENTS.md §7）。keybinder/appindicator/
+      # libsecret 只在 bundle 分发时需要，CI 不装。
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build Linux release
+        run: |
+          cd apps/spb_desktop
+          flutter build linux --release
+
+      # 自包含验证（AGENTS.md §7）：ldd 不得缺库，RUNPATH 不得指向 /home。
+      # CI 用系统 GTK，本来就没有 /home 路径；这条检查防的是将来有人把
+      # bundle_linux_deps.sh 的产物误提交或构建方式漂移。
+      - name: Verify bundle is self-contained
+        run: |
+          cd apps/spb_desktop/build/linux/x64/release/bundle
+          ! ldd spb_desktop | grep 'not found'
+          ! find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \; 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: apps/spb_desktop/build/linux/x64/release/bundle/
+          retention-days: 7
+
+  # ── Android APK ───────────────────────────────────────────────────
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build APK (release)
+        run: |
+          cd apps/spb_mobile
+          flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+
+  # ── Windows 桌面端（2× 配额，仅 main 推送时跑，PR 不跑省额度）──────
+  build-windows:
+    if: github.event_name == 'push'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build Windows release
+        run: flutter build windows --release
+        working-directory: apps/spb_desktop
+
+      # VC++ 运行库不在构建产物里：目标机没装 VC++ Redistributable 会直接
+      # 闪退且报错不友好（AGENTS.md §8 坑 1）。必须手动拷进产物目录。
+      - name: Bundle VC++ runtime
+        shell: pwsh
+        working-directory: apps/spb_desktop
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          Copy-Item "$($crt.FullName)\*.dll" build\windows\x64\runner\Release\
+          Get-ChildItem build\windows\x64\runner\Release\*.dll | Select-Object -ExpandProperty Name
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: build/windows/x64/runner/Release/
+          retention-days: 7
