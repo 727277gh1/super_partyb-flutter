@@ -1456,4 +1456,168 @@ void main() {
       );
     });
   });
+
+  group('导入会话（粘贴凭证 → 落盘 → 请求带 Bearer）', () {
+    testWidgets('导入合法会话后状态变为已登录', (tester) async {
+      // 移动端登录闭环的唯一入口：IdP 未注册 `partyb://oidc/callback`
+      // public client，深链路径当前无法换到 token（见
+      // docs/mobile-oidc-deeplink.md）。故「粘贴导入」不是可选便利功能，
+      // 而是移动端**现在唯一能登录的路径**。
+      final store = InMemoryTokenStore();
+      final h = await pumpApp(
+        tester,
+        tokenStore: store,
+        initialLocation: SpbRoutes.login,
+        mockGroups: false,
+      );
+
+      // 必须先等启动时的 restore() 落定，否则它与 importSession 竞争 store。
+      //
+      // 这是**真实的竞态**（非测试噪音）：`AuthStateNotifier.build()` 里
+      // `unawaited(restore())` 在 store 为空时走「清理残留凭证」分支，
+      // 它 await 完 currentAccessToken() 后会再读一次 store，若那时已被
+      // 导入写入，就判定为残留并 logout()——把刚导入的凭证清掉。
+      await tester.runAsync(() async {
+        while (h.container.read(authStateProvider).status ==
+            AuthStatus.unknown) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+      });
+
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isFalse,
+        reason: '前置条件：导入前必须是未登录，否则本用例空洞通过',
+      );
+
+      final err = await h.container
+          .read(authControllerProvider)
+          .importSession('id_token=test-id-token; refresh_token=test-refresh');
+
+      expect(err, isNull, reason: '合法凭证不该报错');
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '导入后必须变为已登录，否则用户仍被守卫挡在登录页',
+      );
+
+      final stored = await store.read();
+      expect(stored!.accessToken, 'test-id-token');
+      expect(stored.refreshToken, 'test-refresh');
+    });
+
+    testWidgets('认不出的内容报错且不落盘（不造无效凭证）', (tester) async {
+      final store = InMemoryTokenStore();
+      final h = await pumpApp(
+        tester,
+        tokenStore: store,
+        initialLocation: SpbRoutes.login,
+        mockGroups: false,
+      );
+      await tester.runAsync(() async {
+        while (h.container.read(authStateProvider).status ==
+            AuthStatus.unknown) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+      });
+
+      final err = await h.container
+          .read(authControllerProvider)
+          .importSession('session_id=abc; csrf=def');
+
+      expect(err, isNotNull, reason: '无 id_token/access_token 必须报错');
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isFalse,
+        reason: '解析失败不得置为已登录',
+      );
+      expect(await store.read(), isNull, reason: '不该把认不出的数据写进安全存储');
+    });
+
+    testWidgets('导入后请求头带上 Authorization: Bearer <token>', (tester) async {
+      // 闭环的最后一环：光落盘不够，请求必须真的带上凭证，否则服务端仍 401。
+      //
+      // 为什么不能用 pumpApp 的 harness：`pumpApp` 把 dioProvider override
+      // 成裸 dio（只挂 DioAdapter，没有 AuthInterceptor），用它断言「带
+      // Bearer」是空洞的（实测 Authorization 恒为 null）。故自建容器，
+      // 只 override 凭证存储，让 dioProvider 走生产实现。
+      final store = InMemoryTokenStore();
+      final container = ProviderContainer(
+        overrides: [tokenStoreProvider.overrideWithValue(store)],
+      );
+      addTearDown(container.dispose);
+
+      final dio = container.read(dioProvider);
+      final adapter = DioAdapter(dio: dio);
+      addTearDown(dio.close);
+
+      final seen = <String, String?>{};
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            seen['Authorization'] = options.headers['Authorization'] as String?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      await tester.runAsync(() async {
+        while (container.read(authStateProvider).status == AuthStatus.unknown) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+      });
+
+      final err = await container
+          .read(authControllerProvider)
+          .importSession('id_token=test-id-token');
+      expect(err, isNull, reason: '前置条件：导入必须成功');
+      expect(
+        (await store.read())?.accessToken,
+        'test-id-token',
+        reason: '凭证必须真的落盘，否则下面的请求头断言是空洞的',
+      );
+
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        queryParameters: {'limit': 50, 'offset': 0},
+      );
+
+      await tester.runAsync(() => container.read(chatApiProvider).listGroups());
+
+      expect(
+        seen.containsKey('Authorization'),
+        isTrue,
+        reason: '请求必须真的发出，否则下面的断言是空洞的',
+      );
+      expect(
+        seen['Authorization'],
+        'Bearer test-id-token',
+        reason: '导入的凭证必须出现在 Authorization 头上，否则服务端仍 401',
+      );
+    });
+
+    testWidgets('登录页展示导入入口与输入框', (tester) async {
+      // 移动端此前只注入 onSignIn，LoginPage 的导入区不渲染。
+      // 这条用例守住「移动端也有这条路」——它是当前唯一可登录路径。
+      await pumpApp(
+        tester,
+        tokenStore: InMemoryTokenStore(),
+        initialLocation: SpbRoutes.login,
+        mockGroups: false,
+      );
+      await tester.pumpAndSettle();
+
+      // 导入区默认收起（它是备选路径，展开着会让登录页看起来有两条对等入口）
+      // ——必须先展开才能断言输入框存在。
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('login-import-field')),
+        findsOneWidget,
+        reason: '移动端必须展示粘贴导入入口（深链闭环依赖 IdP 注册）',
+      );
+    });
+  });
 }

@@ -16,7 +16,6 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_loopback.dart';
-import 'auth_session_import.dart';
 
 /// 桌面能力 Provider。
 ///

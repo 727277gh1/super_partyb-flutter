@@ -1,12 +1,12 @@
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
 
-import 'package:spb_desktop/auth_session_import.dart';
+import 'package:spb_api/spb_api.dart';
 
 /// `parseSessionCredential` 的纯函数测试。
 ///
 /// ## 这个测试防的是什么
 ///
-/// 桌面端的 SSO 在系统浏览器完成，Flutter 进程读不到浏览器 Cookie，
+/// SSO 在系统浏览器完成，Flutter 进程读不到浏览器 Cookie，
 /// **粘贴导入是唯一的登录闭环入口**。解析失败的表现是「粘贴了但没反应」，
 /// 用户无从判断是自己贴错了还是程序坏了——故每种输入形态都要有明确断言。
 ///

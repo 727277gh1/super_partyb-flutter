@@ -358,6 +358,39 @@ class AuthStateNotifier extends Notifier<AuthState> {
   /// 凭证已落盘（回调收到 token 后调用）。
   void signedIn() => state = AuthState.authenticated;
 
+  /// 粘贴导入已有会话（IdP 未注册 public client 时的降级路径）。
+  ///
+  /// 与桌面端 `AuthStateNotifier.importSession` 同构：解析 → 落盘 →
+  /// 复用 [restore] 验证。为什么必须复用 restore：直接置位会造出「界面已登录、
+  /// 请求全 401」的假状态；restore 会真实读回 token（顺带处理过期刷新），
+  /// 复用还避免新增状态机分支。
+  ///
+  /// ## 为什么失败时返回字符串而不是抛异常
+  ///
+  /// 与 [signIn] 同语义：粘贴错内容是**预期内的用户操作**，不是程序错误。
+  /// 返回值直接显示在登录页上。
+  Future<String?> importSession(String raw) async {
+    final tokens = parseSessionCredential(raw);
+    if (tokens == null) {
+      const msg = '认不出粘贴的内容，请确认包含 id_token 或 access_token';
+      state = AuthState.failed(msg);
+      return msg;
+    }
+
+    try {
+      await ref.read(tokenStoreProvider).write(tokens);
+    } on SpbError catch (e) {
+      // 安全存储写失败：不能假装成功，否则状态会变成「已登录」而凭证其实没落盘。
+      SpbLog.warn('导入会话时写入安全存储失败', {'error': e.toString()});
+      state = AuthState.failed(e.message);
+      return e.message;
+    }
+
+    await restore();
+    // restore 已经把失败写进 state（如写入后仍取不到可用 token）。
+    return state.isAuthenticated ? null : (state.message ?? '导入的会话不可用');
+  }
+
   /// 登出：清凭证并切到未登录。
   Future<void> signOut() async {
     await ref.read(sessionManagerProvider).logout();
@@ -377,15 +410,24 @@ final authControllerProvider = Provider<AuthActions>((ref) {
   return AuthActions(
     signIn: () => ref.read(authStateProvider.notifier).signIn(),
     signOut: () => ref.read(authStateProvider.notifier).signOut(),
+    importSession: (raw) =>
+        ref.read(authStateProvider.notifier).importSession(raw),
   );
 });
 
 /// 认证动作集合。
 class AuthActions {
-  const AuthActions({required this.signIn, required this.signOut});
+  const AuthActions({
+    required this.signIn,
+    required this.signOut,
+    required this.importSession,
+  });
 
   final Future<String?> Function() signIn;
   final Future<void> Function() signOut;
+
+  /// 粘贴导入已有会话，见 [AuthStateNotifier.importSession]。
+  final Future<String?> Function(String raw) importSession;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。
@@ -440,8 +482,9 @@ final searchChatProvider = Provider<SearchChat>((ref) {
 // ==================== 跨 group 待确认收件箱 ====================
 
 /// 待确认列表（首拉）。
-final pendingConfirmationsProvider =
-    FutureProvider<List<ChatConfirmation>>((ref) async {
+final pendingConfirmationsProvider = FutureProvider<List<ChatConfirmation>>((
+  ref,
+) async {
   return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
 });
 
@@ -693,18 +736,19 @@ final uploadRemoteWorkspaceProvider = Provider<RemoteWorkspace>((ref) {
 });
 
 /// 通知器工厂（把当前用户 id 绑进去，见桌面端同名 Provider 的说明）。
-final uploadNotifierFactoryProvider
-    = Provider<UploadNotifier Function(String)>((ref) {
-  final api = ref.watch(chatApiProvider);
-  return (String userId) => ChatApiUploadNotifier(api, userId);
-});
+final uploadNotifierFactoryProvider = Provider<UploadNotifier Function(String)>(
+  (ref) {
+    final api = ref.watch(chatApiProvider);
+    return (String userId) => ChatApiUploadNotifier(api, userId);
+  },
+);
 
 /// 本地文件读取器工厂（与桌面端同名；移动端目录恒定，但保留工厂形态
 /// 让两端动作 provider 逐字一致，差异只留在目录来源）。
-final uploadFileReaderFactoryProvider
-    = Provider<LocalFileReader Function(String)>((ref) {
-  return (String localRoot) => LocalFileSink(localRoot);
-});
+final uploadFileReaderFactoryProvider =
+    Provider<LocalFileReader Function(String)>((ref) {
+      return (String localRoot) => LocalFileSink(localRoot);
+    });
 
 /// 回传是否在途（与桌面端同名同构；移动端无托盘，但保留状态供 UI 禁用按钮）。
 final uploadInFlightProvider = NotifierProvider<UploadInFlightNotifier, bool>(

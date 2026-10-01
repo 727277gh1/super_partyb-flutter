@@ -265,6 +265,10 @@ class _LoginPage extends ConsumerWidget {
     return LoginPage(
       state: ref.watch(authStateProvider),
       onSignIn: () => ref.read(authControllerProvider).signIn(),
+      // 粘贴导入会话：IdP 未注册移动端 public client 时的唯一登录入口
+      //（深链闭环依赖 `partyb://oidc/callback` 注册，见 docs/mobile-oidc-deeplink.md）。
+      onImportSession: (raw) =>
+          ref.read(authControllerProvider).importSession(raw),
     );
   }
 }
@@ -668,7 +672,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     if (!await target.exists()) {
       await target.create(recursive: true);
     }
-    final safeName = p.basename(file.fileName.isEmpty ? 'agent-file' : file.fileName);
+    final safeName = p.basename(
+      file.fileName.isEmpty ? 'agent-file' : file.fileName,
+    );
     await File(p.join(target.path, safeName))
         .writeAsBytes(res.bytes!, flush: true);
   }
