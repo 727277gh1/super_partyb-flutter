@@ -109,7 +109,11 @@ class ChatApiUploadNotifier implements UploadNotifier {
 /// 「下行同步能拉全、回传预检拉不全」的诡异差异（预检把「清单里没有」判成
 /// 「远端已删」），故刻意复制其结构并逐条对齐。
 class UfsRemoteWorkspace implements RemoteWorkspace {
-  const UfsRemoteWorkspace(this.ufs, {this.pageSize = 100, this.maxPages = 200});
+  const UfsRemoteWorkspace(
+    this.ufs, {
+    this.pageSize = 100,
+    this.maxPages = 200,
+  });
 
   final UfsApi ufs;
 

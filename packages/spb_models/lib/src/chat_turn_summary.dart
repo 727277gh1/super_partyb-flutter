@@ -98,20 +98,21 @@ class ChatTurnSummary {
   bool get isRunning => status == 'running' || status == 'queued';
   bool get isFailed => status == 'failed' || hasError;
 
-  factory ChatTurnSummary.fromJson(Map<String, dynamic> json) => ChatTurnSummary(
-    turnId: (json['turn_id'] as String?) ?? '',
-    groupId: (json['group_id'] as String?) ?? '',
-    groupTitle: json['group_title'] as String?,
-    inputPreview: (json['input_preview'] as String?) ?? '',
-    status: (json['status'] as String?) ?? 'queued',
-    source: TurnSource.fromServer(json['derived_source'] as String?),
-    rawSource: json['source'] as String?,
-    createdAt: _date(json['created_at']) ?? DateTime.now(),
-    startedAt: _date(json['started_at']),
-    endedAt: _date(json['ended_at']),
-    hasError: json['has_error'] == true,
-    messageCount: _int(json['message_count']),
-  );
+  factory ChatTurnSummary.fromJson(Map<String, dynamic> json) =>
+      ChatTurnSummary(
+        turnId: (json['turn_id'] as String?) ?? '',
+        groupId: (json['group_id'] as String?) ?? '',
+        groupTitle: json['group_title'] as String?,
+        inputPreview: (json['input_preview'] as String?) ?? '',
+        status: (json['status'] as String?) ?? 'queued',
+        source: TurnSource.fromServer(json['derived_source'] as String?),
+        rawSource: json['source'] as String?,
+        createdAt: _date(json['created_at']) ?? DateTime.now(),
+        startedAt: _date(json['started_at']),
+        endedAt: _date(json['ended_at']),
+        hasError: json['has_error'] == true,
+        messageCount: _int(json['message_count']),
+      );
 
   static int _int(Object? v) {
     if (v is int) return v;

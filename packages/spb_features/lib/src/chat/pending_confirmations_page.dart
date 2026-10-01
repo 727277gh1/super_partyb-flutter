@@ -42,7 +42,7 @@ class PendingConfirmationsPage extends StatefulWidget {
   /// 解决确认（复用既有 `resolveConfirmation`）。参数（confirmation, action）。
   /// 为 null 时不展示解决按钮（只读/导航用途）。
   final Future<void> Function(ChatConfirmation confirmation, String action)?
-      onResolve;
+  onResolve;
 
   @override
   State<PendingConfirmationsPage> createState() =>
@@ -100,9 +100,8 @@ class _PendingConfirmationsPageState extends State<PendingConfirmationsPage> {
       if (!mounted) return;
       setState(() => _resolving.remove(c.id));
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('操作失败，请重试')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('操作失败，请重试')));
       }
     }
   }
@@ -235,9 +234,8 @@ class _ConfirmationTile extends StatelessWidget {
                     Expanded(
                       child: Text(
                         groupTitle ?? '未知对话',
-                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                              color: scheme.primary,
-                            ),
+                        style: Theme.of(context).textTheme.labelMedium
+                            ?.copyWith(color: scheme.primary),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -248,9 +246,8 @@ class _ConfirmationTile extends StatelessWidget {
             else
               Text(
                 groupTitle ?? '未知对话',
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
+                style: Theme.of(context).textTheme.labelMedium
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             const SizedBox(height: SpbSpacing.xs),
             // 问题正文。
@@ -282,9 +279,7 @@ class _ConfirmationTile extends StatelessWidget {
                   Expanded(
                     child: FilledButton.tonal(
                       key: const ValueKey('pending-confirmation-approve'),
-                      onPressed: resolving
-                          ? null
-                          : () => onResolve!('approve'),
+                      onPressed: resolving ? null : () => onResolve!('approve'),
                       child: const Text('继续'),
                     ),
                   ),
@@ -292,9 +287,7 @@ class _ConfirmationTile extends StatelessWidget {
                   Expanded(
                     child: OutlinedButton(
                       key: const ValueKey('pending-confirmation-reject'),
-                      onPressed: resolving
-                          ? null
-                          : () => onResolve!('reject'),
+                      onPressed: resolving ? null : () => onResolve!('reject'),
                       child: const Text('取消'),
                     ),
                   ),

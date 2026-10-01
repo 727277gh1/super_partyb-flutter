@@ -721,7 +721,8 @@ class _SettingsPageState extends State<SettingsPage> {
         _DirectoryCard(
           localRoot: draft.localRoot,
           onPick: _pickDirectory,
-          onOpenDirectory: widget.onOpenDirectory == null ||
+          onOpenDirectory:
+              widget.onOpenDirectory == null ||
                   draft.localRoot == null ||
                   draft.localRoot!.isEmpty
               ? null
@@ -730,9 +731,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   if (!mounted) return;
                   if (!ok) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('无法打开目录，请检查路径是否存在'),
-                      ),
+                      const SnackBar(content: Text('无法打开目录，请检查路径是否存在')),
                     );
                   }
                 },

@@ -15,29 +15,25 @@ AgentFileItem _file({
   String displayName = 'QWEN.md',
   String fileName = 'QWEN.md',
   TtsStreamKind? ttsKind,
-}) =>
-    AgentFileItem(
-      id: 'QWEN.md',
-      createdAt: DateTime.utc(2024, 3, 5),
-      relativePath: 'QWEN.md',
-      fileName: fileName,
-      displayName: displayName,
-      action: action,
-      ufsFileId: ufsFileId,
-      mimeType: mimeType,
-      sizeBytes: sizeBytes,
-      ttsKind: ttsKind,
-    );
+}) => AgentFileItem(
+  id: 'QWEN.md',
+  createdAt: DateTime.utc(2024, 3, 5),
+  relativePath: 'QWEN.md',
+  fileName: fileName,
+  displayName: displayName,
+  action: action,
+  ufsFileId: ufsFileId,
+  mimeType: mimeType,
+  sizeBytes: sizeBytes,
+  ttsKind: ttsKind,
+);
 
 void main() {
   testWidgets('created 卡渲染展示名、生命周期徽标与下载按钮', (t) async {
     await t.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: AgentFileCard(
-            file: _file(),
-            onDownload: (_) async {},
-          ),
+          body: AgentFileCard(file: _file(), onDownload: (_) async {}),
         ),
       ),
     );
@@ -110,9 +106,7 @@ void main() {
     await t.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: AgentFileCard(
-            file: _file(mimeType: 'image/png'),
-          ),
+          body: AgentFileCard(file: _file(mimeType: 'image/png')),
         ),
       ),
     );
@@ -122,9 +116,7 @@ void main() {
     await t.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: AgentFileCard(
-            file: _file(mimeType: 'application/pdf'),
-          ),
+          body: AgentFileCard(file: _file(mimeType: 'application/pdf')),
         ),
       ),
     );

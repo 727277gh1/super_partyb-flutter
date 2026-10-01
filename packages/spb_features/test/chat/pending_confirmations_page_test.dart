@@ -15,18 +15,17 @@ ChatConfirmation _confirmation({
   String status = 'pending',
   String reason = '是否继续执行任务？',
   DateTime? expiresAt,
-}) =>
-    ChatConfirmation(
-      id: id,
-      turnId: turnId,
-      groupId: groupId,
-      userId: 'usr_1',
-      kind: kind,
-      status: status,
-      createdAt: DateTime(2024, 3, 5),
-      decision: {'decision': 'need_confirmation', 'reason': reason},
-      expiresAt: expiresAt,
-    );
+}) => ChatConfirmation(
+  id: id,
+  turnId: turnId,
+  groupId: groupId,
+  userId: 'usr_1',
+  kind: kind,
+  status: status,
+  createdAt: DateTime(2024, 3, 5),
+  decision: {'decision': 'need_confirmation', 'reason': reason},
+  expiresAt: expiresAt,
+);
 
 void main() {
   testWidgets('待确认列表渲染 group 标题与问题正文', (t) async {
@@ -37,11 +36,7 @@ void main() {
           fetch: () async {
             final items = [
               _confirmation(reason: '第一个确认'),
-              _confirmation(
-                id: 'cf_2',
-                groupId: 'grp_2',
-                reason: '第二个确认',
-              ),
+              _confirmation(id: 'cf_2', groupId: 'grp_2', reason: '第二个确认'),
             ];
             fetched.add(items);
             return items;
@@ -53,8 +48,10 @@ void main() {
     await t.pumpAndSettle();
 
     expect(fetched, hasLength(1));
-    expect(find.byKey(const ValueKey('pending-confirmations-list')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('pending-confirmations-list')),
+      findsOneWidget,
+    );
     expect(find.text('对话一'), findsOneWidget);
     expect(find.text('对话二'), findsOneWidget);
     expect(find.text('第一个确认'), findsOneWidget);
@@ -99,8 +96,10 @@ void main() {
     );
     await t.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('pending-confirmations-empty')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('pending-confirmations-empty')),
+      findsOneWidget,
+    );
     expect(find.text('没有待确认的事项'), findsOneWidget);
   });
 
@@ -127,8 +126,10 @@ void main() {
 
     expect(resolved, ['cf_1:approve']);
     // 解决后从列表移除。
-    expect(find.byKey(const ValueKey('pending-confirmations-empty')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('pending-confirmations-empty')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('即将过期的项显示警告提示', (t) async {

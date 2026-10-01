@@ -15,18 +15,17 @@ ChatTurnSummary _turn({
   String status = 'completed',
   TurnSource source = TurnSource.chat,
   bool hasError = false,
-}) =>
-    ChatTurnSummary(
-      turnId: turnId,
-      groupId: groupId,
-      groupTitle: groupTitle,
-      inputPreview: inputPreview,
-      status: status,
-      source: source,
-      createdAt: DateTime(2024, 3, 5, 12, 0),
-      messageCount: 2,
-      hasError: hasError,
-    );
+}) => ChatTurnSummary(
+  turnId: turnId,
+  groupId: groupId,
+  groupTitle: groupTitle,
+  inputPreview: inputPreview,
+  status: status,
+  source: source,
+  createdAt: DateTime(2024, 3, 5, 12, 0),
+  messageCount: 2,
+  hasError: hasError,
+);
 
 void main() {
   testWidgets('最近轮次列表渲染状态徽标、来源、摘要与时间', (t) async {
@@ -91,10 +90,7 @@ void main() {
     );
     await t.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey('my-turns-empty')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const ValueKey('my-turns-empty')), findsOneWidget);
     expect(find.text('最近没有轮次记录'), findsOneWidget);
   });
 
@@ -102,10 +98,12 @@ void main() {
     var calls = 0;
     await t.pumpWidget(
       MaterialApp(
-        home: MyTurnsPage(fetch: () async {
-          calls++;
-          throw StateError('网络不可用');
-        }),
+        home: MyTurnsPage(
+          fetch: () async {
+            calls++;
+            throw StateError('网络不可用');
+          },
+        ),
       ),
     );
     await t.pumpAndSettle();

@@ -127,7 +127,9 @@ void main() {
         rel: [1, 2, 3, 4],
       });
       final state = SyncState(
-        files: {rel: _record([1, 2, 3, 9])}, // 大小相同，内容不同
+        files: {
+          rel: _record([1, 2, 3, 9]),
+        }, // 大小相同，内容不同
       );
 
       final result = await scanLocalDirtyFiles(
@@ -151,7 +153,9 @@ void main() {
           rel: [1, 2, 3],
         }),
         state: SyncState(
-          files: {rel: _record([1, 2, 3])},
+          files: {
+            rel: _record([1, 2, 3]),
+          },
         ),
         filter: _permissive,
         stateKey: workspaceStateKey,
@@ -186,7 +190,9 @@ void main() {
           rel: [1],
         }),
         state: SyncState(
-          files: {rel: _record([2, 2, 2])},
+          files: {
+            rel: _record([2, 2, 2]),
+          },
         ),
         filter: _permissive,
         stateKey: _gid,
@@ -206,7 +212,9 @@ void main() {
           rel: [1],
         }),
         state: SyncState(
-          files: {rel: _record([2])},
+          files: {
+            rel: _record([2]),
+          },
         ),
         filter: _permissive,
         stateKey: _gid,
@@ -221,7 +229,9 @@ void main() {
           rel: [1],
         }),
         state: SyncState(
-          files: {rel: _record([2])},
+          files: {
+            rel: _record([2]),
+          },
         ),
         filter: const SyncFilterConfig(), // includeMedia: false
         stateKey: workspaceStateKey,
@@ -237,7 +247,9 @@ void main() {
           rel: [1, 2, 3, 4, 5],
         }),
         state: SyncState(
-          files: {rel: _record([9])},
+          files: {
+            rel: _record([9]),
+          },
         ),
         filter: const SyncFilterConfig(maxFileSize: 4, includeMedia: true),
         stateKey: workspaceStateKey,
@@ -274,7 +286,9 @@ void main() {
       final result = await scanLocalDirtyFiles(
         reader: _Reader(const {}), // 读不到
         state: SyncState(
-          files: {rel: _record([1, 2])},
+          files: {
+            rel: _record([1, 2]),
+          },
         ),
         filter: _permissive,
         stateKey: workspaceStateKey,
@@ -306,7 +320,9 @@ void main() {
           rel: [1, 2, 3],
         }),
         state: SyncState(
-          files: {rel: _record([9, 9, 9])},
+          files: {
+            rel: _record([9, 9, 9]),
+          },
         ),
         filter: _permissive,
         stateKey: _gid,

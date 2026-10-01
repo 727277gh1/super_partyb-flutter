@@ -458,8 +458,7 @@ void main() {
   });
 
   group('同步页：回传改动', () {
-    testWidgets('扫描前不展示空态（避免「扫描没做完」与「没改动」混淆）',
-        (tester) async {
+    testWidgets('扫描前不展示空态（避免「扫描没做完」与「没改动」混淆）', (tester) async {
       await pumpSync(
         tester,
         pickDirectory: () async => null,
@@ -513,9 +512,11 @@ void main() {
 
       // 逐条：路径 + 体积（用户需要知道传的是什么、多大）。
       expect(
-        find.byKey(const ValueKey(
-          'upload-file-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md',
-        )),
+        find.byKey(
+          const ValueKey(
+            'upload-file-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md',
+          ),
+        ),
         findsOneWidget,
       );
       expect(find.textContaining('reports/a.md'), findsOneWidget);
@@ -596,8 +597,7 @@ void main() {
       expect(calls, 0);
     });
 
-    testWidgets('结果按各终态逐条渲染：已回传 / 冲突已物化 / 走快速捕获 / 已跳过 / 失败',
-        (tester) async {
+    testWidgets('结果按各终态逐条渲染：已回传 / 冲突已物化 / 走快速捕获 / 已跳过 / 失败', (tester) async {
       await pumpSync(
         tester,
         pickDirectory: () async => null,
@@ -657,9 +657,11 @@ void main() {
       // 逐条行里断言：摘要行也含「已回传」字样，故用 descendant 定位到该条目。
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey(
-            'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md',
-          )),
+          of: find.byKey(
+            const ValueKey(
+              'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md',
+            ),
+          ),
           matching: find.text('已回传'),
         ),
         findsOneWidget,
@@ -674,9 +676,11 @@ void main() {
       // 413 兜底条目说明走了附件通道（摘要行也含该字样，故限定到条目内）。
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey(
-            'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/c.pdf',
-          )),
+          of: find.byKey(
+            const ValueKey(
+              'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/c.pdf',
+            ),
+          ),
           matching: find.textContaining('已改走附件通道'),
         ),
         findsOneWidget,
@@ -684,18 +688,22 @@ void main() {
       // 跳过与失败条目给出原因。
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey(
-            'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/d.md',
-          )),
+          of: find.byKey(
+            const ValueKey(
+              'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/d.md',
+            ),
+          ),
           matching: find.textContaining('远端已没有这个文件'),
         ),
         findsOneWidget,
       );
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey(
-            'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/e.md',
-          )),
+          of: find.byKey(
+            const ValueKey(
+              'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/e.md',
+            ),
+          ),
           matching: find.textContaining('路径被拒'),
         ),
         findsOneWidget,
@@ -704,9 +712,11 @@ void main() {
       // 逐条 key 与 relPath 对应。
       for (final name in ['a.md', 'b.md', 'c.pdf', 'd.md', 'e.md']) {
         expect(
-          find.byKey(ValueKey(
-            'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/$name',
-          )),
+          find.byKey(
+            ValueKey(
+              'upload-result-a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/$name',
+            ),
+          ),
           findsOneWidget,
         );
       }
@@ -744,8 +754,7 @@ void main() {
       expect(find.textContaining('未能通知 agent'), findsOneWidget);
     });
 
-    testWidgets('扫描抛 SpbError 时显示错误条（不白屏、不展示空态）',
-        (tester) async {
+    testWidgets('扫描抛 SpbError 时显示错误条（不白屏、不展示空态）', (tester) async {
       await pumpSync(
         tester,
         pickDirectory: () async => null,

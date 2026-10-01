@@ -1069,8 +1069,10 @@ void main() {
       // 会把全部文件判成脏的）。
       expect(contentHashOf([1, 2, 3, 4, 5]), contentHashOf([1, 2, 3, 4, 5]));
       // 已知向量：sha256('hello') = 2cf24dba5fb0a30e26e83b2ac5b9e29e...
-      expect(contentHashOf('hello'.codeUnits),
-          '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
+      expect(
+        contentHashOf('hello'.codeUnits),
+        '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+      );
     });
 
     test('下载成功后记录含 contentHash（对实际写入字节计算）', () async {
@@ -1083,7 +1085,10 @@ void main() {
         filter: _permissive,
       );
 
-      expect(result.state.files['a.md']!.contentHash, contentHashOf([1, 2, 3, 4, 5]));
+      expect(
+        result.state.files['a.md']!.contentHash,
+        contentHashOf([1, 2, 3, 4, 5]),
+      );
     });
 
     test('304 后沿用旧 contentHash（内容未重下，本地仍是那一份）', () async {
@@ -1096,11 +1101,7 @@ void main() {
       final result = await engine.run(
         remote: [_remote('a.md', etag: 'W/"2"', size: 10)],
         state: _stateWith({
-          'a.md': SyncedFile(
-            etag: 'W/"1"',
-            size: 5,
-            contentHash: oldHash,
-          ),
+          'a.md': SyncedFile(etag: 'W/"1"', size: 5, contentHash: oldHash),
         }),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,

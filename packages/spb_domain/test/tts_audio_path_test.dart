@@ -8,9 +8,7 @@ import 'package:test/test.dart';
 void main() {
   group('语音产物 parseTTSAudioPath', () {
     test('合法 tts 路径识别为语音产物', () {
-      final m = parseTTSAudioPath(
-        'reports/tts/c7ad0b62/message_6.mp3',
-      );
+      final m = parseTTSAudioPath('reports/tts/c7ad0b62/message_6.mp3');
       expect(m, isNotNull);
       expect(m!.turnId, 'c7ad0b62');
       expect(m.kind, TtsStreamKind.reply);
@@ -45,51 +43,27 @@ void main() {
         parseTTSAudioPath('workspace/reports/tts/t1/message_1.mp3'),
         isNull,
       );
-      expect(
-        parseTTSAudioPath('/abs/reports/tts/t1/message_1.mp3'),
-        isNull,
-      );
+      expect(parseTTSAudioPath('/abs/reports/tts/t1/message_1.mp3'), isNull);
     });
 
     test('turn_id 含非法字符不识别', () {
       // turn_id 仅允许 [A-Za-z0-9_-]。
-      expect(
-        parseTTSAudioPath('reports/tts/a b/message_1.mp3'),
-        isNull,
-      );
-      expect(
-        parseTTSAudioPath('reports/tts/a.b/message_1.mp3'),
-        isNull,
-      );
+      expect(parseTTSAudioPath('reports/tts/a b/message_1.mp3'), isNull);
+      expect(parseTTSAudioPath('reports/tts/a.b/message_1.mp3'), isNull);
     });
 
     test('文件名无法解析 part 不识别', () {
-      expect(
-        parseTTSAudioPath('reports/tts/t1/random.mp3'),
-        isNull,
-      );
+      expect(parseTTSAudioPath('reports/tts/t1/random.mp3'), isNull);
     });
 
     test('part 排序键：message_{seq}[_n] = seq*1000+n', () {
-      expect(
-        parseTTSAudioPath('reports/tts/t1/message_2.mp3')!.part,
-        2000,
-      );
-      expect(
-        parseTTSAudioPath('reports/tts/t1/message_2_3.mp3')!.part,
-        2003,
-      );
+      expect(parseTTSAudioPath('reports/tts/t1/message_2.mp3')!.part, 2000);
+      expect(parseTTSAudioPath('reports/tts/t1/message_2_3.mp3')!.part, 2003);
     });
 
     test('part 排序键：narration_/speech_/filesummary_ 取末段', () {
-      expect(
-        parseTTSAudioPath('reports/tts/t1/narration_t1_5.mp3')!.part,
-        5,
-      );
-      expect(
-        parseTTSAudioPath('reports/tts/t1/speech_t1_7.mp3')!.part,
-        7,
-      );
+      expect(parseTTSAudioPath('reports/tts/t1/narration_t1_5.mp3')!.part, 5);
+      expect(parseTTSAudioPath('reports/tts/t1/speech_t1_7.mp3')!.part, 7);
     });
   });
 }

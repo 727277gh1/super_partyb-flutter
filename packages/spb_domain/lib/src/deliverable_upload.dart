@@ -448,8 +448,7 @@ class UploadConflict extends UploadPrecheck {
   final String? recordedEtag;
 
   @override
-  String toString() =>
-      'UploadConflict(远端 $remoteEtag vs 记录 $recordedEtag)';
+  String toString() => 'UploadConflict(远端 $remoteEtag vs 记录 $recordedEtag)';
 }
 
 /// 远端已经没有这份文件了（软删除，或清单里不存在）。
@@ -494,7 +493,9 @@ UploadPrecheck precheckUpload({
 
   final remoteEtag = remote.etag;
   final recordedEtag = recorded.etag;
-  if (remoteEtag != null && recordedEtag != null && remoteEtag == recordedEtag) {
+  if (remoteEtag != null &&
+      recordedEtag != null &&
+      remoteEtag == recordedEtag) {
     return UploadClean(remoteEtag: remoteEtag);
   }
   return UploadConflict(remoteEtag: remoteEtag, recordedEtag: recordedEtag);

@@ -339,10 +339,7 @@ void main() {
     test('目录不是文件：读取报错而不是返回空', () async {
       final sink = LocalFileSink(root.path);
       await sink.write('reports/a.md', [1]);
-      await expectLater(
-        sink.readBytes('reports'),
-        throwsA(isA<SpbError>()),
-      );
+      await expectLater(sink.readBytes('reports'), throwsA(isA<SpbError>()));
     });
   });
 

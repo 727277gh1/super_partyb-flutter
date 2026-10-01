@@ -26,7 +26,8 @@ import 'package:crypto/crypto.dart' as crypto;
 /// 「下载时记录 hash」（[SyncedFile.contentHash]）与「回传前比对本地是否被改」
 /// 必须用**同一种**算法与编码，否则脏检测会把全部文件都判成脏的。收敛到一处，
 /// 这个不变量就不依赖调用方的自觉。
-String contentHashOf(List<int> bytes) => crypto.sha256.convert(bytes).toString();
+String contentHashOf(List<int> bytes) =>
+    crypto.sha256.convert(bytes).toString();
 
 /// 单个已同步文件的记录。
 class SyncedFile {

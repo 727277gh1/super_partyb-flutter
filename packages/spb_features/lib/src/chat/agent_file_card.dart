@@ -46,6 +46,7 @@ class _AgentFileCardState extends State<AgentFileCard> {
   List<int>? _thumbnail;
   bool _loadingThumb = false;
   bool _downloading = false;
+
   /// narration 默认折叠（见 [_buildVoiceTile]）。
   bool _narrationExpanded = false;
 
@@ -203,16 +204,8 @@ class _AgentFileCardState extends State<AgentFileCard> {
   Widget _lifecycleBadge(ColorScheme scheme) {
     // action 取阶段优先级（deleted > modified > created），与归约一致。
     final (IconData icon, Color bg, String label) = switch (f.action) {
-      'deleted' => (
-        Icons.delete_outline,
-        scheme.errorContainer,
-        '已删除',
-      ),
-      'modified' => (
-        Icons.edit_outlined,
-        scheme.tertiaryContainer,
-        '已更新',
-      ),
+      'deleted' => (Icons.delete_outline, scheme.errorContainer, '已删除'),
+      'modified' => (Icons.edit_outlined, scheme.tertiaryContainer, '已更新'),
       _ => (Icons.add_circle_outline, scheme.secondaryContainer, '已生成'),
     };
     return Container(
@@ -220,10 +213,7 @@ class _AgentFileCardState extends State<AgentFileCard> {
         horizontal: SpbSpacing.xs,
         vertical: SpbSpacing.xxs,
       ),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: SpbRadius.cardAll,
-      ),
+      decoration: BoxDecoration(color: bg, borderRadius: SpbRadius.cardAll),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -318,16 +308,13 @@ class _AgentFileCardState extends State<AgentFileCard> {
           IconButton(
             key: const ValueKey('tts-narration-toggle'),
             icon: Icon(
-              _narrationExpanded
-                  ? Icons.expand_less
-                  : Icons.expand_more,
+              _narrationExpanded ? Icons.expand_less : Icons.expand_more,
             ),
             tooltip: _narrationExpanded ? '收起' : '展开',
             onPressed: f.isDeleted
                 ? null
-                : () => setState(
-                      () => _narrationExpanded = !_narrationExpanded,
-                    ),
+                : () =>
+                      setState(() => _narrationExpanded = !_narrationExpanded),
           ),
       ],
     );

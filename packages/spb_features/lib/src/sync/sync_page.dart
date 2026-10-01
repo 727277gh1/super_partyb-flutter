@@ -214,9 +214,8 @@ class _SyncPageState extends State<SyncPage> {
     final ok = await cb(path);
     if (!mounted) return;
     if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法打开目录，请检查路径是否存在')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('无法打开目录，请检查路径是否存在')));
     }
   }
 
@@ -671,9 +670,7 @@ class _UploadSection extends StatelessWidget {
               children: [
                 const Icon(Icons.upload_outlined),
                 const SizedBox(width: SpbSpacing.sm),
-                Expanded(
-                  child: Text('回传改动', style: textTheme.titleSmall),
-                ),
+                Expanded(child: Text('回传改动', style: textTheme.titleSmall)),
                 TextButton.icon(
                   key: const ValueKey('upload-scan-button'),
                   onPressed: disabled || scanning || uploading ? null : onScan,
@@ -742,10 +739,9 @@ class _UploadSection extends StatelessWidget {
               const SizedBox(height: SpbSpacing.xs),
               FilledButton.icon(
                 key: const ValueKey('upload-submit-button'),
-                onPressed:
-                    disabled || uploading || selected.isEmpty
-                        ? null
-                        : onUpload,
+                onPressed: disabled || uploading || selected.isEmpty
+                    ? null
+                    : onUpload,
                 icon: uploading
                     ? const SizedBox(
                         width: SpbSpacing.md,
@@ -829,10 +825,7 @@ class _UploadResultCard extends StatelessWidget {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '· ${item.relPath}：',
-                      style: textTheme.bodySmall,
-                    ),
+                    Text('· ${item.relPath}：', style: textTheme.bodySmall),
                     const SizedBox(width: SpbSpacing.xxs),
                     Expanded(
                       child: Text(

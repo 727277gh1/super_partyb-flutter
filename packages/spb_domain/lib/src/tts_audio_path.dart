@@ -78,11 +78,7 @@ TtsAudioMeta? parseTTSAudioPath(String relPath) {
   final part = ttsPartNumber(fileName);
   if (part == null) return null;
 
-  return TtsAudioMeta(
-    turnId: turn,
-    part: part,
-    kind: ttsStreamKind(fileName),
-  );
+  return TtsAudioMeta(turnId: turn, part: part, kind: ttsStreamKind(fileName));
 }
 
 /// 解析语音块文件名的稳定排序键（对齐后端 `agentfilerender.ttsPartNumber`）。
@@ -135,19 +131,27 @@ TtsStreamKind ttsStreamKind(String fileName) {
 
 bool _isTurnId(String s) {
   for (final c in s.codeUnits) {
-    final ok = (c >= 0x30 && c <= 0x39) // 0-9
-        || (c >= 0x41 && c <= 0x5A) // A-Z
-        || (c >= 0x61 && c <= 0x7A) // a-z
-        || c == 0x2D // -
-        || c == 0x5F; // _
+    final ok =
+        (c >= 0x30 && c <= 0x39) // 0-9
+        ||
+        (c >= 0x41 && c <= 0x5A) // A-Z
+        ||
+        (c >= 0x61 && c <= 0x7A) // a-z
+        ||
+        c ==
+            0x2D // -
+            ||
+        c == 0x5F; // _
     if (!ok) return false;
   }
   return true;
 }
 
 String _normalize(String path) {
-  if (!path.contains('\\') && !path.contains('//') &&
-      !path.startsWith('/') && !path.endsWith('/')) {
+  if (!path.contains('\\') &&
+      !path.contains('//') &&
+      !path.startsWith('/') &&
+      !path.endsWith('/')) {
     return path;
   }
   return path

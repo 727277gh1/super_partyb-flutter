@@ -189,9 +189,7 @@ class _Remote implements RemoteWorkspace {
   }) async =>
       // 真实实现按 pathPrefix 过滤；桩直接给全量，让用例依赖它自己匹配
       // ——但为了验证「用例按 group 前缀过滤」这件事，这里做个粗过滤。
-      entries
-          .where((e) => e.path.startsWith(pathPrefix))
-          .toList();
+      entries.where((e) => e.path.startsWith(pathPrefix)).toList();
 
   @override
   Future<List<int>> downloadBytes(String fileId) async {
@@ -285,14 +283,7 @@ DeliverableUploadUseCase _useCaseRaw({
   store.data[workspaceStateKey] = state ?? _state();
   final reader = _Reader(localFiles);
   final remote = _Remote(remoteEntries);
-  return (
-    reader,
-    store,
-    remote,
-    _Uploader(),
-    _Notifier(),
-    _QuickCapture(),
-  );
+  return (reader, store, remote, _Uploader(), _Notifier(), _QuickCapture());
 }
 
 void main() {
@@ -301,7 +292,9 @@ void main() {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         // 远端 etag 与记录一致 → clean。
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
-        localFiles: {_rel: [9, 9, 9]}, // 本地被改过
+        localFiles: {
+          _rel: [9, 9, 9],
+        }, // 本地被改过
       );
       final uc = _useCase(
         reader: reader,
@@ -345,7 +338,9 @@ void main() {
     test('同一文件重跑：requestId 不变（服务端幂等去重，不产生重复消息）', () async {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
       final uc = _useCase(
         reader: reader,
@@ -398,17 +393,18 @@ void main() {
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
         localFiles: {_rel: _human}, // 与记录的 hash 一致
       );
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
 
       expect(report.items, isEmpty);
       expect(report.unchanged, 1);
@@ -425,19 +421,22 @@ void main() {
           },
         ),
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
 
       expect(report.items, isEmpty);
       expect(report.undetectable, 1);
@@ -450,7 +449,9 @@ void main() {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         // 远端 etag 已变（agent 写过）→ conflict。
         remoteEntries: [_remoteEntry(etag: 'W/"2"')],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
       final uc = _useCase(
         reader: reader,
@@ -503,50 +504,53 @@ void main() {
     test('agent 版本下载失败 → 不写目标路径（防止弄丢 agent 版本）', () async {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         remoteEntries: [_remoteEntry(etag: 'W/"2"')],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
       remote.downloadError = const NetworkError('超时');
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
 
       expect(report.items.single.outcome, UploadOutcome.failed);
       expect(report.items.single.reason, contains('下载 agent 版本失败'));
-      expect(
-        uploader.calls,
-        isEmpty,
-        reason: '目标路径不能先写：否则 agent 新版本就丢了',
-      );
+      expect(uploader.calls, isEmpty, reason: '目标路径不能先写：否则 agent 新版本就丢了');
       expect(notifier.calls, isEmpty);
     });
 
     test('副本上传失败 → 报部分成功状态（人类版本已上去）', () async {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         remoteEntries: [_remoteEntry(etag: 'W/"2"')],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
-      uploader.errors['_conflict/2026-09-30T12-00-00Z-x.md.conflict'] =
-          (call) => const HttpError(500, '存储故障');
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-        conflictTimestamp: '2026-09-30T12:00:00Z',
-      );
+      uploader.errors['_conflict/2026-09-30T12-00-00Z-x.md.conflict'] = (
+        call,
+      ) => const HttpError(500, '存储故障');
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+            conflictTimestamp: '2026-09-30T12:00:00Z',
+          );
 
       expect(report.items.single.outcome, UploadOutcome.failed);
       expect(report.items.single.reason, contains('人类版本已上传'));
@@ -564,19 +568,20 @@ void main() {
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
         localFiles: {_rel: List.filled(2 * 1024 * 1024, 7)},
       );
-      uploader.errors['reports/x.md'] =
-          (call) => const HttpError(413, '文件超过 workspace 同步大小上限');
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      uploader.errors['reports/x.md'] = (call) =>
+          const HttpError(413, '文件超过 workspace 同步大小上限');
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
 
       final item = report.items.single;
       expect(item.outcome, UploadOutcome.fallbackQuickCapture);
@@ -604,20 +609,20 @@ void main() {
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
         localFiles: {_rel: List.filled(2 * 1024 * 1024, 7)},
       );
-      uploader.errors['reports/x.md'] =
-          (call) => const HttpError(413, '超限');
+      uploader.errors['reports/x.md'] = (call) => const HttpError(413, '超限');
       quick.uploadError = const NetworkError('断网');
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
       expect(report.items.single.outcome, UploadOutcome.failed);
       expect(report.items.single.reason, contains('附件通道上传失败'));
     });
@@ -627,20 +632,20 @@ void main() {
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
         localFiles: {_rel: List.filled(2 * 1024 * 1024, 7)},
       );
-      uploader.errors['reports/x.md'] =
-          (call) => const HttpError(413, '超限');
+      uploader.errors['reports/x.md'] = (call) => const HttpError(413, '超限');
       quick.enqueueError = const NetworkError('断网');
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
       expect(report.items.single.outcome, UploadOutcome.failed);
       expect(report.items.single.reason, contains('投递失败'));
     });
@@ -650,19 +655,22 @@ void main() {
     test('远端已软删除 → skippedRemoteDeleted，不覆盖不通知', () async {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         remoteEntries: [_remoteEntry(deleted: true)],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
 
       expect(report.items.single.outcome, UploadOutcome.skippedRemoteDeleted);
       expect(uploader.calls, isEmpty);
@@ -672,39 +680,45 @@ void main() {
     test('远端清单里没有该条目 → 同样按 remoteDeleted 处理', () async {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
         remoteEntries: const [], // 清单为空
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
       expect(report.items.single.outcome, UploadOutcome.skippedRemoteDeleted);
     });
 
     test('远端清单拉取失败 → 该 group 全部候选记为失败（不静默跳过）', () async {
       final (reader, store, _, uploader, notifier, quick) = _defaults(
         remoteEntries: const [],
-        localFiles: {_rel: [9, 9, 9]},
+        localFiles: {
+          _rel: [9, 9, 9],
+        },
       );
       final brokenRemote = _BrokenRemote();
-      final report = await _useCaseRaw(
-        reader: reader,
-        store: store,
-        remote: brokenRemote,
-        uploader: uploader,
-        notifier: notifier,
-        quickCapture: quick,
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-      );
+      final report =
+          await _useCaseRaw(
+            reader: reader,
+            store: store,
+            remote: brokenRemote,
+            uploader: uploader,
+            notifier: notifier,
+            quickCapture: quick,
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+          );
       expect(report.items.single.outcome, UploadOutcome.failed);
       expect(report.items.single.reason, contains('拉取远端清单失败'));
     });
@@ -735,18 +749,19 @@ void main() {
         _remoteEntry(groupRel: 'reports/y.md', etag: 'W/"1"'),
       ]);
       final uploader = _Uploader();
-      final report = await _useCase(
-        reader: reader,
-        store: store,
-        remote: remote,
-        uploader: uploader,
-        notifier: _Notifier(),
-        quickCapture: _QuickCapture(),
-      ).run(
-        scope: const SyncWorkspaceScope(),
-        filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
-        only: {rel2},
-      );
+      final report =
+          await _useCase(
+            reader: reader,
+            store: store,
+            remote: remote,
+            uploader: uploader,
+            notifier: _Notifier(),
+            quickCapture: _QuickCapture(),
+          ).run(
+            scope: const SyncWorkspaceScope(),
+            filter: const SyncFilterConfig(maxFileSize: 0, includeMedia: true),
+            only: {rel2},
+          );
 
       expect(report.items, hasLength(1));
       expect(report.items.single.relPath, rel2);

@@ -94,10 +94,7 @@ abstract interface class QuickCaptureSender {
     String? contentType,
   });
 
-  Future<void> enqueueQuickCapture({
-    String input,
-    List<String> attachments,
-  });
+  Future<void> enqueueQuickCapture({String input, List<String> attachments});
 }
 
 /// 发聊天消息（唯一实现：`ChatApi.sendMessage`）。
@@ -425,10 +422,7 @@ class DeliverableUploadUseCase {
       }
 
       final remoteEntry = remoteByGroup[target.groupId]?[target.groupRelPath];
-      final check = precheckUpload(
-        remote: remoteEntry,
-        recorded: record,
-      );
+      final check = precheckUpload(remote: remoteEntry, recorded: record);
 
       items.add(
         await _handleOne(
@@ -782,8 +776,7 @@ class DeliverableUploadUseCase {
     final String input;
     switch (kind) {
       case _NotifyKind.direct:
-        input =
-            '我修改了交付物 $filename（$path）。请基于新版本继续，旧内容已过时。';
+        input = '我修改了交付物 $filename（$path）。请基于新版本继续，旧内容已过时。';
       case _NotifyKind.conflict:
         input =
             '我修改了交付物 $filename（$path），同时你也有一个新版本，'
