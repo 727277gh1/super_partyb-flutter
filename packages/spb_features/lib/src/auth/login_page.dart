@@ -180,68 +180,70 @@ class _LoginPageState extends State<LoginPage> {
 
     return Scaffold(
       body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Padding(
-            padding: SpbSpacing.pagePadding,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Icon(
-                  Icons.shield_outlined,
-                  size: SpbSpacing.xxxl,
-                  color: scheme.primary,
-                ),
-                const SizedBox(height: SpbSpacing.lg),
-                Text(
-                  widget.title,
-                  textAlign: TextAlign.center,
-                  style: textTheme.headlineSmall,
-                ),
-                const SizedBox(height: SpbSpacing.sm),
-                Text(
-                  widget.subtitle,
-                  textAlign: TextAlign.center,
-                  style: textTheme.bodyMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: SpbSpacing.xl),
-                if (error != null) ...[
-                  ErrorBanner(
-                    key: const ValueKey('login-error'),
-                    message: error,
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Padding(
+              padding: SpbSpacing.pagePadding,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Icon(
+                    Icons.shield_outlined,
+                    size: SpbSpacing.xxxl,
+                    color: scheme.primary,
                   ),
                   const SizedBox(height: SpbSpacing.lg),
-                ],
-                FilledButton.icon(
-                  key: const ValueKey('login-sso-button'),
-                  // 加载中禁用，避免重复发起授权（会产生多个 state）。
-                  onPressed: _busy ? null : _handleSignIn,
-                  icon: _busy
-                      ? const SizedBox(
-                          width: SpbSpacing.lg,
-                          height: SpbSpacing.lg,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.login),
-                  label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
-                ),
-                const SizedBox(height: SpbSpacing.md),
-                Text(
-                  '登录将在系统浏览器中完成，'
-                  '完成后自动返回本应用（本地回环回调）。',
-                  textAlign: TextAlign.center,
-                  style: textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
+                  Text(
+                    widget.title,
+                    textAlign: TextAlign.center,
+                    style: textTheme.headlineSmall,
                   ),
-                ),
-                if (widget.onImportSession != null) ...[
-                  const SizedBox(height: SpbSpacing.lg),
-                  _buildImportSection(context),
+                  const SizedBox(height: SpbSpacing.sm),
+                  Text(
+                    widget.subtitle,
+                    textAlign: TextAlign.center,
+                    style: textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: SpbSpacing.xl),
+                  if (error != null) ...[
+                    ErrorBanner(
+                      key: const ValueKey('login-error'),
+                      message: error,
+                    ),
+                    const SizedBox(height: SpbSpacing.lg),
+                  ],
+                  FilledButton.icon(
+                    key: const ValueKey('login-sso-button'),
+                    // 加载中禁用，避免重复发起授权（会产生多个 state）。
+                    onPressed: _busy ? null : _handleSignIn,
+                    icon: _busy
+                        ? const SizedBox(
+                            width: SpbSpacing.lg,
+                            height: SpbSpacing.lg,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.login),
+                    label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
+                  ),
+                  const SizedBox(height: SpbSpacing.md),
+                  Text(
+                    '登录将在系统浏览器中完成，'
+                    '完成后自动返回本应用（本地回环回调）。',
+                    textAlign: TextAlign.center,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  if (widget.onImportSession != null) ...[
+                    const SizedBox(height: SpbSpacing.lg),
+                    _buildImportSection(context),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

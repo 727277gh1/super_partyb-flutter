@@ -22,7 +22,16 @@ void main() {
     required Future<String?> Function() onSignIn,
     AuthState state = const AuthState(),
     Future<String?> Function(String raw)? onImportSession,
+    Size? size,
   }) async {
+    // 窗口尺寸：默认 800×600。改小可复现「内容过高溢出」这类布局问题
+    // （手机横屏 / 错误 banner 撑开的场景）。
+    if (size != null) {
+      tester.view
+        ..physicalSize = size * tester.view.devicePixelRatio
+        ..devicePixelRatio = tester.view.devicePixelRatio;
+      addTearDown(tester.view.reset);
+    }
     await tester.pumpWidget(
       MaterialApp(
         home: LoginPage(
@@ -134,7 +143,9 @@ void main() {
       await tester.pump();
 
       // 加载态：文案变化 + 按钮禁用。
-      expect(find.text('正在跳转…'), findsOneWidget);
+      // （文案在桌面端闭环提交中从「正在跳转…」改为「正在登录…」，
+      // 当时测试未同步，这里对齐实现。）
+      expect(find.text('正在登录…'), findsOneWidget);
       final button = tester.widget<FilledButton>(
         find.byKey(const ValueKey('login-sso-button')),
       );
@@ -366,6 +377,38 @@ void main() {
       expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
       expect(find.textContaining('导入失败'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('小窗口 + 展开的导入区 + 错误 banner 不溢出（回归）', (tester) async {
+      // 测试窗口默认 800×600；错误 banner + 展开的导入区（多行输入框）叠加后
+      // 曾把 Column 撑出 16px（RenderFlex overflow），根布局缺滚动容器。
+      // 手机横屏（高度 < 500）更容易命中。这里用 600×420 直接复现当时的溢出。
+      await pumpLogin(
+        tester,
+        size: const Size(600, 420),
+        onSignIn: () async => null,
+        onImportSession: (raw) async => '认不出粘贴的内容',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-import-session')));
+      await tester.pumpAndSettle();
+      // 小窗口下按钮初始在视口外，先滚到可见再点（真实用户同样要滚一下）。
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-import-field')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('login-import-field')),
+        'garbage',
+      );
+      await tester.pump();
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-import-confirm')),
+      );
+      await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(tester.takeException(), isNull, reason: '错误态不得溢出（可滚动兑底）');
     });
   });
 
