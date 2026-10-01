@@ -54,6 +54,7 @@ export 'src/event_reducer.dart';
 export 'src/gate_decision.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
+export 'src/spec_ui.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
