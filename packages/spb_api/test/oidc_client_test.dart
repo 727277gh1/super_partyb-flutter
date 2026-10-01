@@ -605,11 +605,7 @@ void main() {
       final uri = Uri.parse(SpbEnv.oidcRedirectUri);
       expect(uri.scheme, 'http', reason: 'loopback 回调用 http（不出本机）');
       expect(uri.host, '127.0.0.1', reason: 'RFC 8252 §7.3 要求回环 IP 字面量');
-      expect(
-        uri.hasPort,
-        isFalse,
-        reason: '注册值不含端口：端口由客户端动态选，fosite 负责通配',
-      );
+      expect(uri.hasPort, isFalse, reason: '注册值不含端口：端口由客户端动态选，fosite 负责通配');
       expect(uri.path, '/callback');
       // 不得回退到被 IdP 拒绝的自定义 scheme。
       expect(uri.scheme, isNot('partyb'));

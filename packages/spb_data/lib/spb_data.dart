@@ -6,5 +6,6 @@ library;
 
 export 'src/database.dart';
 export 'src/preferences_store.dart';
+export 'src/secure_pending_auth_store.dart';
 export 'src/secure_token_store.dart';
 export 'src/sync_state_store.dart';

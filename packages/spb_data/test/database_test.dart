@@ -67,12 +67,17 @@ void main() {
       addTearDown(db.close);
       final store = DriftSyncStateStore(db);
 
-      const hash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+      const hash =
+          '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
       await store.save(
         workspaceStateKey,
         const SyncState(
           files: {
-            'g1/with-hash.md': SyncedFile(etag: 'W/"1"', size: 5, contentHash: hash),
+            'g1/with-hash.md': SyncedFile(
+              etag: 'W/"1"',
+              size: 5,
+              contentHash: hash,
+            ),
             // 旧记录（本列引入前写入）：必须读回 null，而不是空串——空串会
             // 让脏检测把它当成一个「有效的 hash」而永远判为脏。
             'g1/no-hash.md': SyncedFile(etag: 'W/"1"', size: 5),
@@ -470,5 +475,8 @@ class _V1User implements QueryExecutorUser {
   int get schemaVersion => 1;
 
   @override
-  Future<void> beforeOpen(QueryExecutor executor, OpeningDetails details) async {}
+  Future<void> beforeOpen(
+    QueryExecutor executor,
+    OpeningDetails details,
+  ) async {}
 }

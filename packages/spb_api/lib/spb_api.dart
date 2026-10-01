@@ -14,6 +14,7 @@ export 'src/loopback_redirect_server.dart';
 export 'src/miniapp_api.dart';
 export 'src/oidc_callback.dart';
 export 'src/oidc_client.dart';
+export 'src/pending_auth_store.dart';
 export 'src/sse_client.dart';
 export 'src/session_credential.dart';
 export 'src/token_store.dart';

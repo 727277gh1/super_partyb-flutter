@@ -17,6 +17,9 @@ import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_platform/spb_platform.dart';
 
+import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+
 import 'package:spb_mobile/app.dart';
 import 'package:spb_mobile/providers.dart';
 import 'package:spb_mobile/router.dart';
@@ -257,6 +260,46 @@ StoredTokens _freshTokens() => StoredTokens(
   accessToken: 'at_test',
   expiresAt: DateTime.now().toUtc().add(const Duration(days: 1)),
 );
+
+/// `flutter_secure_storage` 的内存假后端（无平台通道环境下替换真实现）。
+class _FakeSecureStoragePlatform extends FlutterSecureStoragePlatform
+    with MockPlatformInterfaceMixin {
+  final Map<String, String> data = {};
+
+  @override
+  Future<void> write({
+    required String key,
+    required String value,
+    required Map<String, String> options,
+  }) async => data[key] = value;
+
+  @override
+  Future<String?> read({
+    required String key,
+    required Map<String, String> options,
+  }) async => data[key];
+
+  @override
+  Future<bool> containsKey({
+    required String key,
+    required Map<String, String> options,
+  }) async => data.containsKey(key);
+
+  @override
+  Future<void> delete({
+    required String key,
+    required Map<String, String> options,
+  }) async => data.remove(key);
+
+  @override
+  Future<Map<String, String>> readAll({
+    required Map<String, String> options,
+  }) async => Map.of(data);
+
+  @override
+  Future<void> deleteAll({required Map<String, String> options}) async =>
+      data.clear();
+}
 
 void main() {
   testWidgets('首页渲染对话列表 + 底部标签栏', (tester) async {
@@ -1618,6 +1661,44 @@ void main() {
         findsOneWidget,
         reason: '移动端必须展示粘贴导入入口（深链闭环依赖 IdP 注册）',
       );
+    });
+
+    testWidgets('待验证登录请求持久化：进程重启后仍可消费（回调能完成换 token）', (tester) async {
+      // 深链登录的闭环条件：授权流程把用户带到外部浏览器，应用可能在此期间
+      // 被系统回收。state/verifier 若只存内存，重启后回调会因「没有进行中的
+      // 登录」被拒。这里模拟该场景：put → 丢弃整个容器（进程死亡）→ 新容器
+      // 从加密存储消费。内存实现会在第二步返回 null。
+      //
+      // 平台存储用假后端（flutter_secure_storage 无平台通道，真调用抛
+      // MissingPluginException）；持久化行为本身（TTL、round-trip）由
+      // spb_data 的 secure_pending_auth_store_test.dart 覆盖，这里断言
+      // 「装配点选了持久实现且整条链路真的通」。
+      final fakePlatform = _FakeSecureStoragePlatform();
+      FlutterSecureStoragePlatform.instance = fakePlatform;
+      addTearDown(() {
+        FlutterSecureStoragePlatform.instance = _FakeSecureStoragePlatform();
+      });
+
+      const request = PendingAuthRequest(
+        state: 'st_restart',
+        pkce: PkcePair(verifier: 'v_restart', challenge: 'ch_restart'),
+      );
+
+      // 进程 1：发起登录（写入持久存储）。
+      final container1 = ProviderContainer();
+      addTearDown(container1.dispose);
+      await container1.read(pendingAuthStoreProvider).put(request);
+
+      // 进程 2：系统回收后重启，新容器从加密存储恢复。
+      final container2 = ProviderContainer();
+      addTearDown(container2.dispose);
+      final restored = await container2
+          .read(pendingAuthStoreProvider)
+          .consume();
+
+      expect(restored, isNotNull, reason: '进程被回收后回调必须仍能完成 state 校验');
+      expect(restored!.state, 'st_restart');
+      expect(restored.pkce.verifier, 'v_restart');
     });
   });
 }

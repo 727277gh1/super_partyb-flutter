@@ -94,7 +94,9 @@ class AuthDeepLinkReceiver {
   /// 去请求 token 端点。
   ///
   /// 每次成功取用后应清除（一次性），见 [PendingAuthRequestStore.consume]。
-  final PendingAuthRequest? Function() pendingState;
+  ///
+  /// 异步：生产实现走平台安全存储（一次平台通道往返）。
+  final Future<PendingAuthRequest?> Function() pendingState;
 
   /// 错误上报（用户可见文案）。
   final void Function(String message)? onError;
@@ -131,7 +133,7 @@ class AuthDeepLinkReceiver {
       return;
     }
 
-    final pending = pendingState();
+    final pending = await pendingState();
     if (pending == null) {
       // 没有进行中的登录却收到回调：无法校验 state，拒绝。
       _fail('收到登录回调，但当前没有进行中的登录（请重新发起登录）');
@@ -158,60 +160,6 @@ class AuthDeepLinkReceiver {
   void _fail(String message) {
     SpbLog.warn('OIDC 回调处理失败', {'reason': message});
     onError?.call(message);
-  }
-}
-
-/// 一次进行中的登录请求（`state` + PKCE 参数）。
-///
-/// 二者必须**一起**保存：`state` 用于回调时校验来源，`code_verifier` 用于换
-/// token。分开保存会出现「校验通过但换 token 时找不到 verifier」。
-class PendingAuthRequest {
-  const PendingAuthRequest({required this.state, required this.pkce});
-
-  final String state;
-  final PkcePair pkce;
-
-  /// 诊断用（**不含 verifier 值**）。
-  @override
-  String toString() => 'PendingAuthRequest(state: $state, pkce: $pkce)';
-}
-
-/// 待验证登录请求的存放处。
-///
-/// ## 为什么需要它
-///
-/// 授权流程会把用户带到**外部浏览器**，应用可能在此期间被系统回收
-/// （Android 低内存时很常见）。回调到达时应用可能已经重启，
-/// 若 `state`/`verifier` 只存在内存里就会丢失，表现为「登录后应用毫无反应」。
-///
-/// ## 当前实现：内存
-///
-/// 内存实现（[InMemoryPendingAuthStore]）足以覆盖「应用存活」这条主路径。
-/// 跨进程死亡的重启场景需要把这两个值也持久化（加密存储），
-/// 属后续工作——**在文档里明确记录，而不是假装已经支持**。
-abstract interface class PendingAuthRequestStore {
-  /// 记录一次新发起的登录（覆盖旧的）。
-  void put(PendingAuthRequest request);
-
-  /// 取出并**清除**（一次性）。
-  ///
-  /// 必须一次性：同一个 `state` 若能被重复消费，重放同一个回调链接就能
-  /// 反复换 token。
-  PendingAuthRequest? consume();
-}
-
-/// 内存实现（当前生产使用，见接口文档的说明）。
-class InMemoryPendingAuthStore implements PendingAuthRequestStore {
-  PendingAuthRequest? _pending;
-
-  @override
-  void put(PendingAuthRequest request) => _pending = request;
-
-  @override
-  PendingAuthRequest? consume() {
-    final p = _pending;
-    _pending = null;
-    return p;
   }
 }
 
@@ -257,7 +205,9 @@ Future<String?> mobileSignIn({
 
   final state = (stateGenerator ?? _defaultState)();
   final pkce = (pkceGenerator ?? OidcPkce.generatePair)();
-  store.put(PendingAuthRequest(state: state, pkce: pkce));
+  // 必须 await：写盘完成前不能打开浏览器。若回调在写入完成前到达，
+  // 接收器会读到「没有进行中的登录」而拒绝这次回调。
+  await store.put(PendingAuthRequest(state: state, pkce: pkce));
 
   final url = OidcPkce.buildAuthorizeUrl(
     config: config,
@@ -270,7 +220,7 @@ Future<String?> mobileSignIn({
   try {
     final ok = await launch(url);
     if (!ok) {
-      store.consume();
+      await store.consume();
       return '无法打开浏览器，请手动访问：$url';
     }
     SpbLog.info('已打开移动端 OIDC 授权入口', {
@@ -280,7 +230,7 @@ Future<String?> mobileSignIn({
     return null;
   } catch (e) {
     // 打不开浏览器时清掉待验证请求：留着它会让下次回调误以为有进行中的登录。
-    store.consume();
+    await store.consume();
     SpbLog.warn('打开浏览器失败', {'error': e.toString()});
     return '无法打开浏览器，请手动访问：$url';
   }

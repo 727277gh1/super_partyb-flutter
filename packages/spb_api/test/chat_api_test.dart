@@ -894,8 +894,7 @@ void main() {
       // 解析成空对象，413 兑底分支永远不触发。
       adapter.onPost(
         '/chat/groups/grp_1/workspace-sync/ufs-upload',
-        (server) =>
-            server.reply(413, {'error': '文件超过 workspace 同步大小上限'}),
+        (server) => server.reply(413, {'error': '文件超过 workspace 同步大小上限'}),
         data: Matchers.isA<FormData>(),
       );
 
@@ -917,8 +916,7 @@ void main() {
     test('400（路径黑名单）与 404（/chat 前缀漏写即 404）各映射成 HttpError', () async {
       adapter.onPost(
         '/chat/groups/grp_1/workspace-sync/ufs-upload',
-        (server) =>
-            server.reply(400, {'error': 'workspace 路径已在系统黑名单中'}),
+        (server) => server.reply(400, {'error': 'workspace 路径已在系统黑名单中'}),
         data: Matchers.isA<FormData>(),
       );
       await expectLater(

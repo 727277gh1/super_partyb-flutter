@@ -157,13 +157,12 @@ authStateProvider.signedIn() → 路由守卫放行
 
 ### 3.1 已知的次要不一致（不阻塞，但要记住）
 
-`PendingAuthRequestStore` 当前是**内存实现**。授权流程会把用户带到外部浏览器，
-应用可能在此期间被系统回收（Android 低内存常见）。此时回调到达时应用已重启，
-内存里的 `state`/`code_verifier` 会丢失 → 表现为「登录后应用毫无反应」。
-
-跨进程重启需要把这两个值也持久化（加密存储）。本任务**有意不做**：
-它属「会话持久化」范畴，与 `移动端回跳`（drift）相邻，且当前登录本就无法闭环，
-先加一层持久化无法被验证。**在此明确记录，而不是假装已经支持。**
+~~`PendingAuthRequestStore` 当前是内存实现~~ → **已改为加密持久化**
+（`spb_data` 的 `SecurePendingAuthStore`，走 `flutter_secure_storage`，
+单键 JSON，带 10 分钟 TTL；接口上移至 `spb_api`，与 `TokenStore` 同构）。
+授权流程把用户带到外部浏览器，应用可能在此期间被系统回收（Android 低内存
+常见）；此前内存实现在重启后丢失 `state`/`code_verifier`，表现为「登录后
+应用毫无反应」，持久化后回调仍能完成 state 校验与换 token。
 
 ---
 
@@ -172,7 +171,7 @@ authStateProvider.signedIn() → 路由守卫放行
 - ❌ 未改 IdP 的 `oauth_clients`（跨仓库 + 生产配置，且 AGENTS.md 要求
   「Go API 一行不改」的精神适用于服务端契约）；
 - ❌ 未实现内嵌 webview 方案（理由见 §1.2）；
-- ❌ 未做跨进程重启的 `PendingAuthRequest` 持久化（理由见 §3.1）；
+- ~~未做跨进程重启的 `PendingAuthRequest` 持久化~~ → 已实现（见 §3.1）；
 - ❌ 未验证真机回跳（本机无 Android 模拟器 `/dev/kvm`、无 iOS 构建环境，
   归 issue #4）。
 

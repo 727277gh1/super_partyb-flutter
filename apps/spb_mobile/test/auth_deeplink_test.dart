@@ -40,6 +40,15 @@ class _Recorder {
   void onError(String message) => errors.add(message);
 }
 
+/// 构造一个已写入请求的内存 store（`put` 是异步的，无法再用级联 `..put`）。
+Future<InMemoryPendingAuthStore> _newStore({
+  PendingAuthRequest? pending,
+}) async {
+  final store = InMemoryPendingAuthStore();
+  if (pending != null) await store.put(pending);
+  return store;
+}
+
 PendingAuthRequest _pending({String state = 'st_1'}) => PendingAuthRequest(
   state: state,
   pkce: PkcePair(verifier: 'v' * 43, challenge: 'ch'),
@@ -129,12 +138,12 @@ void main() {
   });
 
   group('PendingAuthRequestStore', () {
-    test('consume 是一次性的（防重放同一个回调链接）', () {
+    test('consume 是一次性的（防重放同一个回调链接）', () async {
       final store = InMemoryPendingAuthStore();
-      store.put(_pending());
+      await store.put(_pending());
 
-      expect(store.consume(), isNotNull);
-      expect(store.consume(), isNull, reason: '同一个 state 不得被消费两次');
+      expect(await store.consume(), isNotNull);
+      expect(await store.consume(), isNull, reason: '同一个 state 不得被消费两次');
     });
   });
 
@@ -144,7 +153,7 @@ void main() {
         initial: Uri.parse('partyb://oidc/callback?code=cold&state=st_1'),
       );
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -163,7 +172,7 @@ void main() {
     test('运行中的链接也会被处理', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -184,7 +193,7 @@ void main() {
     test('非本应用的深链被静默忽略（不报错、不换 token）', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -205,7 +214,7 @@ void main() {
     test('state 不匹配时不换 token，并通过 onError 上报', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending(state: 'st_1'));
+      final store = await _newStore(pending: _pending(state: 'st_1'));
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -249,7 +258,7 @@ void main() {
     test('onCode 返回错误文案时通过 onError 上报', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder()..returnError = 'invalid_grant';
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -271,7 +280,7 @@ void main() {
     test('onCode 抛异常时被兜住（不冒泡到 stream 监听器）', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: (code, pkce) async => throw StateError('boom'),
@@ -293,7 +302,7 @@ void main() {
     test('start 幂等：重复调用不会重复订阅', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -311,7 +320,7 @@ void main() {
     test('dispose 后不再处理链接', () async {
       final source = _FakeDeepLinkSource();
       final rec = _Recorder();
-      final store = InMemoryPendingAuthStore()..put(_pending());
+      final store = await _newStore(pending: _pending());
       final receiver = AuthDeepLinkReceiver(
         source: source,
         onCode: rec.onCode,
@@ -377,7 +386,7 @@ void main() {
         pkceGenerator: () => const PkcePair(verifier: 'v_abc', challenge: 'ch'),
       );
 
-      final pending = store.consume();
+      final pending = await store.consume();
       expect(pending, isNotNull);
       expect(pending!.state, 'st_fixed');
       expect(pending.pkce.verifier, 'v_abc');
@@ -416,7 +425,7 @@ void main() {
       );
 
       expect(error, isNotNull);
-      expect(store.consume(), isNull, reason: '失败后不得留下待验证请求');
+      expect(await store.consume(), isNull, reason: '失败后不得留下待验证请求');
     });
 
     test('launch 抛异常时也清掉待验证请求', () async {
@@ -431,7 +440,7 @@ void main() {
       );
 
       expect(error, contains('无法打开浏览器'));
-      expect(store.consume(), isNull);
+      expect(await store.consume(), isNull);
     });
   });
 }

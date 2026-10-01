@@ -416,9 +416,7 @@ class ChatApi {
     // 同 [uploadQuickCaptureAttachment]：运行时校验而非 assert（release 下
     // assert 被剔除，两个都没传时会变成难定位的空指针）。
     if ((bytes == null) == (path == null)) {
-      throw ArgumentError(
-        'uploadWorkspaceFile 必须且只能给 bytes 或 path 之一',
-      );
+      throw ArgumentError('uploadWorkspaceFile 必须且只能给 bytes 或 path 之一');
     }
     try {
       final mediaType = contentType == null

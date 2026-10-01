@@ -134,11 +134,7 @@ void main() {
       await expectLater(
         api.listMyTurns(),
         throwsA(
-          isA<HttpError>().having(
-            (e) => e.statusCode,
-            'statusCode',
-            400,
-          ),
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 400),
         ),
       );
     });
@@ -147,9 +143,7 @@ void main() {
       adapter.onGet(
         '/me/turns',
         (server) => server.reply(200, {
-          'items': [
-            turnToListItemShape(groupTitle: null, inputPreview: ''),
-          ],
+          'items': [turnToListItemShape(groupTitle: null, inputPreview: '')],
         }),
         queryParameters: {'limit': 50},
       );

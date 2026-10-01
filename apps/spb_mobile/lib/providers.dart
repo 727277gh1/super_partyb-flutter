@@ -249,8 +249,14 @@ final signInActionProvider = Provider<Future<String?> Function()>((ref) {
 });
 
 /// 待验证登录请求（`state` + PKCE verifier）的存放处。
+///
+/// 用**加密持久化**实现：授权流程把用户带到外部浏览器，应用可能在此期间被
+/// 系统回收（Android 低内存常见）。内存实现在重启后丢失 state/verifier，
+/// 回调会因「没有进行中的登录」被拒——表现为「登录成功回到应用但什么也没
+/// 发生」。见 `SecurePendingAuthStore` 与 `docs/mobile-oidc-deeplink.md` §3.1。
+/// 测试可 override 为 [InMemoryPendingAuthStore]（不触平台通道）。
 final pendingAuthStoreProvider = Provider<PendingAuthRequestStore>((ref) {
-  return InMemoryPendingAuthStore();
+  return SecurePendingAuthStore();
 });
 
 /// OIDC 回调接收器（监听自定义 scheme 回跳并把 code 换成会话）。
