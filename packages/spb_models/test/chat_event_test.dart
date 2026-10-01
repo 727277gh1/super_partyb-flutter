@@ -166,6 +166,117 @@ void main() {
     expect(ev.isTimelineVisible, isTrue);
   });
 
+  group('归属反馈访问器（routing_feedback_request / routing_feedback）', () {
+    /// 造一个 routing_feedback_request 事件（Go feedbackRequestPayload 真实形状，
+    /// 见 classify_feedback_request.go / BuildClassifyFeedbackRequest）。
+    // ⚠️ extra 必须用 `...` 并入 payload 字面量，不能写 `..['payload'] = {...}..addAll(extra)`：
+    // 级联 `..` 的目标是**最左操作数**（这里的事件 map），第二个 `..addAll` 会并到
+    // 事件对象而非 payload——表现为「覆盖了却没生效」，且编译期无任何提示。
+    ChatEvent feedbackRequest([Map<String, dynamic> extra = const {}]) =>
+        ChatEvent.fromJson(
+          eventToDictShape()
+            ..['event_type'] = EventTypes.routingFeedbackRequest
+            ..['payload'] = <String, dynamic>{
+              'question': '这条消息我归到了「团队周报」，准确吗？',
+              'options': [
+                {'label': '准确', 'reply': '反馈#正确'},
+                {'label': '不准确', 'reply': '反馈#错误'},
+              ],
+              'token': 'evt_01HZX',
+              'evaluated_turn_id': 'turn_01HZY',
+              'chosen_group_id': 'grp_01HZZ',
+              'candidate_ids': ['grp_01HZZ', 'grp_other'],
+              ...extra,
+            },
+        );
+
+    test('读 question / token / evaluated_turn_id / chosen_group_id', () {
+      final ev = feedbackRequest({});
+
+      expect(ev.feedbackQuestion, '这条消息我归到了「团队周报」，准确吗？');
+      expect(ev.feedbackToken, 'evt_01HZX', reason: 'token = 事件自身 id（服务端约定）');
+      expect(ev.feedbackEvaluatedTurnId, 'turn_01HZY');
+      expect(ev.feedbackChosenGroupId, 'grp_01HZZ');
+    });
+
+    test('options 取每项的 label（语义真源），非 reply', () {
+      final ev = feedbackRequest({});
+
+      expect(ev.feedbackOptions, ['准确', '不准确']);
+    });
+
+    test('options 容忍字符串数组与空缺字段（payload 是 map[string]any）', () {
+      expect(
+        feedbackRequest({
+          'options': ['准确', '不准确'],
+        }).feedbackOptions,
+        ['准确', '不准确'],
+      );
+      expect(
+        feedbackRequest({
+          'options': [
+            {'reply': '反馈#正确'},
+          ],
+        }).feedbackOptions,
+        isEmpty,
+        reason: '无 label 的项不该产出空串选项',
+      );
+      expect(feedbackRequest({'options': null}).feedbackOptions, isEmpty);
+    });
+
+    test('spec 字段存在时被忽略（设计内路径：语义真源在 options）', () {
+      final ev = feedbackRequest({
+        'spec': {
+          'root': 'r1',
+          'elements': {
+            'r1': {
+              'id': 'r1',
+              'type': 'card',
+              'children': ['b1'],
+            },
+            'b1': {
+              'id': 'b1',
+              'type': 'button',
+              'props': {'label': '准确'},
+            },
+          },
+        },
+      });
+
+      // 访问器照常工作，spec 不产生任何影响。
+      expect(ev.feedbackOptions, ['准确', '不准确']);
+      expect(ev.feedbackToken, 'evt_01HZX');
+    });
+
+    test('token 缺失返回空串（异常载荷，UI 据此禁用按钮）', () {
+      final ev = feedbackRequest({'token': null});
+
+      expect(ev.feedbackToken, '');
+    });
+
+    test('question 缺失时给默认问句（不渲染空文案）', () {
+      expect(feedbackRequest({'question': null}).feedbackQuestion, isNotEmpty);
+    });
+
+    test('routing_feedback：correct 容忍 bool 与字符串', () {
+      ChatEvent feedback(Object? correct) => ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.routingFeedback
+          ..['payload'] = {'correct': correct, 'chosen_index': 1},
+      );
+
+      expect(feedback(true).feedbackCorrect, isTrue);
+      expect(feedback(false).feedbackCorrect, isFalse);
+      expect(feedback('true').feedbackCorrect, isTrue);
+      expect(feedback('false').feedbackCorrect, isFalse);
+      expect(
+        feedback(null).feedbackCorrect,
+        isNull,
+        reason: '「没标注」不能被当成「标注为错」（null ≠ false）',
+      );
+    });
+  });
+
   group('gate 决策访问器', () {
     /// 造一个 adaptive_decision 事件（Go 现行扁平 payload）。
     ChatEvent adaptive(Map<String, dynamic> payload) => ChatEvent.fromJson(

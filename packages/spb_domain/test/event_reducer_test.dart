@@ -693,6 +693,161 @@ void main() {
     });
   });
 
+  group('归属反馈卡状态', () {
+    /// routing_feedback_request 事件（payload 照 Go feedbackRequestPayload）。
+    ChatEvent request({
+      String id = 'req_1',
+      String turnId = 'turn_1',
+      String evaluatedTurnId = 'turn_1',
+      String token = 'tok_1',
+      List<Map<String, dynamic>>? options,
+      String question = '这条消息我归到了「团队周报」，准确吗？',
+      int globalSeq = 1,
+    }) => ev(
+      EventTypes.routingFeedbackRequest,
+      id: id,
+      turnId: turnId,
+      globalSeq: globalSeq,
+      payload: {
+        'question': question,
+        'options':
+            options ??
+            [
+              {'label': '准确', 'reply': '反馈#正确'},
+              {'label': '不准确', 'reply': '反馈#错误'},
+            ],
+        'token': token,
+        'evaluated_turn_id': evaluatedTurnId,
+        'chosen_group_id': 'grp_1',
+      },
+    );
+
+    test('产出 FeedbackRequestItem（token/question/options 到位）', () {
+      final r = EventReducer.reduce([request()]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single;
+      expect(item, isA<FeedbackRequestItem>());
+      final fb = item as FeedbackRequestItem;
+      expect(fb.token, 'tok_1', reason: 'token 是回执锚点，缺它无法提交');
+      expect(fb.question, contains('准确吗'));
+      expect(fb.options, ['准确', '不准确']);
+      expect(fb.evaluatedTurnId, 'turn_1');
+      expect(fb.resolved, isFalse);
+      expect(fb.canResolve, isTrue);
+    });
+
+    test('同 turn 重复请求只保留一条（对齐服务端 partial unique index）', () {
+      // 客户端会看到重放：SSE cursor 回放与 timeline 回填存在交叠窗口。
+      // 不幂等则同一次登录出现两张同问题卡片。
+      final r = EventReducer.reduce([
+        request(id: 'req_1', globalSeq: 1),
+        request(id: 'req_2', globalSeq: 2),
+      ]);
+
+      final items = r.items.whereType<FeedbackRequestItem>().toList();
+      expect(items, hasLength(1), reason: '同一 turn 只应有一张反馈卡');
+      expect(items.single.id, 'req_1');
+    });
+
+    test('不同 turn 的请求各自成卡', () {
+      final r = EventReducer.reduce([
+        request(id: 'req_1', turnId: 'turn_1', evaluatedTurnId: 'turn_1'),
+        request(
+          id: 'req_2',
+          turnId: 'turn_2',
+          evaluatedTurnId: 'turn_2',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items.whereType<FeedbackRequestItem>(), hasLength(2));
+    });
+
+    test('重放先到无 token 载荷时，后到的完整载荷补上 token', () {
+      // 降级路径：历史回填可能先给出无 token 的载荷。补全而非新增，
+      // 且 createdAt/身份沿用原卡（排序不应因重放漂移）。
+      final r = EventReducer.reduce([
+        request(id: 'req_1', token: '', globalSeq: 1),
+        request(id: 'req_2', token: 'tok_real', globalSeq: 2),
+      ]);
+
+      final items = r.items.whereType<FeedbackRequestItem>().toList();
+      expect(items, hasLength(1));
+      expect(items.single.token, 'tok_real', reason: '补全后必须可提交回执');
+      expect(items.single.id, 'req_1', reason: '身份沿用原卡');
+    });
+
+    test('token 缺失时不可 resolve（UI 据此禁用按钮）', () {
+      final r = EventReducer.reduce([request(token: '')]);
+
+      expect((r.items.single as FeedbackRequestItem).canResolve, isFalse);
+    });
+
+    test('routing_feedback 到达后标记已解决（按被评价的 turn 匹配）', () {
+      // routing_feedback 的 payload 里**没有** token/事件 id，唯一可靠匹配键
+      // 是 turnId（事件附在被评价的 turn 上）。
+      final r = EventReducer.reduce([
+        request(id: 'req_1', turnId: 'turn_1', evaluatedTurnId: 'turn_1'),
+        ev(
+          EventTypes.routingFeedback,
+          id: 'fb_1',
+          turnId: 'turn_1',
+          globalSeq: 2,
+          payload: {'correct': true},
+        ),
+      ]);
+
+      final fb = r.items.whereType<FeedbackRequestItem>().single;
+      expect(fb.resolved, isTrue);
+      expect(fb.canResolve, isFalse, reason: '已答的卡不得重复提交');
+      expect(fb.token, 'tok_1', reason: '标记已解决不得丢失 token');
+    });
+
+    test('routing_feedback 不误标其他 turn 的卡', () {
+      final r = EventReducer.reduce([
+        request(id: 'req_1', turnId: 'turn_1', evaluatedTurnId: 'turn_1'),
+        request(
+          id: 'req_2',
+          turnId: 'turn_2',
+          evaluatedTurnId: 'turn_2',
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.routingFeedback,
+          id: 'fb_1',
+          turnId: 'turn_2',
+          globalSeq: 3,
+          payload: {'correct': false},
+        ),
+      ]);
+
+      final items = r.items.whereType<FeedbackRequestItem>().toList();
+      expect(items[0].resolved, isFalse, reason: 'turn_1 的卡未被作答');
+      expect(items[1].resolved, isTrue);
+    });
+
+    test('evaluated_turn_id 与事件 turnId 不同时，按 evaluated_turn_id 匹配', () {
+      // 请求事件挂在完成它的 turn 上，而标注写回被评价的 turn。语义不同，
+      // 归约以 payload 的 evaluated_turn_id 为准。
+      final r = EventReducer.reduce([
+        request(
+          id: 'req_1',
+          turnId: 'turn_current',
+          evaluatedTurnId: 'turn_evaluated',
+        ),
+        ev(
+          EventTypes.routingFeedback,
+          id: 'fb_1',
+          turnId: 'turn_evaluated',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items.whereType<FeedbackRequestItem>().single.resolved, isTrue);
+    });
+  });
+
   group('agent.file.* → AgentFileItem', () {
     Map<String, dynamic> filePayload({
       String rel = 'QWEN.md',
@@ -700,20 +855,16 @@ void main() {
       String mime = 'text/markdown; charset=utf-8',
       int size = 3585,
     }) => {
-          'relative_path': rel,
-          'metadata': {'relative_path': rel},
-          'mime_type': mime,
-          'size_bytes': size,
-          if (fileId != null) 'ufs_file_id': fileId,
-        };
+      'relative_path': rel,
+      'metadata': {'relative_path': rel},
+      'mime_type': mime,
+      'size_bytes': size,
+      if (fileId != null) 'ufs_file_id': fileId,
+    };
 
     test('created 产出文件卡，字段映射正确', () {
       final r = EventReducer.reduce([
-        ev(
-          EventTypes.agentFileCreated,
-          payload: filePayload(),
-          globalSeq: 1,
-        ),
+        ev(EventTypes.agentFileCreated, payload: filePayload(), globalSeq: 1),
       ]);
 
       expect(r.items, hasLength(1));
@@ -729,11 +880,7 @@ void main() {
 
     test('created → modified 合并为同一卡且 action 升级', () {
       final r = EventReducer.reduce([
-        ev(
-          EventTypes.agentFileCreated,
-          payload: filePayload(),
-          globalSeq: 1,
-        ),
+        ev(EventTypes.agentFileCreated, payload: filePayload(), globalSeq: 1),
         ev(
           EventTypes.agentFileModified,
           payload: filePayload(size: 4000),
@@ -749,14 +896,9 @@ void main() {
       expect(item.deletedAt, isNull);
     });
 
-    test('created → modified → deleted 合并为一张置灰卡，保留创建时的 fileId',
-        () {
+    test('created → modified → deleted 合并为一张置灰卡，保留创建时的 fileId', () {
       final r = EventReducer.reduce([
-        ev(
-          EventTypes.agentFileCreated,
-          payload: filePayload(),
-          globalSeq: 1,
-        ),
+        ev(EventTypes.agentFileCreated, payload: filePayload(), globalSeq: 1),
         ev(
           EventTypes.agentFileModified,
           payload: filePayload(size: 4000),
@@ -819,10 +961,7 @@ void main() {
       final r = EventReducer.reduce([
         ev(
           EventTypes.agentFileCreated,
-          payload: filePayload(
-            rel: 'reports/tts/abc.mp3',
-            mime: 'audio/mpeg',
-          ),
+          payload: filePayload(rel: 'reports/tts/abc.mp3', mime: 'audio/mpeg'),
           globalSeq: 1,
         ),
       ]);

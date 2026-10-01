@@ -197,6 +197,79 @@ final class ConfirmationItem extends ConversationItem {
       confirmationId.isNotEmpty && groupId.isNotEmpty && !resolved;
 }
 
+/// 归属反馈请求（`routing_feedback_request`）。
+///
+/// 服务端在 **turn 完成后**发出，问用户「这条消息归到这个对话对吗」。
+///
+/// ## 为什么不在入队时问（服务端的设计理由，客户端照抄其语义）
+///
+/// 「归属对不对」只有在用户**看到回答之后**才能答——归属对不对，恰恰要靠
+/// 回答是否接得上上下文来判断。入队时问等于让用户猜。
+///
+/// ## 为什么从 `options` 渲染而不解析 payload 里的 `spec`
+///
+/// Go 侧 `feedbackRequestPayload` 的注释明示：**Options 是语义真源**（所有
+/// 渠道都靠它），Spec 只是其中一种呈现。且 spec 按钮走 `send_next_input`
+/// 消息通道（会产生一条用户消息），而客户端可直接调 `resolveFeedback`
+/// （一次性 CAS、不产生用户消息）——后者更优。
+final class FeedbackRequestItem extends ConversationItem {
+  const FeedbackRequestItem({
+    required super.id,
+    required super.createdAt,
+    required this.token,
+    super.turnId,
+    this.question = '',
+    this.options = const [],
+    this.chosenGroupId,
+    this.evaluatedTurnId,
+    this.resolved = false,
+  });
+
+  /// 回执锚点（= 请求事件的 event id）。
+  ///
+  /// 服务端用它直查请求、校验归属、一次性消费。为空表示异常载荷，
+  /// 此时 UI 必须禁用按钮——不要用 [id] 去试。
+  final String token;
+
+  final String question;
+
+  /// 选项的展示文字（语义真源，来自 payload 的 `options[].label`）。
+  final List<String> options;
+
+  /// 当时归到的对话（供 UI 展示「归到《X》对吗」）。
+  final String? chosenGroupId;
+
+  /// 被评价的 turn（标注将附到它上面）。
+  ///
+  /// 与 [turnId] 语义不同：请求事件在完成它的 turn 上，而标注写回被评价的
+  /// turn。归约时按它做幂等（对齐服务端的 partial unique index）。
+  final String? evaluatedTurnId;
+
+  /// 用户是否已作答（`routing_feedback` 已到达，或本地提交成功后本地标记）。
+  final bool resolved;
+
+  /// 是否可提交回执。
+  ///
+  /// 缺 token 时服务端直查不到请求，提交必然失败。
+  bool get canResolve => token.isNotEmpty && !resolved;
+
+  /// 复制并覆盖部分字段（标记已解决时用）。
+  ///
+  /// 必须带上 [token]：标记已解决**只是渲染状态**，若丢失它，后续任何需要
+  /// 重新读取该项的场景都会退化成不可 resolve（服务端按 token 直查）。
+  FeedbackRequestItem copyWith({bool? resolved}) => FeedbackRequestItem(
+    id: id,
+    createdAt: createdAt,
+    turnId: turnId,
+    token: token,
+    question: question,
+    options: options,
+    chosenGroupId: chosenGroupId,
+    evaluatedTurnId: evaluatedTurnId,
+    resolved: resolved ?? this.resolved,
+  );
+}
+
 /// 后续提问建议（`follow_up_suggested`）。
 final class FollowUpSuggestionItem extends ConversationItem {
   const FollowUpSuggestionItem({
@@ -281,4 +354,3 @@ final class AgentFileItem extends ConversationItem {
     return mt.toLowerCase().startsWith('image/');
   }
 }
-

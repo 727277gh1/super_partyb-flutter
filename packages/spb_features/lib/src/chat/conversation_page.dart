@@ -605,6 +605,9 @@ class _ConversationPageState extends State<ConversationPage> {
     ),
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
     ErrorItem(:final message) => _ErrorNotice(message: message),
+    // 归属反馈卡：卡片组件与两端装配属后续任务，此处先占位渲染避免
+    // switch 非穷尽（Dart 对 sealed class 强制穷尽）。
+    FeedbackRequestItem() => const SizedBox.shrink(),
     AgentFileItem() => AgentFileCard(
       file: item,
       onDownload: widget.onDownloadAgentFile,

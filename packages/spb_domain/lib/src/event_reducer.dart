@@ -308,6 +308,34 @@ class EventReducer {
             );
           }
 
+        case EventTypes.routingFeedbackRequest:
+          // 归属反馈请求：turn **完成后**问用户「这条消息归到这个对话对吗」。
+          // 语义真源在 payload 的 question/options[]（spec 是服务端另一路呈现，
+          // 客户端忽略是设计内路径，见 FeedbackRequestItem 的类文档）。
+          //
+          // token 缺失时仍然入表（服务端不变量是「产出事件 ⇒ 必有 token」，
+          // 缺失属异常载荷），但 canResolve=false，UI 会禁用按钮。
+          _upsertFeedbackRequest(
+            items,
+            FeedbackRequestItem(
+              id: ev.eventId,
+              createdAt: ev.createdAt,
+              turnId: ev.turnId,
+              token: ev.feedbackToken,
+              question: ev.feedbackQuestion,
+              options: ev.feedbackOptions,
+              chosenGroupId: ev.feedbackChosenGroupId,
+              evaluatedTurnId: ev.feedbackEvaluatedTurnId ?? ev.turnId,
+            ),
+          );
+
+        case EventTypes.routingFeedback:
+          // 用户已作答（服务端 CAS 消费成功后写的标注事件）。把被评价 turn 上的
+          // 请求标记为已解决。payload 里**没有** token/事件 id，唯一的可靠匹配键
+          // 是 turnId（事件附在被评价的 turn 上，与请求的 evaluated_turn_id 相同；
+          // 见 Go classify_feedback_resolve.go 的 appendTurnEvent(target.TurnID…)）。
+          _markFeedbackResolved(items, ev.turnId);
+
         case EventTypes.agentFileCreated:
         case EventTypes.agentFileModified:
         case EventTypes.agentFileDeleted:
@@ -338,6 +366,78 @@ class EventReducer {
       lastEventId: lastEventId,
       gateDecisions: gateDecisions,
     );
+  }
+
+  /// 插入或替换归属反馈请求（同 turn 幂等）。
+  ///
+  /// ## 为什么按 evaluatedTurnId 幂等
+  ///
+  /// 服务端用 partial unique index（迁移 0025）保证同一 turn 只有一条反馈
+  /// 请求；但客户端会看到**重放**（SSE cursor 回放 + timeline 回填的交叠窗口）。
+  /// 不幂等的话，同一次登录会出现两张同问题卡片。
+  ///
+  /// 同 turn 已有请求时**保留原卡、不新增**（服务端也只存一条）；若新事件的
+  /// 字段更完整（如历史回填先到的是无 token 的降级载荷），就地更新原卡——
+  /// createdAt 取原卡的（排序不应因重放漂移）。
+  static void _upsertFeedbackRequest(
+    List<ConversationItem> items,
+    FeedbackRequestItem incoming,
+  ) {
+    // evaluatedTurnId 语义优先（它与请求事件的 turnId 可以不同）；
+    // 请求事件必挂在一个 turn 上，故回退后非空。
+    final turnKey = incoming.evaluatedTurnId ?? incoming.turnId;
+    if (turnKey.isNotEmpty) {
+      for (var i = 0; i < items.length; i++) {
+        final it = items[i];
+        if (it is! FeedbackRequestItem) continue;
+        final existingKey = it.evaluatedTurnId ?? it.turnId;
+        if (existingKey == turnKey) {
+          // 同 turn 已有：保留原卡身份，仅当新载荷更完整时补字段。
+          if (it.token.isEmpty && incoming.token.isNotEmpty) {
+            items[i] = FeedbackRequestItem(
+              id: it.id,
+              createdAt: it.createdAt,
+              turnId: it.turnId,
+              token: incoming.token,
+              question: incoming.question.isNotEmpty
+                  ? incoming.question
+                  : it.question,
+              options: incoming.options.isNotEmpty
+                  ? incoming.options
+                  : it.options,
+              chosenGroupId: it.chosenGroupId ?? incoming.chosenGroupId,
+              evaluatedTurnId: it.evaluatedTurnId,
+              resolved: it.resolved,
+            );
+          }
+          return;
+        }
+      }
+    }
+    items.add(incoming);
+  }
+
+  /// 把 [turnId] 上的归属反馈请求标记为已答。
+  ///
+  /// 与 [_markConfirmationResolved] 同构：从后往前找第一条同 turn 且未解决的
+  /// 请求。[turnId] 为空时退化为「最近一条未解决」（历史数据或异常事件下
+  /// 宁可多标一张，也不静默丢掉状态变更）。
+  static void _markFeedbackResolved(
+    List<ConversationItem> items,
+    String turnId,
+  ) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      final it = items[i];
+      if (it is! FeedbackRequestItem || it.resolved) continue;
+      // 匹配键是被评价的 turn（与请求事件的 evaluated_turn_id 一致），
+      // 其次退而用请求事件自身的 turnId（两者通常相同）。
+      final matches =
+          turnId.isNotEmpty &&
+          (it.evaluatedTurnId == turnId || it.turnId == turnId);
+      if (!matches) continue;
+      items[i] = it.copyWith(resolved: true);
+      return;
+    }
   }
 
   /// 把 [turnId] 上最近一条未解决的确认卡标记为已解决。

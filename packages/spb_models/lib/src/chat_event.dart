@@ -154,6 +154,73 @@ class ChatEvent {
         .toList(growable: false);
   }
 
+  // ---------- 归属反馈访问器（routing_feedback_request / routing_feedback） ----------
+  //
+  // 字段名取自 Go `chatpipeline/classify_feedback_request.go` 的
+  // `feedbackRequestPayload`（真实写端，非推测）：payload 只描述**语义**
+  // （问句 + 选项 + 回执），不含渲染细节。
+  //
+  // ⚠️ payload 里还有个 `spec`（JSON UI 描述）字段，本包**故意不解析**：
+  // Go 侧注释明示「Options 是**语义真源**（所有渠道都靠它），Spec 只是其中
+  // 一种呈现」。只给 Spec 的话纯文本渠道得反向解析 JSON 才能拿到按钮文字——
+  // 那就是把渲染格式当协议用。Flutter 有自己的组件体系，按 Options 渲染。
+
+  /// 面向用户的问句（如「归到《团队周报》对吗？」）。
+  String get feedbackQuestion => _str('question') ?? '这条消息归到这个对话，对吗？';
+
+  /// 回执锚点（= 本事件的 event id），调 `resolveFeedback` 时用。
+  ///
+  /// 服务端把它嵌进可视化渠道按钮的 nextInput，据此直查请求、校验归属、
+  /// 一次性消费。为空表示异常载荷，此时 UI 应禁用按钮。
+  String get feedbackToken => _str('token') ?? '';
+
+  /// 可选回答（语义真源）。
+  ///
+  /// 每项含 `label`（展示文字）与 `reply`（回执文本）。这里只取 label——
+  /// 客户端不走「复用普通消息通道回传 reply」的路径，而是直接调
+  /// `resolveFeedback`（一次性 CAS，不产生用户消息）。
+  List<String> get feedbackOptions {
+    final raw = payload?['options'];
+    if (raw is! List) return const [];
+    return raw
+        .map((e) {
+          if (e is String) return e;
+          if (e is Map) return (e['label'] ?? e['text'] ?? '').toString();
+          return '';
+        })
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  /// 当时归到的对话（供 UI 展示「归到《X》对吗」中的 X）。
+  String? get feedbackChosenGroupId =>
+      _str('chosen_group_id') ?? _str('group_id');
+
+  /// 被评价的那个 turn（回执标注将附到它上面）。
+  ///
+  /// 注意：**不是**本事件自身的 [turnId]——请求事件在完成它的 turn 上，
+  /// 而标注要写回被评价的 turn。服务端两者通常相同（请求在完成时发出），
+  /// 但语义不同，取值以 payload 为准。
+  String? get feedbackEvaluatedTurnId => _str('evaluated_turn_id');
+
+  /// 归属反馈的标注结果（`routing_feedback`）：用户认为归属是否正确。
+  ///
+  /// 该事件是「答」，与 `routing_feedback_request`（问）一问一答。payload =
+  /// `{correct, correct_group_id?, chosen_index?, candidate_ids?}`（见 Go
+  /// `classify_feedback_resolve.go` 的 `ParseAttributionFeedback`）。
+  ///
+  /// 为 null 表示 payload 未携带该字段（异常载荷）——与 `false` 不同：
+  /// 「没标注」不能被当成「标注为错」。
+  bool? get feedbackCorrect {
+    final v = payload?['correct'];
+    if (v is bool) return v;
+    if (v is String) {
+      if (v.toLowerCase() == 'true') return true;
+      if (v.toLowerCase() == 'false') return false;
+    }
+    return null;
+  }
+
   // ---------- agent.file.* 访问器 ----------
   //
   // 字段名**已用生产真实 payload 实测**（非推测）：服务端 payload 是
