@@ -154,6 +154,7 @@ void main() {
     WidgetTester tester, {
     String? title = '测试对话',
     void Function(String, String, String)? onResolveConfirmation,
+    void Function(String token, bool correct)? onResolveFeedback,
     Future<void> Function(String)? onSend,
     Future<void> Function(String)? onCancelTurn,
     Future<bool> Function()? onLoadOlder,
@@ -166,6 +167,7 @@ void main() {
           controller: controller,
           title: title,
           onResolveConfirmation: onResolveConfirmation,
+          onResolveFeedback: onResolveFeedback,
           onSend: onSend,
           onCancelTurn: onCancelTurn,
           onLoadOlder: onLoadOlder,
@@ -304,6 +306,106 @@ void main() {
       );
 
       expect(find.text('再详细点'), findsOneWidget);
+    });
+  });
+
+  group('ConversationPage 归属反馈卡', () {
+    testWidgets('routing_feedback_request 渲染为卡片，点击回调收到 token 与 bool', (
+      tester,
+    ) async {
+      final calls = <(String, bool)>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) => calls.add((token, correct)),
+      );
+
+      await pushEvent(
+        tester,
+        EventTypes.routingFeedbackRequest,
+        sseEvent(
+          'routing_feedback_request',
+          id: 'evt_fb',
+          payload: {
+            'question': '这条消息我归到了《团队周报》，准确吗？',
+            'options': [
+              {'label': '准确', 'reply': '反馈#正确'},
+              {'label': '不准确', 'reply': '反馈#错误'},
+            ],
+            'token': 'evt_fb',
+            'evaluated_turn_id': 'turn_1',
+          },
+        ),
+      );
+
+      expect(find.text('这次归属准确吗？'), findsOneWidget);
+      expect(find.text('这条消息我归到了《团队周报》，准确吗？'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+
+      expect(calls, hasLength(1));
+      expect(calls.single.$1, 'evt_fb', reason: 'token 是回执锚点（= 事件 id）');
+      expect(calls.single.$2, isTrue);
+    });
+
+    testWidgets('token 缺失时按钮禁用（提交必然失败，不退化用事件 id）', (tester) async {
+      final calls = <(String, bool)>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) => calls.add((token, correct)),
+      );
+
+      await pushEvent(
+        tester,
+        EventTypes.routingFeedbackRequest,
+        sseEvent(
+          'routing_feedback_request',
+          id: 'evt_fb',
+          payload: const {
+            'question': '准确吗？',
+            'options': [
+              {'label': '准确', 'reply': '反馈#正确'},
+            ],
+          },
+        ),
+      );
+
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('feedback-option-准确')),
+      );
+      expect(button.onPressed, isNull);
+      expect(calls, isEmpty);
+    });
+
+    testWidgets('onResolveFeedback 未注入时按钮禁用（移动端旧装配不炸）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.routingFeedbackRequest,
+        sseEvent(
+          'routing_feedback_request',
+          id: 'evt_fb',
+          payload: const {
+            'question': '准确吗？',
+            'options': [
+              {'label': '准确', 'reply': '反馈#正确'},
+            ],
+            'token': 'evt_fb',
+          },
+        ),
+      );
+
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('feedback-option-准确')),
+      );
+      expect(button.onPressed, isNull);
     });
   });
 

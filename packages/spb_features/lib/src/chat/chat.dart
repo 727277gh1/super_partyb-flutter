@@ -23,6 +23,7 @@ export 'agent_file_card.dart';
 export 'assistant_message_bubble.dart';
 export 'confirmation_card.dart';
 export 'conversation_page.dart';
+export 'feedback_request_card.dart';
 export 'follow_up_chips.dart';
 export 'chat_sidebar.dart';
 export 'group_deliverables_panel.dart';

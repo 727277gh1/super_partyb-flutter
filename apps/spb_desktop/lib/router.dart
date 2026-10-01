@@ -487,6 +487,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 正在提交的确认卡行 id（供待办面板防重复点 + 显示 spinner）。
   final _resolvingConfirmations = <String>{};
 
+  /// 正在提交归属反馈的回执 token（防重复点击）。
+  final _resolvingFeedback = <String>{};
+
   /// 上次见过的 `AgentFileItem` id 集合：用于判定「新出现」。
   ///
   /// 以「上次见过的 id 集合」为基线，每次 items 更新里若出现不在基线的文件 id，
@@ -649,6 +652,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             .catchError((Object e) => SpbLog.warn('打开链接失败', {'error': '$e'})),
       ),
       onResolveConfirmation: _resolveConfirmation,
+      onResolveFeedback: _resolveFeedback,
     );
 
     if (!_showSidebar) return conversation;
@@ -763,6 +767,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         })
         .catchError((Object e) {
           debugPrint('确认提交失败: $e');
+        });
+  }
+
+  /// 提交归属反馈（「这条消息归到这个对话对吗」）。
+  ///
+  /// 与 [_resolveConfirmation] 同构：成功与失败都解锁，失败允许重试。
+  /// busy 集合按 token 去重——页面内 busy 已有一层，这里是第二层（
+  /// 与 [_resolvingConfirmations] 同样防止「两处可点」时的重复提交）。
+  void _resolveFeedback(String token, bool correct) {
+    if (_resolvingFeedback.contains(token)) return;
+    setState(() => _resolvingFeedback.add(token));
+    ref
+        .read(chatApiProvider)
+        .resolveFeedback(token, correct: correct)
+        .whenComplete(() {
+          if (mounted) {
+            setState(() => _resolvingFeedback.remove(token));
+          }
+        })
+        .catchError((Object e) {
+          debugPrint('归属反馈提交失败: $e');
         });
   }
 

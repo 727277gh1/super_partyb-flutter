@@ -11,6 +11,7 @@ import 'package:spb_domain/spb_domain.dart';
 import 'agent_file_card.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
+import 'feedback_request_card.dart';
 import 'follow_up_chips.dart';
 import 'message_composer.dart';
 import 'pending_messages_bar.dart';
@@ -39,6 +40,7 @@ class ConversationPage extends StatefulWidget {
     required this.controller,
     this.title,
     this.onResolveConfirmation,
+    this.onResolveFeedback,
     this.onSend,
     this.onCancelTurn,
     this.onLoadOlder,
@@ -78,6 +80,15 @@ class ConversationPage extends StatefulWidget {
   /// 为 null 时确认卡按钮禁用。
   final void Function(String groupId, String confirmationId, String option)?
   onResolveConfirmation;
+
+  /// 归属反馈卡回调。参数为（回执 token, 是否准确）。
+  ///
+  /// 与 [onResolveConfirmation] 同理注入：真实写端点是
+  /// `POST /chat/feedback/:token/resolve`，页面只收集意图，请求与错误翻译
+  /// 归调用方（也使 widget test 无需 HTTP mock）。
+  ///
+  /// 为 null 时反馈卡按钮禁用。
+  final void Function(String token, bool correct)? onResolveFeedback;
 
   /// 自定义发送逻辑。为 null 时用 `controller.send(input: text)`。
   ///
@@ -184,6 +195,11 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 服务端有 CAS（`pending` → `resolved` 首次写入才生效），重复请求不会造成
   /// 数据错误，但会让 UI 出现两次 loading。本地记录更简单直接。
   final _resolving = <String>{};
+
+  /// 已提交 resolveFeedback 的回执 token（防重复点击，与 [_resolving] 同理）。
+  ///
+  /// 服务端 CAS 保证重复请求无数据错误，但会让 UI 出现两次 loading。
+  final _resolvingFeedback = <String>{};
 
   /// 正在提交「停止生成」请求。
   ///
@@ -461,6 +477,22 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
+  /// 提交归属反馈（防重复点击；与 [_handleResolve] 同构）。
+  ///
+  /// 解锁时机也一致：成功与失败都解锁——服务端 CAS 保证重复请求无数据错误，
+  /// 失败时允许重试（不弹错误打断阅读）。
+  Future<void> _handleResolveFeedback(String token, bool correct) async {
+    final callback = widget.onResolveFeedback;
+    if (callback == null || _resolvingFeedback.contains(token)) return;
+
+    setState(() => _resolvingFeedback.add(token));
+    try {
+      callback(token, correct);
+    } finally {
+      if (mounted) setState(() => _resolvingFeedback.remove(token));
+    }
+  }
+
   /// 是否可以点「停止生成」。
   ///
   /// 两个条件：有流式项，且该项带着非空 [ConversationItem.turnId]。
@@ -605,9 +637,19 @@ class _ConversationPageState extends State<ConversationPage> {
     ),
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
     ErrorItem(:final message) => _ErrorNotice(message: message),
-    // 归属反馈卡：卡片组件与两端装配属后续任务，此处先占位渲染避免
-    // switch 非穷尽（Dart 对 sealed class 强制穷尽）。
-    FeedbackRequestItem() => const SizedBox.shrink(),
+    FeedbackRequestItem() => FeedbackRequestCard(
+      question: item.question,
+      options: item.options,
+      resolved: item.resolved,
+      busy: _resolvingFeedback.contains(item.token),
+      // 三个条件都要满足才给可点按钮：
+      //   - app 层注入了回执通道（未注入时点了没反应，不如直接禁用）；
+      //   - token 非空（服务端按 token 直查请求，一次性 CAS，缺它必然失败）；
+      //   - 尚未作答。
+      onResolve: (widget.onResolveFeedback != null && item.canResolve)
+          ? (correct) => _handleResolveFeedback(item.token, correct)
+          : null,
+    ),
     AgentFileItem() => AgentFileCard(
       file: item,
       onDownload: widget.onDownloadAgentFile,

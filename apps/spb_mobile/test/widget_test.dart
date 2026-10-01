@@ -1264,6 +1264,78 @@ void main() {
     ], reason: 'turnId 必须原样透传到路径，且只发一次请求');
   });
 
+  testWidgets('对话页归属反馈：router 把 token 接到 POST /chat/feedback/:token/resolve', (
+    tester,
+  ) async {
+    // 只验证 **router 的接线**（理由同上一条「停止生成」用例）。
+    // 移动端与桌面端共用同一条回执语义：可视化渠道直接解决，不经消息通道。
+    final hit = <(String, Object?)>[];
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      mockGroups: false,
+      sseClient: _FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+        adapter.onPost(
+          '/chat/feedback/tok_fb1/resolve',
+          (server) => server.replyCallback(200, (options) {
+            hit.add((options.path, options.data));
+            return <String, dynamic>{};
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    final page = tester.widget<ConversationPage>(find.byType(ConversationPage));
+    expect(
+      page.onResolveFeedback,
+      isNotNull,
+      reason: 'router 必须注入 onResolveFeedback，否则反馈卡按钮会被禁用',
+    );
+
+    await tester.runAsync(() async {
+      page.onResolveFeedback!('tok_fb1', false);
+      // onResolveFeedback 返回 void（页面内 fire-and-forget），真实 dio 往返
+      // 需要真实事件循环跑完——短 delay 会拿不到请求。
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+
+    expect(hit, hasLength(1), reason: '必须真的发出一次回执请求');
+    expect(hit.single.$1, '/chat/feedback/tok_fb1/resolve');
+    expect(hit.single.$2, containsPair('correct', false));
+  });
+
   testWidgets('移动端注入的 desktopCapabilities 是空实现', (tester) async {
     final h = await pumpApp(tester);
 

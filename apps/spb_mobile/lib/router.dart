@@ -657,6 +657,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             )
             .catchError((Object e) => debugPrint('确认提交失败: $e'));
       },
+      // 归属反馈：POST /chat/feedback/:token/resolve（可视化渠道直接解决，
+      // 不经消息通道；一次性 CAS）。与桌面端 _resolveFeedback 同语义：
+      // 失败只记日志不打断阅读。
+      onResolveFeedback: (token, correct) {
+        api
+            .resolveFeedback(token, correct: correct)
+            .catchError((Object e) => debugPrint('归属反馈提交失败: $e'));
+      },
     );
   }
 
