@@ -459,6 +459,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 无头环境用内存桩完整验证。
   int _deliverablesReloadToken = 0;
 
+  /// 建议卡标注的「下一条消息由谁回答」（follow_up 的 agent_id）。
+  ///
+  /// 点击建议时设置，发送时经 [ConversationPage.onSend] 透传给控制器。
+  /// null 表示未标注（服务端 routingMode=auto 照常走分类链）。
+  String? _selectedAgentId;
+
   /// controller.items 的订阅（dispose 时释放）。
   StreamSubscription<List<ConversationItem>>? _itemsSub;
 
@@ -653,6 +659,32 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       ),
       onResolveConfirmation: _resolveConfirmation,
       onResolveFeedback: _resolveFeedback,
+      // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
+      // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
+      onSend: (text) => ref
+          .read(chatStreamControllerProvider(userId))
+          .send(input: text, agentId: _selectedAgentId),
+      // spec 卡动作：copy_text 已由页面内部回填输入框（_draft 通道），
+      // 这里只需处理 send_next_input（直接发送）。goal_gate 的 spec 无动作，
+      // 此分支当前不会命中，保留是为了服务端新增动作类型时老客户端仍能工作。
+      onSpecAction: (action) {
+        if (action.type == SpecUiActionType.sendNextInput &&
+            action.nextInput.isNotEmpty) {
+          unawaited(
+            ref
+                .read(chatStreamControllerProvider(userId))
+                .send(input: action.nextInput, agentId: _selectedAgentId)
+                .then((_) => null)
+                .catchError((Object e) {
+                  debugPrint('spec 动作发送失败: $e');
+                  return null;
+                }),
+          );
+        }
+      },
+      // 建议卡标注了 agent_id：记住它，下一条消息（含回填后用户改过再发的）
+      // 由这个 agent 回答。对齐 webapp FollowUpSuggestCard 的「先切人再追加」。
+      onSelectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
     );
 
     if (!_showSidebar) return conversation;

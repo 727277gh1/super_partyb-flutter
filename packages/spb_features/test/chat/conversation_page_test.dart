@@ -155,6 +155,8 @@ void main() {
     String? title = '测试对话',
     void Function(String, String, String)? onResolveConfirmation,
     void Function(String token, bool correct)? onResolveFeedback,
+    void Function(SpecUiAction action)? onSpecAction,
+    void Function(String agentId)? onSelectAgent,
     Future<void> Function(String)? onSend,
     Future<void> Function(String)? onCancelTurn,
     Future<bool> Function()? onLoadOlder,
@@ -168,6 +170,8 @@ void main() {
           title: title,
           onResolveConfirmation: onResolveConfirmation,
           onResolveFeedback: onResolveFeedback,
+          onSpecAction: onSpecAction,
+          onSelectAgent: onSelectAgent,
           onSend: onSend,
           onCancelTurn: onCancelTurn,
           onLoadOlder: onLoadOlder,
@@ -306,6 +310,141 @@ void main() {
       );
 
       expect(find.text('再详细点'), findsOneWidget);
+    });
+  });
+
+  group('ConversationPage 后续提问建议（agent 标注）', () {
+    Future<void> pushFollowUp(WidgetTester tester) => pushEvent(
+      tester,
+      EventTypes.followUpSuggested,
+      sseEvent(
+        'follow_up_suggested',
+        id: 'evt_fu',
+        payload: {
+          'suggestions': [
+            {'id': 's0', 'title': '总结要点', 'text': '帮我总结要点'},
+            {
+              'id': 's1',
+              'title': '查漏补缺',
+              'text': '帮我查漏补缺',
+              'agent_id': 'agt_review',
+            },
+          ],
+        },
+      ),
+    );
+
+    testWidgets('点了带 agent_id 的建议：先切 agent，再把文本回填输入框', (tester) async {
+      // 语义对齐 webapp FollowUpSuggestCard：服务端按钮动作是 copy_text
+      // 「点击复制问题，可修改后再发送」，故**回填输入框**而非直接发送。
+      // 顺序固定「切 agent → 追加」。
+      final order = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onSelectAgent: (id) => order.add('agent:$id'),
+        onSpecAction: (action) => order.add('action:${action.type.name}'),
+      );
+      await pushFollowUp(tester);
+
+      // chip 展示的是 suggestions[].text（不是 title）——`followUpSuggestions`
+      // 取 text ?? title。
+      expect(find.text('帮我查漏补缺'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('follow-up-帮我查漏补缺')));
+      await tester.pump();
+
+      expect(order, ['agent:agt_review'], reason: '切 agent 由 onSelectAgent 上报');
+      // 回填写在输入框里（不产生网络动作）：断言输入框拿到了建议文本。
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        contains('帮我查漏补缺'),
+      );
+    });
+
+    testWidgets('未标注 agent_id 的建议只回填（不误切 agent）', (tester) async {
+      final order = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onSelectAgent: (id) => order.add('agent:$id'),
+        onSpecAction: (_) {},
+      );
+      await pushFollowUp(tester);
+
+      await tester.tap(find.byKey(const ValueKey('follow-up-帮我总结要点')));
+      await tester.pump();
+
+      expect(order, isEmpty, reason: '该建议无 agent_id，不得切换');
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        contains('帮我总结要点'),
+      );
+    });
+  });
+
+  group('ConversationPage 目标进度卡（goal_gate spec）', () {
+    testWidgets('goal_gate_decision 带 spec_schema 时渲染进度卡', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.goalGateDecision,
+        sseEvent(
+          'goal_gate_decision',
+          id: 'evt_goal',
+          payload: {
+            'root': 'goal-card',
+            'goal': '整理周报',
+            'status': '进行中',
+            'spec_schema': {
+              'root': 'goal-card',
+              'elements': {
+                'goal-card': {
+                  'type': 'card',
+                  'props': {'title': '目标进度'},
+                  'children': ['goal-progress', 'goal-status'],
+                },
+                'goal-progress': {
+                  'type': 'progress',
+                  'props': {'value': 40, 'label': '2/5'},
+                },
+                'goal-status': {
+                  'type': 'metric',
+                  'props': {'value': '进行中', 'hint': '下一个：写文档'},
+                },
+              },
+            },
+          },
+        ),
+      );
+
+      expect(find.text('目标进度'), findsOneWidget);
+      expect(find.byKey(const ValueKey('spec-progress-bar')), findsOneWidget);
+      expect(find.text('进行中'), findsOneWidget);
+    });
+
+    testWidgets('spec_schema 损坏时不产出进度卡，时间线其余部分照常', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.goalGateDecision,
+        sseEvent(
+          'goal_gate_decision',
+          id: 'evt_goal',
+          payload: {'spec_schema': 'not-a-spec'},
+        ),
+      );
+
+      expect(find.byKey(const ValueKey('spec-progress-bar')), findsNothing);
+      expect(tester.takeException(), isNull, reason: '损坏的 spec 必须静默降级，不能炸掉时间线');
     });
   });
 

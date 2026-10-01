@@ -498,6 +498,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 故 build 在 userId 就绪前只渲染加载态。
   String? _userId;
 
+  /// 建议卡标注的「下一条消息由谁回答」（follow_up 的 agent_id）。
+  ///
+  /// 点击建议时设置，发送时经 [ConversationPage.onSend] 透传给控制器。
+  /// null 表示未标注（服务端 routingMode=auto 照常走分类链）。
+  String? _selectedAgentId;
+
   /// 是否正在解析 userId（防重复请求）。
   bool _resolvingUser = false;
 
@@ -665,6 +671,26 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             .resolveFeedback(token, correct: correct)
             .catchError((Object e) => debugPrint('归属反馈提交失败: $e'));
       },
+      // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
+      // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
+      onSend: (text) => controller.send(input: text, agentId: _selectedAgentId),
+      // spec 卡动作：copy_text 已由页面内部回填输入框（_draft 通道），
+      // 这里只处理 send_next_input（直接发送）。
+      onSpecAction: (action) {
+        if (action.type == SpecUiActionType.sendNextInput &&
+            action.nextInput.isNotEmpty) {
+          unawaited(
+            controller
+                .send(input: action.nextInput, agentId: _selectedAgentId)
+                .then((_) => null)
+                .catchError((Object e) {
+                  debugPrint('spec 动作发送失败: $e');
+                  return null;
+                }),
+          );
+        }
+      },
+      onSelectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
     );
   }
 

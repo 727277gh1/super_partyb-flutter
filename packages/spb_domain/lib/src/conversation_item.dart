@@ -1,3 +1,4 @@
+import 'spec_ui.dart';
 import 'tts_audio_path.dart';
 
 /// 对话中可渲染的一项（由事件归约而来）。
@@ -276,10 +277,45 @@ final class FollowUpSuggestionItem extends ConversationItem {
     required super.id,
     required super.createdAt,
     required this.suggestions,
+    this.agentIds = const [],
     super.turnId,
   });
 
   final List<String> suggestions;
+
+  /// 每条建议适用的 agent（与 [suggestions] **按下标一一对应**，缺失为 null）。
+  ///
+  /// Go 侧注释：本条建议更适合由哪个 agent 回答（已由服务端校验为 active）。
+  /// 点击建议时除追加文本外还应把选中 Agent 切过去——对齐 webapp
+  /// FollowUpSuggestCard（先切人再追加，与「选人再提问」的直觉一致）。
+  /// 历史建议（功能上线前落库）无此字段，按下标对位 null。
+  final List<String?> agentIds;
+
+  /// 下标 [i] 的建议适用的 agent；越界或未标注返回 null。
+  String? agentIdAt(int i) =>
+      i >= 0 && i < agentIds.length ? agentIds[i] : null;
+}
+
+/// 目标进度卡（`goal_gate_decision` 的 spec_schema 渲染产物）。
+///
+/// 服务端把任务表判定结果编译成 JsonUiSchema（card + progress + metric，
+/// `chatgate/goal_gate_spec.go` buildTaskSpec）。归约时保留**原始 spec**、
+/// 不在归约层展开字段——进度卡的消费场景是「时间线里看到当轮进度」，
+/// 展开字段就得同步维护两份真源；渲染层从 spec 读，与服务端产出一致。
+///
+/// 这是 webapp 的对应行为：goal_gate_decision 带 spec_schema 时每 turn 取
+/// 最后一条（多轮续跑只展示最新进度），渲染进时间线。
+final class GoalProgressItem extends ConversationItem {
+  const GoalProgressItem({
+    required super.id,
+    required super.createdAt,
+    required this.spec,
+    super.turnId,
+  });
+
+  /// 解析后的 spec 文档；服务端产出损坏（解析返回 null 的情形）时为 null，
+  /// UI 据此跳过渲染。
+  final SpecUiDocument? spec;
 }
 
 /// Agent 产出的文件（`agent.file.*`）。

@@ -14,6 +14,7 @@ import 'confirmation_card.dart';
 import 'feedback_request_card.dart';
 import 'follow_up_chips.dart';
 import 'message_composer.dart';
+import 'spec_ui_card.dart';
 import 'pending_messages_bar.dart';
 import 'thought_tile.dart';
 import 'tool_call_tile.dart';
@@ -41,6 +42,8 @@ class ConversationPage extends StatefulWidget {
     this.title,
     this.onResolveConfirmation,
     this.onResolveFeedback,
+    this.onSpecAction,
+    this.onSelectAgent,
     this.onSend,
     this.onCancelTurn,
     this.onLoadOlder,
@@ -89,6 +92,18 @@ class ConversationPage extends StatefulWidget {
   ///
   /// 为 null 时反馈卡按钮禁用。
   final void Function(String token, bool correct)? onResolveFeedback;
+
+  /// spec 卡片上的动作回调（建议卡 `copy_text`、归属反馈卡 `send_next_input`）。
+  ///
+  /// 页面只上抛动作，由 app 层决定怎么处理（copy_text → 回填输入框、
+  /// send_next_input → 直接发送），保持「页面不持有 ChatApi」的分层约定。
+  final void Function(SpecUiAction action)? onSpecAction;
+
+  /// 把选中 Agent 切到指定 id（建议卡标注了 agent_id 时）。
+  ///
+  /// 与 [onSpecAction] 分开：切 agent 是**本地 UI 状态**，不是网络动作，
+  /// app 层只需 setState 即可，走同一回调会把两件事耦合。
+  final void Function(String agentId)? onSelectAgent;
 
   /// 自定义发送逻辑。为 null 时用 `controller.send(input: text)`。
   ///
@@ -201,6 +216,12 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 服务端 CAS 保证重复请求无数据错误，但会让 UI 出现两次 loading。
   final _resolvingFeedback = <String>{};
 
+  /// 追加到输入框的草稿通道（spec 卡 copy_text 动作的「回填输入框」路径）。
+  ///
+  /// 页面持有它并传给 [MessageComposer.draft]：spec 卡在**时间线里**，而输入框
+  /// 在页面底部，两者是兄弟节点，没有更近的共同祖先可放状态。
+  final _draft = ValueNotifier<String>('');
+
   /// 正在提交「停止生成」请求。
   ///
   /// ## 为什么需要它（而不是只看 isStreaming）
@@ -278,6 +299,7 @@ class _ConversationPageState extends State<ConversationPage> {
   void dispose() {
     _itemsSub?.cancel();
     _scrollController.dispose();
+    _draft.dispose();
     super.dispose();
   }
 
@@ -477,6 +499,20 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
+  /// 建议卡点按：把建议文本回填到输入框（copy_text 的 onAppend 路径）。
+  ///
+  /// 走 [_draft] 而非直接发送：MessageComposer 在页面底部，时间线里的卡片
+  /// 无法直接访问它的 controller。
+  void _handleSuggestionAppend(String text) {
+    if (text.isEmpty) return;
+    _draft.value = text;
+  }
+
+  /// spec 卡片上的动作上抛给 app 层。
+  void _handleSpecAction(SpecUiAction action) {
+    widget.onSpecAction?.call(action);
+  }
+
   /// 提交归属反馈（防重复点击；与 [_handleResolve] 同构）。
   ///
   /// 解锁时机也一致：成功与失败都解锁——服务端 CAS 保证重复请求无数据错误，
@@ -557,7 +593,7 @@ class _ConversationPageState extends State<ConversationPage> {
               undo: widget.undoPending!,
               reloadKey: widget.pendingReloadKey ?? '',
             ),
-          MessageComposer(onSubmit: _handleSubmit),
+          MessageComposer(onSubmit: _handleSubmit, draft: _draft),
         ],
       ),
     );
@@ -629,11 +665,33 @@ class _ConversationPageState extends State<ConversationPage> {
                 _handleResolve(item.groupId, item.confirmationId, option)
           : null,
     ),
-    FollowUpSuggestionItem(:final suggestions) => FollowUpChips(
-      suggestions: suggestions,
-      // 点 chip 即发送（与 webapp 一致）。走同一个 _handleSubmit，
-      // 故 onSend 覆盖（如无归属入口）也会被尊重。
+    FollowUpSuggestionItem() => FollowUpChips(
+      suggestions: item.suggestions,
+      // 带 agent 标注的语义：点建议时先切 Agent（若标注了）再追加到输入框。
+      //
+      // 为什么从「点了直接发送」改为「回填输入框」：服务端给建议卡的动作就是
+      // copy_text（「点击复制问题，可修改后再发送」），webapp 同样走
+      // onAppend——建议是**追问的起点**，用户常要改几个字再发。直接发出去
+      // 会把「我要改一下」变成「发错了再重来」。
+      //
+      // onSpecAction / onSelectAgent 都未注入时（旧调用方）退化为点击即发送。
+      richSuggestions: [
+        for (var i = 0; i < item.suggestions.length; i++)
+          FollowUpSuggestion(
+            text: item.suggestions[i],
+            agentId: item.agentIdAt(i),
+          ),
+      ],
+      onAppend: (widget.onSpecAction != null || widget.onSelectAgent != null)
+          ? _handleSuggestionAppend
+          : null,
+      onSelectAgent: widget.onSelectAgent,
       onTap: _handleSubmit,
+    ),
+    GoalProgressItem() => SpecUiCard(
+      doc: item.spec,
+      // 进度卡里的按钮（goal_gate 的 spec 无动作，这里主要是向前兼容）。
+      onAction: _handleSpecAction,
     ),
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
     ErrorItem(:final message) => _ErrorNotice(message: message),

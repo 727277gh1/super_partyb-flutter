@@ -2,6 +2,7 @@ import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
 import 'gate_decision.dart';
+import 'spec_ui.dart';
 import 'tts_audio_path.dart';
 
 /// 把服务端事件流归约成可渲染的对话项列表。
@@ -304,6 +305,28 @@ class EventReducer {
                 createdAt: ev.createdAt,
                 turnId: ev.turnId,
                 suggestions: suggestions,
+                // 按下标对位：agent_id 是 omitempty，历史建议缺失为 null
+                // （不切 agent，保持原行为）。长度不一致时 agentIdAt 越界
+                // 返回 null，不会错位到别的建议上。
+                agentIds: ev.followUpAgentIds,
+              ),
+            );
+          }
+
+        case EventTypes.goalGateDecision:
+          // 目标进度卡：只渲染 spec_schema 能解析出来的情形——解析失败（形状
+          // 漂移/损坏）时**不产出该项**，时间线其余部分照常。
+          // 与 webapp 同语义：每 turn 取最后一条（多轮续跑只展示最新进度），
+          // 故同 turn 已有时替换。
+          final doc = parseSpecUi(ev.specSchema);
+          if (doc != null) {
+            _upsertGoalProgress(
+              items,
+              GoalProgressItem(
+                id: ev.eventId,
+                createdAt: ev.createdAt,
+                turnId: ev.turnId,
+                spec: doc,
               ),
             );
           }
@@ -366,6 +389,27 @@ class EventReducer {
       lastEventId: lastEventId,
       gateDecisions: gateDecisions,
     );
+  }
+
+  /// 插入或替换目标进度卡（同 turn 幂等，与 webapp「每 turn 取最后一条」一致）。
+  ///
+  /// 多轮续跑会产生多条 goal_gate_decision（每轮一条），不替换的话时间线
+  /// 会堆一堆过期进度。以事件 id 为身份键：replace 后 [GoalProgressItem.id]
+  /// 保持**最新那条的 id**（列表 diff 以它为准）。
+  static void _upsertGoalProgress(
+    List<ConversationItem> items,
+    GoalProgressItem incoming,
+  ) {
+    if (incoming.turnId.isNotEmpty) {
+      for (var i = 0; i < items.length; i++) {
+        final it = items[i];
+        if (it is GoalProgressItem && it.turnId == incoming.turnId) {
+          items[i] = incoming;
+          return;
+        }
+      }
+    }
+    items.add(incoming);
   }
 
   /// 插入或替换归属反馈请求（同 turn 幂等）。

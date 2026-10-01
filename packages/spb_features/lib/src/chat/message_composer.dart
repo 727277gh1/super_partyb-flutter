@@ -38,6 +38,7 @@ class MessageComposer extends StatefulWidget {
     this.enabled = true,
     this.hintText = '输入消息…',
     this.autofocus = false,
+    this.draft,
   });
 
   /// 提交回调。参数是去除首尾空白后的文本。
@@ -49,6 +50,16 @@ class MessageComposer extends StatefulWidget {
   final bool enabled;
   final String hintText;
   final bool autofocus;
+
+  /// 外部追加文本到输入框的通道（copy_text 动作的「回填输入框」路径）。
+  ///
+  /// ## 为什么用 ValueNotifier 而不是 TextEditingController 上提
+  ///
+  /// controller 上提后，发送清空、监听重建这些状态机细节就暴露给外部了，
+  /// 调用方很容易直接 setText 破坏「发送后清空」的约定。ValueNotifier 只开一个
+  /// 单向口子：外部追加，内部合并（追加到现有草稿尾部，不覆盖用户已输入的内容），
+  /// 消费后自动清空（同一文本不会被追加两次）。
+  final ValueNotifier<String>? draft;
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -63,6 +74,30 @@ class _MessageComposerState extends State<MessageComposer> {
     super.initState();
     // 输入框的「发送」按钮启用态依赖文本内容，故需监听变化重建。
     _controller.addListener(_onTextChanged);
+    // 外部追加草稿（copy_text → 回填输入框）：追加到现有内容尾部，
+    // 不覆盖用户已输入的内容；消费后清空 notifier，避免重复追加。
+    widget.draft?.addListener(_onDraftAppend);
+  }
+
+  void _onDraftAppend() {
+    final text = widget.draft?.value ?? '';
+    if (text.isEmpty) return;
+    widget.draft!.value = '';
+    final existing = _controller.text;
+    _controller.text = existing.isEmpty ? text : '$existing\n$text';
+    _controller.selection = TextSelection.collapsed(
+      offset: _controller.text.length,
+    );
+    _focusNode.requestFocus();
+  }
+
+  @override
+  void didUpdateWidget(covariant MessageComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.draft != oldWidget.draft) {
+      oldWidget.draft?.removeListener(_onDraftAppend);
+      widget.draft?.addListener(_onDraftAppend);
+    }
   }
 
   @override

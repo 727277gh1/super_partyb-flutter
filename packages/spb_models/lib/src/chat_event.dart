@@ -140,6 +140,16 @@ class ChatEvent {
   /// TTS 音频地址（`tts_completed`）。
   String? get audioUrl => _str('audio_url') ?? _str('url');
 
+  /// 服务端编译的 UI 描述（`spec_schema`），供 spec 渲染器消费。
+  ///
+  /// 形状是 JsonUiSchema `{root, elements}`，解析在 `spb_domain` 的
+  /// `parseSpecUi`（本包只做字段镜像，不含解析规则）。
+  ///
+  /// 当前三类生产者：`goal_gate_decision`（进度卡）、`follow_up_suggested`
+  /// （建议列表卡）、`routing_feedback_request`（归属反馈卡，但客户端按
+  /// options 渲染，不用它）。
+  Object? get specSchema => payload?['spec_schema'];
+
   /// 后续提问建议列表（`follow_up_suggested`）。
   List<String> get followUpSuggestions {
     final raw = payload?['suggestions'] ?? payload?['items'];
@@ -151,6 +161,23 @@ class ChatEvent {
           return '';
         })
         .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  /// 每条建议适用的 agent（`suggestions[].agent_id`，可选）。
+  ///
+  /// 与 [followUpSuggestions] **按下标一一对应**：服务端
+  /// `FollowUpSuggestion.AgentID` 是 omitempty（历史建议无此字段），
+  /// 缺失时对应下标为 null——点击该建议保持原有行为（不切 agent）。
+  List<String?> get followUpAgentIds {
+    final raw = payload?['suggestions'] ?? payload?['items'];
+    if (raw is! List) return const [];
+    return raw
+        .map((e) {
+          if (e is! Map) return null;
+          final v = e['agent_id']?.toString() ?? '';
+          return v.isEmpty ? null : v;
+        })
         .toList(growable: false);
   }
 

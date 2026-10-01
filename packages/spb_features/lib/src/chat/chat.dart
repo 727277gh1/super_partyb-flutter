@@ -38,6 +38,7 @@ export 'message_composer.dart';
 export 'pending_messages_bar.dart';
 export 'pending_confirmations_page.dart';
 export 'search_page.dart';
+export 'spec_ui_card.dart';
 export 'thought_tile.dart';
 export 'tool_call_tile.dart';
 export 'user_message_bubble.dart';
