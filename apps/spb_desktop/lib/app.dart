@@ -138,6 +138,9 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
       debugShowCheckedModeBanner: false,
       theme: SpbTheme.light(),
       darkTheme: SpbTheme.dark(),
+      // 用户选择的主题模式（跟随系统 / 浅色 / 深色），持久化在
+      // `ui.theme_mode`。默认 system = 跟随系统，与改动前行为一致。
+      themeMode: ref.watch(themeModeProvider),
       routerConfig: _router,
     );
   }

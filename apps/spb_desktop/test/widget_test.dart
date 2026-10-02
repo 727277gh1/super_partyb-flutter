@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -6,11 +7,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
+import 'package:path/path.dart' as p;
 
 import 'package:drift/native.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_data/spb_data.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -154,6 +157,13 @@ Future<TestHarness> pumpApp(
   /// 同步目录初始值（同步页用）。默认未选。
   String? syncLocalRoot,
 
+  /// 测试用数据库。默认在内存库上新建。
+  ///
+  /// 需要预置**同步状态 / 目录绑定**的用例传入自己 seed 过的实例——
+  /// 见「已同步则直接打开」用例：它要在库里写入 workspace 布局的已同步记录，
+  /// 才能让 `deliverableLocalIndexProvider` 真的读到东西。
+  AppDatabase? database,
+
   /// 设置页注入点：读取设置。默认「未选目录 + 全部范围」。
   LoadSyncSettings? loadSyncSettings,
 
@@ -181,6 +191,30 @@ Future<TestHarness> pumpApp(
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
+
+  // 默认的 `/api/auth/me`。
+  //
+  // ## 为什么现在必须无条件 mock（此前只有部分用例自己注册）
+  //
+  // 对话列表页现在会订阅 `groupUpdatesProvider`，而该 provider 要先解析出
+  // userId 才能拿到控制器（`family` 的键是 userId，见 providers.dart 的
+  // issue #2 说明）。于是**任何挂在首页的用例**都会触发 `/api/auth/me`。
+  // 不 mock 就会留下一个未结算的请求（→「A Timer is still pending」）。
+  //
+  // 注册在 `beforePump` **之前**：mock 匹配是「后者覆盖前者」，这样需要
+  // 指定 userId 的用例仍可在 `beforePump` 里注册自己的 `/me` 覆盖本默认值。
+  adapter.onGet(
+    '/api/auth/me',
+    (server) => server.reply(200, {
+      'id': 'usr_TEST',
+      'email': 'test@example.com',
+      'name': 'Test',
+      'role': 'member',
+      'roles': ['member'],
+      'permissions': <String>[],
+      'status': 'active',
+    }),
+  );
 
   // 供用例在 pumpWidget **之前**注册 mock。
   //
@@ -224,11 +258,21 @@ Future<TestHarness> pumpApp(
       ),
       // 真实实现要开系统浏览器，测试里换成可控的假实现。
       signInActionProvider.overrideWithValue(signInAction ?? () async => null),
-      if (sseClient != null) sseClientProvider.overrideWithValue(sseClient),
+      // 默认注入假 SSE 客户端。
+      //
+      // ## 为什么不能再用真实的 SseClient
+      //
+      // 对话列表页现在会调 `ensureConnected()` 建立共享连接。真实 `SseClient`
+      // 走 `ResponseType.stream`，`DioAdapter` 不模拟流式响应，于是连接失败后
+      // 进入重连退避——留下未结算的 Timer，flutter_test 直接报
+      // 「A Timer is still pending even after the widget tree was disposed」。
+      //
+      // 需要观察连接行为的用例显式传自己的 fake（见 `connectedPaths`）。
+      sseClientProvider.overrideWithValue(sseClient ?? _FakeSseClient()),
       // 内存库：真实的 appDatabaseProvider 会在 ~/.local/share 下建文件，
       // 让测试污染开发者的同步状态（且用例之间互相干扰）。
       appDatabaseProvider.overrideWith((ref) {
-        final db = AppDatabase(NativeDatabase.memory());
+        final db = database ?? AppDatabase(NativeDatabase.memory());
         ref.onDispose(db.close);
         return db;
       }),
@@ -318,6 +362,22 @@ class _FakeUfsApi extends UfsApi {
   /// `listFiles` 收到的 `pathPrefix`（按调用顺序）。
   final listCalls = <String?>[];
 
+  /// `download` 收到的 file id（按调用顺序）。
+  ///
+  /// 用来断言「已同步的交付物不触发下载」——只断言打开路径还不够：实现若先
+  /// 下载再打开，路径可能看起来也对（取决于实现），但多了一次网络请求。
+  final downloadCalls = <String>[];
+
+  @override
+  Future<UfsDownload> download(String fileId, {String? ifNoneMatch}) async {
+    downloadCalls.add(fileId);
+    return UfsDownload(
+      notModified: false,
+      bytes: const [1, 2, 3],
+      etag: 'W/"test"',
+    );
+  }
+
   @override
   Future<UfsFilePage> listFiles({
     String? pathPrefix,
@@ -371,6 +431,20 @@ void main() {
       (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
       queryParameters: {'status': 'pending', 'limit': 50},
     );
+    // 对话列表页要解析 userId 才能建 SSE（groupUpdatesProvider 的 family 键），
+    // 故必须 mock `/me`——否则请求悬空，留下未结算的 Timer。
+    adapter.onGet(
+      '/api/auth/me',
+      (server) => server.reply(200, {
+        'id': 'usr_1',
+        'email': 'a@b.c',
+        'name': 'Test',
+        'role': 'member',
+        'roles': ['member'],
+        'permissions': <String>[],
+        'status': 'active',
+      }),
+    );
 
     final router = GoRouter(
       routes: buildDesktopRoutes(),
@@ -388,6 +462,10 @@ void main() {
           InMemoryTokenStore(_freshTokens()),
         ),
         signInActionProvider.overrideWithValue(() async => null),
+        // 对话列表页会订阅 groupUpdatesProvider 并建立共享 SSE 连接。
+        // 真实 SseClient 走流式响应，DioAdapter 不模拟，会留下重连 Timer
+        // （→「A Timer is still pending」），故注入假实现。
+        sseClientProvider.overrideWithValue(_FakeSseClient()),
       ],
     );
     addTearDown(container.dispose);
@@ -431,6 +509,16 @@ void main() {
   });
 
   testWidgets('/settings 渲染完整设置页（含同步入口与各配置项）', (tester) async {
+    // 设置页是 ListView，**惰性构建**：屏幕外的条目在树里根本不存在。
+    // 新增「外观」区块后页面变高，默认 800×600 下底部的清理入口已落到屏幕外
+    // → find 不到（与同文件其它设置页用例同一处理）。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     final h = await pumpApp(tester);
 
     h.router.go(SpbRoutes.settings);
@@ -916,6 +1004,276 @@ void main() {
     );
   });
 
+  /// 小程序工作台测试用的载荷构造（形状同 `internal/server/miniapp.go`）。
+  ///
+  /// 抽成函数而不是内联字面量：工作列表项与详情的字段高度重叠（`progress` /
+  /// `status_label` 等），两处手写容易漂移成「测试通过但形状与真源不同」。
+  Map<String, dynamic> workJson({
+    required String id,
+    String title = '某个工作',
+    String status = 'running',
+    String statusLabel = '运行中',
+    int total = 2,
+    int completed = 1,
+  }) => {
+    'id': id,
+    'title': title,
+    'status': status,
+    'status_label': statusLabel,
+    'progress': {'total': total, 'completed': completed, 'percent': 50},
+    'pending_confirmation_count': 0,
+    'latest_summary': null,
+    'latest_artifact': null,
+    'created_at': '2024-03-05T08:09:10Z',
+    'updated_at': '2024-03-05T08:09:12Z',
+  };
+
+  Map<String, dynamic> workDetailJson({
+    required String id,
+    String title = '某个工作',
+    String status = 'running',
+    String statusLabel = '运行中',
+  }) => {
+    'work': {
+      ...workJson(
+        id: id,
+        title: title,
+        status: status,
+        statusLabel: statusLabel,
+      ),
+      'steps': <Map<String, dynamic>>[],
+      'pending_confirmations': <Map<String, dynamic>>[],
+      'artifacts': <Map<String, dynamic>>[],
+      'recent_events': <Map<String, dynamic>>[],
+      'can_send_message': true,
+      'can_stop': true,
+      'can_complete': true,
+    },
+  };
+
+  /// 挂上详情页需要的三个端点（详情 / 事件 / 产物）。
+  void mockWorkDetail(
+    DioAdapter adapter,
+    String workId, {
+    String title = '某个工作',
+  }) {
+    adapter.onGet(
+      '/chat/miniapp/works/$workId',
+      (server) => server.reply(200, workDetailJson(id: workId, title: title)),
+    );
+    adapter.onGet(
+      '/chat/miniapp/works/$workId/events',
+      (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+      queryParameters: {'limit': 100},
+    );
+    adapter.onGet(
+      '/chat/miniapp/works/$workId/artifacts',
+      (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+    );
+  }
+
+  testWidgets('主题模式：默认跟随系统，切换后即时生效并落盘', (tester) async {
+    // 端到端验证：默认 system；设置页选「深色」后 MaterialApp 立刻变；
+    // 值真的写进了偏好库（不是只改内存）。
+    final h = await pumpApp(tester, mockGroups: false);
+
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
+      ThemeMode.system,
+      reason: '未设置过时必须跟随系统（与改动前行为一致）',
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-theme-dark')));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
+      ThemeMode.dark,
+      reason: '选中即生效——主题是即时反馈项，不该等「保存」按钮',
+    );
+    expect(h.container.read(themeModeProvider), ThemeMode.dark);
+
+    final stored = await h.container
+        .read(preferencesStoreProvider)
+        .getString(SpbThemeMode.prefKey);
+    expect(
+      stored,
+      SpbThemeMode.encode(ThemeMode.dark),
+      reason: '必须持久化，否则重启后设置丢失',
+    );
+  });
+
+  testWidgets('主题模式：启动时从偏好库恢复（重启后不丢）', (tester) async {
+    final h = await pumpApp(tester, mockGroups: false);
+
+    await h.container
+        .read(preferencesStoreProvider)
+        .setString(SpbThemeMode.prefKey, SpbThemeMode.encode(ThemeMode.light));
+    await h.container.read(themeModeProvider.notifier).restore();
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
+      ThemeMode.light,
+      reason: '恢复的是偏好里的值，而不是恒为 system',
+    );
+  });
+
+  group('小程序工作台（桌面端接线）', () {
+    testWidgets('对话列表点「工作台」进入工作列表', (tester) async {
+      // 端到端验证 router 把首页的 onOpenWorks 接到了真实路由与端点。
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/miniapp/works',
+            (server) => server.reply(200, {
+              'items': [workJson(id: 'w1', title: '桌面端工作')],
+            }),
+            queryParameters: {'status': 'active', 'limit': 20},
+          );
+        },
+      );
+
+      // 入口只在注入了 onOpenWorks 时出现（见 GroupListPage.onOpenWorks）。
+      await tester.tap(find.byKey(const ValueKey('group-list-works')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.works,
+        reason: '点工作台入口必须真的导航到工作列表，否则入口是摆设',
+      );
+      expect(find.text('桌面端工作'), findsOneWidget);
+      expect(find.text('运行中'), findsOneWidget);
+    });
+
+    testWidgets('工作列表点条目进入详情（work.id 就是 group id）', (tester) async {
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/miniapp/works',
+            (server) => server.reply(200, {
+              'items': [workJson(id: 'grp_w9', title: '报表工作')],
+            }),
+            queryParameters: {'status': 'active', 'limit': 20},
+          );
+          mockWorkDetail(adapter, 'grp_w9', title: '报表工作');
+        },
+      );
+
+      h.router.go(SpbRoutes.works);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      await tester.tap(find.byKey(const ValueKey('miniapp-work-grp_w9')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.work('grp_w9'),
+        reason: 'work.id 就是 group id，直接用作路径参数',
+      );
+      expect(
+        find.byKey(const ValueKey('miniapp-work-detail-page')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('新建工作：POST /chat/miniapp/works 后进入新工作详情', (tester) async {
+      // 端到端验证 router 把「点新建」接到了真实端点，且拿到返回的 workId 导航。
+      Map<String, dynamic>? createBody;
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/miniapp/works',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'status': 'active', 'limit': 20},
+          );
+          adapter.onPost(
+            '/chat/miniapp/works',
+            (server) => server.reply(201, {
+              ...workDetailJson(id: 'grp_new', title: '新会话'),
+              'dispatch': null,
+            }),
+            data: Matchers.any,
+          );
+          mockWorkDetail(adapter, 'grp_new', title: '新会话');
+        },
+      );
+      h.dio.interceptors.insert(
+        0,
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            if (options.path.endsWith('/chat/miniapp/works') &&
+                options.method == 'POST') {
+              createBody = options.data is Map
+                  ? Map<String, dynamic>.from(options.data as Map)
+                  : null;
+            }
+            handler.next(options);
+          },
+        ),
+      );
+
+      h.router.go(SpbRoutes.works);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      await tester.tap(find.byKey(const ValueKey('miniapp-works-create')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(createBody, isNotNull, reason: '必须真的发出建工作请求');
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.work('grp_new'),
+        reason: '新建后直接进详情——列表里一堆同名「新会话」看不出哪个是刚建的',
+      );
+    });
+
+    testWidgets('两条工作台路由不会互相抢匹配', (tester) async {
+      // `/miniapp/works` 是 2 段、`/miniapp/works/:workId` 是 3 段，段数不同。
+      // 这条用例守住「将来有人把它改成嵌套子路由而引入歧义」。
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/miniapp/works',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'status': 'active', 'limit': 20},
+          );
+          mockWorkDetail(adapter, 'grp_x');
+        },
+      );
+
+      h.router.go(SpbRoutes.works);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.byKey(const ValueKey('miniapp-works-page')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('miniapp-work-detail-page')),
+        findsNothing,
+      );
+
+      h.router.go(SpbRoutes.work('grp_x'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      expect(
+        find.byKey(const ValueKey('miniapp-work-detail-page')),
+        findsOneWidget,
+      );
+    });
+  });
+
   group('侧边栏（桌面端接线：交付物 / 待办 / 诊断）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。
@@ -1061,19 +1419,157 @@ void main() {
     });
   });
 
+  // =========================================================================
+  group('交付物「已同步则直接打开」（同步索引打通）', () {
+    /// 最近一次 [seedSyncState] 建好的库（供 pumpApp 的 database 参数使用）。
+    late AppDatabase seededDb;
+
+    /// 建临时同步目录 + 落一个真实文件 + 在库里写入「已同步」记录与目录绑定。
+    ///
+    /// ## 为什么整段包在 `tester.runAsync` 里
+    ///
+    /// `testWidgets` 的测试体跑在 `FakeAsync` 区域：真实文件 IO（
+    /// `createTemp` / `writeAsString`）与真实事件循环绑定，fake 时钟不会推进它，
+    /// 直接 `await` 会**挂死**（实测：10 分钟超时后才报 `TimeoutException`）。
+    /// `runAsync` 临时切回真实异步，专用于这类测试前置副作用。
+    ///
+    /// ## 为什么要落**真实文件**
+    ///
+    /// provider 会 `File(abs).existsSync()` 校验（索引记的是「曾经同步过」，
+    /// 用户可能手动删了）。不建真文件的话菜单项恒为禁用，用例会以
+    /// 「实现看起来没生效」的形式失败。
+    Future<Directory> seedSyncState(
+      WidgetTester tester, {
+      required String gid,
+      required String rel,
+      bool markSynced = true,
+    }) async {
+      late Directory root;
+      late AppDatabase db;
+      await tester.runAsync(() async {
+        root = await Directory.systemTemp.createTemp('spb-sync-');
+        if (markSynced) {
+          final file = File(p.join(root.path, gid, rel));
+          await file.parent.create(recursive: true);
+          await file.writeAsString('# 已同步的交付物\n');
+        }
+        db = AppDatabase(NativeDatabase.memory());
+        final store = DriftSyncStateStore(db);
+        // 先绑目录再写状态：bindLocalRoot 在目录**变化**时会清空状态，
+        // 顺序反了会把刚写入的记录清掉。
+        await store.bindLocalRoot(root.path);
+        if (markSynced) {
+          await store.save(
+            workspaceStateKey,
+            SyncState(
+              cursor: '2026-01-01T00:00:00Z',
+              files: {'$gid/$rel': const SyncedFile(size: 21)},
+            ),
+          );
+        }
+      });
+      // 同步删除（不用异步版本）：tearDown 阶段可能已不在 runAsync 区域内。
+      addTearDown(() {
+        if (root.existsSync()) root.deleteSync(recursive: true);
+        db.close();
+      });
+      // 把 db 也带出去：pumpApp 要它作为 appDatabaseProvider 的 override。
+      seededDb = db;
+      return root;
+    }
+
+    /// 进入某个 group 的对话页所需的 mock（含侧边栏依赖的两个端点）。
+    void mockChat(DioAdapter adapter, String gid) {
+      adapter.onGet(
+        '/api/auth/me',
+        (server) => server.reply(200, {
+          'id': 'usr_REAL',
+          'email': 'a@b.c',
+          'name': 'Test',
+          'role': 'member',
+          'roles': ['member'],
+          'permissions': <String>[],
+          'status': 'active',
+        }),
+      );
+      adapter.onGet(
+        '/chat/groups/$gid/timeline',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+      adapter.onGet(
+        '/users/usr_REAL/chat/messages/pending',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        queryParameters: {'group_id': gid, 'limit': 20},
+      );
+    }
+
+    testWidgets('已同步的交付物不触发下载即可打开', (tester) async {
+      const gid = 'grp_sync';
+      const rel = 'reports/spec.md';
+      final root = await seedSyncState(tester, gid: gid, rel: rel);
+
+      final sse = _FakeSseClient();
+      final caps = _FakeDesktopCapabilities();
+      final ufs = _FakeUfsApi();
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat(gid),
+        mockGroups: false,
+        sseClient: sse,
+        ufsApi: ufs,
+        capabilities: caps,
+        database: seededDb,
+        beforePump: (adapter) => mockChat(adapter, gid),
+      );
+      ufs.entries = [_ufsFile(gid, rel)];
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      expect(find.text('spec.md'), findsOneWidget);
+
+      // 不点「下载」，直接打开。
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      final item = tester.widget<PopupMenuItem<String>>(
+        find.widgetWithText(PopupMenuItem<String>, '用默认程序打开'),
+      );
+      expect(item.enabled, isTrue, reason: '已同步的文件应可直接打开（无需下载）');
+
+      await tester.tap(find.text('用默认程序打开'));
+      await tester.pumpAndSettle();
+
+      expect(caps.openedPaths, hasLength(1));
+      expect(caps.openedPaths.single, p.join(root.path, gid, rel));
+      // 关键断言：没有发生下载（UFS 下载端点一次都没被请求）。
+      expect(ufs.downloadCalls, isEmpty, reason: '已同步的文件不应触发下载');
+    });
+  });
+
   testWidgets('currentUserProvider 走 mock 的 /api/auth/me', (tester) async {
-    final h = await pumpApp(tester, mockGroups: false);
-    h.adapter.onGet(
-      '/api/auth/me',
-      (server) => server.reply(200, {
-        'id': 'usr_1',
-        'email': 'a@b.c',
-        'name': 'Test',
-        'role': 'member',
-        'roles': ['member'],
-        'permissions': <String>[],
-        'status': 'active',
-      }),
+    // `/me` 必须在 `beforePump` 里注册：`pumpApp` 自带一个默认 `/me`（首页
+    // 现在会解析 userId 以建 SSE），而 mock 是「后者覆盖前者」——若在
+    // `pumpApp` 返回后才注册，首帧那次请求早已用默认值发出去了。
+    final h = await pumpApp(
+      tester,
+      mockGroups: false,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_1',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+      },
     );
 
     // 触发请求并推进假时钟。
@@ -1880,6 +2376,12 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   /// 收到的开机自启设置调用。
   final List<bool> launchAtStartupCalls = [];
 
+  /// 收到的「用默认程序打开」路径（按顺序）。
+  final List<String> openedPaths = [];
+
+  /// 收到的「在文件管理器中定位」路径（按顺序）。
+  final List<String> revealedPaths = [];
+
   /// `isLaunchAtStartupEnabled` 的返回值（用例可改以验证初值来源）。
   bool launchAtStartupEnabled = false;
 
@@ -1921,9 +2423,16 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   Future<String?> pickDirectory({String? title}) async => null;
 
   @override
-  Future<bool> revealPath(String path) async => false;
+  Future<bool> revealPath(String path) async {
+    revealedPaths.add(path);
+    return true;
+  }
+
   @override
-  Future<bool> openFile(String path) async => false;
+  Future<bool> openFile(String path) async {
+    openedPaths.add(path);
+    return true;
+  }
 
   @override
   Future<void> dispose() async {}

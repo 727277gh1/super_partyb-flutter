@@ -61,6 +61,15 @@ class SpbRoutes {
 
   /// 我的最近轮次。
   static const myTurns = '/my-turns';
+
+  /// 小程序工作台：工作列表。
+  ///
+  /// 与移动端**路径逐字一致**（`/miniapp/works`）：`work.id` 就是 group id
+  /// （服务端没有独立的 works 表），两端共用同一 id 空间。
+  static const works = '/miniapp/works';
+
+  /// 工作详情。
+  static String work(String workId) => '/miniapp/works/$workId';
 }
 
 /// 桌面端路由表。
@@ -255,6 +264,18 @@ List<RouteBase> buildDesktopRoutes() {
           path: 'overlay',
           builder: (context, state) => const _OverlayQuickCapturePage(),
         ),
+        // 小程序工作台：与移动端同路径。两条路由**不会互相抢匹配**
+        // （`/miniapp/works` 是 2 段，`/miniapp/works/:workId` 是 3 段，
+        // 段数不同），故不依赖声明顺序——移动端有回归用例守着同一结论。
+        GoRoute(
+          path: 'miniapp/works',
+          builder: (context, state) => const _WorksPage(),
+        ),
+        GoRoute(
+          path: 'miniapp/works/:workId',
+          builder: (context, state) =>
+              _WorkDetailPage(workId: state.pathParameters['workId'] ?? ''),
+        ),
       ],
     ),
   ];
@@ -304,10 +325,23 @@ class _HomePage extends ConsumerWidget {
         .maybeWhen(data: (n) => n, orElse: () => 0);
     return GroupListPage(
       api: api,
+      // group 变更实时增量更新（新建/删除/归档/改名）。
+      //
+      // 列表页自己无法收到事件：它不持有 SSE 连接（连接由对话页 `start()`
+      // 建立）。本 provider 用 `ensureConnected` 确保连接在，再转发变更流
+      // ——详见 provider 文档。
+      //
+      groupUpdates: ref.watch(groupUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
+      // 工作台（小程序 BFF 投影层）。
+      //
+      // 桌面端与移动端接的是同一组端点（见 `providers.dart` 的说明），
+      // 故这里与移动端接线同构。用 `push` 而非 `go`：工作台是从列表**深入**
+      // 的一层，返回应回到对话列表并保留滚动位置。
+      onOpenWorks: () => context.push(SpbRoutes.works),
       pendingConfirmationCount: pendingCount,
       // 不需要 userId：`POST /chat/groups` 的身份来自网关注入的 `X-User-ID`
       // （服务端 `chatHandlers.userID` 优先取该头），`ChatApi.createGroup` 的
@@ -471,6 +505,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// controller.gateDecisions 的订阅（与 items 平行，见领域层说明）。
   StreamSubscription<List<GateDecision>>? _gateSub;
 
+  /// controller.activities 的订阅（与 items 平行，见领域层说明）。
+  StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
+
   /// 最近一次归约出的对话项快照。
   ///
   /// ## 为什么在 State 里存一份而不是每次 build 读 controller.snapshot
@@ -483,6 +520,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   /// 最近一次归约出的 gate 决策快照（同上）。
   List<GateDecision> _gateDecisions = const [];
+
+  /// 最近一次归约出的执行中活动快照（同上，按 turnId 索引）。
+  Map<String, TurnActivitySnapshot> _activities = const {};
 
   /// 最近一次归约出的工具调用快照（平铺、非按 turn 分组）。
   ///
@@ -514,6 +554,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void dispose() {
     _itemsSub?.cancel();
     _gateSub?.cancel();
+    _activitiesSub?.cancel();
     super.dispose();
   }
 
@@ -564,9 +605,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       _gateSub = controller.gateDecisions.listen(_onGateDecisionsChanged);
       _onGateDecisionsChanged(controller.gateDecisionsSnapshot);
     }
-    if (_connectedUserId == userId) {
+    if (_activitiesSub == null) {
+      // 执行中活动快照走独立流（见 TurnActivitySnapshot 类文档）。
+      // 与 gate 同取向：先订阅再同步一次快照，避免错过订阅前已到达的事件。
+      _activitiesSub = controller.activities.listen(_onActivitiesChanged);
+      _onActivitiesChanged(controller.activitiesSnapshot);
+    }
+    if (_connectedUserId == userId || controller.isConnected) {
       // 同一 userId 内切 group：复用已有连接（不调 connect，游标保留）。
       await controller.switchGroup(widget.groupId);
+      _connectedUserId = userId;
     } else {
       // 首次聚焦：建立 SSE 连接。
       await controller.start(groupId: widget.groupId);
@@ -618,6 +666,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 不需要 userId：该端点的路径里没有 user_id（与消息流端点不同），
       // 身份来自网关注入的 `X-User-ID`。
       onCancelTurn: (turnId) => api.cancelTurn(turnId),
+      // 「立即发送」：把服务端缓冲区里 pending 的消息立即合并成 turn。
+      //
+      // 用带类型的 flush：服务端在「多条 pending 且未指定策略」时返回
+      // **HTTP 200 + confirmation_required**（什么都没提交），返回 void 的
+      // 版本会把这种待确认当成成功（见 `flushMessagesProvider`）。
+      onFlush: () => ref.read(flushMessagesProvider)(widget.groupId),
+      // 执行中活动指示（turn_activity）：长 turn 的静默期给用户可见进展。
+      //
+      // 传「流 + 首帧快照」两份：快照是同步初值（避免事件在订阅前已到达时
+      // 要等下一次心跳才出现），流是后续增量。
+      activities: controller.activities,
+      activitiesSnapshot: _activities,
       // 向上翻页：加载更早历史。
       //
       // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，
@@ -722,6 +782,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                       ref.read(downloadDeliverableProvider)(file),
                   onOpen: (path) => ref.read(openDeliverableProvider)(path),
                   onReveal: (path) => ref.read(revealDeliverableProvider)(path),
+                  // 已同步到本地目录的交付物直接可打开（不必先在本面板下载）。
+                  //
+                  // 用 `watch` 而不是 `read`：索引是异步加载的（FutureProvider），
+                  // watch 让「加载完成」触发本页重建，菜单项从禁用变为可用；
+                  // read 会永远拿到第一次构建时那个「尚未加载」的版本。
+                  resolveLocalPath: ref.watch(
+                    resolveLocalDeliverableProvider(widget.groupId),
+                  ),
                   // SSE 推送新文件时 bump（见 _onItemsChanged）。
                   reloadToken: _deliverablesReloadToken,
                 ),
@@ -827,6 +895,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onGateDecisionsChanged(List<GateDecision> decisions) {
     if (!mounted) return;
     setState(() => _gateDecisions = decisions);
+  }
+
+  /// 监听 controller.activities：驱动对话页的空窗期进度指示。
+  void _onActivitiesChanged(Map<String, TurnActivitySnapshot> activities) {
+    if (!mounted) return;
+    setState(() => _activities = activities);
   }
 
   /// 监听 controller.items：更新待办面板数据，并在出现新的 `AgentFileItem`
@@ -981,6 +1055,9 @@ class _SettingsPage extends ConsumerWidget {
       capabilities: ref.watch(desktopCapabilitiesProvider),
       onOpenDirectory: (path) =>
           ref.read(desktopCapabilitiesProvider).revealPath(path),
+      // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。
+      loadThemeMode: ref.watch(loadThemeModeProvider),
+      saveThemeMode: ref.watch(saveThemeModeProvider),
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
@@ -1025,6 +1102,9 @@ class _QuickCapturePage extends ConsumerWidget {
 
     return QuickCapturePage(
       submit: (input) => useCase.submit(input: input),
+      // 路由预览（服务端当前只返回**兜底默认 agent**，且响应里没有 group_id；
+      // 页面文案已如实标注，见 `QuickCapturePage._previewLine`）。
+      previewRouting: ref.watch(previewRoutingProvider),
       onQueued: (outcome) {
         // 无归属入口提交成功后导航到服务端判定的对话。
         //
@@ -1101,6 +1181,62 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
         _exitOverlayWindow(ref);
         if (context.mounted) context.go(SpbRoutes.home);
       },
+    );
+  }
+}
+
+/// 工作列表页（小程序工作台）。
+///
+/// 与移动端 `_WorksPage` 同构（端点与页面组件都共用）：workId 就是 group id。
+class _WorksPage extends ConsumerWidget {
+  const _WorksPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return WorksPage(
+      loadWorks: ref.watch(loadMiniappWorksProvider),
+      onOpenWork: (work) => context.push(SpbRoutes.work(work.id)),
+      // 新建后直接进详情：新工作的标题是占位符「新会话」，列表里一堆同名条目
+      // 看不出哪个是自己刚建的；进详情才能看到状态与进度。
+      //
+      // 导航放在装配层（与 `onOpenWork` 同一约定）：本页拿到的是 `workId`
+      // 而非完整的 `MiniappWork`，页面内部造不出来。
+      onCreateWork: () async {
+        final workId = await ref.read(createMiniappWorkProvider)();
+        if (context.mounted) context.push(SpbRoutes.work(workId));
+        return workId;
+      },
+    );
+  }
+}
+
+/// 工作详情页。
+///
+/// ## 为什么用 `family(workId)` 而不是在页面内部取
+///
+/// 十个注入点全部依赖 workId，若在页面内部从路由读，页面就得知道路由——那是
+/// app 装配层的事。用 family 把它变成构造参数，页面保持纯注入（可测）。
+///
+/// 用 `context.push` 而非 `go`：详情是从列表**深入**的一层，返回应回到列表
+/// 并保留滚动位置。
+class _WorkDetailPage extends ConsumerWidget {
+  const _WorkDetailPage({required this.workId});
+
+  final String workId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return WorkDetailPage(
+      loadDetail: ref.watch(loadMiniappWorkDetailProvider(workId)),
+      loadEvents: ref.watch(loadMiniappWorkEventsProvider(workId)),
+      loadArtifacts: ref.watch(loadMiniappArtifactsProvider(workId)),
+      downloadArtifact: ref.watch(downloadMiniappArtifactProvider(workId)),
+      saveArtifact: ref.watch(saveMiniappArtifactProvider),
+      sendMessage: ref.watch(sendMiniappMessageProvider(workId)),
+      complete: ref.watch(completeMiniappWorkProvider(workId)),
+      stop: ref.watch(stopMiniappWorkProvider(workId)),
+      resolveConfirmation: ref.watch(resolveMiniappConfirmationProvider),
+      onUploadFile: ref.watch(uploadMiniappFileProvider(workId)),
     );
   }
 }

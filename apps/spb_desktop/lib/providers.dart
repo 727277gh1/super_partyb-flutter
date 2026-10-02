@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_data/spb_data.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -506,6 +507,66 @@ final searchChatProvider = Provider<SearchChat>((ref) {
   };
 });
 
+/// 路由预览（供悬浮输入窗的「预览」入口注入）。
+///
+/// ## 它预览的是 **agent**，不是归属 group
+///
+/// 服务端 `POST /users/:uid/chat/routing-preview` 的响应里**没有 `group_id`**，
+/// 且当前只走**兜底默认 agent**（embedding 级联已下线）。UI 文案必须如实反映
+/// （见 `QuickCapturePage._previewLine`），不得写成「将发送到某对话」。
+///
+/// 与 [searchChatProvider] 同理：userId 在这里解析，失败就让它抛（可诊断），
+/// 不做空串兜底（`/users//chat/routing-preview` 的 404 完全指不出根因）。
+///
+/// ## 为什么返回 null 而不是抛
+///
+/// 页面注入点的签名是 `Future<RoutingPreview?>`（见 `PreviewRouting`），
+/// 返回 null 表示「取不到」。**但这里不吞异常**——`SpbError` 原样上抛，
+/// 由页面的 catch 转成用户可见提示。吞掉会让「网络断了」与「服务端说没有
+/// agent」变得无法区分。
+final previewRoutingProvider = Provider<PreviewRouting>((ref) {
+  return (String input) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    final raw = await ref
+        .read(chatApiProvider)
+        .routingPreview(userId, input: input);
+    return RoutingPreview.fromJson(raw);
+  };
+});
+
+/// 「立即发送」：把服务端缓冲区里 pending 的消息立即合并提交。
+///
+/// ## 为什么不用 [ChatApi.flushMessages]（那个返回 void）
+///
+/// 服务端在「有多条 pending 且未指定冲突策略」时返回 **HTTP 200** 加
+/// `confirmation_required`（**什么都没提交**）。返回 void 的版本会把这种
+/// 「待确认」当成成功，用户点完以为发好了。故这里用 `flushMessagesTyped`
+/// 并自己处理待确认分支。
+///
+/// ## 待确认时抛错而不是静默
+///
+/// 本 Provider 的注入点签名是 `Future<void>`（`MessageComposer.onFlush`），
+/// 没有返回值可以承载「需要用户选策略」。把它当成失败上报（带可操作的文案）
+/// 是安全的一侧：用户会重试/查看待处理栏，而不是以为已发送。
+///
+/// 真正的「选策略」UI 属后续增强（服务端的 `options` 已解析进 `FlushResult`）。
+final flushMessagesProvider = Provider<Future<void> Function(String)>((ref) {
+  return (String groupId) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    final result = await ref
+        .read(chatApiProvider)
+        .flushMessages(userId, groupId: groupId);
+    if (result.needsConfirmation) {
+      throw ValidationError(
+        '有多条待处理消息，需要先选择合并方式（${result.options.join(' / ')}）',
+      );
+    }
+    if (!result.committed) {
+      throw const ValidationError('没有可立即发送的待处理消息');
+    }
+  };
+});
+
 // ==================== 跨 group 待确认收件箱 ====================
 //
 // `GET /chat/confirmations` 身份来自网关注入的 `X-User-ID`（不需客户端传
@@ -565,6 +626,67 @@ final chatStreamControllerProvider = Provider.autoDispose
       ref.onDispose(controller.dispose);
       return controller;
     });
+
+/// group 变更通知流（对话列表实时增量更新的数据源）。
+///
+/// ## 为什么需要它（而不是让页面自己订阅 controller）
+///
+/// 对话列表页当前**没有任何 SSE 连接**：连接是由对话页调
+/// `ChatStreamController.start()` 建立的。只给页面加一个 `listen` 会「看起来
+/// 做完了，但事件永远不来」——列表页必须自己确保连接在。
+///
+/// ## 为什么不直接复用对话页的聚焦模式
+///
+/// 列表页挂载时对话页往往并不存在（用户在首页）。本 provider 用
+/// [ChatStreamController.ensureConnected]：已有连接（对话页建的聚焦模式）就
+/// 不动它，否则以**全局模式**建连。全局模式不回填任何 group 的时间线，故不会
+/// 白拉一页历史。
+///
+/// ## autoDispose
+///
+/// 与 [chatStreamControllerProvider] 同取向：它间接持有长连接，页面退出即释放。
+/// （移动端尤其重要：常驻连接会持续耗电与流量。）
+///
+/// ## userId 未就绪时返回空流
+///
+/// 空流不是错误状态，而是一个**占位**：`ref.watch(currentUserIdProvider)` 在
+/// `/api/auth/me` 返回后会重建本 provider，那时才返回真正的流。故不需要在这里
+/// 写重试逻辑（也**不得**用空串兜底去建连——那会连到
+/// `/users//chat/stream`，即 issue #2 那个静默故障）。
+/// 返回 [ChatStreamController.groupUpdates]（逐条通知，**不是** AsyncValue）。
+///
+/// ## 为什么不是 StreamProvider
+///
+/// 两个原因：
+///
+/// 1. `StreamProvider` 的 `AsyncValue` 只保留**最后一条**事件，而
+///    [GroupUpdate] 是逐条通知——created 后 deleted 与反过来结果不同，
+///    只留最后一条会丢事件。（其 `.stream` 逐条转发访问器在 riverpod 3.x
+///    已废弃移除。）
+/// 2. 页面注入点的类型就是 `Stream<GroupUpdate>?`（便于单测直接塞一条假流），
+///    这里返回裸流可以原样传递，不必再拆一层 AsyncValue。
+///
+/// ## 订阅时机是安全的（不会丢事件）
+///
+/// `ensureConnected()` 是异步的（要发 HTTP），而本 provider 与页面的
+/// `listen` 注册发生在**同一帧内**、中间没有 await 点。故事件到达时
+/// 订阅一定已经在了——broadcast 流「无监听者即丢弃」的特性不会咬到这里。
+///
+/// 若 userId 尚未就绪则返回空流：`/api/auth/me` 返回后 `ref.watch` 会让本
+/// provider 与页面一起重建，那时才接上真正的流（页面的 `didUpdateWidget`
+/// 会重订阅）。
+final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
+  final userId = ref.watch(currentUserIdProvider).value;
+  if (userId == null || userId.isEmpty) {
+    return const Stream<GroupUpdate>.empty();
+  }
+
+  final controller = ref.watch(chatStreamControllerProvider(userId));
+  // 不 await：provider body 必须同步返回。ensureConnected 幂等——已有连接
+  // （对话页建的聚焦模式）时是空操作，故不会抢走对话页的聚焦目标。
+  unawaited(controller.ensureConnected());
+  return controller.groupUpdates;
+});
 
 /// 无归属入口用例（悬浮输入窗用，纯文本）。
 ///
@@ -1080,6 +1202,77 @@ final executePruneProvider = Provider<ExecutePrune>((ref) {
   };
 });
 
+// ==================== 主题模式 ====================
+
+/// 主题模式控制器。
+///
+/// ## 为什么 `build()` 里同步返回 system 再异步纠正
+///
+/// `Notifier.build()` 必须**同步**返回一个值，而偏好读的是数据库（异步）。
+/// 故先返回 `ThemeMode.system`（与「从未设置过」的默认行为一致），随后
+/// `unawaited(restore())` 把真实值补上。这与 [AuthStateNotifier] 用
+/// `AuthState.unknown` 占位是同一手法。
+///
+/// 代价是启动瞬间可能用 system 渲染一帧再切到用户设的模式（如果用户设的是
+/// 深色而系统是浅色，会闪一下）。可接受：读取是本机数据库的一次查询，
+/// 通常在同一帧内完成；若要彻底消除，得把偏好读取提到 `runApp` 之前
+/// ——那会让启动多一次 await，代价更大。
+class ThemeModeNotifier extends Notifier<ThemeMode> {
+  @override
+  ThemeMode build() {
+    unawaited(restore());
+    return ThemeMode.system;
+  }
+
+  /// 从偏好存储恢复。
+  Future<void> restore() async {
+    try {
+      final prefs = ref.read(preferencesStoreProvider);
+      final raw = await prefs.getString(SpbThemeMode.prefKey);
+      state = SpbThemeMode.decode(raw);
+    } catch (e) {
+      // 读不到就保持 system：偏好是配置，不该让应用起不来。
+      SpbLog.warn('恢复主题模式失败', {'error': e.toString()});
+    }
+  }
+
+  /// 设置并持久化。
+  ///
+  /// 先改 `state` 再落盘：主题要即时生效，落盘失败也不该让界面停在上一个
+  /// 模式（下次启动会回到旧值，用户能看出「没存住」并重试）。
+  Future<void> setMode(ThemeMode mode) async {
+    if (state == mode) return;
+    state = mode;
+    try {
+      final prefs = ref.read(preferencesStoreProvider);
+      await prefs.setString(SpbThemeMode.prefKey, SpbThemeMode.encode(mode));
+    } catch (e) {
+      SpbLog.warn('保存主题模式失败', {'error': e.toString()});
+    }
+  }
+}
+
+/// 当前主题模式。
+final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(
+  ThemeModeNotifier.new,
+);
+
+/// 读取主题模式（供设置页注入）。
+final loadThemeModeProvider = Provider<LoadThemeMode>((ref) {
+  return () async {
+    final prefs = ref.read(preferencesStoreProvider);
+    return SpbThemeMode.decode(await prefs.getString(SpbThemeMode.prefKey));
+  };
+});
+
+/// 保存主题模式（供设置页注入）。
+///
+/// 走 `themeModeProvider` 而不是直接写库：这样设置页的改动会立刻反映到
+/// `MaterialApp.router` 的 `themeMode` 上（两者读的是同一个 provider）。
+final saveThemeModeProvider = Provider<SaveThemeMode>((ref) {
+  return (mode) => ref.read(themeModeProvider.notifier).setMode(mode);
+});
+
 /// 读取 `since_days`：缺失、非法、`<= 0` 都视为「不限」。
 Future<int?> _readSinceDays(PreferencesStore prefs) async {
   final raw = await prefs.getString(sinceDaysPrefKey);
@@ -1179,6 +1372,9 @@ final downloadDeliverableProvider = Provider<DownloadDeliverable>((ref) {
 });
 
 /// 用系统默认程序打开已下载的交付物。
+///
+/// 入参是**绝对路径**（由 [resolveLocalDeliverableProvider] 或面板的下载记录
+/// 产出），本 Provider 只负责把它交给平台层。
 final openDeliverableProvider = Provider<OpenLocalDeliverable>((ref) {
   return (String path) => ref.read(desktopCapabilitiesProvider).openFile(path);
 });
@@ -1188,3 +1384,283 @@ final revealDeliverableProvider = Provider<RevealLocalDeliverable>((ref) {
   return (String path) =>
       ref.read(desktopCapabilitiesProvider).revealPath(path);
 });
+
+/// 交付物同步的本地索引快照（打开 / 定位用）。
+///
+/// ## 为什么同时装 workspace 与单 group 两种状态
+///
+/// 用户选过的同步范围决定了本地落盘布局（见 `DeliverableSyncLayout`）：
+///
+/// | 范围 | 状态键 | 相对路径 |
+/// |---|---|---|
+/// | 全部 / 选中若干 | `__workspace__` | `{gid}/reports/a.md` |
+/// | 单个 group | `groupId` | `reports/a.md` |
+///
+/// 两种都是合法配置（后者只能程序化产出，见 `SyncScopeConfig.toScope`），
+/// 而**查询时无法从库里反推**用户当时用的是哪种。故两种都查：命中哪个用哪个。
+/// 两者都查不到 → 该文件确实没同步过。
+///
+/// ## 为什么把 root 与状态装在一起
+///
+/// 它们是同一个问题的两半（「文件在哪」+「本地有哪些文件」）。分开两个
+/// provider 会让调用方必须同时等两者就绪，且容易出现「用新状态配旧目录」的
+/// 错配（那会指向一个不存在的位置）。
+class DeliverableLocalIndex {
+  const DeliverableLocalIndex({
+    required this.localRoot,
+    required this.workspace,
+    required this.singleGroup,
+  });
+
+  /// 用户选的同步目录；null/空 = 尚未选过，此时不可能有已同步文件。
+  final String? localRoot;
+
+  /// `__workspace__` 状态键下的状态。
+  final SyncState workspace;
+
+  /// `groupId` 状态键下的状态（单 group 范围）。
+  final SyncState singleGroup;
+
+  bool get hasRoot => localRoot != null && localRoot!.trim().isNotEmpty;
+
+  /// 「尚未配置同步目录」的空索引。
+  static const none = DeliverableLocalIndex(
+    localRoot: null,
+    workspace: SyncState.empty,
+    singleGroup: SyncState.empty,
+  );
+
+  /// 该 UFS 路径在同步目录内的**相对**路径；未同步返回 null。
+  ///
+  /// 先试 workspace 布局再试单 group 布局（见类文档）。两种布局的相对路径
+  /// 形态不同（一个带 `{gid}/`、一个不带），不会互相误命中。
+  String? relativePathOf(String groupId, String ufsPath) =>
+      resolveLocalDeliverablePath(workspace, groupId, ufsPath) ??
+      resolveLocalDeliverablePath(
+        singleGroup,
+        groupId,
+        ufsPath,
+        layout: DeliverableSyncLayout.singleGroup,
+      );
+}
+
+/// 读取交付物同步索引（供 [resolveLocalDeliverableProvider] 与页面 watch）。
+///
+/// `autoDispose.family(groupId)`：只有打开侧边栏的对话页会读它，且只需当前
+/// group 的状态。离开该 group 后释放，不把每个访问过的 group 的状态挂在内存。
+final deliverableLocalIndexProvider = FutureProvider.autoDispose
+    .family<DeliverableLocalIndex, String>((ref, groupId) async {
+      final store = ref.watch(syncStateStoreProvider);
+      final root = await store.boundLocalRoot();
+      if (root == null || root.trim().isEmpty) {
+        return DeliverableLocalIndex.none;
+      }
+      // 两个键各查一次。不合并成一次全表扫描：DriftSyncStateStore 的公开
+      // 接口只有按 key 读，且这里最多两次查询（状态表按 state_key 有索引）。
+      final workspace = await store.load(workspaceStateKey);
+      final single = await store.load(groupId);
+      return DeliverableLocalIndex(
+        localRoot: root,
+        workspace: workspace,
+        singleGroup: single,
+      );
+    });
+
+/// 查询某个交付物在**同步目录**里的本地绝对路径（未同步返回 null）。
+///
+/// 装配给 `GroupDeliverablesPanel.resolveLocalPath`。
+///
+/// ## 为什么是同步回调（不返回 Future）
+///
+/// 面板在 `build` 期间对每个可见文件调用它，以决定「打开 / 定位」是否可用。
+/// 若它返回 Future，面板就得为每一行维护一个「正在查询」的中间态（或先全部
+/// 渲染成不可用再逐行点亮），徒增复杂度与闪烁。故这里用 `ref.watch` 读**已
+/// 加载好**的快照：状态变化时页面自然重建（见 [_ChatPage] 对 index 的 watch）。
+///
+/// ## 为什么要校验文件真的在磁盘上
+///
+/// 索引记录的是「**曾经**同步过」。用户可能手动删掉了同步目录里的文件（或
+/// 换了目录后状态未清）。若不做校验，面板会把「打开」置为可用，点下去却报
+/// 「无法打开文件」——比一开始就禁用更让人困惑。
+///
+/// `existsSync` 只对可见行执行（几十个），代价可忽略；换来的是「能点就一定能
+/// 打开」这条确定性。
+///
+/// 索引**未加载完**（`value` 为 null）时一律返回 null（视为未同步）：宁可先
+/// 显示为不可用，也不要短暂指向一个可能不存在的路径。加载完成后页面重建，
+/// 可用状态自然出现。
+final resolveLocalDeliverableProvider = Provider.autoDispose
+    .family<ResolveLocalDeliverable, String>((ref, groupId) {
+      final index = ref.watch(deliverableLocalIndexProvider(groupId)).value;
+      if (index == null || !index.hasRoot) {
+        return (UfsFileEntry file) => null;
+      }
+      final root = index.localRoot!;
+      return (UfsFileEntry file) {
+        final rel = index.relativePathOf(groupId, file.path);
+        if (rel == null) return null;
+        // 拼接用 path 包的 join：Windows 上才会得到反斜杠分隔的路径。
+        final abs = p.join(root, rel);
+        return File(abs).existsSync() ? abs : null;
+      };
+    });
+
+// ==================== 小程序工作台（miniapp BFF）====================
+//
+// 两端共用同一组端点（`/chat/miniapp/*` 是 PartyB API 的投影层，见
+// `internal/server/miniapp.go`），故装配与移动端同构——实现细节与理由见
+// 移动端 `providers.dart` 的同名 provider。
+//
+// 页面全部依赖注入（见 `miniapp.dart` 的说明），故这里只做「把 MiniappApi
+// 的方法绑成页面要的回调」，不含业务规则。
+
+/// 小程序 BFF 客户端。
+///
+/// 与 [chatApiProvider] 共用同一个 [dioProvider]（同一 baseUrl + 同一认证
+/// 拦截器），只是端点前缀不同（`/chat/miniapp/*` 也在 PartyB API 下）。
+final miniappApiProvider = Provider<MiniappApi>((ref) {
+  return MiniappApi(ref.watch(dioProvider));
+});
+
+/// 工作列表（供 [WorksPage] 注入）。
+final loadMiniappWorksProvider = Provider<LoadMiniappWorks>((ref) {
+  final api = ref.watch(miniappApiProvider);
+  return ({String status = 'active', int? cursor}) =>
+      api.listWorks(status: status, cursor: cursor);
+});
+
+/// 新建工作（供 [WorksPage] 注入）。
+///
+/// ## 为什么不传 templateId / goal
+///
+/// 服务端两者都是可选的（`internal/server/miniapp.go` 的 `createWork`：`goal`
+/// 留空写 NULL，`template_id` 直接进 metadata，均无 `binding:"required"`）。
+/// Taro 参考实现也是 `client.createWork({})`。传空参即建一个空工作，标题由
+/// 服务端置占位符「新会话」，首轮后 Title Gate 生成语义标题。
+///
+/// 返回值是 `workId`（= group id），供调用方导航到详情。
+final createMiniappWorkProvider = Provider<CreateMiniappWork>((ref) {
+  final api = ref.watch(miniappApiProvider);
+  return () async {
+    final result = await api.createWork();
+    return result.workId;
+  };
+});
+
+/// 上传附件到指定工作（供 [WorkDetailPage] 注入）。
+///
+/// 用 `family` 把 workId 变成必填参数：与其余 miniapp 注入点同一约定，避免
+/// 出现 `/works//files` 这种语义不明的 404。
+///
+/// ## 为什么丢弃返回的 artifact
+///
+/// 页面在上传后统一 `_reload()`（见 `UploadWorkFile` 的说明）：服务端重新
+/// 投影的产物列表才是权威口径，本地拼一个可能与事件投影的 id 口径不一致。
+final uploadMiniappFileProvider = Provider.family<UploadWorkFile, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return ({required String filename, required List<int> bytes}) async {
+    await api.uploadFile(workId, bytes: bytes, filename: filename);
+  };
+});
+
+/// 工作详情（供 [WorkDetailPage] 注入）。
+///
+/// 用 `family` 把 workId 变成必填参数——workId 未就绪在类型上无法表达，
+/// 避免出现 `/works//` 这种语义不明的 404（与 issue #2 同源的陷阱）。
+final loadMiniappWorkDetailProvider = Provider.family<LoadWorkDetail, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.getWork(workId);
+});
+
+/// 工作事件。
+///
+/// ⚠️ 返回的是 `MiniappWorkEvent`（数据库原始行），**不是** `ChatEvent`——
+/// 用 `ChatEvent.fromJson` 解析会抛 `FormatException`（键名是 `id` 不是
+/// `eventId`）。详见该类文档。
+final loadMiniappWorkEventsProvider = Provider.family<LoadWorkEvents, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.workEvents(workId);
+});
+
+/// 产物列表。
+final loadMiniappArtifactsProvider = Provider.family<LoadWorkArtifacts, String>(
+  (ref, workId) {
+    final api = ref.watch(miniappApiProvider);
+    return () => api.listArtifacts(workId);
+  },
+);
+
+/// 下载产物字节。
+final downloadMiniappArtifactProvider =
+    Provider.family<DownloadArtifact, String>((ref, workId) {
+      final api = ref.watch(miniappApiProvider);
+      return (artifactId) => api.downloadArtifact(workId, artifactId);
+    });
+
+/// 保存下载到的字节到应用沙箱，返回落地路径。
+///
+/// ## 为什么写入 `deliverables/miniapp/`
+///
+/// 与交付物同步的目录（`syncLocalRootProvider` 的 `deliverables/`）分开：
+/// 同步目录的内容由同步游标管理（会被清理计划删除），而这里是用户**主动**
+/// 下载的产物——混在一起会让清理把用户手动下载的文件也删掉。
+final saveMiniappArtifactProvider = Provider<SaveArtifactBytes>((ref) {
+  return (String filename, List<int> bytes) async {
+    final dir = await getApplicationSupportDirectory();
+    final target = Directory(p.join(dir.path, 'deliverables', 'miniapp'));
+    if (!await target.exists()) {
+      await target.create(recursive: true);
+    }
+    // 只取 basename：服务端的 name 可能是路径（事件投影取的是 basename，
+    // 但上传来源的 entry.Name 不保证），拼进来会造成路径穿越。
+    final safeName = p.basename(filename.isEmpty ? 'artifact' : filename);
+    final file = File(p.join(target.path, safeName));
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  };
+});
+
+/// 发送工作消息。
+final sendMiniappMessageProvider = Provider.family<SendWorkMessage, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return (input) => api.sendMessage(workId, input: input);
+});
+
+/// 完成工作。
+final completeMiniappWorkProvider = Provider.family<CompleteWork, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.completeWork(workId);
+});
+
+/// 停止工作。
+final stopMiniappWorkProvider = Provider.family<StopWork, String>((
+  ref,
+  workId,
+) {
+  final api = ref.watch(miniappApiProvider);
+  return () => api.stopWork(workId);
+});
+
+/// 解决确认卡（**不带** group_id 的路径，与 webapp 那套不同）。
+final resolveMiniappConfirmationProvider = Provider<ResolveMiniappConfirmation>(
+  (ref) {
+    final api = ref.watch(miniappApiProvider);
+    return (confirmationId, action) =>
+        api.resolveConfirmation(confirmationId, action: action);
+  },
+);
