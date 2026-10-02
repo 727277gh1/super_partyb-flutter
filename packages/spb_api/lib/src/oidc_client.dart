@@ -356,7 +356,7 @@ class OidcTokens {
 /// ## 职责边界
 ///
 /// 本类只做「构造 URL / 发 token 请求 / 解析响应」，**不碰存储与导航**
-/// （token 持久化见 `token 持久化`，登录页见 `登录页`）。这样它能作为纯
+/// （token 持久化与登录页由上层负责）。这样它能作为纯
 /// Dart 包被无头单测覆盖。
 class OidcClient {
   OidcClient({required this.config, Dio? dio})

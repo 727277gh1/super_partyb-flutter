@@ -1,7 +1,6 @@
 # IdP / 网关 OIDC 能力实测留档（PKCE 与 redirect_uri）
 
-> 对应计划任务 `OIDC 能力实测`，解答 问题 1：「IdP 是否接受自定义 scheme 的
-> redirect_uri」。
+> 记录「IdP 是否接受自定义 scheme 的 redirect_uri」这一问题的实测结论。
 >
 > **实测时间**：2026-09-28 · **实测目标**：`https://app.example.com`（经网关，
 > 生产入口）与 `https://app.example.com/idp`（IdP 公网路径，经网关反代）。
@@ -284,7 +283,7 @@ platforms: ['android', 'ios', 'macos']                        # ← 无 linux
 3. 或后续把「Linux 登录」单独立项（例如与 AGW 协商一个 `X-Forwarded-Host`
    对齐的 loopback 回调，需要**先注册新 client 或新增 redirect_uri**）。
 
-> ⚠️ 这一条会影响 `OIDC 客户端`/`登录页`/`移动端回跳` 的实现形态，但
+> ⚠️ 这一条会影响 OIDC 客户端 / 登录页 / 移动端回跳的实现形态，但
 > **本任务只负责留档与结论**，不在本轮做实现决策。
 
 ---
@@ -293,11 +292,11 @@ platforms: ['android', 'ios', 'macos']                        # ← 无 linux
 
 | 任务 | 影响 |
 |---|---|
-| `OIDC 客户端` OIDC PKCE 客户端（纯 Dart） | 本仓**不需要**完整的 PKCE 授权码交换（客户端拿不到 `client_secret`，IdP 也不强制 PKCE）。该任务应改为「**构造授权 URL + 接收会话凭据**」的薄客户端；纯 Dart 部分可测的是 URL 构造与 cookie/凭据解析 |
-| `token 持久化` token 存储 | 存的是**会话 cookie**（`access_token` 等），不是自签 token；401 仍应映射为 `AuthError` |
-| `登录页` 登录页 | 两端形态不同：移动/Windows/macOS 可用内嵌 webview；**Linux 桌面需系统浏览器 + cookie 导入** |
-| `移动端回跳` 移动端自定义 scheme 回跳 | **不可行**（IdP 拒绝自定义 scheme）。该任务应改为「用内嵌 webview 直接读 cookie」；如坚持要 scheme 回跳，必须先注册 IdP client（跨仓库） |
-| `UFS 客户端` UFS 客户端 | 请求带会话 cookie 走网关 `/ufs/*`（与原 Tauri 一致），不做本地 token 刷新 |
+| OIDC 客户端（纯 Dart） | 本仓**不需要**完整的 PKCE 授权码交换（客户端拿不到 `client_secret`，IdP 也不强制 PKCE）。该任务应改为「**构造授权 URL + 接收会话凭据**」的薄客户端；纯 Dart 部分可测的是 URL 构造与 cookie/凭据解析 |
+| token 存储 | 存的是**会话 cookie**（`access_token` 等），不是自签 token；401 仍应映射为 `AuthError` |
+| 登录页 | 两端形态不同：移动/Windows/macOS 可用内嵌 webview；**Linux 桌面需系统浏览器 + cookie 导入** |
+| 移动端自定义 scheme 回跳 | **不可行**（IdP 拒绝自定义 scheme）。该任务应改为「用内嵌 webview 直接读 cookie」；如坚持要 scheme 回跳，必须先注册 IdP client（跨仓库） |
+| UFS 客户端 | 请求带会话 cookie 走网关 `/ufs/*`（与原 Tauri 一致），不做本地 token 刷新 |
 
 ---
 

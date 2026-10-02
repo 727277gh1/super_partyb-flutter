@@ -1,8 +1,8 @@
 # 移动端 OIDC 回跳：机制选定与阻塞项
 
-> 对应计划任务 `移动端回跳`（原题「移动端自定义 scheme 回跳注册与接收」）。
+> 对应工作项「移动端自定义 scheme 回跳注册与接收」。
 >
-> 前置实测见 [`oidc-verification.md`](./oidc-verification.md)（任务 `OIDC 能力实测`）。
+> 前置实测见 [`oidc-verification.md`](./oidc-verification.md)。
 > 本文记录**本任务实际做了什么**、**为什么机制与任务原文不同**、以及
 > **还差什么才能真正登录**。
 
