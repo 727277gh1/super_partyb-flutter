@@ -64,6 +64,10 @@ cd "$(dirname "$0")/.."
 
 MAP="${SPB_OS_MAP:-$HOME/.config/spb-flutter/opensource-map.env}"
 MAILMAP="${SPB_OS_MAILMAP:-$HOME/.config/spb-flutter/mailmap}"
+# 额外替换规则（`查找==>替换`，与 --replace-text 同格式）。
+# 用于映射表装不下的形态（如内部工作流编号、内部术语）。
+# 同样放在仓库外——它含「待清理目标」本身。
+EXTRA_RULES="${SPB_OS_EXTRA_RULES:-$HOME/.config/spb-flutter/extra-rules.txt}"
 
 # 真实值变量名列表。脚本只认这些**名字**，值一律来自映射文件。
 REAL_VARS=(
@@ -94,8 +98,8 @@ load_map() {
   set -a; . "$MAP"; set +a
 }
 
-# 按 `$VAR` → `${VAR}_PLACEHOLDER` 生成 `真实值==>占位符` 规则。
-# 真实值不打印。
+# 按 `$VAR` → `${VAR}_PLACEHOLDER` 生成 `真实值==>占位符` 规则，
+# 再追加 EXTRA_RULES 里的额外规则。真实值不打印。
 write_rules() {
   local out=$1
   : > "$out"
@@ -114,7 +118,19 @@ write_rules() {
     printf '%s==>%s\n' "$real" "$ph" >> "$out"
     n=$((n + 1))
   done
-  echo "$n $skipped"
+
+  local extra=0
+  if [ -f "$EXTRA_RULES" ]; then
+    while IFS= read -r line; do
+      # 跳过注释与空行；只接受含 `==>` 的行。
+      case "$line" in ''|'#'*) continue ;; esac
+      case "$line" in *'==>'*) ;; *) continue ;; esac
+      printf '%s\n' "$line" >> "$out"
+      extra=$((extra + 1))
+    done < "$EXTRA_RULES"
+  fi
+
+  echo "$n $skipped $extra"
 }
 
 # ── --verify：逐项检查真实值是否仍出现在历史/工作区/提交元数据 ────────
@@ -148,6 +164,23 @@ if [ "$MODE" = "--verify" ]; then
     fi
   done
 
+  # 额外规则的「查找」侧也应归零，否则等于没清干净。
+  if [ -f "$EXTRA_RULES" ]; then
+    while IFS= read -r line; do
+      case "$line" in ''|'#'*) continue ;; esac
+      case "$line" in *'==>'*) ;; *) continue ;; esac
+      lhs="${line%%==>*}"
+      [ -n "$lhs" ] || continue
+      n=$(git log --all -p 2>/dev/null | grep -acF -- "$lhs" || true)
+      if [ "$n" -ne 0 ]; then
+        printf '  ❌ %-28s %s 处\n' "(额外规则)" "$n"
+        fail=1
+      else
+        printf '  ✅ %-28s 0\n' "(额外规则)"
+      fi
+    done < "$EXTRA_RULES"
+  fi
+
   if [ "$fail" -eq 0 ]; then
     echo "✅ 未发现真实标识"
   else
@@ -177,11 +210,11 @@ trap 'rm -rf "$TMP_RULES"' EXIT
 CONTENT_RULES="$TMP_RULES/content.txt"
 MSG_RULES="$TMP_RULES/msg.txt"
 
-read -r n_rules n_skipped <<<"$(write_rules "$CONTENT_RULES")"
+read -r n_rules n_skipped n_extra <<<"$(write_rules "$CONTENT_RULES")"
 cp "$CONTENT_RULES" "$MSG_RULES"
 
 echo "映射文件：$MAP"
-echo "生成 $n_rules 条替换规则（${n_skipped} 项未配置，已跳过；值不打印）"
+echo "生成 $n_rules 条映射规则 + $n_extra 条额外规则（${n_skipped} 项未配置，已跳过；值不打印）"
 echo
 
 # ── 预演：报告命中量，不写历史 ────────────────────────────────────────
