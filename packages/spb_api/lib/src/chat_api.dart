@@ -231,11 +231,55 @@ class ChatApi {
 
   /// `POST /users/:user_id/chat/messages/flush`
   ///
-  /// 把缓冲区中的消息立即提交（通常用于「输入完立刻发送」）。
-  Future<void> flushMessages(String userId, {String? groupId}) => _post(
-    '/users/$userId/chat/messages/flush',
-    body: {if (groupId != null) 'group_id': groupId},
-  );
+  /// 把缓冲区中的 pending 收件箱消息立即合并成一个 turn（通常用于「输入完立刻
+  /// 发送」）。
+  ///
+  /// ## 为什么返回 [FlushResult] 而不是 `void`
+  ///
+  /// 原签名是 `Future<void>`，那会**丢掉一个关键状态**：服务端在「有**多条**
+  /// pending 且未指定 `conflict_strategy`」时返回 **HTTP 200** 加
+  /// `{status: "confirmation_required", ...}`——**什么都没提交**，而是要求
+  /// 调用方选一个冲突策略后重试。只看状态码会把它当成成功。
+  ///
+  /// 把返回类型从 `Future<void>` 放宽到 `Future<FlushResult>` 是**兼容性变更**：
+  /// 忽略返回值的既有调用方式（`await api.flushMessages(...)`）完全不受影响，
+  /// 而需要区分两种结果的调用方拿到了信息。
+  ///
+  /// ## 为什么只传 `group_id`
+  ///
+  /// 服务端还接受 `message_ids`（指定要 flush 哪几条）。本方法只做
+  /// 「把当前 group 的 pending 全部立即提交」这一种用法，与 UI 的
+  /// 「立即发送」按钮语义一致。需要指定 message_ids 或冲突策略时用
+  /// [flushMessagesDetailed]。
+  Future<FlushResult> flushMessages(String userId, {String? groupId}) async {
+    final res = await _post(
+      '/users/$userId/chat/messages/flush',
+      body: {if (groupId != null) 'group_id': groupId},
+    );
+    return FlushResult.fromJson(_asMap(res));
+  }
+
+  /// 带完整参数的 flush（可指定 `message_ids` 与 `conflict_strategy`）。
+  ///
+  /// 用于「多条 pending 待确认」后用户选定策略的重试。见 [flushMessages] 的
+  /// 说明。
+  Future<FlushResult> flushMessagesDetailed(
+    String userId, {
+    String? groupId,
+    List<String>? messageIds,
+    String? conflictStrategy,
+  }) async {
+    final res = await _post(
+      '/users/$userId/chat/messages/flush',
+      body: {
+        if (groupId != null) 'group_id': groupId,
+        if (messageIds != null && messageIds.isNotEmpty)
+          'message_ids': messageIds,
+        if (conflictStrategy != null) 'conflict_strategy': conflictStrategy,
+      },
+    );
+    return FlushResult.fromJson(_asMap(res));
+  }
 
   // ==================== 桌面悬浮输入窗（无归属入口）====================
 
@@ -532,9 +576,26 @@ class ChatApi {
 
   /// `POST /users/:user_id/chat/routing-preview`
   ///
-  /// 预览「这句话会落到哪个 group / agent」。注意：当前服务端**只返回兜底默认
-  /// Agent 的解析结果**，不再调用 embedding 路由（链 A 已下线，见 super_partyb
-  /// AGENTS.md「相似度算法与打分」）。
+  /// 预览「这句话会落到哪个 agent」。
+  ///
+  /// ## ⚠️ 服务端当前**只返回兜底默认 Agent**（文案不得夸大）
+  ///
+  /// 原实现调 `chatrouter.Resolve` 展示 embedding 级联的 trace；**该级联已移除**
+  /// （链 A 下线，见 super_partyb AGENTS.md「相似度算法与打分」）。现在服务端返回
+  /// 的是 `PickDefaultAgent` 的结果：用户级 `user.default_agent_id` > 系统级
+  /// `router.default_agent_id` > 名字序第一个 active agent（`chat_stream.go` 的
+  /// `routingPreview`）。
+  ///
+  /// 因此：
+  /// - **不会返回 group**：响应里没有 `group_id`，归属仍由发消息时的分类链决定；
+  /// - `route_source` 恒为 `"fallback"`，`votes` 恒为空；
+  /// - `candidates` 是**全部 active agent 的前 5 个**（按 id 排序），与这句话的
+  ///   语义无关，不能当成「候选排序」。
+  ///
+  /// 用 [RoutingPreview.fromJson] 解析返回值得到强类型结果（推荐）。
+  ///
+  /// 不在本方法里直接返回 `RoutingPreview`：本方法的返回类型是既有公开契约
+  /// （`Map`），改它会是一个破坏性变更；而解析只需一行。
   Future<Map<String, dynamic>> routingPreview(
     String userId, {
     required String input,
@@ -712,6 +773,198 @@ class ChatApi {
     if (v is Map) return Map<String, dynamic>.from(v);
     return const {};
   }
+}
+
+/// `POST /users/:user_id/chat/routing-preview` 的响应。
+///
+/// ## ⚠️ 这不是「归属预览」（名字有迷惑性）
+///
+/// 端点叫 routing-preview，但**响应里没有 group_id**。它预览的是
+/// **「这句话会用哪个 agent」**，且当前服务端只走兜底路径（embedding 级联已下线）。
+/// 详见 [ChatApi.routingPreview] 的说明。
+///
+/// UI 展示时必须如实说明这一点：不能写成「将发送到某对话」——服务端没给那个
+/// 信息，写成那样是编造。
+class RoutingPreview {
+  const RoutingPreview({
+    required this.resolvedAgentId,
+    required this.routeSource,
+    this.focusTopic,
+    this.candidates = const [],
+    this.trace = const {},
+    this.raw = const {},
+  });
+
+  /// 服务端解析出的 agent id。可能为空串（没有 active agent 时）。
+  final String resolvedAgentId;
+
+  /// 路由来源。当前**恒为** `"fallback"`（链 A 已下线）。
+  final String? routeSource;
+
+  /// 聚焦话题。级联下线后**恒为 null**（保留字段以便将来恢复）。
+  final String? focusTopic;
+
+  /// 候选 agent（当前是「前 5 个 active agent」，与输入语义无关）。
+  final List<RoutingCandidate> candidates;
+
+  /// 服务端 trace（上线回归比对的观测点）。
+  final Map<String, dynamic> trace;
+
+  /// 原始响应，保留未建模字段。
+  final Map<String, dynamic> raw;
+
+  /// 是否走了兜底路径（当前总是）。
+  bool get isFallback => routeSource == 'fallback';
+
+  /// 解析出的候选里能否找到 [resolvedAgentId] 对应的名字。
+  ///
+  /// 找不到时返回 null（服务端可能只给了 id，或候选被截断到 5 条之外）。
+  String? get resolvedAgentName {
+    for (final c in candidates) {
+      if (c.agentId == resolvedAgentId) return c.name;
+    }
+    return null;
+  }
+
+  factory RoutingPreview.fromJson(Map<String, dynamic> json) => RoutingPreview(
+    resolvedAgentId: (json['resolved_agent_id'] ?? '').toString(),
+    routeSource: _nonEmptyStr(json['route_source']),
+    focusTopic: _nonEmptyStr(json['focus_topic']),
+    candidates: (json['candidates'] is List)
+        ? (json['candidates'] as List)
+              .whereType<Map>()
+              .map(
+                (m) => RoutingCandidate.fromJson(Map<String, dynamic>.from(m)),
+              )
+              .toList(growable: false)
+        : const [],
+    trace: json['trace'] is Map
+        ? Map<String, dynamic>.from(json['trace'] as Map)
+        : const {},
+    raw: json,
+  );
+
+  @override
+  String toString() =>
+      'RoutingPreview(agent: $resolvedAgentId, source: $routeSource, '
+      'candidates: ${candidates.length})';
+}
+
+/// 路由预览里的一个候选 agent。
+class RoutingCandidate {
+  const RoutingCandidate({
+    required this.agentId,
+    required this.name,
+    this.description,
+    this.groupName,
+  });
+
+  final String agentId;
+  final String name;
+
+  /// 可能为 null（服务端 `nullStr`）。
+  final String? description;
+
+  /// agent 所属分组名。服务端未取到时为 null。
+  final String? groupName;
+
+  factory RoutingCandidate.fromJson(Map<String, dynamic> json) =>
+      RoutingCandidate(
+        agentId: (json['agent_id'] ?? '').toString(),
+        name: (json['name'] ?? '').toString(),
+        description: _nonEmptyStr(json['description']),
+        groupName: _nonEmptyStr(json['group_name']),
+      );
+}
+
+/// `POST /users/:user_id/chat/messages/flush` 的响应。
+///
+/// ## 两种结果（服务端都用 **HTTP 200** 返回）
+///
+/// | status | 含义 | 客户端应做 |
+/// |---|---|---|
+/// | `confirmation_required` | 有多条 pending 且未指定策略，**什么都没提交** | 让用户选策略后重试 |
+/// | 其它/空（提交成功） | 已合并成 turn | 刷新待处理栏 |
+///
+/// 故「HTTP 200」**不等于**「提交成功」——必须看 [status]。
+class FlushResult {
+  const FlushResult({
+    required this.status,
+    this.turnId,
+    this.flushStrategy,
+    this.consumedMessageIds = const [],
+    this.reason,
+    this.options = const [],
+    this.preview = const {},
+    this.raw = const {},
+  });
+
+  /// 服务端状态。空串 = 成功且服务端未给 status（成功分支只返回 turn_id 等）。
+  final String status;
+
+  /// 新建的 turn id（成功时有值）。
+  final String? turnId;
+
+  /// 实际使用的策略：`latest_only` / `merge_all` / `new_group`。
+  final String? flushStrategy;
+
+  /// 被合并进该 turn 的收件箱消息 id。
+  final List<String> consumedMessageIds;
+
+  /// 待确认时的原因（如 `multiple_pending_messages`）。
+  final String? reason;
+
+  /// 待确认时可选的策略列表。
+  final List<String> options;
+
+  /// 待确认时的预览（`latest_input` / `merged_input` / `group_id`）。
+  final Map<String, dynamic> preview;
+
+  final Map<String, dynamic> raw;
+
+  /// 是否处于「需要用户选冲突策略」状态（未提交）。
+  bool get needsConfirmation => status == 'confirmation_required';
+
+  /// 是否已成功提交（合并出 turn）。
+  ///
+  /// 判据是 [turnId] 非空：待确认分支没有 turn_id，而成功分支一定有。
+  bool get committed => !needsConfirmation && (turnId ?? '').isNotEmpty;
+
+  factory FlushResult.fromJson(Map<String, dynamic> json) => FlushResult(
+    status: (json['status'] ?? '').toString(),
+    turnId: _nonEmptyStr(json['turn_id']),
+    flushStrategy: _nonEmptyStr(json['flush_strategy']),
+    consumedMessageIds: (json['consumed_message_ids'] is List)
+        ? (json['consumed_message_ids'] as List)
+              .map((e) => e.toString())
+              .toList(growable: false)
+        : const [],
+    reason: _nonEmptyStr(json['reason']),
+    options: (json['options'] is List)
+        ? (json['options'] as List)
+              .map((e) => e.toString())
+              .toList(growable: false)
+        : const [],
+    preview: json['preview'] is Map
+        ? Map<String, dynamic>.from(json['preview'] as Map)
+        : const {},
+    raw: json,
+  );
+
+  @override
+  String toString() => needsConfirmation
+      ? 'FlushResult(待确认冲突, options: $options)'
+      : 'FlushResult(turn: $turnId, strategy: $flushStrategy) ';
+}
+
+/// 把 JSON 值转成「非空字符串或 null」。
+///
+/// 服务端用 `omitempty` 与 `nullStr` 两种方式表达「没有」，故空串与 null 都要
+/// 归一成 null——否则调用方得同时判两种，很容易漏一种。
+String? _nonEmptyStr(Object? v) {
+  if (v == null) return null;
+  final s = v.toString();
+  return s.isEmpty ? null : s;
 }
 
 /// `POST /users/:user_id/chat/messages` 的响应。

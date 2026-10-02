@@ -951,4 +951,185 @@ void main() {
       );
     });
   });
+
+  // =========================================================================
+  group('routingPreview：只预览 agent（响应里没有 group_id）', () {
+    /// `chat_stream.go` 的 `routingPreview` 真实输出形状。
+    ///
+    /// 关键点：**没有 group_id 字段**。级联已下线，故 route_source 恒为
+    /// fallback、votes 恒为空、focus_topic 恒为 null。
+    Map<String, dynamic> previewShape() => {
+      'resolved_agent_id': 'agt_1',
+      'route_source': 'fallback',
+      'focus_topic': null,
+      'votes': <dynamic>[],
+      'candidates': [
+        {
+          'agent_id': 'agt_1',
+          'name': '通用助手',
+          'description': '默认',
+          'group_name': '默认',
+        },
+        {
+          'agent_id': 'agt_2',
+          'name': '写手',
+          'description': null,
+          'group_name': null,
+        },
+      ],
+      'trace': {'route': 'fallback', 'reason': 'default_agent_resolution'},
+    };
+
+    test('请求体只含 input（不传 group_id 时）', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/routing-preview',
+        (server) => server.reply(200, previewShape()),
+        data: {'input': '测试'},
+      );
+
+      await api.routingPreview('usr_1', input: '测试');
+    });
+
+    test('解析出 agent / route_source / 候选 / trace', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/routing-preview',
+        (server) => server.reply(200, previewShape()),
+        data: {'input': '测试'},
+      );
+
+      final p = RoutingPreview.fromJson(
+        await api.routingPreview('usr_1', input: '测试'),
+      );
+
+      expect(p.resolvedAgentId, 'agt_1');
+      expect(p.routeSource, 'fallback');
+      expect(p.isFallback, isTrue);
+      expect(p.candidates, hasLength(2));
+      expect(p.candidates.first.name, '通用助手');
+      // 服务端 nullStr → null，不是空串。
+      expect(p.candidates[1].description, isNull);
+      expect(p.candidates[1].groupName, isNull);
+      expect(p.focusTopic, isNull);
+      expect(p.trace['route'], 'fallback');
+      // 候选里能找到 resolved 的名字。
+      expect(p.resolvedAgentName, '通用助手');
+    });
+
+    test('响应里确实没有 group_id（UI 不得声称能预览归属）', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/routing-preview',
+        (server) => server.reply(200, previewShape()),
+        data: {'input': '测试'},
+      );
+
+      final raw = await api.routingPreview('usr_1', input: '测试');
+      expect(raw.containsKey('group_id'), isFalse);
+      expect(raw['route_source'], 'fallback');
+    });
+
+    test('候选里找不到 id 时 resolvedAgentName 返回 null（不编造名字）', () {
+      final p = RoutingPreview.fromJson({
+        'resolved_agent_id': 'agt_missing',
+        'route_source': 'fallback',
+        'candidates': [
+          {'agent_id': 'agt_1', 'name': '通用助手'},
+        ],
+      });
+      expect(p.resolvedAgentName, isNull);
+    });
+
+    test('缺字段时容错（不抛，退回空值）', () {
+      final p = RoutingPreview.fromJson(const {});
+      expect(p.resolvedAgentId, '');
+      expect(p.routeSource, isNull);
+      expect(p.candidates, isEmpty);
+      expect(p.isFallback, isFalse);
+    });
+  });
+
+  // =========================================================================
+  group('flushMessages：HTTP 200 不等于提交成功', () {
+    test('成功分支解析出 turn_id / 策略 / 消费的消息', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/messages/flush',
+        (server) => server.reply(200, {
+          'turn_id': 'turn_1',
+          'consumed_message_ids': ['m1'],
+          'flush_strategy': 'latest_only',
+        }),
+        data: {'group_id': 'grp_1'},
+      );
+
+      final r = await api.flushMessages('usr_1', groupId: 'grp_1');
+
+      expect(r.turnId, 'turn_1');
+      expect(r.flushStrategy, 'latest_only');
+      expect(r.consumedMessageIds, ['m1']);
+      expect(r.committed, isTrue);
+      expect(r.needsConfirmation, isFalse);
+    });
+
+    test('多条 pending → HTTP 200 + confirmation_required（**未提交**）', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/messages/flush',
+        (server) => server.reply(200, {
+          'status': 'confirmation_required',
+          'reason': 'multiple_pending_messages',
+          'message_ids': ['m1', 'm2'],
+          'options': ['latest_only', 'merge_all', 'new_group'],
+          'preview': {'latest_input': '第二句', 'merged_input': '第一句\n第二句'},
+        }),
+        data: {'group_id': 'grp_1'},
+      );
+
+      final r = await api.flushMessages('usr_1', groupId: 'grp_1');
+
+      // 这正是「返回 void」会丢失的那个状态：HTTP 200，但什么都没提交。
+      expect(r.needsConfirmation, isTrue);
+      expect(r.committed, isFalse);
+      expect(r.reason, 'multiple_pending_messages');
+      expect(r.options, ['latest_only', 'merge_all', 'new_group']);
+      expect(r.preview['latest_input'], '第二句');
+      // 待确认分支没有 turn_id。
+      expect(r.turnId, isNull);
+    });
+
+    test('flushMessagesDetailed 可传 message_ids 与 conflict_strategy', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/messages/flush',
+        (server) => server.reply(200, {
+          'turn_id': 'turn_2',
+          'consumed_message_ids': ['m1', 'm2'],
+          'flush_strategy': 'merge_all',
+        }),
+        data: {
+          'message_ids': ['m1', 'm2'],
+          'conflict_strategy': 'merge_all',
+        },
+      );
+
+      final r = await api.flushMessagesDetailed(
+        'usr_1',
+        messageIds: ['m1', 'm2'],
+        conflictStrategy: 'merge_all',
+      );
+
+      expect(r.committed, isTrue);
+      expect(r.flushStrategy, 'merge_all');
+      expect(r.consumedMessageIds, ['m1', 'm2']);
+    });
+
+    test('400（没有可处理的 pending）抛 HttpError', () async {
+      adapter.onPost(
+        '/users/usr_1/chat/messages/flush',
+        (server) => server.reply(400, {'error': '没有可处理的 pending 消息'}),
+        data: {'group_id': 'grp_1'},
+      );
+
+      await expectLater(
+        () => api.flushMessages('usr_1', groupId: 'grp_1'),
+        throwsA(isA<HttpError>()),
+      );
+    });
+  });
 }
