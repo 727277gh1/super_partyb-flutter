@@ -17,7 +17,7 @@ import 'package:spb_domain/spb_domain.dart';
 /// ## 动作经 [onAction] 上抛，页面不直接产生副作用
 ///
 /// 渲染层不知道「回填输入框」和「发送消息」怎么实现（那是 app 层装配），故只
-/// 上抛动作对象。copy_text 的语义按 既有定案 定案的降级方案：**优先回填
+/// 上抛动作对象。copy_text 的语义按既有定案降级：**优先回填
 /// 输入框**（对齐 webapp onAppend 行为），剪贴板写入由调用方按平台能力决定。
 class SpecUiCard extends StatelessWidget {
   const SpecUiCard({super.key, required this.doc, this.onAction});
