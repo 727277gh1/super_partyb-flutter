@@ -323,6 +323,12 @@ class _ConversationsTab extends ConsumerWidget {
         .maybeWhen(data: (n) => n, orElse: () => 0);
     return GroupListPage(
       api: api,
+      // group 变更实时增量更新（新建/删除/归档/改名）。
+      //
+      // 列表页自己无法收到事件：它不持有 SSE 连接（连接由对话页 `start()`
+      // 建立）。本 provider 用 `ensureConnected` 确保连接在，再转发变更流
+      // ——详见 provider 文档。
+      groupUpdates: ref.watch(groupUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       onSearch: () => context.go(SpbRoutes.search),
@@ -429,6 +435,11 @@ class _SettingsTab extends ConsumerWidget {
       executePrune: ref.watch(executePruneProvider),
       pickDirectory: ref.watch(pickDirectoryProvider),
       capabilities: ref.watch(desktopCapabilitiesProvider),
+      loadNotifications: ref.watch(loadNotificationSubscriptionsProvider),
+      saveNotifications: ref.watch(saveNotificationSubscriptionsProvider),
+      // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。
+      loadThemeMode: ref.watch(loadThemeModeProvider),
+      saveThemeMode: ref.watch(saveThemeModeProvider),
       onOpenSync: () => context.go(SpbRoutes.sync),
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 退出登录：清凭证 → 回登录页。
@@ -525,10 +536,28 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// （只清缓冲 + 重新回填，不重连）。
   String? _connectedUserId;
 
+  /// controller.activities 的订阅（与桌面端同取向）。
+  ///
+  /// 移动端此前只订阅 `items`（未订阅 gate 决策），活动指示是它接入的
+  /// 第二条独立流。
+  StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
+
+  /// 最近一次归约出的执行中活动快照（按 turnId 索引）。
+  ///
+  /// 存 State 而非在 build 里读 `controller.activitiesSnapshot`：后者是同步
+  /// getter，建立不了依赖，事件到达时不会触发重建。
+  Map<String, TurnActivitySnapshot> _activities = const {};
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _resolveUserAndFocus());
+  }
+
+  @override
+  void dispose() {
+    _activitiesSub?.cancel();
+    super.dispose();
   }
 
   @override
@@ -565,14 +594,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     _focused = key;
 
     final controller = ref.read(chatStreamControllerProvider(userId));
-    if (_connectedUserId == userId) {
+    if (_activitiesSub == null) {
+      // 执行中活动快照走独立流（见领域层 TurnActivitySnapshot 类文档）。
+      // 先订阅再同步一次快照，避免错过订阅前已到达的事件。
+      _activitiesSub = controller.activities.listen(_onActivitiesChanged);
+      _onActivitiesChanged(controller.activitiesSnapshot);
+    }
+    if (_connectedUserId == userId || controller.isConnected) {
       // 同一 userId 内切 group：复用已有连接（不调 connect，游标保留）。
       await controller.switchGroup(widget.groupId);
+      _connectedUserId = userId;
     } else {
       // 首次聚焦：建立 SSE 连接。
       await controller.start(groupId: widget.groupId);
       _connectedUserId = userId;
     }
+  }
+
+  /// 监听 controller.activities：驱动对话页的空窗期进度指示。
+  void _onActivitiesChanged(Map<String, TurnActivitySnapshot> activities) {
+    if (!mounted) return;
+    setState(() => _activities = activities);
   }
 
   @override
@@ -604,6 +646,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 停止生成：`POST /chat/turns/:turn_id/cancel`。
       // 路径里没有 user_id，身份来自网关注入的 `X-User-ID`。
       onCancelTurn: (turnId) => api.cancelTurn(turnId),
+      // 「立即发送」：把服务端缓冲区里 pending 的消息立即合并成 turn。
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      onFlush: () => ref.read(flushMessagesProvider)(widget.groupId),
+      // 执行中活动指示（turn_activity）：长 turn 的静默期给用户可见进展。
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      activities: controller.activities,
+      activitiesSnapshot: _activities,
       // 向上翻页：加载更早历史。
       //
       // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，
@@ -788,6 +837,8 @@ class _QuickCapturePage extends ConsumerWidget {
 
     return QuickCapturePage(
       submit: (input) => useCase.submit(input: input),
+      // 路由预览（服务端当前只返回**兜底默认 agent**，且响应里没有 group_id）。
+      previewRouting: ref.watch(previewRoutingProvider),
       onQueued: (outcome) {
         // 提交成功后导航到服务端判定的对话。不回显（不传 echoInto）：
         // 本页没有可见的对话，回显由目标对话页的 timeline 回填完成。

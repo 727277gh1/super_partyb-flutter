@@ -13,8 +13,10 @@ import 'package:drift/native.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_data/spb_data.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
@@ -144,6 +146,30 @@ Future<TestHarness> pumpApp(
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
 
+  // 默认的 `/api/auth/me`。
+  //
+  // ## 为什么现在必须无条件 mock（此前只有部分用例自己注册）
+  //
+  // 对话列表页现在会订阅 `groupUpdatesProvider`，而该 provider 要先解析出
+  // userId 才能拿到控制器（`family` 的键是 userId，见 providers.dart 的
+  // issue #2 说明）。于是**任何挂在首页的用例**都会触发 `/api/auth/me`。
+  // 不 mock 就会留下一个未结算的请求（→「A Timer is still pending」）。
+  //
+  // 注册在 `beforePump` **之前**：mock 匹配是「后者覆盖前者」，这样需要
+  // 指定 userId 的用例仍可在 `beforePump` 里注册自己的 `/me` 覆盖本默认值。
+  adapter.onGet(
+    '/api/auth/me',
+    (server) => server.reply(200, {
+      'id': 'usr_TEST',
+      'email': 'test@example.com',
+      'name': 'Test',
+      'role': 'member',
+      'roles': ['member'],
+      'permissions': <String>[],
+      'status': 'active',
+    }),
+  );
+
   // 供用例在 pumpWidget **之前**注册 mock。
   //
   // ## 为什么需要这个钩子
@@ -191,7 +217,17 @@ Future<TestHarness> pumpApp(
       ),
       // 移动端真实实现尚未接入（属下一任务），测试里注入可控假实现。
       signInActionProvider.overrideWithValue(signInAction ?? () async => null),
-      if (sseClient != null) sseClientProvider.overrideWithValue(sseClient),
+      // 默认注入假 SSE 客户端。
+      //
+      // ## 为什么不能再用真实的 SseClient
+      //
+      // 对话列表页现在会调 `ensureConnected()` 建立共享连接。真实 `SseClient`
+      // 走 `ResponseType.stream`，`DioAdapter` 不模拟流式响应，于是连接失败后
+      // 进入重连退避——留下未结算的 Timer，flutter_test 直接报
+      // 「A Timer is still pending even after the widget tree was disposed」。
+      //
+      // 需要观察连接行为的用例显式传自己的 fake（见 `connectedPaths`）。
+      sseClientProvider.overrideWithValue(sseClient ?? _FakeSseClient()),
       // 内存库：真实实现走 path_provider 平台通道，测试环境必然抛
       // MissingPluginException（且会写开发者本机的应用数据目录）。
       appDatabaseProvider.overrideWith((ref) {
@@ -327,6 +363,20 @@ void main() {
       (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
       queryParameters: {'status': 'pending', 'limit': 50},
     );
+    // 对话列表页要解析 userId 才能建 SSE（groupUpdatesProvider 的 family 键），
+    // 故必须 mock `/me`——否则请求悬空，留下未结算的 Timer。
+    adapter.onGet(
+      '/api/auth/me',
+      (server) => server.reply(200, {
+        'id': 'usr_1',
+        'email': 'a@b.c',
+        'name': 'Test',
+        'role': 'member',
+        'roles': ['member'],
+        'permissions': <String>[],
+        'status': 'active',
+      }),
+    );
 
     final router = GoRouter(
       routes: buildMobileRoutes(),
@@ -344,6 +394,10 @@ void main() {
           InMemoryTokenStore(_freshTokens()),
         ),
         signInActionProvider.overrideWithValue(() async => null),
+        // 对话列表页会订阅 groupUpdatesProvider 并建立共享 SSE 连接。
+        // 真实 SseClient 走流式响应，DioAdapter 不模拟，会留下重连 Timer
+        // （→「A Timer is still pending」），故注入假实现。
+        sseClientProvider.overrideWithValue(_FakeSseClient()),
       ],
     );
     addTearDown(container.dispose);
@@ -1017,7 +1071,112 @@ void main() {
     expect(find.text('/app/deliverables'), findsOneWidget);
   });
 
+  testWidgets('设置页通知订阅：读真实端点并按服务端返回回显', (tester) async {
+    // 端到端验证 router 把 provider 接到了真实端点（只断言页面渲染会漏掉
+    // 「provider 绑错方法」这类缺陷）。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final h = await pumpApp(
+      tester,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/chat/miniapp/notifications/subscriptions',
+          (server) => server.reply(200, {
+            'items': [
+              {'template_key': 'notify', 'remaining_quota': 4, 'enabled': true},
+            ],
+          }),
+        );
+      },
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('settings-notification-notify')),
+      findsOneWidget,
+    );
+    expect(find.text('剩余 4 条'), findsOneWidget, reason: '必须回显服务端额度，而不是本地猜一个');
+  });
+
+  testWidgets('设置页通知订阅：切换开关打到 POST 且 body 只含白名单 key', (tester) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    Map<String, dynamic>? savedBody;
+    final h = await pumpApp(
+      tester,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/chat/miniapp/notifications/subscriptions',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        );
+        adapter.onPost(
+          '/chat/miniapp/notifications/subscriptions',
+          (server) => server.reply(200, {
+            'items': [
+              {'template_key': 'notify', 'remaining_quota': 1, 'enabled': true},
+            ],
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+    h.dio.interceptors.insert(
+      0,
+      InterceptorsWrapper(
+        onRequest: (options, handler) {
+          if (options.path.endsWith('/notifications/subscriptions') &&
+              options.method == 'POST') {
+            savedBody = options.data is Map
+                ? Map<String, dynamic>.from(options.data as Map)
+                : null;
+          }
+          handler.next(options);
+        },
+      ),
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('settings-notification-notify')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(savedBody, isNotNull, reason: '必须真的发出保存请求');
+    expect(savedBody!['accepted'], {'notify': 1});
+    expect(
+      MiniappNotificationTemplates.isKnown(
+        (savedBody!['accepted'] as Map).keys.first as String,
+      ),
+      isTrue,
+      reason: '未知 key 服务端整体 400，客户端不得自造',
+    );
+  });
+
   testWidgets('移动端设置页保存走注入的 saveSyncSettings', (tester) async {
+    // 设置页是 ListView，**惰性构建**：屏幕外的条目在树里根本不存在。
+    // 新增「外观」区块后页面变高，默认 800×600 下媒体开关已落到屏幕外
+    // → find 不到（与同文件其它设置页用例同一处理）。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     SyncSettings? saved;
     final h = await pumpApp(tester, saveSyncSettings: (s) async => saved = s);
 
@@ -1030,6 +1189,72 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(saved!.filter.includeMedia, isTrue);
+  });
+
+  testWidgets('主题模式：默认跟随系统，切换后即时生效并落盘', (tester) async {
+    // 端到端验证三件事：① 默认 themeMode 是 system（改动前行为）；② 在设置页
+    // 选「深色」后 MaterialApp 立刻变；③ 值真的写进了偏好库（不是只改内存）。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final h = await pumpApp(tester, mockGroups: false);
+
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
+      ThemeMode.system,
+      reason: '未设置过时必须跟随系统',
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-theme-dark')));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
+      ThemeMode.dark,
+      reason: '选中即生效——主题是即时反馈项，不该等「保存」按钮',
+    );
+    expect(h.container.read(themeModeProvider), ThemeMode.dark);
+
+    // 落盘：直接读偏好库，证明不是只改了内存。
+    final stored = await h.container
+        .read(preferencesStoreProvider)
+        .getString(SpbThemeMode.prefKey);
+    expect(
+      stored,
+      SpbThemeMode.encode(ThemeMode.dark),
+      reason: '必须持久化，否则重启后设置丢失',
+    );
+  });
+
+  testWidgets('主题模式：启动时从偏好库恢复（重启后不丢）', (tester) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final h = await pumpApp(tester, mockGroups: false);
+
+    // 模拟「上次设过深色」：直接写偏好，再让 notifier 重读。
+    await h.container
+        .read(preferencesStoreProvider)
+        .setString(SpbThemeMode.prefKey, SpbThemeMode.encode(ThemeMode.light));
+    await h.container.read(themeModeProvider.notifier).restore();
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
+      ThemeMode.light,
+      reason: '恢复的是偏好里的值，而不是恒为 system',
+    );
   });
 
   testWidgets('从设置进入 /settings/sync 渲染同步页', (tester) async {

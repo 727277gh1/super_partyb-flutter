@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_data/spb_data.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -485,6 +486,46 @@ final searchChatProvider = Provider<SearchChat>((ref) {
   };
 });
 
+/// 路由预览（供悬浮输入窗的「预览」入口注入）。
+///
+/// ## 它预览的是 **agent**，不是归属 group
+///
+/// 服务端响应里**没有 `group_id`**，且当前只走**兜底默认 agent**（embedding
+/// 级联已下线）。UI 文案必须如实反映（见 `QuickCapturePage._previewLine`）。
+///
+/// 实现细节与理由见桌面端 `providers.dart` 的同名 provider（两端共用同一套
+/// 端点，装配同构）。
+final previewRoutingProvider = Provider<PreviewRouting>((ref) {
+  return (String input) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    final raw = await ref
+        .read(chatApiProvider)
+        .routingPreview(userId, input: input);
+    return RoutingPreview.fromJson(raw);
+  };
+});
+
+/// 「立即发送」：把服务端缓冲区里 pending 的消息立即合并提交。
+///
+/// 用带类型的 flush 并处理 `confirmation_required`（服务端用 **HTTP 200**
+/// 返回它，但**什么都没提交**）。详见桌面端同名 provider。
+final flushMessagesProvider = Provider<Future<void> Function(String)>((ref) {
+  return (String groupId) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    final result = await ref
+        .read(chatApiProvider)
+        .flushMessages(userId, groupId: groupId);
+    if (result.needsConfirmation) {
+      throw ValidationError(
+        '有多条待处理消息，需要先选择合并方式（${result.options.join(' / ')}）',
+      );
+    }
+    if (!result.committed) {
+      throw const ValidationError('没有可立即发送的待处理消息');
+    }
+  };
+});
+
 // ==================== 跨 group 待确认收件箱 ====================
 
 /// 待确认列表（首拉）。
@@ -535,6 +576,51 @@ final chatStreamControllerProvider = Provider.autoDispose
       ref.onDispose(controller.dispose);
       return controller;
     });
+
+/// group 变更通知流（对话列表实时增量更新的数据源）。
+///
+/// 实现与理由见桌面端 `providers.dart` 的同名 provider（两端同构）：
+///
+/// - 对话列表页自身**没有** SSE 连接（连接由对话页 `start()` 建立），只加一个
+///   `listen` 会「看起来做完了，但事件永远不来」；
+/// - 用 [ChatStreamController.ensureConnected]：已有连接就不动它，否则以全局
+///   模式建连（不回填任何 group 的时间线）；
+/// - userId 未就绪时返回空流占位，`/api/auth/me` 返回后由 `ref.watch` 重建；
+///   **不得**用空串兜底建连（那会连到 `/users//chat/stream`，见 issue #2）。
+/// 返回 [ChatStreamController.groupUpdates]（逐条通知，**不是** AsyncValue）。
+///
+/// ## 为什么不是 StreamProvider
+///
+/// 两个原因：
+///
+/// 1. `StreamProvider` 的 `AsyncValue` 只保留**最后一条**事件，而
+///    [GroupUpdate] 是逐条通知——created 后 deleted 与反过来结果不同，
+///    只留最后一条会丢事件。（其 `.stream` 逐条转发访问器在 riverpod 3.x
+///    已废弃移除。）
+/// 2. 页面注入点的类型就是 `Stream<GroupUpdate>?`（便于单测直接塞一条假流），
+///    这里返回裸流可以原样传递，不必再拆一层 AsyncValue。
+///
+/// ## 订阅时机是安全的（不会丢事件）
+///
+/// `ensureConnected()` 是异步的（要发 HTTP），而本 provider 与页面的
+/// `listen` 注册发生在**同一帧内**、中间没有 await 点。故事件到达时
+/// 订阅一定已经在了——broadcast 流「无监听者即丢弃」的特性不会咬到这里。
+///
+/// 若 userId 尚未就绪则返回空流：`/api/auth/me` 返回后 `ref.watch` 会让本
+/// provider 与页面一起重建，那时才接上真正的流（页面的 `didUpdateWidget`
+/// 会重订阅）。
+final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
+  final userId = ref.watch(currentUserIdProvider).value;
+  if (userId == null || userId.isEmpty) {
+    return const Stream<GroupUpdate>.empty();
+  }
+
+  final controller = ref.watch(chatStreamControllerProvider(userId));
+  // 不 await：provider body 必须同步返回。ensureConnected 幂等——已有连接
+  // （对话页建的聚焦模式）时是空操作，故不会抢走对话页的聚焦目标。
+  unawaited(controller.ensureConnected());
+  return controller.groupUpdates;
+});
 
 /// 无归属入口用例（悬浮输入窗用）。
 ///
@@ -1070,6 +1156,103 @@ final resolveMiniappConfirmationProvider = Provider<ResolveMiniappConfirmation>(
         api.resolveConfirmation(confirmationId, action: action);
   },
 );
+
+// ==================== 通知订阅额度 ====================
+
+/// 读取通知订阅额度（供设置页注入）。
+///
+/// ## 503 由页面处理，provider 不吞
+///
+/// 数据库不可用时服务端返回 503，`MiniappApi` 会抛 `HttpError(503)`。这里
+/// **不**把它转成空列表：空列表会被页面渲染成「四个模板都未开启」，而实际是
+/// 「读不到」。页面据此显示「暂时不可用 + 重试」。
+final loadNotificationSubscriptionsProvider =
+    Provider<LoadNotificationSubscriptions>((ref) {
+      final api = ref.watch(miniappApiProvider);
+      return api.listNotificationSubscriptions;
+    });
+
+/// 保存通知订阅额度（供设置页注入）。
+///
+/// `n > 0` 累加额度（服务端 `AddQuota`）、`n == 0` 归零并禁用（`ResetQuota`）。
+/// 页面只会传 [MiniappNotificationTemplates.all] 里的 key——未知 key 服务端
+/// 整体 400（不是忽略该项）。
+final saveNotificationSubscriptionsProvider =
+    Provider<SaveNotificationSubscriptions>((ref) {
+      final api = ref.watch(miniappApiProvider);
+      return api.saveNotificationSubscriptions;
+    });
+
+// ==================== 主题模式 ====================
+
+/// 主题模式控制器。
+///
+/// ## 为什么 `build()` 里同步返回 system 再异步纠正
+///
+/// `Notifier.build()` 必须**同步**返回一个值，而偏好读的是数据库（异步）。
+/// 故先返回 `ThemeMode.system`（与「从未设置过」的默认行为一致），随后
+/// `unawaited(restore())` 把真实值补上。这与 [AuthStateNotifier] 用
+/// `AuthState.unknown` 占位是同一手法。
+///
+/// 代价是启动瞬间可能用 system 渲染一帧再切到用户设的模式（如果用户设的是
+/// 深色而系统是浅色，会闪一下）。可接受：读取是本机数据库的一次查询，
+/// 通常在同一帧内完成；若要彻底消除，得把偏好读取提到 `runApp` 之前
+/// ——那会让启动多一次 await，代价更大。
+class ThemeModeNotifier extends Notifier<ThemeMode> {
+  @override
+  ThemeMode build() {
+    unawaited(restore());
+    return ThemeMode.system;
+  }
+
+  /// 从偏好存储恢复。
+  Future<void> restore() async {
+    try {
+      final prefs = ref.read(preferencesStoreProvider);
+      final raw = await prefs.getString(SpbThemeMode.prefKey);
+      state = SpbThemeMode.decode(raw);
+    } catch (e) {
+      // 读不到就保持 system：偏好是配置，不该让应用起不来。
+      SpbLog.warn('恢复主题模式失败', {'error': e.toString()});
+    }
+  }
+
+  /// 设置并持久化。
+  ///
+  /// 先改 `state` 再落盘：主题要即时生效，落盘失败也不该让界面停在上一个
+  /// 模式（下次启动会回到旧值，用户能看出「没存住」并重试）。
+  Future<void> setMode(ThemeMode mode) async {
+    if (state == mode) return;
+    state = mode;
+    try {
+      final prefs = ref.read(preferencesStoreProvider);
+      await prefs.setString(SpbThemeMode.prefKey, SpbThemeMode.encode(mode));
+    } catch (e) {
+      SpbLog.warn('保存主题模式失败', {'error': e.toString()});
+    }
+  }
+}
+
+/// 当前主题模式。
+final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(
+  ThemeModeNotifier.new,
+);
+
+/// 读取主题模式（供设置页注入）。
+final loadThemeModeProvider = Provider<LoadThemeMode>((ref) {
+  return () async {
+    final prefs = ref.read(preferencesStoreProvider);
+    return SpbThemeMode.decode(await prefs.getString(SpbThemeMode.prefKey));
+  };
+});
+
+/// 保存主题模式（供设置页注入）。
+///
+/// 走 `themeModeProvider` 而不是直接写库：这样设置页的改动会立刻反映到
+/// `MaterialApp.router` 的 `themeMode` 上（两者读的是同一个 provider）。
+final saveThemeModeProvider = Provider<SaveThemeMode>((ref) {
+  return (mode) => ref.read(themeModeProvider.notifier).setMode(mode);
+});
 
 /// 读取 `since_days`：缺失、非法、`<= 0` 都视为「不限」。
 Future<int?> _readSinceDays(PreferencesStore prefs) async {
