@@ -4,5 +4,13 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!--
+	  出站网络。沙箱下**不开这项就无法发起任何网络请求**，表现为登录、
+	  SSE、全部 API 调用一起失败——而 debug 构建（用
+	  DebugProfile.entitlements，见其 network.server 一行）能正常联网，
+	  于是问题只在正式包上暴露。
+	-->
+	<key>com.apple.security.network.client</key>
+	<true/>
 </dict>
 </plist>
