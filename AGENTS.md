@@ -573,7 +573,41 @@ windows:
 
 ### macOS / iOS：需 macOS 主机
 
-且 macOS runner 在 GitHub Actions 上**按 10× 计费倍数**，成本显著。优先级最低。
+macOS runner 在 GitHub Actions 上**按 10× 计费倍数**，成本显著（见下节）。
+
+#### macOS 出包（已在 `release.yml` 实现，仅 tag 触发）
+
+不需要 Apple Developer 账号：Flutter 的 macOS 模板在 project 级设了
+`CODE_SIGN_IDENTITY = "-"`（**ad-hoc 签名**）。Apple Silicon **强制要求**
+二进制至少被 ad-hoc 签过，故不能像 iOS 那样「完全跳过签名」。
+
+两个易踩的点：
+
+1. **打包必须用 `ditto`，不能用 `zip`**。`.app` 是目录，内含符号链接
+   （Frameworks 里大量使用）与可执行位；`zip` 会把符号链接存成普通文件、
+   丢掉权限位，解压后签名校验失败、app 启动即崩。
+2. **Release 默认产出 universal（arm64 + x86_64）**，无需显式指定 `ARCHS`。
+
+代价：产物未用 Developer ID 签名也未公证，用户首次打开被 Gatekeeper
+拦下，需右键→打开，或 `xattr -dr com.apple.quarantine <app>`。
+
+#### ⚠️ 已知缺陷：macOS 交付物同步写不进用户所选目录
+
+`Release.entitlements` / `DebugProfile.entitlements` **都缺**：
+
+```xml
+<key>com.apple.security.files.user-selected.read-write</key>
+<true/>
+```
+
+而 `file_selector` 的 macOS README 明确要求它（沙箱下访问用户所选目录）。
+交付物同步会用 `LocalFileSink` 向用户选定的同步目录写文件，**沙箱会拒绝**，
+表现为「同步报写入失败」。debug 构建沙箱较松可能不暴露，**只在正式包上现形**。
+修法：两份 entitlements 各加上面两行。
+
+### iOS：必须 Apple Developer 账号
+
+无法像 macOS 那样 ad-hoc 凑合——需 $99/年账号 + 签名证书 + 描述文件。
 
 ### CI 成本参考（私有仓库 Free 计划 2,000 Linux 分钟/月）
 
@@ -585,6 +619,9 @@ windows:
 | macOS | **10×** | ~16 min | **3,200（160% ← 必超额）** |
 
 **结论：Linux + Android + Windows 三端全在免费额度内（约 47%）。macOS 是唯一会花钱的。**
+
+发布流水线据此做了限制：macOS job **只在 tag 触发时跑**（见 `.github/workflows/release.yml`），
+PR 与手动触发均不跑——避免日常开发白烧 10× 额度。
 
 ---
 
@@ -655,9 +692,10 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
 - [ ] 移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`，见 `docs/mobile-oidc-deeplink.md`）
 - [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
-- [x] 发布流水线（`.github/workflows/release.yml`：tag 触发三端出包 → GitHub Release）
+- [x] 发布流水线（`.github/workflows/release.yml`：tag 触发四端出包 → GitHub Release）
 - [x] Windows 出包（GitHub Actions `windows-2022`，见 `docs/windows-release.md`）
-- [ ] macOS 出包（需 macOS runner，10× 计费，暂不做，见 §8）
+- [x] macOS 出包（GitHub Actions `macos-14`，ad-hoc 签名 + 通用二进制，**仅 tag 触发**）
+- [ ] iOS 出包（需 Apple Developer 账号 $99/年 + 签名证书，无法 ad-hoc 凑合）
 
 ### CI / 发布流水线速查
 
@@ -697,8 +735,10 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 问题 | 状态 | 参考 |
 |---|---|---|
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |
-| macOS 出包需 macOS runner（10× 计费） | 待决策 | §8、`super_partyb` issue #31 |
+| macOS 包未签名/未公证，首次打开需绕过 Gatekeeper | 已知限制（免签名分发） | §8 |
+| iOS 出包需 Apple Developer 账号 | 待决策 | §8、`super_partyb` issue #31 |
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
+| macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement | 已知缺陷，未修 | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ Linux 原生 channel 已实现 | §6.7 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |

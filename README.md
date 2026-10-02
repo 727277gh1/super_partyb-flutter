@@ -13,13 +13,17 @@
 |---|---|
 | **Windows** x64 | [Releases](../../releases) → `spb_desktop-windows-x64.zip`，解压后双击 `spb_desktop.exe`。已内置 VC++ 运行库，无需额外安装 |
 | **Linux** x64 | [Releases](../../releases) → `spb_desktop-linux-x64.tar.gz` |
+| **macOS** 12+（通用） | [Releases](../../releases) → `spb_desktop-macos-universal.zip`，解压后把 `spb_desktop.app` 拖进「应用程序」 |
 | **Android** | [Releases](../../releases) → `spb_mobile-android.apk` |
-| **macOS / iOS** | 暂不出包（需 macOS runner，CI 按 10× 计费） |
+| **iOS** | 暂不出包（需 Apple Developer 账号 $99/年 + 签名证书） |
 
 未打 tag 时，Actions 页的 artifact 也可下载（需登录 GitHub，存 30 天）。
+> macOS 是 10× 计费，其 job 只在打 tag 时跑，手动触发不产 macOS 包。
 
-> Windows 包未做代码签名，首次运行会被 SmartScreen 拦下——
-> 选「更多信息 → 仍要运行」。详见 **[docs/windows-release.md](docs/windows-release.md)**。
+> **三个平台均未做代码签名**：Windows 会被 SmartScreen 拦下（选「更多信息 → 仍要运行」）；
+macOS 是 ad-hoc 签名、未公证，首次打开需右键 → 打开，或执行
+`xattr -dr com.apple.quarantine /Applications/spb_desktop.app`。
+详见 **[docs/windows-release.md](docs/windows-release.md)**。
 
 ---
 
