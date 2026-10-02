@@ -99,12 +99,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 编译 C++ runner 的最低需求（AGENTS.md §7）。keybinder/appindicator/
-      # libsecret 只在 bundle 分发时需要，CI 不装。
+      # 编译 C++ runner 的最低需求 + **插件的编译期依赖**（AGENTS.md §7）。
+      #
+      # ⚠️ 后三个不是可选的：插件的 CMakeLists 里是 FATAL_ERROR / REQUIRED，
+      # 缺任一个直接编译失败（不是「功能降级」）：
+      #   libkeybinder-3.0-dev          → hotkey_manager_linux
+      #   libayatana-appindicator3-dev  → tray_manager
+      #   libsecret-1-dev               → flutter_secure_storage_linux（REQUIRED）
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev \
+            libkeybinder-3.0-dev libayatana-appindicator3-dev libsecret-1-dev patchelf
 
       - uses: subosito/flutter-action@v2
         with:
@@ -120,13 +127,20 @@ jobs:
           flutter build linux --release
 
       # 自包含验证（AGENTS.md §7）：ldd 不得缺库，RUNPATH 不得指向 /home。
-      # CI 用系统 GTK，本来就没有 /home 路径；这条检查防的是将来有人把
-      # bundle_linux_deps.sh 的产物误提交或构建方式漂移。
+      # CI 用系统 GTK/keybinder（apt 装的），本来就没有 /home 路径；这条检查
+      # 防的是将来有人把 bundle_linux_deps.sh 的产物误提交或构建方式漂移。
       - name: Verify bundle is self-contained
         run: |
           cd apps/spb_desktop/build/linux/x64/release/bundle
-          ! ldd spb_desktop | grep 'not found'
-          ! find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \; 2>/dev/null || true
+          if ldd spb_desktop | grep 'not found'; then
+            echo '❌ 缺动态库'; exit 1
+          fi
+          # 注意：此处先 build 完再查 lib/ 的 RUNPATH。lib/ 里是插件 .so，
+          # 它们的 rpath 应为 $ORIGIN（见 bundle_linux_deps.sh 的说明）。
+          if find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \;; then
+            echo '❌ RUNPATH 仍指向 /home'; exit 1
+          fi
+          echo '✅ bundle 自包含'
 
       - uses: actions/upload-artifact@v4
         with:
@@ -196,8 +210,11 @@ jobs:
           Copy-Item "$($crt.FullName)\*.dll" build\windows\x64\runner\Release\
           Get-ChildItem build\windows\x64\runner\Release\*.dll | Select-Object -ExpandProperty Name
 
+      # 注意路径必须从**仓库根**写起：upload-artifact 的 path 相对 GITHUB_WORKSPACE，
+      # 不继承上面 step 的 working-directory。写成 `build/...` 会静默传一个空目录
+      # （v4 默认 warn 而非 fail），产物看似上传成功实则没有 exe。
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: build/windows/x64/runner/Release/
+          path: apps/spb_desktop/build/windows/x64/runner/Release/
           retention-days: 7
