@@ -5,4 +5,5 @@
 library;
 
 export 'src/theme.dart';
+export 'src/theme_mode.dart';
 export 'src/tokens.dart';
