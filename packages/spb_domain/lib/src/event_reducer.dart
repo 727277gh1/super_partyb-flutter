@@ -4,6 +4,7 @@ import 'conversation_item.dart';
 import 'gate_decision.dart';
 import 'spec_ui.dart';
 import 'tts_audio_path.dart';
+import 'turn_activity.dart';
 
 /// 把服务端事件流归约成可渲染的对话项列表。
 ///
@@ -42,6 +43,13 @@ class EventReducer {
     // [events] 是 Iterable，可能是惰性流（如 `_buffer.map(...)`）；迭代两次
     // 会重算或拿到不同结果。单趟保证两个输出基于同一批事件。
     final gateDecisions = <GateDecision>[];
+
+    // 执行中活动快照，按 turnId 取最新（见 ReductionResult.activities）。
+    //
+    // 同在一个循环里收集的理由与 gateDecisions 相同（单趟、同一批事件）。
+    // 它**不**进 items：进度提示不是对话正文（与 webapp 的
+    // `categorizeEvent('turn_activity') === 'event'` 同语义）。
+    final activities = <String, TurnActivitySnapshot>{};
     var lastEventId = '';
 
     // 当前正在累积的 assistant 段落 / thought 段落。
@@ -59,6 +67,18 @@ class EventReducer {
 
       final gate = gateDecisionFrom(ev);
       if (gate != null) gateDecisions.add(gate);
+
+      // turn_activity：按 turnId 取最新。
+      //
+      // WHY 在循环顶部而非 switch 分支里：`default:` 分支的语义是「控制事件，
+      // 不进对话列表也不进任何通道」；放进去就等于宣称它被丢弃。它确实不产
+      // items，但产出 activities——与 adaptive_decision 同样的「顶部收集 +
+      // default 不管」写法（这正是修复 2927 条事件被吞时确立的取向）。
+      //
+      // 同 turn 多条只保留最后一条：服务端每次心跳重算 elapsed_ms，越新越准
+      // （对齐 webapp chat-timeline.ts 的 `group.activity = {...}` 覆盖写）。
+      final activity = TurnActivitySnapshot.fromEvent(ev);
+      if (activity != null) activities[activity.turnId] = activity;
 
       switch (ev.eventType) {
         case EventTypes.userMessage:
@@ -388,6 +408,7 @@ class EventReducer {
       items: items,
       lastEventId: lastEventId,
       gateDecisions: gateDecisions,
+      activities: activities,
     );
   }
 
@@ -700,6 +721,7 @@ class ReductionResult {
     required this.items,
     required this.lastEventId,
     this.gateDecisions = const [],
+    this.activities = const {},
   });
 
   final List<ConversationItem> items;
@@ -716,4 +738,21 @@ class ReductionResult {
   /// 「agent 为什么自己又跑了一轮」的关键排障依据。故走独立通道，
   /// 由侧边栏诊断面板消费（对齐 webapp `WorkbenchGatePanel`）。
   final List<GateDecision> gateDecisions;
+
+  /// 执行中活动快照（`turn_activity`），按 turnId 索引。
+  ///
+  /// ## 为什么不在 [items] 里
+  ///
+  /// 与 [gateDecisions] 同因：时间线只放用户可见的对话内容。进度提示是
+  /// **状态指示**——它每 15s 刷新一次，进时间线会不断插入/更新条目、把对话
+  /// 冲得七零八落，而且历史回放时早已过期（Transient 不落库，故断线重连后
+  /// 本映射为空，需等下一个心跳）。故走独立通道，由对话页在空窗期消费。
+  ///
+  /// ## 为什么是 Map 而不是 List
+  ///
+  /// 语义是「每个 turn 当前的活动状态」，同 turn 多条只保留最新（越新越准）。
+  /// Map 天然表达这一点，消费方按 turnId 直查，无需自己扫描去重。
+  ///
+  /// 值为 null 与「不存在该键」等价（都用 `activities[turnId]` 取）。
+  final Map<String, TurnActivitySnapshot> activities;
 }

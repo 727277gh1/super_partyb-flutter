@@ -1021,4 +1021,112 @@ void main() {
       expect(item.fileName, 'QWEN.md');
     });
   });
+
+  group('turn_activity → activities 通道（不进时间线）', () {
+    /// 造一个 turn_activity 事件（Transient，不落库）。
+    ChatEvent activity({
+      String turnId = 'turn_1',
+      int? elapsedMs = 45000,
+      String? lastEventType = 'tool_call',
+      int? sinceLastEventMs = 3200,
+      int globalSeq = 1,
+    }) => ev(
+      EventTypes.turnActivity,
+      turnId: turnId,
+      transient: true,
+      globalSeq: globalSeq,
+      payload: {
+        if (elapsedMs != null) 'elapsed_ms': elapsedMs,
+        if (lastEventType != null) 'last_event_type': lastEventType,
+        if (sinceLastEventMs != null) 'since_last_event_ms': sinceLastEventMs,
+      },
+    );
+
+    test('产出 activities，但不产生任何 items', () {
+      final r = EventReducer.reduce([activity()]);
+
+      expect(r.items, isEmpty, reason: '进度提示不是对话正文');
+      expect(r.activities, hasLength(1));
+      final a = r.activities['turn_1']!;
+      expect(a.turnId, 'turn_1');
+      expect(a.elapsedMs, 45000);
+      expect(a.lastEventType, 'tool_call');
+      expect(a.sinceLastEventMs, 3200);
+    });
+
+    test('同一 turn 两条只保留最新（越新越准）', () {
+      final r = EventReducer.reduce([
+        activity(elapsedMs: 15000, lastEventType: 'thought', globalSeq: 1),
+        activity(elapsedMs: 45000, lastEventType: 'tool_call', globalSeq: 2),
+      ]);
+
+      expect(r.activities, hasLength(1), reason: '同 turn 只留一条');
+      expect(r.activities['turn_1']!.elapsedMs, 45000);
+      expect(r.activities['turn_1']!.lastEventType, 'tool_call');
+    });
+
+    test('不同 turn 各自独立', () {
+      final r = EventReducer.reduce([
+        activity(turnId: 'turn_a', elapsedMs: 1000, globalSeq: 1),
+        activity(turnId: 'turn_b', elapsedMs: 2000, globalSeq: 2),
+      ]);
+
+      expect(r.activities.keys, containsAll(['turn_a', 'turn_b']));
+      expect(r.activities['turn_a']!.elapsedMs, 1000);
+      expect(r.activities['turn_b']!.elapsedMs, 2000);
+    });
+
+    test('首帧无上一步事件时 lastEventType/sinceLastEventMs 为 null', () {
+      final r = EventReducer.reduce([
+        activity(lastEventType: null, sinceLastEventMs: null),
+      ]);
+
+      final a = r.activities['turn_1']!;
+      expect(a.elapsedMs, 45000);
+      expect(a.lastEventType, isNull);
+      expect(a.sinceLastEventMs, isNull);
+    });
+
+    test('elapsed_ms 缺失时退化为 0（异常载荷不产出 null）', () {
+      final r = EventReducer.reduce([activity(elapsedMs: null)]);
+
+      expect(r.activities['turn_1']!.elapsedMs, 0);
+    });
+
+    test('turnId 为空的 turn_activity 被丢弃（无法按 turn 归并）', () {
+      final r = EventReducer.reduce([activity(turnId: '')]);
+
+      expect(r.activities, isEmpty);
+    });
+
+    test('turn_activity 不推进 SSE 游标（Transient 无有效 ID）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.message,
+          id: 'evt_msg',
+          payload: {'text': 'hi'},
+          globalSeq: 1,
+        ),
+        activity(globalSeq: 2),
+      ]);
+
+      expect(r.lastEventId, 'evt_msg', reason: 'Transient 事件不得作游标');
+    });
+
+    test('activity 与同 turn 的正文共存：items 有正文、activities 有进度', () {
+      final r = EventReducer.reduce([
+        activity(elapsedMs: 30000, globalSeq: 1),
+        ev(
+          EventTypes.message,
+          payload: {'text': '正在分析…'},
+          transient: true,
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      expect(r.items.single, isA<AssistantMessageItem>());
+      expect(r.activities['turn_1']!.elapsedMs, 30000);
+    });
+  });
 }

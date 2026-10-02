@@ -34,6 +34,7 @@ library;
 //   DeliverableSyncUseCase        —— 同步编排：分页拉取 → 计划 → 执行 → 存状态
 //   UfsFileDownloader             —— UfsApi → FileDownloader 适配（304 语义映射）
 //   groupRelativePath 等           —— UFS 路径 → 本地相对路径（含穿越防御）
+//   resolveLocalDeliverablePath 等  —— 已同步交付物 → 本地相对路径（打开/定位用，含布局校验）
 //   effectiveCursor               —— 游标与 since_days 合并成 updated_since（纯函数）
 //   SyncScopeConfig               —— 同步范围**持久化形态**（允许空列表）→ toScope()
 //   SyncSettings / LocalSyncStats —— 设置页的表单聚合形态与本地统计
@@ -41,6 +42,8 @@ library;
 //   buildArtifactTree / ArtifactNode —— 交付物清单 → 树（隐式目录、聚合、排序，纯逻辑）
 //   GateDecision / GateDecisionKind / GateSourceKind —— Gate 决策（adaptive_decision / goal_gate_decision 归约输出，独立于时间线）
 //   collectGateDecisions / gateDecisionFrom —— 事件流 → Gate 决策列表（纯函数）
+//   TurnActivitySnapshot          —— 执行中活动快照（turn_activity 归约输出，空窗期进度指示）
+//   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
@@ -52,6 +55,7 @@ export 'src/deliverable_upload_adapters.dart';
 export 'src/deliverable_upload_usecase.dart';
 export 'src/event_reducer.dart';
 export 'src/gate_decision.dart';
+export 'src/local_deliverable_path.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
 export 'src/spec_ui.dart';
@@ -59,6 +63,7 @@ export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
 export 'src/tts_audio_path.dart';
+export 'src/turn_activity.dart';
 export 'src/turn_group.dart';
 export 'src/sync_scope_config.dart';
 export 'src/sync_settings.dart';

@@ -8,6 +8,7 @@ import 'package:spb_models/spb_models.dart';
 import 'conversation_item.dart';
 import 'event_reducer.dart';
 import 'gate_decision.dart';
+import 'turn_activity.dart';
 
 /// 对话流控制器：把 SSE 帧流 + timeline 回填统一成一条对话项流。
 ///
@@ -48,6 +49,9 @@ class ChatStreamController {
   final _itemsController = StreamController<List<ConversationItem>>.broadcast();
   final _gateDecisionsController =
       StreamController<List<GateDecision>>.broadcast();
+  final _activitiesController =
+      StreamController<Map<String, TurnActivitySnapshot>>.broadcast();
+  final _groupUpdatesController = StreamController<GroupUpdate>.broadcast();
   final _errorController = StreamController<SpbError>.broadcast();
   final _stateController = StreamController<SseState>.broadcast();
 
@@ -76,6 +80,29 @@ class ChatStreamController {
   Stream<List<GateDecision>> get gateDecisions =>
       _gateDecisionsController.stream;
 
+  /// 执行中活动快照流（与 [items] 平行，由同一次归约产出）。
+  ///
+  /// 供对话页在「已起跑但还没有正文」的空窗期展示进度（见
+  /// [TurnActivitySnapshot] 的类文档）。推送的是**全量 Map**（按 turnId 索引），
+  /// 与 [items] 的全量重建取向一致：消费方按 turnId 直查，无需自己合并。
+  Stream<Map<String, TurnActivitySnapshot>> get activities =>
+      _activitiesController.stream;
+
+  /// group 变更通知流（逐条推送，**不累积**）。
+  ///
+  /// ## 为什么与 [items] / [gateDecisions] 不同（增量而非全量）
+  ///
+  /// 前者是「当前状态快照」，后者是「发生了什么事」。group 变更按顺序处理
+  /// （created 后 deleted 与反过来结果不同），累积成列表反而要求消费方自己
+  /// 排序；逐条推送保留真实发生顺序，消费方按 op 增量更新或整体重拉。
+  ///
+  /// ## 为什么不受 [switchGroup] 的 group 过滤影响（全局模式）
+  ///
+  /// SSE 是 user 级订阅，group 变更与「当前打开哪个对话」无关：A 端建组时
+  /// B 端侧栏要实时出现，而列表页在全局模式下运行。故 [_onFrame] 对
+  /// `group_updated` 的 group 过滤有**例外**（见那里的注释）。
+  Stream<GroupUpdate> get groupUpdates => _groupUpdatesController.stream;
+
   Stream<SpbError> get errors => _errorController.stream;
 
   Stream<SseState> get connectionState => _stateController.stream;
@@ -87,6 +114,10 @@ class ChatStreamController {
 
   /// 当前 Gate 决策快照。
   List<GateDecision> get gateDecisionsSnapshot => _reduction.gateDecisions;
+
+  /// 当前执行中活动快照（按 turnId 索引）。
+  Map<String, TurnActivitySnapshot> get activitiesSnapshot =>
+      _reduction.activities;
 
   /// 归约缓冲区（缓存最近一次 [_emit] 的结果，避免在 `snapshot` /
   /// `gateDecisionsSnapshot` 上各自重算）。
@@ -124,6 +155,38 @@ class ChatStreamController {
     });
 
     await _sse.connect(path: '/users/$userId/chat/stream');
+  }
+
+  /// 是否已建立过 SSE 连接（[start] 已调用过）。
+  ///
+  /// ## 为什么需要它（对话列表与对话页共用一条连接）
+  ///
+  /// SSE 是 **user 级订阅**：整个进程一个 userId 只有一条连接（见 [switchGroup]）。
+  /// 对话列表页也要实时反映 group 变更，故它必须确保连接在——但它**不该**
+  /// 抢走对话页的聚焦目标，也不该清掉对话页刚回填好的时间线。
+  ///
+  /// [ensureConnected] 依赖本标志判断「连接是否已经有人建好了」。
+  bool get isConnected => _frameSub != null;
+
+  /// 确保 SSE 连接已建立，**不改变**当前聚焦的 group、不清空缓冲。
+  ///
+  /// 供「只关心全局通知、不关心某个 group 时间线」的页面（对话列表）使用。
+  ///
+  /// - 已有连接（无论是对话页建的聚焦模式，还是本方法建的全局模式）：空操作；
+  /// - 尚未连接：以全局模式建立（`groupId: null`，不回填时间线）。
+  ///
+  /// ## 为什么不直接调 [start]
+  ///
+  /// `start` 会 `_buffer.clear()` 并按 groupId 回填。若对话页正在显示某个对话，
+  /// 列表页的一次「确保连接」就会把它的时间线清空重建——表现为列表页一挂载，
+  /// 打开的对话内容就闪一下。故这里只在**确实还没有连接**时才动手。
+  ///
+  /// 注：`group_updated` 在 [_onFrame] 里是**先于 group 过滤**推送的（见那里的
+  /// 注释），故即便连接是由对话页以聚焦模式建立的，列表页依然能收到所有
+  /// group 的变更——本方法不需要强制切到全局模式。
+  Future<void> ensureConnected() async {
+    if (_frameSub != null) return;
+    await start(groupId: null);
   }
 
   /// 切换聚焦的 group（如用户点了另一个对话）。
@@ -339,6 +402,21 @@ class ChatStreamController {
 
     // group 过滤：SSE 是 user 级订阅，会收到其他 group 的事件。
     // 全局模式（_groupId == null）不过滤。
+    //
+    // ⚠️ **`group_updated` 是例外**：它的 groupId 指向「被变更的那个 group」，
+    // 而它与「当前打开哪个对话」无关（列表页在全局模式运行，但要实时反映
+    // 任何 group 的变更）。按当前 group 过滤会把「新建了另一个 group」这类
+    // 恰恰最需要的事件全部丢掉。故它在过滤**之前**先推入通知流。
+    //
+    // 放在这里（而非下面的 switch/归约层）的理由：它是**通知**而非对话状态，
+    // 不应受「当前聚焦哪个对话」约束；而 turn_activity 是对话状态，必须受约束。
+    if (event.eventType == EventTypes.groupUpdated) {
+      final update = GroupUpdate.fromEvent(event);
+      if (update != null && !_groupUpdatesController.isClosed) {
+        _groupUpdatesController.add(update);
+      }
+    }
+
     final gid = _groupId;
     if (gid != null && event.groupId.isNotEmpty && event.groupId != gid) {
       return;
@@ -373,6 +451,9 @@ class ChatStreamController {
     _itemsController.add(_cachedReduction!.items);
     if (!_gateDecisionsController.isClosed) {
       _gateDecisionsController.add(_cachedReduction!.gateDecisions);
+    }
+    if (!_activitiesController.isClosed) {
+      _activitiesController.add(_cachedReduction!.activities);
     }
   }
 
@@ -434,6 +515,8 @@ class ChatStreamController {
     await _stateSub?.cancel();
     await _itemsController.close();
     await _gateDecisionsController.close();
+    await _activitiesController.close();
+    await _groupUpdatesController.close();
     await _errorController.close();
     await _stateController.close();
   }
