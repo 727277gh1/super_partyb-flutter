@@ -162,6 +162,7 @@ void main() {
     Future<bool> Function()? onLoadOlder,
     String? historyKey,
     VoidCallback? onReconnect,
+    bool wireActivities = true,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -177,6 +178,13 @@ void main() {
           onLoadOlder: onLoadOlder,
           historyKey: historyKey,
           onReconnect: onReconnect,
+          // 活动流由 app 层注入（与 onCancelTurn 等同取向）。默认接上
+          // controller，便于测「事件到达 → 指示器出现」的完整链路；
+          // wireActivities=false 用于验证「未注入时不展示」。
+          activities: wireActivities ? controller.activities : null,
+          activitiesSnapshot: wireActivities
+              ? controller.activitiesSnapshot
+              : null,
         ),
       ),
     );
@@ -820,6 +828,188 @@ void main() {
         findsNothing,
         reason: '只读时间线用法下不应出现点了没反应的按钮',
       );
+    });
+  });
+
+  group('ConversationPage 执行中活动指示', () {
+    /// 推一条 turn_activity（Transient，与 executor 心跳升级后的形态一致）。
+    Future<void> pushActivity(
+      WidgetTester tester, {
+      String turnId = 'turn_1',
+      int elapsedMs = 45000,
+      String? lastEventType = 'bash',
+      int seq = 9,
+    }) => pushEvent(
+      tester,
+      EventTypes.turnActivity,
+      sseEvent(
+        EventTypes.turnActivity,
+        id: 'e_act',
+        turnId: turnId,
+        transient: true,
+        seq: seq,
+        payload: {
+          'elapsed_ms': elapsedMs,
+          if (lastEventType != null) 'last_event_type': lastEventType,
+        },
+      ),
+    );
+
+    /// 推一个**无正文**的流式思考段（长 turn 的静默期就是这样：在思考、
+    /// 还没吐字，且没有 AssistantMessageItem 正文）。
+    Future<void> pushStreamingThought(
+      WidgetTester tester, {
+      String turnId = 'turn_1',
+    }) => pushEvent(
+      tester,
+      EventTypes.thought,
+      sseEvent(
+        'thought',
+        id: 'e_thought',
+        turnId: turnId,
+        transient: true,
+        payload: {'text': '让我想想…'},
+      ),
+    );
+
+    testWidgets('流式中无正文时展示「已运行 X · 最近：Y」', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingThought(tester);
+      await pushActivity(tester, elapsedMs: 45000, lastEventType: 'bash');
+
+      final indicator = find.byKey(
+        const ValueKey('conversation-turn-activity'),
+      );
+      expect(
+        indicator,
+        findsOneWidget,
+        reason: '空窗期必须给用户进展证据，否则他分不清「在干活」与「卡死」',
+      );
+      expect(find.textContaining('已运行 45 秒'), findsOneWidget);
+      expect(find.text('最近：bash'), findsOneWidget);
+    });
+
+    testWidgets('≥ 1 分钟拆成「X 分 Y 秒」（webapp 只给秒数，此处有意更易读）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingThought(tester);
+      await pushActivity(tester, elapsedMs: 125000, lastEventType: 'tool_call');
+
+      expect(find.textContaining('已运行 2 分 5 秒'), findsOneWidget);
+    });
+
+    testWidgets('无 last_event_type 时不渲染「最近：」段（不显示 null）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingThought(tester);
+      await pushActivity(tester, lastEventType: null);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity-last')),
+        findsNothing,
+        reason: '首帧活动不带上一步，拼出「最近：null」比不显示更糟',
+      );
+    });
+
+    testWidgets('已有正文时让位给真实内容（不插进度噪声）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingMessage(tester);
+      await pushActivity(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+        reason: '正文在往下滚，再插一句「已运行」只是噪声',
+      );
+    });
+
+    testWidgets('无活动事件时不展示（不凭空造进度）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingThought(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('done 到达后不再展示（不在已完成的对话下挂「执行中」）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingThought(tester);
+      await pushActivity(tester);
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsOneWidget,
+      );
+
+      await pushEvent(
+        tester,
+        EventTypes.done,
+        sseEvent(
+          'done',
+          id: 'e_done',
+          payload: {'status': 'completed'},
+          seq: 20,
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+        reason: 'done 会闭合流式段；活动快照仍残留在 State，必须靠流式判定排除',
+      );
+    });
+
+    testWidgets('未注入活动流时不展示（保持纯只读时间线用法）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, wireActivities: false);
+      await pushStreamingThought(tester);
+      await pushActivity(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('活动只作用于自己的 turn（不串到别的流式 turn）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushStreamingThought(tester, turnId: 'turn_1');
+      // 另一个 turn 的活动快照：不应驱动当前指示器。
+      await pushActivity(tester, turnId: 'turn_other', elapsedMs: 99000);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+        reason: '按 turnId 直查，不拿「最近一条活动」冒充当前 turn 的进度',
+      );
+    });
+
+    test('formatTurnElapsed：秒/分/时各量级', () {
+      expect(formatTurnElapsed(0), '0 秒');
+      expect(formatTurnElapsed(-500), '0 秒', reason: '异常载荷不产出负数');
+      expect(formatTurnElapsed(3000), '3 秒');
+      expect(formatTurnElapsed(59000), '59 秒');
+      expect(formatTurnElapsed(60000), '1 分钟');
+      expect(formatTurnElapsed(125000), '2 分 5 秒');
+      expect(formatTurnElapsed(7325000), '122 分 5 秒');
     });
   });
 

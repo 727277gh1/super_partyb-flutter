@@ -25,6 +25,15 @@ typedef OpenLocalDeliverable = Future<bool> Function(String path);
 /// 在系统文件管理器中定位已下载文件。返回是否成功发起。
 typedef RevealLocalDeliverable = Future<bool> Function(String path);
 
+/// 查询某个交付物**在同步目录里的本地绝对路径**（未同步返回 null）。
+///
+/// 与 [DownloadDeliverable] 的区别是「这份文件从哪来」：
+/// - [DownloadDeliverable]：用户点「下载」，把远端内容拉到应用目录；
+/// - 本回调：**只查询**，回答「交付物同步是否已经把这文件放到用户选的目录里了」。
+///
+/// 由 app 装配层实现（它持有同步状态库与同步目录），页面本身不碰存储。
+typedef ResolveLocalDeliverable = String? Function(UfsFileEntry file);
+
 /// 当前 group 的交付物侧边栏。
 ///
 /// ## 它解决什么（与既有组件的边界）
@@ -45,12 +54,33 @@ typedef RevealLocalDeliverable = Future<bool> Function(String path);
 /// 故全部靠注入：[loadFiles] 取数、[onDownload] / [onOpen] / [onReveal] 发动作，
 /// 页面只负责渲染与防重复点。
 ///
-/// ## 「打开 / 定位」为什么只在下载后才可用
+/// ## 「打开 / 定位」的两条本地路径来源
 ///
-/// 远端文件没有本地路径，无法交给系统默认程序或文件管理器。本面板采用最简
-/// 语义：用户先下载（拿到落地路径），面板记住该路径，随后「打开 / 定位」
-/// 才在操作菜单里变为可用。与交付物同步的「本地已同步则直接打开」是后续
-/// 的增强（需要把 `SyncPage` 的本地索引接进来），不是本面板的 MVP 范围。
+/// 远端文件没有本地路径，无法交给系统默认程序或文件管理器。本面板按**优先级**
+/// 取两者之一：
+///
+/// 1. [resolveLocalPath]（交付物**同步**索引）：**已同步则直接打开**——用户若
+///    已把该 group 同步到本地目录，文件早就在磁盘上了，不必再下载一次；
+/// 2. [onDownload] 的落地路径（用户在本面板里点过「下载」）。
+///
+/// 两者都没有时「打开 / 定位」禁用——并在菜单项上体现为 `enabled: false`，
+/// 而不是点了没反应。
+///
+/// （「已同步则直接打开」曾是待做项，现已打通：同步索引 → 本地相对路径由
+/// `spb_domain` 的 `resolveLocalDeliverablePath` 计算，app 层把它接成
+/// [resolveLocalPath]。）
+///
+/// ## 为什么同步索引优先于下载路径
+///
+/// 同步目录里的那份是**用户自己选的目录**，也是他在文件管理器里能找到的地方；
+/// 面板的下载目录是应用支持目录下的隐藏位置，用户不容易找到。同一个文件两边
+/// 都有时，指向用户熟悉的那份更符合预期。
+///
+/// ## 为什么 [resolveLocalPath] 是同步回调
+///
+/// 它在 `build` 期间对每个可见文件调用。实现方必须读**已加载好的**状态快照
+/// （由 app 层用 provider 预先加载），而不是在这里做磁盘/数据库查询——否则
+/// 列表滚动会触发大量同步 IO。
 ///
 /// ## 刷新模型
 ///
@@ -71,6 +101,7 @@ class GroupDeliverablesPanel extends StatefulWidget {
     this.onDownload,
     this.onOpen,
     this.onReveal,
+    this.resolveLocalPath,
     this.reloadToken,
     this.title = '交付物',
     this.emptyHint = '这个对话还没有交付物',
@@ -86,6 +117,10 @@ class GroupDeliverablesPanel extends StatefulWidget {
 
   final OpenLocalDeliverable? onOpen;
   final RevealLocalDeliverable? onReveal;
+
+  /// 交付物同步索引查询（见类文档「两条本地路径来源」）。null = 不做同步查询
+  /// （此时「打开 / 定位」仍只在手动下载后可用）。
+  final ResolveLocalDeliverable? resolveLocalPath;
 
   /// 刷新令牌：变化时强制重新拉取。
   ///
@@ -111,8 +146,17 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
 
   /// 已下载文件的本地落地路径：`ufs file id → 本地路径`。
   ///
-  /// 「打开 / 定位」依赖它——远端文件没有本地路径，只有下载后才出现。
+  /// 只存**本面板内下载**的结果。同步索引那份由 [GroupDeliverablesPanel.resolveLocalPath]
+  /// 实时查询（不缓存：同步可能在本页打开期间推进，缓存会让「刚同步好的文件」
+  /// 仍显示为不可打开）。
   final _localPaths = <String, String>{};
+
+  /// 该文件可用的本地路径（同步索引优先，其次本面板的下载记录）。
+  String? _localPathOf(ArtifactFileNode node) {
+    final fromSync = widget.resolveLocalPath?.call(node.file);
+    if (fromSync != null && fromSync.isNotEmpty) return fromSync;
+    return _localPaths[node.file.id];
+  }
 
   /// 是否至少有一个动作回调（决定行尾菜单是否渲染）。
   bool get _hasAnyAction =>
@@ -189,7 +233,7 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
   }
 
   Future<void> _open(ArtifactFileNode node) async {
-    final path = _localPaths[node.file.id];
+    final path = _localPathOf(node);
     final cb = widget.onOpen;
     if (path == null || cb == null) return;
     try {
@@ -202,7 +246,7 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
   }
 
   Future<void> _reveal(ArtifactFileNode node) async {
-    final path = _localPaths[node.file.id];
+    final path = _localPathOf(node);
     final cb = widget.onReveal;
     if (path == null || cb == null) return;
     try {
@@ -402,7 +446,7 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
   Widget _buildFile(ArtifactFileNode node, int depth) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final localPath = _localPaths[node.file.id];
+    final localPath = _localPathOf(node);
     final busy = _downloading.contains(node.file.id);
     final canOpen = localPath != null && widget.onOpen != null;
     final canReveal = localPath != null && widget.onReveal != null;

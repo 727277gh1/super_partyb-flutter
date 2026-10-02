@@ -8,8 +8,22 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 import 'package:spb_ui/spb_ui.dart';
 
+import 'notification_subscriptions_card.dart';
+
 /// 弹出目录选择器。返回 null = 用户取消。
 typedef PickSettingsDirectory = Future<String?> Function();
+
+/// 读取主题模式偏好。
+typedef LoadThemeMode = Future<ThemeMode> Function();
+
+/// 保存主题模式偏好。
+///
+/// ## 为什么这个不是「整份提交」的 draft 的一部分
+///
+/// 主题是**即时反馈**项：用户点了「深色」就该立刻变深色。若并进 draft，
+/// 用户得再点一次「保存」才生效——而那时他已经在看着浅色界面确认「没生效」。
+/// 故本项独立注入、选中即保存（与通知订阅额度同一取舍）。
+typedef SaveThemeMode = Future<void> Function(ThemeMode mode);
 
 /// 读取已保存的同步设置。
 typedef LoadSyncSettings = Future<SyncSettings> Function();
@@ -83,6 +97,10 @@ class SettingsPage extends StatefulWidget {
     this.onOpenMyTurns,
     this.loadLaunchAtStartup,
     this.setLaunchAtStartup,
+    this.loadNotifications,
+    this.saveNotifications,
+    this.loadThemeMode,
+    this.saveThemeMode,
     this.title = '设置',
   });
 
@@ -149,6 +167,23 @@ class SettingsPage extends StatefulWidget {
   /// ——比显示一个乐观的勾选更诚实。
   final Future<void> Function(bool enabled)? setLaunchAtStartup;
 
+  /// 通知订阅额度的读取入口。为 null 时**不展示**该区块。
+  ///
+  /// ## 为什么与其余设置项不同，不放进 draft
+  ///
+  /// 额度是服务端账本（`miniapp_subscriptions` 表），没有「草稿」语义——
+  /// 详见 [NotificationSubscriptionsCard] 的类文档。
+  final LoadNotificationSubscriptions? loadNotifications;
+
+  /// 通知订阅额度的保存入口。与 [loadNotifications] 成对注入。
+  final SaveNotificationSubscriptions? saveNotifications;
+
+  /// 读取主题模式。为 null 时**不展示**「外观」区块。
+  final LoadThemeMode? loadThemeMode;
+
+  /// 保存主题模式。与 [loadThemeMode] 成对注入。
+  final SaveThemeMode? saveThemeMode;
+
   final String title;
 
   @override
@@ -180,6 +215,16 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 开机自启的当前状态。null = 尚未读到（或未接入）。
   bool? _launchAtStartup;
+
+  /// 当前主题模式。null = 尚未读到（或未接入）。
+  ///
+  /// ## 为什么单独存一份而不直接读 provider
+  ///
+  /// 本页不依赖 Riverpod（是纯 `StatefulWidget`，全靠注入），故主题值也走
+  /// 注入：读回来的值放这里供 RadioGroup 渲染，切换时调注入的保存回调。
+  /// 应用层（`MaterialApp.router` 的 `themeMode`）由 provider 驱动，
+  /// 本页只是它的一个编辑入口。
+  ThemeMode? _themeMode;
 
   /// 自启开关是否在途（防重复切换 + 禁用控件）。
   bool _togglingLaunch = false;
@@ -228,6 +273,7 @@ class _SettingsPageState extends State<SettingsPage> {
       // 统计与对话列表是次要信息：不阻塞首屏（分别单独加载）。
       _loadStats();
       _loadLaunchAtStartup();
+      _loadThemeMode();
       if (!settings.scope.allGroups) _loadGroups();
     } catch (e) {
       if (!mounted) return;
@@ -241,6 +287,40 @@ class _SettingsPageState extends State<SettingsPage> {
   void _syncMaxSizeField(SyncSettings s) {
     final mb = s.filter.maxFileSize ~/ (1024 * 1024);
     _maxSizeController.text = '$mb';
+  }
+
+  /// 读取主题模式。
+  ///
+  /// 与首屏设置分开放：它要走数据库（`PreferencesStore`），不该拖慢首屏。
+  /// 读不到时保持 null → 区块渲染成「禁用」，而不是假装「跟随系统」
+  /// ——后者会让用户以为当前就是跟随系统，而实际只是没读到。
+  Future<void> _loadThemeMode() async {
+    final loader = widget.loadThemeMode;
+    if (loader == null) return;
+    try {
+      final mode = await loader();
+      if (!mounted) return;
+      setState(() => _themeMode = mode);
+    } catch (e) {
+      SpbLog.warn('读取主题模式失败', {'error': e.toString()});
+    }
+  }
+
+  /// 切换主题模式：选中即保存（不走 draft，见 [SaveThemeMode] 的说明）。
+  Future<void> _setThemeMode(ThemeMode mode) async {
+    final saver = widget.saveThemeMode;
+    if (saver == null || _themeMode == mode) return;
+    final previous = _themeMode;
+    // 乐观更新：主题是即时反馈项，等落盘再变会让用户觉得「点了没反应」。
+    // 失败时回滚到 previous，避免界面显示的值与库里不一致。
+    setState(() => _themeMode = mode);
+    try {
+      await saver(mode);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _themeMode = previous);
+      SpbLog.warn('保存主题模式失败', {'error': e.toString()});
+    }
   }
 
   /// 读取开机自启状态。
@@ -717,6 +797,36 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: SpbSpacing.lg),
         ],
+        // 外观：与其余设置项不同，**选中即保存**（不走 draft）。见
+        // [SaveThemeMode] 的说明——主题需要即时反馈。
+        if (widget.loadThemeMode != null && widget.saveThemeMode != null) ...[
+          SectionTitle('外观', highlight: true),
+          Card(
+            key: const ValueKey('settings-appearance'),
+            margin: EdgeInsets.zero,
+            child: RadioGroup<ThemeMode>(
+              groupValue: _themeMode,
+              onChanged: (v) {
+                if (v != null) _setThemeMode(v);
+              },
+              child: Column(
+                children: [
+                  for (final mode in SpbThemeMode.all)
+                    RadioListTile<ThemeMode>(
+                      key: ValueKey('settings-theme-${mode.name}'),
+                      value: mode,
+                      title: Text(SpbThemeMode.label(mode)),
+                      // 未读到当前值时禁用：宁可让用户等一帧，也不显示一个
+                      // 可能错的选中项。
+                      enabled: _themeMode != null,
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.lg),
+        ],
+
         SectionTitle('同步目录', highlight: true),
         _DirectoryCard(
           localRoot: draft.localRoot,
@@ -817,6 +927,17 @@ class _SettingsPageState extends State<SettingsPage> {
           canPrune: draft.hasLocalRoot,
           onPrune: _prune,
         ),
+
+        // 通知订阅：仅在两端都注入了读写入口时展示（成对判断，避免出现
+        // 有读无写的半截区块）。
+        if (widget.loadNotifications != null &&
+            widget.saveNotifications != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          NotificationSubscriptionsCard(
+            load: widget.loadNotifications!,
+            save: widget.saveNotifications!,
+          ),
+        ],
 
         // 桌面能力项：移动端（isSupported == false）整段不展示。
         if (widget.capabilities.isSupported) ...[

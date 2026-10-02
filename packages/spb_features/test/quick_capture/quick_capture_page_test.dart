@@ -348,6 +348,198 @@ void main() {
     });
   });
 
+  group('QuickCapturePage 路由预览（只预览 agent，不预览 group）', () {
+    /// 构造一个带候选的预览结果（与真实服务端响应同形）。
+    RoutingPreview preview({
+      String agentId = 'ag_1',
+      String routeSource = 'fallback',
+      List<RoutingCandidate> candidates = const [
+        RoutingCandidate(agentId: 'ag_1', name: '通用助手'),
+      ],
+    }) => RoutingPreview(
+      resolvedAgentId: agentId,
+      routeSource: routeSource,
+      candidates: candidates,
+    );
+
+    testWidgets('点「预览」触发注入回调，并把输入传给它', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      final asked = <String>[];
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            previewRouting: (input) async {
+              asked.add(input);
+              return preview();
+            },
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), '帮我查日志');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+
+      expect(asked, ['帮我查日志']);
+      // 预览**不**提交（它是只读查询）。
+      expect(useCase.calls, isEmpty);
+    });
+
+    testWidgets('展示结果：agent 名字 + 标注「兜底默认」', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            previewRouting: (input) async => preview(),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'x');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('quick-capture-preview-result')),
+        findsOneWidget,
+      );
+      // 文案必须是「将使用 agent」+「兜底默认」——服务端响应里**没有**
+      // group_id，写成「将发送到某对话」就是编造。
+      expect(find.textContaining('将使用 agent：通用助手'), findsOneWidget);
+      expect(find.textContaining('兜底默认'), findsOneWidget);
+    });
+
+    testWidgets('候选里找不到 id 时退回显示 id（不假装有名字）', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            // 候选为空：服务端只给了 id。
+            previewRouting: (input) async =>
+                preview(agentId: 'ag_unknown', candidates: const []),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'x');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('ag_unknown'), findsOneWidget);
+    });
+
+    testWidgets('空输入点预览：不调回调，给出提示', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      var asked = 0;
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            previewRouting: (input) async {
+              asked++;
+              return preview();
+            },
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+
+      expect(asked, 0, reason: '空输入没必要发请求');
+      expect(find.textContaining('先输入内容'), findsOneWidget);
+    });
+
+    testWidgets('改输入后旧预览失效（不显示过时结果）', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            previewRouting: (input) async => preview(),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), '第一句');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('quick-capture-preview-result')),
+        findsOneWidget,
+      );
+
+      // 改内容：旧结果对应的是「第一句」，留着会误导。
+      await tester.enterText(find.byType(TextField), '完全不同的第二句');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('quick-capture-preview-result')),
+        findsNothing,
+        reason: '输入变化后旧预览必须失效',
+      );
+    });
+
+    testWidgets('未接线时不显示「预览」入口', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(_host(QuickCapturePage(submit: useCase.submit)));
+
+      expect(find.byKey(const ValueKey('quick-capture-preview')), findsNothing);
+      // 原有提示不受影响。
+      expect(find.text('Enter 提交 · Esc 取消'), findsOneWidget);
+    });
+
+    testWidgets('预览失败展示错误且不崩溃', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            previewRouting: (input) async => throw const NetworkError('连不上'),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.byType(TextField), 'x');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('预览失败'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('布局契约：预览入口不额外占一行（132px 窗高）', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(
+        _host(
+          QuickCapturePage(
+            submit: useCase.submit,
+            previewRouting: (input) async => preview(),
+          ),
+        ),
+      );
+
+      // 预览结果复用状态行（见 _buildStatusLine）：输入框仍是单行，
+      // 且预览前后都没有溢出异常。
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.maxLines, 1);
+
+      await tester.enterText(find.byType(TextField), 'x');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('quick-capture-preview')));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+    });
+  });
+
   group('QuickCapturePage 布局契约', () {
     testWidgets('输入框是单行的（对应 132px 窗高）', (tester) async {
       final useCase = _FakeUseCase(_FakeUseCase.queued());

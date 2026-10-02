@@ -28,6 +28,8 @@ const _gidA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const _gidB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 void main() {
+  _themeModeTests();
+
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
     WidgetTester tester, {
@@ -42,6 +44,8 @@ void main() {
     Future<void> Function()? onSignOut,
     Future<bool> Function()? loadLaunchAtStartup,
     Future<void> Function(bool)? setLaunchAtStartup,
+    Future<ThemeMode> Function()? loadThemeMode,
+    Future<void> Function(ThemeMode)? saveThemeMode,
   }) async {
     // ## 为什么要把测试窗口调高
     //
@@ -74,6 +78,8 @@ void main() {
           onSignOut: onSignOut,
           loadLaunchAtStartup: loadLaunchAtStartup,
           setLaunchAtStartup: setLaunchAtStartup,
+          loadThemeMode: loadThemeMode,
+          saveThemeMode: saveThemeMode,
         ),
       ),
     );
@@ -904,4 +910,136 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
 
   @override
   Future<void> dispose() async {}
+}
+
+/// 外观（主题模式）区块测试。
+///
+/// ## 这个测试防的是什么
+///
+/// 主题是本仓库唯一的「选中即保存」设置项（其余项都走 draft + 保存按钮）。
+/// 这条差异若被后来的改动「统一」掉，失败方式是静默的：用户点了「深色」，
+/// 界面没变，而页面也没提示需要保存——他会以为功能坏了。
+///
+/// 另有一条容易漏的：装配层没注入时**不得显示**该区块。展示一个点了没反应的
+/// 三选一，比不展示更糟（与 `onOpenDirectory` 同一约定）。
+void _themeModeTests() {
+  Future<void> pumpTheme(
+    WidgetTester tester, {
+    Future<ThemeMode> Function()? load,
+    Future<void> Function(ThemeMode)? save,
+  }) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          capabilities: const NoopDesktopCapabilities(),
+          loadThemeMode: load,
+          saveThemeMode: save,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  group('设置页：外观（主题模式）', () {
+    testWidgets('渲染三个选项（跟随系统 / 浅色 / 深色）', (tester) async {
+      await pumpTheme(
+        tester,
+        load: () async => ThemeMode.system,
+        save: (_) async {},
+      );
+
+      expect(find.byKey(const ValueKey('settings-appearance')), findsOneWidget);
+      expect(find.text('跟随系统'), findsOneWidget);
+      expect(find.text('浅色'), findsOneWidget);
+      expect(find.text('深色'), findsOneWidget);
+    });
+
+    testWidgets('回显当前模式（已存 dark 时深色被选中）', (tester) async {
+      await pumpTheme(
+        tester,
+        load: () async => ThemeMode.dark,
+        save: (_) async {},
+      );
+
+      final group = tester.widget<RadioGroup<ThemeMode>>(
+        find.descendant(
+          of: find.byKey(const ValueKey('settings-appearance')),
+          matching: find.byType(RadioGroup<ThemeMode>),
+        ),
+      );
+      expect(group.groupValue, ThemeMode.dark);
+    });
+
+    testWidgets('选择后立即调用保存回调（无需再点保存按钮）', (tester) async {
+      ThemeMode? saved;
+      await pumpTheme(
+        tester,
+        load: () async => ThemeMode.system,
+        save: (m) async => saved = m,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-theme-dark')));
+      await tester.pumpAndSettle();
+
+      expect(saved, ThemeMode.dark, reason: '主题必须选中即生效，不能等保存按钮');
+      expect(
+        find.byKey(const ValueKey('settings-save')),
+        findsNothing,
+        reason: '主题不该让页面进入「有未保存改动」状态——它已即时保存',
+      );
+    });
+
+    testWidgets('未注入读写入口时不显示该区块', (tester) async {
+      await pumpTheme(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-appearance')),
+        findsNothing,
+        reason: '装配层没接就不显示——展示一个点了没反应的三选一更糟',
+      );
+      expect(find.text('跟随系统'), findsNothing);
+    });
+
+    testWidgets('只注入读取（无保存）时也不显示，避免半截区块', (tester) async {
+      await pumpTheme(tester, load: () async => ThemeMode.system);
+
+      expect(find.byKey(const ValueKey('settings-appearance')), findsNothing);
+    });
+
+    testWidgets('保存失败时回滚选中项（界面不显示与库不一致的值）', (tester) async {
+      await pumpTheme(
+        tester,
+        load: () async => ThemeMode.system,
+        save: (m) async => throw const StorageError('写库失败'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-theme-dark')));
+      await tester.pumpAndSettle();
+
+      final group = tester.widget<RadioGroup<ThemeMode>>(
+        find.descendant(
+          of: find.byKey(const ValueKey('settings-appearance')),
+          matching: find.byType(RadioGroup<ThemeMode>),
+        ),
+      );
+      expect(
+        group.groupValue,
+        ThemeMode.system,
+        reason: '落盘失败必须回滚，否则界面显示的值与库里不一致',
+      );
+    });
+  });
 }

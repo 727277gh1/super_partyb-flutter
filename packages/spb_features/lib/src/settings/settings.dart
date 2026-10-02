@@ -21,4 +21,5 @@
 /// 事务边界由实现方决定，页面无从破坏。
 library;
 
+export 'notification_subscriptions_card.dart';
 export 'settings_page.dart';

@@ -45,6 +45,7 @@ class ConversationPage extends StatefulWidget {
     this.onSpecAction,
     this.onSelectAgent,
     this.onSend,
+    this.onFlush,
     this.onCancelTurn,
     this.onLoadOlder,
     this.onReconnect,
@@ -54,6 +55,8 @@ class ConversationPage extends StatefulWidget {
     this.loadPending,
     this.undoPending,
     this.pendingReloadKey,
+    this.activities,
+    this.activitiesSnapshot,
     this.actions,
     this.emptyHint = '还没有对话，输入消息开始吧',
   });
@@ -110,6 +113,14 @@ class ConversationPage extends StatefulWidget {
   /// 之所以可覆盖：悬浮窗等入口走 `QuickCaptureUseCase`（无归属），
   /// 而本页是「已知 group」的常规发送。
   final Future<void> Function(String text)? onSend;
+
+  /// 「立即发送」：把服务端缓冲区里已 pending 的消息立即合并提交。
+  ///
+  /// null = 不显示该入口（如移动端或未接线时）。
+  ///
+  /// 与 [onSend] 的区别见 `MessageComposer` 的类文档：前者发**新的一条**，
+  /// 本回调推**已经排队的那批**。
+  final Future<void> Function()? onFlush;
 
   /// 下载 agent 文件产物的回调。null 时下载按钮禁用。
   ///
@@ -196,6 +207,30 @@ class ConversationPage extends StatefulWidget {
   /// 不靠这个键就会一直显示上一个 group 的待处理消息。
   final String? pendingReloadKey;
 
+  /// 执行中活动快照流（`turn_activity`，Transient）。
+  ///
+  /// ## 它解决什么问题
+  ///
+  /// 执行器在「已起跑但还没吐出任何正文」的空窗期是静默的（读代码、跑 bash、
+  /// 等模型首 token），此时时间线不动，用户分不清「在干活」与「卡死了」。
+  /// 本流携带「已运行多久 + 上一步是什么」，用于展示进度。
+  ///
+  /// ## 为什么是 Map 而不是单条快照
+  ///
+  /// SSE 是 user 级订阅，一条流里可能同时存在多个 turn 的活动。单条快照只能
+  /// 表达「最近一次事件属于哪个 turn」，若那个 turn 不是当前流式的 turn，
+  /// 页面就无法拿到自己需要的那条。Map 按 turnId 索引，直查即得。
+  ///
+  /// 为 null 时不展示活动指示（与 [activitiesSnapshot] 一同省略）。
+  final Stream<Map<String, TurnActivitySnapshot>>? activities;
+
+  /// 首帧活动快照（供首屏渲染，避免等下一次推送）。
+  ///
+  /// 与 [activities] 的关系同 `controller.snapshot` 与 `controller.items`：
+  /// 快照是同步初值，流是后续增量。两者都要传，否则「事件在订阅前已到达」
+  /// 会让指示器到下一次心跳（约 15s）才出现。
+  final Map<String, TurnActivitySnapshot>? activitiesSnapshot;
+
   final String emptyHint;
 
   @override
@@ -258,6 +293,14 @@ class _ConversationPageState extends State<ConversationPage> {
   StreamSubscription<List<ConversationItem>>? _itemsSub;
   List<ConversationItem> _items = const [];
 
+  /// `turn_activity` 订阅与最近一次快照（按 turnId 索引）。
+  ///
+  /// 与 [_items] 同取向：存在 State 里 + 订阅推送时 setState。若在 build 里
+  /// 读 `controller.activitiesSnapshot`，那是同步 getter，建立不了依赖，
+  /// 事件到达时**不会**触发重建（指示器永远不出现）。
+  StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
+  Map<String, TurnActivitySnapshot> _activities = const {};
+
   /// 是否跟随底部。
   ///
   /// ## 为什么用状态标志而不是每次重新测量位置
@@ -277,6 +320,22 @@ class _ConversationPageState extends State<ConversationPage> {
     _items = widget.controller.snapshot;
     _itemsSub = widget.controller.items.listen(_onItems);
     _scrollController.addListener(_onScroll);
+    _subscribeActivities();
+  }
+
+  /// 订阅活动流（仅在调用方传了 [ConversationPage.activities] 时）。
+  ///
+  /// 用「注入才订阅」而非「总是订阅 controller」：保持本页在未注入时是
+  /// **纯只读时间线**（同 [ConversationPage.onCancelTurn] 等注入参数的取向），
+  /// 且不白订阅一条无人消费的流。
+  void _subscribeActivities() {
+    final stream = widget.activities;
+    if (stream == null) return;
+    _activitiesSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _activities = snapshot);
+    });
+    _activities = widget.activitiesSnapshot ?? const {};
   }
 
   @override
@@ -286,6 +345,13 @@ class _ConversationPageState extends State<ConversationPage> {
       _itemsSub?.cancel();
       _items = widget.controller.snapshot;
       _itemsSub = widget.controller.items.listen(_onItems);
+    }
+    // 活动流换了来源（或从未注入变为注入）：重订阅。
+    if (oldWidget.activities != widget.activities) {
+      unawaited(_activitiesSub?.cancel());
+      _activitiesSub = null;
+      _activities = const {};
+      _subscribeActivities();
     }
     // 换了对话就要重新给翻页一次机会：`_reachedOldest` 是上一个 group 的结论，
     // 沿用会让新对话永远翻不到历史（见 [historyKey] 的说明）。
@@ -298,6 +364,7 @@ class _ConversationPageState extends State<ConversationPage> {
   @override
   void dispose() {
     _itemsSub?.cancel();
+    _activitiesSub?.cancel();
     _scrollController.dispose();
     _draft.dispose();
     super.dispose();
@@ -541,6 +608,46 @@ class _ConversationPageState extends State<ConversationPage> {
     return item != null && item.turnId.isNotEmpty;
   }
 
+  /// 当前应展示的执行中活动快照；null 表示不该展示。
+  ///
+  /// ## 显示条件（逐条对齐 webapp `ChatMessageList.tsx:471`）
+  ///
+  /// | webapp 条件 | 本页等价物 |
+  /// |---|---|
+  /// | `turn.activity` 存在 | [_activities] 里有该 turnId 的快照 |
+  /// | `isStreaming` | 该 turn 是 [_streamingItem] 的 turn |
+  /// | `!hasAgentContent` | 该 turn 还没有非空正文的 [AssistantMessageItem] |
+  /// | `!turn.status`（无终态） | 有流式项即意味着 `done` 尚未到达（`_sealStreaming` 会闭合全部流式段） |
+  /// | `!turn.queueReason` | 客户端**未跟踪**排队原因（无对应领域字段），恒真 |
+  ///
+  /// ## 为什么四个条件都要
+  ///
+  /// 只判「有活动」会在两种情况下产生误导：
+  /// 1. **已有正文**：正文在往下滚，再插一句「已运行 3 分」只是噪声；
+  /// 2. **已收尾**：`done` 之后活动快照可能仍在 State 里（它是 Transient，
+  ///    只能靠下一个事件或切对话清掉），不判终态会在完成的对话下挂一条
+  ///    「执行中」，比不显示更糟。
+  ///
+  /// 反过来，这两个条件都不能用来「省掉 `isStreaming`」：`isStreaming` 才是
+  /// 「turn 在跑」的直接证据，而「无正文」也可能是「早就跑完且本来就没回复」。
+  TurnActivitySnapshot? get _visibleActivity {
+    final streaming = _streamingItem;
+    if (streaming == null || streaming.turnId.isEmpty) return null;
+
+    final activity = _activities[streaming.turnId];
+    if (activity == null) return null;
+
+    // 已有正文 → 让位给真实内容。
+    for (final item in _items) {
+      if (item is AssistantMessageItem &&
+          item.turnId == streaming.turnId &&
+          item.text.isNotEmpty) {
+        return null;
+      }
+    }
+    return activity;
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = widget.title;
@@ -587,13 +694,22 @@ class _ConversationPageState extends State<ConversationPage> {
                 : _buildTimeline(),
           ), // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
           // 的那条」，语义上与输入区相邻而非与时间线相邻。
+          // 执行中活动指示放在**时间线与待处理栏之间**：它描述的是「正在跑的
+          // 那个 turn 的进度」，语义上属于时间线；而待处理栏的语义属于输入区，
+          // 两者各贴各自的一端（见各自文档）。
+          if (_visibleActivity != null)
+            _TurnActivityIndicator(activity: _visibleActivity!),
           if (widget.loadPending != null && widget.undoPending != null)
             PendingMessagesBar(
               load: widget.loadPending!,
               undo: widget.undoPending!,
               reloadKey: widget.pendingReloadKey ?? '',
             ),
-          MessageComposer(onSubmit: _handleSubmit, draft: _draft),
+          MessageComposer(
+            onSubmit: _handleSubmit,
+            onFlush: widget.onFlush,
+            draft: _draft,
+          ),
         ],
       ),
     );
@@ -713,6 +829,110 @@ class _ConversationPageState extends State<ConversationPage> {
       onDownload: widget.onDownloadAgentFile,
     ),
   };
+}
+
+/// 执行中活动指示：在「已起跑但还没有正文」的空窗期展示「已运行 X · 最近：Y」。
+///
+/// ## 为什么需要它
+///
+/// 长 turn 的静默期可达数十秒（读代码 / 跑 bash / 等模型首 token）。此时时间线
+/// 一动不动，用户唯一的判断依据是「它是不是死了」。本组件把服务端 `turn_activity`
+/// 里的「已运行多久 + 上一步是什么」呈现出来，让等待有可见的进展。
+///
+/// ## 文案对齐 webapp
+///
+/// `apps/webapp/messages/zh.json`：
+/// - `turnActivity` = `执行中 · 已运行 {elapsed}`
+/// - `turnActivityJustStarted` = `刚开始`
+/// - `turnActivityLast` = `最近：{action}`
+///
+/// 两者用同一套措辞，便于用户跨端对照。
+class _TurnActivityIndicator extends StatelessWidget {
+  const _TurnActivityIndicator({required this.activity});
+
+  final TurnActivitySnapshot activity;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final last = activity.lastEventType;
+
+    return Material(
+      key: const ValueKey('conversation-turn-activity'),
+      // 与待处理栏同用 secondaryContainer：两者都是「临时状态条」，
+      // 视觉上应属同一族而非各造一套。
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: SpbSpacing.lg,
+              height: SpbSpacing.lg,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                '执行中 · 已运行 ${formatTurnElapsed(activity.elapsedMs)}',
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+            // 无上一步时不渲染该段：服务端首帧（刚起跑）不带 last_event_type，
+            // 拼出「最近：null」比不显示更糟。
+            if (last != null && last.isNotEmpty)
+              Text(
+                '最近：$last',
+                key: const ValueKey('conversation-turn-activity-last'),
+                style: textTheme.labelSmall?.copyWith(
+                  color: scheme.onSecondaryContainer.withValues(alpha: 0.7),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 已运行时长文案（毫秒 → 中文）。
+///
+/// ## 为什么在客户端算，而不是直接用服务端字符串
+///
+/// 服务端只给 `elapsed_ms`（数字），文案是渲染层职责。
+///
+/// ## 单位选择：≥ 1 分钟才拆成「X 分 Y 秒」
+///
+/// webapp 用 `date-fns` 的 `formatDuration({seconds}, {zero: false})`，实测输出
+/// 是「3 秒」「90 秒」「7325 秒」——即**只取最大单位且不拆**（因为传进去的
+/// duration 只有 `seconds` 字段）。本函数采用同一口径，但把 ≥ 60s 拆成
+/// 「X 分 Y 秒」：
+///
+/// - `formatDuration` 在这种输入下给出的是「7325 秒」，人脑得自己除 60；
+/// - 空窗期动辄几分钟，这是用户唯一的时间参照，「2 分 2 秒」比「122 秒」好读。
+///
+/// 这是**有意偏离**（改善可读性，不是修正错误）。若将来要求逐字对齐，改成
+/// 「只取最大单位」即可，判定逻辑已在下方分开。
+///
+/// 负数与缺失一律按 0 处理（服务端异常载荷不产出「已运行 -1 秒」）。
+@visibleForTesting
+String formatTurnElapsed(int elapsedMs) {
+  final totalSeconds = elapsedMs <= 0 ? 0 : (elapsedMs / 1000).round();
+  if (totalSeconds < 60) return '$totalSeconds 秒';
+
+  final minutes = totalSeconds ~/ 60;
+  final seconds = totalSeconds % 60;
+  if (seconds == 0) return '$minutes 分钟';
+  return '$minutes 分 $seconds 秒';
 }
 
 /// 连接状态指示（AppBar 右侧）。

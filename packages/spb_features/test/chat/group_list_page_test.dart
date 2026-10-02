@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +7,7 @@ import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 
@@ -63,6 +66,7 @@ void main() {
     WidgetTester tester, {
     void Function(ChatGroup)? onOpenGroup,
     Future<ChatGroup> Function(String)? onCreateGroup,
+    Stream<GroupUpdate>? groupUpdates,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -71,6 +75,7 @@ void main() {
           api: api,
           onOpenGroup: onOpenGroup,
           onCreateGroup: onCreateGroup,
+          groupUpdates: groupUpdates,
           pageSize: pageSize,
         ),
       ),
@@ -355,5 +360,211 @@ void main() {
 
     // 不崩溃，且新项出现、g0 仍只有一个。
     expect(find.text('真正的新对话'), findsOneWidget);
+  });
+
+  group('group_updated 实时增量更新', () {
+    /// 造一条 group 变更通知。
+    GroupUpdate update(
+      GroupUpdateOp op, {
+      String groupId = 'g1',
+      String? title,
+      String? status,
+    }) => GroupUpdate(
+      op: op,
+      groupId: groupId,
+      title: title,
+      status: status,
+      at: DateTime(2024, 3, 5, 8, 30),
+    );
+
+    testWidgets('op: created → 列表新增一项（用服务端权威行）', (tester) async {
+      // created 的快照刻意最小化（只有 id/title/status，没有时间戳与
+      // active_session），故页面要读回权威行。
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '已有的')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      // 新建的那个 group 的权威行。
+      adapter.onGet(
+        '/chat/groups/g_new',
+        (server) => server.reply(200, groupJson(id: 'g_new', title: '别处建的对话')),
+      );
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+      expect(find.text('别处建的对话'), findsNothing);
+
+      stream.add(update(GroupUpdateOp.created, groupId: 'g_new'));
+      await settleIo(tester);
+
+      expect(
+        find.text('别处建的对话'),
+        findsOneWidget,
+        reason: 'A 端建组，B 端列表必须实时出现（服务端广播 group_updated 的存在理由）',
+      );
+    });
+
+    testWidgets('op: created 重复推送不重复插入', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '已有的')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      adapter.onGet(
+        '/chat/groups/g_new',
+        (server) => server.reply(200, groupJson(id: 'g_new', title: '新来的')),
+      );
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+
+      stream.add(update(GroupUpdateOp.created, groupId: 'g_new'));
+      await settleIo(tester);
+      stream.add(update(GroupUpdateOp.created, groupId: 'g_new'));
+      await settleIo(tester);
+
+      // 重复 Key 会让 Flutter 直接抛异常，故「不崩溃 + 只有一个」都要断言。
+      expect(find.text('新来的'), findsOneWidget);
+    });
+
+    testWidgets('op: deleted → 从列表移除', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(id: 'g1', title: '要删的'),
+          groupJson(id: 'g2', title: '保留的'),
+        ],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+      expect(find.text('要删的'), findsOneWidget);
+
+      stream.add(update(GroupUpdateOp.deleted));
+      await settleIo(tester);
+
+      expect(find.text('要删的'), findsNothing);
+      expect(find.text('保留的'), findsOneWidget, reason: '只移除被删的那一项');
+    });
+
+    testWidgets('op: title → 标题就地更新', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '旧标题')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+
+      stream.add(update(GroupUpdateOp.title, title: '新标题'));
+      await settleIo(tester);
+
+      expect(find.text('新标题'), findsOneWidget);
+      expect(find.text('旧标题'), findsNothing);
+    });
+
+    testWidgets('op: title 不带标题时不动（不把名字清空）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '原标题')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+
+      // 异常载荷：op=title 却没带 title。
+      stream.add(update(GroupUpdateOp.title));
+      await settleIo(tester);
+
+      expect(find.text('原标题'), findsOneWidget);
+    });
+
+    testWidgets('op: archived → 显示归档标记且条目留在原位', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '活跃的')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+      expect(find.text('已归档'), findsNothing);
+
+      stream.add(update(GroupUpdateOp.archived, status: 'archived'));
+      await settleIo(tester);
+
+      expect(find.text('已归档'), findsOneWidget);
+      expect(find.text('活跃的'), findsOneWidget, reason: '本页是单列表 + 归档角标，不移出列表');
+    });
+
+    testWidgets('op: active → 归档标记消失', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '恢复的', status: 'archived')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+      expect(find.text('已归档'), findsOneWidget);
+
+      stream.add(update(GroupUpdateOp.active, status: 'active'));
+      await settleIo(tester);
+
+      expect(find.text('已归档'), findsNothing);
+    });
+
+    testWidgets('op: metadata → 不触发列表变化（本页不渲染 metadata）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '不动我')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+
+      stream.add(update(GroupUpdateOp.metadata));
+      await settleIo(tester);
+
+      expect(find.text('不动我'), findsOneWidget);
+    });
+
+    testWidgets('变更的 group 不在已加载页时忽略（不凭空插入）', (tester) async {
+      // 改名/归档不是「新出现」的语义。凭空插入会让用户看到一个
+      // 从未加载过的条目——下次翻页拉到它时又会重复。
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '已加载的')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(tester, groupUpdates: stream.stream);
+
+      stream.add(
+        update(GroupUpdateOp.title, groupId: 'g_unknown', title: '没加载过'),
+      );
+      await settleIo(tester);
+
+      expect(find.text('没加载过'), findsNothing);
+      expect(find.text('已加载的'), findsOneWidget);
+    });
+
+    testWidgets('未注入 groupUpdates 时不崩溃（保持纯拉取用法）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '只读')],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('只读'), findsOneWidget);
+    });
   });
 }

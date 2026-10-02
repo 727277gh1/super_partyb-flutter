@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 
 /// 消息输入框。
@@ -12,6 +13,19 @@ import 'package:spb_design/spb_design.dart';
 /// | `Enter` | 发送 |
 /// | `Shift+Enter` | 换行 |
 /// | `Esc` | 清空输入 |
+///
+/// ## 「立即发送」是什么（与「发送」的区别）
+///
+/// 「发送」提交的是**输入框里这句话**（`onSubmit`）；「立即发送」请求服务端把
+/// **缓冲区里已 pending 的收件箱消息**立即合并成一个 turn（[onFlush]）。
+///
+/// 两者不是同一件事：平台的两段式模型是「消息先进 `chat_inbox_messages`
+/// （pending）→ dispatcher 合并成 turn」。正常情况下 dispatcher 很快消费，
+/// 用户感知不到；但当它因任何原因还没跑（或平台刻意攒批）时，用户会看到
+/// 「我发出去了但没反应」。「立即发送」就是那条把等待时间归零的入口。
+///
+/// 故它**不消费输入框内容**，也不因输入框为空而禁用——它的语义是「推一下
+/// 已经排队的那些」，与「再发一条新的」无关。
 ///
 /// ## 为什么用 `Focus(onKeyEvent:)` 而不是 `Shortcuts`
 ///
@@ -39,6 +53,7 @@ class MessageComposer extends StatefulWidget {
     this.hintText = '输入消息…',
     this.autofocus = false,
     this.draft,
+    this.onFlush,
   });
 
   /// 提交回调。参数是去除首尾空白后的文本。
@@ -61,6 +76,17 @@ class MessageComposer extends StatefulWidget {
   /// 消费后自动清空（同一文本不会被追加两次）。
   final ValueNotifier<String>? draft;
 
+  /// 「立即发送」回调：请求服务端把 pending 收件箱消息立即合并成 turn。
+  ///
+  /// null = 不显示该入口（如移动端或未接线时）。
+  ///
+  /// ## 为什么不是 `VoidCallback`
+  ///
+  /// 它要等一个网络往返，期间按钮必须禁用（防重复点）并向用户反馈结果
+  /// （服务端可能返回「多条待确认，请选策略」——那不是成功）。这些都需要
+  /// 一个可 await 的返回值，页面自己管理在途状态。
+  final Future<void> Function()? onFlush;
+
   @override
   State<MessageComposer> createState() => _MessageComposerState();
 }
@@ -68,6 +94,9 @@ class MessageComposer extends StatefulWidget {
 class _MessageComposerState extends State<MessageComposer> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
+
+  /// 「立即发送」是否在途（防重复点 + 禁用按钮）。
+  bool _flushing = false;
 
   @override
   void initState() {
@@ -126,6 +155,61 @@ class _MessageComposerState extends State<MessageComposer> {
     widget.onSubmit!(text);
     // 发送后保持焦点：连续对话时不必每次重新点击输入框。
     _focusNode.requestFocus();
+  }
+
+  /// 「立即发送」：请服务端把 pending 消息立即合并成 turn。
+  ///
+  /// ## 为什么不禁用「输入框为空」的情况
+  ///
+  /// 本动作操作的是**已排队的收件箱消息**，与输入框里有没有新草稿无关。
+  /// 若按输入框内容禁用，用户在「已经发出去但平台没反应」时反而找不到这个
+  /// 按钮——而那正是它唯一的用途。
+  ///
+  /// ## 为什么错误必须在这里处理（不能上抛）
+  ///
+  /// `onPressed: _flush` 会**丢弃**返回的 Future（Flutter 的 onPressed 是
+  /// `VoidCallback`，不接受 Future）。若这里不 catch，一次网络失败就会变成
+  /// **未处理的异步异常**（测试里报 uncaught error，生产里进 zone 的全局
+  /// 错误处理），而上层**根本无从捕获**——它没有任何地方 await 这个 Future。
+  ///
+  /// 故失败反馈的责任在本组件（与 `ConversationPage._handleSubmit` 同一
+  /// 做法：catch `SpbError` → SnackBar）。
+  ///
+  /// 非 `SpbError` 的异常（编程错误）也一并 catch：它们是**意外**，但不该让
+  /// 用户点了按钮后什么都没有发生。记日志（供排查）+ 给一句通用提示。
+  Future<void> _flush() async {
+    final cb = widget.onFlush;
+    if (cb == null || _flushing) return;
+    setState(() => _flushing = true);
+    try {
+      await cb();
+    } on SpbError catch (e) {
+      _showFlushError('立即发送失败：${e.message}');
+    } on Object catch (e, st) {
+      SpbLog.warn('立即发送抛非 SpbError 异常', {'error': '$e', 'stack': '$st'});
+      _showFlushError('立即发送失败');
+    } finally {
+      // 无论成功失败都要复位：不复位会让按钮永久禁用。
+      if (mounted) setState(() => _flushing = false);
+    }
+  }
+
+  /// 展示「立即发送」的错误。
+  ///
+  /// ## 为什么用 SnackBar 而不是内联提示
+  ///
+  /// 输入区没有可容纳提示行的位置（它已经排了输入框 + 发送按钮 + 快捷键
+  /// 说明，再加一行会把输入框挤窄）。`ConversationPage._handleSubmit` 的发送
+  /// 失败提示也用 SnackBar，保持一致。
+  ///
+  /// 无 Scaffold 时（组件被孤立测试）静默降级，不抛异常。
+  void _showFlushError(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -191,6 +275,25 @@ class _MessageComposerState extends State<MessageComposer> {
             ),
           ),
           const SizedBox(width: SpbSpacing.sm),
+          // 「立即发送」入口（仅接线时出现）。
+          //
+          // 用 tooltip 说明它与「发送」的区别：两个按钮相邻且图标都是发送类，
+          // 不解释的话用户会以为重复了。
+          if (widget.onFlush != null) ...[
+            IconButton(
+              key: const ValueKey('composer-flush'),
+              onPressed: _flushing ? null : _flush,
+              tooltip: '立即发送（把已排队的消息马上合并提交）',
+              icon: _flushing
+                  ? const SizedBox(
+                      width: SpbSpacing.lg,
+                      height: SpbSpacing.lg,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.flash_on_outlined, size: SpbSpacing.lg),
+            ),
+            const SizedBox(width: SpbSpacing.xs),
+          ],
           // 用 IconButton + tooltip 而非纯图标：桌面端 tooltip 能提示快捷键。
           IconButton.filled(
             key: const ValueKey('composer-send'),

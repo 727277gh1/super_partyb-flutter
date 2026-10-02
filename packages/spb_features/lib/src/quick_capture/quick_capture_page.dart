@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
@@ -21,6 +22,18 @@ import 'package:spb_ui/spb_ui.dart';
 /// 生产代码传 `QuickCaptureUseCase.submit`（注意其可选参数 `echoInto` 在此
 /// **不应**使用：悬浮窗没有可见的对话，回显无处可显示）。
 typedef QuickCaptureSubmit = Future<QuickCaptureOutcome> Function(String input);
+
+/// 「预览会用哪个 agent」的查询回调（路由预览）。
+///
+/// ## ⚠️ 它**不**预览归属 group
+///
+/// 服务端 `POST /users/:uid/chat/routing-preview` 的响应里没有 `group_id`
+/// （见 `ChatApi.routingPreview` 的说明）。它只回答「这句话会用哪个 agent」，
+/// 且当前只走**兜底默认 agent**（embedding 级联已下线）。
+///
+/// 故 UI 文案不得写成「将发送到某对话」——那是编造服务端没给的信息。
+/// 返回 null 表示未能取得结果（调用方负责展示错误）。
+typedef PreviewRouting = Future<RoutingPreview?> Function(String input);
 
 /// 悬浮输入窗页面（quick capture）。
 ///
@@ -55,6 +68,7 @@ class QuickCapturePage extends StatefulWidget {
     required this.submit,
     this.onQueued,
     this.onCancel,
+    this.previewRouting,
     this.hintText = '说点什么…',
     this.autofocus = true,
   });
@@ -71,6 +85,11 @@ class QuickCapturePage extends StatefulWidget {
   /// 用户按 Esc 或点取消时的回调（通常关闭本窗口）。
   final VoidCallback? onCancel;
 
+  /// 路由预览回调。null = 不显示「预览」入口。
+  ///
+  /// 见 [PreviewRouting]：它预览的是 **agent**，不是归属 group。
+  final PreviewRouting? previewRouting;
+
   final String hintText;
 
   /// 是否自动聚焦。悬浮窗应自动聚焦（唤起即可打字）。
@@ -85,6 +104,17 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
   final _focusNode = FocusNode();
 
   bool _busy = false;
+
+  /// 路由预览是否在途。
+  bool _previewing = false;
+
+  /// 最近一次预览结果。null = 尚未预览或已失效。
+  ///
+  /// ## 为什么在输入变化时清掉
+  ///
+  /// 预览是对**特定一段文字**的回答。用户改了文字后，旧结果已经不对应了；
+  /// 留着它会让人以为「现在也是这个 agent」。
+  RoutingPreview? _preview;
 
   /// 一次性提示（提交结果）。null 表示无提示。
   ///
@@ -108,7 +138,48 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
     super.dispose();
   }
 
-  void _onTextChanged() => setState(() {});
+  void _onTextChanged() => setState(() {
+    // 输入一变，之前的预览结果就失效了（见 [_preview] 的说明）。
+    // 在 setState 内直接清，避免多一次重建。
+    _preview = null;
+  });
+
+  /// 预览「这句话会用哪个 agent」。
+  ///
+  /// ## 为什么不在每次输入时自动预览
+  ///
+  /// 那会把每一次击键变成一个网络请求（且悬浮窗是全局快捷键唤起的，很可能
+  /// 在用户根本没打算发送时触发）。故做成显式动作。
+  Future<void> _previewRoute() async {
+    final cb = widget.previewRouting;
+    if (cb == null || _previewing) return;
+    final text = _controller.text.trim();
+    if (text.isEmpty) {
+      setState(() => _hint = const Hint('先输入内容再预览', HintKind.warn));
+      return;
+    }
+    setState(() {
+      _previewing = true;
+      _hint = null;
+    });
+    try {
+      final result = await cb(text);
+      if (!mounted) return;
+      setState(() {
+        _previewing = false;
+        _preview = result;
+        if (result == null) {
+          _hint = const Hint('预览失败', HintKind.error);
+        }
+      });
+    } on SpbError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _previewing = false;
+        _hint = Hint('预览失败：${e.message}', HintKind.error);
+      });
+    }
+  }
 
   bool get _canSubmit => !_busy && _controller.text.trim().isNotEmpty;
 
@@ -238,17 +309,21 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
 
     return Row(
       children: [
-        Expanded(
-          child: _hint == null
-              ? Text(
-                  'Enter 提交 · Esc 取消',
-                  style: textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                )
-              : HintLine(hint: _hint!),
-        ),
+        Expanded(child: _buildStatusLine(scheme, textTheme)),
         const SizedBox(width: SpbSpacing.sm),
+        // 预览入口（仅接线时出现）。
+        //
+        // ## 为什么不另起一行展示结果
+        //
+        // 本窗口固定 132px 高（见 `WindowSpec.quickCapture`），只够「一行输入
+        // + 一行状态」。另起一行会把输入框挤出可视区，而预览结果恰好与提示语
+        // 互斥（预览成功清提示、失败写提示），共用这一行不损失信息。
+        if (widget.previewRouting != null)
+          TextButton(
+            key: const ValueKey('quick-capture-preview'),
+            onPressed: _busy || _previewing ? null : _previewRoute,
+            child: const Text('预览'),
+          ),
         TextButton(
           key: const ValueKey('quick-capture-cancel'),
           onPressed: _busy ? null : _handleCancel,
@@ -259,6 +334,48 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
           key: const ValueKey('quick-capture-submit'),
           onPressed: _canSubmit ? _handleSubmit : null,
           child: const Text('发送'),
+        ),
+      ],
+    );
+  }
+
+  /// 状态行：优先展示预览结果，其次提示，最后是快捷键说明。
+  Widget _buildStatusLine(ColorScheme scheme, TextTheme textTheme) {
+    if (_preview != null) return _previewLine(scheme, textTheme);
+    if (_hint != null) return HintLine(hint: _hint!);
+    return Text(
+      'Enter 提交 · Esc 取消',
+      style: textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+    );
+  }
+
+  /// 预览结果行。
+  ///
+  /// ## 文案必须如实
+  ///
+  /// 服务端当前只走**兜底默认 agent**（embedding 级联已下线），且响应里
+  /// **没有 group_id**。故这里只能说「将使用 agent X」，不能说「将发送到
+  /// 某对话」——后者是服务端没给的信息。
+  ///
+  /// 当 [RoutingPreview.isFallback] 为真时额外标注「兜底」，让用户知道这不是
+  /// 「根据内容智能选出」的结果（否则会高估它的智能程度）。
+  Widget _previewLine(ColorScheme scheme, TextTheme textTheme) {
+    final p = _preview!;
+    final name = p.resolvedAgentName;
+    final label =
+        name ?? (p.resolvedAgentId.isEmpty ? '（未指定）' : p.resolvedAgentId);
+    final suffix = p.isFallback ? '（兜底默认）' : '';
+    return Row(
+      key: const ValueKey('quick-capture-preview-result'),
+      children: [
+        Icon(Icons.route_outlined, size: SpbSpacing.md, color: scheme.primary),
+        const SizedBox(width: SpbSpacing.xs),
+        Expanded(
+          child: Text(
+            '将使用 agent：$label$suffix',
+            overflow: TextOverflow.ellipsis,
+            style: textTheme.bodySmall?.copyWith(color: scheme.primary),
+          ),
         ),
       ],
     );

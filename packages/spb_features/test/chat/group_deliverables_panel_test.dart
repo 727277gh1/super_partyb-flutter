@@ -53,6 +53,7 @@ void main() {
     DownloadDeliverable? onDownload,
     OpenLocalDeliverable? onOpen,
     RevealLocalDeliverable? onReveal,
+    ResolveLocalDeliverable? resolveLocalPath,
     Size size = const Size(420, 900),
   }) async {
     // 面板是纵向列表，需要足够高度让多个条目一次性构建
@@ -74,6 +75,7 @@ void main() {
             onDownload: onDownload,
             onOpen: onOpen,
             onReveal: onReveal,
+            resolveLocalPath: resolveLocalPath,
           ),
         ),
       ),
@@ -505,6 +507,209 @@ void main() {
       );
       expect(item.enabled, isFalse, reason: '切 group 后本地路径应已清空');
       expect(opened, isFalse);
+    });
+  });
+
+  // =========================================================================
+  group('已同步则直接打开（同步索引优先于下载记录）', () {
+    testWidgets('已同步的交付物不下载即可打开，且路径来自同步索引', (tester) async {
+      var opened = '';
+      var downloads = 0;
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        // 提供下载回调以证明「无需调用它」：面板不应为了打开而先下载。
+        onDownload: (f) async {
+          downloads++;
+          return '/tmp/downloaded.md';
+        },
+        onOpen: (path) async {
+          opened = path;
+          return true;
+        },
+        // 同步索引命中 → 直接给本地路径。
+        resolveLocalPath: (f) => '/sync/root/$_gid/README.md',
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+
+      // 菜单项必须**已可用**（未下载也能打开）。
+      final item = tester.widget<PopupMenuItem<String>>(
+        find.widgetWithText(PopupMenuItem<String>, '用默认程序打开'),
+      );
+      expect(item.enabled, isTrue, reason: '已同步的文件应可直接打开');
+
+      await tester.tap(find.text('用默认程序打开'));
+      await tester.pumpAndSettle();
+
+      expect(opened, '/sync/root/$_gid/README.md');
+      expect(downloads, 0, reason: '已同步的文件不应触发下载');
+    });
+
+    testWidgets('已同步的交付物不下载即可定位', (tester) async {
+      var revealed = '';
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onReveal: (path) async {
+          revealed = path;
+          return true;
+        },
+        resolveLocalPath: (f) => '/sync/root/$_gid/README.md',
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('在文件管理器中定位'));
+      await tester.pumpAndSettle();
+
+      expect(revealed, '/sync/root/$_gid/README.md');
+    });
+
+    testWidgets('单击行直接打开已同步的文件', (tester) async {
+      var opened = '';
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onOpen: (path) async {
+          opened = path;
+          return true;
+        },
+        resolveLocalPath: (f) => '/sync/root/$_gid/README.md',
+      );
+
+      await tester.tap(find.text('README.md'));
+      await tester.pumpAndSettle();
+
+      expect(opened, '/sync/root/$_gid/README.md');
+    });
+
+    testWidgets('未同步的文件仍禁用「打开」（索引返回 null）', (tester) async {
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onDownload: (f) async => '/tmp/a.md',
+        onOpen: (_) async => true,
+        // 未同步：实现方返回 null。
+        resolveLocalPath: (f) => null,
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+
+      final item = tester.widget<PopupMenuItem<String>>(
+        find.widgetWithText(PopupMenuItem<String>, '用默认程序打开'),
+      );
+      expect(item.enabled, isFalse, reason: '未同步且未下载 → 无本地路径');
+    });
+
+    testWidgets('同步索引优先于下载记录（两者都有时用同步目录那份）', (tester) async {
+      var opened = '';
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onDownload: (f) async => '/app/support/downloads/a.md',
+        onOpen: (path) async {
+          opened = path;
+          return true;
+        },
+        resolveLocalPath: (f) => '/sync/root/$_gid/README.md',
+      );
+
+      // 先下载（写入面板自己的下载记录）。
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('下载'));
+      await tester.pumpAndSettle();
+
+      // 再打开：应指向同步目录，而不是刚下载的应用目录。
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('用默认程序打开'));
+      await tester.pumpAndSettle();
+
+      expect(opened, '/sync/root/$_gid/README.md');
+    });
+
+    testWidgets('同步索引返回空串视为未同步（不打开空路径）', (tester) async {
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onDownload: (f) async => '/tmp/a.md',
+        onOpen: (_) async => true,
+        resolveLocalPath: (f) => '',
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+
+      final item = tester.widget<PopupMenuItem<String>>(
+        find.widgetWithText(PopupMenuItem<String>, '用默认程序打开'),
+      );
+      expect(item.enabled, isFalse);
+    });
+
+    testWidgets('未提供同步索引时退化为「仅下载后可用」（不报错）', (tester) async {
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onDownload: (f) async => '/tmp/a.md',
+        onOpen: (_) async => true,
+        // resolveLocalPath 不传。
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      var item = tester.widget<PopupMenuItem<String>>(
+        find.widgetWithText(PopupMenuItem<String>, '用默认程序打开'),
+      );
+      expect(item.enabled, isFalse, reason: '无索引时未下载 → 不可打开');
+
+      // 下载后仍可打开（原有行为不受影响）。
+      await tester.tap(find.text('下载'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      item = tester.widget<PopupMenuItem<String>>(
+        find.widgetWithText(PopupMenuItem<String>, '用默认程序打开'),
+      );
+      expect(item.enabled, isTrue);
+    });
+
+    testWidgets('切对话后索引按新 group 重新查询（不沿用旧 group 的结果）', (tester) async {
+      // 索引回调按 groupId 返回不同路径，模拟真实装配里的 family 键。
+      var opened = '';
+      final queried = <String>[];
+
+      Widget build(String gid) => MaterialApp(
+        home: Scaffold(
+          body: GroupDeliverablesPanel(
+            groupId: gid,
+            loadFiles: () async => [_file('README.md', gid: gid)],
+            onOpen: (path) async {
+              opened = path;
+              return true;
+            },
+            resolveLocalPath: (f) {
+              queried.add(gid);
+              return '/sync/root/$gid/README.md';
+            },
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(build(_gid));
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(build(_otherGid));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('README.md'));
+      await tester.pumpAndSettle();
+
+      expect(opened, '/sync/root/$_otherGid/README.md');
+      expect(queried, contains(_otherGid));
     });
   });
 

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 
 import 'group_management.dart';
@@ -36,10 +37,24 @@ class GroupListPage extends StatefulWidget {
     this.onCreateGroup,
     this.pendingConfirmationCount = 0,
     this.onOpenConfirmations,
+    this.groupUpdates,
     this.pageSize = 30,
   });
 
   final ChatApi api;
+
+  /// group 变更通知流（`group_updated`，Transient）。
+  ///
+  /// ## 为什么列表页需要它
+  ///
+  /// 列表原来只在挂载时拉一次、下拉时刷新，于是**别人建的对话不会出现**。
+  /// 服务端已把建组/改名/归档/删除都广播成 `group_updated`，但那些入口大多
+  /// 不经过本页：chatpipeline 静默建组、habit 建独立组、miniapp 建 work、
+  /// 以及另一端（另一台设备）的任意操作。
+  ///
+  /// 为 null 时不订阅——保持本页在未注入时是**纯拉取列表**（同
+  /// [onOpenGroup] 等可选参数的取向），也让页面单测不必造一条假流。
+  final Stream<GroupUpdate>? groupUpdates;
 
   /// 点击某个对话时的回调。
   final void Function(ChatGroup group)? onOpenGroup;
@@ -123,18 +138,169 @@ class _GroupListPageState extends State<GroupListPage> {
   /// 用户会以为没删掉）。这里把对应条目的菜单禁用掉。
   String? _busyGroupId;
 
+  /// [GroupListPage.groupUpdates] 的订阅。
+  StreamSubscription<GroupUpdate>? _groupUpdatesSub;
+
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
+    _subscribeGroupUpdates();
     _loadMore();
   }
 
   @override
+  void didUpdateWidget(GroupListPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.groupUpdates != widget.groupUpdates) {
+      unawaited(_groupUpdatesSub?.cancel());
+      _groupUpdatesSub = null;
+      _subscribeGroupUpdates();
+    }
+  }
+
+  @override
   void dispose() {
+    _groupUpdatesSub?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
+
+  void _subscribeGroupUpdates() {
+    final stream = widget.groupUpdates;
+    if (stream == null) return;
+    _groupUpdatesSub = stream.listen(_onGroupUpdate);
+  }
+
+  /// 按 op 把一条变更反映到本地列表。
+  ///
+  /// ## 为什么是增量而不是「收到就整体重拉」
+  ///
+  /// group 变更频率极低，两种做法代价都可忽略；但增量不会打断用户的滚动位置
+  /// 与已加载的多页数据（重拉只会回到第一页）。
+  ///
+  /// ## 与 webapp 的差异（有意）
+  ///
+  /// webapp 维护「活跃 / 已归档」两个分区，故 `archived` 是「转移分区」。
+  /// 本页是**单一列表 + 已归档角标**（见 [_GroupTile]），故 `archived`/`active`
+  /// 只改状态标记，条目留在原位。
+  void _onGroupUpdate(GroupUpdate update) {
+    if (!mounted) return;
+    switch (update.op) {
+      case GroupUpdateOp.created:
+        // created 的快照刻意最小化（只有 id/title/status，没有时间戳与
+        // active_session），插进列表会缺字段，故读回权威行。
+        unawaited(_insertCreated(update));
+      case GroupUpdateOp.deleted:
+        setState(() {
+          final index = _groups.indexWhere((g) => g.id == update.groupId);
+          if (index >= 0) _groups.removeAt(index);
+          // 同时放开去重集合：否则该 id 之后若被服务端重新返回（如撤销删除后
+          // 重建同名 id），会因「已见过」被静默丢弃，表现为列表少一项。
+          // 与 [_handleAction] 的删除分支保持同一套判据。
+          _seenIds.remove(update.groupId);
+        });
+      case GroupUpdateOp.archived:
+        _patchLoaded(update, status: 'archived');
+      case GroupUpdateOp.active:
+        _patchLoaded(update, status: 'active');
+      case GroupUpdateOp.title:
+        _patchLoaded(update, title: update.title);
+      case GroupUpdateOp.metadata:
+        // 本页只渲染标题与状态（metadata 的开关在设置页/对话页编辑）。
+        // 刻意不处理：重拉一次只为更新看不见的字段是白费一次往返。
+        break;
+      case GroupUpdateOp.unknown:
+        // 服务端新增了本客户端不认识的 op，无从增量应用。
+        // 整体重拉是唯一安全兜底（见 [GroupUpdateOp.needsRefetch]）。
+        unawaited(_refresh());
+    }
+  }
+
+  /// 就地把已加载条目的字段改掉；条目不在当前已加载页里则忽略。
+  ///
+  /// 忽略是安全的：下次 [_loadMore] / 下拉刷新拉到的本就是最新行。
+  /// 刻意**不**为「不在列表里」的 group 插一条——改名/归档不是「新出现」
+  /// 的语义，凭空插入会让用户看到一个从未加载过的条目。
+  void _patchLoaded(GroupUpdate update, {String? title, String? status}) {
+    final index = _groups.indexWhere((g) => g.id == update.groupId);
+    if (index < 0) return;
+    setState(() {
+      _groups[index] = _copyGroup(
+        _groups[index],
+        title: title,
+        status: status,
+        // 服务端在 PATCH/归档时也会推新 updated_at，用事件时间做近似
+        // （快照里的 updated_at 没有进 GroupUpdate——见该类文档）。
+        updatedAt: update.at,
+      );
+    });
+  }
+
+  /// 处理 `op=created`：读回权威行后插到列表最前。
+  ///
+  /// 读回失败（网络抖动）时退化为用快照里的 title/status 造一条占位项——
+  /// 「新建了但列表里没有」比「标题暂时不全」更糟。
+  Future<void> _insertCreated(GroupUpdate update) async {
+    if (_seenIds.contains(update.groupId)) return;
+
+    ChatGroup? group;
+    try {
+      group = await widget.api.getGroup(update.groupId);
+    } on SpbError catch (e) {
+      SpbLog.warn('拉取新建的 group 失败，改用事件快照占位', {
+        'groupId': update.groupId,
+        'error': e.toString(),
+      });
+    }
+    if (!mounted) return;
+
+    final resolved = group ?? _placeholderFrom(update);
+    if (resolved == null) return;
+    setState(() {
+      // 服务端按 updated_at 倒序，刚建的必然在最前（与 [_createGroup] 一致）。
+      if (_seenIds.add(resolved.id)) _groups.insert(0, resolved);
+    });
+  }
+
+  /// 用事件快照造一条占位 [ChatGroup]；连标题都没有时返回 null。
+  ///
+  /// 无标题的条目在列表里就是一个空白行，用户无法辨认——不如不插。
+  static ChatGroup? _placeholderFrom(GroupUpdate update) {
+    final title = update.title;
+    if (title == null) return null;
+    final at = update.at ?? DateTime.now();
+    return ChatGroup(
+      id: update.groupId,
+      userId: '',
+      title: title,
+      status: update.status ?? 'active',
+      createdAt: at,
+      updatedAt: at,
+    );
+  }
+
+  /// 复制一个 [ChatGroup] 并覆盖若干字段。
+  ///
+  /// [ChatGroup] 没有 `copyWith`，而它字段不多——在此就地展开比给模型层加一个
+  /// 只有本页用的 API 更收敛（加在模型层会诱导其他页面各自拼装字段）。
+  static ChatGroup _copyGroup(
+    ChatGroup g, {
+    String? title,
+    String? status,
+    DateTime? updatedAt,
+  }) => ChatGroup(
+    id: g.id,
+    userId: g.userId,
+    title: title ?? g.title,
+    status: status ?? g.status,
+    createdAt: g.createdAt,
+    updatedAt: updatedAt ?? g.updatedAt,
+    goal: g.goal,
+    metadata: g.metadata,
+    activeSession: g.activeSession,
+    currentGoal: g.currentGoal,
+  );
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;

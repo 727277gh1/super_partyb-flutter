@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 
 /// 包一层 MaterialApp（组件依赖 Theme 与 Directionality）。
@@ -146,6 +149,155 @@ void main() {
       await tester.pumpWidget(_host(const MessageComposer(onSubmit: null)));
 
       expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+    });
+  });
+
+  group('MessageComposer 「立即发送」（flush）', () {
+    testWidgets('点「立即发送」触发注入回调一次', (tester) async {
+      var flushed = 0;
+      await tester.pumpWidget(
+        _host(MessageComposer(onSubmit: null, onFlush: () async => flushed++)),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pumpAndSettle();
+
+      expect(flushed, 1);
+    });
+
+    testWidgets('输入框为空时「立即发送」仍可用（它推的是已排队的消息）', (tester) async {
+      var flushed = 0;
+      await tester.pumpWidget(
+        _host(MessageComposer(onSubmit: null, onFlush: () async => flushed++)),
+      );
+
+      // 关键区别：与「发送」不同，本入口不以输入框内容为条件。
+      final button = tester.widget<IconButton>(
+        find.byKey(const ValueKey('composer-flush')),
+      );
+      expect(button.onPressed, isNotNull);
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pumpAndSettle();
+      expect(flushed, 1);
+    });
+
+    testWidgets('在途时禁用按钮（防重复点）', (tester) async {
+      final gate = Completer<void>();
+      var flushed = 0;
+      await tester.pumpWidget(
+        _host(
+          MessageComposer(
+            onSubmit: null,
+            onFlush: () async {
+              flushed++;
+              await gate.future;
+            },
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pump();
+
+      // 在途：按钮禁用（连点不应发多次请求）。
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('composer-flush')))
+            .onPressed,
+        isNull,
+      );
+      expect(flushed, 1);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+      // 完成后恢复可用。
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('composer-flush')))
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('回调抛错时给用户提示并复位（不产生未处理异常）', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MessageComposer(
+              onSubmit: null,
+              onFlush: () async => throw const NetworkError('连不上'),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pumpAndSettle();
+
+      // 错误必须被本组件消化：`onPressed` 会丢弃 Future，上抛就变成
+      // **未处理异步异常**，上层无从捕获。
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('立即发送失败'), findsOneWidget);
+      // 且按钮已复位（不会永久禁用）。
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('composer-flush')))
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('非 SpbError 异常也不会变成未处理异常', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MessageComposer(
+              onSubmit: null,
+              onFlush: () async => throw StateError('boom'),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('composer-flush')))
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('未接线时不显示「立即发送」入口', (tester) async {
+      await tester.pumpWidget(_host(MessageComposer(onSubmit: null)));
+
+      expect(find.byKey(const ValueKey('composer-flush')), findsNothing);
+      // 「发送」按钮不受影响。
+      expect(find.byKey(const ValueKey('composer-send')), findsOneWidget);
+    });
+
+    testWidgets('「立即发送」不清空输入框（与「发送」语义不同）', (tester) async {
+      // 必须给一个非 null 的 onSubmit：否则输入框本身是 disabled 的，
+      // 无法用 enterText 写入草稿。
+      await tester.pumpWidget(
+        _host(MessageComposer(onSubmit: (_) {}, onFlush: () async {})),
+      );
+
+      await tester.enterText(find.byType(TextField), '还没写完的草稿');
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        '还没写完的草稿',
+        reason: 'flush 推的是已排队的消息，不应动草稿',
+      );
     });
   });
 

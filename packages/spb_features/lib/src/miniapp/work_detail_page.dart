@@ -22,9 +22,14 @@ typedef DownloadArtifact = Future<List<int>> Function(String artifactId);
 
 /// 保存下载到的字节，返回**用户可见的落地路径**。
 ///
-/// 由 app 装配层实现（移动端写入应用沙箱，桌面端弹保存对话框）。
+/// 由 app 装配层实现（两端均写入应用支持目录下的 `deliverables/miniapp/`）。
 /// 页面不碰文件系统——否则 `spb_features` 会为这一个页面引入平台依赖，
 /// 且 widget test 无法验证。
+///
+/// 之所以不弹系统保存对话框（桌面端本可做到）：取消路径在调用方没有承载位置
+/// ——`WorkDetailPage._download` 拿到返回值后直接提示「已保存到 $path」，
+/// 用户取消时会提示一句空路径。与桌面端 `downloadDeliverableProvider` 同一
+/// 取舍（那里配「打开 / 定位」能力，这里只提示路径）。
 typedef SaveArtifactBytes = Future<String> Function(
   String filename,
   List<int> bytes,
