@@ -93,7 +93,7 @@ BEGIN
             VALUE "FileDescription", "spb_desktop" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "spb_desktop" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.atjog.spb. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 jim. Licensed under the MIT License." "\0"
             VALUE "OriginalFilename", "spb_desktop.exe" "\0"
             VALUE "ProductName", "spb_desktop" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

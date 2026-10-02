@@ -11,4 +11,4 @@ PRODUCT_NAME = spb_desktop
 PRODUCT_BUNDLE_IDENTIFIER = com.atjog.spb.spbDesktop
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.atjog.spb. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 jim. Licensed under the MIT License.

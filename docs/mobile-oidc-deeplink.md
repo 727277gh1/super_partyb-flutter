@@ -134,7 +134,7 @@ authStateProvider.signedIn() → 路由守卫放行
 1. **注册回调地址**：把 `partyb://oidc/callback` 加进该 client 的
    `oauth_clients.redirectUris`。当前只有三个网关回调：
    ```console
-   $ <deploy-host> 'sqlite3 /opt/<idp>/data/idp.db "SELECT clientId, redirectUris FROM oauth_clients;"'
+   $ ssh <deploy-host> 'sqlite3 /opt/<idp>/data/idp.db "SELECT clientId, redirectUris FROM oauth_clients;"'
    client_PLACEHOLDER_0000000000000000|["http://203.0.113.10:9000/auth/oidc/callback","https://app.example.com/auth/oidc/callback","https://app2.example.com/auth/oidc/callback"]|1
    ```
 2. **需要一个 public client**：当前 client 的

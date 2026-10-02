@@ -1,8 +1,7 @@
 # super_partyb-flutter
 
-Super PartyB 的 **Flutter 多端客户端**：桌面端（Linux / Windows / macOS）+ 移动端（Android / iOS）。
-
-取代原 [`super_partyb`](../super_partyb) 仓库的 `apps/desktop`（Tauri 薄壳），并新增独立移动 App。
+本仓库是 Super PartyB 的 **Flutter 多端客户端**：桌面端（Linux / Windows / macOS）+ 移动端（Android / iOS），
+取代原 Tauri 薄壳桌面端，并新增独立移动 App。
 
 > **完整开发指引见 [AGENTS.md](AGENTS.md)**（架构、分层规则、Go API 契约、构建限制、环境要求）。
 
@@ -14,7 +13,7 @@ Super PartyB 的 **Flutter 多端客户端**：桌面端（Linux / Windows / mac
 |---|---|
 | **Windows** x64 | [Releases](../../releases) → `spb_desktop-windows-x64.zip`，解压后双击 `spb_desktop.exe`。已内置 VC++ 运行库，无需额外安装 |
 | **Linux** x64 | [Releases](../../releases) → `spb_desktop-linux-x64.tar.gz` |
-| **Android** | [Releases](../../releases) → `app-release.apk` |
+| **Android** | [Releases](../../releases) → `spb_mobile-android.apk` |
 | **macOS / iOS** | 暂不出包（需 macOS runner，CI 按 10× 计费） |
 
 未打 tag 时，Actions 页的 artifact 也可下载（需登录 GitHub，存 30 天）。
@@ -90,3 +89,18 @@ packages/
 3. **实时流统一 SSE** —— 禁止引入 WebSocket
 4. **客户端不解析 JWT、不申请 API Key** —— 认证由网关 OIDC 完成
 5. **不在客户端硬编码服务地址** —— 一律走 `--dart-define`，构建期注入
+
+---
+
+## 说明
+
+本仓库是**客户端**：不含服务端实现。它需要一个兼容的 PartyB Go API
+（网关 OIDC 认证 + SSE 事件流）才能实际使用；仓库内的 `docs/` 记录了
+所依赖的接口契约与实测结论。
+
+文档中的域名、IP、`client_id` 均为占位符（`example.com` / RFC 5737 的
+`203.0.113.0/24`），非真实部署值。
+
+## 许可证
+
+[MIT](LICENSE)

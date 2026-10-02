@@ -175,7 +175,7 @@ flutter build linux --release \
 ### 7.3 部署 IdP 二进制
 
 ```bash
-cd id-provider/go && make build && bash scripts/<host>.sh
+cd id-provider/go && make build && bash scripts/deploy-<host>.sh
 ```
 
 > IdP 侧改动**不需要数据库迁移**：`oauth_clients.tokenEndpointAuthMethod`

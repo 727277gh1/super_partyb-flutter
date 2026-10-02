@@ -2,8 +2,12 @@
 
 本文件指导 Claude Code / pi 等 AI Agent 在 **super_partyb-flutter** 仓库中工作。
 
-> 姊妹仓库：[`super_partyb`](../super_partyb)（Go API + Next.js webapp + Taro 小程序）。
+> 姊妹仓库：`super_partyb`（Go API + Next.js webapp + Taro 小程序，**未公开**）。
 > **本仓库只做客户端**，业务真源永远在 `super_partyb/apps/go-api`。
+>
+> ⚠️ 下文出现的 `super_partyb/...` 路径、`api-gateway/...`、`id-provider/...`
+> 等**不在本仓库内**，仅作为契约依据的引用。本仓库可独立构建与测试，
+> 不需要这些仓库在场（除下节“引用”说明的契约同步工作外）。
 
 ---
 

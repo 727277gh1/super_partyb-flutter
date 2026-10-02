@@ -113,7 +113,7 @@ $ curl -sS -w ' <- HTTP %{http_code}\n' \
 该 client 在 IdP 库中注册的回调（`oauth_clients.redirectUris`，仅取该列）：
 
 ```console
-$ <deploy-host> 'sqlite3 /opt/<idp>/data/idp.db "SELECT clientId, redirectUris, isActive FROM oauth_clients;"'
+$ ssh <deploy-host> 'sqlite3 /opt/<idp>/data/idp.db "SELECT clientId, redirectUris, isActive FROM oauth_clients;"'
 client_PLACEHOLDER_0000000000000000|["http://203.0.113.10:9000/auth/oidc/callback","https://app.example.com/auth/oidc/callback","https://app2.example.com/auth/oidc/callback"]|1
 client_ba4ea75c-51b8-4669-a|[]|1
 ```
