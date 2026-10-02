@@ -1,4 +1,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      联网权限。
+
+      ⚠️ 必须声明在 **main** 源集，不能只依赖 debug/profile 源集：
+      `src/debug/AndroidManifest.xml` 与 `src/profile/AndroidManifest.xml` 里
+      各有一份 INTERNET，但那只用于 Flutter 工具的热重载/断点通信，**release
+      构建不会合并它们**。
+
+      也不能指望插件贡献：已逐个核对全部依赖的 `android/src/main/
+      AndroidManifest.xml`，贡献 INTERNET 的插件数为 **0**（flutter_secure_
+      storage / share_plus / app_links / file_selector_android / sqlite3_
+      flutter_libs / shared_preferences_android 等都没有）。
+
+      缺失时的表现是「debug 能跑、release 包一联网就失败」——而且不是崩
+      溃，是 API 调用抛 SocketException / 登录无响应，排查成本高。
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="spb_mobile"
         android:name="${applicationName}"
