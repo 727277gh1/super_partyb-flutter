@@ -650,8 +650,27 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
 - [ ] 移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`，见 `docs/mobile-oidc-deeplink.md`）
-- [ ] CI 流水线（本地门禁脚本已就绪：`check_format.sh` / `check_layering.sh`）
-- [ ] Windows/macOS 出包（需对应 runner，见 §8）
+- [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
+- [x] 发布流水线（`.github/workflows/release.yml`：tag 触发三端出包 → GitHub Release）
+- [x] Windows 出包（GitHub Actions `windows-2022`，见 `docs/windows-release.md`）
+- [ ] macOS 出包（需 macOS runner，10× 计费，暂不做，见 §8）
+
+### CI / 发布流水线速查
+
+| 文件 | 职责 | 触发 | 产物保留 |
+|---|---|---|---|
+| `.github/workflows/ci.yml` | **验证**：analyze / format / layering / test / 能否构建 | push main + PR | Actions 7 天 |
+| `.github/workflows/release.yml` | **交付**：三端出包 + 建 Release | `v*` tag + 手动 | Release 长期 / Actions 30 天 |
+
+发布构建的地址参数（API/UFS/webapp/OIDC）由仓库 **Variables** 提供
+（Settings → Secrets and variables → Actions → Variables），优先级：
+`workflow_dispatch` 输入 > Variables > `SpbEnv` 内置默认值。
+
+> ⚠️ **公开仓库里 Variables 是全局可见的**（与 Secrets 不同）。
+> 不要把内网主机名或未公开域名填进去；不宜公开的地址改用 dispatch 输入。
+
+Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE_PASSWORD` /
+`ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`）；未配置时回退 debug 签名并打印警告。
 
 ### 交付物同步的既有语义（迁移自 Tauri，**必须保持**）
 
@@ -674,7 +693,8 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 | 问题 | 状态 | 参考 |
 |---|---|---|
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |
-| Windows/macOS 需额外 runner | 待决策 | `super_partyb` issue #31 |
+| macOS 出包需 macOS runner（10× 计费） | 待决策 | §8、`super_partyb` issue #31 |
+| Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ Linux 原生 channel 已实现 | §6.7 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
@@ -705,6 +725,7 @@ docs: 补充 Windows 构建限制
 
 | 文档 | 位置 |
 |---|---|
+| Windows 下载与出包 | `docs/windows-release.md` |
 | Go API 契约与业务逻辑 | `super_partyb/AGENTS.md` |
 | Tauri 桌面端（迁移来源） | `super_partyb/apps/desktop/README.md` |
 | 微信小程序（BFF 可复用） | `super_partyb/apps/miniapp/README.md` |
