@@ -16,6 +16,16 @@ class EventTypes {
   static const thought = 'thought';
   static const plan = 'plan'; // 保留给未来真实 plan 事件，勿用于心跳
   static const heartbeat = 'heartbeat'; // Transient，不落库不渲染
+
+  /// 执行中的活动快照（`internal/chat/turn_worker.go` 的
+  /// `upgradeHeartbeatToActivity`：把 executor 心跳升级而来）。
+  ///
+  /// **Transient**：与 [heartbeat] 同族（不落库、不回放），payload 是
+  /// `{elapsed_ms, last_event_type?, since_last_event_ms?, content?}`。
+  /// 用途是在「执行中但还没有正文」的空窗期展示「已运行多久 + 上一步是什么」，
+  /// 避免用户误判为卡死。**不进 [timelineVisible]**：它是进度提示，不是时间线正文。
+  static const turnActivity = 'turn_activity';
+
   static const toolCall = 'tool_call';
   static const toolResult = 'tool_result';
   static const error = 'error';
@@ -88,6 +98,18 @@ class EventTypes {
   /// goal / task 变更通知（不落库，仅广播）。
   static const goalUpdated = 'goal_updated';
 
+  /// group 自身的生命周期变更通知（创建/删除/归档/恢复/改名/元数据）。
+  ///
+  /// **Transient**：真源在 `chat_groups` 表，事件只提示「你手上的 group 列表
+  /// 过期了」。payload = `{op, group: {id, title, status, ...}}`，op 值域见
+  /// `internal/chat/group_events.go` 的 `GroupEventOp`（created / deleted /
+  /// archived / active / title / metadata）。发布口只有 `PublishGroupUpdated`。
+  ///
+  /// 与 [groupTitleUpdated] 的关系：后者是 Title Gate 在 turn 收尾时发的**已落库**
+  /// 事件（有 turn），本事件覆盖 title 之外的 group 生命周期变更，两者共存。
+  /// **不进 [timelineVisible]**：它驱动对话列表刷新，不是时间线正文。
+  static const groupUpdated = 'group_updated';
+
   /// 分组标题被自动生成/改写（`internal/chatgate/title_gate.go`）。
   ///
   /// **Transient**：真源在 `chat_groups.title`，事件只提示「你手上的标题过期了」。
@@ -110,6 +132,7 @@ class EventTypes {
     thought,
     plan,
     heartbeat,
+    turnActivity,
     toolCall,
     toolResult,
     error,
@@ -139,6 +162,7 @@ class EventTypes {
     groupMetadataUpdated,
     goalUpdated,
     confirmationExpired,
+    groupUpdated,
     groupTitleUpdated,
     pigoSessionMissing,
     // agent.file.* 不列入：见 [timelineVisible] 的前缀匹配说明。

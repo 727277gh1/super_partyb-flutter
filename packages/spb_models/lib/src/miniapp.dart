@@ -815,6 +815,60 @@ class MiniappNotificationSubscription {
       'enabled=$enabled)';
 }
 
+/// 通知模板白名单。
+///
+/// **真源**：`apps/go-api/internal/notifications/store.go` 的 `KnownTemplate`。
+/// 本类是它的镜像，两边必须同步（同 [EventTypes] 的做法）。
+///
+/// ## 为什么必须用白名单 key，不能自造
+///
+/// `saveNotificationSubscriptions` 逐个 `KnownTemplate` 校验，**有一个不认就
+/// 整体 400**——不是忽略那一项。故传一个拼错的 key 会让整批保存失败，
+/// 而调用方可能只看到「保存失败」四个字。
+///
+/// ## 四个 key 的真实地位不同（读代码前必须知道）
+///
+/// | key | 地位 |
+/// |---|---|
+/// | [notify] | **唯一有生产者**的 key。turn 完成/失败、待确认三类事件都由
+/// `OutboxService` 以它入队（`dispatcher.go` 的 `EnqueueTurnCompleted` /
+/// `EnqueueConfirmationRequired`），状态由模板 `phrase` 字段区分 |
+/// | [workCompleted] | 与 [notify] **共用同一微信模板**（`TemplateMap.ID` 里两者都
+/// 解析到 `Completed`）。保留用于兼容历史 `miniapp_subscriptions` 行 |
+/// | [workFailed] | 服务端**预留**：`TemplateMap` 有对应字段但 `MINIAPP_NOTIFY_TEMPLATE_FAILED`
+/// 未配置，且当前**没有任何事件会以它入队** |
+/// | [confirmationRequired] | 同上，预留 |
+///
+/// 后两个 key 写入是**成功的**（白名单放行），只是没有事件会消耗它们的额度。
+/// 这是服务端的现状，不是客户端的 bug——UI 如实展示即可，但文案不该
+/// 暗示「打开它就能收到某类通知」。
+class MiniappNotificationTemplates {
+  const MiniappNotificationTemplates._();
+
+  /// 三类事件共用的主 key（唯一有生产者）。
+  static const notify = 'notify';
+
+  /// 与 [notify] 共用同一微信模板的历史兼容 key。
+  static const workCompleted = 'work_completed';
+
+  /// 服务端预留（无生产者）。
+  static const workFailed = 'work_failed';
+
+  /// 服务端预留（无生产者）。
+  static const confirmationRequired = 'confirmation_required';
+
+  /// 全部白名单 key，顺序即 UI 展示顺序（主 key 在前）。
+  static const all = <String>[
+    notify,
+    workCompleted,
+    workFailed,
+    confirmationRequired,
+  ];
+
+  /// 是否白名单 key（客户端侧预校验，避免把整批保存打成 400）。
+  static bool isKnown(String key) => all.contains(key);
+}
+
 // ==================== 归一化辅助 ====================
 //
 // 与 `ChatInboxMessage` 同策略：服务端 `nullStr` 产出 JSON null、`iso` 对零值

@@ -311,6 +311,56 @@ class ChatEvent {
     return null;
   }
 
+  // ---------- turn_activity 访问器 ----------
+  //
+  // 字段名取自 Go `internal/chat/turn_worker.go` 的 `upgradeHeartbeatToActivity`
+  // （真实写端，非推测）：payload = `{elapsed_ms, last_event_type?,
+  // since_last_event_ms?, content?}`。三个数值字段都是「有上一步事件才有」，
+  // 故均可为 null——调用方不能把 null 当成 0。
+  //
+  // ⚠️ 与 gate 访问器不同，这五个访问器**按 eventType 做了门禁**：
+  // `elapsed_ms` / `op` / `group` 都是通用键名，不加门禁的话，任何 payload 里
+  // 恰好带同名键的事件都会被误读成本类事件的字段（例如 goal_updated 的 `op`
+  // 会被当成 group 变更 op）。门禁让「类型不符 → null」成为可靠契约。
+
+  /// 本 turn 已运行的毫秒数（`turn_activity`）。
+  ///
+  /// 服务端在每次心跳时用 `time.Since(turnStartedAt)` 重算，故直接用它即可，
+  /// 无需客户端按本地时钟重算（两者会在重连/时钟偏移时不一致）。
+  int? get turnActivityElapsedMs =>
+      eventType == EventTypes.turnActivity ? _intField('elapsed_ms') : null;
+
+  /// 上一步发生的事件类型（`turn_activity`）。
+  ///
+  /// 为空表示本 turn 还没有过任何事件（刚起跑）——UI 应只显示已运行时长。
+  String? get turnActivityLastEventType =>
+      eventType == EventTypes.turnActivity ? _str('last_event_type') : null;
+
+  /// 距上一步事件已过去的毫秒数（`turn_activity`）。
+  int? get turnActivitySinceLastEventMs => eventType == EventTypes.turnActivity
+      ? _intField('since_last_event_ms')
+      : null;
+
+  // ---------- group_updated 访问器 ----------
+  //
+  // 字段名取自 Go `internal/chat/group_events.go` 的 `PublishGroupUpdated`：
+  // payload = `{op, group: {id, title, status, created_at?, updated_at?}}`，
+  // 快照**刻意最小化**（只带身份字段），列表内容以 refetch 为准。
+
+  /// group 变更操作（`group_updated`）：`created` / `deleted` / `archived` /
+  /// `active` / `title` / `metadata`（见 Go `GroupEventOp`）。
+  ///
+  /// 服务端可能新增 op，故调用方应对未知值走「忽略或整体重拉」而非抛异常。
+  String? get groupUpdateOp =>
+      eventType == EventTypes.groupUpdated ? _str('op') : null;
+
+  /// group 身份快照（`group_updated` 的 `group` 字段）。
+  ///
+  /// 非 Map（缺失/异常载荷）返回 null。**不是**完整 group DTO——只有
+  /// `id` / `title` / `status` 等身份字段，需要完整字段时应重新拉列表。
+  Map<String, dynamic>? get groupUpdateSnapshot =>
+      eventType == EventTypes.groupUpdated ? _map('group') : null;
+
   // ---------- gate 决策访问器（adaptive_decision / goal_gate_decision）----------
   //
   // 两类事件共用这几个访问器，键名差异已在各 getter 里归一：

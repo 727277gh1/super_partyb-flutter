@@ -277,6 +277,144 @@ void main() {
     });
   });
 
+  group('turn_activity 访问器', () {
+    /// 造一个 turn_activity 事件（Go `upgradeHeartbeatToActivity` 真实形状）。
+    ChatEvent activity([Map<String, dynamic> extra = const {}]) =>
+        ChatEvent.fromJson(
+          eventToDictShape()
+            ..['event_type'] = EventTypes.turnActivity
+            ..['transient'] = true
+            ..['payload'] = <String, dynamic>{
+              'elapsed_ms': 45000,
+              'last_event_type': 'tool_call',
+              'since_last_event_ms': 3200,
+              'content': '（pigo 执行中…）',
+              ...extra,
+            },
+        );
+
+    test('turn_activity 是已知事件，但不进时间线（进度提示非正文）', () {
+      final ev = activity();
+
+      expect(ev.isKnown, isTrue, reason: '漂移会让 isKnown=false 而静默丢弃');
+      expect(ev.isTimelineVisible, isFalse, reason: '它是空窗期进度提示，不应污染时间线正文');
+      expect(ev.transient, isTrue, reason: '服务端标为 Transient，不落库不回放');
+    });
+
+    test('读 elapsed_ms / last_event_type / since_last_event_ms', () {
+      final ev = activity();
+
+      expect(ev.turnActivityElapsedMs, 45000);
+      expect(ev.turnActivityLastEventType, 'tool_call');
+      expect(ev.turnActivitySinceLastEventMs, 3200);
+    });
+
+    test('数值字段容忍字符串（payload 是 map[string]any）', () {
+      final ev = activity({
+        'elapsed_ms': '45000',
+        'since_last_event_ms': '3200',
+      });
+
+      expect(ev.turnActivityElapsedMs, 45000);
+      expect(ev.turnActivitySinceLastEventMs, 3200);
+    });
+
+    test('首个活动（尚无上一步事件）时上一步字段为 null，而非 0/空串', () {
+      final ev = activity({
+        'last_event_type': null,
+        'since_last_event_ms': null,
+      });
+
+      expect(ev.turnActivityElapsedMs, 45000, reason: 'elapsed_ms 总在');
+      expect(ev.turnActivityLastEventType, isNull);
+      expect(
+        ev.turnActivitySinceLastEventMs,
+        isNull,
+        reason: 'null ≠ 0：「没有上一步」与「上一步就在此刻」不同',
+      );
+    });
+
+    test('非 turn_activity 事件的访问器返回 null', () {
+      final ev = ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.message
+          ..['payload'] = {'text': 'hi', 'elapsed_ms': 999},
+      );
+
+      expect(ev.turnActivityElapsedMs, isNull);
+      expect(ev.turnActivityLastEventType, isNull);
+      expect(ev.turnActivitySinceLastEventMs, isNull);
+    });
+  });
+
+  group('group_updated 访问器', () {
+    /// 造一个 group_updated 事件（Go `PublishGroupUpdated` 真实形状）。
+    ChatEvent groupUpdated([Map<String, dynamic> extra = const {}]) =>
+        ChatEvent.fromJson(
+          eventToDictShape()
+            ..['event_type'] = EventTypes.groupUpdated
+            ..['transient'] = true
+            ..['payload'] = <String, dynamic>{
+              'op': 'created',
+              'group': {'id': 'grp_new', 'title': '新对话', 'status': 'active'},
+              ...extra,
+            },
+        );
+
+    test('group_updated 是已知事件，但不进时间线（驱动列表刷新）', () {
+      final ev = groupUpdated();
+
+      expect(ev.isKnown, isTrue, reason: '漂移会让 isKnown=false 而静默丢弃');
+      expect(ev.isTimelineVisible, isFalse);
+      expect(ev.transient, isTrue);
+    });
+
+    test('读 op 与 group 快照', () {
+      final ev = groupUpdated();
+
+      expect(ev.groupUpdateOp, 'created');
+      expect(ev.groupUpdateSnapshot, {
+        'id': 'grp_new',
+        'title': '新对话',
+        'status': 'active',
+      });
+    });
+
+    test('六种 op 都能原样读出（值域由服务端定义，客户端不枚举）', () {
+      for (final op in [
+        'created',
+        'deleted',
+        'archived',
+        'active',
+        'title',
+        'metadata',
+      ]) {
+        expect(groupUpdated({'op': op}).groupUpdateOp, op);
+      }
+    });
+
+    test('未知 op 不被当异常（服务端可新增），原样返回供调用方忽略', () {
+      expect(groupUpdated({'op': 'renamed'}).groupUpdateOp, 'renamed');
+    });
+
+    test('group 缺失或类型异常时快照为 null', () {
+      expect(groupUpdated({'group': null}).groupUpdateSnapshot, isNull);
+      expect(groupUpdated({'group': 'grp_x'}).groupUpdateSnapshot, isNull);
+      expect(groupUpdated({'op': null}).groupUpdateOp, isNull);
+    });
+
+    test('非 group_updated 事件的访问器返回 null', () {
+      final ev = ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.goalUpdated
+          ..['payload'] = {'op': 'created'},
+      );
+
+      expect(ev.groupUpdateOp, isNull);
+      expect(ev.groupUpdateSnapshot, isNull);
+    });
+  });
+
   group('gate 决策访问器', () {
     /// 造一个 adaptive_decision 事件（Go 现行扁平 payload）。
     ChatEvent adaptive(Map<String, dynamic> payload) => ChatEvent.fromJson(
