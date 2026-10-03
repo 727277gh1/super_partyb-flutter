@@ -713,6 +713,31 @@ final dragDropCapabilityProvider = Provider<DragDropCapability>((ref) {
   return const NoopDragDropCapability();
 });
 
+// ==================== 习惯（habit）====================
+//
+// 端点真源见 `spb_api` 的 [HabitApi] 类文档。
+//
+// 两个 app 都需要这组 provider（桌面端与移动端都支持习惯），但**各自复制**
+// 而非共享：`apps/*` 之间不互相依赖（只依赖 `packages/*`），且两端的错误翻译
+// 文案（snackbar）本来就不同。
+
+/// 习惯 API 客户端（与 [chatApiProvider] 共用同一个 [dioProvider]）。
+final habitApiProvider = Provider<HabitApi>((ref) {
+  return HabitApi(ref.watch(dioProvider));
+});
+
+/// 规则列表首拉（供 [HabitsPage.loadHabits] 注入）。
+///
+/// 用 FutureProvider 缓存首拉，刷新走 `ref.invalidate`。
+final habitsProvider = FutureProvider<List<UserHabit>>((ref) async {
+  return ref.watch(habitApiProvider).listHabits();
+});
+
+/// 执行历史首拉（跨规则，含无 pattern 的候选建议记录）。
+final habitRunsProvider = FutureProvider<List<HabitRun>>((ref) async {
+  return ref.watch(habitApiProvider).listAllRuns();
+});
+
 // ==================== 交付物同步 ====================
 
 /// UFS API 客户端（独立 baseUrl，与 PartyB API 不同服务）。

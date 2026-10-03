@@ -1,3 +1,5 @@
+import 'package:spb_models/spb_models.dart';
+
 import 'spec_ui.dart';
 import 'tts_audio_path.dart';
 
@@ -316,6 +318,110 @@ final class GoalProgressItem extends ConversationItem {
   /// 解析后的 spec 文档；服务端产出损坏（解析返回 null 的情形）时为 null，
   /// UI 据此跳过渲染。
   final SpecUiDocument? spec;
+}
+
+/// 习惯候选建议卡（`habit_suggestion_created` / `habit_suggestion_resolved`）。
+///
+/// ## 为什么归约层要处理它（而非静默丢弃）
+///
+/// 该事件由 `workers/habit/timeline_events.go` 的 `TimelineEmitter` 落库并广播，
+/// 会随普通时间线一起到达（客户端拉 timeline 时不带 `event_type` 过滤，服务端
+/// `chat.go` 在无过滤时返回全部）。它**不是**控制事件——它是用户在对话里看到
+/// 「检测到一个习惯，要不要采纳」的**唯一**入口，webapp 与小程序都渲染它。
+/// 若不显式处理，它会落到归约器的 `default:` 分支被静默丢弃，用户永远看不到
+/// 建议（与 `agent.file.*` 曾被吞掉 2927 条是同一类缺陷）。
+///
+/// ## 为什么按 suggestionId 幂等，而不是 turnId
+///
+/// `habit_suggestion_resolved` 附在**与 created 同一个 turn** 上（服务端 resolve
+/// 时重新取该 group 最近一条 turn，见 `TimelineEmitter.Emit`），所以同一 turn
+/// 上会先有一条 created、后有一条 resolved。按 turnId 合并会把两张卡（不同
+/// 建议）错并成一张；按 [suggestionId] 合并才能「created 建卡、resolved 就地
+/// 更新同一张卡」。
+///
+/// 另一重必要性：SSE cursor 回放与 timeline 回填存在交叠窗口，同一事件会被
+/// 归约两次，不幂等会看到重复卡片。
+final class HabitSuggestionItem extends ConversationItem {
+  const HabitSuggestionItem({
+    required super.id,
+    required super.createdAt,
+    required this.suggestionId,
+    super.turnId,
+    this.topicKey = '',
+    this.triggerType = HabitTriggerType.timeBased,
+    this.triggerConfig,
+    this.preferredAgentId,
+    this.targetAcceptanceLevel,
+    this.confidence,
+    this.reasons = const [],
+    this.evidence = const {},
+    this.editableFields = const [],
+    this.userFeedback,
+    this.resolvedPatternId,
+    this.snoozeUntil,
+  });
+
+  /// 建议 id（`habit_runs.id`）。**身份键**，跨 created/resolved 两个事件不变。
+  final String suggestionId;
+
+  /// 主题 key（`rule_draft.topic_key`）。
+  final String topicKey;
+
+  final HabitTriggerType triggerType;
+
+  /// 建议的触发配置（watch 与 time_based 形状不同，见 [HabitTriggerConfig]）。
+  final HabitTriggerConfig? triggerConfig;
+
+  final String? preferredAgentId;
+
+  /// 采纳后应使用的接受级别。
+  final HabitAcceptanceLevel? targetAcceptanceLevel;
+
+  final double? confidence;
+  final List<String> reasons;
+  final Map<String, dynamic> evidence;
+  final List<String> editableFields;
+
+  /// 用户反馈（null = 仍待处理）。
+  final HabitUserFeedback? userFeedback;
+
+  /// accept 后建出的 pattern id（resolved 事件的 `resolved_pattern_id`）。
+  final String? resolvedPatternId;
+
+  /// snooze 的截止时刻（resolved 事件的 `snooze_until`）。
+  final DateTime? snoozeUntil;
+
+  /// 是否仍可操作。
+  ///
+  /// 与 `FeedbackRequestItem.canResolve` 同思路：服务端 resolve 用 CAS，
+  /// 已处理过的建议再提交会 409。本地据此禁用按钮，避免用户点了才被拒。
+  bool get canResolve => userFeedback == null;
+
+  /// 是否已被接受（含 edit_and_accept，两者在服务端都写 `accept_rule`）。
+  bool get isAccepted => userFeedback == HabitUserFeedback.accepted;
+
+  HabitSuggestionItem copyWith({
+    HabitUserFeedback? userFeedback,
+    String? resolvedPatternId,
+    DateTime? snoozeUntil,
+  }) => HabitSuggestionItem(
+    id: id,
+    createdAt: createdAt,
+    turnId: turnId,
+    suggestionId: suggestionId,
+    topicKey: topicKey,
+    triggerType: triggerType,
+    triggerConfig: triggerConfig,
+    preferredAgentId: preferredAgentId,
+    targetAcceptanceLevel: targetAcceptanceLevel,
+    confidence: confidence,
+    reasons: reasons,
+    evidence: evidence,
+    editableFields: editableFields,
+    userFeedback: userFeedback ?? this.userFeedback,
+    resolvedPatternId: resolvedPatternId ?? this.resolvedPatternId,
+    snoozeUntil: snoozeUntil ?? this.snoozeUntil,
+  );
 }
 
 /// Agent 产出的文件（`agent.file.*`）。

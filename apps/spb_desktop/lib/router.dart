@@ -7,9 +7,11 @@ import 'package:go_router/go_router.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'providers.dart';
@@ -61,6 +63,9 @@ class SpbRoutes {
 
   /// 我的最近轮次。
   static const myTurns = '/my-turns';
+
+  /// 习惯管理（规则列表 + 执行历史）。
+  static const habits = '/habits';
 
   /// 小程序工作台：工作列表。
   ///
@@ -247,6 +252,10 @@ List<RouteBase> buildDesktopRoutes() {
           builder: (context, state) => const _MyTurnsPage(),
         ),
         GoRoute(
+          path: 'habits',
+          builder: (context, state) => const _HabitsPage(),
+        ),
+        GoRoute(
           path: 'settings',
           builder: (context, state) => const _SettingsPage(),
           routes: [
@@ -342,6 +351,7 @@ class _HomePage extends ConsumerWidget {
       // 故这里与移动端接线同构。用 `push` 而非 `go`：工作台是从列表**深入**
       // 的一层，返回应回到对话列表并保留滚动位置。
       onOpenWorks: () => context.push(SpbRoutes.works),
+      onOpenHabits: () => context.push(SpbRoutes.habits),
       pendingConfirmationCount: pendingCount,
       // 不需要 userId：`POST /chat/groups` 的身份来自网关注入的 `X-User-ID`
       // （服务端 `chatHandlers.userID` 优先取该头），`ChatApi.createGroup` 的
@@ -430,6 +440,72 @@ class _MyTurnsPage extends ConsumerWidget {
     return MyTurnsPage(
       fetch: () => api.listMyTurns(),
       onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
+    );
+  }
+}
+
+/// 习惯管理页。
+///
+/// ## 为什么列表/历史用 provider 而写操作用 `ref.read`
+///
+/// 两个 `FutureProvider`（[habitsProvider] / [habitRunsProvider]）只作**首拉**
+/// 缓存，页面的 `loadHabits` / `loadRuns` 回调在刷新时重新调 API——若直接返回
+/// provider 的缓存值，用户点「刷新」看不到新数据（服务端刚被另一端改过）。
+///
+/// 写操作后不 invalidate provider：页面自己会重新拉（`_load`），invalidate 会
+/// 额外触发一次无谓重建。
+class _HabitsPage extends ConsumerStatefulWidget {
+  const _HabitsPage();
+
+  @override
+  ConsumerState<_HabitsPage> createState() => _HabitsPageState();
+}
+
+class _HabitsPageState extends ConsumerState<_HabitsPage> {
+  /// groupId → title 缓存（`/api/habits/runs` 只给 id，标题要自己查）。
+  final _titles = <String, String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final api = ref.watch(habitApiProvider);
+    return HabitsPage(
+      loadHabits: () => api.listHabits(),
+      loadRuns: () async {
+        final runs = await api.listAllRuns();
+        // 预取涉及的 group 标题（缺失则静默，列表不展示标题）。
+        //
+        // 与 `_PendingConfirmationsPageState` 同策略：只查缺的、不重复查。
+        await Future.wait(
+          runs.map((r) async {
+            final gid = r.deliveryGroupId ?? r.originGroupId;
+            if (gid.isEmpty || _titles.containsKey(gid)) return;
+            try {
+              final g = await ref.read(chatApiProvider).getGroup(gid);
+              _titles[gid] = g.title;
+            } on Object catch (_) {
+              // 静默：标题查不到不该让整个列表失败。
+            }
+          }),
+        );
+        return runs;
+      },
+      groupTitleOf: (gid) => _titles[gid],
+      // 写操作统一走 `HabitApi`。异常由 `HabitsPage` 接住并翻成提示
+      // （409 → 「状态已变化」），故这里不做 try/catch。
+      onTrigger: (h) => api.triggerHabit(h.id),
+      onPause: (h) => api.pauseHabit(h.id),
+      onResume: (h) async => api.resumeHabit(h.id),
+      onArchive: (h) => api.archiveHabit(h.id),
+      onCreate: (draft) async {
+        final r = await api.createHabit(
+          topicKey: draft.topicKey,
+          acceptanceLevel: draft.acceptanceLevel,
+          triggerConfig: draft.triggerConfig,
+        );
+        return r.patternId;
+      },
+      // 习惯执行产生的对话就是普通对话，直接跳过去（同 `_MyTurnsPage`）。
+      onOpenTurn: (groupId, _) => context.go(SpbRoutes.chat(groupId)),
     );
   }
 }
@@ -719,6 +795,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       ),
       onResolveConfirmation: _resolveConfirmation,
       onResolveFeedback: _resolveFeedback,
+      onAcceptHabit: _acceptHabit,
+      onDismissHabit: _dismissHabit,
+      onSnoozeHabit: _snoozeHabit,
       // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
       // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
       onSend: (text) => ref
@@ -889,6 +968,79 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         .catchError((Object e) {
           debugPrint('归属反馈提交失败: $e');
         });
+  }
+
+  /// 接受习惯建议。
+  ///
+  /// ## 为什么用 `HabitApi` 而不是 `ChatStreamController`
+  ///
+  /// 建议卡虽在对话里，但它的端点是 `/api/chat/habit-suggestions/:id/resolve`
+  /// （属习惯域，不是发消息）。走发消息通道会把「接受建议」变成一条普通用户
+  /// 消息——服务端不认这种回执，且会在时间线里多出一条毫无意义的用户气泡。
+  ///
+  /// 成功/失败都只记日志：**结果的权威呈现是 `habit_suggestion_resolved`
+  /// 事件**（服务端 resolve 后会广播，归约器把卡片换成结果行）。在这里乐观
+  /// 更新本地状态反而会与事件打架（重放/延迟到达时出现双重状态）。
+  void _acceptHabit(HabitSuggestionItem s) {
+    unawaited(
+      ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.accept,
+          )
+          .catchError((Object e) {
+            debugPrint('接受习惯建议失败: $e');
+            _showHabitError('接受失败，请重试');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+    );
+  }
+
+  /// 忽略习惯建议（服务端写 24h 冷却窗口）。
+  void _dismissHabit(HabitSuggestionItem s) {
+    unawaited(
+      ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.dismiss,
+          )
+          .catchError((Object e) {
+            debugPrint('忽略习惯建议失败: $e');
+            _showHabitError('操作失败，请重试');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+    );
+  }
+
+  /// 稍后提醒。
+  ///
+  /// `snooze_until` 由 [HabitSnoozeOption.until] 算（UTC）——**不在本处手写
+  /// 时间计算**：服务端解析失败会静默回退冷却时长（不报错），格式错了用户会
+  /// 发现「明明选了 1 小时后，却要等一天」。
+  void _snoozeHabit(HabitSuggestionItem s, HabitSnoozeOption option) {
+    unawaited(
+      ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.snooze,
+            snoozeUntil: option.until(DateTime.now()),
+          )
+          .catchError((Object e) {
+            debugPrint('延后习惯建议失败: $e');
+            _showHabitError('操作失败，请重试');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+    );
+  }
+
+  void _showHabitError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 监听 controller.gateDecisions：更新诊断面板数据。

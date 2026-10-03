@@ -34,6 +34,7 @@ class GroupListPage extends StatefulWidget {
     this.onGroupAction,
     this.onSearch,
     this.onOpenWorks,
+    this.onOpenHabits,
     this.onCreateGroup,
     this.pendingConfirmationCount = 0,
     this.onOpenConfirmations,
@@ -97,6 +98,12 @@ class GroupListPage extends StatefulWidget {
   /// 为 null 时**不展示**入口。仅移动端接线——桌面端不做小程序投影层
   /// （那是为小程序/移动端准备的 BFF）。
   final VoidCallback? onOpenWorks;
+
+  /// 打开习惯管理页。
+  ///
+  /// 与 [onOpenWorks] 同为可选入口（不注入则不显示）：移动端与桌面端都支持
+  /// 习惯，但测试与只读用法不需要它。
+  final VoidCallback? onOpenHabits;
 
   /// 跨 group 的待确认数量（角标）。> 0 时显示角标。
   final int pendingConfirmationCount;
@@ -493,6 +500,13 @@ class _GroupListPageState extends State<GroupListPage> {
               icon: const Icon(Icons.work_outline),
               tooltip: '工作台',
               onPressed: widget.onOpenWorks,
+            ),
+          if (widget.onOpenHabits != null)
+            IconButton(
+              key: const ValueKey('group-list-habits'),
+              icon: const Icon(Icons.repeat),
+              tooltip: '习惯',
+              onPressed: widget.onOpenHabits,
             ),
         ],
       ),

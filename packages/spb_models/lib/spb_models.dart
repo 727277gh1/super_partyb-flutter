@@ -13,6 +13,8 @@ library;
 //   ChatSearchHit                —— 搜索命中项（turn 摘要，**不是** ChatEvent）
 //   UfsFileEntry / UfsFilePage   —— UFS 文件条目与分页响应（交付物同步用）
 //   Miniapp*                     —— 小程序工作台 BFF 契约（work/artifact/confirmation/通知）
+//   UserHabit / HabitRun / HabitSuggestion / HabitInsightsSummary
+//                                —— 习惯契约（pattern / 执行记录 / 候选建议 / 洞察）
 export 'src/chat_confirmation.dart';
 export 'src/chat_event.dart';
 export 'src/chat_group.dart';
@@ -22,6 +24,7 @@ export 'src/chat_search_hit.dart';
 export 'src/chat_turn.dart';
 export 'src/chat_turn_summary.dart';
 export 'src/event_types.dart';
+export 'src/habit.dart';
 export 'src/miniapp.dart';
 export 'src/pagination.dart';
 export 'src/ufs_file_entry.dart';

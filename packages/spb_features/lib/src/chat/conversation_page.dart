@@ -7,12 +7,14 @@ import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
 
 import 'agent_file_card.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'feedback_request_card.dart';
 import 'follow_up_chips.dart';
+import 'habit_suggestion_card.dart';
 import 'message_composer.dart';
 import 'spec_ui_card.dart';
 import 'pending_messages_bar.dart';
@@ -42,6 +44,9 @@ class ConversationPage extends StatefulWidget {
     this.title,
     this.onResolveConfirmation,
     this.onResolveFeedback,
+    this.onAcceptHabit,
+    this.onDismissHabit,
+    this.onSnoozeHabit,
     this.onSpecAction,
     this.onSelectAgent,
     this.onSend,
@@ -95,6 +100,25 @@ class ConversationPage extends StatefulWidget {
   ///
   /// 为 null 时反馈卡按钮禁用。
   final void Function(String token, bool correct)? onResolveFeedback;
+
+  /// 习惯建议卡：接受（`action=accept`）。
+  ///
+  /// 服务端会据此建出 active pattern（`misc_extra.go` 的
+  /// `createPatternFromSuggestion`），所以这是**有副作用的写操作**，
+  /// app 层应给出成功/失败反馈。
+  ///
+  /// 为 null 时接受按钮不显示。
+  final void Function(HabitSuggestionItem suggestion)? onAcceptHabit;
+
+  /// 习惯建议卡：忽略（`action=dismiss`，服务端写 24h 冷却窗口）。
+  final void Function(HabitSuggestionItem suggestion)? onDismissHabit;
+
+  /// 习惯建议卡：稍后提醒（`action=snooze` + 选中的时长）。
+  ///
+  /// 时长→`snooze_until` 的换算在 [HabitSnoozeOption.untilIso]（UTC），
+  /// 不由本页做：那是契约计算，归 `spb_models`，否则两个端会算出不同时区。
+  final void Function(HabitSuggestionItem suggestion, HabitSnoozeOption option)?
+  onSnoozeHabit;
 
   /// spec 卡片上的动作回调（建议卡 `copy_text`、归属反馈卡 `send_next_input`）。
   ///
@@ -250,6 +274,13 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 服务端 CAS 保证重复请求无数据错误，但会让 UI 出现两次 loading。
   final _resolvingFeedback = <String>{};
+
+  /// 已提交过操作的**建议 id**（防重复点击，与上面两个同理）。
+  ///
+  /// 用 suggestionId 而非事件 id：resolved 事件到达后卡片会换成结果行，
+  /// 这中间的窗口靠本集合关掉，否则用户可以连点两下「让它自动做」
+  /// ——服务端会建出两条 pattern。
+  final _resolvingHabit = <String>{};
 
   /// 追加到输入框的草稿通道（spec 卡 copy_text 动作的「回填输入框」路径）。
   ///
@@ -596,6 +627,35 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
+  /// 提交习惯建议操作（接受 / 忽略 / 稍后），三个共用一个在途标记。
+  ///
+  /// ## 为什么三者共用一个集合
+  ///
+  /// 它们作用于**同一张卡**，且在途期间卡上三个按钮都应禁用（用户在等结果，
+  /// 不该再点另一个）。分三个集合反而要维护三份「另一个是否在途」的查询。
+  ///
+  /// 在途标记按 suggestionId 记录，且**在回调返回后立即清除**（不等 resolved
+  /// 事件到达）：若服务端广播延迟，一直禁用会让用户以为卡坏了；而服务端的 CAS
+  /// 已经能挡住真正的重复提交。
+  Future<void> _handleHabitAction(
+    HabitSuggestionItem suggestion,
+    void Function(HabitSuggestionItem suggestion) callback,
+  ) async {
+    if (!suggestion.canResolve ||
+        _resolvingHabit.contains(suggestion.suggestionId)) {
+      return;
+    }
+
+    setState(() => _resolvingHabit.add(suggestion.suggestionId));
+    try {
+      callback(suggestion);
+    } finally {
+      if (mounted) {
+        setState(() => _resolvingHabit.remove(suggestion.suggestionId));
+      }
+    }
+  }
+
   /// 是否可以点「停止生成」。
   ///
   /// 两个条件：有流式项，且该项带着非空 [ConversationItem.turnId]。
@@ -823,6 +883,27 @@ class _ConversationPageState extends State<ConversationPage> {
       onResolve: (widget.onResolveFeedback != null && item.canResolve)
           ? (correct) => _handleResolveFeedback(item.token, correct)
           : null,
+    ),
+    HabitSuggestionItem() => HabitSuggestionCard(
+      suggestion: item,
+      busy: _resolvingHabit.contains(item.suggestionId),
+      // 三个回调都需 app 层注入：本页不持有 HabitApi（分层约定，
+      // 且 widget test 因此不需要 HTTP mock）。
+      //
+      // 注意卡片上的回调签名是 `VoidCallback`（无参）——卡自己知道是哪条建议，
+      // 页面用闭包把 item 带进去，而不是把 item 再传一遍。
+      onAccept: widget.onAcceptHabit == null
+          ? null
+          : () => _handleHabitAction(item, widget.onAcceptHabit!),
+      onDismiss: widget.onDismissHabit == null
+          ? null
+          : () => _handleHabitAction(item, widget.onDismissHabit!),
+      onSnooze: widget.onSnoozeHabit == null
+          ? null
+          : (option) => _handleHabitAction(
+              item,
+              (x) => widget.onSnoozeHabit!(x, option),
+            ),
     ),
     AgentFileItem() => AgentFileCard(
       file: item,

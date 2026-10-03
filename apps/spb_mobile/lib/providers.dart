@@ -663,6 +663,27 @@ final dragDropCapabilityProvider = Provider<DragDropCapability>((ref) {
   return const NoopDragDropCapability();
 });
 
+// ==================== 习惯（habit）====================
+//
+// 与桌面端逐字同构（两端共享同一组端点，见 `spb_api` 的 [HabitApi]）。
+// **不抽到共享包**：`apps/*` 之间不互相依赖（只依赖 `packages/*`），且习惯
+// 页面在两端的导航语义不同（移动端 `context.push` 会带底部标签栏）。
+
+/// 习惯 API 客户端（与 [chatApiProvider] 共用同一个 [dioProvider]）。
+final habitApiProvider = Provider<HabitApi>((ref) {
+  return HabitApi(ref.watch(dioProvider));
+});
+
+/// 规则列表首拉（供 [HabitsPage.loadHabits] 注入）。
+final habitsProvider = FutureProvider<List<UserHabit>>((ref) async {
+  return ref.watch(habitApiProvider).listHabits();
+});
+
+/// 执行历史首拉（跨规则，含无 pattern 的候选建议记录）。
+final habitRunsProvider = FutureProvider<List<HabitRun>>((ref) async {
+  return ref.watch(habitApiProvider).listAllRuns();
+});
+
 // ==================== 交付物同步 ====================
 //
 // 移动端同样具备同步能力（把交付物拉到手机存储），但**没有目录选择器**：

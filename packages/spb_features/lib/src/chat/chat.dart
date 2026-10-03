@@ -33,6 +33,7 @@ export 'group_todos_panel.dart';
 export 'group_tool_calls_panel.dart';
 export 'group_management.dart';
 export 'group_list_page.dart';
+export 'habit_suggestion_card.dart';
 export 'my_turns_page.dart';
 export 'message_composer.dart';
 export 'pending_messages_bar.dart';

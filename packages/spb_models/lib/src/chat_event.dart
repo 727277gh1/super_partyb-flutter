@@ -341,6 +341,88 @@ class ChatEvent {
       ? _intField('since_last_event_ms')
       : null;
 
+  // ---------- habit 建议访问器 ----------
+  //
+  // 字段名取自 Go `internal/workers/habit/timeline_events.go` 的
+  // `BuildSuggestionCreatedPayload` / `BuildSuggestionResolvedPayload`
+  // （真实写端，非推测）。
+  //
+  // 本包只做字段镜像与解析，**不构造**领域对象：完整映射在 `spb_domain` 的
+  // `HabitSuggestion.fromEventPayload`，因为那里才是「建议」语义的归属层
+  // （同 `spec_schema` 与 `parseSpecUi` 的分工）。
+
+  /// 建议 id（`habit_suggestion_created` / `habit_suggestion_resolved`）。
+  ///
+  /// 两个事件共用它作身份键，归约时据此把 resolved 合到 created 的卡上。
+  /// 非 habit 事件或载荷异常时返回 null。
+  String? get habitSuggestionId {
+    if (eventType != EventTypes.habitSuggestionCreated &&
+        eventType != EventTypes.habitSuggestionResolved) {
+      return null;
+    }
+    final v = _str('suggestion_id');
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  /// 建议草稿（`rule_draft`）：`topic_key` / `trigger_type` /
+  /// `trigger_config` / `preferred_agent_id` / `delivery_group_id` /
+  /// `target_acceptance_level`。
+  ///
+  /// 仅 `habit_suggestion_created` 有；resolved 事件不带草稿（返回 null）。
+  Map<String, dynamic>? get habitRuleDraft =>
+      eventType == EventTypes.habitSuggestionCreated
+      ? _map('rule_draft')
+      : null;
+
+  /// 推荐信息（`recommendation`）：`{action, confidence, reasons[]}`。
+  Map<String, dynamic>? get habitRecommendation =>
+      eventType == EventTypes.habitSuggestionCreated
+      ? _map('recommendation')
+      : null;
+
+  /// 候选为 null（`habit_pattern_id` 显式下发为 null）。
+  ///
+  /// 服务端刻意用 null 而非空串区分「没有 pattern」与「有 pattern 但为空」，
+  /// 故这里也保留 null 语义。
+  String? get habitPatternId {
+    if (eventType != EventTypes.habitSuggestionCreated) return null;
+    return _str('habit_pattern_id');
+  }
+
+  /// 用户反馈（resolved 事件的 `user_feedback`）：`accepted` / `dismissed` /
+  /// `snoozed`。
+  ///
+  /// ⚠️ 这里给的是**服务端写库值**（`accept_rule` 会被归一成 `accepted`——
+  /// 服务端写 `user_feedback` 时用的是 `mapFeedbackValue` 的结果，事件 payload
+  /// 里的 `user_feedback` 就是那个值）。不要拿它去匹配请求体的 `action`
+  /// （请求体是 `accept`，见 `HabitSuggestionAction`）。
+  String? get habitUserFeedback =>
+      eventType == EventTypes.habitSuggestionResolved
+      ? _str('user_feedback')
+      : null;
+
+  /// 用户动作（resolved 事件的 `action`）：`accept` / `dismiss` / `snooze` /
+  /// `edit_and_accept`。
+  String? get habitResolvedAction =>
+      eventType == EventTypes.habitSuggestionResolved ? _str('action') : null;
+
+  /// accept 后建出的 pattern id（resolved 事件的 `resolved_pattern_id`）。
+  ///
+  /// ⚠️ 与 `POST .../resolve` **响应**里的 `pattern_id` 不同名（两处真源：
+  /// 事件在 `BuildSuggestionResolvedPayload`，响应在 `misc_extra.go`）。
+  String? get habitResolvedPatternId =>
+      eventType == EventTypes.habitSuggestionResolved
+      ? _str('resolved_pattern_id')
+      : null;
+
+  /// snooze 截止时刻（resolved 事件的 `snooze_until`，RFC3339）。
+  DateTime? get habitSnoozeUntil {
+    if (eventType != EventTypes.habitSuggestionResolved) return null;
+    final s = _str('snooze_until');
+    if (s == null || s.isEmpty) return null;
+    return DateTime.tryParse(s)?.toLocal();
+  }
+
   // ---------- group_updated 访问器 ----------
   //
   // 字段名取自 Go `internal/chat/group_events.go` 的 `PublishGroupUpdated`：

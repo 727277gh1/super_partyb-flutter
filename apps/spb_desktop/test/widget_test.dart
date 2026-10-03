@@ -1274,6 +1274,111 @@ void main() {
     });
   });
 
+  group('习惯（桌面端接线）', () {
+    /// `/api/habits` 列表项（sqlc camelCase 形态）。
+    Map<String, dynamic> habitJson({
+      String id = 'hp_1',
+      String topicKey = 'weekly-report',
+      String status = 'active',
+    }) => {
+      'id': id,
+      'userId': 'usr_1',
+      'originGroupId': 'grp_1',
+      'topicKey': topicKey,
+      'triggerType': 'time_based',
+      'triggerConfigJson': '{"weekday":[1],"times":[{"hour":9,"minute":0}]}',
+      'acceptanceLevel': 'suggest_only',
+      'sourceType': 'manual',
+      'status': status,
+      'triggerCount': 2,
+      'confidence': 0.5,
+      'nextFireAt': {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
+    };
+
+    /// `/api/habits/runs` 列表项（snake_case + `run_id`）。
+    Map<String, dynamic> runJson({
+      String runId = 'run_1',
+      String? turnId = 'turn_9',
+    }) => {
+      'run_id': runId,
+      'pattern_id': 'hp_1',
+      'topic_key': 'weekly-report',
+      'trigger_reason': 'due_rule',
+      'outcome': 'completed',
+      'created_at': '2024-03-05T08:09:10Z',
+      'delivery_group_id': 'grp_1',
+      'delivery_group_title': null,
+      'turn_id': turnId,
+      'reply_text': '已生成周报草稿。',
+      'is_manual': false,
+    };
+
+    testWidgets('对话列表点「习惯」进入习惯页（两个 Tab 都拉到数据）', (tester) async {
+      // 端到端验证 router 把 onOpenHabits 接到真实路由与两个端点。
+      //
+      // 两个 Tab 都要 mock：页面首次构建时两个 FutureProvider 都会被监听到
+      // （TabBarView 用 IndexedStack 语义保留两个子页），漏一个会留下未结算请求。
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/habits',
+            (server) => server.reply(200, {
+              'items': [habitJson()],
+            }),
+            queryParameters: {'limit': 50, 'offset': 0},
+          );
+          adapter.onGet(
+            '/api/habits/runs',
+            (server) => server.reply(200, {
+              'items': [runJson()],
+            }),
+            queryParameters: {'limit': 50},
+          );
+        },
+      );
+
+      // 入口只在注入了 onOpenHabits 时出现（见 GroupListPage.onOpenHabits）。
+      await tester.tap(find.byKey(const ValueKey('group-list-habits')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.habits,
+        reason: '点习惯入口必须真的导航到习惯页，否则入口是摆设',
+      );
+      expect(find.text('weekly report'), findsOneWidget);
+    });
+
+    testWidgets('未注入 habit 回调时习惯页仍可浏览（只读不炸）', (tester) async {
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/habits',
+            (server) => server.reply(200, {
+              'items': [habitJson()],
+            }),
+            queryParameters: {'limit': 50, 'offset': 0},
+          );
+          adapter.onGet(
+            '/api/habits/runs',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'limit': 50},
+          );
+        },
+      );
+
+      h.router.go(SpbRoutes.habits);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('weekly report'), findsOneWidget);
+    });
+  });
+
   group('侧边栏（桌面端接线：交付物 / 待办 / 诊断）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。

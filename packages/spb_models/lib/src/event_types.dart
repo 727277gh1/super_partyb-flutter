@@ -122,6 +122,48 @@ class EventTypes {
   /// 默认不渲染给用户，仅供排查。
   static const pigoSessionMissing = 'pigo_session_missing';
 
+  // ---- 习惯（habit）----
+  //
+  // 真源：`internal/workers/habit/timeline_events.go` 的 `EventHabitSuggestion*`
+  // 常量（该文件注释明示「前端 habit-timeline.mts 与 projector.extractFeedback
+  // 均按这两个字面量识别，改动即破坏契约」）。
+  //
+  // ⚠️ 本仓库的 `spb_models/test/event_types_test.dart` 与 Go 侧的
+  // `chatbus/broker.go` **都不含**这两个常量——`broker.go` 只登记经它广播的
+  // 类型，而 habit 事件由 `habit.TimelineEmitter` 用字面量直接 `Publish`。
+  // 这正是「只对 broker.go 做镜像会漏事件」的实例（同 [userMessage] 的境遇）。
+
+  /// 检测器产出新的习惯候选建议。
+  ///
+  /// 落库事件（非 Transient），payload 见 `BuildSuggestionCreatedPayload`：
+  /// `{suggestion_id, habit_pattern_id(候选为 null), status, trigger_type,
+  /// recommendation{action,confidence,reasons}, rule_draft{topic_key,
+  /// trigger_type,trigger_config,preferred_agent_id,delivery_group_id,
+  /// target_acceptance_level}, evidence, editable_fields}`。
+  static const habitSuggestionCreated = 'habit_suggestion_created';
+
+  /// 用户已处理（accept / dismiss / snooze / edit_and_accept）某条建议。
+  ///
+  /// payload 见 `BuildSuggestionResolvedPayload`：`{suggestion_id, status,
+  /// action, user_feedback, resolved_pattern_id, snooze_until, topic_key}`。
+  ///
+  /// ⚠️ 该事件附在**与 created 同一个 turn** 上（服务端 resolve 时重新取该
+  /// group 最近一条 turn），故客户端按 `suggestion_id` 匹配（见
+  /// `HabitSuggestionItem`），不能按 turnId。
+  static const habitSuggestionResolved = 'habit_suggestion_resolved';
+
+  /// 习惯规则被重新校准。
+  ///
+  /// ⚠️ **Go 侧当前没有任何产出点**（`workers/habit/projector.go` 注释确认
+  /// Python 时代的事件未随迁移补上），webapp 的消费列表里却仍列着它，
+  /// `habit_insights.go` 的 `countRecalibrationEvents` 也在查它（故
+  /// `recalibration.total_count` 恒为 0）。声明常量只为让 `isKnown` 不误判，
+  /// **不要**据此在 UI 上做「重校准次数」的确定性展示。
+  static const habitPatternRecalibrated = 'habit_pattern_recalibrated';
+
+  /// 自动执行的习惯跑完一轮。同 [habitPatternRecalibrated]，Go 侧无产出点。
+  static const habitAutoRunCompleted = 'habit_auto_run_completed';
+
   /// 本客户端已知的全部事件类型。
   ///
   /// 新增事件时同步加进来；[ChatEvent.isKnown] 依赖它区分「服务端发了新事件」
@@ -165,6 +207,10 @@ class EventTypes {
     groupUpdated,
     groupTitleUpdated,
     pigoSessionMissing,
+    habitSuggestionCreated,
+    habitSuggestionResolved,
+    habitPatternRecalibrated,
+    habitAutoRunCompleted,
     // agent.file.* 不列入：见 [timelineVisible] 的前缀匹配说明。
   };
 
@@ -190,6 +236,8 @@ class EventTypes {
     followUpSuggested,
     goalGateDecision,
     goalGateStopped,
+    habitSuggestionCreated,
+    habitSuggestionResolved,
   };
 
   /// 流式增量事件：收到时应「追加」而非「替换」。

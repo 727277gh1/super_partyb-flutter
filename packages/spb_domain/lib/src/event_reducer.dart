@@ -384,6 +384,51 @@ class EventReducer {
         case EventTypes.agentFileDeleted:
           _mergeAgentFile(items, ev);
 
+        case EventTypes.habitSuggestionCreated:
+          // 习惯候选建议：服务端检测到周期性行为后发的事件，是用户看到建议卡
+          // 的**唯一**入口（webapp / 小程序均渲染）。
+          //
+          // 之前该事件落到 `default:` 分支被静默丢弃——同 `agent.file.*` 曾被
+          // 吐掉 2927 条的缺陷类别。显式分支是本次修复的核心。
+          //
+          // payload 不完整（无 suggestion_id）时**不产出该项**：没有身份键
+          // 就无法与后续 resolved 合并，也无法提交 accept/dismiss。
+          final suggestion = HabitSuggestion.fromEventPayload(
+            ev.payload ?? const {},
+            groupId: ev.groupId,
+            userId: ev.userId,
+            createdAt: ev.createdAt,
+          );
+          if (suggestion != null) {
+            _upsertHabitSuggestion(
+              items,
+              HabitSuggestionItem(
+                id: ev.eventId,
+                createdAt: ev.createdAt,
+                turnId: ev.turnId,
+                suggestionId: suggestion.id,
+                topicKey: suggestion.topicKey,
+                triggerType: suggestion.triggerType,
+                triggerConfig: suggestion.triggerConfig,
+                preferredAgentId: suggestion.preferredAgentId,
+                targetAcceptanceLevel: suggestion.targetAcceptanceLevel,
+                confidence: suggestion.confidence,
+                reasons: suggestion.reasons,
+                evidence: suggestion.evidence,
+                editableFields: suggestion.editableFields,
+              ),
+            );
+          }
+
+        case EventTypes.habitSuggestionResolved:
+          // 就地更新已存在的建议卡（同一 suggestion_id）。
+          //
+          // 找不到对应的 created 时**不新建卡**：resolved 不带 rule_draft，
+          // 凭它建出来的卡会缺 topic_key / 触发配置（渲染成一张空白卡）。
+          // 正常情形下 created 总在 resolved 之前（同一 turn，按 seq 排序），
+          // 找不到说明调用方只归约了部分事件窗口（如 SSE cursor 从中间接入）。
+          _applyHabitSuggestionResolved(items, ev);
+
         default:
           // heartbeat / queue_state / gate_evaluated / gate_completed /
           // gate_error / tts_* / goal_gate_stopped / schedule_created 等控制事件
@@ -431,6 +476,71 @@ class EventReducer {
       }
     }
     items.add(incoming);
+  }
+
+  /// 插入或更新习惯建议卡（按 suggestionId 幂等）。
+  ///
+  /// ## 为什么不用 turnId 作幂等键
+  ///
+  /// 同一 turn 上可能有多条不同的建议（不同 suggestion_id），也可能一条
+  /// created + 一条 resolved。按 turnId 合并会把不同建议错并成一张。
+  ///
+  /// ## 重放时保留先到者的 createdAt
+  ///
+  /// SSE cursor 回放与 timeline 回填交叠时同一事件会到达两次。若每次都把
+  /// createdAt 换成新值，列表排序会因重放而漂移（用户看到卡片位置跳动）。
+  /// 故更新时保留原卡的 createdAt 与 id。
+  static void _upsertHabitSuggestion(
+    List<ConversationItem> items,
+    HabitSuggestionItem incoming,
+  ) {
+    for (var i = 0; i < items.length; i++) {
+      final it = items[i];
+      if (it is HabitSuggestionItem &&
+          it.suggestionId == incoming.suggestionId) {
+        items[i] = incoming.copyWith(
+          // 保留已处理状态：resolved 先于 created 到达的反常序下，
+          // 不能因为来了一个「未处理」的 created 就把已处理重置。
+          userFeedback: it.userFeedback,
+          resolvedPatternId: it.resolvedPatternId,
+          snoozeUntil: it.snoozeUntil,
+        );
+        return;
+      }
+    }
+    items.add(incoming);
+  }
+
+  /// 把 `habit_suggestion_resolved` 应用到已存在的建议卡上。
+  ///
+  /// 无匹配卡时**什么都不做**（不新建）——resolved 不带 `rule_draft`，
+  /// 新建出来的卡会缺 topic_key 与触发配置。见调用点的说明。
+  static void _applyHabitSuggestionResolved(
+    List<ConversationItem> items,
+    ChatEvent ev,
+  ) {
+    final suggestionId = ev.habitSuggestionId;
+    if (suggestionId == null) return;
+    // `action` 是请求动作（accept/dismiss/snooze/edit_and_accept），
+    // `user_feedback` 是写库值（accepted/dismissed/snoozed）。
+    // 优先读 user_feedback；缺失时从 action 推（兼容旧载荷）。
+    final feedback =
+        HabitUserFeedback.from(ev.habitUserFeedback) ??
+        HabitUserFeedback.from(
+          HabitSuggestionAction.from(ev.habitResolvedAction)?.feedback,
+        );
+    if (feedback == null) return;
+    for (var i = 0; i < items.length; i++) {
+      final it = items[i];
+      if (it is HabitSuggestionItem && it.suggestionId == suggestionId) {
+        items[i] = it.copyWith(
+          userFeedback: feedback,
+          resolvedPatternId: ev.habitResolvedPatternId,
+          snoozeUntil: ev.habitSnoozeUntil,
+        );
+        return;
+      }
+    }
   }
 
   /// 插入或替换归属反馈请求（同 turn 幂等）。

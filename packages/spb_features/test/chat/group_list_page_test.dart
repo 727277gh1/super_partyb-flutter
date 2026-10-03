@@ -67,6 +67,7 @@ void main() {
     void Function(ChatGroup)? onOpenGroup,
     Future<ChatGroup> Function(String)? onCreateGroup,
     Stream<GroupUpdate>? groupUpdates,
+    VoidCallback? onOpenHabits,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -76,6 +77,7 @@ void main() {
           onOpenGroup: onOpenGroup,
           onCreateGroup: onCreateGroup,
           groupUpdates: groupUpdates,
+          onOpenHabits: onOpenHabits,
           pageSize: pageSize,
         ),
       ),
@@ -335,6 +337,24 @@ void main() {
       findsNothing,
       reason: '入口存在但点了没反应，比没有入口更糟（同 onSearch / onOpenWorks 约定）',
     );
+  });
+
+  testWidgets('习惯入口：注入了才展示，点击调回调', (tester) async {
+    var opened = 0;
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(tester, onOpenHabits: () => opened++);
+
+    await tester.tap(find.byKey(const ValueKey('group-list-habits')));
+    await tester.pump();
+
+    expect(opened, 1);
+  });
+
+  testWidgets('未注入 onOpenHabits 时不展示习惯入口（只读装配不炸）', (tester) async {
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(tester);
+
+    expect(find.byKey(const ValueKey('group-list-habits')), findsNothing);
   });
 
   testWidgets('offset 分页去重：重复返回同一 id 不产生重复项', (tester) async {

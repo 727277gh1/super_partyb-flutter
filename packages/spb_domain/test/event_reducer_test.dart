@@ -1129,4 +1129,197 @@ void main() {
       expect(r.activities['turn_1']!.elapsedMs, 30000);
     });
   });
+
+  /// 习惯建议事件（`habit_suggestion_created` / `habit_suggestion_resolved`）。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 这两个事件不在 `chatbus/broker.go` 里（由 `habit.TimelineEmitter` 用字面量
+  /// 直接广播），若只对着 broker.go 做镜像就会漏掉它们，于是事件落到归约器的
+  /// `default:` 分支被**静默丢弃**——用户永远看不到建议卡，且没有任何报错
+  /// （与 `agent.file.*` 曾被吞 2927 条是同一类缺陷）。
+  group('habit 建议 → HabitSuggestionItem', () {
+    /// `BuildSuggestionCreatedPayload` 的真实形状。
+    Map<String, dynamic> createdPayload({String id = 'run-sugg-1'}) => {
+      'suggestion_id': id,
+      'habit_pattern_id': null,
+      'status': 'pending',
+      'trigger_type': 'time_based',
+      'recommendation': {
+        'action': 'accept_rule',
+        'confidence': 0.72,
+        'reasons': ['每周一你都会让我写周报'],
+      },
+      'rule_draft': {
+        'topic_key': 'weekly-report',
+        'trigger_type': 'time_based',
+        'trigger_config': {
+          'hour': 9,
+          'weekday': [1],
+        },
+        'preferred_agent_id': 'agt-1',
+        'delivery_group_id': 'grp-1',
+        'target_acceptance_level': 'suggest_only',
+      },
+      'evidence': {'occurrences': 3},
+      'editable_fields': ['topic_key', 'trigger_config'],
+    };
+
+    test('created 产出建议卡（不再被 default 分支丢弃）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.habitSuggestionCreated,
+          payload: createdPayload(),
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single;
+      expect(item, isA<HabitSuggestionItem>());
+      final s = item as HabitSuggestionItem;
+      expect(s.suggestionId, 'run-sugg-1');
+      expect(s.topicKey, 'weekly-report');
+      expect(s.triggerType, HabitTriggerType.timeBased);
+      expect(s.triggerConfig!.time!.firstHour, 9);
+      expect(s.preferredAgentId, 'agt-1');
+      expect(s.targetAcceptanceLevel, HabitAcceptanceLevel.suggestOnly);
+      expect(s.confidence, 0.72);
+      expect(s.reasons, hasLength(1));
+      expect(s.canResolve, isTrue, reason: '未反馈时应可操作');
+      expect(s.isAccepted, isFalse);
+    });
+
+    test('缺 suggestion_id 的载荷不产出项（无身份键不可操作）', () {
+      final payload = createdPayload()..remove('suggestion_id');
+      final r = EventReducer.reduce([
+        ev(EventTypes.habitSuggestionCreated, payload: payload),
+      ]);
+      expect(r.items, isEmpty);
+    });
+
+    test('resolved 就地更新同一张卡（按 suggestionId 而非 turnId）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.habitSuggestionCreated,
+          payload: createdPayload(),
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.habitSuggestionResolved,
+          // 同一 turn：服务端 resolve 时重新取该 group 最近一条 turn。
+          payload: {
+            'suggestion_id': 'run-sugg-1',
+            'status': 'resolved',
+            'action': 'accept',
+            'user_feedback': 'accepted',
+            'resolved_pattern_id': 'hp-new',
+            'snooze_until': null,
+            'topic_key': 'weekly-report',
+          },
+          globalSeq: 2,
+        ),
+      ]);
+
+      // 关键：仍然只有一张卡（不是 created 一张 + resolved 一张）。
+      expect(r.items, hasLength(1));
+      final s = r.items.single as HabitSuggestionItem;
+      expect(s.userFeedback, HabitUserFeedback.accepted);
+      expect(s.resolvedPatternId, 'hp-new');
+      expect(s.canResolve, isFalse, reason: '已处理应禁用按钮');
+      expect(s.isAccepted, isTrue);
+      // 草稿信息不应因 resolved 而丢失。
+      expect(s.topicKey, 'weekly-report');
+      expect(s.triggerConfig!.time!.firstHour, 9);
+    });
+
+    test('resolved 无对应 created 时不新建空白卡', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.habitSuggestionResolved,
+          payload: {
+            'suggestion_id': 'run-orphan',
+            'action': 'dismiss',
+            'user_feedback': 'dismissed',
+          },
+        ),
+      ]);
+      // resolved 不带 rule_draft，凭它建卡会得到一张没有 topic_key 的空白卡。
+      expect(r.items, isEmpty);
+    });
+
+    test('snooze 记下 snooze_until', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.habitSuggestionCreated,
+          payload: createdPayload(),
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.habitSuggestionResolved,
+          payload: {
+            'suggestion_id': 'run-sugg-1',
+            'action': 'snooze',
+            'user_feedback': 'snoozed',
+            'snooze_until': '2026-10-05T00:00:00Z',
+          },
+          globalSeq: 2,
+        ),
+      ]);
+
+      final s = r.items.single as HabitSuggestionItem;
+      expect(s.userFeedback, HabitUserFeedback.snoozed);
+      expect(s.snoozeUntil, isNotNull);
+      expect(s.snoozeUntil!.toUtc().day, 5);
+    });
+
+    test('重放同一事件不产生重复卡（SSE 回放 + 回填交叠窗口）', () {
+      final e = ev(
+        EventTypes.habitSuggestionCreated,
+        payload: createdPayload(),
+        globalSeq: 1,
+      );
+      final r = EventReducer.reduce([e, e]);
+      expect(r.items, hasLength(1));
+    });
+
+    test('同一 turn 上两条不同建议各自成卡（不能按 turnId 合并）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.habitSuggestionCreated,
+          payload: createdPayload(id: 'run-a'),
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.habitSuggestionCreated,
+          payload: createdPayload(id: 'run-b'),
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2));
+      final ids = r.items.cast<HabitSuggestionItem>().map(
+        (s) => s.suggestionId,
+      );
+      expect(ids, containsAll(['run-a', 'run-b']));
+    });
+
+    test('watch 候选按 watch 形状渲染（不显示凌晨 0 点）', () {
+      final payload = createdPayload();
+      payload['trigger_type'] = 'watch';
+      (payload['rule_draft'] as Map)['trigger_type'] = 'watch';
+      (payload['rule_draft'] as Map)['trigger_config'] = {
+        'cadence': {'initial_seconds': 3600},
+      };
+
+      final r = EventReducer.reduce([
+        ev(EventTypes.habitSuggestionCreated, payload: payload),
+      ]);
+
+      final s = r.items.single as HabitSuggestionItem;
+      expect(s.triggerType, HabitTriggerType.watch);
+      expect(s.triggerConfig!.time, isNull);
+      expect(s.triggerConfig!.summary, isNot(contains('00:00')));
+    });
+  });
 }

@@ -157,6 +157,10 @@ void main() {
     void Function(String token, bool correct)? onResolveFeedback,
     void Function(SpecUiAction action)? onSpecAction,
     void Function(String agentId)? onSelectAgent,
+    void Function(HabitSuggestionItem suggestion)? onAcceptHabit,
+    void Function(HabitSuggestionItem suggestion)? onDismissHabit,
+    void Function(HabitSuggestionItem suggestion, HabitSnoozeOption option)?
+    onSnoozeHabit,
     Future<void> Function(String)? onSend,
     Future<void> Function(String)? onCancelTurn,
     Future<bool> Function()? onLoadOlder,
@@ -171,6 +175,9 @@ void main() {
           title: title,
           onResolveConfirmation: onResolveConfirmation,
           onResolveFeedback: onResolveFeedback,
+          onAcceptHabit: onAcceptHabit,
+          onDismissHabit: onDismissHabit,
+          onSnoozeHabit: onSnoozeHabit,
           onSpecAction: onSpecAction,
           onSelectAgent: onSelectAgent,
           onSend: onSend,
@@ -553,6 +560,167 @@ void main() {
         find.byKey(const ValueKey('feedback-option-准确')),
       );
       expect(button.onPressed, isNull);
+    });
+  });
+
+  group('ConversationPage 习惯建议卡', () {
+    /// `habit_suggestion_created` 的服务端载荷（snake_case，见
+    /// `workers/habit/timeline_events.go`）。
+    Map<String, dynamic> createdPayload({
+      String id = 'run-sugg-1',
+      String topicKey = 'weekly-report',
+    }) => {
+      'suggestion_id': id,
+      'habit_pattern_id': null,
+      'status': 'pending',
+      'trigger_type': 'time_based',
+      'recommendation': {
+        'action': 'accept_rule',
+        'confidence': 0.72,
+        'reasons': ['每周一你都会让我写周报'],
+      },
+      'rule_draft': {
+        'topic_key': topicKey,
+        'trigger_type': 'time_based',
+        'trigger_config': {
+          'hour': 9,
+          'weekday': [1],
+        },
+        'delivery_group_id': 'grp-1',
+        'target_acceptance_level': 'suggest_only',
+      },
+      'evidence': {'occurrences': 3},
+      'editable_fields': ['topic_key', 'trigger_config'],
+    };
+
+    /// 推一条建议卡事件。
+    Future<void> pushSuggestion(
+      WidgetTester tester, {
+      String id = 'run-sugg-1',
+      String eventId = 'evt_sugg',
+    }) async {
+      await pushEvent(
+        tester,
+        EventTypes.habitSuggestionCreated,
+        sseEvent(
+          EventTypes.habitSuggestionCreated,
+          id: eventId,
+          payload: createdPayload(id: id),
+        ),
+      );
+    }
+
+    testWidgets('建议卡渲染（不再被 default 分支丢弃）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onAcceptHabit: (_) {}, onDismissHabit: (_) {});
+
+      await pushSuggestion(tester);
+
+      expect(find.byType(HabitSuggestionCard), findsOneWidget);
+      expect(find.text('weekly report'), findsOneWidget);
+    });
+
+    testWidgets('点接受回调收到该建议（而非事件 id）', (tester) async {
+      final seen = <HabitSuggestionItem>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onAcceptHabit: seen.add);
+
+      await pushSuggestion(tester);
+      await tester.tap(find.byKey(const ValueKey('habit-accept')));
+      await tester.pumpAndSettle();
+
+      expect(seen, hasLength(1));
+      // 身份键是 suggestion_id（服务端 resolve 路径里的 id），不是事件 id。
+      expect(seen.single.suggestionId, 'run-sugg-1');
+    });
+
+    testWidgets('点忽略回调收到该建议', (tester) async {
+      final seen = <HabitSuggestionItem>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onDismissHabit: seen.add);
+
+      await pushSuggestion(tester);
+      await tester.tap(find.byKey(const ValueKey('habit-dismiss')));
+      await tester.pumpAndSettle();
+
+      expect(seen.single.suggestionId, 'run-sugg-1');
+    });
+
+    testWidgets('稍后提醒：回调收到选中的时长选项', (tester) async {
+      final seen = <(HabitSuggestionItem, HabitSnoozeOption)>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onSnoozeHabit: (s, o) => seen.add((s, o)));
+
+      await pushSuggestion(tester);
+      await tester.tap(find.byKey(const ValueKey('habit-snooze')));
+      await tester.pumpAndSettle();
+
+      // 选一个具体时长（选项由 `HabitSnoozeOption` 定义，不在此处硬编时间）。
+      final option = HabitSnoozeOption.values.first;
+      await tester.tap(find.text(option.label));
+      await tester.pumpAndSettle();
+
+      expect(seen, hasLength(1));
+      expect(seen.single.$1.suggestionId, 'run-sugg-1');
+      expect(seen.single.$2, option);
+    });
+
+    testWidgets('未注入回调时三个按钮都不显示（只读装配不炸）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushSuggestion(tester);
+
+      // 卡本身仍要渲染（历史回看能看到「当时建议过什么」）。
+      expect(find.byType(HabitSuggestionCard), findsOneWidget);
+      expect(find.byKey(const ValueKey('habit-accept')), findsNothing);
+      expect(find.byKey(const ValueKey('habit-dismiss')), findsNothing);
+      expect(find.byKey(const ValueKey('habit-snooze')), findsNothing);
+    });
+
+    testWidgets('已 resolved 的卡不再显示操作按钮（不显示必然 409 的按钮）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onAcceptHabit: (_) {}, onDismissHabit: (_) {});
+
+      await pushSuggestion(tester);
+      // resolved 事件与 created 同 turn（服务端 resolve 时重取最近 turn）。
+      await pushEvent(
+        tester,
+        EventTypes.habitSuggestionResolved,
+        sseEvent(
+          EventTypes.habitSuggestionResolved,
+          id: 'evt_res',
+          payload: const {
+            'suggestion_id': 'run-sugg-1',
+            'status': 'resolved',
+            'action': 'accept',
+            'user_feedback': 'accepted',
+            'resolved_pattern_id': 'hp-1',
+          },
+        ),
+      );
+
+      // 卡不隐藏（历史回看需要看到「建议过什么、答了什么」），只置灰。
+      expect(find.byType(HabitSuggestionCard), findsOneWidget);
+      expect(find.byKey(const ValueKey('habit-accept')), findsNothing);
+      expect(find.byKey(const ValueKey('habit-dismiss')), findsNothing);
+    });
+
+    testWidgets('两张建议卡按 suggestionId 各自独立（不互相覆盖）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onAcceptHabit: (_) {});
+
+      await pushSuggestion(tester, id: 'sugg-a', eventId: 'evt_a');
+      await pushSuggestion(tester, id: 'sugg-b', eventId: 'evt_b');
+
+      expect(find.byType(HabitSuggestionCard), findsNWidgets(2));
     });
   });
 

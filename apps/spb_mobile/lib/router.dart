@@ -9,9 +9,11 @@ import 'package:go_router/go_router.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 
 import 'providers.dart';
 
@@ -63,6 +65,12 @@ class SpbRoutes {
 
   /// 我的最近轮次。
   static const myTurns = '/my-turns';
+
+  /// 习惯管理（规则列表 + 执行历史）。
+  ///
+  /// 与 [myTurns] 同挂在「对话」标签的导航栈下：它们都是**对话的衍生视图**
+  /// （从对话里提取出的轮次/规则），从对话列表进入比从设置进入更符合心智。
+  static const habits = '/habits';
 }
 
 /// 移动端路由表。
@@ -205,6 +213,10 @@ List<RouteBase> buildMobileRoutes() {
                   path: 'my-turns',
                   builder: (context, state) => const _MyTurnsPage(),
                 ),
+                GoRoute(
+                  path: 'habits',
+                  builder: (context, state) => const _HabitsPage(),
+                ),
               ],
             ),
           ],
@@ -336,6 +348,8 @@ class _ConversationsTab extends ConsumerWidget {
       pendingConfirmationCount: pendingCount,
       // 工作台（小程序 BFF）只有移动端接——它是为小程序/移动端做的投影层。
       onOpenWorks: () => context.push(SpbRoutes.works),
+      // 习惯：两端都接（端点与页面都是共享的，见 `spb_features` 的 `HabitsPage`）。
+      onOpenHabits: () => context.push(SpbRoutes.habits),
       // 不需要 userId：身份来自网关注入的 `X-User-ID`，请求体里没有 user_id。
       onCreateGroup: (title) => api.createGroup(title: title),
     );
@@ -409,6 +423,61 @@ class _MyTurnsPage extends ConsumerWidget {
     return MyTurnsPage(
       fetch: () => api.listMyTurns(),
       onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
+    );
+  }
+}
+
+/// 习惯管理页。
+///
+/// 与桌面端 `_HabitsPage` 逐字同构（除导航：移动端 `context.go` 到对话会在
+/// 当前分支里推进，符合标签栏栈语义）。
+class _HabitsPage extends ConsumerStatefulWidget {
+  const _HabitsPage();
+
+  @override
+  ConsumerState<_HabitsPage> createState() => _HabitsPageState();
+}
+
+class _HabitsPageState extends ConsumerState<_HabitsPage> {
+  /// groupId → title 缓存（`/api/habits/runs` 只给 id）。
+  final _titles = <String, String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final api = ref.watch(habitApiProvider);
+    return HabitsPage(
+      loadHabits: () => api.listHabits(),
+      loadRuns: () async {
+        final runs = await api.listAllRuns();
+        // 预取涉及的 group 标题（缺失则静默）。
+        await Future.wait(
+          runs.map((r) async {
+            final gid = r.deliveryGroupId ?? r.originGroupId;
+            if (gid.isEmpty || _titles.containsKey(gid)) return;
+            try {
+              final g = await ref.read(chatApiProvider).getGroup(gid);
+              _titles[gid] = g.title;
+            } on Object catch (_) {
+              // 静默：标题查不到不该让整个列表失败。
+            }
+          }),
+        );
+        return runs;
+      },
+      groupTitleOf: (gid) => _titles[gid],
+      onTrigger: (h) => api.triggerHabit(h.id),
+      onPause: (h) => api.pauseHabit(h.id),
+      onResume: (h) async => api.resumeHabit(h.id),
+      onArchive: (h) => api.archiveHabit(h.id),
+      onCreate: (draft) async {
+        final r = await api.createHabit(
+          topicKey: draft.topicKey,
+          acceptanceLevel: draft.acceptanceLevel,
+          triggerConfig: draft.triggerConfig,
+        );
+        return r.patternId;
+      },
+      onOpenTurn: (groupId, _) => context.go(SpbRoutes.chat(groupId)),
     );
   }
 }
@@ -722,6 +791,44 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             .resolveFeedback(token, correct: correct)
             .catchError((Object e) => debugPrint('归属反馈提交失败: $e'));
       },
+      // 习惯建议：接受/忽略/稍后。与桌面端逐字同构——端点是习惯域的
+      // `/api/chat/habit-suggestions/:id/resolve`，**不走发消息通道**。
+      //
+      // 结果的权威呈现是 `habit_suggestion_resolved` 事件（服务端广播后归约器
+      // 把卡片换成结果行），故这里不乐观更新本地状态。
+      onAcceptHabit: (s) => ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.accept,
+          )
+          .catchError((Object e) {
+            debugPrint('接受习惯建议失败: $e');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+      onDismissHabit: (s) => ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.dismiss,
+          )
+          .catchError((Object e) {
+            debugPrint('忽略习惯建议失败: $e');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+      onSnoozeHabit: (s, option) => ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.snooze,
+            // `until` 返回 UTC RFC3339 无毫秒（服务端解析失败会静默回退冷却
+            // 时长，不报错——格式错了用户只能发现「时间不对」）。
+            snoozeUntil: option.until(DateTime.now()),
+          )
+          .catchError((Object e) {
+            debugPrint('延后习惯建议失败: $e');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
       // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
       // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
       onSend: (text) => controller.send(input: text, agentId: _selectedAgentId),

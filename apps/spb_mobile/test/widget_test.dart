@@ -1271,6 +1271,60 @@ void main() {
     expect(find.byKey(const ValueKey('sync-pick-directory')), findsOneWidget);
   });
 
+  group('习惯（移动端接线）', () {
+    /// `/api/habits` 列表项（sqlc camelCase 形态）。
+    Map<String, dynamic> habitJson({
+      String id = 'hp_1',
+      String topicKey = 'weekly-report',
+    }) => {
+      'id': id,
+      'userId': 'usr_1',
+      'originGroupId': 'grp_1',
+      'topicKey': topicKey,
+      'triggerType': 'time_based',
+      'triggerConfigJson': '{"weekday":[1],"times":[{"hour":9,"minute":0}]}',
+      'acceptanceLevel': 'suggest_only',
+      'sourceType': 'manual',
+      'status': 'active',
+      'triggerCount': 2,
+      'confidence': 0.5,
+      'nextFireAt': {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
+    };
+
+    testWidgets('对话列表点「习惯」进入习惯页（挂在对话标签的栈下）', (tester) async {
+      // 端到端验证 router 把 onOpenHabits 接到真实路由与两个端点。
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/habits',
+            (server) => server.reply(200, {
+              'items': [habitJson()],
+            }),
+            queryParameters: {'limit': 50, 'offset': 0},
+          );
+          adapter.onGet(
+            '/api/habits/runs',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'limit': 50},
+          );
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('group-list-habits')));
+      await tester.pumpAndSettle();
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.habits,
+        reason: '点习惯入口必须真的导航到习惯页，否则入口是摆设',
+      );
+      expect(find.text('weekly report'), findsOneWidget);
+      // 挂在 shell 内（对话标签的栈），故底部标签栏仍在。
+      expect(find.byType(NavigationBar), findsOneWidget);
+    });
+  });
+
   group('未认证重定向（登录页 + /login 路由）', () {
     testWidgets('未认证访问 / 被重定向到 /login（且不带标签栏）', (tester) async {
       // 回归防线：守卫必须真的生效。若没接上，未登录用户会看到列表页，
