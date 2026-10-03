@@ -21,6 +21,26 @@
 /// 3. **只删到 group 目录这一层**，不递归删除任意深度的路径。
 library;
 
+/// 清理结果。
+///
+/// ## 为什么定义在 domain 而不是执行层（`spb_platform/local_prune.dart`）
+///
+/// 它是纯数据（删除计数 + 失败原因），与 [LocalGroupStats] / [PrunePlan] 同构，
+/// 且被设置页的 `ExecutePrune` 类型直接引用。若留在平台层，设置页为了这一个
+/// 类型就得 import `spb_platform`（拖带窗口/托盘/快捷键插件）。
+/// 执行层从本包 re-export，既有调用方不受影响。
+class PruneOutcome {
+  const PruneOutcome({required this.deleted, required this.failed});
+
+  /// 成功删除的 group 数。
+  final int deleted;
+
+  /// 失败项：groupId → 原因。
+  final Map<String, String> failed;
+
+  bool get hasFailures => failed.isNotEmpty;
+}
+
 /// 本地一个 group 目录的概况（由扫描层产出，已通过形状与软链校验）。
 class LocalGroupStats {
   const LocalGroupStats({

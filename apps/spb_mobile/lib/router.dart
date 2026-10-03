@@ -434,7 +434,9 @@ class _SettingsTab extends ConsumerWidget {
       scanGroups: ref.watch(scanLocalGroupsProvider),
       executePrune: ref.watch(executePruneProvider),
       pickDirectory: ref.watch(pickDirectoryProvider),
-      capabilities: ref.watch(desktopCapabilitiesProvider),
+      // 移动端没有托盘/全局快捷键（触屏），恒不展示「桌面集成」区块——
+      // 直接传常量，无需为这一个布尔去读平台能力接口。
+      desktopInfo: DesktopIntegrationInfo.hidden,
       loadNotifications: ref.watch(loadNotificationSubscriptionsProvider),
       saveNotifications: ref.watch(saveNotificationSubscriptionsProvider),
       // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。

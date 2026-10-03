@@ -5,7 +5,6 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
-import 'package:spb_platform/spb_platform.dart';
 import 'package:spb_ui/spb_ui.dart';
 
 import 'notification_subscriptions_card.dart';
@@ -49,6 +48,32 @@ typedef ScanLocalGroups = Future<List<LocalGroupStats>> Function();
 /// 执行清理计划。
 typedef ExecutePrune = Future<PruneOutcome> Function(PrunePlan plan);
 
+/// 「桌面集成」区块的展示信息（纯数据）。
+///
+/// ## 为什么是值对象而不是平台能力接口
+///
+/// 设置页只需要两件事：是否展示该区块、快捷键文案是什么。若为此注入整个
+/// `DesktopIntegrationInfo`，页面就与平台能力包（窗口 / 托盘 / 快捷键插件）
+/// 绑在一起——移动端为了这一个布尔也不得不构造一个空能力对象，而页面
+/// 本身其实对「怎么拿到这些值」毫无兴趣。
+///
+/// 换成值对象后，**判定留在装配层**（那里才真的持有能力实现），页面只渲染。
+class DesktopIntegrationInfo {
+  const DesktopIntegrationInfo({required this.visible, this.hotkeyLabel = ''});
+
+  /// 是否展示「桌面集成」区块（移动端为 false）。
+  final bool visible;
+
+  /// 悬浮输入窗快捷键的人类可读文案。
+  ///
+  /// 由装配层传入绑定的 `label`——**不在页面里硬编码** `Alt+Space`，
+  /// 改绑定时只需改一处。
+  final String hotkeyLabel;
+
+  /// 不展示（移动端 / 无桌面能力）。
+  static const hidden = DesktopIntegrationInfo(visible: false);
+}
+
 /// 「全部删除」在清理策略对话框里的哨兵值。
 ///
 /// 用哨兵而非第二个布尔变量：三个选项因此共用同一个 `RadioGroup<int>`，
@@ -77,10 +102,10 @@ const int _pruneAllSentinel = -1;
 ///
 /// ## 桌面能力项的显示条件
 ///
-/// 托盘 / 全局快捷键是桌面专属。移动端注入 [NoopDesktopCapabilities]
-/// （`isSupported == false`），此时**不展示**这些项——展示一堆点了没反应的
-/// 开关比不展示更糟。快捷键盘绑定文案取 [HotkeyBinding.quickCapture] 的
-/// `label`，避免把 `Alt+Space` 硬编码在页面里（改绑定时只需改一处）。
+/// 托盘 / 全局快捷键是桌面专属。移动端传 [DesktopIntegrationInfo.hidden]
+/// （`visible == false`），此时**不展示**这些项——展示一堆点了没反应的
+/// 开关比不展示更糟。快捷键文案由装配层放进 [DesktopIntegrationInfo.hotkeyLabel]，
+/// 页面不硬编码 `Alt+Space`（改绑定时只需改一处）。
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
     super.key,
@@ -90,7 +115,7 @@ class SettingsPage extends StatefulWidget {
     required this.scanGroups,
     required this.executePrune,
     required this.pickDirectory,
-    required this.capabilities,
+    this.desktopInfo = DesktopIntegrationInfo.hidden,
     this.onOpenSync,
     this.onSignOut,
     this.onOpenDirectory,
@@ -122,8 +147,11 @@ class SettingsPage extends StatefulWidget {
   /// 本项是低频的「回顾」动作，放设置页更合适。
   final VoidCallback? onOpenMyTurns;
 
-  /// 平台能力（决定是否展示托盘/快捷键项）。
-  final DesktopCapabilities capabilities;
+  /// 桌面集成区块的展示信息（决定是否展示托盘/快捷键项）。
+  ///
+  /// 默认不展示：未显式注入时按移动端处理（与其余可选注入同一取向——
+  /// 不展示比展示一个点了没反应的区块更安全）。
+  final DesktopIntegrationInfo desktopInfo;
 
   /// 打开「交付物同步」页。
   ///
@@ -152,7 +180,7 @@ class SettingsPage extends StatefulWidget {
   /// 读取「开机自启」当前状态。
   ///
   /// 为 null 时**不展示**该项（移动端注入 null）。不用
-  /// `capabilities.isSupported` 判断：能力接口上的
+  /// [DesktopIntegrationInfo.visible] 判断：平台能力实现上的
   /// `isLaunchAtStartupEnabled` 在移动端恒返回 false，那会让开关看起来
   /// 「已关闭」而实际点不动——展示一个骗人的开关比不展示更糟。
   final Future<bool> Function()? loadLaunchAtStartup;
@@ -939,8 +967,8 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ],
 
-        // 桌面能力项：移动端（isSupported == false）整段不展示。
-        if (widget.capabilities.isSupported) ...[
+        // 桌面能力项：移动端（visible == false）整段不展示。
+        if (widget.desktopInfo.visible) ...[
           const SizedBox(height: SpbSpacing.lg),
           SectionTitle('桌面集成', highlight: true),
           Card(
@@ -951,7 +979,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 ListTile(
                   leading: const Icon(Icons.keyboard_outlined),
                   title: const Text('悬浮输入窗快捷键'),
-                  subtitle: Text(HotkeyBinding.quickCapture.label),
+                  subtitle: Text(widget.desktopInfo.hotkeyLabel),
                 ),
                 const Divider(height: 1),
                 // 托盘**已接线**（`desktop_integration.dart` 的

@@ -24,18 +24,10 @@ import 'dart:io';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 
-/// 清理结果。
-class PruneOutcome {
-  const PruneOutcome({required this.deleted, required this.failed});
-
-  /// 成功删除的 group 数。
-  final int deleted;
-
-  /// 失败项：groupId → 原因。
-  final Map<String, String> failed;
-
-  bool get hasFailures => failed.isNotEmpty;
-}
+// 清理结果类型定义在 domain（纯数据，见 sync_prune.dart 的说明）；
+// 这里 re-export，使既有 `import 'package:spb_platform/spb_platform.dart'`
+// 的调用方无需改动。
+export 'package:spb_domain/spb_domain.dart' show PruneOutcome;
 
 /// 扫描 `localRoot` 下的 group 目录。
 ///

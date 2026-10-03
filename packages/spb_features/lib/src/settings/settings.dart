@@ -7,7 +7,8 @@
 /// - 本地目录扫描与删除 → `spb_platform`（`local_prune.dart`）；
 /// - 清理**计划**的规则（哪些目录有资格删）→ `spb_domain`（`sync_prune.dart`）；
 /// - 对话列表 → `spb_api`（`ChatApi.listGroups`）；
-/// - 平台能力判定（是否展示托盘/快捷键）→ `spb_platform`。
+/// - 桌面集成区块的显隐与文案 → [DesktopIntegrationInfo]（纯数据，
+///   由 app 装配层从平台能力算好传入；页面不依赖 `spb_platform`）。
 ///
 /// 页面全部依赖注入（`loadSettings` / `saveSettings` / `pickDirectory` /
 /// `scanGroups` / `executePrune`），与 [LoginPage] 的 `onSignIn` 同一模式：

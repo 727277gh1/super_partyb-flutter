@@ -1052,7 +1052,10 @@ class _SettingsPage extends ConsumerWidget {
         final caps = ref.read(desktopCapabilitiesProvider);
         return caps.pickDirectory(title: '选择交付物同步目录');
       },
-      capabilities: ref.watch(desktopCapabilitiesProvider),
+      desktopInfo: DesktopIntegrationInfo(
+        visible: ref.watch(desktopCapabilitiesProvider).isSupported,
+        hotkeyLabel: HotkeyBinding.quickCapture.label,
+      ),
       onOpenDirectory: (path) =>
           ref.read(desktopCapabilitiesProvider).revealPath(path),
       // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。

@@ -6,7 +6,6 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
-import 'package:spb_platform/spb_platform.dart';
 
 /// 设置页测试。
 ///
@@ -36,7 +35,7 @@ void main() {
     SyncSettings initial = const SyncSettings(),
     List<ChatGroup> groups = const [],
     List<LocalGroupStats> localGroups = const [],
-    DesktopCapabilities? capabilities,
+    DesktopIntegrationInfo? desktopInfo,
     Future<void> Function(SyncSettings)? onSave,
     Future<PruneOutcome> Function(PrunePlan)? onPrune,
     Future<String?> Function()? pickDirectory,
@@ -74,7 +73,7 @@ void main() {
               onPrune ??
               (_) async => const PruneOutcome(deleted: 0, failed: {}),
           pickDirectory: pickDirectory ?? () async => null,
-          capabilities: capabilities ?? const NoopDesktopCapabilities(),
+          desktopInfo: desktopInfo ?? DesktopIntegrationInfo.hidden,
           onSignOut: onSignOut,
           loadLaunchAtStartup: loadLaunchAtStartup,
           setLaunchAtStartup: setLaunchAtStartup,
@@ -377,7 +376,7 @@ void main() {
 
   group('设置页：桌面能力项按平台显隐', () {
     testWidgets('移动端（isSupported=false）不展示桌面集成项', (tester) async {
-      await pumpSettings(tester, capabilities: const NoopDesktopCapabilities());
+      await pumpSettings(tester, desktopInfo: DesktopIntegrationInfo.hidden);
 
       expect(
         find.byKey(const ValueKey('settings-capabilities')),
@@ -386,17 +385,17 @@ void main() {
       );
     });
 
-    testWidgets('桌面端展示桌面集成项，快捷键文案取自 HotkeyBinding', (tester) async {
-      await pumpSettings(tester, capabilities: _FakeDesktopCapabilities());
+    testWidgets('桌面端展示桌面集成项，快捷键文案来自注入的 hotkeyLabel', (tester) async {
+      await pumpSettings(tester, desktopInfo: _visibleDesktopInfo);
 
       expect(
         find.byKey(const ValueKey('settings-capabilities')),
         findsOneWidget,
       );
       expect(
-        find.text(HotkeyBinding.quickCapture.label),
+        find.text(_visibleDesktopInfo.hotkeyLabel),
         findsOneWidget,
-        reason: '快捷键文案应取绑定对象的 label，避免把 Alt+Space 硬编码在页面里',
+        reason: '快捷键文案由装配层传入（本测试用非默认值），页面不硬编码 Alt+Space',
       );
     });
   });
@@ -615,7 +614,7 @@ void main() {
             executePrune: (_) async =>
                 const PruneOutcome(deleted: 0, failed: {}),
             pickDirectory: () async => null,
-            capabilities: const NoopDesktopCapabilities(),
+            desktopInfo: DesktopIntegrationInfo.hidden,
           ),
         ),
       );
@@ -631,16 +630,16 @@ void main() {
   });
 
   group('设置页：开机自启', () {
-    // ## 为什么每个用例都要传 `capabilities`
+    // ## 为什么每个用例都要传 `desktopInfo`
     //
-    // 桌面集成整段由 `capabilities.isSupported` 把守（移动端不展示），而
-    // 测试默认注入 `NoopDesktopCapabilities`（isSupported == false）——
+    // 桌面集成整段由 `desktopInfo.visible` 把守（移动端不展示），而
+    // 测试默认注入 `DesktopIntegrationInfo.hidden`（visible == false）——
     // 不传的话整个区块都不渲染，`find` 全部落空。
-    testWidgets('未注入 loadLaunchAtStartup 时不展示该项（移动端）', (tester) async {
-      // 不用 capabilities.isSupported 判断：Noop 能力的
-      // isLaunchAtStartupEnabled 恒返回 false，会渲染成一个看起来「已关闭」
+    testWidgets('未注入 loadLaunchAtStartup 时不展示该项', (tester) async {
+      // 不用 visible 判断展示与否：开关的可点性由 loadLaunchAtStartup
+      // 是否注入决定。若用能力实现的状态初始化，会渲染成一个看起来「已关闭」
       // 却点不动的开关——展示骗人的开关比不展示更糟。
-      await pumpSettings(tester, capabilities: _FakeDesktopCapabilities());
+      await pumpSettings(tester, desktopInfo: _visibleDesktopInfo);
 
       expect(
         find.byKey(const ValueKey('settings-launch-at-startup')),
@@ -651,7 +650,7 @@ void main() {
     testWidgets('开关初值来自 loadLaunchAtStartup（true）', (tester) async {
       await pumpSettings(
         tester,
-        capabilities: _FakeDesktopCapabilities(),
+        desktopInfo: _visibleDesktopInfo,
         loadLaunchAtStartup: () async => true,
       );
 
@@ -664,7 +663,7 @@ void main() {
     testWidgets('开关初值来自 loadLaunchAtStartup（false）', (tester) async {
       await pumpSettings(
         tester,
-        capabilities: _FakeDesktopCapabilities(),
+        desktopInfo: _visibleDesktopInfo,
         loadLaunchAtStartup: () async => false,
       );
 
@@ -679,7 +678,7 @@ void main() {
       final received = <bool>[];
       await pumpSettings(
         tester,
-        capabilities: _FakeDesktopCapabilities(),
+        desktopInfo: _visibleDesktopInfo,
         loadLaunchAtStartup: () async => false,
         setLaunchAtStartup: (v) async => received.add(v),
       );
@@ -704,7 +703,7 @@ void main() {
       var enabled = false;
       await pumpSettings(
         tester,
-        capabilities: _FakeDesktopCapabilities(),
+        desktopInfo: _visibleDesktopInfo,
         loadLaunchAtStartup: () async => enabled,
         // 模拟平台真的写进去了。
         setLaunchAtStartup: (v) async => enabled = v,
@@ -728,7 +727,7 @@ void main() {
       var enabled = false;
       await pumpSettings(
         tester,
-        capabilities: _FakeDesktopCapabilities(),
+        desktopInfo: _visibleDesktopInfo,
         loadLaunchAtStartup: () async => enabled,
         // 模拟「写不进去」：调用成功但状态没变。
         setLaunchAtStartup: (v) async {},
@@ -748,7 +747,7 @@ void main() {
     testWidgets('读不到状态（抛异常）时禁用开关，不假装「已关闭」', (tester) async {
       await pumpSettings(
         tester,
-        capabilities: _FakeDesktopCapabilities(),
+        desktopInfo: _visibleDesktopInfo,
         loadLaunchAtStartup: () async => throw StateError('无 autostart 目录'),
         setLaunchAtStartup: (v) async {},
       );
@@ -762,7 +761,7 @@ void main() {
     testWidgets('不再展示过时的「待接入（M0 验证项）」文案', (tester) async {
       // 托盘其实已在 desktop_integration.dart 的 _installTrayMenu 接线完成，
       // 旧文案是事实错误。
-      await pumpSettings(tester, capabilities: _FakeDesktopCapabilities());
+      await pumpSettings(tester, desktopInfo: _visibleDesktopInfo);
 
       expect(find.textContaining('待接入'), findsNothing);
       expect(find.textContaining('系统托盘'), findsOneWidget);
@@ -868,49 +867,17 @@ void main() {
   });
 }
 
-/// 桌面能力桩（`isSupported == true` 以触发桌面专属区块）。
-class _FakeDesktopCapabilities implements DesktopCapabilities {
-  @override
-  bool get isSupported => true;
-
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<void> showWindow(WindowRole role) async {}
-
-  @override
-  Future<void> hideWindow(WindowRole role) async {}
-
-  @override
-  Future<bool> registerHotkey(String id, HotkeyBinding binding) async => true;
-
-  @override
-  Future<void> unregisterHotkey(String id) async {}
-
-  @override
-  Future<bool> isLaunchAtStartupEnabled() async => false;
-
-  @override
-  Future<void> setLaunchAtStartup(bool enabled) async {}
-
-  @override
-  Future<void> setTrayMenu(List<TrayMenuItem> items) async {}
-
-  @override
-  Future<void> setTrayTooltip(String tooltip) async {}
-
-  @override
-  Future<String?> pickDirectory({String? title}) async => null;
-
-  @override
-  Future<bool> revealPath(String path) async => false;
-  @override
-  Future<bool> openFile(String path) async => false;
-
-  @override
-  Future<void> dispose() async {}
-}
+/// 展示桌面集成区块时用的信息（等价于桌面端装配层传的值）。
+///
+/// ## 为什么不再用能力桩
+///
+/// 页面只读 [DesktopIntegrationInfo]（纯数据），不再持有能力接口
+/// ——测试里也不需要实现那个 12 方法的接口，一个 const 值即可。hotkeyLabel
+/// 故意用非默认值：能断言「页面展示的是注入的值」而不是巧合的硬编码字符串。
+const _visibleDesktopInfo = DesktopIntegrationInfo(
+  visible: true,
+  hotkeyLabel: 'Ctrl+Shift+K',
+);
 
 /// 外观（主题模式）区块测试。
 ///
@@ -944,7 +911,7 @@ void _themeModeTests() {
           scanGroups: () async => const [],
           executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
           pickDirectory: () async => null,
-          capabilities: const NoopDesktopCapabilities(),
+          desktopInfo: DesktopIntegrationInfo.hidden,
           loadThemeMode: load,
           saveThemeMode: save,
         ),
