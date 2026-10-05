@@ -24,3 +24,4 @@ library;
 
 export 'notification_subscriptions_card.dart';
 export 'settings_page.dart';
+export 'user_preferences_card.dart';

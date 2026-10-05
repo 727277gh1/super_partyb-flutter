@@ -654,6 +654,78 @@ class ChatApi {
     return CurrentUser.fromJson(_asMap(res));
   }
 
+  // ==================== 用户偏好 ====================
+
+  /// `GET /me/preferences` —— 读当前用户的偏好。
+  ///
+  /// ## ⚠️ 路径**不带** `/api` 前缀
+  ///
+  /// 用户级端点在服务端挂在 `r.Group("/me")`（与 `/me/turns` 同组，见
+  /// `router.go` 的 `meRG := r.Group("/me")`），**不在** `apiv1 := r.Group("/api")`
+  /// 下。写成 `/api/me/preferences` 会 404，且因前端会把失败降级成「选项区空白」，
+  /// 界面上不报错、很难定位——webapp 用回归测试钉住了这一条
+  /// （`apps/webapp/src/lib/api/user-preferences.test.ts` 的 `pathOf(...)` 断言
+  /// `toBe("/me/preferences")`），客户端照抄该约束。
+  ///
+  /// 注意与上面 [me] 的对比：那个是 `/api/auth/me`（**带** `/api`）。两个端点的
+  /// 前缀不同是既有事实，不能「统一」。
+  ///
+  /// 服务端只返回**已显式设置**的项，但 `reply_language` 恒有值（未设置时为
+  /// `auto`），故调用方无需区分「字段缺失」与「默认」。
+  Future<UserPreferences> getPreferences() async {
+    final res = await _get('/me/preferences');
+    return UserPreferences.fromJson(_asMap(res));
+  }
+
+  /// `PUT /me/preferences` —— 部分更新偏好，返回**生效值**。
+  ///
+  /// ## 只提交显式传入的键
+  ///
+  /// 服务端是**部分更新**语义（未提交的保持原值），且显式校验「至少要提交一个
+  /// 字段」（全空 body 返回 400）。故这里用 `if (x != null)` 逐键拼接，而非提交
+  /// 一个完整对象——后者会把未编辑的字段一并覆盖，且空串会被当成「清空」
+  /// （例如只改昵称却把回复语言重置成 auto）。
+  ///
+  /// ## 空串是**有效入参**（清除），不是「不传」
+  ///
+  /// 三个字段的空串各有语义，且服务端都接受：
+  /// - `displayName: ''` / `avatarUrl: ''` → 清除自设值，展示侧回落默认；
+  /// - `defaultAgentId: ''` → 恢复「跟随系统默认」（服务端删记录）；
+  /// - `replyLanguage: 'auto'` → 同上（删记录），**不是**空串。
+  ///
+  /// ## 非法 `replyLanguage` 会 400（而非静默回落）
+  ///
+  /// 服务端对白名单外的语言值直接 400 并带上 `supported` 列表。这是**有意**的：
+  /// 静默回落 `auto` 会让用户以为设置成功了。故调用方必须把该错误透出给用户，
+  /// 不能吞掉。
+  ///
+  /// ⚠️ 服务端的文案在 [HttpError.body] 里，**不在** `message`——后者恒为
+  /// `"HTTP 400"`（见 [_unwrap]）。要展示给用户必须从 body 提取
+  /// `error` / `message` 字段（参见 `GroupSettingsUseCase` 的 `_errorDetail`）。
+  ///
+  /// ## 返回的是服务端**回读的生效值**
+  ///
+  /// 与群设置写端点只回布尔不同，这里回的就是完整偏好对象，调用方可直接用它
+  /// 替换本地状态（无需再发一次 GET）。
+  Future<UserPreferences> updatePreferences({
+    String? displayName,
+    String? avatarUrl,
+    String? replyLanguage,
+    String? defaultAgentId,
+    String? habitNotifyChannels,
+  }) async {
+    final body = <String, dynamic>{
+      if (displayName != null) 'display_name': displayName,
+      if (avatarUrl != null) 'avatar_url': avatarUrl,
+      if (replyLanguage != null) 'reply_language': replyLanguage,
+      if (defaultAgentId != null) 'default_agent_id': defaultAgentId,
+      if (habitNotifyChannels != null)
+        'habit_notify_channels': habitNotifyChannels,
+    };
+    final res = await _put('/me/preferences', body: body);
+    return UserPreferences.fromJson(_asMap(res));
+  }
+
   /// `GET /me/turns` —— 跨 group 列出当前用户的最近轮次。
   ///
   /// ## 身份来自网关注入的 `X-User-ID`
@@ -1301,6 +1373,31 @@ class CurrentUser {
   bool get isAdmin => roles.contains('admin') || role == 'admin';
 
   bool get hasId => id.isNotEmpty;
+
+  /// 是否自设了昵称（`users.name` 非空）。
+  ///
+  /// ## `name` 已经是**回退后的结果**，不需要客户端再拼回退链
+  ///
+  /// 服务端 `GET /api/auth/me` 已按 `user.display_name` 偏好 → `users.name` →
+  /// `email` 解析好昵称（见 Go `auth_me_test.go` 的
+  /// `TestAuthMeFallsBackToUserName` / `TestAuthMePrefersDisplayPrefs`），
+  /// 故客户端**不要**自己再拿 `preferences.displayName` 拼一遍回退链——那会与
+  /// 服务端结果不一致（例如偏好被另一台设备清空时）。
+  ///
+  /// 本 getter 只用于判断「是否已有一个可展示的名称」。
+  bool get hasName => name.isNotEmpty;
+
+  /// 展示用名称（昵称 → 邮箱）；两者都空时返回空串，由调用方给占位文案。
+  String get displayNameFallback => name.isNotEmpty ? name : email;
+
+  /// 头像地址（服务端 `/api/auth/me` 的 `avatar_url`）。
+  ///
+  /// 服务端已把 `user.avatar_url` 偏好合并进来；**空串 = 未设置**，渲染侧应回落
+  /// 内置图标（服务端下发前不做 URL 校验，故渲染前需自行 sanitize）。
+  ///
+  /// 从 [raw] 取：本类未把它提成构造参数（后加字段，硬加会破坏既有调用方），
+  /// 而 `raw` 保留了完整响应。
+  String get avatarUrl => (raw['avatar_url'] ?? '').toString();
 
   factory CurrentUser.fromJson(Map<String, dynamic> json) => CurrentUser(
     id: (json['id'] ?? '').toString(),

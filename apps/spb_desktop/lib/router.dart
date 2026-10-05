@@ -1454,6 +1454,16 @@ class _SettingsPage extends ConsumerWidget {
       // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。
       loadThemeMode: ref.watch(loadThemeModeProvider),
       saveThemeMode: ref.watch(saveThemeModeProvider),
+      // 个人偏好：昵称 / 头像 / 回复语言 / 默认 Agent。
+      //
+      // 昵称回落值取自 `/api/auth/me` 的 name（服务端已按
+      // display_name → users.name → email 解析好），仅作输入框占位提示。
+      // 用 `.value` 而非 `watch(future)`：本页是 ConsumerWidget，不该因
+      // 「我是谁」重新加载而重建（会丢掉表单草稿）。
+      loadPreferences: ref.watch(loadUserPreferencesProvider),
+      savePreferences: ref.watch(saveUserPreferencesProvider),
+      preferenceFallbackDisplayName:
+          ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),

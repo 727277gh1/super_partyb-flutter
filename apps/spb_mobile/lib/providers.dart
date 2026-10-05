@@ -1283,6 +1283,34 @@ final saveThemeModeProvider = Provider<SaveThemeMode>((ref) {
   return (mode) => ref.read(themeModeProvider.notifier).setMode(mode);
 });
 
+// ==================== 用户偏好 ====================
+
+/// 读取用户偏好（供设置页注入）。
+///
+/// 失败**不吞**：设置页需要区分「读到空偏好」与「读不到」——后者应显示重试
+/// 入口，而不是渲染一个看起来像「你的偏好是空的」的空表单（用户可能就此
+/// 覆盖掉真实值）。
+final loadUserPreferencesProvider = Provider<LoadUserPreferences>((ref) {
+  final api = ref.watch(chatApiProvider);
+  return api.getPreferences;
+});
+
+/// 保存用户偏好（供设置页注入）。
+///
+/// ## 空值参数是「不改」而非「清空」
+///
+/// 直接转发给 `ChatApi.updatePreferences`：它只把**非 null** 的键拼进 body
+/// （服务端是部分更新语义）。清空某项要显式传空串。
+///
+/// ## 不做本地缓存
+///
+/// 返回的是服务端**回读的生效值**，页面直接用它替换本地状态。在本层再存一份
+/// 只会制造第二个真源（另一台设备改了之后本层不知道）。
+final saveUserPreferencesProvider = Provider<SaveUserPreferences>((ref) {
+  final api = ref.watch(chatApiProvider);
+  return api.updatePreferences;
+});
+
 // ==================== Agent 目录与会话切换 ====================
 
 /// Agent API 客户端。

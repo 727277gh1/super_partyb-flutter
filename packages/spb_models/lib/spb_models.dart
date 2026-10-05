@@ -15,6 +15,8 @@ library;
 //   Miniapp*                     —— 小程序工作台 BFF 契约（work/artifact/confirmation/通知）
 //   UserHabit / HabitRun / HabitSuggestion / HabitInsightsSummary
 //                                —— 习惯契约（pattern / 执行记录 / 候选建议 / 洞察）
+//   UserPreferences / PreferenceChannelOption
+//                                —— 用户偏好（回复语言 / 昵称 / 头像 / 默认 agent / 习惯推送渠道）
 //   Agent / GroupSession / GroupAgentSwitchResult
 //                                —— Agent 目录与对话内的 agent 会话绑定
 export 'src/agent.dart';
@@ -31,3 +33,4 @@ export 'src/habit.dart';
 export 'src/miniapp.dart';
 export 'src/pagination.dart';
 export 'src/ufs_file_entry.dart';
+export 'src/user_preferences.dart';

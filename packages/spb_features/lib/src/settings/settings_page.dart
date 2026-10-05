@@ -8,6 +8,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_ui/spb_ui.dart';
 
 import 'notification_subscriptions_card.dart';
+import 'user_preferences_card.dart';
 
 /// 弹出目录选择器。返回 null = 用户取消。
 typedef PickSettingsDirectory = Future<String?> Function();
@@ -126,6 +127,10 @@ class SettingsPage extends StatefulWidget {
     this.saveNotifications,
     this.loadThemeMode,
     this.saveThemeMode,
+    this.loadPreferences,
+    this.savePreferences,
+    this.preferenceAgentOptions = const [],
+    this.preferenceFallbackDisplayName = '',
     this.title = '设置',
   });
 
@@ -211,6 +216,26 @@ class SettingsPage extends StatefulWidget {
 
   /// 保存主题模式。与 [loadThemeMode] 成对注入。
   final SaveThemeMode? saveThemeMode;
+
+  /// 用户偏好的读取入口。为 null 时**不展示**该区块。
+  ///
+  /// ## 为什么自管状态而不进 draft
+  ///
+  /// 服务端对用户偏好是**部分更新**语义，而本页的 draft 是整份提交；
+  /// 并在一起会强迫调用方在一份不含这些字段的对象里表示它们。
+  /// 详见 [UserPreferencesCard] 的类文档。
+  final LoadUserPreferences? loadPreferences;
+
+  /// 用户偏好的保存入口。与 [loadPreferences] 成对注入。
+  final SaveUserPreferences? savePreferences;
+
+  /// 「默认 Agent」下拉的可选项（装配层从 agent 列表映射）。
+  ///
+  /// 为空时下拉只有「自动」一项——不是错误，只是本端还没接 agent 列表。
+  final List<PreferenceAgentOption> preferenceAgentOptions;
+
+  /// 昵称未设置时的回落值（`users.name` → `email`），仅作输入框占位提示。
+  final String preferenceFallbackDisplayName;
 
   final String title;
 
@@ -964,6 +989,18 @@ class _SettingsPageState extends State<SettingsPage> {
           NotificationSubscriptionsCard(
             load: widget.loadNotifications!,
             save: widget.saveNotifications!,
+          ),
+        ],
+
+        // 个人偏好：同样成对判断（有读无写的半截区块会让用户以为改不了）。
+        if (widget.loadPreferences != null &&
+            widget.savePreferences != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          UserPreferencesCard(
+            load: widget.loadPreferences!,
+            save: widget.savePreferences!,
+            agentOptions: widget.preferenceAgentOptions,
+            fallbackDisplayName: widget.preferenceFallbackDisplayName,
           ),
         ],
 

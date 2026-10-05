@@ -511,6 +511,16 @@ class _SettingsTab extends ConsumerWidget {
       // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。
       loadThemeMode: ref.watch(loadThemeModeProvider),
       saveThemeMode: ref.watch(saveThemeModeProvider),
+      // 个人偏好：昵称 / 头像 / 回复语言 / 默认 Agent。
+      //
+      // 昵称回落值取自 `/api/auth/me` 的 name（服务端已按
+      // display_name → users.name → email 解析好），仅作输入框占位提示。
+      // 用 `.value` 而非 `watch(future)`：本页不该因「我是谁」重新加载而重建
+      // （会丢掉表单草稿）。
+      loadPreferences: ref.watch(loadUserPreferencesProvider),
+      savePreferences: ref.watch(saveUserPreferencesProvider),
+      preferenceFallbackDisplayName:
+          ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
       onOpenSync: () => context.go(SpbRoutes.sync),
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 退出登录：清凭证 → 回登录页。

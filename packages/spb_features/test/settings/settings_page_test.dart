@@ -28,6 +28,7 @@ const _gidB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 void main() {
   _themeModeTests();
+  _userPreferencesTests();
 
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
@@ -1007,6 +1008,147 @@ void _themeModeTests() {
         ThemeMode.system,
         reason: '落盘失败必须回滚，否则界面显示的值与库里不一致',
       );
+    });
+  });
+}
+
+/// 用户偏好区块在设置页里的显隐与装配测试。
+///
+/// ## 这个测试防的是什么
+///
+/// 与其余可选注入同一约定：**未注入即隐藏**。展示一个加载不出来的偏好表单
+/// 比不展示更糟——用户会以为「我的昵称丢了」，而实际只是本端没接这个接口。
+///
+/// 另防「只注入一半」：只有 load 没有 save 时会渲染出一个能改但存不下的表单，
+/// 用户点保存毫无反应。故成对判断。
+void _userPreferencesTests() {
+  Future<void> pumpPrefs(
+    WidgetTester tester, {
+    LoadUserPreferences? load,
+    SaveUserPreferences? save,
+    List<PreferenceAgentOption> agentOptions = const [],
+    String fallbackDisplayName = '',
+  }) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          desktopInfo: DesktopIntegrationInfo.hidden,
+          loadPreferences: load,
+          savePreferences: save,
+          preferenceAgentOptions: agentOptions,
+          preferenceFallbackDisplayName: fallbackDisplayName,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  UserPreferences prefs() => const UserPreferences(
+    replyLanguage: 'en',
+    availableLanguages: ['auto', 'zh-CN', 'en', 'ja'],
+    languageLabels: {
+      'auto': '跟随输入',
+      'zh-CN': '简体中文',
+      'en': 'English',
+      'ja': '日本語',
+    },
+    customized: true,
+  );
+
+  group('设置页：用户偏好区块的显隐', () {
+    testWidgets('未注入时整块不渲染', (tester) async {
+      await pumpPrefs(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-user-preferences')),
+        findsNothing,
+        reason: '装配层没接就不显示',
+      );
+      expect(find.text('个人偏好'), findsNothing);
+    });
+
+    testWidgets('只注入读取（无保存）时也不显示，避免半截区块', (tester) async {
+      await pumpPrefs(tester, load: () async => prefs());
+
+      expect(
+        find.byKey(const ValueKey('settings-user-preferences')),
+        findsNothing,
+        reason: '能改但存不下的表单比不展示更糟',
+      );
+    });
+
+    testWidgets('成对注入时渲染，且语言选项来自响应（非硬编码）', (tester) async {
+      await pumpPrefs(
+        tester,
+        load: () async => prefs(),
+        save: ({
+          String? displayName,
+          String? avatarUrl,
+          String? replyLanguage,
+          String? defaultAgentId,
+        }) async => prefs(),
+      );
+
+      expect(
+        find.byKey(const ValueKey('settings-user-preferences')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-prefs-reply-language')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('日本語'), findsWidgets);
+    });
+
+    testWidgets('注入的昵称回落值出现在输入框占位里', (tester) async {
+      await pumpPrefs(
+        tester,
+        load: () async => prefs(),
+        save: ({
+          String? displayName,
+          String? avatarUrl,
+          String? replyLanguage,
+          String? defaultAgentId,
+        }) async => prefs(),
+        fallbackDisplayName: 'u1@example.com',
+      );
+
+      expect(find.text('u1@example.com'), findsOneWidget);
+    });
+
+    testWidgets('注入的 agent 列表出现在默认 Agent 下拉里', (tester) async {
+      await pumpPrefs(
+        tester,
+        load: () async => prefs(),
+        save: ({
+          String? displayName,
+          String? avatarUrl,
+          String? replyLanguage,
+          String? defaultAgentId,
+        }) async => prefs(),
+        agentOptions: const [PreferenceAgentOption(id: 'a1', name: '写作助手')],
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-prefs-default-agent')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('写作助手'), findsWidgets);
     });
   });
 }
