@@ -20,6 +20,7 @@
 library;
 
 export 'agent_file_card.dart';
+export 'agent_switcher.dart';
 export 'assistant_message_bubble.dart';
 export 'confirmation_card.dart';
 export 'conversation_page.dart';
@@ -32,6 +33,8 @@ export 'group_gate_panel.dart';
 export 'group_todos_panel.dart';
 export 'group_tool_calls_panel.dart';
 export 'group_management.dart';
+export 'group_settings.dart';
+export 'group_settings_panel.dart';
 export 'group_list_page.dart';
 export 'habit_suggestion_card.dart';
 export 'my_turns_page.dart';

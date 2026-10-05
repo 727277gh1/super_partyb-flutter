@@ -15,6 +15,9 @@ library;
 //   Miniapp*                     —— 小程序工作台 BFF 契约（work/artifact/confirmation/通知）
 //   UserHabit / HabitRun / HabitSuggestion / HabitInsightsSummary
 //                                —— 习惯契约（pattern / 执行记录 / 候选建议 / 洞察）
+//   Agent / GroupSession / GroupAgentSwitchResult
+//                                —— Agent 目录与对话内的 agent 会话绑定
+export 'src/agent.dart';
 export 'src/chat_confirmation.dart';
 export 'src/chat_event.dart';
 export 'src/chat_group.dart';

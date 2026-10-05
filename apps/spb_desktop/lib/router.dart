@@ -562,6 +562,30 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 侧边栏是否展开。
   bool _showSidebar = false;
 
+  /// 当前对话的权威 ChatGroup（设置 tab 的目标文本与三个开关的真源）。
+  ///
+  /// 由 `GET /chat/groups/:id` 取得，写操作成功后用其响应覆盖（见
+  /// [GroupSettingsUseCase] 的说明：写端点只回布尔，权威状态必须回读）。
+  ChatGroup? _group;
+
+  /// 拉取 group 失败的原因（可直接展示）。
+  ///
+  /// ## 为什么需要显式错误态而不是「永远转圈」
+  ///
+  /// 加载失败时若仍渲染进度指示器，用户看到的是**永不结束的转圈**——既不知道
+  /// 出了问题，也没法重试。且无限动画会让 `pumpAndSettle` 永不收敛（测试里
+  /// 表现为超时，真实环境里表现为耗电的持续重绘）。
+  String? _groupError;
+
+  /// 设置写操作是否在途（面板用它禁用全部控件，防并发提交把 CAS 打成 409）。
+  bool _settingsBusy = false;
+
+  /// agent 切换是否在途。
+  ///
+  /// 切换会归档旧绑定 + 写新绑定，是**非幂等**的（并发切换会把绑定顺序打乱，
+  /// 最后落库的未必是用户最后选的那个）。故在途时禁用入口。
+  bool _switchingAgent = false;
+
   /// 交付物刷新令牌：自增 int。
   ///
   /// 由本 State 监听 controller.items：出现新的 `AgentFileItem`（agent 产出了
@@ -619,11 +643,17 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 让长度变化但不代表新文件。
   Set<String> _seenFileItemIds = {};
 
+  /// 已加载 group 的 groupId（防重复拉取）。
+  bool _loadingGroup = false;
+
   @override
   void initState() {
     super.initState();
     // 在首帧后解析：`ref.watch` 在 initState 里不可用。
-    WidgetsBinding.instance.addPostFrameCallback((_) => _resolveUserAndFocus());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _resolveUserAndFocus();
+      _loadGroup();
+    });
   }
 
   @override
@@ -637,7 +667,144 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   @override
   void didUpdateWidget(_ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.groupId != widget.groupId) _resolveUserAndFocus();
+    if (oldWidget.groupId != widget.groupId) {
+      // 先置空再拉：不置空会让新对话的设置 tab 短暂显示上一个对话的目标与开关
+      // （State 被 Flutter 复用，_group 不会自动失效）。
+      _group = null;
+      _groupError = null;
+      _resolveUserAndFocus();
+      _loadGroup();
+    }
+  }
+
+  /// 把本对话切到另一个 agent（含「同 Agent 开新会话」）。
+  ///
+  /// ## 为什么切换后要重拉 group **并**刷新时间线
+  ///
+  /// - 重拉 group：`activeSession.agentId` 变了，AppBar 的标签要跟着变；
+  /// - 刷新时间线：服务端会归档旧 binding，新 binding 的 `session_id` 是
+  ///   lazy 的（下一轮 turn 才回填）。虽然历史消息仍属于这个 group（时间线
+  ///   不会少内容），但重拉能保证「下一轮回复来自新 agent」这一事实有最新
+  ///   的服务端状态兜底，而不是靠本地推断。
+  ///
+  /// 失败弹 SnackBar：切换是用户主动发起且带确认的动作，失败必须告知——
+  /// 静默失败会让用户以为切好了，接着发消息却发现回复还来自旧 agent。
+  Future<GroupAgentSwitchResult> _switchAgent(
+    String agentId, {
+    required bool forceNewSession,
+  }) async {
+    if (_switchingAgent) {
+      throw const ValidationError('切换正在进行中，请稍候');
+    }
+    setState(() => _switchingAgent = true);
+    try {
+      final result = await ref
+          .read(agentsApiProvider)
+          .switchGroupAgent(
+            widget.groupId,
+            agentId: agentId,
+            forceNewSession: forceNewSession,
+          );
+      if (!mounted) return result;
+      await _loadGroup();
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(content: Text(forceNewSession ? '已开始新会话' : '已切换 Agent')),
+          );
+      }
+      return result;
+    } on SpbError catch (e) {
+      SpbLog.warn('切换 Agent 失败', {
+        'groupId': widget.groupId,
+        'agentId': agentId,
+        'error': e.toString(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(_describeSwitchError(e))));
+      }
+      rethrow;
+    } finally {
+      if (mounted) setState(() => _switchingAgent = false);
+    }
+  }
+
+  /// 把切换失败翻成用户能看懂的一句话。
+  ///
+  /// `HttpError.message` 恒为 `"HTTP 400"`，服务端文案在 `body` 里
+  /// （见 `AgentsApi._unwrap`），故必须从 body 提取。
+  static String _describeSwitchError(SpbError e) {
+    if (e is HttpError) {
+      final body = e.body ?? '';
+      // 404 = agent 已被删除（列表可能是在它删除前拉的）。
+      if (e.isNotFound) return '这个 Agent 已不存在，请重新打开列表选择';
+      if (body.contains('agentId')) return '切换失败：Agent 参数无效';
+      if (e.statusCode == 401) return '登录已过期，请重新登录';
+      return '切换失败（HTTP ${e.statusCode}）';
+    }
+    if (e is NetworkError) return '网络连接失败，请检查网络后重试';
+    return e.message;
+  }
+
+  /// 拉取当前 group 的权威状态（设置 tab 的初始值）。
+  ///
+  /// 失败不阻断对话页（聊天与设置是两件事），但必须**如实报错**：设置 tab
+  /// 显示重试入口，而不是一个永不结束的转圈。
+  Future<void> _loadGroup() async {
+    if (!mounted || _loadingGroup) return;
+    _loadingGroup = true;
+    try {
+      final group = await ref.read(chatApiProvider).getGroup(widget.groupId);
+      if (mounted) {
+        setState(() {
+          _group = group;
+          _groupError = null;
+        });
+      }
+    } on SpbError catch (e) {
+      SpbLog.warn('读取对话设置失败', {
+        'groupId': widget.groupId,
+        'error': e.toString(),
+      });
+      if (mounted) setState(() => _groupError = describeGroupSettingsError(e));
+    } finally {
+      _loadingGroup = false;
+    }
+  }
+
+  /// 执行一个设置写操作：成功后用返回的权威 group 覆盖本地。
+  ///
+  /// ## 为什么 busy 是一个全局布尔而不是按动作区分
+  ///
+  /// 这几个设置都写同一个 `metadata`（goal_gate / follow_up_suggest / tts 共处
+  /// 一个 JSON 列），服务端用乐观锁（CAS）写入。两个并发写会让其中一个拿到
+  /// 409。故同一时刻只允许一个设置在途——粒度再细也不能让它们并行。
+  Future<void> _runSetting(Future<ChatGroup> Function() action) async {
+    if (_settingsBusy) return;
+    setState(() => _settingsBusy = true);
+    try {
+      final updated = await action();
+      if (mounted) setState(() => _group = updated);
+    } on GroupSettingsFailure catch (e) {
+      _showSettingsError(e.message);
+    } on SpbError catch (e) {
+      // 纵深防御：[GroupSettingsUseCase] 已把 SpbError 翻成
+      // [GroupSettingsFailure]，漏到这里说明翻译层自己出了问题。
+      SpbLog.warn('设置失败（未经翻译）', {'error': e.toString()});
+      _showSettingsError('设置失败，请稍后重试');
+    } finally {
+      if (mounted) setState(() => _settingsBusy = false);
+    }
+  }
+
+  void _showSettingsError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 先解析 userId，再聚焦到当前 group。
@@ -719,6 +886,21 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       title: '对话',
       // 侧边栏开关（仅桌面端渲染本页）。
       actions: [
+        // Agent 切换：
+        //
+        // 放在 AppBar 而非侧边栏 tab：它是「这段对话由谁回答」的全局属性，
+        // 用户在对话过程中随时可能要换，不该先展开侧边栏再切 tab。
+        //
+        // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「未绑定」——
+        // 这与真实状态（尚未拉取）不符，但切换本身仍可用（服务端以 agentId
+        // 为准），且比隐藏入口让用户以为「本端不支持切 agent」要好。
+        AgentSwitcher(
+          loadAgents: ref.watch(loadAgentsProvider),
+          switchAgent: (agentId, {forceNewSession = false}) =>
+              _switchAgent(agentId, forceNewSession: forceNewSession),
+          currentAgentId: _group?.activeSession?.agentId,
+          busy: _switchingAgent,
+        ),
         IconButton(
           key: const ValueKey('toggle-deliverables'),
           icon: Icon(
@@ -891,6 +1073,64 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                   // tab 标签已命名「待办」，不重复面板标题。
                   showHeader: false,
                 ),
+              ),
+              ChatSidebarTab(
+                label: '设置',
+                icon: Icons.tune,
+                content: _group == null
+                    // 权威状态未就绪：不能渲染面板——面板的每个控件都要读
+                    // metadata（键缺失会被当成「全部关闭」），先渲染会显示一个
+                    // 假的「全关」状态，用户可能在加载完成前就去点它。
+                    ? GroupSettingsLoading(
+                        error: _groupError,
+                        onRetry: _loadGroup,
+                      )
+                    : GroupSettingsPanel(
+                        group: _group!,
+                        busy: _settingsBusy,
+                        // tab 标签已命名「设置」，不重复面板标题。
+                        showHeader: false,
+                        // 每个回调都只带**变化的那一个键**，由
+                        // GroupSettingsUseCase 补一次 getGroup 拿权威状态
+                        // （写端点只回布尔）。
+                        onSaveGoal: (text) => _runSetting(
+                          () => ref
+                              .read(groupSettingsUseCaseProvider)
+                              .saveGoal(widget.groupId, text),
+                        ),
+                        onToggleGoalGate: (enabled) => _runSetting(
+                          () => ref
+                              .read(groupSettingsUseCaseProvider)
+                              .toggleGoalGate(widget.groupId, enabled),
+                        ),
+                        onSaveMaxAutoTurns: (turns) => _runSetting(
+                          () => ref
+                              .read(groupSettingsUseCaseProvider)
+                              .saveMaxAutoTurns(widget.groupId, turns),
+                        ),
+                        onToggleFollowUpSuggest: (enabled) => _runSetting(
+                          () => ref
+                              .read(groupSettingsUseCaseProvider)
+                              .toggleFollowUpSuggest(widget.groupId, enabled),
+                        ),
+                        onSaveTts:
+                            ({
+                              enabled,
+                              narrateThinking,
+                              narrationMode,
+                              fileSummary,
+                            }) => _runSetting(
+                              () => ref
+                                  .read(groupSettingsUseCaseProvider)
+                                  .saveTts(
+                                    widget.groupId,
+                                    enabled: enabled,
+                                    narrateThinking: narrateThinking,
+                                    narrationMode: narrationMode,
+                                    fileSummary: fileSummary,
+                                  ),
+                            ),
+                      ),
               ),
               ChatSidebarTab(
                 label: '诊断',

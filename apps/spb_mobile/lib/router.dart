@@ -613,6 +613,24 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 第二条独立流。
   StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
 
+  /// 当前对话的权威 ChatGroup（设置弹层的目标文本与三个开关的真源）。
+  ///
+  /// 移动端没有侧边栏，故设置入口是 AppBar 的一个按钮 → 底部弹层。真源与桌面端
+  /// 一致：`GET /chat/groups/:id`，写操作成功后用其响应覆盖。
+  ChatGroup? _group;
+
+  /// 设置写操作是否在途（面板用它禁用全部控件，防并发提交把 CAS 打成 409）。
+  bool _settingsBusy = false;
+
+  /// agent 切换是否在途。
+  ///
+  /// 切换会归档旧绑定 + 写新绑定，是**非幂等**的（并发切换会把绑定顺序打乱，
+  /// 最后落库的未必是用户最后选的那个）。故在途时禁用入口。
+  bool _switchingAgent = false;
+
+  /// 已发过 group 拉取（防重复请求）。
+  bool _loadingGroup = false;
+
   /// 最近一次归约出的执行中活动快照（按 turnId 索引）。
   ///
   /// 存 State 而非在 build 里读 `controller.activitiesSnapshot`：后者是同步
@@ -622,7 +640,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _resolveUserAndFocus());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _resolveUserAndFocus();
+      _loadGroup();
+    });
   }
 
   @override
@@ -634,7 +655,212 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   @override
   void didUpdateWidget(_ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.groupId != widget.groupId) _resolveUserAndFocus();
+    if (oldWidget.groupId != widget.groupId) {
+      // 先置空再拉：State 被 Flutter 复用，不置空会让新对话的设置弹层
+      // 短暂显示上一个对话的目标与开关。
+      _group = null;
+      _resolveUserAndFocus();
+      _loadGroup();
+    }
+  }
+
+  /// 把本对话切到另一个 agent（含「同 Agent 开新会话」）。
+  ///
+  /// ## 为什么切换后要重拉 group **并**刷新时间线
+  ///
+  /// - 重拉 group：`activeSession.agentId` 变了，AppBar 的标签要跟着变；
+  /// - 刷新时间线：服务端会归档旧 binding，新 binding 的 `session_id` 是
+  ///   lazy 的（下一轮 turn 才回填）。虽然历史消息仍属于这个 group（时间线
+  ///   不会少内容），但重拉能保证「下一轮回复来自新 agent」这一事实有最新
+  ///   的服务端状态兜底，而不是靠本地推断。
+  ///
+  /// 失败弹 SnackBar：切换是用户主动发起且带确认的动作，失败必须告知——
+  /// 静默失败会让用户以为切好了，接着发消息却发现回复还来自旧 agent。
+  Future<GroupAgentSwitchResult> _switchAgent(
+    String agentId, {
+    required bool forceNewSession,
+  }) async {
+    if (_switchingAgent) {
+      throw const ValidationError('切换正在进行中，请稍候');
+    }
+    setState(() => _switchingAgent = true);
+    try {
+      final result = await ref
+          .read(agentsApiProvider)
+          .switchGroupAgent(
+            widget.groupId,
+            agentId: agentId,
+            forceNewSession: forceNewSession,
+          );
+      if (!mounted) return result;
+      await _loadGroup();
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(content: Text(forceNewSession ? '已开始新会话' : '已切换 Agent')),
+          );
+      }
+      return result;
+    } on SpbError catch (e) {
+      SpbLog.warn('切换 Agent 失败', {
+        'groupId': widget.groupId,
+        'agentId': agentId,
+        'error': e.toString(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(_describeSwitchError(e))));
+      }
+      rethrow;
+    } finally {
+      if (mounted) setState(() => _switchingAgent = false);
+    }
+  }
+
+  /// 把切换失败翻成用户能看懂的一句话。
+  ///
+  /// `HttpError.message` 恒为 `"HTTP 400"`，服务端文案在 `body` 里
+  /// （见 `AgentsApi._unwrap`），故必须从 body 提取。
+  static String _describeSwitchError(SpbError e) {
+    if (e is HttpError) {
+      final body = e.body ?? '';
+      // 404 = agent 已被删除（列表可能是在它删除前拉的）。
+      if (e.isNotFound) return '这个 Agent 已不存在，请重新打开列表选择';
+      if (body.contains('agentId')) return '切换失败：Agent 参数无效';
+      if (e.statusCode == 401) return '登录已过期，请重新登录';
+      return '切换失败（HTTP ${e.statusCode}）';
+    }
+    if (e is NetworkError) return '网络连接失败，请检查网络后重试';
+    return e.message;
+  }
+
+  /// 拉取当前 group 的权威状态（设置弹层的初始值）。
+  ///
+  /// 失败只记日志、不阻断对话页：设置入口仍可点开，显示的是「未配置」形态。
+  Future<void> _loadGroup() async {
+    if (!mounted || _loadingGroup) return;
+    _loadingGroup = true;
+    try {
+      final group = await ref.read(chatApiProvider).getGroup(widget.groupId);
+      if (mounted) setState(() => _group = group);
+    } on SpbError catch (e) {
+      SpbLog.warn('读取对话设置失败', {
+        'groupId': widget.groupId,
+        'error': e.toString(),
+      });
+    } finally {
+      _loadingGroup = false;
+    }
+  }
+
+  /// 打开设置底部弹层。
+  ///
+  /// ## 为什么用 `showModalBottomSheet` 而不是新路由
+  ///
+  /// 设置弹层需要读写 `_group` / `_settingsBusy` 这两个 State，而新路由会得到
+  /// 另一个 `_ChatPage` 实例（State 不共享），写成功后回写的是那个实例的
+  /// `_group`——关掉弹层回到对话页又变回旧值。用弹层共享同一份 State，
+  /// 也让「保存中」的 busy 态自然覆盖整个面板。
+  Future<void> _openSettings() async {
+    final group = _group;
+    if (group == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        // 弹层需要跟随外层 setState 重建（写成功后 _group 换了新对象），
+        // 故用 StatefulBuilder + 每次 build 重新读 _group。
+        builder: (sheetContext, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+          ),
+          child: SizedBox(
+            height: MediaQuery.of(sheetContext).size.height * 0.8,
+            child: GroupSettingsPanel(
+              group: _group ?? group,
+              busy: _settingsBusy,
+              // 弹层自带拖拽条，不再重复面板标题。
+              showHeader: false,
+              onSaveGoal: (text) => _runSetting(
+                () => ref
+                    .read(groupSettingsUseCaseProvider)
+                    .saveGoal(widget.groupId, text),
+                onChanged: setSheetState,
+              ),
+              onToggleGoalGate: (enabled) => _runSetting(
+                () => ref
+                    .read(groupSettingsUseCaseProvider)
+                    .toggleGoalGate(widget.groupId, enabled),
+                onChanged: setSheetState,
+              ),
+              onSaveMaxAutoTurns: (turns) => _runSetting(
+                () => ref
+                    .read(groupSettingsUseCaseProvider)
+                    .saveMaxAutoTurns(widget.groupId, turns),
+                onChanged: setSheetState,
+              ),
+              onToggleFollowUpSuggest: (enabled) => _runSetting(
+                () => ref
+                    .read(groupSettingsUseCaseProvider)
+                    .toggleFollowUpSuggest(widget.groupId, enabled),
+                onChanged: setSheetState,
+              ),
+              onSaveTts:
+                  ({enabled, narrateThinking, narrationMode, fileSummary}) =>
+                      _runSetting(
+                        () => ref
+                            .read(groupSettingsUseCaseProvider)
+                            .saveTts(
+                              widget.groupId,
+                              enabled: enabled,
+                              narrateThinking: narrateThinking,
+                              narrationMode: narrationMode,
+                              fileSummary: fileSummary,
+                            ),
+                        onChanged: setSheetState,
+                      ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 执行一个设置写操作：成功后用返回的权威 group 覆盖本地。
+  ///
+  /// [onChanged] 是弹层自己的 setState（弹层不在本 State 的 build 子树里，
+  /// 外层 setState 不会重建它）。
+  Future<void> _runSetting(
+    Future<ChatGroup> Function() action, {
+    StateSetter? onChanged,
+  }) async {
+    if (_settingsBusy) return;
+    setState(() => _settingsBusy = true);
+    onChanged?.call(() {});
+    try {
+      final updated = await action();
+      if (mounted) setState(() => _group = updated);
+    } on GroupSettingsFailure catch (e) {
+      _showSettingsError(e.message);
+    } on SpbError catch (e) {
+      // 纵深防御：[GroupSettingsUseCase] 已把 SpbError 翻成
+      // [GroupSettingsFailure]，漏到这里说明翻译层自己出了问题。
+      SpbLog.warn('设置失败（未经翻译）', {'error': e.toString()});
+      _showSettingsError('设置失败，请稍后重试');
+    } finally {
+      if (mounted) setState(() => _settingsBusy = false);
+      onChanged?.call(() {});
+    }
+  }
+
+  void _showSettingsError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 先解析 userId，再聚焦到当前 group。
@@ -705,6 +931,36 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     return ConversationPage(
       controller: controller,
       title: '对话',
+      // 对话设置入口（目标 + 三个 CAS 开关）。
+      //
+      // 移动端没有侧边栏，故走 AppBar 按钮 → 底部弹层；桌面端同一份
+      // [GroupSettingsPanel] 挂在侧边栏「设置」tab 上（见 desktop router）。
+      //
+      // 权威 group 未就绪时**禁用而非隐藏**：AppBar 宽度恒定，不会因加载完成
+      // 而拖动其余图标（与停止按钮同一取舍）。
+      actions: [
+        // Agent 切换：
+        //
+        // 放在 AppBar 而非底部弹层里：它是「这段对话由谁回答」的全局属性，
+        // 用户在对话过程中随时可能要换，不该先开设置弹层再切。
+        //
+        // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「未绑定」——
+        // 这与真实状态（尚未拉取）不符，但切换本身仍可用（服务端以 agentId
+        // 为准），且比隐藏入口让用户以为「本端不支持切 agent」要好。
+        AgentSwitcher(
+          loadAgents: ref.watch(loadAgentsProvider),
+          switchAgent: (agentId, {forceNewSession = false}) =>
+              _switchAgent(agentId, forceNewSession: forceNewSession),
+          currentAgentId: _group?.activeSession?.agentId,
+          busy: _switchingAgent,
+        ),
+        IconButton(
+          key: const ValueKey('open-group-settings'),
+          icon: const Icon(Icons.tune),
+          tooltip: '对话设置',
+          onPressed: _group == null ? null : _openSettings,
+        ),
+      ],
       // 待处理收件箱消息（可撤销）。
       //
       // 撤销需要 userId，而页面不该知道 userId 从哪来——故在这里闭包捕获

@@ -30,9 +30,10 @@ class ChatGroup {
   /// 分组的顶层目标描述（可能为空）。
   final String? goal;
 
-  /// 自由元数据。关键键：
+  /// 自由元数据。关键键（均有对应只读 getter，见下）：
   /// - `follow_up_suggest.enabled`：后续提问建议开关（group 级）
-  /// - `tts.narrate_thinking` / `tts.file_summary`：TTS 行为开关
+  /// - `goal_gate.enabled` / `goal_gate.continue_until_done` / `goal_gate.max_auto_turns`
+  /// - `tts.enabled` / `tts.narrate_thinking` / `tts.narration_mode` / `tts.file_summary`
   /// 值可能是嵌套 map，故用 `Object?` 而非 `String`。
   final Map<String, dynamic>? metadata;
 
@@ -48,11 +49,83 @@ class ChatGroup {
   ///
   /// 注意这是**双层开关**：group 级 metadata 之外还有全局 `FOLLOW_UP_SUGGEST_ENABLED`。
   /// 客户端只反映 group 级状态，全局关闭时即使此处为 true 也不会收到事件。
-  bool get followUpSuggestEnabled {
-    final v = metadata?['follow_up_suggest'];
-    if (v is Map) return v['enabled'] == true;
-    return false;
+  bool get followUpSuggestEnabled =>
+      _subMap(metadata?['follow_up_suggest'])?['enabled'] == true;
+
+  /// 当前目标文本（**结构化 goal 优先**，旧列兜底）。
+  ///
+  /// ## 为什么有这个优先级
+  ///
+  /// 迁移 0022 之后「goal 变更 = 新建 `chat_goals` 行」，`chat_groups.goal` 旧列
+  /// 不再被写入。存量 group 可能只有旧列，故保留回退（与 webapp
+  /// `WorkbenchGroupGoalControl` 及服务端 `goalGateEffectiveGoal` 同口径）。
+  ///
+  /// 快照形状见 `group_goal_snapshot.go` 的 `goalSnapshotDTO`：
+  /// `{goal: {id, goal_text, status, ...}, tasks: [...], progress: {...}}`。
+  String get currentGoalText {
+    final snapshot = _subMap(currentGoal?['goal']);
+    final text = (snapshot?['goal_text'] as String?)?.trim() ?? '';
+    if (text.isNotEmpty) return text;
+    return (goal ?? '').trim();
   }
+
+  /// 「自动实现目标」（Goal Gate）是否对本 group 生效。
+  ///
+  /// ## 为什么是 `enabled && continue_until_done`（而不是只看 enabled）
+  ///
+  /// 服务端的接管判定是 `GoalGateConfig.CanTakeOver() = Enabled && ContinueUntilDone`
+  /// （`chatgate/goal_gate_config.go`）。只看 `enabled` 会在「开了但没持续执行」
+  /// 时谎报已接管。两个键由 `setGroupGoalGate` 端点成对写入，故实践中总是相等；
+  /// 仍按服务端口径取「与」——否则手工改过 metadata 的存量 group 会显示错。
+  ///
+  /// 键缺失 = 关闭（与 [followUpSuggestEnabled] 及服务端的删除语义一致）。
+  bool get goalGateEnabled {
+    final gate = _subMap(metadata?['goal_gate']);
+    return gate?['enabled'] == true && gate?['continue_until_done'] == true;
+  }
+
+  /// Goal Gate 的最大自动轮次。
+  ///
+  /// 键缺失时返回**服务端生效的默认值** 20（`chatgate/goal_gate_config.go` 的
+  /// `clampAnyInt(gate["max_auto_turns"], 20, 1, 200)`），而不是 null——
+  /// 面板要显示「当前生效值」，缺失时那个值就是 20。
+  ///
+  /// 非数字/越界的存量值同样按默认值处理（服务端读取时也会 clamp）。
+  int get goalGateMaxAutoTurns {
+    const fallback = 20;
+    final raw = _subMap(metadata?['goal_gate'])?['max_auto_turns'];
+    final n = raw is num ? raw.toInt() : null;
+    if (n == null) return fallback;
+    return n.clamp(1, 200);
+  }
+
+  /// `metadata.tts` 子对象（缺失或结构不对时为 null）。
+  Map<String, dynamic>? get _tts => _subMap(metadata?['tts']);
+
+  /// 语音回复总开关。
+  ///
+  /// 关闭时服务端**整块删除** `metadata.tts`（而非写 false），故键缺失 = 关闭。
+  bool get ttsEnabled => _tts?['enabled'] == true;
+
+  /// 思考阶段播报。
+  ///
+  /// ## 为什么在总开关关闭时恒为 false
+  ///
+  /// 存量 metadata 可能残留 `narrate_thinking`（历史上先开子开关、后关总开关）。
+  /// 总开关关闭时该键**不生效**（服务端不会播报），如实返回 false 才不会让面板
+  /// 在关闭的总开关下显示一个勾选的子开关。与 webapp `parseGroupTTS` 的归一化
+  /// 口径一致（`enabled !== true` 时全部归零）。
+  bool get ttsNarrateThinking =>
+      ttsEnabled && _tts?['narrate_thinking'] == true;
+
+  /// 播报模式：`filler`（固定短句）或 `summary`（中文摘要）。
+  ///
+  /// 未知值 / 键缺失 / 总开关关闭 → `filler`（服务端 `setTTS` 的归一化默认值）。
+  String get ttsNarrationMode =>
+      ttsEnabled && _tts?['narration_mode'] == 'summary' ? 'summary' : 'filler';
+
+  /// 文件产出播报（同 [ttsNarrateThinking]，总开关关闭时恒为 false）。
+  bool get ttsFileSummary => ttsEnabled && _tts?['file_summary'] == true;
 
   factory ChatGroup.fromJson(Map<String, dynamic> json) => ChatGroup(
     id: (json['id'] as String?) ?? '',
@@ -72,6 +145,14 @@ class ChatGroup {
     if (v is Map) return Map<String, dynamic>.from(v);
     return null;
   }
+
+  /// 取嵌套子对象（metadata 下的 `tts` / `goal_gate` / `follow_up_suggest`）。
+  ///
+  /// 与 [_asMap] 的区别：后者用于顶层 JSON（非 Map 时返回 null 表示「没这个
+  /// 字段」），本方法额外把**非 Map 的值**（如 `tts: false` 这种手工写坏的
+  /// metadata）也归一成 null，让所有 getter 共用一条「结构不对 = 未配置」路径。
+  static Map<String, dynamic>? _subMap(Object? v) =>
+      v is Map ? Map<String, dynamic>.from(v) : null;
 
   static DateTime _date(Object? v) =>
       DateTime.tryParse((v as String?) ?? '')?.toLocal() ?? DateTime.now();

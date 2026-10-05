@@ -7,6 +7,7 @@
 /// 业务规则在 `spb_domain`。
 library;
 
+export 'src/agents_api.dart';
 export 'src/auth_interceptor.dart';
 export 'src/chat_api.dart';
 export 'src/habit_api.dart';

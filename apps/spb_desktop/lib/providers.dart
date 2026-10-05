@@ -158,6 +158,14 @@ final groupManagementUseCaseProvider = Provider<GroupManagementUseCase>((ref) {
   return GroupManagementUseCase(ref.watch(chatApiProvider));
 });
 
+/// 群设置（目标 + 三个 CAS 开关）的写用例。
+///
+/// 每个写操作都是「调专用 PUT 端点 → 回读 group」两步，两个 app 共用本 provider
+/// 保证语义一致（详见 `GroupSettingsUseCase` 类文档）。
+final groupSettingsUseCaseProvider = Provider<GroupSettingsUseCase>((ref) {
+  return GroupSettingsUseCase(ref.watch(chatApiProvider));
+});
+
 /// 对话管理动作的执行入口（供 `GroupListPage.onGroupAction` 注入）。
 ///
 /// ## 为什么在这里把异常翻译成 [GroupActionRejected]
@@ -1296,6 +1304,28 @@ final loadThemeModeProvider = Provider<LoadThemeMode>((ref) {
 /// `MaterialApp.router` 的 `themeMode` 上（两者读的是同一个 provider）。
 final saveThemeModeProvider = Provider<SaveThemeMode>((ref) {
   return (mode) => ref.read(themeModeProvider.notifier).setMode(mode);
+});
+
+// ==================== Agent 目录与会话切换 ====================
+
+/// Agent API 客户端。
+///
+/// 单独一个 provider（而非复用 `chatApiProvider`）：`/api/agents` 与
+/// `/chat/*` 是两套命名空间，分开便于将来按需替换/禁用。
+final agentsApiProvider = Provider<AgentsApi>((ref) {
+  return AgentsApi(ref.watch(dioProvider));
+});
+
+/// 读取可选 agent 列表（供对话页的切换入口注入）。
+///
+/// ## 失败不吞成空列表
+///
+/// 空列表会让入口**隐藏**——与「真的没有 agent」表现相同。而入口自身已把
+/// 「加载失败」处理为「隐藏 + 记日志」（见 `AgentSwitcher` 的类文档），故这里
+/// 直接抛出即可，不必转成空列表（转了就丢失了「失败」这一信息）。
+final loadAgentsProvider = Provider<LoadAgents>((ref) {
+  final api = ref.watch(agentsApiProvider);
+  return api.listAgents;
 });
 
 /// 读取 `since_days`：缺失、非法、`<= 0` 都视为「不限」。
