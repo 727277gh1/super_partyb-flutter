@@ -92,6 +92,149 @@ class ChatApi {
   Future<void> unarchiveGroup(String groupId) =>
       _post('/chat/groups/$groupId/unarchive');
 
+  // ==================== 群级开关与目标 ====================
+  //
+  // 这一组全部是服务端注册的 **PUT 专用端点**（`chat_ext.go:83-89`），
+  // 而不是 `PATCH /chat/groups/:id` 的 metadata 通道。
+  //
+  // ## 为什么不能用 PATCH 的 metadata 通道
+  //
+  // PATCH 是**整包替换**语义：只提交 `{metadata: {goal_gate: ...}}` 会把
+  // `metadata.tts` / `metadata.follow_up_suggest` 等其它子系统写入的键一并
+  // 清掉（webapp 的历史 bug）。专用端点服务端做 CAS 读-改-写，既保留其它键，
+  // 也不与 goal gate worker / title gate / 另一台设备等并发写者互相覆盖。
+  //
+  // ## 为什么这些方法都返回 void
+  //
+  // 服务端只回 `{updated: true}` / `{enabled: ...}` / `{tts: ...}`，**没有**
+  // group。若照 `ChatGroup.fromJson({updated: true})` 解析会得到字段全空的对象
+  // （`id: ''`、`title: ''`），把它写回列表会让该条目变成空白行。故由调用方
+  // 补一次 [getGroup] 取权威状态——与 `GroupManagementUseCase._reload` 同一约定。
+
+  /// `PUT /chat/groups/:group_id/goal-gate` —— 「自动实现目标」开关与熔断上限。
+  ///
+  /// 两个字段共用一个 CAS 端点，**只提交显式传入的键**：
+  /// - 只传 [maxAutoTurns] 时 `enabled` 保持不变（服务端 `toggleEnabled` 为 false，
+  ///   不触发「开启需有目标」预检）。
+  /// - 服务端要求两者**至少传一个**，都不传则 400。
+  /// - [maxAutoTurns] 服务端会 clamp 到 `1..200`（越界夹取而非报错）。
+  ///
+  /// ## 开启时会校验非空目标
+  ///
+  /// `enabled: true` 而该 group 既没有结构化 goal 也没有旧 `group.goal` 列时，
+  /// 服务端返回 **400 `{error: 'goal_required'}`**（开了也没法判定是否达成）。
+  /// 调用方应提示「请先设置目标」而不是「保存失败」。
+  Future<void> setGroupGoalGate(
+    String groupId, {
+    bool? enabled,
+    int? maxAutoTurns,
+  }) async {
+    await _put(
+      '/chat/groups/$groupId/goal-gate',
+      body: {
+        if (enabled != null) 'enabled': enabled,
+        if (maxAutoTurns != null) 'max_auto_turns': maxAutoTurns,
+      },
+    );
+  }
+
+  /// `PUT /chat/groups/:group_id/follow-up-suggest` —— 「后续提问建议」开关。
+  ///
+  /// ⚠️ 这是**双层开关**：本端点只写 group 级 `metadata.follow_up_suggest`，
+  /// 全局 `FOLLOW_UP_SUGGEST_ENABLED` 为 false 时即使开启也不会生效。
+  ///
+  /// 关闭时服务端**删键而非写 false**（「键缺失 = 关闭」），读取方
+  /// [ChatGroup.followUpSuggestEnabled] 对缺失键返回 false，语义一致。
+  Future<void> setGroupFollowUpSuggest(String groupId, bool enabled) async {
+    await _put(
+      '/chat/groups/$groupId/follow-up-suggest',
+      body: {'enabled': enabled},
+    );
+  }
+
+  /// `PUT /chat/groups/:group_id/tts` —— 语音回复及其子开关。
+  ///
+  /// 全部参数可空，**只提交显式传入的键**（服务端要求至少传一个，否则 400）：
+  ///
+  /// - [enabled]：总开关。`false` 时服务端**整块删除** `metadata.tts`；
+  ///   **只传子开关时不动总开关**（否则「只改思考播报」会意外把语音回复整个关掉）。
+  /// - [narrateThinking]：思考阶段播报。开启时服务端归一化写入
+  ///   `narrate_thinking: true` + `narration_mode`；关闭时删两个键。
+  /// - [narrationMode]：`filler`（默认）或 `summary`。仅传本参数时，服务端**只在
+  ///   播报已开启时**才写入，避免留下 `narrate_thinking` 缺失但
+  ///   `narration_mode` 存在的畸形配置。
+  /// - [fileSummary]：文件产出播报。
+  ///
+  /// 服务端做浅合并，`provider_key` / `voice_id` 等本方法不管理的字段会被保留。
+  Future<void> setGroupTts(
+    String groupId, {
+    bool? enabled,
+    bool? narrateThinking,
+    String? narrationMode,
+    bool? fileSummary,
+  }) async {
+    await _put(
+      '/chat/groups/$groupId/tts',
+      body: {
+        if (enabled != null) 'enabled': enabled,
+        if (narrateThinking != null) 'narrate_thinking': narrateThinking,
+        if (narrationMode != null) 'narration_mode': narrationMode,
+        if (fileSummary != null) 'file_summary': fileSummary,
+      },
+    );
+  }
+
+  /// 设置 group 的目标文本（走**结构化 goal 表**，迁移 0022）。
+  ///
+  /// ## 为什么不用 `PUT /chat/groups/:group_id/goal`
+  ///
+  /// 那个端点（`chat_ext.go:112`）写的是 `chat_groups.goal` **旧列**——迁移 0022
+  /// 之后该列已不再被写入（「goal 变更 = 新建 `chat_goals` 行」）。保留它只是为
+  /// 兼容存量数据（`goalGateEffectiveGoal` 会回退读旧列）。本方法对齐 webapp，
+  /// 走结构化表，使 goal 变更后**任务列表与进度**也跟着走同一份数据。
+  ///
+  /// ## 语义：goal 变更 = 重新创建 goal
+  ///
+  /// 旧 active goal 由服务端归档，其历史与任务全部保留。故：
+  ///
+  /// 1. 先读当前 goal（`GET .../goals/current`，无 goal 时服务端回 `goal: null`）；
+  /// 2. **文本与当前 goal 相同时直接返回，不建新行**——否则双击保存（或调用方
+  ///    没禁用按钮）就会留下一串内容相同的 goal 版本，而「重新创建」语义下这
+  ///    不可逆（旧行只能归档）；
+  /// 3. 文本非空 → `POST .../goals` 新建；
+  /// 4. 文本为空且存在 current → `PATCH /chat/goals/:id` 置 `status=archived`。
+  ///    **不建新行**，否则会留下一堆空目标。
+  ///
+  /// 返回 void，由调用方补一次 [getGroup] 取权威状态（同本节的其它写方法）。
+  Future<void> setGroupGoal(String groupId, String goalText) async {
+    final text = goalText.trim();
+    final current = await _currentGoal(groupId);
+    if (current != null && current.goalText.trim() == text) return;
+    if (text.isNotEmpty) {
+      await _post(
+        '/chat/groups/$groupId/goals',
+        body: {'goal_text': text, 'tasks_source': 'manual'},
+      );
+    } else if (current != null) {
+      await _patch('/chat/goals/${current.id}', body: {'status': 'archived'});
+    }
+  }
+
+  /// 读 `GET /chat/groups/:group_id/goals/current` 的当前 goal。
+  ///
+  /// 只取 [setGroupGoal] 需要的两个字段（id 与文本），不建完整 DTO：服务端还回
+  /// `tasks` / `progress`，而本轮客户端不消费它们（Goal/Task 全量管理不在范围内）。
+  /// 无 goal 时服务端回 `{goal: null}`，此处归一成 `null`。
+  Future<({String id, String goalText})?> _currentGoal(String groupId) async {
+    final res = await _get('/chat/groups/$groupId/goals/current');
+    final goal = _asMap(res)['goal'];
+    if (goal is! Map) return null;
+    final m = Map<String, dynamic>.from(goal);
+    final id = (m['id'] as String?) ?? '';
+    if (id.isEmpty) return null;
+    return (id: id, goalText: (m['goal_text'] as String?) ?? '');
+  }
+
   // ==================== 时间线 ====================
 
   /// `GET /chat/groups/:group_id/timeline`
@@ -744,6 +887,29 @@ class ChatApi {
   Future<Object?> _patch(String path, {Map<String, dynamic>? body}) async {
     try {
       final res = await _dio.patch(path, data: body);
+      return _unwrap(res);
+    } on DioException catch (e) {
+      throw _toSpbError(e);
+    }
+  }
+
+  /// `PUT` 请求。
+  ///
+  /// ## 为什么必须有这个 helper
+  ///
+  /// 群级开关（goal-gate / follow-up-suggest / tts）在服务端注册的是 **PUT**
+  /// 专用端点（`chat_ext.go:83-89`），不是 PATCH。缺了 `_put` 就只能改用
+  /// `PATCH /chat/groups/:id` 的 metadata 通道，而那是**整包替换**语义：只提交
+  /// `{goal_gate}` 会连带清掉 `metadata.tts` 等其它子系统写入的键（webapp 历史
+  /// bug）。PUT 端点服务端做 CAS 读-改-写，既保其它键，也不与并发写者互相覆盖。
+  ///
+  /// ## 为什么要走 [_unwrap]
+  ///
+  /// 同 [_patch]：`validateStatus` 放行了 <500 的状态码，4xx 不会抛
+  /// `DioException`。不补判会把 `400 goal_required` 当成成功。
+  Future<Object?> _put(String path, {Map<String, dynamic>? body}) async {
+    try {
+      final res = await _dio.put(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
