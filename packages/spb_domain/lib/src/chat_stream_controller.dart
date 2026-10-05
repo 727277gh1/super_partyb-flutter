@@ -403,14 +403,24 @@ class ChatStreamController {
     // group 过滤：SSE 是 user 级订阅，会收到其他 group 的事件。
     // 全局模式（_groupId == null）不过滤。
     //
-    // ⚠️ **`group_updated` 是例外**：它的 groupId 指向「被变更的那个 group」，
-    // 而它与「当前打开哪个对话」无关（列表页在全局模式运行，但要实时反映
-    // 任何 group 的变更）。按当前 group 过滤会把「新建了另一个 group」这类
-    // 恰恰最需要的事件全部丢掉。故它在过滤**之前**先推入通知流。
+    // ⚠️ **`group_updated` 与 `group_title_updated` 是例外**：它们的 groupId
+    // 指向「被变更的那个 group」，而与「当前打开哪个对话」无关（列表页在全局
+    // 模式运行，但要实时反映任何 group 的变更）。按当前 group 过滤会把「新建了
+    // 另一个 group」这类恰恰最需要的事件全部丢掉。故它们在过滤**之前**先推入
+    // 通知流。
     //
-    // 放在这里（而非下面的 switch/归约层）的理由：它是**通知**而非对话状态，
+    // 放在这里（而非下面的 switch/归约层）的理由：它们是**通知**而非对话状态，
     // 不应受「当前聚焦哪个对话」约束；而 turn_activity 是对话状态，必须受约束。
-    if (event.eventType == EventTypes.groupUpdated) {
+    //
+    // ⚠️ 两者都不推游标（`group_title_updated` 的 `Transient: true` 见 Go
+    // `buildTitleUpdatedEvent`）：Transient 事件无有效 ID，拿它当 cursor 会
+    // 跳过其后的权威帧（AGENTS.md §5.4）。下面的游标推进已按
+    // `!event.transient` 把关，这里提前 return 的路径也**不能**顺手推进。
+    //
+    // （事件本身仍会落入 [_buffer]，但归约器对它没有 case、不产生对话项，
+    // 故对时间线无影响。）
+    if (event.eventType == EventTypes.groupUpdated ||
+        event.eventType == EventTypes.groupTitleUpdated) {
       final update = GroupUpdate.fromEvent(event);
       if (update != null && !_groupUpdatesController.isClosed) {
         _groupUpdatesController.add(update);
@@ -507,7 +517,9 @@ class ChatStreamController {
   /// 但**所有帧都被静默丢弃**（`_pushFrame`/`_setState` 在关闭后直接 return）
   /// ——表现为「看起来连上了，其实一条事件都没有」。
   ///
-  /// 故这里只取消**自己的**订阅并关闭**自己的**三个 StreamController。
+  /// 故这里只取消**自己的**订阅（`_frameSub` / `_stateSub`）并关闭**自己的**
+  /// 六个 StreamController（`_items` / `_gateDecisions` / `_activities` /
+  /// `_groupUpdates` / `_error` / `_state`）。
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

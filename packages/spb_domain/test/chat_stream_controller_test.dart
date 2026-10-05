@@ -950,6 +950,178 @@ void main() {
     });
   });
 
+  // 标题实时更新的回归防线。
+  //
+  // 缺口背景：`group_title_updated` 在 `EventTypes` 里已声明、服务端
+  // `chatgate/title_gate.go` 也确实会发（Transient、payload `{new_title}`），
+  // 但没有任何消费者——表现为「首轮对话后标题变了，列表里还是『新会话』，
+  // 除非手动刷新」。
+  //
+  // 与之配对的服务端 bug：发射端曾写 `title`、前端读 `new_title`，两边各自看
+  // 代码都「对」，导致该功能**从未生效过**（见 `title_gate_test.go` 的
+  // `TestTitleGateEmitsNewTitleKey`）。故这里用键名 `new_title`。
+  group('标题实时更新（group_title_updated）', () {
+    /// 造一个 group_title_updated 帧（Transient，见 Go buildTitleUpdatedEvent）。
+    Map<String, dynamic> titleUpdatedEvent({
+      String id = 'evt_gt_1',
+      String groupId = 'grp_1',
+      String? newTitle = '燕麦怎么吃',
+    }) => sseEvent(
+      EventTypes.groupTitleUpdated,
+      id: id,
+      groupId: groupId,
+      transient: true,
+      // globalSeq 为 0：Transient 事件不落库，无有效序号。
+      globalSeq: 0,
+      payload: {if (newTitle != null) 'new_title': newTitle},
+    );
+
+    test(
+      '收到 group_title_updated → 一条 GroupUpdate(op=title, title=新标题)',
+      () async {
+        final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+        mockTimeline();
+        await c.start(groupId: 'grp_1');
+
+        final pushed = <GroupUpdate>[];
+        final sub = c.groupUpdates.listen(pushed.add);
+
+        sse.push(EventTypes.groupTitleUpdated, titleUpdatedEvent());
+        await Future<void>.delayed(Duration.zero);
+
+        expect(pushed, hasLength(1));
+        expect(pushed.single.op, GroupUpdateOp.title);
+        expect(pushed.single.title, '燕麦怎么吃');
+        expect(pushed.single.groupId, 'grp_1');
+        // 该事件没有 status 快照，不得凭空给一个值（列表页会拿它覆盖现有状态）。
+        expect(pushed.single.status, isNull);
+
+        await sub.cancel();
+        await c.dispose();
+      },
+    );
+
+    test('游标不被推进（Transient 无有效 ID，作 cursor 会跳过权威帧）', () async {
+      // 这是本通道最危险的一步：一旦把 group_title_updated 的 eventId 记进
+      // cursor，重连时服务端会从它之后回放，而它是 Transient（未落库）——
+      // 用它定位等于跳过一个不存在的位置，其后的权威帧会永久丢失。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(EventTypes.groupTitleUpdated, titleUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sse.recordedEventIds, isEmpty, reason: 'Transient 事件不得作游标');
+
+      await c.dispose();
+    });
+
+    test('不受 group 过滤影响：聚焦 grp_1 时也能收到 grp_other 的标题变更', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.groupTitleUpdated,
+        titleUpdatedEvent(id: 'evt_other', groupId: 'grp_other'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1));
+      expect(pushed.single.groupId, 'grp_other');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('不进 items（标题更新不是时间线正文）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(EventTypes.groupTitleUpdated, titleUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty);
+
+      await c.dispose();
+    });
+
+    test('groupId 为空时丢弃（无法定位要更新哪一项）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(EventTypes.groupTitleUpdated, titleUpdatedEvent(groupId: ''));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, isEmpty);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('new_title 缺失/空串时不产生标题（不得把标题清空）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.groupTitleUpdated,
+        titleUpdatedEvent(id: 'evt_a', newTitle: null),
+      );
+      sse.push(
+        EventTypes.groupTitleUpdated,
+        titleUpdatedEvent(id: 'evt_b', newTitle: ''),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(2), reason: '事件本身仍要送达（op=title）');
+      expect(pushed[0].title, isNull);
+      expect(pushed[1].title, isNull);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('旧键名 title 不再被读取（服务端已改为 new_title）', () async {
+      // 服务端 2026-09 的修复方向是「改发射端」（前端两处一致读 new_title）。
+      // 本用例钉住：若有人把客户端改成读 payload.title，这里会失败。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.groupTitleUpdated,
+        sseEvent(
+          EventTypes.groupTitleUpdated,
+          transient: true,
+          globalSeq: 0,
+          payload: {'title': '旧键名的标题'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed.single.title, isNull);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+  });
+
   group('生命周期', () {
     test('reconnect 委托给 SseClient.resume', () async {
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');

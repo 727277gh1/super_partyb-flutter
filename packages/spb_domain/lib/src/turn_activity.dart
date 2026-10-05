@@ -147,7 +147,7 @@ enum GroupUpdateOp {
   bool get needsRefetch => this == unknown;
 }
 
-/// 一条 group 变更通知（由 `group_updated` 事件归一化而来）。
+/// 一条 group 变更通知（由 `group_updated` 或 `group_title_updated` 事件归一化而来）。
 ///
 /// ## 为什么是通知而不是快照
 ///
@@ -194,11 +194,37 @@ class GroupUpdate {
   /// 事件到达时间。
   final DateTime? at;
 
-  /// 从事件构造；非 `group_updated` 事件返回 null。
+  /// 从事件构造；不认识的类型返回 null。
   ///
   /// `groupId` 为空的事件无法定位要更新哪一项，丢弃（服务端不变量是「发布即
   /// 有 group id」，缺失属异常载荷）。
+  ///
+  /// ## 两类事件归一到这里
+  ///
+  /// - `group_updated`：完整的生命周期变更（created / deleted / archived /
+  ///   active / title / metadata），带 `{op, group: {id, title, status}}`。
+  /// - `group_title_updated`：Title Gate 在 turn 收尾时单独发的标题变更
+  ///   （`chatgate/title_gate.go`），payload 只有 `{new_title}`。
+  ///
+  /// 合并的理由：**对列表页而言两者是同一件事**（「某对话的标题变了」），
+  /// 分开走两条通道会让列表页写两套处理逻辑，而它已经能处理
+  /// [GroupUpdateOp.title]。
+  ///
+  /// ⚠️ 键名是 `new_title` 而不是 `title`。服务端曾在 2026-09 修复过这个 bug：
+  /// 发射端写 `title`、前端读 `new_title`，导致标题实时更新**从未生效过**。
+  /// 两边各自看代码都「对」，故这里用 Go 侧 `TestTitleGateEmitsNewTitleKey`
+  /// 钉住的键名（见 `title_gate_test.go`）。
   static GroupUpdate? fromEvent(ChatEvent ev) {
+    if (ev.eventType == EventTypes.groupTitleUpdated) {
+      if (ev.groupId.isEmpty) return null;
+      return GroupUpdate(
+        op: GroupUpdateOp.title,
+        groupId: ev.groupId,
+        // 该事件**没有** status 快照——不能拿 null 去覆盖列表里的现有状态。
+        title: _strOrNull(ev.payload?['new_title']),
+        at: ev.createdAt,
+      );
+    }
     if (ev.eventType != EventTypes.groupUpdated) return null;
     if (ev.groupId.isEmpty) return null;
     final snap = ev.groupUpdateSnapshot;

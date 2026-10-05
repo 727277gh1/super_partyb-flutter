@@ -445,6 +445,12 @@ class EventReducer {
           // 原注释声称「如连接指示器、TTS 播放器」会消费，但客户端
           // **从来没有** TTS 播放器（`grep tts|audioPlayer` 零命中），
           // 误导性的「托底」比没有注释更糟（会让排障者以为有处理而放过泄漏）。
+          //
+          // ⚠️ `group_title_updated` 落在这里是**有意**的，不是遗漏：它是
+          // Transient 的「你手上的标题过期了」通知，真源在 `chat_groups.title`，
+          // 时间线里不该出现「已改名」气泡。它由 `GroupUpdate.fromEvent`
+          // 归一后走 `groupUpdates` 通道驱动列表刷新
+          // （见 `ChatStreamController._onFrame` 的例外推送）。
           break;
       }
     }
