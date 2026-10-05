@@ -34,7 +34,8 @@ class LoopbackSignInResult {
 /// 1. bind 127.0.0.1:<随机端口>（LoopbackRedirectServer）
 /// 2. 生成 state（CSRF）+ PKCE 对（RFC 7636 S256）
 /// 3. 拼直连 IdP 的授权 URL（redirect_uri = http://127.0.0.1:<port>/callback）
-/// 4. xdg-open 交给系统浏览器 → IdP 登录页
+/// 4. 交给系统默认程序打开授权 URL（`openInBrowser` → `spb_platform` 的
+///    `spawnSystemOpen`：Linux `xdg-open` / macOS `open` / Windows `explorer`）
 /// 5. 用户登录 → IdP 302 回 loopback 端口 → 浏览器 GET 本地监听器
 /// 6. 监听器取出 code（+ state 校验）→ 关停监听
 /// 7. POST {issuer}/oauth2/token 换 token（public client：无 secret，带 verifier）

@@ -786,8 +786,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
       // 打开 Markdown 回复里的链接。
       //
-      // 走与 OIDC 登录同一个入口（`openInBrowser`，Linux 用 `xdg-open`），
-      // 不另引 `url_launcher`——理由见 `auth_browser.dart` 的注释。
+      // 走与 OIDC 登录同一个入口（`openInBrowser`，三平台分派在
+      // `spb_platform` 的 `spawnSystemOpen`），不另引 `url_launcher`
+      // ——理由见 `auth_browser.dart` 的注释。
       // 失败只记日志：链接点不开不该弹错误打断阅读。
       onOpenLink: (url, _) => unawaited(
         openInBrowser(url)

@@ -153,8 +153,9 @@ class ConversationPage extends StatefulWidget {
 
   /// 打开 Markdown 回复里的链接。null 时链接不响应点击（仅保留样式）。
   ///
-  /// 与 [onDownloadAgentFile] 同理：打开 URL 属平台 IO（Linux 走 `xdg-open`，
-  /// 移动端走 `url_launcher`），页面只收集意图，由 app 层注入。
+  /// 与 [onDownloadAgentFile] 同理：打开 URL 属平台 IO（桌面端走 `xdg-open` /
+  /// `open` / `explorer`，移动端走 `url_launcher`），页面只收集意图，由 app
+  /// 层注入。
   final void Function(String url, String title)? onOpenLink;
 
   /// 停止正在生成的轮次（入参是 [ConversationItem.turnId]）。

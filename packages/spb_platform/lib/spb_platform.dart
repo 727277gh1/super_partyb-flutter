@@ -16,11 +16,14 @@ library;
 ///   DroppedFile                 —— 拖入文件的归一形态（惰性读字节）
 ///   scanLocalGroups / scanLocalStats —— 本地同步目录扫描（只认 group_id 形状）
 ///   executePrunePlan            —— 按计划清理本地目录（删除前重新校验）
+///   HostPlatform / ProcessRunner / spawnSystemOpen
+///                               —— 系统「打开」命令的三平台分派（可注入以便测试）
 export 'src/desktop_capabilities.dart';
 export 'src/directory_picker.dart';
 export 'src/drag_drop.dart';
 export 'src/file_sink.dart';
 export 'src/local_prune.dart';
 export 'src/overlay_files.dart';
+export 'src/system_open.dart';
 export 'src/tray.dart';
 export 'src/window_manager.dart';

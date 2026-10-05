@@ -1,8 +1,8 @@
-import 'dart:io';
 import 'dart:math';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 /// 在系统浏览器中打开网关的 OIDC 授权入口。
 ///
@@ -77,18 +77,23 @@ String generateOidcState({Random? random}) {
 
 /// 用系统默认浏览器打开 URL。
 ///
-/// 不引入 `url_launcher`：当前只需 Linux 桌面（开发平台），`xdg-open` 是
-/// Linux 桌面标准入口。将来支持 Windows/macOS 时在此按平台分支即可，
-/// **调用方不需要改**。
+/// 三平台分派统一委托给 `spb_platform` 的 [spawnSystemOpen]（`xdg-open` /
+/// `open` / `explorer`）——与交付物同步的 `revealPath` / `openFile` 走**同一
+/// 份**实现，避免两处平台分支各自漂移（历史上本函数只实现了 Linux，导致
+/// Windows/macOS 上 OIDC 登录与 Markdown 链接点击都不可用）。
+///
+/// 不引入 `url_launcher`：桌面端只需系统命令，少一个插件依赖。
+///
+/// ## 为什么失败要抛异常（而 `spb_platform` 返回 bool）
+///
+/// [spawnSystemOpen] 的契约是「静默降级返回 false」，适合「打开一个本地文件」
+/// 这类失败只需提示一次的场景。而本函数的调用方需要**用户可见的原因**：
+/// [openGatewaySignIn] 把它翻成「无法打开浏览器，请手动访问：`<url>`」，
+/// `router.dart` 的 `onOpenLink` 记一条日志。故在此把 `false` 翻成
+/// [PlatformError]，保留「谁负责展示」的决定权在调用方。
 Future<void> openInBrowser(String url) async {
-  if (Platform.isLinux) {
-    final result = await Process.run('xdg-open', [url]);
-    if (result.exitCode != 0) {
-      throw PlatformError('xdg-open 退出码 ${result.exitCode}');
-    }
-    return;
+  final ok = await spawnSystemOpenHere(url);
+  if (!ok) {
+    throw PlatformError('无法在当前平台打开链接（已尝试系统默认程序）');
   }
-  // 其余平台尚未验证：明确报错而不是静默什么都不做（静默会让用户
-  // 以为「点了没反应」）。
-  throw const PlatformError('当前平台暂不支持打开浏览器（仅实现了 Linux）');
 }

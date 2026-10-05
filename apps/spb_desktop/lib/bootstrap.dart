@@ -563,8 +563,8 @@ class PlatformDesktopCapabilities
 
   @override
   Future<bool> revealPath(String path) async {
-    // 先校验目录存在（对齐 Tauri 的「同步目录已不存在」检查）：避免 xdg-open
-    // 打开一个不存在的路径而用户以为是应用坏了。
+    // 先校验目录存在（对齐 Tauri 的「同步目录已不存在」检查）：避免 spawn
+    // 一个打开空路径的文件管理器而用户以为是应用坏了。
     try {
       if (!await Directory(path).exists()) {
         SpbLog.warn('revealPath 目录不存在', {'path': path});
@@ -604,35 +604,21 @@ class PlatformDesktopCapabilities
   /// 在 Linux/macOS 上，「用默认程序打开文件」与「在文件管理器中打开目录」
   /// 走的是**同一个**命令（`xdg-open` / `open`）——系统按目标类型分派。
   /// 两者的差别在**校验**（目录 vs 文件）与**调用意图**，不在 spawn 方式。
-  /// 故抽出本函数，避免复制三份平台分支（本机只能验证 Linux 分支，复制
-  /// 未验证的分支更容易漂移）。
+  /// 故共用一条路径。
+  ///
+  /// ## 为什么委托给 `spb_platform` 而不是在本类里写三分支
+  ///
+  /// 平台分派必须只有**一份**。此前本类与 `auth_browser.dart` 各写了一遍，
+  /// 结果后者只实现了 Linux，Windows/macOS 上 OIDC 登录与链接点击不可用。
+  /// 现在两份都走 [spawnSystemOpen]，新增平台只改 `spb_platform`。
   Future<bool> _spawnSystemOpen(String path, {required String what}) async {
-    try {
-      ProcessResult result;
-      // 按平台 spawn（本机仅验证 Linux；Windows/macOS 分支写了但无运行环境验证，
-      // 见 AGENTS.md §8）。
-      if (Platform.isLinux) {
-        result = await Process.run('xdg-open', [path]);
-      } else if (Platform.isMacOS) {
-        result = await Process.run('open', [path]);
-      } else if (Platform.isWindows) {
-        result = await Process.run('explorer', [path]);
-      } else {
-        SpbLog.warn('当前平台不支持打开路径', {'path': path});
-        return false;
-      }
-      if (result.exitCode != 0) {
-        SpbLog.warn('打开$what spawn 返回非 0', {
-          'path': path,
-          'exit': result.exitCode,
-        });
-        return false;
-      }
-      return true;
-    } on Object catch (e) {
-      SpbLog.warn('打开$what spawn 异常', {'path': path, 'error': '$e'});
-      return false;
+    final ok = await spawnSystemOpenHere(path);
+    if (!ok) {
+      // 具体原因（不支持 / 退出码非 0 / spawn 异常）已在 `spawnSystemOpen`
+      // 内部按 warn 记录，此处不重复记日志，只把结果告知调用方。
+      SpbLog.debug('打开$what失败', {'path': path});
     }
+    return ok;
   }
 
   // ---------------------------------------------------------------------------
