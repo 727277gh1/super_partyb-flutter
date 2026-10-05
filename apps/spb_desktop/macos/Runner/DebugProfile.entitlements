@@ -15,5 +15,13 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!--
+	  用户所选文件的读写。与 Release.entitlements 同因（交付物同步用
+	  `LocalFileSink` 写用户选定目录），**两份文件必须同时声明**：
+	  只改 Release 会让 debug 构建与正式包行为不一致，问题被 debug
+	  构建掩盖（见 AGENTS.md §8）。
+	-->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 </dict>
 </plist>
