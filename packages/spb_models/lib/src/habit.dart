@@ -23,6 +23,12 @@
 /// ⚠️ **`/me/habits` 只有 create 与 trigger 两个别名**
 /// （`registerUserHabitAliasRoutes`），列表/详情/更新都在 `/api/habits` 下。
 ///
+/// ## `trigger_context` / `feedback_payload` 的两个形状
+///
+/// 候选建议列表（`habitRunToMap`）下发**对象**，执行记录
+/// （`habitRunsWithReply`）下发 `*_json` **字符串**。用 `habitStr` 读对象形态会
+/// 得到不合法的 JSON 文本，下游解析失败后被静默吃掉（见 [habitJsonString]）。
+///
 /// ## 命名是双形态，且有两处「裸列名」陷阱
 ///
 /// `list` 直接序列化 sqlc 生成的 `queries.HabitPattern`，JSON tag 是
@@ -92,6 +98,31 @@ DateTime? habitDate(Map<String, dynamic> json, String camel, String snake) {
   final s = habitStr(json, camel, snake);
   if (s == null) return null;
   return DateTime.tryParse(s)?.toLocal();
+}
+
+/// 取「JSON 对象」或「JSON 字符串」两种形态的字段，统一归一为**字符串**。
+///
+/// ## 为什么需要这个（不是冗余防御）
+///
+/// 服务端两个端点对同一份数据下发了**不同的形状与键名**：
+///
+/// | 端点 | 键名 | 类型 |
+/// |---|---|---|
+/// | `habitRunToMap`（候选建议列表） | `trigger_context` / `feedback_payload` | **对象** |
+/// | `habitRunsWithReply`（执行记录） | `trigger_context_json` / `feedback_payload_json` | 字符串 |
+///
+/// 只用 `habitStr` 读对象形态会得到 Dart 的 `Map.toString()`
+/// （`{topic_key: x}`——**键无引号，不是合法 JSON**），下游 `jsonDecode` 抛
+/// `FormatException` 后被当成「无上下文」静默吃掉：表现为候选卡显示「未命名」、
+/// 无理由，已处理项显示不出「习惯已生效」。比 500 更难发现。
+///
+/// 故这里把对象形态 `jsonEncode` 回字符串，下游的 `_decodeJsonObject` 保持不变。
+String? habitJsonString(Map<String, dynamic> json, String key) {
+  final v = json[key] ?? json['${key}_json'];
+  if (v == null) return null;
+  if (v is String) return v.isEmpty ? null : v;
+  if (v is Map || v is List) return jsonEncode(v);
+  return null;
 }
 
 Map<String, dynamic> habitMap(

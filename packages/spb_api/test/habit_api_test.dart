@@ -235,6 +235,53 @@ void main() {
       expect(captured!['acceptance_level'], 'auto_run');
     });
 
+    test('patchHabit 能改 topic_key（服务端 update 接受它）', () async {
+      Map<String, dynamic>? captured;
+      adapter.onPatch(
+        '/api/habits/hp-1',
+        (server) => server.reply(200, {'updated': true, 'pattern_id': 'hp-1'}),
+        data: Matchers.any,
+      );
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            captured = options.data as Map<String, dynamic>?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      await api.patchHabit('hp-1', topicKey: 'weekly-report');
+
+      expect(captured!.keys, ['topic_key']);
+      expect(captured!['topic_key'], 'weekly-report');
+    });
+
+    test('patchHabit 的 preferredAgentId 空串原样发送（服务端当清除）', () async {
+      // 服务端 `PreferredAgentID json.RawMessage` 三态：nil=未传、null=清除、
+      // `"x"`=设置；随后 `toNullString(TrimSpace(v))` 把空串也归成「无效」=清除。
+      // 故空串必须真的发出去（不能被 `if (x != null)` 之类的过滤吃掉）。
+      Map<String, dynamic>? captured;
+      adapter.onPatch(
+        '/api/habits/hp-1',
+        (server) => server.reply(200, {'updated': true, 'pattern_id': 'hp-1'}),
+        data: Matchers.any,
+      );
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            captured = options.data as Map<String, dynamic>?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      await api.patchHabit('hp-1', preferredAgentId: '');
+
+      expect(captured!.containsKey('preferred_agent_id'), isTrue);
+      expect(captured!['preferred_agent_id'], '');
+    });
+
     test('resolveSuggestion 的 snooze_until 是 UTC RFC3339（无毫秒）', () async {
       Map<String, dynamic>? captured;
       adapter.onPost(
@@ -300,6 +347,162 @@ void main() {
       expect(r.patternId, 'hp-new');
       expect(r.suggestion!.userFeedback, HabitUserFeedback.accepted);
     });
+
+    test('edit_and_accept 带 pattern_patch（服务端只在该 action 消费它）', () async {
+      Map<String, dynamic>? captured;
+      adapter.onPost(
+        '/api/chat/habit-suggestions/run-1/resolve',
+        (server) => server.reply(200, {
+          'resolved': true,
+          'suggestion': {'id': 'run-1', 'user_feedback': 'accepted'},
+          'pattern_id': 'hp-new',
+        }),
+        data: Matchers.any,
+      );
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            captured = options.data as Map<String, dynamic>?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      final r = await api.resolveSuggestion(
+        'run-1',
+        action: HabitSuggestionAction.editAndAccept,
+        patternPatch: {
+          'topic_key': 'weekly-report-v2',
+          'trigger_config': {
+            'times': [
+              {'hour': 10, 'minute': 30},
+            ],
+            'weekday': [2, 4],
+          },
+        },
+      );
+
+      expect(captured!['action'], 'edit_and_accept');
+      expect(captured!['pattern_patch'], isA<Map<String, dynamic>>());
+      final patch = captured!['pattern_patch'] as Map<String, dynamic>;
+      // 键名原样透传：服务端 applyPatternPatch 认 topic_key 与嵌套 trigger_config。
+      expect(patch['topic_key'], 'weekly-report-v2');
+      expect(patch['trigger_config'], {
+        'times': [
+          {'hour': 10, 'minute': 30},
+        ],
+        'weekday': [2, 4],
+      });
+      expect(r.resolved, isTrue);
+    });
+
+    test('edit_and_accept 的 patch 可只含一个键（增量而非整包替换）', () async {
+      // 服务端 applyPatternPatch 的合并语义是「出现即覆盖、未出现即保留」，
+      // 故客户端不必（也不应）回填未改的字段——回填会把用户在别处的修改覆盖。
+      Map<String, dynamic>? captured;
+      adapter.onPost(
+        '/api/chat/habit-suggestions/run-1/resolve',
+        (server) => server.reply(200, {
+          'resolved': true,
+          'suggestion': {'id': 'run-1', 'user_feedback': 'accepted'},
+          'pattern_id': 'hp-new',
+        }),
+        data: Matchers.any,
+      );
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            captured = options.data as Map<String, dynamic>?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      await api.resolveSuggestion(
+        'run-1',
+        action: HabitSuggestionAction.editAndAccept,
+        patternPatch: {'preferred_agent_id': null},
+      );
+
+      final patch = captured!['pattern_patch'] as Map<String, dynamic>;
+      // ⚠️ 显式 null 与「不传该键」不同：服务端把 null 解释为「清除指定 agent」。
+      // 若把 null 过滤掉（如用 whereValueNotNull），用户就永远清不掉。
+      expect(patch.containsKey('preferred_agent_id'), isTrue);
+      expect(patch['preferred_agent_id'], isNull);
+      expect(patch.containsKey('topic_key'), isFalse);
+      expect(patch.containsKey('trigger_config'), isFalse);
+    });
+
+    test('其他 action 即使传了 patternPatch 也不下发（服务端不消费）', () async {
+      // 服务端 PatternPatch 字段注释明写「仅 edit_and_accept 消费」。其余 action
+      // 带上它只会让服务端白跑一次 applyPatternPatch，且可能被将来的校验逻辑
+      // 当成异常输入。
+      for (final action in [
+        HabitSuggestionAction.accept,
+        HabitSuggestionAction.dismiss,
+        HabitSuggestionAction.snooze,
+      ]) {
+        Map<String, dynamic>? captured;
+        adapter.onPost(
+          '/api/chat/habit-suggestions/run-1/resolve',
+          (server) => server.reply(200, {
+            'resolved': true,
+            'suggestion': {'id': 'run-1'},
+            'pattern_id': '',
+          }),
+          data: Matchers.any,
+        );
+        final interceptor = InterceptorsWrapper(
+          onRequest: (options, handler) {
+            captured = options.data as Map<String, dynamic>?;
+            handler.next(options);
+          },
+        );
+        dio.interceptors.add(interceptor);
+
+        await api.resolveSuggestion(
+          'run-1',
+          action: action,
+          patternPatch: {'topic_key': 'should-not-be-sent'},
+        );
+
+        expect(
+          captured!.containsKey('pattern_patch'),
+          isFalse,
+          reason: '${action.wire} 不是 edit_and_accept，不应下发 pattern_patch',
+        );
+        dio.interceptors.remove(interceptor);
+      }
+    });
+
+    test('edit_and_accept 不传 patternPatch 时不下发该键（等价于 accept）', () async {
+      Map<String, dynamic>? captured;
+      adapter.onPost(
+        '/api/chat/habit-suggestions/run-1/resolve',
+        (server) => server.reply(200, {
+          'resolved': true,
+          'suggestion': {'id': 'run-1', 'user_feedback': 'accepted'},
+          'pattern_id': 'hp-new',
+        }),
+        data: Matchers.any,
+      );
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            captured = options.data as Map<String, dynamic>?;
+            handler.next(options);
+          },
+        ),
+      );
+
+      await api.resolveSuggestion(
+        'run-1',
+        action: HabitSuggestionAction.editAndAccept,
+      );
+
+      expect(captured!['action'], 'edit_and_accept');
+      expect(captured!.containsKey('pattern_patch'), isFalse);
+    });
   });
 
   group('响应解析', () {
@@ -357,6 +560,43 @@ void main() {
         expect(s.id, 'run-sugg');
         expect(s.topicKey, 'daily-standup');
         expect(s.isPending, isTrue);
+      },
+    );
+
+    test(
+      'listSuggestions 也吃对象形态的 trigger_context / feedback_payload',
+      () async {
+        // ⚠️ 回归锁：真实 `habitRunToMap` 下发的是**对象**（不是 `*_json` 字符串）。
+        // 只读字符串形态会让候选卡静默变成「未命名 / 无理由」，且已处理项
+        // 显示不出「习惯已生效」——不会报错，比 500 更难发现。
+        adapter.onGet(
+          '/api/chat/habit-suggestions',
+          (server) => server.reply(200, {
+            'items': [
+              {
+                'id': 'run-obj',
+                'trigger_reason': 'candidate_detected',
+                'outcome': 'suggested',
+                'user_feedback': 'accepted',
+                'trigger_context': {
+                  'topic_key': 'weekly-report',
+                  'reasons': ['每周一你都会让我写周报'],
+                },
+                'feedback_payload': {
+                  'action': 'accept',
+                  'resolved_pattern_id': 'hp-1',
+                },
+              },
+            ],
+          }),
+          queryParameters: {'status': 'pending'},
+        );
+
+        final s = (await api.listSuggestions()).single;
+        expect(s.topicKey, 'weekly-report');
+        expect(s.reasons, ['每周一你都会让我写周报']);
+        expect(s.feedbackPayload?['resolved_pattern_id'], 'hp-1');
+        expect(s.hasResolvedPattern, isTrue);
       },
     );
 

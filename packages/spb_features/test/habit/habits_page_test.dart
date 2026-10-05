@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -26,6 +27,7 @@ void main() {
     HabitSourceType source = HabitSourceType.manual,
     int triggerCount = 3,
     DateTime? nextFireAt,
+    HabitTriggerType triggerType = HabitTriggerType.timeBased,
     String triggerConfigJson =
         '{"weekday":[1],"times":[{"hour":9,"minute":0}]}',
   }) => UserHabit.fromJson({
@@ -33,7 +35,7 @@ void main() {
     'userId': 'usr-1',
     'originGroupId': 'grp-1',
     'topicKey': topicKey,
-    'triggerType': 'time_based',
+    'triggerType': triggerType.wire,
     'triggerConfigJson': triggerConfigJson,
     'acceptanceLevel': level.wire,
     'sourceType': source.wire,
@@ -71,6 +73,79 @@ void main() {
     'user_feedback': feedback?.wire,
   });
 
+  /// 造一条建议（`habitRunToMap` 形状，即列表端点返回的）。
+  HabitSuggestion suggestion({
+    String id = 'sugg-1',
+    String topicKey = 'weekly-report',
+    String? feedback,
+    Map<String, dynamic>? feedbackPayload,
+    String triggerContextJson =
+        '{"topic_key":"weekly-report","hour":9,"reasons":["每周一你都会让我写周报"]}',
+  }) => HabitSuggestion.fromListItem({
+    'id': id,
+    'user_id': 'usr-1',
+    'origin_group_id': 'grp-1',
+    'trigger_reason': 'candidate_detected',
+    'outcome': 'suggested',
+    'trigger_context_json': triggerContextJson,
+    'user_feedback': feedback,
+    'feedback_payload': feedbackPayload,
+    'created_at': '2026-10-04T01:30:00Z',
+  });
+
+  /// 造一份洞察摘要（`habit_insights.go` 的 gin.H 形状）。
+  HabitInsightsSummary insights({
+    int days = 30,
+    int created = 4,
+    double acceptRate = 0.5,
+    int accepted = 2,
+    int dismissed = 1,
+    int snoozed = 1,
+    int pending = 0,
+    int triggerCount = 6,
+    int continuedRuns = 3,
+    int recalibrationTotal = 0,
+  }) => HabitInsightsSummary.fromJson({
+    'window': {
+      'days': days,
+      'start_at': '2026-09-04T00:00:00Z',
+      'end_at': '2026-10-04T00:00:00Z',
+    },
+    'suggestions': {
+      'created_count': created,
+      'accept_rate': acceptRate,
+      'feedback_counts': {
+        'accepted': accepted,
+        'dismissed': dismissed,
+        'snoozed': snoozed,
+        'pending': pending,
+      },
+      'by_topic': const [],
+      'by_hour': const [],
+      'by_weekday': const [],
+    },
+    'due_rules': {
+      'trigger_count': triggerCount,
+      'reward_count': 0,
+      'continued_interaction': {
+        'total_runs': triggerCount,
+        'continued_runs': continuedRuns,
+        'continued_rate': 0.5,
+      },
+      'recalibration': {
+        'total_count': recalibrationTotal,
+        'reason_counts': {'acceptance_feedback': 0, 'blocking_feedback': 0},
+      },
+      'by_user_day': const [],
+      'by_group_day': const [],
+    },
+    'signal_coverage': {
+      'user_message_count': 10,
+      'routing_selected_count': 4,
+      'coverage_rate': 0.4,
+    },
+  });
+
   Widget host({
     List<UserHabit>? habits,
     List<HabitRun>? runs,
@@ -81,8 +156,20 @@ void main() {
     Future<void> Function(UserHabit)? onResume,
     Future<void> Function(UserHabit)? onArchive,
     Future<String> Function(HabitDraft)? onCreate,
+    EditHabit? onEdit,
+    LoadHabitRuns? loadHabitRuns,
     void Function(String, String)? onOpenTurn,
     Object? error,
+    // ---------- 建议收件箱 ----------
+    List<HabitSuggestion>? suggestions,
+    Future<List<HabitSuggestion>> Function(HabitSuggestionListFilter)?
+    loadSuggestions,
+    ResolveHabitSuggestion? resolveSuggestion,
+    UnresolveHabitSuggestion? unresolveSuggestion,
+    // ---------- 洞察 ----------
+    HabitInsightsSummary? insightsSummary,
+    LoadHabitInsights? loadInsights,
+    Object? insightsError,
   }) => MaterialApp(
     home: HabitsPage(
       loadHabits:
@@ -103,8 +190,30 @@ void main() {
       onResume: onResume,
       onArchive: onArchive,
       onCreate: onCreate,
+      onEdit: onEdit,
+      loadHabitRuns: loadHabitRuns,
       onOpenTurn: onOpenTurn,
+      loadSuggestions: loadSuggestions,
+      resolveSuggestion: resolveSuggestion,
+      unresolveSuggestion: unresolveSuggestion,
+      loadInsights: loadInsights,
     ),
+  );
+
+  /// 注入了建议回调的 host（三个 Tab）。默认建议列表为空。
+  Widget suggestionsHost({
+    List<HabitSuggestion>? items,
+    Future<List<HabitSuggestion>> Function(HabitSuggestionListFilter)?
+    loadSuggestions,
+    ResolveHabitSuggestion? resolveSuggestion,
+    UnresolveHabitSuggestion? unresolveSuggestion,
+  }) => host(
+    habits: const [],
+    runs: const [],
+    loadSuggestions:
+        loadSuggestions ?? (_) async => items ?? const <HabitSuggestion>[],
+    resolveSuggestion: resolveSuggestion,
+    unresolveSuggestion: unresolveSuggestion,
   );
 
   group('规则列表', () {
@@ -462,6 +571,631 @@ void main() {
 
       expect(calls, greaterThan(1));
       expect(find.text('weekly report'), findsOneWidget);
+    });
+  });
+
+  group('建议 Tab 的可见性', () {
+    testWidgets('未注入 loadSuggestions 时只有两个 Tab（向后兼容）', (tester) async {
+      await tester.pumpWidget(host(habits: [habit()]));
+      await tester.pumpAndSettle();
+
+      expect(find.text('规则'), findsOneWidget);
+      expect(find.text('执行记录'), findsOneWidget);
+      expect(find.text('建议'), findsNothing);
+      // 未注入时不渲染「显示已处理」开关（它属于建议 Tab）。
+      expect(
+        find.byKey(const ValueKey('habit-suggestions-show-resolved')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('注入后出现第三个 Tab，且能切过去', (tester) async {
+      await tester.pumpWidget(
+        suggestionsHost(
+          items: [suggestion()],
+          resolveSuggestion: (s, action, {snooze}) async {},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('建议'), findsOneWidget);
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      // 卡片与时间线里的是同一个组件（同主题名、同按钮）。
+      expect(find.text('weekly report'), findsOneWidget);
+      expect(find.byKey(const ValueKey('habit-accept')), findsOneWidget);
+    });
+
+    testWidgets('空列表给空态而不是转圈', (tester) async {
+      await tester.pumpWidget(suggestionsHost(items: const []));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.textContaining('没有待处理的建议'), findsOneWidget);
+    });
+  });
+
+  group('建议 Tab：动作', () {
+    testWidgets('「让它自动做」提交 accept 并刷新列表', (tester) async {
+      final calls = <HabitSuggestionAction>[];
+      var loads = 0;
+      await tester.pumpWidget(
+        suggestionsHost(
+          items: [suggestion()],
+          loadSuggestions: (_) async {
+            loads++;
+            return loads == 1 ? [suggestion()] : const <HabitSuggestion>[];
+          },
+          resolveSuggestion: (s, action, {snooze}) async => calls.add(action),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-accept')));
+      await tester.pumpAndSettle();
+
+      expect(calls, [HabitSuggestionAction.accept]);
+      // 成功后重拉：服务端的权威状态可能与本地预期不同（故不本地移除）。
+      expect(loads, 2);
+      expect(find.byKey(const ValueKey('habit-accept')), findsNothing);
+    });
+
+    testWidgets('「忽略」提交 dismiss', (tester) async {
+      final calls = <HabitSuggestionAction>[];
+      await tester.pumpWidget(
+        suggestionsHost(
+          items: [suggestion()],
+          resolveSuggestion: (s, action, {snooze}) async => calls.add(action),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-dismiss')));
+      await tester.pumpAndSettle();
+
+      expect(calls, [HabitSuggestionAction.dismiss]);
+    });
+
+    testWidgets('「稍后」提交 snooze 且带选中的时长', (tester) async {
+      HabitSnoozeOption? got;
+      await tester.pumpWidget(
+        suggestionsHost(
+          items: [suggestion()],
+          resolveSuggestion: (s, action, {snooze}) async => got = snooze,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-snooze')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(HabitSnoozeOption.oneHour.label));
+      await tester.pumpAndSettle();
+
+      expect(got, HabitSnoozeOption.oneHour);
+    });
+
+    testWidgets('未注入 resolveSuggestion 时卡片没有动作按钮', (tester) async {
+      await tester.pumpWidget(suggestionsHost(items: [suggestion()]));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('habit-accept')), findsNothing);
+      expect(find.byKey(const ValueKey('habit-dismiss')), findsNothing);
+      // 只读展示仍在（用户至少知道「有这条建议」）。
+      expect(find.text('weekly report'), findsOneWidget);
+    });
+  });
+
+  group('建议 Tab：撤销', () {
+    testWidgets('「显示已处理」切到 dismissed 分支（服务端只有两个分支）', (tester) async {
+      final filters = <HabitSuggestionListFilter>[];
+      await tester.pumpWidget(
+        suggestionsHost(
+          loadSuggestions: (f) async {
+            filters.add(f);
+            return const <HabitSuggestion>[];
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('habit-suggestions-show-resolved')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(filters, [
+        HabitSuggestionListFilter.pending,
+        HabitSuggestionListFilter.dismissed,
+      ]);
+    });
+
+    testWidgets('已处理项可撤销，撤销后刷新列表', (tester) async {
+      final unresolved = <String>[];
+      var loads = 0;
+      await tester.pumpWidget(
+        suggestionsHost(
+          loadSuggestions: (_) async {
+            loads++;
+            return loads == 1
+                ? [
+                    suggestion(
+                      id: 'sugg-9',
+                      feedback: 'dismissed',
+                      feedbackPayload: const {'action': 'dismiss'},
+                    ),
+                  ]
+                : const <HabitSuggestion>[];
+          },
+          unresolveSuggestion: (id) async => unresolved.add(id),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-unresolve-sugg-9')));
+      await tester.pumpAndSettle();
+
+      expect(unresolved, ['sugg-9']);
+      expect(loads, 2);
+    });
+
+    testWidgets('未注入 unresolveSuggestion 时不渲染撤销入口', (tester) async {
+      await tester.pumpWidget(
+        suggestionsHost(
+          items: [
+            suggestion(
+              id: 'sugg-9',
+              feedback: 'dismissed',
+              feedbackPayload: const {'action': 'dismiss'},
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('habit-unresolve-sugg-9')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('409（已被别处处理）弹提示并说明要刷新', (tester) async {
+      await tester.pumpWidget(
+        suggestionsHost(
+          items: [suggestion()],
+          resolveSuggestion: (s, action, {snooze}) async =>
+              throw const HttpError(409, '建议已被处理或状态不符'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('建议'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-accept')));
+      await tester.pumpAndSettle();
+
+      // 用户必须知道「是别人处理过了」而不是「客户端坏了」。
+      expect(find.textContaining('已被别处处理'), findsOneWidget);
+      expect(find.textContaining('建议已被处理或状态不符'), findsOneWidget);
+    });
+  });
+
+  group('洞察摘要', () {
+    testWidgets('未注入 loadInsights 时不渲染摘要条', (tester) async {
+      await tester.pumpWidget(host(habits: [habit()]));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('habit-insights-bar')), findsNothing);
+    });
+
+    testWidgets('渲染建议计数与采纳率', (tester) async {
+      await tester.pumpWidget(
+        host(habits: const [], loadInsights: (_) async => insights()),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('habit-insights-bar')), findsOneWidget);
+      expect(find.textContaining('近 30 天的习惯表现'), findsOneWidget);
+      expect(find.textContaining('50%'), findsOneWidget);
+      expect(find.textContaining('规则触发 6 次'), findsOneWidget);
+    });
+
+    testWidgets('没有建议时不显示「采纳率 0%」（那不是观测，是没有分母）', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: const [],
+          loadInsights: (_) async => insights(created: 0, accepted: 0),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('habit-insights-empty')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('采纳率'), findsNothing);
+      expect(find.textContaining('0%'), findsNothing);
+    });
+
+    testWidgets('不呈现重校准指标（Go 版恒为 0，渲染会误导）', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: const [],
+          // 即使服务端某天开始下发非零值，也不该在本摘要条里出现。
+          loadInsights: (_) async => insights(recalibrationTotal: 7),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('重校准'), findsNothing);
+      expect(find.textContaining('7'), findsNothing);
+    });
+
+    testWidgets('洞察加载失败时静默，页面主体仍可用', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: [habit()],
+          loadInsights: (_) async => throw const NetworkError('摘要挂了'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 摘要不该拖垮整页：规则仍在，且没有错误页。
+      expect(find.byKey(const ValueKey('habit-insights-bar')), findsNothing);
+      expect(find.text('weekly report'), findsOneWidget);
+      expect(find.byKey(const ValueKey('habits-retry')), findsNothing);
+    });
+  });
+
+  group('规则菜单：编辑与执行记录入口', () {
+    testWidgets('未注入 onEdit / loadHabitRuns 时没有溢出菜单', (tester) async {
+      await tester.pumpWidget(host(habits: [habit()]));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('habit-menu-hp-1')), findsNothing);
+    });
+
+    testWidgets('注入后菜单里有「编辑」与「执行记录」', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: [habit()],
+          onEdit: (h, patch) async {},
+          loadHabitRuns: (_) async => const [],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('habit-edit')), findsOneWidget);
+      expect(find.byKey(const ValueKey('habit-runs')), findsOneWidget);
+    });
+
+    testWidgets('只注入 onEdit 时菜单里只有「编辑」', (tester) async {
+      await tester.pumpWidget(
+        host(habits: [habit()], onEdit: (h, patch) async {}),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('habit-edit')), findsOneWidget);
+      expect(find.byKey(const ValueKey('habit-runs')), findsNothing);
+    });
+  });
+
+  group('编辑规则', () {
+    testWidgets('对话框回填现值，只提交改动过的字段', (tester) async {
+      final patches = <HabitPatch>[];
+      await tester.pumpWidget(
+        host(
+          habits: [habit(topicKey: 'weekly-report')],
+          onEdit: (h, patch) async => patches.add(patch),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+
+      // 回填现值（不是新建时的默认值）。
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('habit-edit-topic')))
+            .controller!
+            .text,
+        'weekly-report',
+      );
+
+      // 只改主题。
+      await tester.enterText(
+        find.byKey(const ValueKey('habit-edit-topic')),
+        'daily-report',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-save')));
+      await tester.pumpAndSettle();
+
+      expect(patches, hasLength(1));
+      final p = patches.single;
+      expect(p.topicKey, 'daily-report');
+      // 其余字段未动 → 必须是 null（服务端只覆盖「真正出现」的字段；
+      // 多发一个 trigger_config 就会重算 next_fire_at）。
+      expect(p.acceptanceLevel, isNull);
+      expect(p.triggerConfig, isNull);
+      expect(p.preferredAgentId, isNull);
+    });
+
+    testWidgets('没改动时保存按钮禁用（不发无意义的 PATCH）', (tester) async {
+      await tester.pumpWidget(
+        host(habits: [habit()], onEdit: (h, patch) async {}),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const ValueKey('habit-edit-save')))
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('改接受级别时只提交 acceptance_level', (tester) async {
+      final patches = <HabitPatch>[];
+      await tester.pumpWidget(
+        host(habits: [habit()], onEdit: (h, patch) async => patches.add(patch)),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-level-auto_run')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-save')));
+      await tester.pumpAndSettle();
+
+      final p = patches.single;
+      expect(p.acceptanceLevel, HabitAcceptanceLevel.autoRun);
+      expect(p.topicKey, isNull);
+      expect(p.triggerConfig, isNull);
+    });
+
+    testWidgets('改星期时提交 trigger_config（times + 1-based weekday）', (
+      tester,
+    ) async {
+      final patches = <HabitPatch>[];
+      await tester.pumpWidget(
+        host(habits: [habit()], onEdit: (h, patch) async => patches.add(patch)),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+      // 现值是 [1]（周一），加上周三。
+      await tester.tap(find.byKey(const ValueKey('habit-edit-weekday-3')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-save')));
+      await tester.pumpAndSettle();
+
+      final cfg = patches.single.triggerConfig!;
+      expect(cfg.time!.weekdays, [1, 3]);
+      expect(cfg.time!.firstHour, 9);
+      expect(cfg.time!.firstMinute, 0);
+    });
+
+    testWidgets('盯梢型规则不提供时间编辑，只展示只读节奏', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: [
+            habit(
+              triggerType: HabitTriggerType.watch,
+              triggerConfigJson: '{"cadence":{"initial_seconds":1800}}',
+            ),
+          ],
+          onEdit: (h, patch) async {},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('habit-edit-watch-readonly')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('habit-edit-time')), findsNothing);
+      expect(find.byKey(const ValueKey('habit-edit-weekday-1')), findsNothing);
+    });
+
+    testWidgets('清空优先 Agent 时提交空串（服务端当清除）', (tester) async {
+      final patches = <HabitPatch>[];
+      await tester.pumpWidget(
+        host(habits: [habit()], onEdit: (h, patch) async => patches.add(patch)),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('habit-edit-agent')),
+        'agent-x',
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('habit-edit-agent')),
+        '',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-save')));
+      await tester.pumpAndSettle();
+
+      // 原值为空串（无 agent）→ 输入 'agent-x' 再清空 = 回到原点，不算改动。
+      expect(patches, isEmpty);
+    });
+
+    testWidgets('409 弹提示并说明要刷新', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: [habit()],
+          onEdit: (h, patch) async =>
+              throw const HttpError(409, 'habit pattern 不存在'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('habit-edit-topic')),
+        'other',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-save')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('habit pattern 不存在'), findsOneWidget);
+    });
+
+    testWidgets('取消不发请求', (tester) async {
+      var calls = 0;
+      await tester.pumpWidget(
+        host(habits: [habit()], onEdit: (h, patch) async => calls++),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('habit-edit-topic')),
+        'other',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-edit-cancel')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 0);
+    });
+  });
+
+  group('按规则查看执行记录', () {
+    testWidgets('点「执行记录」调 loadHabitRuns(patternId) 而非 loadRuns', (
+      tester,
+    ) async {
+      var allRunsCalls = 0;
+      final patternIds = <String>[];
+      await tester.pumpWidget(
+        host(
+          habits: [habit(id: 'hp-7', topicKey: 'weekly-report')],
+          loadRuns: () async {
+            allRunsCalls++;
+            return const <HabitRun>[];
+          },
+          loadHabitRuns: (patternId) async {
+            patternIds.add(patternId);
+            return [run(id: 'run-p')];
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final callsBefore = allRunsCalls;
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-7')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-runs')));
+      await tester.pumpAndSettle();
+
+      // 传的是这条规则的 id，不是「全部」。
+      expect(patternIds, ['hp-7']);
+      // 没有额外调跨规则的 listAllRuns。
+      expect(allRunsCalls, callsBefore);
+    });
+
+    testWidgets('标题用规则自身的 topic_key（不依赖对话标题预取）', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: [habit(topicKey: 'weekly-report')],
+          loadHabitRuns: (_) async => const <HabitRun>[],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-runs')));
+      await tester.pumpAndSettle();
+
+      // AppBar 标题 = 规则主题（分隔符换成空格），不是「团队周报」。
+      expect(find.text('weekly report'), findsOneWidget);
+    });
+
+    testWidgets('渲染该规则的记录与空态', (tester) async {
+      await tester.pumpWidget(
+        host(habits: [habit()], loadHabitRuns: (_) async => const <HabitRun>[]),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-runs')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('这条规则还没有执行记录'), findsOneWidget);
+    });
+
+    testWidgets('加载失败显示错误与重试', (tester) async {
+      await tester.pumpWidget(
+        host(
+          habits: [habit()],
+          loadHabitRuns: (_) async => throw const NetworkError('记录加载失败'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('habit-menu-hp-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('habit-runs')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('记录加载失败'), findsOneWidget);
+      expect(find.byKey(const ValueKey('habit-runs-retry')), findsOneWidget);
     });
   });
 }

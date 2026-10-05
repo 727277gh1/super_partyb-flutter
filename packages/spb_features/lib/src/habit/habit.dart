@@ -11,6 +11,15 @@
 ///
 /// 建议卡本身在 `chat/` 下（[HabitSuggestionCard]）——它渲染在对话时间线里，
 /// 与其余 item 组件同族；本目录放的是**独立页面**。
+///
+/// ## 三个页面/对话框
+///
+/// - [HabitsPage]：规则列表 / 执行记录 / 建议收件箱（三个 Tab）+ 洞察摘要条；
+/// - [HabitEditDialog]：编辑既有规则（`PATCH /api/habits/:id`，只发改动字段）；
+/// - [HabitRunsPage]：**按单条规则**看执行记录（`GET /api/habits/:id/runs`）。
 library;
 
+export 'habit_edit_dialog.dart';
+export 'habit_insights_bar.dart';
+export 'habit_runs_page.dart';
 export 'habits_page.dart';

@@ -196,20 +196,12 @@ class HabitRun {
       triggerReason: HabitTriggerReason.from(
         habitStr(json, 'trigger_reason', 'trigger_reason'),
       ),
-      triggerContextJson: habitStr(
-        json,
-        'trigger_context_json',
-        'trigger_context_json',
-      ),
+      triggerContextJson: habitJsonString(json, 'trigger_context'),
       outcome: HabitRunOutcome.from(habitStr(json, 'outcome', 'outcome')),
       userFeedback: HabitUserFeedback.from(
         habitStr(json, 'user_feedback', 'user_feedback'),
       ),
-      feedbackPayloadJson: habitStr(
-        json,
-        'feedback_payload_json',
-        'feedback_payload_json',
-      ),
+      feedbackPayloadJson: habitJsonString(json, 'feedback_payload'),
       feedbackAt: habitDate(json, 'feedback_at', 'feedback_at'),
       scheduledTurnId:
           habitNullString2(json, 'scheduled_turn_id', 'scheduled_turn_id') ??

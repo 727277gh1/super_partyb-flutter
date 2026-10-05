@@ -1,8 +1,50 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
+
+import '../chat/habit_suggestion_card.dart';
+import 'habit_edit_dialog.dart';
+import 'habit_insights_bar.dart';
+import 'habit_runs_page.dart';
+
+/// 拉取建议列表。参数即服务端 `?status=` 的二分取值（见
+/// [HabitSuggestionListFilter]）。
+typedef LoadHabitSuggestions = Future<List<HabitSuggestion>> Function(
+  HabitSuggestionListFilter filter,
+);
+
+/// 提交建议动作（accept / dismiss / snooze）。
+///
+/// `snooze` 仅在 `action == HabitSuggestionAction.snooze` 时有意义，且
+/// **时刻由调用方算**（[HabitSnoozeOption.until] → UTC RFC3339）：服务端解析
+/// 失败会静默回退冷却时长，格式错了用户只能发现「时间不对」。
+typedef ResolveHabitSuggestion = Future<void> Function(
+  HabitSuggestion suggestion,
+  HabitSuggestionAction action, {
+  HabitSnoozeOption? snooze,
+});
+
+/// 撤销处理（把建议退回待处理）。
+typedef UnresolveHabitSuggestion = Future<void> Function(String suggestionId);
+
+/// 拉取洞察摘要。参数是窗口天数。
+typedef LoadHabitInsights = Future<HabitInsightsSummary> Function(int days);
+
+/// 编辑规则（`PATCH /api/habits/:pattern_id`）。
+///
+/// 参数是**增量补丁**（只含改动字段），不是完整快照——见 [HabitPatch] 的类文档
+/// （多发一个 `trigger_config` 就会让服务端重算 `next_fire_at`）。
+/// 装配层实现即 `HabitApi.patchHabit`（逐字段映射补丁里的非 null 项）。
+typedef EditHabit = Future<void> Function(UserHabit habit, HabitPatch patch);
+
+/// 洞察摘要默认窗口（与服务端 `days` 默认值一致）。
+const int kHabitInsightsDays = 30;
 
 /// 习惯管理页：规则列表 + 启停 + 立即执行 + 执行历史。
 ///
@@ -13,7 +55,7 @@ import 'package:spb_models/spb_models.dart';
 /// - widget test 里无需 HTTP mock 就能验证「什么条件下可点、点了传什么」；
 /// - 「习惯功能整体关闭」时可以只不注入而不动页面代码。
 ///
-/// ## 为什么列表与历史在同一页（两个 Tab）而不是两个页面
+/// ## 为什么列表与历史在同一页（三个 Tab）而不是三个页面
 ///
 /// 用户看习惯时的真实问题是「这条规则到底有没有用」——需要**在规则旁边**看到
 /// 它的执行记录。分成两个页面后，用户要在两处之间来回跳、还要自己把
@@ -22,6 +64,17 @@ import 'package:spb_models/spb_models.dart';
 /// 但历史是**跨规则**的（服务端 `/api/habits/runs` 返回全部，含没有 pattern 的
 /// 候选建议记录），故两个 Tab 各自的查询不同：规则 Tab 用 [loadHabits]，
 /// 历史 Tab 用 [loadRuns]。
+///
+/// 第三个 Tab（建议收件箱）的存在理由是**可找回**：建议原本只在对话时间线里
+/// 内联出现，用户当时没点、后来想找就翻不到；误点了忽略也无法撤销。故本页
+/// 提供一个独立的待处理列表 + 撤销入口。
+///
+/// ## 与 [HabitRunsPage] 的分工
+///
+/// 本页的「执行记录」Tab 是**跨规则**的（`GET /api/habits/runs`，近 N 天、含候选
+/// 记录），用于「最近发生了什么」。想回答「**这一条**规则跑过几次、都做了什么」
+/// 则走规则条目的「执行记录」入口 → [HabitRunsPage]
+/// （`GET /api/habits/:id/runs`，无时间窗、无其它规则干扰）。
 class HabitsPage extends StatefulWidget {
   const HabitsPage({
     super.key,
@@ -32,7 +85,13 @@ class HabitsPage extends StatefulWidget {
     this.onResume,
     this.onArchive,
     this.onCreate,
+    this.onEdit,
     this.onOpenTurn,
+    this.loadSuggestions,
+    this.resolveSuggestion,
+    this.unresolveSuggestion,
+    this.loadInsights,
+    this.loadHabitRuns,
     required this.groupTitleOf,
   });
 
@@ -57,8 +116,32 @@ class HabitsPage extends StatefulWidget {
   /// 新建规则。返回服务端建出的 pattern id（空串表示服务端未返回）。
   final Future<String> Function(HabitDraft draft)? onCreate;
 
+  /// 编辑规则（`PATCH`，增量补丁）。为 null 时规则条目不显示「编辑」入口。
+  final EditHabit? onEdit;
+
+  /// 拉取**单条规则**的执行记录（`GET /api/habits/:pattern_id/runs`）。
+  ///
+  /// 为 null 时规则条目不显示「执行记录」入口。
+  final LoadHabitRuns? loadHabitRuns;
+
   /// 跳到某条执行记录产生的对话。
   final void Function(String groupId, String turnId)? onOpenTurn;
+
+  /// 拉取建议列表（`GET /api/chat/habit-suggestions`）。
+  ///
+  /// 为 null 时**不渲染「建议」Tab**（整个建议收件箱能力缺失）。
+  final LoadHabitSuggestions? loadSuggestions;
+
+  /// 提交建议动作。为 null 时建议 Tab 里的卡片只有只读展示（无按钮）。
+  final ResolveHabitSuggestion? resolveSuggestion;
+
+  /// 撤销处理。为 null 时已处理项不显示「撤销」入口。
+  final UnresolveHabitSuggestion? unresolveSuggestion;
+
+  /// 拉取洞察摘要（`GET /api/chat/habit-insights/summary`）。
+  ///
+  /// 为 null 时不渲染顶部摘要条。失败也只静默（摘要不该拖垮整页）。
+  final LoadHabitInsights? loadInsights;
 
   /// 给定 groupId 返回对话标题（历史列表展示上下文用）。
   ///
@@ -80,10 +163,37 @@ class _HabitsPageState extends State<HabitsPage> {
   /// 正在执行写操作的 pattern id（防重复点击）。
   final _busy = <String>{};
 
+  // ---------- 建议收件箱 ----------
+
+  List<HabitSuggestion>? _suggestions;
+  Object? _suggestionsError;
+  bool _suggestionsLoading = false;
+
+  /// 「显示已处理」开关。对应服务端 `?status=dismissed`。
+  ///
+  /// ⚠️ 服务端 `ListDismissedHabitSuggestions` 的过滤条件是
+  /// `user_feedback IS NOT NULL`（近 30 天）——**不只有 ignored**，已采纳与已
+  /// 延后的也在里面。故文案是「显示已处理」而不是「显示已忽略」。
+  bool _showResolved = false;
+
+  /// 正在提交的建议 id（防重复点击；服务端 CAS 会挡，但连点会闪两次）。
+  final _suggestionBusy = <String>{};
+
+  // ---------- 洞察摘要 ----------
+
+  HabitInsightsSummary? _insights;
+
   @override
   void initState() {
     super.initState();
     _load();
+    // 建议与洞察**独立加载**：任一失败不该让整页变成错误页。
+    if (widget.loadSuggestions != null) {
+      unawaited(_loadSuggestions());
+    }
+    if (widget.loadInsights != null) {
+      unawaited(_loadInsights());
+    }
   }
 
   Future<void> _load() async {
@@ -110,6 +220,93 @@ class _HabitsPageState extends State<HabitsPage> {
         _loading = false;
       });
     }
+  }
+
+  /// 拉取建议列表。
+  ///
+  /// 刷新语义与 [_load] 不同：这里**保留旧列表**直到新数据到达（`_suggestions
+  /// != null` 时不清空），否则用户点「撤销」后列表会闪一下空态。
+  Future<void> _loadSuggestions() async {
+    final load = widget.loadSuggestions;
+    if (load == null) return;
+    setState(() {
+      _suggestionsLoading = true;
+      _suggestionsError = null;
+    });
+    try {
+      final items = await load(
+        _showResolved
+            ? HabitSuggestionListFilter.dismissed
+            : HabitSuggestionListFilter.pending,
+      );
+      if (!mounted) return;
+      setState(() {
+        _suggestions = items;
+        _suggestionsLoading = false;
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _suggestionsError = e;
+        _suggestionsLoading = false;
+      });
+    }
+  }
+
+  /// 拉取洞察摘要。失败静默（只记日志）——摘要不是页面的主内容。
+  Future<void> _loadInsights() async {
+    final load = widget.loadInsights;
+    if (load == null) return;
+    try {
+      final insights = await load(kHabitInsightsDays);
+      if (!mounted) return;
+      setState(() => _insights = insights);
+    } on Object catch (e) {
+      SpbLog.warn('习惯洞察摘要加载失败', {'error': '$e'});
+    }
+  }
+
+  /// 提交一个针对某条建议的写操作。
+  ///
+  /// 成功后**重新拉取列表**（而不是本地移除）：服务端的权威状态可能与本地
+  /// 预期不同（如 accept 后列表里该条会消失，但「显示已处理」模式下它会变成
+  /// 一条带「撤销」的已处理项）。
+  Future<void> _runSuggestionAction(
+    HabitSuggestion suggestion,
+    Future<void> Function() action,
+  ) async {
+    if (_suggestionBusy.contains(suggestion.id)) return;
+    setState(() => _suggestionBusy.add(suggestion.id));
+    try {
+      await action();
+      if (!mounted) return;
+      await _loadSuggestions();
+    } on SpbError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(_suggestionErrorText(e))));
+      // 失败后刷新：多半是另一端已处理过（409），刷新让用户看到真实状态。
+      await _loadSuggestions();
+    } on Object catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('操作失败，请重试')));
+    } finally {
+      if (mounted) setState(() => _suggestionBusy.remove(suggestion.id));
+    }
+  }
+
+  /// 把建议类错误翻成用户能理解的话。
+  ///
+  /// 409 是**预期内**的失败：服务端 resolve/unresolve 都走 CAS，两端同时操作
+  /// 时后者必失败。必须同时给出「原因」（服务端文案，如「建议未被处理，无需恢复」）
+  /// 与「怎么办」（刷新），否则用户会以为客户端坏了。
+  static String _suggestionErrorText(SpbError e) {
+    if (e is HttpError && e.isConflict) {
+      final detail = e.message.isEmpty ? '' : '：${e.message}';
+      return '建议已被别处处理，请刷新后重试$detail';
+    }
+    return _actionErrorText(e);
   }
 
   /// 执行一个针对某条规则的写操作，统一处理在途标记与失败提示。
@@ -188,10 +385,51 @@ class _HabitsPageState extends State<HabitsPage> {
     }
   }
 
+  /// 编辑规则。
+  ///
+  /// ## 为什么先弹对话框再算补丁，而不是把 `habit` 直接交给对话框去提交
+  ///
+  /// 对话框只负责「回填 + 收集改动」，不知道怎么写请求（与页面其余部分同一分层
+  /// 约定）。它返回 [HabitPatch]，由调用方经 [HabitsPage.onEdit] 发出去。
+  ///
+  /// ## 为什么「没改动」就不发请求
+  ///
+  /// 服务端 `update` 以现值为基准做部分更新，但 `trigger_config` **一旦出现**就
+  /// 会重算 `next_fire_at`（把即将到期的触发推到下一个周期）。对话框已经用
+  /// `HabitPatch.isEmpty` 禁用了保存按钮，这里是第二道防线（防将来有人把按钮
+  /// 逻辑改坏）。
+  Future<void> _handleEdit(UserHabit habit) async {
+    final cb = widget.onEdit;
+    if (cb == null) return;
+    final patch = await HabitEditDialog.show(context, habit: habit);
+    if (patch == null || patch.isEmpty || !mounted) return;
+    await _runAction(habit, (h) => cb(h, patch));
+  }
+
+  /// 进入「按规则查看执行记录」。
+  ///
+  /// 用 `Navigator.push` 而非路由：它是本页的子视图（带返回按钮），不需要 URL
+  /// 可寻址性，也不该出现在浏览器/桌面端的深链接里。
+  void _openRuns(UserHabit habit) {
+    final load = widget.loadHabitRuns;
+    if (load == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => HabitRunsPage(
+          habit: habit,
+          loadRuns: () => load(habit.id),
+          onOpenTurn: widget.onOpenTurn,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Tab 数随注入能力变化：未注入建议回调时保持原有的两个 Tab（向后兼容）。
+    final showSuggestions = widget.loadSuggestions != null;
     return DefaultTabController(
-      length: 2,
+      length: showSuggestions ? 3 : 2,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('习惯'),
@@ -207,13 +445,14 @@ class _HabitsPageState extends State<HabitsPage> {
               key: const ValueKey('habits-refresh'),
               icon: const Icon(Icons.refresh),
               tooltip: '刷新',
-              onPressed: _loading ? null : _load,
+              onPressed: _loading ? null : _refreshAll,
             ),
           ],
-          bottom: const TabBar(
+          bottom: TabBar(
             tabs: [
-              Tab(text: '规则'),
-              Tab(text: '执行记录'),
+              const Tab(text: '规则'),
+              const Tab(text: '执行记录'),
+              if (showSuggestions) const Tab(text: '建议'),
             ],
           ),
         ),
@@ -222,21 +461,158 @@ class _HabitsPageState extends State<HabitsPage> {
     );
   }
 
+  /// 「刷新」按钮：把三个来源都重拉一遍（含洞察）。
+  ///
+  /// 只刷 `_load()` 会让用户以为「刷新没生效」——他在「建议」Tab 上点了刷新，
+  /// 建议列表却没动。
+  Future<void> _refreshAll() async {
+    await Future.wait([
+      _load(),
+      if (widget.loadSuggestions != null) _loadSuggestions(),
+      if (widget.loadInsights != null) _loadInsights(),
+    ]);
+  }
+
   Widget _buildBody() {
     if (_loading && _habits == null) {
       return const Center(child: CircularProgressIndicator());
     }
     final err = _error;
     if (err != null && _habits == null) {
-      return _ErrorView(error: err, onRetry: _load);
+      return HabitErrorView(
+        error: err,
+        onRetry: _load,
+        retryKey: const ValueKey('habits-retry'),
+      );
     }
-    return TabBarView(children: [_buildHabits(), _buildRuns()]);
+    final insights = _insights;
+    final tabs = TabBarView(
+      children: [
+        _buildHabits(),
+        _buildRuns(),
+        if (widget.loadSuggestions != null) _buildSuggestions(),
+      ],
+    );
+    if (insights == null) return tabs;
+    // 摘要条固定在 Tab 之上：它是「整页的总览」，跟着 Tab 滚动会让人以为它属于
+    // 当前 Tab。
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            SpbSpacing.lg,
+            SpbSpacing.lg,
+            SpbSpacing.lg,
+            0,
+          ),
+          child: HabitInsightsBar(insights: insights),
+        ),
+        Expanded(child: tabs),
+      ],
+    );
+  }
+
+  /// 「建议」Tab：待处理收件箱 + 「显示已处理」开关。
+  Widget _buildSuggestions() {
+    final showResolved = _showResolved;
+    final toggle = SwitchListTile(
+      key: const ValueKey('habit-suggestions-show-resolved'),
+      dense: true,
+      value: showResolved,
+      title: const Text('显示已处理'),
+      // 说明范围，避免用户以为「已处理 = 我点过忽略的」。
+      subtitle: const Text('含已采纳 / 已忽略 / 已延后（近 30 天）'),
+      onChanged: _suggestionsLoading
+          ? null
+          : (v) {
+              setState(() => _showResolved = v);
+              unawaited(_loadSuggestions());
+            },
+    );
+
+    final items = _suggestions;
+    final err = _suggestionsError;
+    Widget body;
+    if (items == null && _suggestionsLoading) {
+      body = const Center(child: CircularProgressIndicator());
+    } else if (items == null && err != null) {
+      body = HabitErrorView(
+        error: err,
+        onRetry: _loadSuggestions,
+        retryKey: const ValueKey('habits-retry'),
+      );
+    } else if (items == null || items.isEmpty) {
+      body = HabitEmptyView(
+        icon: showResolved ? Icons.history : Icons.auto_awesome,
+        text: showResolved
+            ? '近 30 天没有被处理过的建议。'
+            : '没有待处理的建议。\nAgent 发现你的规律后会在这里（以及对话里）给出建议。',
+      );
+    } else {
+      body = RefreshIndicator(
+        onRefresh: _loadSuggestions,
+        child: ListView.separated(
+          padding: const EdgeInsets.only(bottom: SpbSpacing.lg),
+          itemCount: items.length,
+          separatorBuilder: (_, _) => const SizedBox(height: SpbSpacing.sm),
+          itemBuilder: (context, i) => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: SpbSpacing.lg),
+            child: _buildSuggestionCard(items[i]),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        toggle,
+        const Divider(height: 1),
+        Expanded(child: body),
+      ],
+    );
+  }
+
+  Widget _buildSuggestionCard(HabitSuggestion s) {
+    final resolve = widget.resolveSuggestion;
+    final unresolve = widget.unresolveSuggestion;
+    final busy = _suggestionBusy.contains(s.id);
+    // 列表项没有 `editable_fields`（服务端 `habitRunToMap` 不下发），故
+    // `HabitSuggestionItem.fromSuggestion` 产出的项 `canEdit == false`——
+    // 卡片不会渲染「编辑并接受」。这不是漏接：编辑需要事件 payload 里的
+    // 白名单，而收件箱走的是列表端点。
+    return HabitSuggestionCard(
+      suggestion: HabitSuggestionItem.fromSuggestion(s),
+      busy: busy,
+      onAccept: resolve == null
+          ? null
+          : () => _runSuggestionAction(
+              s,
+              () => resolve(s, HabitSuggestionAction.accept),
+            ),
+      onDismiss: resolve == null
+          ? null
+          : () => _runSuggestionAction(
+              s,
+              () => resolve(s, HabitSuggestionAction.dismiss),
+            ),
+      onSnooze: resolve == null
+          ? null
+          : (option) => _runSuggestionAction(
+              s,
+              () => resolve(s, HabitSuggestionAction.snooze, snooze: option),
+            ),
+      // 撤销只在已处理项上有意义（服务端 CAS 的 WHERE 要求 user_feedback
+      // 非空），且只在注入时渲染。
+      onUnresolve: unresolve == null
+          ? null
+          : () => _runSuggestionAction(s, () => unresolve(s.id)),
+    );
   }
 
   Widget _buildHabits() {
     final habits = _habits ?? const <UserHabit>[];
     if (habits.isEmpty) {
-      return const _EmptyView(
+      return const HabitEmptyView(
         icon: Icons.repeat,
         text: '还没有习惯。\nAgent 发现你的规律后会在这里（以及对话里）给出建议。',
       );
@@ -262,6 +638,12 @@ class _HabitsPageState extends State<HabitsPage> {
           onArchive: widget.onArchive == null
               ? null
               : (h) => _confirmArchive(h),
+          // 编辑对 archived 也允许：服务端 `update` 不校验状态（注释明写
+          // 「对 archived 的 pattern 也能 PATCH 成功，只是它不会再被调度」）。
+          // 而「已归档」的规则往往正需要改完再恢复——把它藏起来只会逼用户
+          // 重建一条。
+          onEdit: widget.onEdit == null ? null : _handleEdit,
+          onOpenRuns: widget.loadHabitRuns == null ? null : _openRuns,
         ),
       ),
     );
@@ -297,7 +679,7 @@ class _HabitsPageState extends State<HabitsPage> {
   Widget _buildRuns() {
     final runs = _runs ?? const <HabitRun>[];
     if (runs.isEmpty) {
-      return const _EmptyView(icon: Icons.history, text: '还没有执行记录。');
+      return const HabitEmptyView(icon: Icons.history, text: '还没有执行记录。');
     }
     return RefreshIndicator(
       onRefresh: _load,
@@ -305,7 +687,7 @@ class _HabitsPageState extends State<HabitsPage> {
         padding: SpbSpacing.pagePadding,
         itemCount: runs.length,
         separatorBuilder: (_, _) => const Divider(height: SpbSpacing.xl),
-        itemBuilder: (context, i) => _RunTile(
+        itemBuilder: (context, i) => HabitRunTile(
           run: runs[i],
           // 优先投递对话（实际执行处），回退来源对话。
           //
@@ -325,6 +707,12 @@ class _HabitsPageState extends State<HabitsPage> {
   }
 }
 
+/// 规则卡片溢出菜单里的动作。
+///
+/// 用枚举而非两个独立按钮：菜单项的存在条件不同（各自看回调是否注入），
+/// `PopupMenuButton.onSelected` 必须能区分选中的是哪一项。
+enum _HabitMenuAction { edit, runs }
+
 /// 一条规则卡片。
 class _HabitTile extends StatelessWidget {
   const _HabitTile({
@@ -334,6 +722,8 @@ class _HabitTile extends StatelessWidget {
     this.onPause,
     this.onResume,
     this.onArchive,
+    this.onEdit,
+    this.onOpenRuns,
   });
 
   final UserHabit habit;
@@ -342,6 +732,12 @@ class _HabitTile extends StatelessWidget {
   final void Function(UserHabit)? onPause;
   final void Function(UserHabit)? onResume;
   final void Function(UserHabit)? onArchive;
+
+  /// 打开编辑对话框（已由页面判定过注入）。
+  final void Function(UserHabit)? onEdit;
+
+  /// 进入该规则的执行记录页。
+  final void Function(UserHabit)? onOpenRuns;
 
   @override
   Widget build(BuildContext context) {
@@ -365,6 +761,33 @@ class _HabitTile extends StatelessWidget {
                   ),
                 ),
                 _StatusChip(status: habit.status),
+                // 「编辑」与「执行记录」放进溢出菜单：两者都不是高频操作，
+                // 与「立即执行/暂停/归档」平铺会挤满一行，且归档是终态、
+                // 混在一起容易被误点。
+                if (onEdit != null || onOpenRuns != null)
+                  PopupMenuButton<_HabitMenuAction>(
+                    key: ValueKey('habit-menu-${habit.id}'),
+                    enabled: !busy,
+                    tooltip: '更多',
+                    onSelected: (action) => switch (action) {
+                      _HabitMenuAction.edit => onEdit!(habit),
+                      _HabitMenuAction.runs => onOpenRuns!(habit),
+                    },
+                    itemBuilder: (context) => [
+                      if (onEdit != null)
+                        const PopupMenuItem(
+                          key: ValueKey('habit-edit'),
+                          value: _HabitMenuAction.edit,
+                          child: Text('编辑'),
+                        ),
+                      if (onOpenRuns != null)
+                        const PopupMenuItem(
+                          key: ValueKey('habit-runs'),
+                          value: _HabitMenuAction.runs,
+                          child: Text('执行记录'),
+                        ),
+                    ],
+                  ),
               ],
             ),
             const SizedBox(height: SpbSpacing.xs),
@@ -490,192 +913,6 @@ class _StatusChip extends StatelessWidget {
       child: Text(
         status.label,
         style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg),
-      ),
-    );
-  }
-}
-
-/// 一条执行记录。
-class _RunTile extends StatelessWidget {
-  const _RunTile({
-    required this.run,
-    required this.groupTitle,
-    this.onOpenTurn,
-  });
-
-  final HabitRun run;
-  final String groupTitle;
-  final void Function(String groupId, String turnId)? onOpenTurn;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                run.topicKey.isEmpty ? '未命名' : run.topicKey,
-                style: textTheme.titleSmall,
-              ),
-            ),
-            Text(
-              _formatTime(run.createdAt),
-              style: textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: SpbSpacing.xxs),
-        Wrap(
-          spacing: SpbSpacing.sm,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Text(
-              run.triggerReason.label,
-              style: textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            Text(
-              run.outcome.label,
-              style: textTheme.bodySmall?.copyWith(
-                color: run.outcome == HabitRunOutcome.failed
-                    ? scheme.error
-                    : scheme.onSurfaceVariant,
-              ),
-            ),
-            if (run.isManual)
-              Text(
-                '手动',
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            if (run.userFeedback != null)
-              Text(
-                run.userFeedback!.label,
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            if (groupTitle.isNotEmpty)
-              Text(
-                groupTitle,
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-          ],
-        ),
-        if (run.replyText.isNotEmpty) ...[
-          const SizedBox(height: SpbSpacing.xs),
-          Text(
-            run.replyText,
-            maxLines: 4,
-            overflow: TextOverflow.ellipsis,
-            style: textTheme.bodyMedium,
-          ),
-        ],
-        if (onOpenTurn != null && run.hasTurn) ...[
-          const SizedBox(height: SpbSpacing.xs),
-          TextButton(
-            key: ValueKey('habit-run-open-${run.id}'),
-            onPressed: () {
-              // 与列表展示同一优先级（投递对话 → 来源对话）：点「查看对话」
-              // 应落到用户实际能看到那条回复的对话，而不是一个空的来源组。
-              final gid = run.deliveryGroupId ?? run.originGroupId;
-              if (gid.isEmpty) return;
-              onOpenTurn!(gid, run.scheduledTurnId!);
-            },
-            child: const Text('查看对话'),
-          ),
-        ],
-      ],
-    );
-  }
-
-  static String _formatTime(DateTime? t) {
-    if (t == null) return '';
-    final local = t.toLocal();
-    String p2(int v) => v.toString().padLeft(2, '0');
-    return '${local.month}/${local.day} ${p2(local.hour)}:${p2(local.minute)}';
-  }
-}
-
-/// 空态。
-class _EmptyView extends StatelessWidget {
-  const _EmptyView({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: SpbSpacing.pagePadding,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: SpbSpacing.xxxl, color: scheme.onSurfaceVariant),
-            const SizedBox(height: SpbSpacing.md),
-            Text(
-              text,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium
-                  ?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 错误态（带重试）。
-class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.error, required this.onRetry});
-
-  final Object error;
-  final VoidCallback onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final msg = error is SpbError ? (error as SpbError).message : '$error';
-    final display = msg.isEmpty ? '加载失败' : msg;
-    return Center(
-      child: Padding(
-        padding: SpbSpacing.pagePadding,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.error_outline,
-              size: SpbSpacing.xxxl,
-              color: scheme.error,
-            ),
-            const SizedBox(height: SpbSpacing.md),
-            Text(
-              display,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const SizedBox(height: SpbSpacing.md),
-            FilledButton(
-              key: const ValueKey('habits-retry'),
-              onPressed: onRetry,
-              child: const Text('重试'),
-            ),
-          ],
-        ),
       ),
     );
   }

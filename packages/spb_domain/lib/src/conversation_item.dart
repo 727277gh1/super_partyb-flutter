@@ -397,8 +397,74 @@ final class HabitSuggestionItem extends ConversationItem {
   /// 已处理过的建议再提交会 409。本地据此禁用按钮，避免用户点了才被拒。
   bool get canResolve => userFeedback == null;
 
+  /// 是否可编辑（服务端 `editable_fields` 非空）。
+  ///
+  /// 与 `HabitSuggestion.canEdit` 同一语义，但本类是真源——卡片与编辑器都从
+  /// 归约后的时间线项渲染，而不是从列表端点的 `HabitSuggestion`。
+  ///
+  /// 为 false 时 UI 应**隐藏**编辑入口（而不是渲染成禁用按钮）：服务端没给
+  /// 可编辑字段时，对话框会是一个空白表单，提交出的 patch 是 `{}`。
+  bool get canEdit => editableFields.isNotEmpty;
+
   /// 是否已被接受（含 edit_and_accept，两者在服务端都写 `accept_rule`）。
   bool get isAccepted => userFeedback == HabitUserFeedback.accepted;
+
+  /// 从**列表端点**的建议（`GET /api/chat/habit-suggestions`）构造时间线项。
+  ///
+  /// ## 为什么需要这个转换
+  ///
+  /// 「建议收件箱」页拿到的是一批 `HabitSuggestion`（`spb_models`），而卡片
+  /// （[HabitSuggestionCard]）渲染的是归约后的 [HabitSuggestionItem]。两者字段
+  /// 高度重叠但**不是同一个类**（前者是 HTTP 契约，后者带 `turnId` 等归约状态）。
+  /// 与其在页面里手抄一份字段映射，不如集中在这里——映射错一个字段就是
+  /// 「卡片显示未命名 / 无理由」，且不会报错。
+  ///
+  /// ## 三处刻意的字段缺口
+  ///
+  /// - [id]：列表项没有 eventId，用 `suggestionId` 兜底（同一批内唯一，够用）。
+  /// - [editableFields]：**列表端点不下发**它（`habitRunToMap` 没有该字段），
+  ///   故转换后 [canEdit] 恒为 false——收件箱里不会出现「编辑并接受」按钮。
+  ///   这是对的：服务端只从事件 payload 下发白名单，客户端自行填一份会让用户
+  ///   编辑出服务端不接受的 patch。
+  /// - [resolvedPatternId] / [snoozeUntil]：列表端点把它们埋在
+  ///   `feedback_payload` 里（键 `resolved_pattern_id` / `snooze_until`），
+  ///   而不是顶层——这里显式挖出来，否则已处理项会显示成「已采纳」（没有
+  ///   「习惯已生效」）与「已延后」（没有具体时刻）。
+  static HabitSuggestionItem fromSuggestion(HabitSuggestion s) =>
+      HabitSuggestionItem(
+        id: s.id,
+        createdAt: s.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+        suggestionId: s.id,
+        topicKey: s.topicKey,
+        triggerType: s.triggerType,
+        triggerConfig: s.triggerConfig,
+        preferredAgentId: s.preferredAgentId,
+        targetAcceptanceLevel: s.targetAcceptanceLevel,
+        confidence: s.confidence,
+        reasons: s.reasons,
+        evidence: s.evidence,
+        editableFields: s.editableFields,
+        userFeedback: s.userFeedback,
+        resolvedPatternId: _feedbackString(
+          s.feedbackPayload,
+          'resolved_pattern_id',
+        ),
+        snoozeUntil: _feedbackTime(s.feedbackPayload, 'snooze_until'),
+      );
+
+  static String? _feedbackString(Map<String, dynamic>? payload, String key) {
+    final v = payload?[key];
+    return v is String && v.isNotEmpty ? v : null;
+  }
+
+  /// 从 `feedback_payload` 取时刻。
+  ///
+  /// 与 `ChatEvent.habitSnoozeUntil` 同约定转本地时区：服务端存的是 UTC 串，
+  /// 不转的话 UI 会把「明天 09:00」显示成「今天 01:00」。
+  static DateTime? _feedbackTime(Map<String, dynamic>? payload, String key) {
+    final s = _feedbackString(payload, key);
+    return s == null ? null : DateTime.tryParse(s)?.toLocal();
+  }
 
   HabitSuggestionItem copyWith({
     HabitUserFeedback? userFeedback,

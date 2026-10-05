@@ -37,6 +37,7 @@ export 'group_settings.dart';
 export 'group_settings_panel.dart';
 export 'group_list_page.dart';
 export 'habit_suggestion_card.dart';
+export 'habit_suggestion_editor.dart';
 export 'my_turns_page.dart';
 export 'message_composer.dart';
 export 'pending_messages_bar.dart';

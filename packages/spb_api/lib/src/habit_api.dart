@@ -89,10 +89,31 @@ class HabitApi {
   /// 只发送显式传入的字段（PATCH 语义）。改 `trigger_config` 会让服务端按新
   /// 配置重算 `next_fire_at`（`TestHabitUpdateComputesNextFireAt`）。
   ///
+  /// ## 五个字段与服务端 `update` 的对应关系
+  ///
+  /// | 参数 | 服务端行为 |
+  /// |---|---|
+  /// | [topicKey] | `TrimSpace` 后非空校验（空串 400 `topic_key 无效`） |
+  /// | [acceptanceLevel] | 白名单校验（非法 400 `acceptance_level 无效`） |
+  /// | [triggerConfig] | 归一化后重算 `next_fire_at` |
+  /// | [preferredAgentId] | 非空 = 设置；空串 = **清除**（见下） |
+  /// | [status] | 服务端 `update` **不接受**它（状态只能走 pause/resume/archive） |
+  ///
+  /// ## [preferredAgentId] 的三态陷阱
+  ///
+  /// 服务端用 `json.RawMessage` 区分「未传」（`nil`，保留原值）、「清除」
+  /// （字面量 `null`）与「设置」（`"x"`）——因为 `*string` 下 `null` 与「未传」
+  /// 都是 `nil`，清除会被静默忽略。而服务端随后走 `toNullString(TrimSpace(v))`，
+  /// 即**空串与 `null` 等价**（都是清除）。
+  ///
+  /// ⚠️ 本方法对空串的处理是**原样发送空串**（服务端会当成清除），
+  /// 而 `null` 才是「不动」。调用方若只想改别的字段，务必传 `null`。
+  ///
   /// ⚠️ 服务端**不校验状态**：对 archived 的 pattern 也能 PATCH 成功，
   /// 只是它不会再被调度。UI 应自己按 [UserHabit.status] 决定是否允许编辑。
   Future<void> patchHabit(
     String patternId, {
+    String? topicKey,
     HabitAcceptanceLevel? acceptanceLevel,
     HabitTriggerConfig? triggerConfig,
     String? preferredAgentId,
@@ -102,6 +123,7 @@ class HabitApi {
     await _patch(
       '/api/habits/$patternId',
       body: {
+        if (topicKey != null) 'topic_key': topicKey,
         if (acceptanceLevel != null) 'acceptance_level': acceptanceLevel.wire,
         if (triggerConfig != null) 'trigger_config': triggerConfig.toJson(),
         if (preferredAgentId != null) 'preferred_agent_id': preferredAgentId,
@@ -218,11 +240,51 @@ class HabitApi {
   /// [snoozeUntil] 仅在 `action == snooze` 时有意义，且必须是 UTC RFC3339；
   /// 服务端解析失败会静默回退冷却时长（不报错），故客户端必须传对
   /// （用 [HabitSnoozeOption.untilIso]）。
+  ///
+  /// ## [patternPatch]：就地编辑的内容（仅 `edit_and_accept` 消费）
+  ///
+  /// 服务端 `misc_extra.go` 的 `PatternPatch json.RawMessage` 注释写明
+  /// 「仅 edit_and_accept 消费」，解析与校验集中在 `applyPatternPatch`。
+  /// 故本方法**只在 action == editAndAccept 时下发它**——其余 action 带上
+  /// 只会让服务端白跑一次 `applyPatternPatch`，且可能被将来的校验逻辑当成
+  /// 异常输入。
+  ///
+  /// ### 合并语义：出现即覆盖，未出现即保留
+  ///
+  /// patch 里**出现**的键覆盖候选值，未出现的保留候选值。故 patch 是**增量**
+  /// 而非整包替换——只传 `{'topic_key': 'x'}` 不会把触发时间清空。
+  ///
+  /// ### 键集由服务端白名单决定，客户端不得自行扩大
+  ///
+  /// 真源是 `workers/habit/timeline_events.go` 的 `SuggestionEditableFields`：
+  /// `topic_key` / `trigger_config` / `preferred_agent_id` / `delivery_group_id`，
+  /// 随事件 payload 的 `editable_fields` 下发。
+  /// `applyPatternPatch` 接受的键（含嵌套 `trigger_config` 内的 `times`）就是
+  /// 这份白名单的实现，多带一个未来新增的键只会被忽略——但**不要**据此就把
+  /// 客户端字段集写成「什么都能传」（见 `HabitSuggestionItem.editableFields`）。
+  ///
+  /// ### 两种形状都认
+  ///
+  /// 扁平 `{'hour': 9, 'weekday': 1}` 与嵌套
+  /// `{'trigger_config': {'times': [...], 'weekday': [...]}}` 等价
+  /// （见 `applyPatternPatch` 的「为什么两种形状都要认」）。本仓库统一发**嵌套**
+  /// 形态（与 `HabitTriggerConfig.toJson` 同形），因为它能原样承载候选值。
+  ///
+  /// ### patch 不是对象时服务端**忽略而非报错**
+  ///
+  /// `applyPatternPatch` 对 `len == 0` / `"null"` / 反序列化失败 / `nil` 一律
+  /// 返回候选原值，**不返回错误**。即：传了格式错的 patch 会「接受成功但配置
+  /// 没变」——静默失效。故调用方不要依赖服务端报错来发现自己的 bug。
+  ///
+  /// 同理 `agent_id` / `preferred_agent_id` 传 `null` 表示**清除**指定 agent
+  /// （不是「不传」），而空数组的 `weekday` 会被当成「无该键」保留候选值
+  /// （服务端不让用户把 weekday 清空，那会让引擎算不出下次触发）。
   Future<HabitSuggestionResolveResult> resolveSuggestion(
     String suggestionId, {
     required HabitSuggestionAction action,
     String? comment,
     DateTime? snoozeUntil,
+    Map<String, dynamic>? patternPatch,
   }) async {
     final res = await _post(
       '/api/chat/habit-suggestions/$suggestionId/resolve',
@@ -230,6 +292,10 @@ class HabitApi {
         'action': action.wire,
         if (comment != null && comment.isNotEmpty) 'comment': comment,
         if (snoozeUntil != null) 'snooze_until': _isoUtc(snoozeUntil),
+        // 只在 edit_and_accept 时下发：服务端明确只在该 action 消费它。
+        if (action == HabitSuggestionAction.editAndAccept &&
+            patternPatch != null)
+          'pattern_patch': patternPatch,
       },
     );
     return HabitSuggestionResolveResult.fromJson(_asMap(res));

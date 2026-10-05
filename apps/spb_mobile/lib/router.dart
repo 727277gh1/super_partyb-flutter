@@ -478,6 +478,26 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
         return r.patternId;
       },
       onOpenTurn: (groupId, _) => context.go(SpbRoutes.chat(groupId)),
+      // 编辑 + 按规则查记录：与桌面端逐字同构。
+      onEdit: (h, patch) => api.patchHabit(
+        h.id,
+        topicKey: patch.topicKey,
+        acceptanceLevel: patch.acceptanceLevel,
+        triggerConfig: patch.triggerConfig,
+        preferredAgentId: patch.preferredAgentId,
+      ),
+      loadHabitRuns: (patternId) => api.listHabitRuns(patternId),
+      // 建议收件箱 + 洞察摘要：与桌面端逐字同构（同一套端点与同一页面）。
+      loadSuggestions: (filter) => api.listSuggestions(filter: filter),
+      resolveSuggestion: (s, action, {snooze}) => api
+          .resolveSuggestion(
+            s.id,
+            action: action,
+            snoozeUntil: snooze?.until(DateTime.now()),
+          )
+          .then((_) {}),
+      unresolveSuggestion: api.unresolveSuggestion,
+      loadInsights: (days) => api.habitInsights(days: days),
     );
   }
 }
@@ -1070,6 +1090,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           )
           .catchError((Object e) {
             debugPrint('接受习惯建议失败: $e');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+      onEditAndAcceptHabit: (s, patch) => ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.editAndAccept,
+            // patch 的字段集由服务端下发的 editable_fields 决定（见
+            // HabitSuggestionEditor），这里原样透传，不做二次筛选。
+            patternPatch: patch,
+          )
+          .catchError((Object e) {
+            debugPrint('编辑并接受习惯建议失败: $e');
             return HabitSuggestionResolveResult(resolved: false);
           }),
       onDismissHabit: (s) => ref

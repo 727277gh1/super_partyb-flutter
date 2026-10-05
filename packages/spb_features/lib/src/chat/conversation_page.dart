@@ -45,6 +45,7 @@ class ConversationPage extends StatefulWidget {
     this.onResolveConfirmation,
     this.onResolveFeedback,
     this.onAcceptHabit,
+    this.onEditAndAcceptHabit,
     this.onDismissHabit,
     this.onSnoozeHabit,
     this.onSpecAction,
@@ -112,6 +113,21 @@ class ConversationPage extends StatefulWidget {
 
   /// 习惯建议卡：忽略（`action=dismiss`，服务端写 24h 冷却窗口）。
   final void Function(HabitSuggestionItem suggestion)? onDismissHabit;
+
+  /// 习惯建议卡：就地编辑后接受（`action=edit_and_accept` + `pattern_patch`）。
+  ///
+  /// 与 [onAcceptHabit] 同属「建出 active pattern」的写操作，区别只是服务端
+  /// 会先把 patch 合并进候选值（`applyPatternPatch`，出现即覆盖、未出现即保留）。
+  ///
+  /// patch 的字段集由服务端下发的 `editable_fields` 决定（见
+  /// `HabitSuggestionEditor`），本页不做任何筛选。
+  ///
+  /// 为 null 时编辑入口不显示。
+  final void Function(
+    HabitSuggestionItem suggestion,
+    Map<String, dynamic> patch,
+  )?
+  onEditAndAcceptHabit;
 
   /// 习惯建议卡：稍后提醒（`action=snooze` + 选中的时长）。
   ///
@@ -896,6 +912,14 @@ class _ConversationPageState extends State<ConversationPage> {
       onAccept: widget.onAcceptHabit == null
           ? null
           : () => _handleHabitAction(item, widget.onAcceptHabit!),
+      // 编辑回调带 patch：页面用闭包把 item 与 patch 一起交给 app 层，
+      // 卡片只需知道「用户改了什么」（见 HabitSuggestionCard._openEditor）。
+      onEditAndAccept: widget.onEditAndAcceptHabit == null
+          ? null
+          : (patch) => _handleHabitAction(
+              item,
+              (x) => widget.onEditAndAcceptHabit!(x, patch),
+            ),
       onDismiss: widget.onDismissHabit == null
           ? null
           : () => _handleHabitAction(item, widget.onDismissHabit!),

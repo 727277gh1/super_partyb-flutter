@@ -4,6 +4,8 @@ import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'habit_suggestion_editor.dart';
+
 /// 习惯建议卡（`habit_suggestion_created` / `habit_suggestion_resolved`）。
 ///
 /// ## 视觉与 [FeedbackRequestCard] / [ConfirmationCard] 同族
@@ -27,8 +29,10 @@ class HabitSuggestionCard extends StatelessWidget {
     super.key,
     required this.suggestion,
     this.onAccept,
+    this.onEditAndAccept,
     this.onDismiss,
     this.onSnooze,
+    this.onUnresolve,
     this.busy = false,
   });
 
@@ -37,11 +41,33 @@ class HabitSuggestionCard extends StatelessWidget {
   /// 接受建议（服务端会建出 active pattern）。
   final VoidCallback? onAccept;
 
+  /// 就地编辑后接受。参数即 `pattern_patch`。
+  ///
+  /// 与 [onAccept] 的区别只在服务端消费的字段（`action` 从 `accept` 变成
+  /// `edit_and_accept`，并带上 patch）——两者都建出 active pattern。
+  ///
+  /// 对话框由**本卡片**弹出（它需要 `BuildContext`，而调用方拿不到卡内部的
+  /// context），提交后把 patch 交给本回调；用户取消时不调用。
+  final void Function(Map<String, dynamic> patch)? onEditAndAccept;
+
   /// 忽略（服务端写 24h 冷却窗口）。
   final VoidCallback? onDismiss;
 
   /// 稍后提醒。参数是选中的时长。
   final void Function(HabitSnoozeOption option)? onSnooze;
+
+  /// 撤销处理（`POST /api/chat/habit-suggestions/:id/unresolve`），把建议退回待处理。
+  ///
+  /// ## 只在已处理态有意义，故只在结果行渲染
+  ///
+  /// 未处理时服务端 CAS 必然命中不了（`WHERE ... user_feedback IS NOT NULL`），
+  /// 会返回 409「建议未被处理，无需恢复」。
+  ///
+  /// ## 不注入就不渲染
+  ///
+  /// 与其余回调同约定：app 装配层未接该能力（如习惯功能整体关闭）时，渲染一个
+  /// 点了没反应的按钮不如不渲染。
+  final VoidCallback? onUnresolve;
 
   /// 请求进行中：按钮禁用，避免重复提交（服务端 CAS 会挡，但连点会让 UI 闪两次）。
   final bool busy;
@@ -49,7 +75,10 @@ class HabitSuggestionCard extends StatelessWidget {
   bool get _interactive =>
       suggestion.canResolve &&
       !busy &&
-      (onAccept != null || onDismiss != null || onSnooze != null);
+      (onAccept != null ||
+          onEditAndAccept != null ||
+          onDismiss != null ||
+          onSnooze != null);
 
   @override
   Widget build(BuildContext context) {
@@ -116,12 +145,19 @@ class HabitSuggestionCard extends StatelessWidget {
             ],
             const SizedBox(height: SpbSpacing.md),
             if (resolved)
-              _ResolvedRow(suggestion: suggestion)
+              _ResolvedRow(
+                suggestion: suggestion,
+                busy: busy,
+                onUnresolve: onUnresolve,
+              )
             else
               _ActionRow(
                 enabled: _interactive,
                 busy: busy,
                 onAccept: onAccept,
+                onEdit: (onEditAndAccept != null && suggestion.canEdit)
+                    ? () => _openEditor(context)
+                    : null,
                 onDismiss: onDismiss,
                 onSnooze: onSnooze,
               ),
@@ -129,6 +165,22 @@ class HabitSuggestionCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// 弹出编辑器并把用户提交的 patch 交给 [onEditAndAccept]。
+  ///
+  /// 取消（返回 null）时不调回调——否则会发出一个空 patch 的
+  /// `edit_and_accept`，与「直接接受」等价但多一次无效往返。
+  Future<void> _openEditor(BuildContext context) async {
+    final callback = onEditAndAccept;
+    if (callback == null) return;
+    final patch = await showHabitSuggestionEditor(
+      context,
+      suggestion: suggestion,
+      busy: busy,
+    );
+    if (patch == null) return;
+    callback(patch);
   }
 
   /// 主题展示名。
@@ -190,6 +242,7 @@ class _ActionRow extends StatelessWidget {
     required this.enabled,
     required this.busy,
     this.onAccept,
+    this.onEdit,
     this.onDismiss,
     this.onSnooze,
   });
@@ -197,6 +250,10 @@ class _ActionRow extends StatelessWidget {
   final bool enabled;
   final bool busy;
   final VoidCallback? onAccept;
+
+  /// 打开编辑器（已由卡片判定过「服务端给了可编辑字段」）。
+  final VoidCallback? onEdit;
+
   final VoidCallback? onDismiss;
   final void Function(HabitSnoozeOption option)? onSnooze;
 
@@ -212,6 +269,15 @@ class _ActionRow extends StatelessWidget {
             key: const ValueKey('habit-accept'),
             onPressed: enabled ? onAccept : null,
             child: const Text('让它自动做'),
+          ),
+        // 只有服务端真的给了可编辑字段时才渲染（`canEdit`）：没有可编辑内容
+        // 时对话框会是一个空白表单，提交出的 patch 是 `{}`——与「直接接受」
+        // 等价但多了一次无效往返。故是**隐藏**而非禁用。
+        if (onEdit != null)
+          OutlinedButton(
+            key: const ValueKey('habit-edit-and-accept'),
+            onPressed: enabled ? onEdit : null,
+            child: const Text('编辑并接受'),
           ),
         if (onSnooze != null)
           PopupMenuButton<HabitSnoozeOption>(
@@ -305,9 +371,18 @@ class _OutlinedLikeButton extends StatelessWidget {
 
 /// 已处理后的结果行。
 class _ResolvedRow extends StatelessWidget {
-  const _ResolvedRow({required this.suggestion});
+  const _ResolvedRow({
+    required this.suggestion,
+    required this.busy,
+    this.onUnresolve,
+  });
 
   final HabitSuggestionItem suggestion;
+
+  /// 撤销请求在途：禁用按钮，避免重复提交（服务端 CAS 会挡，但连点会闪两次）。
+  final bool busy;
+
+  final VoidCallback? onUnresolve;
 
   @override
   Widget build(BuildContext context) {
@@ -337,6 +412,23 @@ class _ResolvedRow extends StatelessWidget {
         Icon(icon, size: SpbSpacing.lg, color: scheme.onSecondaryContainer),
         const SizedBox(width: SpbSpacing.sm),
         Expanded(child: Text(label, style: style)),
+        // 撤销入口。仅在注入时渲染（未注入 = app 未接该能力）。
+        // 已处理但**未**出现在收件箱历史里的项也能撤销——服务端只看 run 状态。
+        if (onUnresolve != null)
+          TextButton(
+            key: ValueKey('habit-unresolve-${suggestion.suggestionId}'),
+            onPressed: busy ? null : onUnresolve,
+            child: const Text('撤销'),
+          ),
+        if (busy)
+          const Padding(
+            padding: EdgeInsets.only(left: SpbSpacing.xs),
+            child: SizedBox(
+              width: SpbSpacing.lg,
+              height: SpbSpacing.lg,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
       ],
     );
   }

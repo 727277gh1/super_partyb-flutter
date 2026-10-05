@@ -506,6 +506,34 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
       },
       // 习惯执行产生的对话就是普通对话，直接跳过去（同 `_MyTurnsPage`）。
       onOpenTurn: (groupId, _) => context.go(SpbRoutes.chat(groupId)),
+      // ---------- 编辑 + 按规则查记录 ----------
+      //
+      // 两者都只发改动字段 / 只查单条规则，见 `HabitPatch` 与 `HabitRunsPage`
+      // 的类文档。
+      onEdit: (h, patch) => api.patchHabit(
+        h.id,
+        topicKey: patch.topicKey,
+        acceptanceLevel: patch.acceptanceLevel,
+        triggerConfig: patch.triggerConfig,
+        preferredAgentId: patch.preferredAgentId,
+      ),
+      loadHabitRuns: (patternId) => api.listHabitRuns(patternId),
+      // ---------- 建议收件箱 ----------
+      //
+      // 与卡片上的接受/忽略/稍后同一套端点（`/api/chat/habit-suggestions`）。
+      // 页面不持有 `HabitApi`（分层约定），故这里把三个方法传进去。
+      loadSuggestions: (filter) => api.listSuggestions(filter: filter),
+      resolveSuggestion: (s, action, {snooze}) => api
+          .resolveSuggestion(
+            s.id,
+            action: action,
+            // 时刻由 `HabitSnoozeOption.until` 算（UTC RFC3339）——服务端解析
+            // 失败会**静默**回退冷却时长，格式错了用户只能发现「时间不对」。
+            snoozeUntil: snooze?.until(DateTime.now()),
+          )
+          .then((_) {}),
+      unresolveSuggestion: api.unresolveSuggestion,
+      loadInsights: (days) => api.habitInsights(days: days),
     );
   }
 }
@@ -979,6 +1007,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onResolveConfirmation: _resolveConfirmation,
       onResolveFeedback: _resolveFeedback,
       onAcceptHabit: _acceptHabit,
+      onEditAndAcceptHabit: _editAndAcceptHabit,
       onDismissHabit: _dismissHabit,
       onSnoozeHabit: _snoozeHabit,
       // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
@@ -1233,6 +1262,33 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           .catchError((Object e) {
             debugPrint('接受习惯建议失败: $e');
             _showHabitError('接受失败，请重试');
+            return HabitSuggestionResolveResult(resolved: false);
+          }),
+    );
+  }
+
+  /// 就地编辑后接受（`action=edit_and_accept` + `pattern_patch`）。
+  ///
+  /// ## 为什么不做乐观更新
+  ///
+  /// 与 [_acceptHabit] 同约定：结果的权威来源是服务端随后推送的
+  /// `habit_suggestion_resolved` 事件（归约器会原地更新卡片）。乐观更新会让
+  /// 「patch 被服务端静默忽略」（如格式不对——`applyPatternPatch` 不报错）
+  /// 的情况显示成「已按你的修改生效」。
+  ///
+  /// 失败只记日志 + 弹提示：事件不会到来，卡片会继续停在未处理态，用户可重试。
+  void _editAndAcceptHabit(HabitSuggestionItem s, Map<String, dynamic> patch) {
+    unawaited(
+      ref
+          .read(habitApiProvider)
+          .resolveSuggestion(
+            s.suggestionId,
+            action: HabitSuggestionAction.editAndAccept,
+            patternPatch: patch,
+          )
+          .catchError((Object e) {
+            debugPrint('编辑并接受习惯建议失败: $e');
+            _showHabitError('保存失败，请重试');
             return HabitSuggestionResolveResult(resolved: false);
           }),
     );

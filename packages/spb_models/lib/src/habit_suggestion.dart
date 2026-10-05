@@ -7,8 +7,18 @@ enum HabitSuggestionAction {
   accept('accept', 'accepted', '接受'),
 
   /// 与 [accept] 的区别：服务端同样建 pattern，但语义上表示用户改过草稿。
-  /// 本客户端当前不发它（编辑走「先 accept 再 PATCH pattern」两步），
-  /// 保留枚举以便将来支持单请求编辑。
+  ///
+  /// ## 必须与 [patternPatch] 一起用（否则等于 [accept]）
+  ///
+  /// 服务端只在 `action == edit_and_accept` 时消费 `pattern_patch`
+  /// （`misc_extra.go` 的 `PatternPatch` 字段注释 + `applyPatternPatch`）。
+  /// 不发 patch 时服务端走 `accept_rule` 建出**候选原值**的规则——用户以为
+  /// 改过了，实际没改。
+  ///
+  /// 可编辑的字段由服务端白名单 `SuggestionEditableFields`
+  /// （`topic_key` / `trigger_config` / `preferred_agent_id` / `delivery_group_id`）
+  /// 经事件 payload 的 `editable_fields` 下发，见
+  /// [HabitSuggestionItem.editableFields]。
   editAndAccept('edit_and_accept', 'accepted', '编辑并接受'),
 
   dismiss('dismiss', 'dismissed', '忽略'),
@@ -164,6 +174,19 @@ class HabitSuggestion {
   final Map<String, dynamic> evidence;
 
   /// 允许用户就地编辑的字段名（服务端 `SuggestionEditableFields`）。
+  ///
+  /// 真源：`workers/habit/timeline_events.go:52`
+  /// ```go
+  /// var SuggestionEditableFields = []string{"topic_key", "trigger_config",
+  ///   "preferred_agent_id", "delivery_group_id"}
+  /// ```
+  /// 随 `habit_suggestion_created` 事件的 payload 下发。
+  ///
+  /// ## 为什么是「下发」而不是客户端写死
+  ///
+  /// 服务端新增/收窄可编辑面时不应要求客户端改代码；且客户端自行扩大字段集
+  /// 会让用户编辑出一个服务端**不接受**的 patch——`applyPatternPatch` 对不认识
+  /// 的键静默忽略，表现为「保存成功但配置没变」。故 UI 必须只渲染这里出现的键。
   final List<String> editableFields;
 
   /// 用户反馈（null = 未处理）。
