@@ -1,13 +1,16 @@
 # Windows 桌面端：下载与出包
 
-> 对应流水线：`.github/workflows/release-windows.yml`
+> 对应流水线（**两个文件，职责不同**）：
+> - **交付**：`.github/workflows/release.yml` 的 `windows` job —— 出 zip 并挂到 GitHub Release；
+> - **验证**：`.github/workflows/ci.yml` 的 `build-windows` job —— 只在 main 推送时验证「能不能构建」。
+>
 > 相关约束：`AGENTS.md` §8（构建平台限制）、§6.6（相对 Tauri 的净损失）
 
 ---
 
 ## 1. 下载现成的 exe（普通用户）
 
-**前提**：仓库维护者已经打过 tag（`v*`）或手动跑过一次 `release-windows`。
+**前提**：仓库维护者已经打过 tag（`v*`）或手动跑过一次 `release`（见 §2.2）。
 
 ### 路径 A：从 Release 下载（推荐）
 
@@ -18,9 +21,9 @@
 
 ### 路径 B：从 Actions 产物下载（未打 tag 时）
 
-1. 打开 **Actions** → 左侧选 `release-windows`；
+1. 打开 **Actions** → 左侧选 `release`；
 2. 点开最近一次成功的运行；
-3. 页面底部 **Artifacts** → 下载 `spb_desktop-windows-x64`；
+3. 页面底部 **Artifacts** → 下载 `windows-x64`（`release.yml` 的 windows job 里 `upload-artifact` 的 `name`）；
 4. 同上解压运行。
 
 > ⚠️ Actions 产物需要**登录 GitHub** 才能下载，且默认只存 30 天。
@@ -85,7 +88,7 @@ git push <github-remote> v0.1.0
 
 **手动触发（只出 artifact，验证参数用）：**
 
-Actions → `release-windows` → **Run workflow**，可填：
+Actions → `release` → **Run workflow**，可填：
 
 | 输入 | 说明 | 留空时 |
 |---|---|---|
@@ -96,6 +99,10 @@ Actions → `release-windows` → **Run workflow**，可填：
 | `oidc_client_id` | OIDC client_id | 同上 |
 
 **优先级**：`workflow_dispatch` 输入 > 仓库 Variables > 代码里的默认值。
+
+> 手动触发只出 `windows-x64` 这类 Actions artifact（存 30 天）；要长期免登录
+> 下载的 Release asset，得推 `v*` tag。手动触发时 macOS job 不跑
+> （10× 配额，见 `release.yml` 文件头）。
 
 ### 2.3 配置仓库 Variables
 
@@ -141,7 +148,8 @@ Release\
 目标机若未安装 [VC++ Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)，
 会**直接闪退且不给出可读错误**——用户只看到窗口一闪而过。
 
-流水线里的处理（`.github/workflows/release-windows.yml`）：
+流水线里的处理（`.github/workflows/release.yml` 的 `windows` job，另见
+`.github/workflows/ci.yml` 的 `build-windows` job 的同一段拷贝）：
 
 ```powershell
 $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `

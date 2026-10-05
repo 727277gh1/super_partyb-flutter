@@ -43,7 +43,6 @@ dependencies:
   flutter_secure_storage: ^9.2.2   # Keychain / Keystore
   path_provider: ^2.1.4
   path: ^1.9.0
-  share_plus: ^10.1.2              # 分享交付物
   url_launcher: ^6.3.1
 
   cupertino_icons: ^1.0.8

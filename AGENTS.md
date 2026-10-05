@@ -436,14 +436,20 @@ Flutter → POST /me/quick-capture/enqueue      → PartyB Go API → mq-server 
 
 **enqueue 提交后不导航**：投递是异步的，本页拿不到 `groupId`。结果由主窗口订阅 SSE 呈现。
 
-### 6.8 剪贴板文件粘贴（待实现）
+### 6.8 剪贴板文件粘贴（**三平台均已实现**）
 
-`readClipboardFiles()`（`spb_platform/lib/src/overlay_files.dart`）已定义契约与降级路径，
-但**各平台的原生侧尚未实现**（`MethodChannel('com.atjog.spb/clipboard_files')`）。
+`readClipboardFiles()`（`spb_platform/lib/src/overlay_files.dart`）走
+`MethodChannel('com.atjog.spb/clipboard_files')`，各平台原生侧**均已注册**：
 
-- 当前行为：channel 未注册 → `MissingPluginException` → 静默返回空（**不影响文本粘贴**）。
-- 缺失影响：用户截图后无法直接 `Ctrl+V` 到悬浮窗，需先存盘再拖入。
-- 实现位置：`apps/spb_desktop/{linux,windows,macos}/` 的原生侧。
+| 平台 | 实现位置 |
+|---|---|
+| Linux | `apps/spb_desktop/linux/runner/my_application.cc` |
+| Windows | `apps/spb_desktop/windows/runner/flutter_window.cpp` |
+| macOS | `apps/spb_desktop/macos/Runner/AppDelegate.swift` |
+
+降级路径仍在：channel 未注册（如单元测试环境、或将来新增未实现平台）时
+抛 `MissingPluginException`，函数**静默返回空**——不影响文本粘贴。
+原生侧刻意不回 error，避免用户从网页复制文件时看到报错弹窗。
 
 ---
 
@@ -680,7 +686,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] ~~多窗口可行性~~ → `window_manager` **做不到**；改用「主窗口临时变身」（见 §6.5）
 - [x] 托盘 + 全局快捷键（`bootstrap.dart` 已接 `window_manager`/`tray_manager`/`hotkey_manager`）
 - [x] **OIDC 登录打通**（桌面端 RFC 8252 §7.3 loopback 授权码流程，见 `docs/rfc8252-loopback-signin.md`；粘贴导入为降级路径）
-- [x] 剪贴板文件读取的原生实现（Linux `clipboard_files` channel，见 §6.7）
+- [x] 剪贴板文件读取的原生实现（Linux/Windows/macOS 三平台 `clipboard_files` channel，见 §6.8）
 
 ### M1+：功能实现（**大部分已完成**）
 
@@ -740,7 +746,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
 | macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement | 已知缺陷，未修 | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
-| ~~剪贴板文件粘贴无原生实现~~ | ✅ Linux 原生 channel 已实现 | §6.7 |
+| ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | IdP 生产未注册桌面 public client | **当前登录阻塞项**（粘贴导入可降级） | `docs/rfc8252-loopback-signin.md` §7 |
 | 契约同步靠人工 | 可接受 | §6.2 |

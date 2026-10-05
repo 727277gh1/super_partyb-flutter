@@ -95,8 +95,8 @@ class GroupListPage extends StatefulWidget {
 
   /// 打开工作台（小程序 BFF 的工作列表）。
   ///
-  /// 为 null 时**不展示**入口。仅移动端接线——桌面端不做小程序投影层
-  /// （那是为小程序/移动端准备的 BFF）。
+  /// 为 null 时**不展示**入口。**两端均已接线**（`apps/spb_desktop/lib/router.dart`
+  /// 与 `apps/spb_mobile/lib/router.dart` 都传了 `onOpenWorks`）。
   final VoidCallback? onOpenWorks;
 
   /// 打开习惯管理页。

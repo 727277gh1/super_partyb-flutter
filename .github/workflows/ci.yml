@@ -66,9 +66,9 @@ jobs:
       # 秒级启动）；含 UI 的包必须 flutter test。逐包跑而不是根目录一把梭：
       # 根目录的 `dart test` 不会进 Flutter 包，`flutter test` 又要求逐包执行。
       #
-      # 跳过没有 test/ 的包（spb_core / spb_design 当前无测试）：
-      # 直接对空目录跑 `dart test` 会挂住等输入（不是干净的非零退出），
-      # 会把整个 job 拖到超时。将来往这些包里加测试无需回来改本文件。
+      # 跳过没有 test/ 的包：直接对空目录跑 `dart test` 会挂住等输入
+      # （不是干净的非零退出），会把整个 job 拖到超时。将来往这些包里加测试
+      # 无需回来改本文件（下两个循环同样用 `-d` 守卫）。
       - name: Test pure Dart packages
         run: |
           for pkg in spb_core spb_models spb_api spb_domain; do
