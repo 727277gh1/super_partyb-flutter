@@ -766,4 +766,194 @@ void main() {
       expect(field.controller!.text, '新目标');
     });
   });
+
+  // Goal Gate 自动停用后的状态错显。
+  //
+  // ## 这个测试防的是什么（事实性错误）
+  //
+  // Goal Gate 达成目标（`chatgate/goal_gate.go:440`）或达到 max_auto_turns
+  // 熔断（`:555`）时，服务端自己把 `metadata.goal_gate.enabled` 改成 false
+  // （`markGoalGateCompleted`）。这是**后台 worker** 的动作，没有 HTTP 响应
+  // 回到客户端。
+  //
+  // 不消费 `group_metadata_updated` 的后果：面板继续显示「自动实现目标：开」，
+  // 用户以为还会自动续跑，实际已停——**事实性错误**，比不显示更糟。
+  //
+  // 本组用真实链路断言：`ChatEvent`（服务端载荷）→ `GroupUpdate.fromEvent`
+  // → `applyTo` → 面板渲染。不是在测试里重写一遍套用逻辑。
+  group('group_metadata_updated 纠正 goal gate 自动停用后的错显', () {
+    /// 服务端 `emitEvent(EventGroupMetadataUpdated, {reason, metadata})` 的载荷。
+    ///
+    /// metadata 是**完整**的 `chat_groups.metadata`（Go `updateGroupMetadata`
+    /// 返回整个 map，不是子树），故这里带上 tts 以验证「整体替换不丢其它键」。
+    ChatEvent metadataUpdatedEvent({
+      String reason = 'goal_completed',
+      bool gateEnabled = false,
+      bool ttsEnabled = true,
+    }) => ChatEvent.fromJson({
+      'eventId': 'evt_gm_1',
+      'userId': 'usr_1',
+      'groupId': 'grp_1',
+      'turnId': 'turn_1',
+      'eventType': EventTypes.groupMetadataUpdated,
+      'seq': 1,
+      'globalSeq': 10,
+      'source': 'system',
+      'payload': {
+        'reason': reason,
+        'metadata': {
+          'goal_gate': {
+            'enabled': gateEnabled,
+            'continue_until_done': gateEnabled,
+            'state': {'status': 'completed'},
+          },
+          'tts': {'enabled': ttsEnabled, 'narration_mode': 'summary'},
+        },
+      },
+      'createdAt': '2026-09-28T10:11:12.345Z',
+    });
+
+    /// gate 开启的初始 group（模拟用户之前开了「自动实现目标」）。
+    ChatGroup gateOnGroup() => ChatGroup.fromJson(
+      groupJson(
+        metadata: {
+          'goal_gate': {'enabled': true, 'continue_until_done': true},
+          'tts': {'enabled': false},
+        },
+        currentGoal: goalSnapshot('把同步做稳'),
+      ),
+    );
+
+    testWidgets('初始状态：开关为「开」', (tester) async {
+      await pumpPanel(tester, group: gateOnGroup());
+
+      expect(
+        switchValue(tester, 'group-goal-gate-switch'),
+        isTrue,
+        reason: '前置条件：用户之前开了自动实现目标',
+      );
+    });
+
+    testWidgets('收到 goal_completed 事件后，开关变为「关」', (tester) async {
+      final group = gateOnGroup();
+      expect(group.goalGateEnabled, isTrue, reason: '前置条件');
+
+      // 真实链路：服务端事件 → 领域模型归一 → 套用到 group。
+      final update = GroupUpdate.fromEvent(metadataUpdatedEvent())!;
+      expect(update.op, GroupUpdateOp.metadata);
+      final updated = update.applyTo(group);
+
+      expect(
+        updated.goalGateEnabled,
+        isFalse,
+        reason: '服务端已自动停用，客户端必须跟着关——否则是事实性错误',
+      );
+
+      await pumpPanel(tester, group: updated);
+
+      expect(
+        switchValue(tester, 'group-goal-gate-switch'),
+        isFalse,
+        reason: '面板必须显示「关」（修复前这里仍是 true）',
+      );
+    });
+
+    testWidgets('熔断（max_auto_turns_reached）同样纠正为「关」', (tester) async {
+      final update = GroupUpdate.fromEvent(
+        metadataUpdatedEvent(reason: 'max_auto_turns_reached'),
+      )!;
+      final updated = update.applyTo(gateOnGroup());
+
+      await pumpPanel(tester, group: updated);
+
+      expect(switchValue(tester, 'group-goal-gate-switch'), isFalse);
+    });
+
+    testWidgets('整体替换不丢其它 metadata 键（tts 仍为开）', (tester) async {
+      final update = GroupUpdate.fromEvent(
+        metadataUpdatedEvent(gateEnabled: false, ttsEnabled: true),
+      )!;
+      final updated = update.applyTo(gateOnGroup());
+
+      expect(
+        updated.ttsEnabled,
+        isTrue,
+        reason: '事件带的是完整 metadata，tts 键不得因套用而丢失',
+      );
+      expect(updated.ttsNarrationMode, 'summary');
+
+      await pumpPanel(tester, group: updated);
+      expect(switchValue(tester, 'group-tts-switch'), isTrue);
+    });
+
+    testWidgets('只替换 metadata，标题与 goal 快照保留', (tester) async {
+      final group = gateOnGroup();
+      final updated = GroupUpdate.fromEvent(metadataUpdatedEvent())!
+          .applyTo(group);
+
+      expect(updated.id, 'grp_1');
+      expect(updated.title, '某个对话');
+      expect(updated.currentGoalText, '把同步做稳', reason: '该事件不携带 goal，不得丢失');
+    });
+
+    testWidgets('别的 group 的事件不套用（SSE 是 user 级订阅）', (tester) async {
+      final group = gateOnGroup();
+      final other = ChatEvent.fromJson({
+        'eventId': 'e2',
+        'groupId': 'grp_other',
+        'eventType': EventTypes.groupMetadataUpdated,
+        'payload': {
+          'reason': 'goal_completed',
+          'metadata': {
+            'goal_gate': {'enabled': false, 'continue_until_done': false},
+          },
+        },
+        'createdAt': '2026-09-28T10:11:12.345Z',
+      });
+
+      final update = GroupUpdate.fromEvent(other)!;
+      expect(
+        identical(update.applyTo(group), group),
+        isTrue,
+        reason: 'groupId 不匹配时返回原对象，调用方据此跳过 setState',
+      );
+      expect(group.goalGateEnabled, isTrue);
+    });
+
+    testWidgets('metadata 缺失时返回原对象（不得清空现有开关）', (tester) async {
+      final group = gateOnGroup();
+      final ev = ChatEvent.fromJson({
+        'eventId': 'e3',
+        'groupId': 'grp_1',
+        'eventType': EventTypes.groupMetadataUpdated,
+        'payload': {'reason': 'goal_completed'},
+        'createdAt': '2026-09-28T10:11:12.345Z',
+      });
+
+      final update = GroupUpdate.fromEvent(ev)!;
+      expect(update.metadata, isNull);
+      expect(identical(update.applyTo(group), group), isTrue);
+      expect(group.goalGateEnabled, isTrue, reason: '异常载荷不得把开关全清成关（那会制造另一种错显）');
+    });
+
+    testWidgets('非 metadata 分支的 group 变更不影响设置面板', (tester) async {
+      final group = gateOnGroup();
+      final titleEvent = ChatEvent.fromJson({
+        'eventId': 'e4',
+        'groupId': 'grp_1',
+        'eventType': EventTypes.groupTitleUpdated,
+        'payload': {'new_title': '改了名'},
+        'createdAt': '2026-09-28T10:11:12.345Z',
+      });
+
+      final update = GroupUpdate.fromEvent(titleEvent)!;
+      expect(update.op, GroupUpdateOp.title);
+      expect(
+        identical(update.applyTo(group), group),
+        isTrue,
+        reason: '本页不渲染标题，不应因标题变更重建设置面板',
+      );
+      expect(group.goalGateEnabled, isTrue);
+    });
+  });
 }

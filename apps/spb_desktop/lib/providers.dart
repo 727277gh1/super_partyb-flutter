@@ -151,6 +151,14 @@ final chatApiProvider = Provider<ChatApi>((ref) {
   return ChatApi(ref.watch(dioProvider));
 });
 
+/// 目标 / 任务 API 客户端（与 [chatApiProvider] 共用同一个 [dioProvider]）。
+///
+/// 单独一个 provider 而不是塞进 [chatApiProvider]：`GoalApi` 的 12 个端点
+/// 属于「目标管理」这个可独立关闭的子系统（与 `HabitApi` 同一取舍）。
+final goalApiProvider = Provider<GoalApi>((ref) {
+  return GoalApi(ref.watch(dioProvider));
+});
+
 // ==================== 对话管理（改名 / 归档 / 删除）====================
 
 /// 对话管理用例。

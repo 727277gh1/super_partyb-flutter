@@ -666,6 +666,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 第二条独立流。
   StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
 
+  /// controller.contextUsage 的订阅（与 activities 平行，见领域层说明）。
+  StreamSubscription<ContextUsage?>? _contextUsageSub;
+
   /// 当前对话的权威 ChatGroup（设置弹层的目标文本与三个开关的真源）。
   ///
   /// 移动端没有侧边栏，故设置入口是 AppBar 的一个按钮 → 底部弹层。真源与桌面端
@@ -690,6 +693,44 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// getter，建立不了依赖，事件到达时不会触发重建。
   Map<String, TurnActivitySnapshot> _activities = const {};
 
+  /// 最近一次归约出的上下文用量快照（同上）。
+  ///
+  /// 为 null 表示尚无可用用量数据（服务端未发射或载荷无法解析），
+  /// 页面据此隐藏用量区。
+  ContextUsage? _contextUsage;
+
+  /// controller.executionStatus 的订阅（queue_state / retry_scheduled）。
+  StreamSubscription<ExecutionStatus?>? _executionStatusSub;
+
+  /// 最近一次归约出的等待/重试状态；null 表示当前无等待。
+  ExecutionStatus? _executionStatus;
+
+  /// controller.ttsStatus 的订阅（tts_started / tts_completed / tts_failed）。
+  StreamSubscription<TtsStatus?>? _ttsStatusSub;
+
+  /// controller.goalUpdates 的订阅（goal_updated）。
+  ///
+  /// 事件携带与 `GET /goals/current` 同构的完整快照，故直接套进 _group
+  /// 即可，无需再发一次 HTTP（见 GoalUpdate 类文档）。
+  StreamSubscription<GoalUpdate>? _goalUpdatesSub;
+
+  /// controller.groupUpdates 的订阅（本页只关心 metadata 变更）。
+  ///
+  /// ## 为什么对话页也要订阅（列表页已经在用了）
+  ///
+  /// `group_metadata_updated` 是 Goal Gate **后台**自动停用时的唯一通知：
+  /// 服务端改了 `chat_groups.metadata`（`markGoalGateCompleted` 写
+  /// `gate["enabled"] = false`），但没有任何 HTTP 响应回到客户端。
+  /// 不消费它，设置面板会继续显示「自动实现目标：开」——事实性错误。
+  ///
+  /// 列表页虽也收到该事件，但 `GroupListPage._onGroupUpdate` 对
+  /// `GroupUpdateOp.metadata` 是**刻意忽略**的（它只渲染标题与状态，
+  /// metadata 的开关在对话页/设置面板编辑）。故本页必须自己订阅。
+  StreamSubscription<GroupUpdate>? _groupUpdatesSub;
+
+  /// 最近一次归约出的播报状态；null 表示本群未开语音/尚无事件。
+  TtsStatus? _ttsStatus;
+
   @override
   void initState() {
     super.initState();
@@ -702,6 +743,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   @override
   void dispose() {
     _activitiesSub?.cancel();
+    _contextUsageSub?.cancel();
+    _executionStatusSub?.cancel();
+    _ttsStatusSub?.cancel();
+    _goalUpdatesSub?.cancel();
+    _groupUpdatesSub?.cancel();
     super.dispose();
   }
 
@@ -922,6 +968,131 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  // ==================== 任务清单 ====================
+
+  /// 当前 goal 快照（无 goal 或 `current_goal` 缺失时为空快照）。
+  ///
+  /// 与桌面端逐字同构：快照来自 `_group.currentGoal`（首次由
+  /// `GET /chat/groups/:id` 填充，此后由 `goal_updated` SSE 覆盖），
+  /// 不另发 HTTP。
+  GoalSnapshot get _goalSnapshot =>
+      GoalSnapshot.fromJson(_group?.currentGoal ?? const {});
+
+  /// 当前 goal 的行 id（任务端点的路径参数）。无 goal 时为空串。
+  String get _goalId => _goalSnapshot.goal?.id ?? '';
+
+  /// 打开任务清单底部弹层。
+  ///
+  /// 同 [_openSettings]：用弹层而非新路由，共享同一份 State（`_group` /
+  /// `_settingsBusy`），否则写成功后回写的是另一个 `_ChatPage` 实例。
+  Future<void> _openGoalTasks() async {
+    if (_group == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+          ),
+          child: SizedBox(
+            height: MediaQuery.of(sheetContext).size.height * 0.8,
+            child: GoalTasksPanel(
+              snapshot: _goalSnapshot,
+              // 移动端当前**不**消费 gate 决策（没有诊断 tab/面板）。
+              // 传空列表而不是新接一条订阅：本任务只加任务清单，接诊断是
+              // 另一个能力（桌面端已从 `controller.gateDecisions` 订阅）。
+              // 面板在列表为空时整块不渲染，故这里不产生空壳。
+              busy: _settingsBusy,
+              // 弹层自带拖拽条，不再重复面板标题。
+              showHeader: false,
+              reloadToken: widget.groupId,
+              onReload: () => _runGoalWrite(null, onChanged: setSheetState),
+              onSetStatus: (taskId, status) => _runGoalWrite(
+                () => ref
+                    .read(goalApiProvider)
+                    .setTaskStatus(_goalId, taskId, status),
+                onChanged: setSheetState,
+              ),
+              onCreate: ({required title, description}) => _runGoalWrite(
+                () => ref
+                    .read(goalApiProvider)
+                    .createTask(
+                      _goalId,
+                      title: title,
+                      description: description,
+                      // 与桌面端同一取舍：必须显式 manual，否则人工新增的任务会
+                      // 在下次 LLM 展开时被当作可覆盖项删掉。
+                      origin: GoalTaskOrigin.manual,
+                    ),
+                onChanged: setSheetState,
+              ),
+              onDelete: (taskId) => _runGoalWrite(
+                () => ref.read(goalApiProvider).deleteTask(_goalId, taskId),
+                onChanged: setSheetState,
+              ),
+              onReorder: (taskIds) => _runGoalWrite(
+                () => ref.read(goalApiProvider).reorderTasks(_goalId, taskIds),
+                onChanged: setSheetState,
+              ),
+              onResetForExpand: () => _runGoalWrite(
+                () => ref.read(goalApiProvider).resetForExpand(_goalId),
+                onChanged: setSheetState,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 执行一个任务写操作（`action` 为 null 时只重拉）。
+  ///
+  /// 与桌面端 `_runGoalWrite` 同一取舍：写端点响应形状各异（`{task,progress}`
+  /// / `{items}` / `{deleted}` / 被删保留清单），逐个写本地归一化会与
+  /// `goal_updated` 事件路径产生两套真相，故统一 write → re-read。
+  Future<void> _runGoalWrite(
+    Future<void> Function()? action, {
+    StateSetter? onChanged,
+  }) async {
+    if (_settingsBusy) return;
+    if (_goalId.isEmpty) {
+      _showSettingsError('当前对话没有目标，无法操作任务');
+      return;
+    }
+    setState(() => _settingsBusy = true);
+    onChanged?.call(() {});
+    try {
+      if (action != null) await action();
+      await _loadGroup();
+    } on SpbError catch (e) {
+      SpbLog.warn('任务操作失败', {
+        'groupId': widget.groupId,
+        'goalId': _goalId,
+        'error': e.toString(),
+      });
+      _showSettingsError(_describeGoalError(e));
+    } finally {
+      if (mounted) setState(() => _settingsBusy = false);
+      onChanged?.call(() {});
+    }
+  }
+
+  /// 把任务写操作的错误翻成用户能看懂的一句话（与桌面端同一取舍）。
+  String _describeGoalError(SpbError e) {
+    if (e is HttpError) {
+      return switch (e.statusCode) {
+        404 => '任务或目标不存在（可能已被删除），已刷新列表',
+        409 => '任务编号已存在，请换一个标题后重试',
+        400 => '请求被拒绝：${e.message}',
+        _ => '操作失败（HTTP ${e.statusCode}），请稍后重试',
+      };
+    }
+    if (e is AuthError) return '登录已失效，请重新登录';
+    return '操作失败，请稍后重试';
+  }
+
   /// 先解析 userId，再聚焦到当前 group。
   Future<void> _resolveUserAndFocus() async {
     if (!mounted || _resolvingUser) return;
@@ -956,6 +1127,33 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       _activitiesSub = controller.activities.listen(_onActivitiesChanged);
       _onActivitiesChanged(controller.activitiesSnapshot);
     }
+    if (_contextUsageSub == null) {
+      // 上下文用量走独立流（见领域层 ContextUsage 类文档）。与 activities 同取向：
+      // 先订阅再同步一次快照，避免错过订阅前已到达的事件。
+      _contextUsageSub = controller.contextUsage.listen(_onContextUsageChanged);
+      _onContextUsageChanged(controller.contextUsageSnapshot);
+    }
+    if (_executionStatusSub == null) {
+      // 等待/重试状态走独立流（见 ExecutionStatus 类文档）。
+      _executionStatusSub = controller.executionStatus.listen(
+        _onExecutionStatusChanged,
+      );
+      _onExecutionStatusChanged(controller.executionStatusSnapshot);
+    }
+    if (_ttsStatusSub == null) {
+      // 语音播报状态走独立流（见 TtsStatus 类文档）。
+      _ttsStatusSub = controller.ttsStatus.listen(_onTtsStatusChanged);
+      _onTtsStatusChanged(controller.ttsStatusSnapshot);
+    }
+    // 目标变更通知走独立流（见 GoalUpdate 类文档）。
+    //
+    // ⚠️ 该事件在服务端漏设 Transient（见 GoalUpdate 的类文档），
+    // 控制器已按事件类型把它挡在游标推进之外——此处只消费快照。
+    _goalUpdatesSub ??= controller.goalUpdates.listen(_onGoalUpdated);
+    // group 变更通知走独立流。本页只处理 metadata 分支（见 _onGroupMetadataChanged）。
+    _groupUpdatesSub ??= controller.groupUpdates.listen(
+      _onGroupMetadataChanged,
+    );
     if (_connectedUserId == userId || controller.isConnected) {
       // 同一 userId 内切 group：复用已有连接（不调 connect，游标保留）。
       await controller.switchGroup(widget.groupId);
@@ -971,6 +1169,86 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onActivitiesChanged(Map<String, TurnActivitySnapshot> activities) {
     if (!mounted) return;
     setState(() => _activities = activities);
+  }
+
+  /// 监听 controller.contextUsage：驱动对话页顶部的用量读数。
+  ///
+  /// 快照可为 null（尚无数据），直接存下即可——页面按 `hasData` 决定是否渲染。
+  void _onContextUsageChanged(ContextUsage? usage) {
+    if (!mounted) return;
+    setState(() => _contextUsage = usage);
+  }
+
+  /// 监听 controller.executionStatus：驱动对话页的等待/重试提示。
+  void _onExecutionStatusChanged(ExecutionStatus? status) {
+    if (!mounted) return;
+    setState(() => _executionStatus = status);
+  }
+
+  /// 监听 controller.ttsStatus：驱动对话页的播报状态条。
+  void _onTtsStatusChanged(TtsStatus? status) {
+    if (!mounted) return;
+    setState(() => _ttsStatus = status);
+  }
+
+  /// 监听 controller.goalUpdates：实时刷新本对话的目标快照。
+  ///
+  /// ## 为什么直接套快照而不重新拉 group
+  ///
+  /// 事件 payload 的 goal/tasks/progress 由与 `GET /goals/current` 完全
+  /// 相同的 DTO 函数生成（Go `goalToDTO`/`taskToDTO`/`progressFromTasks`），
+  /// 是服务端刻意的防漂移设计。重发 HTTP 只为拿已在手里的数据是白费一次
+  /// 往返，且会打断设置面板里的草稿编辑。
+  ///
+  /// ## 三条守卫
+  ///
+  /// 1. **只处理本对话的变更**：SSE 是 user 级订阅，会收到别的 group 的
+  ///    goal 变更（agent 可能在别处改任务）；套错会把本页目标改掉。
+  /// 2. **_group 未就绪时忽略**：初始 `_loadGroup` 会拿到最新状态，此处
+  ///    无事可做（也不能拿 null 去拼快照）。
+  /// 3. **快照为 null 时忽略**：goal 字段缺失的异常载荷不得清空现有目标
+  ///    （否则面板上的目标会凭空消失）。
+  /// 监听 controller.groupUpdates：把 Goal Gate 自动停用的 metadata 套进 _group。
+  ///
+  /// ## 只处理 metadata 分支
+  ///
+  /// 本页不渲染 group 的标题/状态（那是列表页的事），`created`/`deleted`/
+  /// `title` 等 op 对设置面板无影响，处理它们只会白费一次 setState。
+  ///
+  /// ## 三条守卫
+  ///
+  /// 1. **只处理本对话**：SSE 是 user 级订阅，会收到别的 group 的变更
+  ///    （`groupUpdates` 刻意不过滤 group）。套错会把本页开关改掉。
+  /// 2. **_group 未就绪时忽略**：初始 `_loadGroup` 会拿到最新 metadata。
+  /// 3. **metadata 为 null 时忽略**：不得用空 map 覆盖现有值
+  ///    （否则面板会显示假的「全部关闭」）。
+  ///
+  /// ## 为什么整体替换而不深合并
+  ///
+  /// payload 的 metadata 是**完整**的 `chat_groups.metadata`（Go
+  /// `updateGroupMetadata` 返回整个 map）。服务端的删除语义是「把键移除」
+  /// （关闭 tts 时整块删 `metadata.tts`），深合并会让「已关」的开关
+  /// 继续显示为开。
+  void _onGroupMetadataChanged(GroupUpdate update) {
+    if (!mounted) return;
+    final group = _group;
+    if (group == null) return;
+    // 判定逻辑在 GroupUpdate.applyTo（两端共用，见其文档）：
+    // op 非 metadata / groupId 不匹配 / metadata 缺失时返回**原对象**，
+    // 据此跳过无意义的 setState。
+    final next = update.applyTo(group);
+    if (identical(next, group)) return;
+    setState(() => _group = next);
+  }
+
+  void _onGoalUpdated(GoalUpdate update) {
+    if (!mounted) return;
+    if (update.groupId != widget.groupId) return;
+    final group = _group;
+    if (group == null) return;
+    final snapshot = update.snapshot;
+    if (snapshot == null) return;
+    setState(() => _group = group.withCurrentGoal(snapshot));
   }
 
   @override
@@ -1019,6 +1297,22 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           tooltip: '对话设置',
           onPressed: _group == null ? null : _openSettings,
         ),
+        // 任务清单入口。
+        //
+        // ## 为什么与设置分开而不是塞进设置弹层
+        //
+        // 任务清单是一个**可操作列表**（勾选/新增/重排/删除），而设置弹层是
+        // 表单。混在一起会让设置弹层变成两套交互的堆叠，且任务的实时刷新
+        // （`goal_updated` SSE）会与表单草稿编辑互相干扰。
+        //
+        // 未就绪时**禁用而非隐藏**：AppBar 宽度恒定，不会因加载完成而拖动
+        // 其余图标（与设置按钮同一取舍）。
+        IconButton(
+          key: const ValueKey('open-goal-tasks'),
+          icon: const Icon(Icons.checklist_outlined),
+          tooltip: '任务清单',
+          onPressed: _group == null ? null : _openGoalTasks,
+        ),
       ],
       // 待处理收件箱消息（可撤销）。
       //
@@ -1039,6 +1333,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       activities: controller.activities,
       activitiesSnapshot: _activities,
+      // 上下文用量（context_update）：贴时间线顶部的诊断读数。
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      contextUsage: controller.contextUsage,
+      contextUsageSnapshot: _contextUsage,
+      // 等待/重试提示（queue_state / retry_scheduled）：与活动指示共用槽位。
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      executionStatus: controller.executionStatus,
+      executionStatusSnapshot: _executionStatus,
+      // 语音播报状态（tts_*）：只做状态展示，不引入播放（AGENTS.md §11）。
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      ttsStatus: controller.ttsStatus,
+      ttsStatusSnapshot: _ttsStatus,
       // 向上翻页：加载更早历史。
       //
       // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，
