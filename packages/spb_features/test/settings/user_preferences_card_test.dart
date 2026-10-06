@@ -19,13 +19,24 @@ import 'package:spb_models/spb_models.dart';
 /// 故逐条断言：只提交改动字段、选项来自注入列表、空串有文案、非法地址阻止
 /// 保存并给出改法、加载失败整块退化为重试入口。
 void main() {
+  /// 默认的两个可推送渠道选项（服务端 `available_channels` 的真实形状）。
+  const kDefaultChannels = [
+    PreferenceChannelOption(value: 'wechat_ilink', label: '微信'),
+    PreferenceChannelOption(value: 'dingtalk', label: '钉钉'),
+  ];
+
   /// 服务端 `userPrefResponse` 的典型形状。
   UserPreferences prefs({
     String replyLanguage = 'en',
     bool customized = true,
+    bool followUpSuggest = false,
+    bool habitSuggest = false,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
+    String habitNotifyChannels = '',
+    bool habitNotifyChannelsSet = false,
+    List<PreferenceChannelOption>? availableChannels,
     List<String>? availableLanguages,
     Map<String, String>? languageLabels,
   }) => UserPreferences(
@@ -36,9 +47,14 @@ void main() {
         languageLabels ??
         const {'auto': '跟随输入', 'zh-CN': '简体中文', 'en': 'English', 'ja': '日本語'},
     customized: customized,
+    followUpSuggest: followUpSuggest,
+    habitSuggest: habitSuggest,
     defaultAgentId: defaultAgentId,
     displayName: displayName,
     avatarUrl: avatarUrl,
+    habitNotifyChannels: habitNotifyChannels,
+    habitNotifyChannelsSet: habitNotifyChannelsSet,
+    availableChannels: availableChannels ?? kDefaultChannels,
   );
 
   /// 一次 save 调用捕获到的参数。
@@ -47,6 +63,9 @@ void main() {
     String? avatarUrl,
     String? replyLanguage,
     String? defaultAgentId,
+    bool? followUpSuggest,
+    bool? habitSuggest,
+    String? habitNotifyChannels,
   })?
   lastSave;
 
@@ -92,6 +111,9 @@ void main() {
                     String? avatarUrl,
                     String? replyLanguage,
                     String? defaultAgentId,
+                    bool? followUpSuggest,
+                    bool? habitSuggest,
+                    String? habitNotifyChannels,
                   }) async {
                     saveCalls++;
                     lastSave = (
@@ -99,6 +121,9 @@ void main() {
                       avatarUrl: avatarUrl,
                       replyLanguage: replyLanguage,
                       defaultAgentId: defaultAgentId,
+                      followUpSuggest: followUpSuggest,
+                      habitSuggest: habitSuggest,
+                      habitNotifyChannels: habitNotifyChannels,
                     );
                     if (saveError != null) throw saveError;
                     return saveResult?.call() ?? prefs();
@@ -615,6 +640,260 @@ void main() {
     test('空串返回 null（空 = 未设置，由调用方先判空）', () {
       expect(sanitizeAvatarUrl(''), isNull);
       expect(sanitizeAvatarUrl('   '), isNull);
+    });
+  });
+
+  group('新建对话默认开关（两个 bool 各自只提交自己的键）', () {
+    testWidgets('初值来自权威值', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(followUpSuggest: true, habitSuggest: false),
+      );
+
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('pref-follow-up-suggest')),
+            )
+            .value,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('pref-habit-suggest')),
+            )
+            .value,
+        isFalse,
+      );
+    });
+
+    testWidgets('只动 follow-up 时 body 只含 follow_up_suggest', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      await tester.tap(find.byKey(const ValueKey('pref-follow-up-suggest')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.followUpSuggest, isTrue);
+      expect(lastSave!.habitSuggest, isNull, reason: '没碰的字段必须为 null');
+      expect(lastSave!.displayName, isNull);
+      expect(lastSave!.replyLanguage, isNull);
+      expect(lastSave!.habitNotifyChannels, isNull);
+    });
+
+    testWidgets('只动 habit 时 body 只含 habit_suggest', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      await tester.tap(find.byKey(const ValueKey('pref-habit-suggest')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.habitSuggest, isTrue);
+      expect(lastSave!.followUpSuggest, isNull, reason: '没碰的字段必须为 null');
+      expect(lastSave!.displayName, isNull);
+      expect(lastSave!.habitNotifyChannels, isNull);
+    });
+
+    testWidgets('关掉已开的开关会提交 false（不是 null）', (tester) async {
+      // 写成 `if (x == true)` 就永远关不掉。
+      await pumpCard(tester, loaded: prefs(habitSuggest: true));
+
+      await tester.tap(find.byKey(const ValueKey('pref-habit-suggest')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.habitSuggest, isFalse);
+    });
+
+    testWidgets('未改动时不显示保存按钮（两个开关也不误报改动）', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(followUpSuggest: true, habitSuggest: true),
+      );
+
+      expect(find.byKey(const ValueKey('settings-prefs-save')), findsNothing);
+      expect(saveCalls, 0);
+    });
+  });
+
+  group('习惯推送渠道（单个逗号分隔串，不是数组）', () {
+    testWidgets('选项来自服务端 available_channels（不自算中文名）', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      expect(find.text('微信'), findsOneWidget);
+      expect(find.text('钉钉'), findsOneWidget);
+    });
+
+    testWidgets('只勾选渠道 A → body 只含 habit_notify_channels，值为该渠道串', (
+      tester,
+    ) async {
+      await pumpCard(tester, loaded: prefs());
+
+      await tester.tap(
+        find.byKey(const ValueKey('pref-habit-channel-dingtalk')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.habitNotifyChannels, 'dingtalk');
+      // 其它字段一个都不能被带上（部分更新语义）。
+      expect(lastSave!.displayName, isNull);
+      expect(lastSave!.avatarUrl, isNull);
+      expect(lastSave!.replyLanguage, isNull);
+      expect(lastSave!.defaultAgentId, isNull);
+      expect(lastSave!.followUpSuggest, isNull);
+      expect(lastSave!.habitSuggest, isNull);
+    });
+
+    testWidgets('多选编成逗号串且排序稳定（勾选顺序不产生「未保存」）', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      // 反序勾选（先钉钉后微信）仍应得到排序后的串。
+      await tester.tap(
+        find.byKey(const ValueKey('pref-habit-channel-dingtalk')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('pref-habit-channel-wechat_ilink')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.habitNotifyChannels, 'dingtalk,wechat_ilink');
+    });
+
+    testWidgets('已保存的渠道回填为勾选态', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          habitNotifyChannels: 'wechat_ilink',
+          habitNotifyChannelsSet: true,
+        ),
+      );
+
+      expect(
+        tester
+            .widget<CheckboxListTile>(
+              find.byKey(const ValueKey('pref-habit-channel-wechat_ilink')),
+            )
+            .value,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<CheckboxListTile>(
+              find.byKey(const ValueKey('pref-habit-channel-dingtalk')),
+            )
+            .value,
+        isFalse,
+      );
+    });
+
+    testWidgets('未设置 → 徒标「自动」，不是「已关闭」', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      expect(find.text('自动'), findsOneWidget);
+      expect(find.text('已关闭'), findsNothing);
+    });
+
+    testWidgets('显式关闭（off）→ 徒标「已关闭」且按钮为「恢复自动」', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          habitNotifyChannels: kHabitNotifyOff,
+          habitNotifyChannelsSet: true,
+        ),
+      );
+
+      expect(find.text('已关闭'), findsOneWidget);
+      expect(find.text('恢复自动'), findsOneWidget);
+    });
+
+    testWidgets('点「关闭推送」提交 off 哨兵（不是空串）', (tester) async {
+      // 空串 = 删记录 = 回退「最近入站渠道」→ 推送反而重新打开。
+      // 两者语义相反，必须区分。
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          habitNotifyChannels: 'dingtalk',
+          habitNotifyChannelsSet: true,
+        ),
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('pref-habit-notify-toggle-off')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.habitNotifyChannels, kHabitNotifyOff);
+    });
+
+    testWidgets('点「恢复自动」提交空串（删记录）', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          habitNotifyChannels: kHabitNotifyOff,
+          habitNotifyChannelsSet: true,
+        ),
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('pref-habit-notify-toggle-off')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.habitNotifyChannels, '');
+    });
+
+    testWidgets('已配置但渠道已失效时给出提示', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          // set=true 但 available_channels 里已无该渠道（用户解绑了）。
+          habitNotifyChannels: 'feishu',
+          habitNotifyChannelsSet: true,
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('pref-habit-notify-stale')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('无可用渠道且未关闭时给出说明且不渲染勾选项', (tester) async {
+      await pumpCard(tester, loaded: prefs(availableChannels: const []));
+
+      expect(find.text('你还没有绑定任何可推送的渠道，无法选择'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('pref-habit-channel-wechat_ilink')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('脏存量值（多余空白）不误判为「有改动」', (tester) async {
+      // 服务端把该串当不透明串存取，历史值可能带空白。若两侧不过同一个
+      // 编码函数，这里会平白亮起保存按钮。
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          habitNotifyChannels: ' wechat_ilink , dingtalk ',
+          habitNotifyChannelsSet: true,
+        ),
+      );
+
+      expect(find.byKey(const ValueKey('settings-prefs-save')), findsNothing);
+      expect(saveCalls, 0);
     });
   });
 }

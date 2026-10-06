@@ -21,11 +21,33 @@ typedef LoadUserPreferences = Future<UserPreferences> Function();
 /// - `avatarUrl: ''` 清除自设头像；
 /// - `defaultAgentId: ''` 恢复「跟随系统默认」；
 /// - `replyLanguage` 用 `'auto'`（不是空串）表达「跟随输入」。
+///
+/// ## 两个 bool 的语义
+///
+/// [followUpSuggest] / [habitSuggest] 是**新建对话的默认播种值**，仅影响之后
+/// 新建的 group，不回溯修改既有 group（服务端 `user_preferences.go`）。与群级
+/// 同名开关是不同层次：本处是「以后新建的默认」，群级那个是「这个对话现在
+/// 开不开」。
+///
+/// 它们同样遵循「非 null 即提交」：传 `false` 是**有意义的显式关闭**，与
+/// 「不传」（保持原值）必须区分——若写成 `if (x == true)` 就永远关不掉。
+///
+/// ## [habitNotifyChannels] 是**单个逗号分隔字符串**，不是数组
+///
+/// 服务端把它当不透明串存取（`userpref` 层），故这里也不拆成列表：
+/// - `''` = 未设置（服务端删记录 → 回退「最近入站渠道」）；
+/// - `'off'`（[kHabitNotifyOff]）= 显式关闭推送；
+/// - `'wechat_ilink,dingtalk'` = 只推这些渠道。
+///
+/// 三者语义互不相同，尤其是 `''` 与 `'off'`——**不能**用「空列表」表达关闭。
 typedef SaveUserPreferences = Future<UserPreferences> Function({
   String? displayName,
   String? avatarUrl,
   String? replyLanguage,
   String? defaultAgentId,
+  bool? followUpSuggest,
+  bool? habitSuggest,
+  String? habitNotifyChannels,
 });
 
 /// 「默认 Agent」下拉的一项。
@@ -77,7 +99,8 @@ String? sanitizeAvatarUrl(String raw) {
   return value;
 }
 
-/// 用户偏好区块（昵称 / 头像 / 回复语言 / 默认 Agent）。
+/// 用户偏好区块（昵称 / 头像 / 回复语言 / 默认 Agent / 两个新建默认开关 /
+/// 习惯推送渠道）。
 ///
 /// ## 为什么自管状态，不并进设置页的 draft
 ///
@@ -149,6 +172,23 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
   String? _replyLanguage;
   String? _defaultAgentId;
 
+  /// 草稿里的两个「新建对话默认值」开关。
+  ///
+  /// 与 [_replyLanguage] 同形：初值来自权威值，`_pendingChanges` 逐字段比对。
+  bool? _followUpSuggest;
+  bool? _habitSuggest;
+
+  /// 草稿里的习惯推送渠道（勾选集合 + 显式关闭标志）。
+  ///
+  /// ## 为什么是两个字段而不是一个字符串
+  ///
+  /// 线格式（[_channelsToWire]）里 `''`（恢复自动）与 `'off'`（显式关闭）
+  /// 都「没有渠道」，但它们是**两个相反的动作**，UI 必须能区分——用一个字符串
+  /// 表达会把「用户点了关闭」变成「用户清空了选择」→ 服务端删记录 → 回退自动，
+  /// 推送反而重新打开了。
+  Set<String> _habitChannels = <String>{};
+  bool _habitChannelsOff = false;
+
   @override
   void initState() {
     super.initState();
@@ -192,6 +232,12 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     _avatarUrl.text = prefs.avatarUrl;
     _replyLanguage = prefs.replyLanguage;
     _defaultAgentId = prefs.defaultAgentId;
+    _followUpSuggest = prefs.followUpSuggest;
+    _habitSuggest = prefs.habitSuggest;
+    _habitChannels = prefs.selectedHabitChannels.toSet();
+    // `habitNotifyDisabled` 同时覆盖「存了 off」与「set=true 但值为空」
+    // （两者服务端语义相同：不推送），与 webapp 的 `isOff` 同口径。
+    _habitChannelsOff = prefs.habitNotifyDisabled;
     _savedFlash = false;
   }
 
@@ -206,6 +252,24 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     return sanitizeAvatarUrl(raw) == null ? '已忽略非法地址：只接受 http/https 链接' : null;
   }
 
+  /// 把渠道草稿编成服务端线格式（**单个逗号分隔串**，见 [SaveUserPreferences]）。
+  ///
+  /// 三态互斥，且 `''` 与 `'off'` 语义相反：
+  /// - 显式关闭 → `'off'`（[kHabitNotifyOff]）；
+  /// - 一个都没勾 → `''`（服务端删记录 → 回退「最近入站渠道」）；
+  /// - 勾了若干 → 逗号连接。
+  ///
+  /// ## 为什么要排序
+  ///
+  /// 同一集合必须编出**同一个串**，否则 `_pendingChanges` 会因勾选顺序不同而
+  /// 误判为「有改动」，保存按钮在没真改的情况下亮起来。
+  static String _channelsToWire(Set<String> selected, bool off) {
+    if (off) return kHabitNotifyOff;
+    if (selected.isEmpty) return '';
+    final sorted = selected.toList()..sort();
+    return sorted.join(',');
+  }
+
   /// 相对基线的改动集合。
   ///
   /// ## 为什么逐字段比对而不是「提交全部草稿」
@@ -217,6 +281,9 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     String? avatarUrl,
     String? replyLanguage,
     String? defaultAgentId,
+    bool? followUpSuggest,
+    bool? habitSuggest,
+    String? habitNotifyChannels,
   })
   get _pendingChanges {
     final saved = _saved;
@@ -226,8 +293,18 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         avatarUrl: null,
         replyLanguage: null,
         defaultAgentId: null,
+        followUpSuggest: null,
+        habitSuggest: null,
+        habitNotifyChannels: null,
       );
     }
+    // 两侧都过同一个编码函数，故 `' wechat , dingtalk '` 这类脏存量值与
+    // 排序后的草稿能正确判定为「无改动」（否则会平白亮起保存按钮）。
+    final channels = _channelsToWire(_habitChannels, _habitChannelsOff);
+    final savedChannels = _channelsToWire(
+      saved.selectedHabitChannels.toSet(),
+      saved.habitNotifyDisabled,
+    );
     return (
       displayName: _draftDisplayName == saved.displayName
           ? null
@@ -243,6 +320,11 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
       defaultAgentId: _defaultAgentId == saved.defaultAgentId
           ? null
           : _defaultAgentId,
+      followUpSuggest: _followUpSuggest == saved.followUpSuggest
+          ? null
+          : _followUpSuggest,
+      habitSuggest: _habitSuggest == saved.habitSuggest ? null : _habitSuggest,
+      habitNotifyChannels: channels == savedChannels ? null : channels,
     );
   }
 
@@ -251,7 +333,10 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     return p.displayName != null ||
         p.avatarUrl != null ||
         p.replyLanguage != null ||
-        p.defaultAgentId != null;
+        p.defaultAgentId != null ||
+        p.followUpSuggest != null ||
+        p.habitSuggest != null ||
+        p.habitNotifyChannels != null;
   }
 
   /// 非法头像地址时禁止保存。
@@ -270,6 +355,9 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         avatarUrl: p.avatarUrl,
         replyLanguage: p.replyLanguage,
         defaultAgentId: p.defaultAgentId,
+        followUpSuggest: p.followUpSuggest,
+        habitSuggest: p.habitSuggest,
+        habitNotifyChannels: p.habitNotifyChannels,
       );
       if (!mounted) return;
       setState(() {
@@ -383,6 +471,10 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
               _buildReplyLanguage(context),
               const SizedBox(height: SpbSpacing.md),
               _buildDefaultAgent(context),
+              const SizedBox(height: SpbSpacing.md),
+              _buildNewGroupDefaults(context),
+              const SizedBox(height: SpbSpacing.md),
+              _buildHabitNotifyChannels(context),
             ],
           ),
         ),
@@ -536,6 +628,190 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
           DropdownMenuItem(value: current, child: Text('$current（已失效）')),
       ],
       onChanged: _saving ? null : (v) => setState(() => _defaultAgentId = v),
+    );
+  }
+
+  /// 两个「新建对话默认值」开关。
+  ///
+  /// ## 与群级同名开关的关系
+  ///
+  /// 这里只影响**之后新建**的对话（服务端建组时播种到 metadata）。既有对话
+  /// 不受影响——文案必须说清，否则用户改完默认值去老对话里找不到变化，会以为
+  /// 设置没生效。
+  Widget _buildNewGroupDefaults(BuildContext context) {
+    final theme = Theme.of(context);
+    final saved = _saved!;
+    // 草稿优先，未初始化时用权威值（`_applyAuthoritative` 已赋，此处仅是保险）。
+    final followUp = _followUpSuggest ?? saved.followUpSuggest;
+    final habit = _habitSuggest ?? saved.habitSuggest;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('新建对话的默认开关', style: theme.textTheme.labelLarge),
+        SwitchListTile(
+          key: const ValueKey('pref-follow-up-suggest'),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: followUp,
+          onChanged: _saving
+              ? null
+              : (v) => setState(() => _followUpSuggest = v),
+          title: const Text('默认开启「后续提问建议」'),
+          subtitle: const Text('仅影响之后新建的对话，不回溯修改既有对话'),
+        ),
+        SwitchListTile(
+          key: const ValueKey('pref-habit-suggest'),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: habit,
+          onChanged: _saving ? null : (v) => setState(() => _habitSuggest = v),
+          title: const Text('默认开启「习惯建议」'),
+          subtitle: const Text('仅影响之后新建的对话，不回溯修改既有对话'),
+        ),
+      ],
+    );
+  }
+
+  /// 习惯结果推送渠道（多选 + 关闭 / 恢复自动）。
+  ///
+  /// ## 选项必须来自服务端下发的 `available_channels`
+  ///
+  /// 渠道白名单真源在 mq-server（跨仓），中文名真源在 Go `outboundchannel`。
+  /// 客户端硬编码必然漂移，且允许用户选一个**没绑定**的渠道 = 保证推送失败。
+  ///
+  /// ## 三个状态必须区分（与 webapp 同口径）
+  ///
+  /// | 状态 | 判据 | 展示 |
+  /// |---|---|---|
+  /// | 自动（未设置） | `!habitNotifyChannelsSet` | 「自动」徒标 + 无勾选 |
+  /// | 已关闭 | `habitNotifyDisabled` | 「已关闭」徒标 |
+  /// | 已配置 | 其它 | 「已配置」徒标 + 勾选 |
+  ///
+  /// 只看 `habitNotifyChannels` 无法区分前两者（都是空）——而它们语义相反：
+  /// 未设置应显示默认选中项，已关闭应显示「不再推送」。
+  Widget _buildHabitNotifyChannels(BuildContext context) {
+    final theme = Theme.of(context);
+    final saved = _saved!;
+    final options = saved.availableChannels;
+
+    // 「已配置但渠道已全部失效」：配置还在（set=true）但可选项里已没有它。
+    final staleSelected =
+        saved.habitNotifyChannelsSet &&
+        saved.selectedHabitChannels.isNotEmpty &&
+        !saved.selectedHabitChannels.any(
+          (v) => options.any((o) => o.value == v),
+        );
+
+    // 无可用渠道且未显式关闭：用户没绑定任何可推送渠道，无从选择。
+    //
+    // 看草稿而非基线：用户点「关闭推送」后（草稿 off），这条提示应立即消失
+    // （此时确实「无需选择」），否则会跟按钮文案（已是「恢复自动」）自相矛盾。
+    final noChannels = options.isEmpty && !_habitChannelsOff;
+
+    // 徒标也看草稿：勾选态已是草稿，徒标若看基线，用户点关闭后勾选框已清空、
+    // 徒标却还写着「已配置」，二者在保存前就已经不一致。
+    final badgeLabel = _habitChannelsOff
+        ? '已关闭'
+        : _habitChannels.isNotEmpty
+        ? '已配置'
+        : '自动';
+
+    return Column(
+      key: const ValueKey('pref-habit-notify-channels'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Text('习惯结果推送渠道', style: theme.textTheme.labelLarge),
+            const SizedBox(width: SpbSpacing.sm),
+            Container(
+              key: const ValueKey('pref-habit-notify-badge'),
+              padding: const EdgeInsets.symmetric(
+                horizontal: SpbSpacing.sm,
+                vertical: SpbSpacing.xxs,
+              ),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                borderRadius: SpbRadius.cardAll,
+              ),
+              child: Text(badgeLabel, style: theme.textTheme.labelSmall),
+            ),
+          ],
+        ),
+        const SizedBox(height: SpbSpacing.xs),
+        Text(
+          '习惯到点执行完后，把实际回复推送到这些 IM 渠道',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: SpbSpacing.sm),
+        if (noChannels)
+          Text(
+            '你还没有绑定任何可推送的渠道，无法选择',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          )
+        else ...[
+          for (final opt in options)
+            CheckboxListTile(
+              key: ValueKey('pref-habit-channel-${opt.value}'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: _habitChannels.contains(opt.value),
+              // 关闭态下勾选框仍可点：点一下即隐含「重新开启推送」。
+              // 否则用户得先找到「恢复自动」才能再选，多一步且不直观。
+              onChanged: _saving
+                  ? null
+                  : (checked) => setState(() {
+                      if (checked == true) {
+                        _habitChannels.add(opt.value);
+                      } else {
+                        _habitChannels.remove(opt.value);
+                      }
+                      // 任何手动勾选都意味着「不再是显式关闭」。
+                      _habitChannelsOff = false;
+                    }),
+              title: Text(opt.label),
+            ),
+        ],
+        if (staleSelected)
+          Padding(
+            padding: const EdgeInsets.only(top: SpbSpacing.xs),
+            child: Text(
+              '你选的渠道已失效（可能已解绑），请重新选择',
+              key: const ValueKey('pref-habit-notify-stale'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ),
+        if (!noChannels) ...[
+          const SizedBox(height: SpbSpacing.xs),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const ValueKey('pref-habit-notify-toggle-off'),
+              onPressed: _saving
+                  ? null
+                  : () => setState(() {
+                      // 单动作切换：关闭 ⇄ 恢复自动。
+                      //
+                      // 不要求用户自己清空勾选：那会把「关闭」与「清空」两种
+                      // 相反意图混为一谈（清空 = 删记录 = 回退自动，推送反而
+                      // 重新打开）。
+                      final off = !_habitChannelsOff;
+                      _habitChannelsOff = off;
+                      if (off) _habitChannels.clear();
+                    }),
+              child: Text(_habitChannelsOff ? '恢复自动' : '关闭推送'),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
