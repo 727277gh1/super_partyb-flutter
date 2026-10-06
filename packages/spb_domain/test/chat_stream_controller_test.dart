@@ -815,6 +815,401 @@ void main() {
     });
   });
 
+  group('上下文用量通道（context_update）', () {
+    test('contextUsageSnapshot 含用量，且不进 items', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          payload: {
+            'telemetry': {'context_tokens': 50000, 'context_window': 200000},
+          },
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty, reason: '用量是诊断读数，不进时间线');
+      final u = c.contextUsageSnapshot;
+      expect(u, isNotNull);
+      expect(u!.used, 50000);
+      expect(u.size, 200000);
+      expect(u.remaining, 150000);
+
+      await c.dispose();
+    });
+
+    test('contextUsage 流在事件到达时推送快照', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <ContextUsage?>[];
+      final sub = c.contextUsage.listen(pushed.add);
+
+      sse.push(
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          payload: {
+            'telemetry': {'context_tokens': 1234, 'context_window': 8000},
+          },
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, isNotEmpty);
+      expect(pushed.last!.used, 1234);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('切 group 后用量快照被清空（不泄漏上一个对话的读数）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.start(groupId: 'grp_1');
+      sse.push(
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          payload: {
+            'telemetry': {'context_tokens': 500, 'context_window': 1000},
+          },
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(c.contextUsageSnapshot, isNotNull);
+
+      await c.switchGroup('grp_2');
+
+      expect(c.contextUsageSnapshot, isNull, reason: '切对话后旧用量不得残留');
+
+      await c.dispose();
+    });
+
+    test('context_update 推进 SSE 游标（Go 侧 flushEvent 落库，非 Transient）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          id: 'evt_ctx_1',
+          payload: {
+            'telemetry': {'context_tokens': 100, 'context_window': 1000},
+          },
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        sse.recordedEventIds,
+        contains('evt_ctx_1'),
+        reason: '落库事件带有效 ID，应推进游标（与 turn_activity 相反）',
+      );
+
+      await c.dispose();
+    });
+  });
+
+  group('执行等待通道（queue_state / retry_scheduled）', () {
+    test('executionStatusSnapshot 含等待原因，且不进 items', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.queueState,
+        sseEvent(
+          EventTypes.queueState,
+          payload: {
+            'state': 'queued',
+            'reason': 'session_busy',
+            'queue_total': 3,
+            'queue_user': 1,
+          },
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty, reason: '等待提示不进时间线');
+      final s = c.executionStatusSnapshot;
+      expect(s, isNotNull);
+      expect(s!.kind, ExecutionStatusKind.queued);
+      expect(s.reason, 'session_busy');
+
+      await c.dispose();
+    });
+
+    test('executionStatus 流在事件到达时推送快照', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <ExecutionStatus?>[];
+      final sub = c.executionStatus.listen(pushed.add);
+
+      sse.push(
+        EventTypes.retryScheduled,
+        sseEvent(
+          EventTypes.retryScheduled,
+          payload: {'attempt': 2, 'max_retries': 3},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, isNotEmpty);
+      expect(pushed.last!.kind, ExecutionStatusKind.retryScheduled);
+      expect(pushed.last!.attempt, 2);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('切 group 后等待状态被清空（不泄漏上一个对话的提示）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.start(groupId: 'grp_1');
+      sse.push(
+        EventTypes.queueState,
+        sseEvent(
+          EventTypes.queueState,
+          payload: {'state': 'queued', 'reason': 'session_busy'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(c.executionStatusSnapshot, isNotNull);
+
+      await c.switchGroup('grp_2');
+
+      expect(c.executionStatusSnapshot, isNull, reason: '切对话后旧等待不得残留');
+
+      await c.dispose();
+    });
+
+    test('message 到达后等待状态被清除（不挂着过期提示）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.queueState,
+        sseEvent(
+          EventTypes.queueState,
+          payload: {'state': 'queued', 'reason': 'session_busy'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(c.executionStatusSnapshot, isNotNull);
+
+      sse.push(
+        EventTypes.message,
+        sseEvent(
+          EventTypes.message,
+          id: 'evt_msg_1',
+          payload: {'text': '回复来了'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.executionStatusSnapshot, isNull);
+
+      await c.dispose();
+    });
+
+    test('queue_state 推进 SSE 游标（Go 侧落库，非 Transient）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.queueState,
+        sseEvent(
+          EventTypes.queueState,
+          id: 'evt_qs_1',
+          payload: {'state': 'queued', 'reason': 'session_busy'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        sse.recordedEventIds,
+        contains('evt_qs_1'),
+        reason: '落库事件带有效 ID，应推进游标（与 turn_activity 相反）',
+      );
+
+      await c.dispose();
+    });
+  });
+
+  group('语音播报通道（tts_started / tts_completed / tts_failed）', () {
+    test('ttsStatusSnapshot 含播报状态，且不进 items', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.ttsStarted,
+        sseEvent(
+          EventTypes.ttsStarted,
+          transient: true,
+          payload: {'mode': 'message', 'seq': 1},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty, reason: '播报状态不进时间线');
+      final s = c.ttsStatusSnapshot;
+      expect(s.phase, TtsPhase.started);
+      expect(s.mode, 'message');
+
+      await c.dispose();
+    });
+
+    test('ttsStatus 流在事件到达时推送快照', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <TtsStatus?>[];
+      final sub = c.ttsStatus.listen(pushed.add);
+
+      sse.push(
+        EventTypes.ttsFailed,
+        sseEvent(
+          EventTypes.ttsFailed,
+          payload: {'message': '语音生成失败，本次文本回复不受影响。'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, isNotEmpty);
+      expect(pushed.last!.phase, TtsPhase.failed);
+      expect(pushed.last!.message, '语音生成失败，本次文本回复不受影响。');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('started → completed 推进到终态', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.ttsStarted,
+        sseEvent(
+          EventTypes.ttsStarted,
+          transient: true,
+          payload: {'mode': 'stream'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(c.ttsStatusSnapshot.phase, TtsPhase.started);
+
+      sse.push(
+        EventTypes.ttsCompleted,
+        sseEvent(EventTypes.ttsCompleted, payload: {'parts': 2}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.ttsStatusSnapshot.phase, TtsPhase.completed);
+      expect(c.ttsStatusSnapshot.parts, 2);
+
+      await c.dispose();
+    });
+
+    test('切 group 后播报状态被清空（不泄漏上一个对话的提示）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.start(groupId: 'grp_1');
+      sse.push(
+        EventTypes.ttsCompleted,
+        sseEvent(EventTypes.ttsCompleted, payload: {'parts': 1}),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(c.ttsStatusSnapshot.hasStatus, isTrue);
+
+      await c.switchGroup('grp_2');
+
+      expect(c.ttsStatusSnapshot.phase, TtsPhase.idle, reason: '切对话后旧播报不得残留');
+
+      await c.dispose();
+    });
+
+    test('tts_started 不推进游标，终态事件推进游标', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.ttsStarted,
+        sseEvent(
+          EventTypes.ttsStarted,
+          id: 'evt_tts_started',
+          transient: true,
+          payload: {'mode': 'stream'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        sse.recordedEventIds,
+        isNot(contains('evt_tts_started')),
+        reason: 'tts_started 是 Transient，不得作游标',
+      );
+
+      sse.push(
+        EventTypes.ttsCompleted,
+        sseEvent(
+          EventTypes.ttsCompleted,
+          id: 'evt_tts_done',
+          payload: {'parts': 1},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        sse.recordedEventIds,
+        contains('evt_tts_done'),
+        reason: '终态落库，应推进游标',
+      );
+
+      await c.dispose();
+    });
+  });
+
   group('group 变更通知通道（group_updated）', () {
     /// 造一个 group_updated 帧（Transient，见 Go PublishGroupUpdated）。
     Map<String, dynamic> groupUpdatedEvent({
@@ -947,6 +1342,427 @@ void main() {
       expect(sse.recordedEventIds, isEmpty);
 
       await c.dispose();
+    });
+  });
+
+  // Goal Gate 自动停用时的 metadata 通知。
+  //
+  // ## 这个测试防的是什么（事实性错误）
+  //
+  // Goal Gate 达成目标（`chatgate/goal_gate.go:440`）或达到 max_auto_turns
+  // 熔断（`:555`）时，服务端会自己把 `metadata.goal_gate.enabled` 改为 false
+  // （`markGoalGateCompleted` 写 `gate["enabled"] = false`）。
+  //
+  // 这是**后台 worker** 的动作，没有任何 HTTP 响应回到客户端。不消费本事件，
+  // 设置面板会继续显示「自动实现目标：开」——用户以为还会自动续跑，实际已停。
+  //
+  // ## ⚠️ 与 goal_updated 相反：本事件**是落库的**
+  //
+  // `broker.go:82` 把它列在「持久化到 chat_events，前端可渲染」一组，且它确实
+  // 有 turn（`emitEvent` 带 `TurnID`）。故它**应当**推进游标、落入缓冲区、
+  // 并在断线回放时重新套用——与 goal_updated（漏设 Transient 且不落库，必须
+  // 提前 return）刚好相反。下面用用例钉住这个差异。
+  group('group 元数据通知通道（group_metadata_updated）', () {
+    /// 造一个 group_metadata_updated 帧。
+    ///
+    /// ⚠️ `transient` 默认 **false**——对齐服务端实际行为（它确实落库）。
+    Map<String, dynamic> metadataUpdatedEvent({
+      String id = 'evt_gm_1',
+      String groupId = 'grp_1',
+      String reason = 'goal_completed',
+      Map<String, dynamic>? metadata,
+    }) => sseEvent(
+      EventTypes.groupMetadataUpdated,
+      id: id,
+      groupId: groupId,
+      payload: {
+        'reason': reason,
+        'metadata':
+            metadata ??
+            {
+              'goal_gate': {
+                'enabled': false,
+                'continue_until_done': false,
+                'state': {'status': 'completed'},
+              },
+              'tts': {'enabled': true},
+            },
+      },
+    );
+
+    test('收到事件 → groupUpdates 流收到 op=metadata 且携带完整 metadata', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(EventTypes.groupMetadataUpdated, metadataUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1));
+      expect(pushed.single.op, GroupUpdateOp.metadata);
+      expect(pushed.single.groupId, 'grp_1');
+
+      final md = pushed.single.metadata;
+      expect(md, isNotNull, reason: '必须携带 metadata，否则面板无法刷新');
+      expect(
+        (md!['goal_gate'] as Map)['enabled'],
+        isFalse,
+        reason: 'goal gate 已被服务端自动停用——这就是需要纠正的错显',
+      );
+      expect(
+        (md['goal_gate'] as Map)['continue_until_done'],
+        isFalse,
+        reason: '两个键成对写入，只改一个会让 goalGateEnabled 仍为 true',
+      );
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('reason 可读：goal_completed / max_auto_turns_reached', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.groupMetadataUpdated,
+        metadataUpdatedEvent(id: 'e1', reason: 'goal_completed'),
+      );
+      sse.push(
+        EventTypes.groupMetadataUpdated,
+        metadataUpdatedEvent(id: 'e2', reason: 'max_auto_turns_reached'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(2));
+      // reason 在事件上（不在 GroupUpdate 里）；此处用原始事件验证可读性。
+      expect(pushed[0].op, GroupUpdateOp.metadata);
+      expect(pushed[1].op, GroupUpdateOp.metadata);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('⚠️ 与 goal_updated 相反：本事件**推进**游标（它确实落库）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.groupMetadataUpdated,
+        metadataUpdatedEvent(id: 'evt_gm_cursor'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        sse.recordedEventIds,
+        contains('evt_gm_cursor'),
+        reason:
+            'group_metadata_updated 持久化到 chat_events（broker.go:82），'
+            '带有效 ID，应当推进游标以便断线回放',
+      );
+
+      await c.dispose();
+    });
+
+    test('不受 group 过滤影响：别的 group 的 metadata 变更也能收到', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.groupMetadataUpdated,
+        metadataUpdatedEvent(id: 'e_other', groupId: 'grp_other'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1));
+      expect(pushed.single.groupId, 'grp_other');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('metadata 缺失的异常载荷不推送（避免清空现有开关）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GroupUpdate>[];
+      final sub = c.groupUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.groupMetadataUpdated,
+        sseEvent(
+          EventTypes.groupMetadataUpdated,
+          id: 'evt_no_md',
+          payload: {'reason': 'goal_completed'},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1));
+      expect(
+        pushed.single.metadata,
+        isNull,
+        reason: '无 metadata 时消费方应忽略（不得用空 map 覆盖）',
+      );
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('不进 items（时间线不得出现元数据变更气泡）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(EventTypes.groupMetadataUpdated, metadataUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty);
+
+      await c.dispose();
+    });
+  });
+
+  // 目标变更通知的回归防线。
+  //
+  // ## 为什么必须有这个 group（不能只靠 group_updated 的测试）
+  //
+  // 服务端 `emitGoalUpdated`（`server/goal_api.go:212`）注释写着「不落库，仅广播」，
+  // 但 `chatbus.Event` 的 `Transient` 字段留了**零值 false**——对比同族的
+  // `PublishGroupUpdated`（`chat/group_events.go:63`）与 `buildTitleUpdatedEvent`
+  // （`chatgate/title_gate.go:258`）都显式设了 true，可见是漏设。
+  //
+  // 后果比「丢一条事件」严重得多：事件带 `transient=false` + 有效 eventId，
+  // 而它**不在** `chat_events` 表里（无 turn，`turn_id` NOT NULL 写不进去）。
+  // 若走通用路径，`recordEventId` 会把它记作 SSE 游标；断线重连时服务端
+  // `replayUserEvents` 按 `chat_events.id` 定位 cursor 找不到该 ID
+  // → `start < 0` → 返回 nil → **整个回放窗口丢失**。
+  //
+  // 故这里的核心断言是「`recordedEventIds` 为空」。若将来服务端修了那个标志位，
+  // 这些用例仍应通过（客户端按事件类型分流，不依赖那个不可信的字段）。
+  group('目标变更通知通道（goal_updated）', () {
+    /// 造一个 goal_updated 帧。
+    ///
+    /// ⚠️ `transient` 默认 **false**——刻意对齐服务端的实际行为（漏设）。
+    /// 用 true 造数据会让游标断言在假前提上通过。
+    Map<String, dynamic> goalUpdatedEvent({
+      String id = 'evt_goal_1',
+      String groupId = 'grp_1',
+      String op = 'goal_create',
+      String source = 'user',
+      String? goalText = '把同步做稳',
+      List<Map<String, dynamic>>? tasks,
+      bool transient = false,
+    }) => sseEvent(
+      EventTypes.goalUpdated,
+      id: id,
+      groupId: groupId,
+      transient: transient,
+      globalSeq: 0,
+      payload: {
+        'op': op,
+        if (goalText != null)
+          'goal': {
+            'id': 'goal_1',
+            'group_id': groupId,
+            'goal_text': goalText,
+            'status': 'active',
+          },
+        'tasks':
+            tasks ??
+            [
+              {'task_id': 't1', 'status': 'in_progress', 'title': '修 bug'},
+            ],
+        'progress': {'total': 1, 'completed': 0, 'in_progress': 1},
+      },
+    );
+
+    test('收到 goal_updated → goalUpdates 流收到一条（含快照）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GoalUpdate>[];
+      final sub = c.goalUpdates.listen(pushed.add);
+
+      sse.push(EventTypes.goalUpdated, goalUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1));
+      expect(pushed.single.op, 'goal_create');
+      expect(pushed.single.groupId, 'grp_1');
+      expect(pushed.single.goalText, '把同步做稳');
+      expect(pushed.single.tasks, hasLength(1));
+      expect(pushed.single.snapshot, isNotNull);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('⚠️ 核心：不推进游标（服务端漏设 Transient，穿透会丢整个回放窗口）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(EventTypes.goalUpdated, goalUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        sse.recordedEventIds,
+        isEmpty,
+        reason:
+            'goal_updated 不在 chat_events 表里，若被记作 cursor，服务端 '
+            'replayUserEvents 定位不到该 ID 会返回 nil，丢掉整个回放窗口',
+      );
+      expect(sse.lastEventId, isNull, reason: '游标必须保持未变（可用 lastEventId 观测）');
+
+      await c.dispose();
+    });
+
+    test('不进 items（时间线不得出现目标变更气泡）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(EventTypes.goalUpdated, goalUpdatedEvent());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.snapshot, isEmpty);
+      expect(c.bufferedEventCount, 0, reason: '通知类事件不占缓冲区');
+
+      await c.dispose();
+    });
+
+    test('即便服务端将来设了 transient=true 也不推游标（按类型分流）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.push(
+        EventTypes.goalUpdated,
+        goalUpdatedEvent(id: 'evt_goal_t', transient: true),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sse.recordedEventIds, isEmpty);
+
+      await c.dispose();
+    });
+
+    test('不受 group 过滤影响：别的 group 的目标变更也能收到', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GoalUpdate>[];
+      final sub = c.goalUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.goalUpdated,
+        goalUpdatedEvent(id: 'evt_other', groupId: 'grp_other'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1));
+      expect(pushed.single.groupId, 'grp_other');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('逐条推送而非累积（task_create 后 task_reorder 各一次）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GoalUpdate>[];
+      final sub = c.goalUpdates.listen(pushed.add);
+
+      sse.push(
+        EventTypes.goalUpdated,
+        goalUpdatedEvent(id: 'evt_1', op: 'task_create'),
+      );
+      sse.push(
+        EventTypes.goalUpdated,
+        goalUpdatedEvent(id: 'evt_2', op: 'task_reorder'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(2), reason: '通知语义：逐条推送，不累积');
+      expect(pushed[0].op, 'task_create');
+      expect(pushed[1].op, 'task_reorder');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('goal 缺失的异常载荷不推送（避免清空现有目标）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      final pushed = <GoalUpdate>[];
+      final sub = c.goalUpdates.listen(pushed.add);
+
+      // 无 goal 字段（服务端任务列表读失败时会退化为不带快照的信号）。
+      sse.push(
+        EventTypes.goalUpdated,
+        sseEvent(
+          EventTypes.goalUpdated,
+          id: 'evt_no_goal',
+          payload: {'op': 'task_create', 'tasks': <Map<String, dynamic>>[]},
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, hasLength(1), reason: '事件本身仍送达（消费方可据此选择重拉）');
+      expect(pushed.single.snapshot, isNull, reason: '无 goal 时不造空快照');
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('groupId 为空时丢弃（无法定位要刷新哪个对话）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      final pushed = <GoalUpdate>[];
+      final sub = c.goalUpdates.listen(pushed.add);
+
+      await c.ensureConnected();
+      sse.push(EventTypes.goalUpdated, goalUpdatedEvent(groupId: ''));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(pushed, isEmpty);
+      expect(sse.recordedEventIds, isEmpty);
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('dispose 后不报错（流已关闭）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      await c.dispose();
+
+      // 控制器已关闭，推事件不应抛异常。
+      expect(
+        () => sse.push(EventTypes.goalUpdated, goalUpdatedEvent()),
+        returnsNormally,
+      );
+      await Future<void>.delayed(Duration.zero);
     });
   });
 
@@ -1643,6 +2459,118 @@ void main() {
 
       expect(await c.loadOlder(), isFalse);
       expect(c.snapshot, hasLength(1), reason: '失败不得破坏已有缓冲区');
+
+      await c.dispose();
+    });
+  });
+
+  group('事件缓冲上限（长会话不无界增长）', () {
+    /// 推 [count] 条廉价事件（`heartbeat` 进缓冲但不产对话项）。
+    ///
+    /// 用 `heartbeat` 而非 `message` / `user_message`：后两者会产出对话项，
+    /// 2000 条会把「裁剪」的断言淹没在归约开销里；而缓冲上限作用于
+    /// **事件**层，与控制事件同样适用。
+    ///
+    /// eventId 编码序号，便于断言「丢的是最旧的、留的是最新的」。
+    void pushMany(int from, int count) {
+      for (var i = 0; i < count; i++) {
+        final n = from + i;
+        sse.push(
+          EventTypes.heartbeat,
+          sseEvent(
+            EventTypes.heartbeat,
+            id: 'e$n',
+            payload: {'n': n},
+            globalSeq: n,
+          ),
+        );
+      }
+    }
+
+    test('超过上限时丢弃最旧事件，保留最新', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      const overflow = 100;
+      final total = ChatStreamController.maxBufferEvents + overflow;
+      pushMany(1, total);
+      // 广播流按 microtask 派发，一次事件循环轮次即可排空全部待投递帧。
+      await pumpEventQueue();
+
+      expect(
+        c.bufferedEventCount,
+        ChatStreamController.maxBufferEvents,
+        reason: '缓冲长度必须被钉在上限，不得随会话无限增长',
+      );
+      final ids = c.bufferedEventIds;
+      expect(ids.first, 'e${overflow + 1}', reason: '从头部丢最旧的 $overflow 条');
+      expect(ids.last, 'e$total', reason: '最新的必须保留（时间线焦点在最新）');
+      expect(ids.contains('e1'), isFalse, reason: '最旧的一条必须已被丢弃，否则上限没生效');
+
+      await c.dispose();
+    });
+
+    test('未超上限时不丢弃任何事件', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      pushMany(1, 10);
+      await pumpEventQueue();
+
+      expect(c.bufferedEventCount, 10, reason: '上限内不得丢弃');
+      expect(c.bufferedEventIds.first, 'e1');
+
+      await c.dispose();
+    });
+
+    test('裁剪不抬高翻页游标（否则会把刚裁掉的又拉回来）', () async {
+      // 这是「裁剪从头部丢」最危险的下游后果：若翻页游标改用「当前缓冲区
+      // 的最小 globalSeq」，它会随裁剪一起抬高，于是刚被丢掉的事件又被判为
+      // 「更早的一页」拉回来、拉回来又被立刻裁掉——滚到顶就抖动，而真正的
+      // 更早历史永远拉不到。故游标必须由独立的「历史边界」承载。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      // 首屏：globalSeq 100..102。
+      mockTimeline(
+        events: [
+          for (final n in [100, 101, 102])
+            sseEvent(
+              EventTypes.userMessage,
+              id: 'e$n',
+              turnId: 't$n',
+              payload: {'input': '$n'},
+              globalSeq: n,
+            ),
+        ],
+      );
+      await c.start(groupId: 'grp_1');
+
+      // 灌到超上限，把首屏那三条（含最小 globalSeq 100）全部挤出缓冲区。
+      pushMany(103, ChatStreamController.maxBufferEvents);
+      await pumpEventQueue();
+      expect(
+        c.bufferedEventIds.contains('e100'),
+        isFalse,
+        reason: '前提：首屏最早的事件已被裁掉',
+      );
+
+      final seen = <String?>[];
+      adapter.onGet(
+        '/chat/groups/grp_1/timeline',
+        (server) => server.replyCallback(200, (options) {
+          seen.add(options.queryParameters['before_global_seq']?.toString());
+          return {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          };
+        }),
+        queryParameters: {'limit': 50, 'before_global_seq': '100'},
+      );
+
+      await c.loadOlder();
+
+      expect(seen, ['100'], reason: '游标必须是「曾加载到过的最早」（100），不是裁剪后的缓冲区最小值');
 
       await c.dispose();
     });

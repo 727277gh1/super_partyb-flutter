@@ -608,6 +608,30 @@ void main() {
       expect(r.items, isEmpty);
     });
 
+    test('goal_updated 即使带完整快照也不进对话列表', () {
+      // 归约器的 default 丢弃是**有意**的：目标快照走 `goalUpdates` 通道
+      // （见 `ChatStreamController._onFrame` 的提前分流），时间线里不该出现
+      // 「目标已更新」气泡。上面的用例用空 payload，这里用真实形态钉住。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.goalUpdated,
+          payload: {
+            'op': 'task_status',
+            'goal': {'id': 'goal_1', 'goal_text': '把同步做稳'},
+            'tasks': [
+              {'task_id': 't1', 'status': 'in_progress'},
+            ],
+            'progress': {'total': 1, 'completed': 0},
+          },
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(r.items, isEmpty);
+      expect(r.gateDecisions, isEmpty);
+      expect(r.activities, isEmpty);
+    });
+
     test('未知事件类型被静默忽略（向前兼容）', () {
       final r = EventReducer.reduce([
         ev('brand_new_event', payload: {'text': 'x'}),
@@ -1130,6 +1154,601 @@ void main() {
     });
   });
 
+  group('context_update → contextUsage 通道（不进时间线）', () {
+    /// 造一个 context_update 事件。
+    ///
+    /// 默认 transient=false：Go 侧它走 `flushEvent`（**落库**）而非
+    /// `flushEventTransient`，故会带有效 eventId/globalSeq 并推进游标。
+    ChatEvent ctx(
+      Map<String, dynamic> payload, {
+      String turnId = 'turn_1',
+      int globalSeq = 1,
+    }) => ev(
+      EventTypes.contextUpdate,
+      turnId: turnId,
+      globalSeq: globalSeq,
+      payload: payload,
+    );
+
+    test('Go telemetry 形状：产出 contextUsage，但不产生任何 items', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {
+            'turns': 3,
+            'truncation_count': 0,
+            'compaction_count': 1,
+            'context_utilization': 0.25,
+            'context_tokens': 50000,
+            'context_window': 200000,
+          },
+        }),
+      ]);
+
+      expect(r.items, isEmpty, reason: '用量是诊断读数，不是对话正文');
+      final u = r.contextUsage;
+      expect(u, isNotNull);
+      expect(u!.used, 50000, reason: 'context_tokens → used');
+      expect(u.size, 200000, reason: 'context_window → size');
+      expect(u.remaining, 150000, reason: '未显式给出时由 size - used 推出');
+      expect(u.cost, isNull, reason: 'Go 从不发射 cost，不得伪造');
+      expect(u.hasData, isTrue);
+    });
+
+    test('Go compaction 形状：tokens_after 优先于 tokens_before', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'compaction': {
+            'status': 'completed',
+            'reason': 'auto',
+            'tokens_before': 180000,
+            'tokens_after': 42000,
+            'summarized_count': 12,
+            'kept_count': 3,
+          },
+        }),
+      ]);
+
+      expect(r.items, isEmpty);
+      final u = r.contextUsage!;
+      expect(u.used, 42000, reason: '压缩完成后以 tokens_after 为准');
+      expect(u.size, isNull, reason: '压缩事件不带窗口大小');
+    });
+
+    test('compaction_started 只有 tokens_before 时也能取到用量', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'compaction': {'status': 'started', 'tokens_before': 190000},
+        }),
+      ]);
+
+      expect(r.contextUsage!.used, 190000);
+    });
+
+    test('遗留 context 形状（webapp 解析的那份）也支持，含 cost', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'context': {
+            'used': 1234,
+            'size': 8000,
+            'remaining': 6766,
+            'cost': {'amount': 0.0123, 'currency': 'USD'},
+          },
+        }),
+      ]);
+
+      final u = r.contextUsage!;
+      expect(u.used, 1234);
+      expect(u.size, 8000);
+      expect(u.remaining, 6766);
+      expect(u.cost!.amount, 0.0123);
+      expect(u.cost!.currency, 'USD');
+    });
+
+    test('同 turn 多条合并：telemetry 的窗口与 compaction 的用量互不覆盖', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {'context_tokens': 10000, 'context_window': 200000},
+        }, globalSeq: 1),
+        ctx({
+          'compaction': {'status': 'completed', 'tokens_after': 3000},
+        }, globalSeq: 2),
+      ]);
+
+      final u = r.contextUsage!;
+      expect(u.used, 3000, reason: '新的 used 覆盖旧值');
+      expect(u.size, 200000, reason: '窗口大小沿用上一条 telemetry');
+      expect(u.remaining, 197000, reason: 'used 更新后 remaining 必须重算');
+    });
+
+    test('context_update 推进 SSE 游标（Go 侧落库，不是 Transient）', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {'context_tokens': 100, 'context_window': 1000},
+        }, globalSeq: 7),
+      ]);
+
+      expect(
+        r.lastEventId,
+        'context_update_7',
+        reason: 'flushEvent 落库事件带有效 ID，可作游标',
+      );
+    });
+
+    test('无法解析的异常载荷不产出快照（也不清空已有值）', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {'context_tokens': 500, 'context_window': 1000},
+        }, globalSeq: 1),
+        // 只带 compaction 状态、无任何 token 字段：fromEventPayload 返回 null。
+        ctx({
+          'compaction': {'status': 'started'},
+        }, globalSeq: 2),
+      ]);
+
+      expect(r.contextUsage!.used, 500, reason: '异常载荷不得清空已知用量');
+      expect(r.contextUsage!.size, 1000);
+    });
+
+    test('用量与同 turn 的正文共存：items 有正文、contextUsage 有读数', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {'context_tokens': 2000, 'context_window': 8000},
+        }, globalSeq: 1),
+        ev(
+          EventTypes.message,
+          payload: {'text': '好了'},
+          transient: true,
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      expect(r.contextUsage!.used, 2000);
+    });
+
+    test('无 context_update 时 contextUsage 为 null', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.message, payload: {'text': 'hi'}),
+      ]);
+
+      expect(r.contextUsage, isNull, reason: '无数据应隐藏而非显示 0');
+    });
+  });
+
+  group('queue_state / retry_scheduled → executionStatus 通道（不进时间线）', () {
+    /// 造一个 queue_state 事件。
+    ///
+    /// ⚠️ 默认 transient=false：Go 侧五个发射点**全部未设 Transient**
+    /// （`enqueue.go` 走 persistEventAtomic、`turn_worker.go` / `gate_impls.go`
+    /// 走 w.emit 的落库分支），故它们是落库事件、会推进游标。
+    ChatEvent qs(
+      Map<String, dynamic> payload, {
+      String turnId = 'turn_1',
+      int globalSeq = 1,
+    }) => ev(
+      EventTypes.queueState,
+      turnId: turnId,
+      globalSeq: globalSeq,
+      payload: payload,
+    );
+
+    ChatEvent retry(
+      Map<String, dynamic> payload, {
+      String turnId = 'turn_1',
+      int globalSeq = 1,
+    }) => ev(
+      EventTypes.retryScheduled,
+      turnId: turnId,
+      globalSeq: globalSeq,
+      payload: payload,
+    );
+
+    test('queue_state(queued) 产出 executionStatus，但不产生任何 items', () {
+      final r = EventReducer.reduce([
+        qs({
+          'state': 'queued',
+          'reason': 'session_busy',
+          'queue_total': 7,
+          'queue_user': 2,
+        }),
+      ]);
+
+      expect(r.items, isEmpty, reason: '等待提示不是对话正文');
+      final s = r.executionStatus;
+      expect(s, isNotNull);
+      expect(s!.turnId, 'turn_1');
+      expect(s.kind, ExecutionStatusKind.queued);
+      expect(s.reason, 'session_busy');
+      expect(s.queueTotal, 7);
+      expect(s.queueUser, 2);
+    });
+
+    test(
+      'retry_scheduled 产出 executionStatus（attempt / max_retries / delay_ms）',
+      () {
+        final r = EventReducer.reduce([
+          retry({
+            'attempt': 2,
+            'max_retries': 3,
+            'delay_ms': 5000,
+            'reason': 'stderr 原文不应被当文案',
+          }),
+        ]);
+
+        expect(r.items, isEmpty);
+        final s = r.executionStatus!;
+        expect(s.kind, ExecutionStatusKind.retryScheduled);
+        expect(s.attempt, 2);
+        expect(s.maxRetries, 3);
+        expect(s.delayMs, 5000);
+      },
+    );
+
+    test('start 清除同一 turn 的等待状态（起跑即等待结束）', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued', 'reason': 'session_busy'}, globalSeq: 1),
+        ev(EventTypes.start, payload: {'status': 'running'}, globalSeq: 2),
+      ]);
+
+      expect(r.executionStatus, isNull, reason: '已起跑，不该再显示「排队中」');
+    });
+
+    test('message 正文到达后清除等待状态', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued', 'reason': 'session_busy'}, globalSeq: 1),
+        ev(
+          EventTypes.message,
+          payload: {'text': '回复来了'},
+          transient: true,
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      expect(r.executionStatus, isNull, reason: '已有正文，等待显然结束');
+    });
+
+    test('done / error 终态也清除等待状态', () {
+      final done = EventReducer.reduce([
+        qs({'state': 'queued'}, globalSeq: 1),
+        ev(EventTypes.done, payload: {'status': 'completed'}, globalSeq: 2),
+      ]);
+      expect(done.executionStatus, isNull);
+
+      final failed = EventReducer.reduce([
+        qs({'state': 'queued'}, globalSeq: 1),
+        ev(EventTypes.error, payload: {'message': 'boom'}, globalSeq: 2),
+      ]);
+      expect(failed.executionStatus, isNull);
+    });
+
+    test('清除只作用于同一 turn（别的 turn 的正文不抹掉本 turn 的等待）', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued'}, turnId: 'turn_1', globalSeq: 1),
+        ev(
+          EventTypes.message,
+          turnId: 'turn_2',
+          payload: {'text': '另一个 turn'},
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.executionStatus, isNotNull, reason: 'turn_2 的正文与 turn_1 是否在等无关');
+      expect(r.executionStatus!.turnId, 'turn_1');
+    });
+
+    test('queue_state(state=cancelled) 是终态而非等待，且会清除已有等待', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued', 'reason': 'session_busy'}, globalSeq: 1),
+        qs({'state': 'cancelled', 'reason': 'cancelled'}, globalSeq: 2),
+      ]);
+
+      expect(
+        r.executionStatus,
+        isNull,
+        reason: 'cancelled 是等待结束（EmitCanceled），不是新的等待',
+      );
+    });
+
+    test('同 turn 多条等待只留最后一条（越新越准）', () {
+      final r = EventReducer.reduce([
+        qs({
+          'state': 'queued',
+          'reason': 'global_concurrency_limit',
+        }, globalSeq: 1),
+        qs({'state': 'queued', 'reason': 'session_busy'}, globalSeq: 2),
+      ]);
+
+      expect(r.executionStatus!.reason, 'session_busy');
+    });
+
+    test('retry_scheduled 覆盖先前的 queue_state（后到的等待原因胜出）', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued', 'reason': 'session_busy'}, globalSeq: 1),
+        retry({'attempt': 2}, globalSeq: 2),
+      ]);
+
+      expect(r.executionStatus!.kind, ExecutionStatusKind.retryScheduled);
+      expect(r.executionStatus!.attempt, 2);
+    });
+
+    test('state 缺失或非 queued 的 queue_state 不产出状态', () {
+      expect(EventReducer.reduce([qs(const {})]).executionStatus, isNull);
+      expect(
+        EventReducer.reduce([
+          qs({'state': 'running'}),
+        ]).executionStatus,
+        isNull,
+      );
+    });
+
+    test('turnId 为空的等待事件被丢弃（无法定位 turn）', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued'}, turnId: ''),
+      ]);
+
+      expect(r.executionStatus, isNull);
+    });
+
+    test('两类事件均推进 SSE 游标（Go 侧落库，非 Transient）', () {
+      final r = EventReducer.reduce([
+        qs({'state': 'queued'}, globalSeq: 5),
+        retry({'attempt': 1}, globalSeq: 6),
+      ]);
+
+      expect(
+        r.lastEventId,
+        'retry_scheduled_6',
+        reason: '落库事件带有效 ID，应作游标（与 turn_activity 相反）',
+      );
+    });
+
+    test('等待与同 turn 正文共存：等待在 message 前有效、之后被清', () {
+      final before = EventReducer.reduce([
+        qs({'state': 'queued'}, globalSeq: 1),
+      ]);
+      expect(before.executionStatus, isNotNull);
+
+      final after = EventReducer.reduce([
+        qs({'state': 'queued'}, globalSeq: 1),
+        ev(EventTypes.message, payload: {'text': '好了'}, globalSeq: 2),
+      ]);
+      expect(after.items, hasLength(1));
+      expect(after.executionStatus, isNull);
+    });
+  });
+
+  group('tts_* → ttsStatus 通道（不进时间线）', () {
+    /// 造一个 TTS 生命周期事件。
+    ///
+    /// ⚠️ `tts_started` 默认 transient=true（Go `main.go:715` 只对它设 Transient）；
+    /// 两个终态事件是**落库**的，故用 transient=false。
+    ChatEvent tts(
+      String type,
+      Map<String, dynamic> payload, {
+      String turnId = 'turn_1',
+      int globalSeq = 1,
+    }) => ev(
+      type,
+      turnId: turnId,
+      globalSeq: globalSeq,
+      transient: type == EventTypes.ttsStarted,
+      payload: payload,
+    );
+
+    test('tts_started 产出 ttsStatus(started)，但不产生任何 items', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsStarted, {'mode': 'message', 'seq': 1}),
+      ]);
+
+      expect(r.items, isEmpty, reason: '播报状态不是对话正文');
+      final s = r.ttsStatus;
+      expect(s.turnId, 'turn_1');
+      expect(s.phase, TtsPhase.started);
+      expect(s.mode, 'message');
+      expect(s.hasStatus, isTrue);
+      expect(s.isTerminal, isFalse);
+    });
+
+    test('stream 模式的 tts_started 带 reason=first_delta', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsStarted, {'mode': 'stream', 'reason': 'first_delta'}),
+      ]);
+
+      expect(r.ttsStatus.mode, 'stream');
+      expect(r.ttsStatus.reason, 'first_delta');
+    });
+
+    test('tts_completed 产出 ttsStatus(completed) 并记下段数', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsStarted, {'mode': 'stream'}, globalSeq: 1),
+        tts(EventTypes.ttsCompleted, {
+          'parts': 3,
+          'bytes': 1024,
+          'duration_ms': 2500,
+        }, globalSeq: 2),
+      ]);
+
+      final s = r.ttsStatus;
+      expect(s.phase, TtsPhase.completed);
+      expect(s.parts, 3);
+      expect(s.isTerminal, isTrue);
+    });
+
+    test('tts_failed 产出 ttsStatus(failed) 并保留服务端文案与诊断字段', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsFailed, {
+          'reason': 'synthesize_failed',
+          'seq': 1,
+          'message': '语音生成失败，本次文本回复不受影响。',
+        }),
+      ]);
+
+      final s = r.ttsStatus;
+      expect(s.phase, TtsPhase.failed);
+      expect(s.message, '语音生成失败，本次文本回复不受影响。');
+      expect(s.reason, 'synthesize_failed');
+      expect(s.isTerminal, isTrue);
+    });
+
+    test('stream 终态失败：completed_parts 作为 parts，并带 failed_part/lost_chars', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsFailed, {
+          'parts': 5,
+          'bytes': 900,
+          'duration_ms': 1000,
+          'reason': 'provider_error',
+          'failed_part': 3,
+          'completed_parts': 2,
+          'lost_chars': 42,
+          'message': '语音生成未完全成功，已生成的部分仍可播放。',
+        }),
+      ]);
+
+      final s = r.ttsStatus;
+      expect(s.phase, TtsPhase.failed);
+      expect(s.parts, 2, reason: '失败时 parts 取 completed_parts（已完成数）');
+      expect(s.failedPart, 3);
+      expect(s.lostChars, 42);
+    });
+
+    test('started → completed 按顺序覆盖（回放也得到终态）', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsStarted, {'mode': 'stream'}, globalSeq: 1),
+        tts(EventTypes.ttsCompleted, {'parts': 1}, globalSeq: 2),
+      ]);
+
+      expect(
+        r.ttsStatus.phase,
+        TtsPhase.completed,
+        reason: '终态落库且顺序在后，回放历史不应停在「合成中」',
+      );
+    });
+
+    test('started → failed 按顺序覆盖', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsStarted, {'mode': 'message'}, globalSeq: 1),
+        tts(EventTypes.ttsFailed, {'message': '失败了'}, globalSeq: 2),
+      ]);
+
+      expect(r.ttsStatus.phase, TtsPhase.failed);
+    });
+
+    test('新 turn 的 user_message 清除上一轮播报状态（不粘在新一轮上）', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsCompleted, {'parts': 1}, globalSeq: 1),
+        ev(
+          EventTypes.userMessage,
+          turnId: 'turn_2',
+          payload: {'input': '下一个问题'},
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.ttsStatus.phase, TtsPhase.idle, reason: '上一轮的「语音已生成」不该粘在新一轮上');
+      expect(r.ttsStatus.hasStatus, isFalse);
+      expect(r.items, hasLength(1), reason: 'user_message 仍正常进时间线');
+    });
+
+    test('同 turn 重放的 user_message 不清掉本 turn 的播报状态', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.userMessage,
+          turnId: 'turn_1',
+          payload: {'input': '问题'},
+          globalSeq: 1,
+        ),
+        tts(EventTypes.ttsCompleted, {'parts': 1}, globalSeq: 2),
+        ev(
+          EventTypes.userMessage,
+          turnId: 'turn_1',
+          payload: {'input': '问题'},
+          globalSeq: 3,
+        ),
+      ]);
+
+      expect(
+        r.ttsStatus.phase,
+        TtsPhase.completed,
+        reason: '同 turn 的重复 user_message 不应误清本 turn 状态',
+      );
+    });
+
+    test('turnId 为空的 tts 事件被丢弃（无法按 turn 归并）', () {
+      final r = EventReducer.reduce([
+        tts(EventTypes.ttsCompleted, {'parts': 1}, turnId: ''),
+      ]);
+
+      expect(r.ttsStatus.phase, TtsPhase.idle);
+    });
+
+    test('非 TTS 事件的通用键不被误读为播报字段', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.error,
+          payload: {'message': '这不是语音失败', 'reason': 'boom'},
+          globalSeq: 1,
+        ),
+      ]);
+
+      expect(
+        r.ttsStatus.phase,
+        TtsPhase.idle,
+        reason: 'error 事件的 message 不是播报文案',
+      );
+    });
+
+    test('tts_started 不推进游标，终态事件推进游标', () {
+      final started = EventReducer.reduce([
+        tts(EventTypes.ttsStarted, {'mode': 'stream'}, globalSeq: 1),
+      ]);
+      expect(started.lastEventId, isEmpty, reason: 'Transient 无有效 ID');
+
+      final completed = EventReducer.reduce([
+        tts(EventTypes.ttsCompleted, {'parts': 1}, globalSeq: 2),
+      ]);
+      expect(
+        completed.lastEventId,
+        'tts_completed_2',
+        reason: '终态落库，应推进游标（与 started 相反）',
+      );
+    });
+
+    test('无 tts 事件时 ttsStatus 为 idle（非 null）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.message, payload: {'text': 'hi'}),
+      ]);
+
+      expect(r.ttsStatus.phase, TtsPhase.idle);
+      expect(r.ttsStatus.hasStatus, isFalse, reason: 'UI 据此不渲染状态条');
+    });
+
+    test('四态齐备：idle 是显式态而非 null', () {
+      // 需求列出 idle/started/completed/failed 四态。idle 不是「null 的别名」，
+      // 而是可穷举的一个分支（UI 的 switch 能无 default 地覆盖它）。
+      const idle = TtsStatus.idle();
+      expect(idle.phase, TtsPhase.idle);
+      expect(idle.turnId, isEmpty);
+      expect(idle.hasStatus, isFalse);
+      expect(idle.isTerminal, isFalse);
+      expect(idle.at, isNull, reason: '空闲不是事件，没有时间戳');
+
+      expect(TtsPhase.values, hasLength(4));
+      expect(TtsPhase.values.map((p) => p.wire).toList(), [
+        'idle',
+        'started',
+        'completed',
+        'failed',
+      ]);
+    });
+
+    test('默认归约结果就是 idle（调用方无需判空）', () {
+      final r = EventReducer.reduce(const []);
+
+      expect(r.ttsStatus.phase, TtsPhase.idle);
+    });
+  });
+
   /// 习惯建议事件（`habit_suggestion_created` / `habit_suggestion_resolved`）。
   ///
   /// ## 这个测试防的是什么
@@ -1320,6 +1939,91 @@ void main() {
       expect(s.triggerType, HabitTriggerType.watch);
       expect(s.triggerConfig!.time, isNull);
       expect(s.triggerConfig!.summary, isNot(contains('00:00')));
+    });
+  });
+
+  /// 习惯自动执行完成（`habit_auto_run_completed`）——习惯回环的 Reward 环。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 同 [habitSuggestionCreated]：该事件**不在** `chatbus/broker.go` 的常量表里，
+  /// 只对着 broker.go 做镜像必然漏掉，于是落到归约器的 `default:` 分支被静默
+  /// 丢弃——用户永远看不到「服务端帮你跑了一轮习惯」的回执。
+  ///
+  /// ## ⚠️ 契约来源说明
+  ///
+  /// Go 侧当前**不产出**本事件（`workers/habit/turn_terminal.go:35` 明说不做），
+  /// 载荷形状取自 Python 的 `build_habit_auto_run_completed_payload` 与 webapp 的
+  /// 解析器。这里钉住的是「事件一旦补齐，客户端能正确渲染」——即验收要求的
+  /// 「事件产出对话项」。
+  group('habit 自动执行 → HabitAutoRunItem', () {
+    /// `build_habit_auto_run_completed_payload` 的真实形状。
+    Map<String, dynamic> autoRunPayload({
+      String topicKey = 'daily_review',
+      String runId = 'run-1',
+    }) => {
+      'habit_pattern_id': 'hp-1',
+      'habit_run_id': runId,
+      'turn_id': 'turn_1',
+      'delivery_group_id': 'grp_1',
+      'topic_key': topicKey,
+      'summary': 'daily review 习惯提醒已成功送达，完成本轮强化。',
+    };
+
+    test('产出习惯强化项（不再被 default 分支丢弃）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.habitAutoRunCompleted, payload: autoRunPayload()),
+      ]);
+
+      expect(r.items, isNotEmpty, reason: '事件必须产出可见反馈');
+      expect(r.items, hasLength(1));
+      final item = r.items.single;
+      expect(item, isA<HabitAutoRunItem>());
+      final h = item as HabitAutoRunItem;
+      expect(h.topicKey, 'daily_review');
+      expect(h.topicLabel, 'daily review', reason: '下划线应换成空格');
+      expect(h.runId, 'run-1');
+      expect(h.patternId, 'hp-1');
+      expect(h.turnId, 'turn_1');
+    });
+
+    test('缺 topic_key 仍产出项（身份键不是它，渲染为未命名）', () {
+      final payload = autoRunPayload()..remove('topic_key');
+      final r = EventReducer.reduce([
+        ev(EventTypes.habitAutoRunCompleted, payload: payload),
+      ]);
+
+      // 与建议卡不同：建议卡缺 suggestion_id 必须丢弃（无身份键不可操作），
+      // 本项是纯通知，没有可操作性，不应因缺展示字段而消失。
+      expect(r.items, hasLength(1));
+      expect((r.items.single as HabitAutoRunItem).topicLabel, '未命名习惯');
+    });
+
+    test('重放同一事件不产生重复项（SSE 回放 + 回填交叠窗口）', () {
+      final e = ev(EventTypes.habitAutoRunCompleted, payload: autoRunPayload());
+      final r = EventReducer.reduce([e, e]);
+      expect(r.items, hasLength(1));
+    });
+
+    test('同一 turn 上两次不同执行各自成项（不能按 turnId 合并）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.habitAutoRunCompleted,
+          id: 'evt-a',
+          payload: autoRunPayload(topicKey: 'daily_review', runId: 'run-a'),
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.habitAutoRunCompleted,
+          id: 'evt-b',
+          payload: autoRunPayload(topicKey: 'weekly_report', runId: 'run-b'),
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2));
+      final labels = r.items.cast<HabitAutoRunItem>().map((h) => h.topicLabel);
+      expect(labels, containsAll(['daily review', 'weekly report']));
     });
   });
 }

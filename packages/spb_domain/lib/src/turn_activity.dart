@@ -169,6 +169,7 @@ class GroupUpdate {
     required this.groupId,
     this.title,
     this.status,
+    this.metadata,
     this.at,
   });
 
@@ -191,6 +192,22 @@ class GroupUpdate {
   /// 且本字段只用于乐观更新展示，未知值忽略即可。
   final String? status;
 
+  /// 变更后的**完整** metadata（仅 `group_metadata_updated` 携带）。
+  ///
+  /// ## 为什么只有这一个来源带它
+  ///
+  /// `group_updated` 的快照是**刻意最小化**的（只有 id/title/status，见
+  /// `PublishGroupUpdated` 的注释），不带 metadata；而
+  /// `group_metadata_updated` 由 Goal Gate 发出，payload 就是
+  /// `{reason, metadata}`，其中 metadata 是完整的 `chat_groups.metadata`
+  /// （Go `updateGroupMetadata` 返回整个 map，不是子树）。
+  ///
+  /// 消费方应**整体替换**而非深合并——服务端的删除语义是「把键移除」
+  /// （关闭 tts 时整块删 `metadata.tts`），合并会让「已关」的开关显示为开。
+  ///
+  /// 为 null 时**不得**用空 map 覆盖现有值（否则面板会显示假的「全关」）。
+  final Map<String, dynamic>? metadata;
+
   /// 事件到达时间。
   final DateTime? at;
 
@@ -199,21 +216,24 @@ class GroupUpdate {
   /// `groupId` 为空的事件无法定位要更新哪一项，丢弃（服务端不变量是「发布即
   /// 有 group id」，缺失属异常载荷）。
   ///
-  /// ## 两类事件归一到这里
+  /// ## 三类事件归一到这里
   ///
   /// - `group_updated`：完整的生命周期变更（created / deleted / archived /
   ///   active / title / metadata），带 `{op, group: {id, title, status}}`。
   /// - `group_title_updated`：Title Gate 在 turn 收尾时单独发的标题变更
   ///   （`chatgate/title_gate.go`），payload 只有 `{new_title}`。
+  /// - `group_metadata_updated`：Goal Gate 自动停用时发的 metadata 变更
+  ///   （`chatgate/goal_gate.go:440` / `:555`），payload 为
+  ///   `{reason, metadata}`，metadata 是**完整**的。
   ///
-  /// 合并的理由：**对列表页而言两者是同一件事**（「某对话的标题变了」），
-  /// 分开走两条通道会让列表页写两套处理逻辑，而它已经能处理
-  /// [GroupUpdateOp.title]。
+  /// 合并的理由：**对列表页而言它们是同一件事**（「某对话的某项变了」），
+  /// 分开走三条通道会让列表页写三套处理逻辑，而它已经能处理
+  /// [GroupUpdateOp.title] / [GroupUpdateOp.metadata]。
   ///
-  /// ⚠️ 键名是 `new_title` 而不是 `title`。服务端曾在 2026-09 修复过这个 bug：
-  /// 发射端写 `title`、前端读 `new_title`，导致标题实时更新**从未生效过**。
-  /// 两边各自看代码都「对」，故这里用 Go 侧 `TestTitleGateEmitsNewTitleKey`
-  /// 钉住的键名（见 `title_gate_test.go`）。
+  /// ⚠️ `group_title_updated` 的键名是 `new_title` 而不是 `title`。服务端曾在
+  /// 2026-09 修复过这个 bug：发射端写 `title`、前端读 `new_title`，导致标题
+  /// 实时更新**从未生效过**。两边各自看代码都「对」，故这里用 Go 侧
+  /// `TestTitleGateEmitsNewTitleKey` 钉住的键名（见 `title_gate_test.go`）。
   static GroupUpdate? fromEvent(ChatEvent ev) {
     if (ev.eventType == EventTypes.groupTitleUpdated) {
       if (ev.groupId.isEmpty) return null;
@@ -222,6 +242,20 @@ class GroupUpdate {
         groupId: ev.groupId,
         // 该事件**没有** status 快照——不能拿 null 去覆盖列表里的现有状态。
         title: _strOrNull(ev.payload?['new_title']),
+        at: ev.createdAt,
+      );
+    }
+    // Goal Gate 的 metadata 变更：payload `{reason, metadata}`。
+    //
+    // ⚠️ 它**是落库的**（`broker.go:82` 的「持久化到 chat_events」一组），
+    // 与 goal_updated 相反，故不需要（也不应）做游标豁免。
+    if (ev.eventType == EventTypes.groupMetadataUpdated) {
+      if (ev.groupId.isEmpty) return null;
+      return GroupUpdate(
+        op: GroupUpdateOp.metadata,
+        groupId: ev.groupId,
+        // 整体替换语义：metadata 是完整的 chat_groups.metadata。
+        metadata: ev.groupMetadata,
         at: ev.createdAt,
       );
     }
@@ -245,9 +279,38 @@ class GroupUpdate {
     return v.isEmpty ? null : v;
   }
 
+  /// 把本通知套用到 [group]，返回更新后的 group。
+  ///
+  /// ## 为什么抽成方法（而不是在每个页面的回调里各写一遍）
+  ///
+  /// 两个端（desktop / mobile）的对话页都要做「收到 metadata 变更 → 更新
+  /// 本页 _group」这件事，写在两处必然漂移；且抽出来之后可以用真实的
+  /// 「事件 → 套用 → 面板渲染」链写测试，而不是在测试里重写一遍逻辑。
+  ///
+  /// ## 只处理 metadata 分支
+  ///
+  /// 对话页不渲染 group 的标题/状态（那是列表页的事），`created`/`deleted`/
+  /// `title` 等 op 对设置面板无影响，处理它们只会白费一次 setState。
+  ///
+  /// ## 不适用的情形返回**原对象**（不是 null）
+  ///
+  /// 调用方据此判断「有无变化」：返回同一实例则不 setState。
+  ///
+  /// - op 不是 [GroupUpdateOp.metadata]；
+  /// - [metadata] 为 null（不得用空 map 覆盖现有值，否则面板显示假的「全关」）；
+  /// - [groupId] 与 group 不匹配（SSE 是 user 级订阅，会收到别的 group 的变更）。
+  ChatGroup applyTo(ChatGroup group) {
+    if (op != GroupUpdateOp.metadata) return group;
+    if (groupId != group.id) return group;
+    final next = metadata;
+    if (next == null) return group;
+    return group.withMetadata(next);
+  }
+
   @override
   String toString() =>
       'GroupUpdate(${op.wire}, group=$groupId'
       '${title != null ? ', title=$title' : ''}'
-      '${status != null ? ', status=$status' : ''})';
+      '${status != null ? ', status=$status' : ''}'
+      '${metadata != null ? ', metadata=${metadata!.length} keys' : ''})';
 }

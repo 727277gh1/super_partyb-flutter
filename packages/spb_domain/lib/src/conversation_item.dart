@@ -490,6 +490,68 @@ final class HabitSuggestionItem extends ConversationItem {
   );
 }
 
+/// 习惯自动执行完成（`habit_auto_run_completed`）——习惯回环的 **Reward 环**。
+///
+/// ## 为什么归约层要处理它（而非静默丢弃）
+///
+/// 它是「服务端自动帮你把习惯跑了一轮」的**唯一用户可见回执**。不显式处理就会
+/// 落到归约器的 `default:` 分支被静默丢弃（与 `agent.file.*` 曾被吞 2927 条、
+/// `habit_suggestion_created` 曾被丢是同一类缺陷）。
+///
+/// ## ⚠️ Go 侧当前不产出该事件
+///
+/// 详见 [EventTypes.habitAutoRunCompleted] 的说明：Python 时代有、Go 迁移时刻意
+/// 未补（`turn_terminal.go:35` 明说不做）。本类按**已冻结的契约**实现，
+/// 事件补齐后即刻生效，无需再改客户端。
+///
+/// ## 为什么是独立项而非合并进 [HabitSuggestionItem]
+///
+/// 两者的生命周期完全不同：建议卡有 created → resolved 两态且要用户作答；
+/// 本项是**终态通知**（一次性、无需操作）。合进去会让卡片多出一堆对本事件
+/// 无意义的字段（`userFeedback` / `canResolve` / 触发配置…），且 `suggestion_id`
+/// 与 `habit_run_id` 不是同一个键——按错键合并会把两条真实事件错并成一张。
+///
+/// ## 身份键用 eventId（不是 runId）
+///
+/// 服务端一条完成事件对应一次执行，`habit_run_id` 理论上唯一；但用 eventId 与
+/// 其余「无状态生命周期」项一致（如 [GoalProgressItem]），且能在 SSE 回放与
+/// timeline 回填交叠时按事件粒度去重（见 [_upsertHabitAutoRun]）。
+final class HabitAutoRunItem extends ConversationItem {
+  const HabitAutoRunItem({
+    required super.id,
+    required super.createdAt,
+    this.topicKey = '',
+    this.runId,
+    this.patternId,
+    this.serverSummary,
+    super.turnId,
+  });
+
+  /// 主题 key（`topic_key`）。空串表示载荷没给——卡片应回退到「未命名习惯」。
+  final String topicKey;
+
+  /// 本次执行记录 id（`habit_run_id`），供深链到执行历史。
+  final String? runId;
+
+  /// 命中的习惯规则 id（`habit_pattern_id`）。
+  final String? patternId;
+
+  /// 服务端原始摘要（`summary`）。
+  ///
+  /// 仅在排障/兜底时使用：主文案由卡片自行拼（与 webapp 一致），见
+  /// [ChatEvent.habitAutoRunSummary] 的说明。
+  final String? serverSummary;
+
+  /// 主题展示名：`topic_key` 的分隔符换成空格。
+  ///
+  /// 与 [HabitSuggestionCard] 同一取舍：`topic_key` 是机器键，不能编造中文名
+  /// （服务端没有 topic 标题表），但也不应把 `weekly-report` 原样丢给用户。
+  String get topicLabel {
+    if (topicKey.isEmpty) return '未命名习惯';
+    return topicKey.replaceAll(RegExp(r'[._-]+'), ' ');
+  }
+}
+
 /// Agent 产出的文件（`agent.file.*`）。
 ///
 /// ## 为什么 [id] 用归一化的相对路径，而非 eventId

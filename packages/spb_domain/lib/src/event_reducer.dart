@@ -1,9 +1,11 @@
 import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
+import 'execution_status.dart';
 import 'gate_decision.dart';
 import 'spec_ui.dart';
 import 'tts_audio_path.dart';
+import 'tts_status.dart';
 import 'turn_activity.dart';
 
 /// 把服务端事件流归约成可渲染的对话项列表。
@@ -50,6 +52,48 @@ class EventReducer {
     // 它**不**进 items：进度提示不是对话正文（与 webapp 的
     // `categorizeEvent('turn_activity') === 'event'` 同语义）。
     final activities = <String, TurnActivitySnapshot>{};
+
+    // 上下文用量快照（`context_update`）。
+    //
+    // 单个值而非 Map：用量是**对话级**状态（当前上下文窗口被占了多少），
+    // 不是 per-turn 的——同一 turn 内 telemetry 与 compaction 会交替到达，
+    // 各自只带部分字段，故用 `mergedWith` 逐字段累积（见 ContextUsage 类文档）。
+    //
+    // 它**不**进 items：用量是诊断/状态信息，不是对话正文（对齐 webapp 把
+    // 它渲染在右侧状态侧边栏而非时间线）。
+    ContextUsage? contextUsage;
+
+    // 执行等待/重试状态（`queue_state` / `retry_scheduled`）。
+    //
+    // 单个值而非 Map：它是「当前这个 group 里哪个 turn 在等」的一行提示，
+    // 同一时刻只需要展示一条（最新的等待者胜出）。
+    //
+    // ## 为什么清除要按 turn 作用域 + 按事件顺序
+    //
+    // 这两类事件在 Go 侧**是落库的**（非 Transient，见 ExecutionStatus 类文档），
+    // 故回放一段「排队 → 起跑 → 回复」的历史时也会经过这里。清除必须按
+    // globalSeq 升序自然生效（本循环就是升序），回放才能得到与实时一致的终态
+    // ——否则历史回放会永远挂着一条「排队中」。
+    //
+    // 作用域限同 turn：别的 turn 的正文不该抹掉本 turn 的排队提示。
+    ExecutionStatus? executionStatus;
+
+    // 语音播报状态（`tts_started` / `tts_completed` / `tts_failed`）。
+    //
+    // 非空且默认为 [TtsPhase.idle]：调用方无需到处判空，UI 用 [TtsStatus.hasStatus]
+    // 决定是否渲染。
+    //
+    // ## 为什么不能按「当前流式的 turn」查表
+    //
+    // 终态（completed/failed）在 turn 结束后才到达，那时已经没有流式项了
+    // （`_streamingItem` 为 null）。若按 turnId 查表，恰恰在最需要展示
+    // 「合成完成 / 失败原因」时查不到。故取「最近一条」而非「当前 turn 的」。
+    //
+    // ## 跨 turn 失效
+    //
+    // 新 turn 的 `user_message` 到达时置回 idle（见下方），避免「上一轮的已完成」
+    // 横幅粘在新一轮上。
+    var ttsStatus = const TtsStatus.idle();
     var lastEventId = '';
 
     // 当前正在累积的 assistant 段落 / thought 段落。
@@ -79,6 +123,64 @@ class EventReducer {
       // （对齐 webapp chat-timeline.ts 的 `group.activity = {...}` 覆盖写）。
       final activity = TurnActivitySnapshot.fromEvent(ev);
       if (activity != null) activities[activity.turnId] = activity;
+
+      // context_update：累积成对话级用量快照。
+      //
+      // WHY 在循环顶部而非 switch 分支里：与 turn_activity 同因——`default:`
+      // 分支的语义是「控制事件，不进对话列表也不进任何通道」；放进去就等于
+      // 宣称它被丢弃。它确实不产 items，但产出 contextUsage。
+      //
+      // ⚠️ 该事件在 Go 侧走 `flushEvent`（落库）而非 `flushEventTransient`，
+      // 故**会**带有效 eventId/globalSeq、**会**推进 SSE 游标——这里无需像
+      // goal_updated 那样做 Transient 豁免。上面的游标推进已按 `!transient`
+      // 把关，两条路径一致。
+      if (ev.eventType == EventTypes.contextUpdate) {
+        final parsed = ContextUsage.fromEventPayload(ev.payload ?? const {});
+        if (parsed != null) {
+          // 同 turn 内多条按到达顺序合并；跨 turn 同样合并（窗口大小不变，
+          // 最新一轮的用量覆盖旧值）。
+          contextUsage = contextUsage?.mergedWith(parsed) ?? parsed;
+        }
+      }
+
+      // queue_state / retry_scheduled：维护「尚未回复的原因」。
+      //
+      // WHY 在循环顶部而非 switch 分支里：与 turn_activity / context_update 同因
+      // ——`default:` 分支的语义是「控制事件，不进对话列表也不进任何通道」，
+      // 放进去就等于宣称它被丢弃。它确实不产 items，但产出 executionStatus。
+      //
+      // ⚠️ 清除必须**先于**设置判定，且限同 turn：`queue_state` 的
+      // `state=cancelled` 既是「清除信号」又属该事件类型，两者互斥
+      // （fromEvent 只在 state=queued 时非 null）。
+      final status = ExecutionStatus.fromEvent(ev);
+      if (status != null) {
+        // 新的等待者胜出（可能是另一个 turn 在排队）。
+        executionStatus = status;
+      } else if (executionStatus != null &&
+          executionStatus.turnId == ev.turnId &&
+          ExecutionStatus.clearsOn(ev)) {
+        executionStatus = null;
+      }
+
+      // tts_started / tts_completed / tts_failed：维护播报状态。
+      //
+      // WHY 在循环顶部而非 switch 分支里：与 turn_activity / executionStatus 同因
+      // ——`default:` 分支的语义是「不进对话列表也不进任何通道」，放进去就等于
+      // 宣称它被丢弃。它确实不产 items，但产出 ttsStatus。
+      //
+      // ⚠️ 覆盖按到达顺序（本循环即 globalSeq 升序）即可，无需额外时序处理：
+      // `tts_started` 是 Transient（不落库），两个终态**落库**，故回放一段
+      // 「started → completed」会自然得到终态。
+      final tts = TtsStatus.fromEvent(ev);
+      if (tts != null) {
+        ttsStatus = tts;
+      } else if (ttsStatus.hasStatus &&
+          ev.eventType == EventTypes.userMessage &&
+          ev.turnId != ttsStatus.turnId) {
+        // 新 turn 开始：上一轮的播报状态已过期，不要粘在新一轮上。
+        // （只对新 turn 生效：同 turn 重放的 user_message 不应清掉本 turn 状态。）
+        ttsStatus = const TtsStatus.idle();
+      }
 
       switch (ev.eventType) {
         case EventTypes.userMessage:
@@ -429,6 +531,32 @@ class EventReducer {
           // 找不到说明调用方只归约了部分事件窗口（如 SSE cursor 从中间接入）。
           _applyHabitSuggestionResolved(items, ev);
 
+        case EventTypes.habitAutoRunCompleted:
+          // 习惯自动执行完成：习惯回环的 Reward 环，给用户「服务端真的帮你
+          // 跑了一轮」的可见反馈。
+          //
+          // 之前该事件落到 `default:` 分支被静默丢弃——与
+          // `habit_suggestion_created` 同因（不在 `chatbus/broker.go` 的
+          // 常量表里，只对着 broker.go 做镜像必然漏掉）。
+          //
+          // ⚠️ Go 侧当前**不产出**本事件（见 [EventTypes.habitAutoRunCompleted]
+          // 的说明）：本分支是按已冻结契约实现的前向兼容，一旦补齐即刻生效。
+          //
+          // 无 topic_key 也**照常产出**（与建议卡不同）：本项不靠它作身份键，
+          // 空 topic 只会渲染成「未命名习惯」，比整条事件消失好得多。
+          _upsertHabitAutoRun(
+            items,
+            HabitAutoRunItem(
+              id: ev.eventId,
+              createdAt: ev.createdAt,
+              turnId: ev.turnId,
+              topicKey: ev.habitAutoRunTopicKey ?? '',
+              runId: ev.habitAutoRunRunId,
+              patternId: ev.habitAutoRunPatternId,
+              serverSummary: ev.habitAutoRunSummary,
+            ),
+          );
+
         default:
           // heartbeat / queue_state / gate_evaluated / gate_completed /
           // gate_error / tts_* / goal_gate_stopped / schedule_created 等控制事件
@@ -460,6 +588,9 @@ class EventReducer {
       lastEventId: lastEventId,
       gateDecisions: gateDecisions,
       activities: activities,
+      contextUsage: contextUsage,
+      executionStatus: executionStatus,
+      ttsStatus: ttsStatus,
     );
   }
 
@@ -480,6 +611,27 @@ class EventReducer {
           return;
         }
       }
+    }
+    items.add(incoming);
+  }
+
+  /// 插入习惯自动执行完成项（按事件 id 幂等）。
+  ///
+  /// ## 为什么用事件 id 而不是 runId
+  ///
+  /// 同一事件会在「SSE cursor 回放」与「timeline 回填」的交叠窗口到达两次；
+  /// 两者带的是**同一个 eventId**，故按 id 去重即可。用 `runId` 会在载荷缺它
+  /// （旧载荷/降级载荷）时失去幂等性，而事件 id 是 ChatEvent 必有的。
+  ///
+  /// 与 [_upsertHabitSuggestion] 不同：本项是**终态通知**（无后续事件改写它），
+  /// 故不保留旧字段，重复到达时以先到者为准（不重建、不刷 createdAt——
+  /// 列表排序不应因重放而漂移）。
+  static void _upsertHabitAutoRun(
+    List<ConversationItem> items,
+    HabitAutoRunItem incoming,
+  ) {
+    for (final it in items) {
+      if (it is HabitAutoRunItem && it.id == incoming.id) return;
     }
     items.add(incoming);
   }
@@ -838,6 +990,9 @@ class ReductionResult {
     required this.lastEventId,
     this.gateDecisions = const [],
     this.activities = const {},
+    this.contextUsage,
+    this.executionStatus,
+    this.ttsStatus = const TtsStatus.idle(),
   });
 
   final List<ConversationItem> items;
@@ -871,4 +1026,52 @@ class ReductionResult {
   ///
   /// 值为 null 与「不存在该键」等价（都用 `activities[turnId]` 取）。
   final Map<String, TurnActivitySnapshot> activities;
+
+  /// 上下文用量与费用快照（`context_update`）。
+  ///
+  /// ## 为什么不在 [items] 里
+  ///
+  /// 与 [gateDecisions] / [activities] 同因：用量是**状态**而非对话正文。
+  /// 夹在消息之间会把对话冲散，而它是持续变化的一行数字（webapp 同样把它
+  /// 放在右侧状态侧边栏，见 `WorkbenchStatusSidebar`）。
+  ///
+  /// ## 为什么是单个值而不是 Map
+  ///
+  /// 用量描述的是「当前这个上下文窗口」，与具体哪个 turn 无关：
+  /// 同一 turn 内 telemetry 与 compaction 会交替播报，各自只带部分字段，
+  /// 归约时逐字段合并成**一个**快照（见 [ContextUsage.mergedWith]）。
+  ///
+  /// 为 null 表示缓冲区里没有任何可识别的 `context_update`（含服务端未发射、
+  /// 或事件只带无法解析的异常载荷）——UI 应**隐藏**该区域而非显示 0。
+  final ContextUsage? contextUsage;
+
+  /// 执行等待/重试状态（`queue_state` / `retry_scheduled`）。
+  ///
+  /// ## 为什么不在 [items] 里
+  ///
+  /// 与 [gateDecisions] / [activities] / [contextUsage] 同因：它是**状态提示**
+  /// 而非对话正文。它回答的是「为什么还没有回复」——夹在消息之间会与真正的
+  /// 回复混淆，而它本质上是「此刻在等」的瞬时判断。
+  ///
+  /// ## 与 [activities] 的区别（UI 用同一个槽位）
+  ///
+  /// [activities] 是「已在跑但没正文」，本字段是「还没开始跑（等名额/等重试）」。
+  /// 两者互斥展示，本字段**优先**（对齐 webapp `turn.activity && !turn.queueReason`）。
+  ///
+  /// 为 null 表示当前无等待（服务端未发射、已起跑/已回复、或已终态）。
+  final ExecutionStatus? executionStatus;
+
+  /// 语音播报状态（`tts_started` / `tts_completed` / `tts_failed`）。
+  ///
+  /// ## 为什么不在 [items] 里
+  ///
+  /// 与 [gateDecisions] / [activities] / [contextUsage] / [executionStatus] 同因：
+  /// 它是**状态指示**而非对话正文。语音是文本回复的衍生物，夹进时间线会让人
+  /// 以为「又多了一条回复」。
+  ///
+  /// 取「最近一条」而非按 turnId 查表：终态事件在 turn 结束后才到达，那时已
+  /// 没有流式项可关联（详见归约器内的注释）。
+  ///
+  /// 非空：无播报事件时为 [TtsPhase.idle]（UI 用 [TtsStatus.hasStatus] 判断）。
+  final TtsStatus ttsStatus;
 }

@@ -43,6 +43,9 @@ library;
 //   GateDecision / GateDecisionKind / GateSourceKind —— Gate 决策（adaptive_decision / goal_gate_decision 归约输出，独立于时间线）
 //   collectGateDecisions / gateDecisionFrom —— 事件流 → Gate 决策列表（纯函数）
 //   TurnActivitySnapshot          —— 执行中活动快照（turn_activity 归约输出，空窗期进度指示）
+//   ContextUsage / ContextCost    —— 上下文用量与费用（context_update 归约输出，诊断区展示）
+//   ExecutionStatus / Kind        —— 执行等待/重试状态（queue_state / retry_scheduled 归约输出）
+//   TtsStatus / TtsPhase          —— 语音播报状态（tts_started / tts_completed / tts_failed 归约输出）
 //   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
 export 'src/artifact_tree.dart';
@@ -54,7 +57,9 @@ export 'src/deliverable_upload.dart';
 export 'src/deliverable_upload_adapters.dart';
 export 'src/deliverable_upload_usecase.dart';
 export 'src/event_reducer.dart';
+export 'src/execution_status.dart';
 export 'src/gate_decision.dart';
+export 'src/goal_update.dart';
 export 'src/local_deliverable_path.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
@@ -63,6 +68,7 @@ export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
 export 'src/tts_audio_path.dart';
+export 'src/tts_status.dart';
 export 'src/turn_activity.dart';
 export 'src/turn_group.dart';
 export 'src/sync_scope_config.dart';

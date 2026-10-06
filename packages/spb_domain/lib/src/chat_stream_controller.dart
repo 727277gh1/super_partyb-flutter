@@ -1,13 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:meta/meta.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
 import 'event_reducer.dart';
+import 'execution_status.dart';
 import 'gate_decision.dart';
+import 'goal_update.dart';
+import 'tts_status.dart';
 import 'turn_activity.dart';
 
 /// 对话流控制器：把 SSE 帧流 + timeline 回填统一成一条对话项流。
@@ -51,11 +55,53 @@ class ChatStreamController {
       StreamController<List<GateDecision>>.broadcast();
   final _activitiesController =
       StreamController<Map<String, TurnActivitySnapshot>>.broadcast();
+  final _contextUsageController = StreamController<ContextUsage?>.broadcast();
+  final _executionStatusController =
+      StreamController<ExecutionStatus?>.broadcast();
+  final _ttsStatusController = StreamController<TtsStatus?>.broadcast();
   final _groupUpdatesController = StreamController<GroupUpdate>.broadcast();
+
+  /// 目标变更通知流（`goal_updated`）。
+  ///
+  /// 与 [_groupUpdatesController] 分开而非复用：两者载荷类型不同
+  /// （[GroupUpdate] 是最小身份快照，[GoalUpdate] 是完整目标快照），且消费方
+  /// 也不同（列表页 vs 对话页/设置面板）。
+  final _goalUpdatesController = StreamController<GoalUpdate>.broadcast();
   final _errorController = StreamController<SpbError>.broadcast();
   final _stateController = StreamController<SseState>.broadcast();
 
+  /// 事件缓冲区上限（条）。
+  ///
+  /// ## 为什么必须有上限
+  ///
+  /// [_buffer] 只增不减：[start] / [_backfill] 灌首屏、[loadOlder] 每次往头部
+  /// 前插一页、[_onFrame] 每条 SSE 事件追加，且**从不裁剪**。而 [_emit] 每次都
+  /// `EventReducer.reduce(_buffer)` 全量重算——于是长会话下这是 O(n²)：翻 20 页
+  /// 历史（约 1200 条）后，每来一条新事件都要重新归约上千条并重建整个对话项
+  /// 列表，内存同样无界增长。
+  ///
+  /// ## 为什么取 2000
+  ///
+  /// 首屏 [_backfill] 拉 200 条、[loadOlder] 每次 50 条，2000 条相当于「连续往上
+  /// 翻 36 页」——远超实际使用深度；同时把单次归约的输入规模固定在 2000 条以内。
+  static const int maxBufferEvents = 2000;
+
   final List<ChatEvent> _buffer = [];
+
+  /// 「曾经加载到过的最早落库事件」的 globalSeq（跨裁剪保持，不因丢头部而抬高）。
+  ///
+  /// ## 为什么不能用「当前缓冲区的最小 globalSeq」当翻页游标
+  ///
+  /// 裁剪从头部丢弃最旧事件，会把缓冲区的最小 globalSeq 抬高。若游标跟着抬高，
+  /// 那些刚被裁掉的事件会被再次判为「更早的一页」重新拉回来，拉回来又立刻被
+  /// 裁掉——形成「滚到顶 → 拉回 → 再裁掉」的抖动，而真正的更早历史永远拉不到。
+  ///
+  /// 故本字段记录「历史边界」：只在 [_backfill]（重置为首页最小值）与
+  /// [loadOlder]（前插一页后下调）更新，裁剪**不影响**它。
+  ///
+  /// 重置时机：`start` / `switchGroup`——换了 group，历史边界无意义。
+  int? _oldestLoadedGlobalSeq;
+
   StreamSubscription<SseFrame>? _frameSub;
   StreamSubscription<SseState>? _stateSub;
   bool _disposed = false;
@@ -88,6 +134,28 @@ class ChatStreamController {
   Stream<Map<String, TurnActivitySnapshot>> get activities =>
       _activitiesController.stream;
 
+  /// 上下文用量流（与 [items] 平行，由同一次归约产出）。
+  ///
+  /// 推送**单个快照**（对话级状态，非 per-turn），供对话页在诊断区展示
+  /// 「已用 / 窗口」与（若服务端提供）费用。推送 null 表示当前无可用数据
+  /// ——消费方应隐藏该区域。
+  ///
+  /// 与 [activities] 同为「注入才订阅」：对话页不持有控制器时无需订阅。
+  Stream<ContextUsage?> get contextUsage => _contextUsageController.stream;
+
+  /// 执行等待/重试状态流（与 [items] 平行，由同一次归约产出）。
+  ///
+  /// 推送单个快照或 null（null = 当前无等待）。供对话页展示「尚未回复的原因」。
+  /// 与 [contextUsage] 同为「注入才订阅」。
+  Stream<ExecutionStatus?> get executionStatus =>
+      _executionStatusController.stream;
+
+  /// 语音播报状态流（与 [items] 平行，由同一次归约产出）。
+  ///
+  /// 推送单个快照或 null（null = 本群未开语音 / 尚无播报事件）。
+  /// 与 [executionStatus] 同为「注入才订阅」。
+  Stream<TtsStatus?> get ttsStatus => _ttsStatusController.stream;
+
   /// group 变更通知流（逐条推送，**不累积**）。
   ///
   /// ## 为什么与 [items] / [gateDecisions] 不同（增量而非全量）
@@ -102,6 +170,28 @@ class ChatStreamController {
   /// B 端侧栏要实时出现，而列表页在全局模式下运行。故 [_onFrame] 对
   /// `group_updated` 的 group 过滤有**例外**（见那里的注释）。
   Stream<GroupUpdate> get groupUpdates => _groupUpdatesController.stream;
+
+  /// 目标变更通知流（`goal_updated`，逐条通知）。
+  ///
+  /// ## 为什么它也绕开 group 过滤
+  ///
+  /// 与 [groupUpdates] 同因：事件的 `groupId` 指向「被变更的那个 group」。
+  /// 但本事件的消费方（设置面板）只在聚焦模式跑，故实际上过滤不会咬到它；
+  /// 仍与 group 变更同路径处理是为了保持「通知类事件不受聚焦约束」这条
+  /// 不变式一致。
+  ///
+  /// ## ⚠️ 本通道是游标安全的**唯一**保障
+  ///
+  /// 服务端 `emitGoalUpdated` 漏设 `Transient: true`（注释写着「不落库」但字段
+  /// 留了零值 false，见 [GoalUpdate] 类文档），所以线上事件是
+  /// `transient=false` + 有效 eventId，而它**不在** `chat_events` 表里。
+  ///
+  /// 若它落到通用路径，`_onFrame` 尾部的 `if (!event.transient && ...)` 会把它
+  /// 记作 SSE 游标；服务端 `replayUserEvents` 按 `chat_events.id` 定位 cursor，
+  /// 找不到该 ID → `start < 0` → 返回 nil → **整个断线回放窗口丢失**。
+  ///
+  /// 故 [_onFrame] 对它**提前分流并 return**，绝不落到 `recordEventId`。
+  Stream<GoalUpdate> get goalUpdates => _goalUpdatesController.stream;
 
   Stream<SpbError> get errors => _errorController.stream;
 
@@ -118,6 +208,33 @@ class ChatStreamController {
   /// 当前执行中活动快照（按 turnId 索引）。
   Map<String, TurnActivitySnapshot> get activitiesSnapshot =>
       _reduction.activities;
+
+  /// 当前上下文用量快照；无数据时为 null。
+  ContextUsage? get contextUsageSnapshot => _reduction.contextUsage;
+
+  /// 当前执行等待/重试状态；无等待时为 null。
+  ExecutionStatus? get executionStatusSnapshot => _reduction.executionStatus;
+
+  /// 当前语音播报状态；无播报事件时为 [TtsPhase.idle]（非空）。
+  TtsStatus get ttsStatusSnapshot => _reduction.ttsStatus;
+
+  /// 缓冲区当前事件数（仅测试用）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// [maxBufferEvents] 的上限作用于 [_buffer]，而 [_buffer] 与 [snapshot]
+  /// （归约后的对话项）**不是一一对应**：`queue_state` 等控制事件进缓冲但不产生
+  /// 对话项，而 `message` 的多个增量帧会塌缩成一项。断言「裁剪真的发生了」必须
+  /// 直接看缓冲长度，不能靠 `snapshot.length` 反推。
+  @visibleForTesting
+  int get bufferedEventCount => _buffer.length;
+
+  /// 缓冲区当前事件的 eventId（按时间正序，仅测试用）。
+  ///
+  /// 用于断言裁剪「丢的是最旧的、留的是最新的」，同样无法从 [snapshot] 观测。
+  @visibleForTesting
+  List<String> get bufferedEventIds =>
+      _buffer.map((e) => e.eventId).toList(growable: false);
 
   /// 归约缓冲区（缓存最近一次 [_emit] 的结果，避免在 `snapshot` /
   /// `gateDecisionsSnapshot` 上各自重算）。
@@ -137,6 +254,7 @@ class ChatStreamController {
   Future<void> start({String? groupId}) async {
     _groupId = groupId;
     _buffer.clear();
+    _oldestLoadedGlobalSeq = null;
 
     if (groupId != null) {
       await _backfill(groupId);
@@ -196,6 +314,7 @@ class ChatStreamController {
   Future<void> switchGroup(String? groupId) async {
     _groupId = groupId;
     _buffer.clear();
+    _oldestLoadedGlobalSeq = null;
     if (groupId != null) {
       await _backfill(groupId);
     }
@@ -244,6 +363,9 @@ class ChatStreamController {
         transient: true,
       ),
     );
+    // 乐观回显在尾部，裁剪只丢头部，故它不会被丢；这里仍调用以维持
+    // 「所有 _buffer 变更点都裁剪」这一不变式。
+    _trimBuffer();
     _emit();
   }
 
@@ -261,6 +383,9 @@ class ChatStreamController {
       _buffer
         ..clear()
         ..addAll(events);
+      // 首屏拉的是**最新**一页，故本页最小值就是「历史边界」。
+      _oldestLoadedGlobalSeq = _minGlobalSeqOf(events);
+      _trimBuffer();
       SpbLog.info('对话历史回填完成', {'groupId': groupId, 'count': events.length});
     } catch (e) {
       SpbLog.warn('对话历史回填失败，仅依赖实时流', {'error': e.toString()});
@@ -281,10 +406,14 @@ class ChatStreamController {
   /// 用 `createdAt` 也会错——只有毫秒精度，同毫秒内的多条事件无法定序。
   /// `global_seq` 是唯一「全局唯一且单调」的排序键。
   ///
-  /// ## 游标为什么取「缓冲区里最小的 globalSeq」
+  /// ## 游标为什么取 [_oldestLoadedGlobalSeq]（而不是当前缓冲区的最小值）
   ///
-  /// 首屏 [_backfill] 拉的是**最新**一页，故缓冲区里最小的 globalSeq 就是
-  /// 「已知最早的落库事件」；服务端返回的正是「比它更早的一页」。
+  /// 首屏 [_backfill] 拉的是**最新**一页，故它记录「曾经加载到过的最早落库
+  /// 事件」；服务端返回的正是「比它更早的一页」。
+  ///
+  /// ⚠️ **不能改用「当前缓冲区的最小 globalSeq」**：[_trimBuffer] 会从头部丢弃
+  /// 最旧事件，最小值随之抬高，于是刚被裁掉的事件会被当成「更早的一页」重新
+  /// 拉回来、又被立刻裁掉。详见 [_oldestLoadedGlobalSeq] 的说明。
   ///
   /// ## 为什么必须跳过 0 与 null
   ///
@@ -312,7 +441,7 @@ class ChatStreamController {
     if (groupId == null || _disposed) return false;
     if (_loadingOlder) return true;
 
-    final cursor = _minLoadedGlobalSeq();
+    final cursor = _oldestLoadedGlobalSeq;
     if (cursor == null) return false;
 
     _loadingOlder = true;
@@ -338,6 +467,15 @@ class ChatStreamController {
         return false;
       }
       _buffer.insertAll(0, fresh);
+      // 历史边界下调到本页最小值（只降不升）：裁剪不影响它，故这里用
+      // 「本页最小值」而不是「缓冲区最小值」。
+      final oldest = _minGlobalSeqOf(fresh);
+      if (oldest != null &&
+          (_oldestLoadedGlobalSeq == null ||
+              oldest < _oldestLoadedGlobalSeq!)) {
+        _oldestLoadedGlobalSeq = oldest;
+      }
+      _trimBuffer();
       _emit();
       SpbLog.info('加载更早历史完成', {
         'groupId': groupId,
@@ -357,18 +495,41 @@ class ChatStreamController {
     }
   }
 
-  /// 缓冲区中最小的**落库**事件 globalSeq；无有效游标时返回 null。
+  /// 一组事件中最小的**落库** globalSeq；无有效值返回 null。
   ///
   /// 跳过 `null` 与 `<= 0`：前者是本地乐观回显，后者是 transient 事件
   /// （不落库，服务端从不给它分配 global_seq）。
-  int? _minLoadedGlobalSeq() {
+  static int? _minGlobalSeqOf(Iterable<ChatEvent> events) {
     int? min;
-    for (final e in _buffer) {
+    for (final e in events) {
       final g = e.globalSeq;
       if (g == null || g <= 0) continue;
       if (min == null || g < min) min = g;
     }
     return min;
+  }
+
+  /// 丢弃缓冲区里最旧的事件，使其不超过 [maxBufferEvents]。
+  ///
+  /// ## 为什么从头部丢
+  ///
+  /// [_buffer] 按 globalSeq 升序（见 [_backfill] / [loadOlder] 的排序），头部
+  /// 最旧。时间线以「最新」为焦点（打开即滚到底部、新事件从尾部追加），故丢
+  /// 头部对用户可感知的影响最小。
+  ///
+  /// ## 为什么不抬高翻页游标
+  ///
+  /// 只丢事件、**不动** [_oldestLoadedGlobalSeq]——否则被裁掉的事件会被再次
+  /// 拉回来。见 [_oldestLoadedGlobalSeq] 的说明。
+  void _trimBuffer() {
+    final excess = _buffer.length - maxBufferEvents;
+    if (excess <= 0) return;
+    _buffer.removeRange(0, excess);
+    SpbLog.debug('事件缓冲区超出上限，丢弃最旧事件', {
+      'dropped': excess,
+      'kept': _buffer.length,
+      'limit': maxBufferEvents,
+    });
   }
 
   void _onFrame(SseFrame frame) {
@@ -403,28 +564,67 @@ class ChatStreamController {
     // group 过滤：SSE 是 user 级订阅，会收到其他 group 的事件。
     // 全局模式（_groupId == null）不过滤。
     //
-    // ⚠️ **`group_updated` 与 `group_title_updated` 是例外**：它们的 groupId
-    // 指向「被变更的那个 group」，而与「当前打开哪个对话」无关（列表页在全局
-    // 模式运行，但要实时反映任何 group 的变更）。按当前 group 过滤会把「新建了
-    // 另一个 group」这类恰恰最需要的事件全部丢掉。故它们在过滤**之前**先推入
-    // 通知流。
+    // ⚠️ **`group_updated` / `group_title_updated` / `group_metadata_updated`
+    // 是例外**：它们的 groupId 指向「被变更的那个 group」，而与「当前打开哪个
+    // 对话」无关（列表页在全局模式运行，但要实时反映任何 group 的变更）。按
+    // 当前 group 过滤会把「新建了另一个 group」这类恰恰最需要的事件全部丢掉。
+    // 故它们在过滤**之前**先推入通知流。
     //
     // 放在这里（而非下面的 switch/归约层）的理由：它们是**通知**而非对话状态，
     // 不应受「当前聚焦哪个对话」约束；而 turn_activity 是对话状态，必须受约束。
     //
-    // ⚠️ 两者都不推游标（`group_title_updated` 的 `Transient: true` 见 Go
-    // `buildTitleUpdatedEvent`）：Transient 事件无有效 ID，拿它当 cursor 会
-    // 跳过其后的权威帧（AGENTS.md §5.4）。下面的游标推进已按
-    // `!event.transient` 把关，这里提前 return 的路径也**不能**顺手推进。
+    // ## 三者的游标语义**不同**（不能一概而论）
     //
-    // （事件本身仍会落入 [_buffer]，但归约器对它没有 case、不产生对话项，
-    // 故对时间线无影响。）
+    // - `group_updated` / `group_title_updated`：Go 侧显式设了
+    //   `Transient: true`（`group/group_events.go:63`、
+    //   `chatgate/title_gate.go:258`），无有效 ID，下面的游标推进天然不会
+    //   碰到它们（故本分支**不** return，让它们自然穿透）。
+    // - `group_metadata_updated`：**是落库的**（`broker.go:82` 的「持久化到
+    //   chat_events」一组，且它确实有 turn），故它**应当**推进游标并落入
+    //   [_buffer] 以便回放——本分支同样**不** return，让它继续走通用路径。
+    //
+    // 这与 `goal_updated` 的处理刚好相反：后者漏设 Transient 且不落库，必须
+    // 提前 return 才能避免污染游标（见下方）。
+    //
+    // （三者对归约器都无 case、不产生对话项，故对时间线无影响。）
     if (event.eventType == EventTypes.groupUpdated ||
-        event.eventType == EventTypes.groupTitleUpdated) {
+        event.eventType == EventTypes.groupTitleUpdated ||
+        event.eventType == EventTypes.groupMetadataUpdated) {
       final update = GroupUpdate.fromEvent(event);
       if (update != null && !_groupUpdatesController.isClosed) {
         _groupUpdatesController.add(update);
       }
+    }
+
+    // `goal_updated`：目标/任务变更通知（含完整快照）。
+    //
+    // ## 为什么必须在这里 return（不能像 group_updated 那样穿透）
+    //
+    // 上面两类事件靠 Go 侧显式设了 `Transient: true` 而天然不推游标
+    // （`group/group_events.go:63`、`chatgate/title_gate.go:258`）。
+    //
+    // `goal_updated` **没有**：`goal_api.go` 的 `emitGoalUpdated` 注释写着
+    // 「不落库，仅广播」，但 `chatbus.Event` 的 `Transient` 字段留了零值
+    // **false**——对比同族的 `PublishGroupUpdated` 可见这是漏设，不是有意。
+    //
+    // 于是事件带 `transient=false` + 有效 eventId，而它**不在** `chat_events`
+    // 表里（无 turn，`turn_id` NOT NULL 写不进去）。若穿透到下面的游标推进，
+    // 它会被 `recordEventId` 记下；服务端 `replayUserEvents` 按 `chat_events.id`
+    // 定位 cursor 找不到该 ID → `start < 0` → 返回 nil → **整个断线回放窗口
+    // 丢失**（不只是丢这一条）。
+    //
+    // 客户端无法修正服务端标志位（约束：Go API 一行不改），故在这里按
+    // **事件类型**显式分流 + return——不依赖那个不可信的 transient 字段。
+    //
+    // 同样不进 [_buffer]：它无 turn、无 globalSeq，对时间线无任何贡献
+    // （与 group_updated 不同，后者至少被归约器忽略而无害；这里直接不放入，
+    // 避免无意义的缓冲占用）。
+    if (event.eventType == EventTypes.goalUpdated) {
+      final update = GoalUpdate.fromEvent(event);
+      if (update != null && !_goalUpdatesController.isClosed) {
+        _goalUpdatesController.add(update);
+      }
+      return;
     }
 
     final gid = _groupId;
@@ -438,6 +638,7 @@ class ChatStreamController {
     }
 
     _buffer.add(event);
+    _trimBuffer();
 
     // cursor 只在落库事件上推进（Transient 事件无有效 ID）。
     if (!event.transient && event.eventId.isNotEmpty) {
@@ -464,6 +665,15 @@ class ChatStreamController {
     }
     if (!_activitiesController.isClosed) {
       _activitiesController.add(_cachedReduction!.activities);
+    }
+    if (!_contextUsageController.isClosed) {
+      _contextUsageController.add(_cachedReduction!.contextUsage);
+    }
+    if (!_executionStatusController.isClosed) {
+      _executionStatusController.add(_cachedReduction!.executionStatus);
+    }
+    if (!_ttsStatusController.isClosed) {
+      _ttsStatusController.add(_cachedReduction!.ttsStatus);
     }
   }
 
@@ -518,8 +728,9 @@ class ChatStreamController {
   /// ——表现为「看起来连上了，其实一条事件都没有」。
   ///
   /// 故这里只取消**自己的**订阅（`_frameSub` / `_stateSub`）并关闭**自己的**
-  /// 六个 StreamController（`_items` / `_gateDecisions` / `_activities` /
-  /// `_groupUpdates` / `_error` / `_state`）。
+  /// 九个 StreamController（`_items` / `_gateDecisions` / `_activities` /
+  /// `_contextUsage` / `_executionStatus` / `_ttsStatus` / `_groupUpdates` /
+  /// `_goalUpdates` / `_error` / `_state`）。
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
@@ -528,7 +739,11 @@ class ChatStreamController {
     await _itemsController.close();
     await _gateDecisionsController.close();
     await _activitiesController.close();
+    await _contextUsageController.close();
+    await _executionStatusController.close();
+    await _ttsStatusController.close();
     await _groupUpdatesController.close();
+    await _goalUpdatesController.close();
     await _errorController.close();
     await _stateController.close();
   }
