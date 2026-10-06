@@ -35,6 +35,7 @@ class GroupListPage extends StatefulWidget {
     this.onSearch,
     this.onOpenWorks,
     this.onOpenHabits,
+    this.onOpenQuickCapture,
     this.onCreateGroup,
     this.pendingConfirmationCount = 0,
     this.onOpenConfirmations,
@@ -104,6 +105,23 @@ class GroupListPage extends StatefulWidget {
   /// 与 [onOpenWorks] 同为可选入口（不注入则不显示）：移动端与桌面端都支持
   /// 习惯，但测试与只读用法不需要它。
   final VoidCallback? onOpenHabits;
+
+  /// 打开**无归属**快速输入入口（悬浮窗）。
+  ///
+  /// ## 为什么挂在列表页而不是移动端的标签栏外壳上
+  ///
+  /// 「没有对话 UI 的入口」在列表页是最自然的落点（没有聚焦的对话可发）。
+  /// 若挂到 `_AppShell`，它会同时出现在「设置」标签上——在设置页弹一个
+  /// 「发消息」按钮语义不成立。
+  ///
+  /// ## 为什么指向带附件的那条链路
+  ///
+  /// 目标路由是 `/overlay`（`POST /me/quick-capture/enqueue`）而非
+  /// `/quick-capture`（同步、**无附件**）：附件只能在 enqueue 那条链路上落地
+  /// （见 AGENTS.md §6.7）。纯文本场景两者等价，故不必再暴露一个功能更弱的入口。
+  ///
+  /// 为 null 时不展示（保持「只读列表」用法，与其余可选入口一致）。
+  final VoidCallback? onOpenQuickCapture;
 
   /// 跨 group 的待确认数量（角标）。> 0 时显示角标。
   final int pendingConfirmationCount;
@@ -216,6 +234,12 @@ class _GroupListPageState extends State<GroupListPage> {
       case GroupUpdateOp.metadata:
         // 本页只渲染标题与状态（metadata 的开关在设置页/对话页编辑）。
         // 刻意不处理：重拉一次只为更新看不见的字段是白费一次往返。
+        //
+        // ⚠️ 这里的忽略**不影响**对话页的开关刷新：
+        // `group_metadata_updated`（Goal Gate 自动停用）也归一为
+        // [GroupUpdateOp.metadata]，但对话页自己订阅了 `controller.groupUpdates`
+        // 并单独处理该分支（见 `_onGroupMetadataChanged`）。两个订阅者各取所需，
+        // 互不依赖——本页看不到 metadata 是**设计如此**，不是缺口。
         break;
       case GroupUpdateOp.unknown:
         // 服务端新增了本客户端不认识的 op，无从增量应用。
@@ -511,6 +535,16 @@ class _GroupListPageState extends State<GroupListPage> {
         ],
       ),
       body: RefreshIndicator(onRefresh: _refresh, child: _buildBody()),
+      // 无归属快速输入入口（悬浮窗）。未注入时不展示——入口存在但点了没反应
+      // 比没有入口更糟（同 [onOpenWorks] 的取向）。
+      floatingActionButton: widget.onOpenQuickCapture == null
+          ? null
+          : FloatingActionButton(
+              key: const ValueKey('group-list-quick-capture'),
+              tooltip: '快速记录',
+              onPressed: widget.onOpenQuickCapture,
+              child: const Icon(Icons.bolt),
+            ),
     );
   }
 

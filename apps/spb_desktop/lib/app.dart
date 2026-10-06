@@ -34,7 +34,7 @@ class SpbDesktopApp extends ConsumerStatefulWidget {
 
   /// 可选的外部路由实例（测试用）。
   ///
-  /// 测试需要主动导航（如验证 `/quick-capture` 可达），而 router 若在内部
+  /// 测试需要主动导航（如验证 `/overlay` 可达），而 router 若在内部
   /// 创建就无法从外部拿到。提供这个钩子比在测试里靠 `GoRouter.of(context)`
   /// 反查更直接、也更稳定（不依赖 widget 树结构）。
   ///

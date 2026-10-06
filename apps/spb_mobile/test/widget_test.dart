@@ -445,6 +445,29 @@ void main() {
     expect(find.byType(NavigationBar), findsNothing, reason: '悬浮输入窗不应占据标签分支');
   });
 
+  testWidgets('对话列表的 FAB 进入 /overlay（无归属入口在移动端可达）', (tester) async {
+    // ## 本用例防的是什么
+    //
+    // `/overlay` 路由、页面、provider 接线、甚至自己的用例此前**全都在**，
+    // 但没有任何导航调用点：桌面端靠 Alt+Space 与托盘，而移动端既无快捷键
+    // 也无托盘，于是这个功能在手机上完全不可达。光测「路由能渲染」抓不到
+    // 这类缺口（那种用例直接 `router.go(...)`，绕过了入口），故本用例从
+    // **首页的入口**出发。
+    final h = await pumpApp(tester);
+    await tester.pumpAndSettle();
+
+    final fab = find.byKey(const ValueKey('group-list-quick-capture'));
+    expect(fab, findsOneWidget, reason: '移动端必须有进入无归属入口的入口');
+
+    await tester.tap(fab);
+    await tester.pumpAndSettle();
+
+    // 到的是**带附件**那条链路（enqueue），不是无附件的 /quick-capture。
+    expect(h.router.state.uri.path, SpbRoutes.overlay);
+    expect(find.byKey(const ValueKey('overlay-input')), findsOneWidget);
+    expect(find.byKey(const ValueKey('overlay-attach')), findsOneWidget);
+  });
+
   group('带附件的悬浮输入窗（/overlay）', () {
     /// 造一个真实存在的临时文件并 mock 系统文件选择器返回它。
     ///

@@ -350,6 +350,17 @@ class _ConversationsTab extends ConsumerWidget {
       onOpenWorks: () => context.push(SpbRoutes.works),
       // 习惯：两端都接（端点与页面都是共享的，见 `spb_features` 的 `HabitsPage`）。
       onOpenHabits: () => context.push(SpbRoutes.habits),
+      // 无归属快速输入入口（带附件）。
+      //
+      // ## 为什么移动端需要它
+      //
+      // 此前 `/overlay` 与 `/quick-capture` 两条路由都注册了、页面与测试也在，
+      // 但**没有任何导航调用点**——用户碰不到（桌面端靠 Alt+Space 与托盘，
+      // 移动端没有快捷键也没有托盘）。移动端只能从列表页进入，故用 FAB。
+      //
+      // 用 `push` 而非 `go`：悬浮窗是临时页，`go` 会把它替换进列表所在的
+      // 分支栈，返回时列表的滚动位置会丢。
+      onOpenQuickCapture: () => context.push(SpbRoutes.overlay),
       // 不需要 userId：身份来自网关注入的 `X-User-ID`，请求体里没有 user_id。
       onCreateGroup: (title) => api.createGroup(title: title),
     );

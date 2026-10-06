@@ -500,26 +500,19 @@ void main() {
     expect(find.text('对话'), findsOneWidget);
   });
 
-  testWidgets('/quick-capture 可导航且渲染悬浮输入窗', (tester) async {
-    // 该页面不请求任何数据（提交才发请求），故无需 mock 任何端点——
-    // 这本身也验证了「打开悬浮窗不产生网络请求」。
-    final h = await pumpApp(tester);
-
-    h.router.go(SpbRoutes.quickCapture);
-    await tester.pumpAndSettle();
-
-    expect(find.text('Enter 提交 · Esc 取消'), findsOneWidget);
-    expect(find.byKey(const ValueKey('quick-capture-submit')), findsOneWidget);
-  });
-
   testWidgets('/overlay 可导航且渲染带附件的悬浮输入窗', (tester) async {
-    // 与 /quick-capture 同一理由：该页面提交才发请求，打开时不产生网络流量。
+    // 该页面提交才发请求，打开时不产生网络流量（无需 mock 任何端点）。
+    //
+    // ## 为什么没有 `/quick-capture` 的对应用例
+    //
+    // 那条路由已删：它无任何导航调用点（`Alt+Space` 与托盘都指向本路由），
+    // 且走的是无附件的同步端点。`SpbRoutes.quickCapture` 这个常量也不存在了
+    // ——重加一条死路由会先在编译期报 `undefined_getter`。
     final h = await pumpApp(tester);
 
     h.router.go(SpbRoutes.overlay);
     await tester.pumpAndSettle();
 
-    // 附件入口与多行输入是它与旧页面的可见差异。
     expect(find.byKey(const ValueKey('overlay-input')), findsOneWidget);
     expect(find.byKey(const ValueKey('overlay-attach')), findsOneWidget);
     expect(find.text('Enter 提交 · Shift+Enter 换行 · Esc 清空'), findsOneWidget);

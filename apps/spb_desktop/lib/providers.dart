@@ -515,33 +515,6 @@ final searchChatProvider = Provider<SearchChat>((ref) {
   };
 });
 
-/// 路由预览（供悬浮输入窗的「预览」入口注入）。
-///
-/// ## 它预览的是 **agent**，不是归属 group
-///
-/// 服务端 `POST /users/:uid/chat/routing-preview` 的响应里**没有 `group_id`**，
-/// 且当前只走**兜底默认 agent**（embedding 级联已下线）。UI 文案必须如实反映
-/// （见 `QuickCapturePage._previewLine`），不得写成「将发送到某对话」。
-///
-/// 与 [searchChatProvider] 同理：userId 在这里解析，失败就让它抛（可诊断），
-/// 不做空串兜底（`/users//chat/routing-preview` 的 404 完全指不出根因）。
-///
-/// ## 为什么返回 null 而不是抛
-///
-/// 页面注入点的签名是 `Future<RoutingPreview?>`（见 `PreviewRouting`），
-/// 返回 null 表示「取不到」。**但这里不吞异常**——`SpbError` 原样上抛，
-/// 由页面的 catch 转成用户可见提示。吞掉会让「网络断了」与「服务端说没有
-/// agent」变得无法区分。
-final previewRoutingProvider = Provider<PreviewRouting>((ref) {
-  return (String input) async {
-    final userId = await ref.read(currentUserIdProvider.future);
-    final raw = await ref
-        .read(chatApiProvider)
-        .routingPreview(userId, input: input);
-    return RoutingPreview.fromJson(raw);
-  };
-});
-
 /// 「立即发送」：把服务端缓冲区里 pending 的消息立即合并提交。
 ///
 /// ## 为什么不用 [ChatApi.flushMessages]（那个返回 void）
@@ -696,16 +669,9 @@ final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
   return controller.groupUpdates;
 });
 
-/// 无归属入口用例（悬浮输入窗用，纯文本）。
-///
-/// 不 autoDispose：它无状态，只包一个 `ChatApi`，重建没有意义。
-final quickCaptureUseCaseProvider = Provider<QuickCaptureUseCase>((ref) {
-  return QuickCaptureUseCase(ref.watch(chatApiProvider));
-});
-
 /// 无归属入口用例（**带附件**，走 mq-server 通用入站渠道）。
 ///
-/// 与 [quickCaptureUseCaseProvider] 的差别：本用例支持附件（上传 → 投递两步），
+/// 与 [quickCaptureEnqueueUseCaseProvider] 的差别：本用例支持附件（上传 → 投递两步），
 /// 但投递是异步的，拿不到 groupId。见 `QuickCaptureEnqueueUseCase` 的文档。
 final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>(
   (ref) {

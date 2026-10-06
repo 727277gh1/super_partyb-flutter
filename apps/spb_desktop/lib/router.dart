@@ -27,13 +27,19 @@ class SpbRoutes {
 
   static const home = '/';
   static const settings = '/settings';
-  static const quickCapture = '/quick-capture';
 
   /// 全局悬浮输入窗（带附件）。
   ///
-  /// 与 [quickCapture] 并存而不是取代它：两者走不同端点，返回语义不同
-  /// （见 `OverlayQuickCapturePage` 的类文档）。保留旧路由是为了不破坏
-  /// 已有的调试入口与移动端行为。
+  /// ## 为什么只有这一条（曾经的 `/quick-capture` 已删）
+  ///
+  /// 旧路由走 `POST /me/quick-capture`（同步、返回 groupId、**无附件**），
+  /// 而本路由走 `POST /me/quick-capture/enqueue`（异步、带附件）。两者的
+  /// 差别只在「有无附件」：纯文本场景行为等价，故同一入口不需要两个页面
+  /// ——保留一个功能更弱的反而会让用户选了它之后发现贴不了图。
+  ///
+  /// 旧路由的类注释自称「主窗口内的调试入口」，但全仓并无任何导航调用点
+  /// （`Alt+Space` 与托盘「快速输入」都指向本路由）。保留一条不可达且功能
+  /// 更弱的重复页面只会让下一个人以为它有用户。
   static const overlay = '/overlay';
 
   /// 交付物同步页。
@@ -264,10 +270,6 @@ List<RouteBase> buildDesktopRoutes() {
               builder: (context, state) => const _SyncPage(),
             ),
           ],
-        ),
-        GoRoute(
-          path: 'quick-capture',
-          builder: (context, state) => const _QuickCapturePage(),
         ),
         GoRoute(
           path: 'overlay',
@@ -1547,37 +1549,6 @@ class _SettingsPage extends ConsumerWidget {
           ref.read(desktopCapabilitiesProvider).isLaunchAtStartupEnabled(),
       setLaunchAtStartup: (enabled) =>
           ref.read(desktopCapabilitiesProvider).setLaunchAtStartup(enabled),
-    );
-  }
-}
-
-/// 悬浮输入窗页面。
-///
-/// 生产环境的真实悬浮窗是**独立窗口**（`WindowSpec.quickCapture`）；
-/// 此路由用于在无多窗口能力时（或作为主窗口内的调试入口）渲染同一页面。
-class _QuickCapturePage extends ConsumerWidget {
-  const _QuickCapturePage();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final useCase = ref.watch(quickCaptureUseCaseProvider);
-
-    return QuickCapturePage(
-      submit: (input) => useCase.submit(input: input),
-      // 路由预览（服务端当前只返回**兜底默认 agent**，且响应里没有 group_id；
-      // 页面文案已如实标注，见 `QuickCapturePage._previewLine`）。
-      previewRouting: ref.watch(previewRoutingProvider),
-      onQueued: (outcome) {
-        // 无归属入口提交成功后导航到服务端判定的对话。
-        //
-        // 注意**不回显**（不传 echoInto）：本页只是悬浮窗，没有可见的对话；
-        // 回显要到目标对话页由 `_focus` 的 timeline 回填完成。
-        if (context.mounted) context.go(SpbRoutes.chat(outcome.groupId));
-      },
-      onCancel: () {
-        // 独立窗口下应关窗；主窗口内的调试入口则退回列表。
-        if (context.mounted) context.go(SpbRoutes.home);
-      },
     );
   }
 }
