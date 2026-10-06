@@ -172,6 +172,9 @@ class HabitApi {
   /// 跨 pattern 的全局执行历史（含候选建议类，`pattern_id` 可能为空）。
   /// 返回 `habitRunsWithReply` 形状（`run_id` / `topic_key` / `reply_text` /
   /// `is_manual`，见 [HabitRun.fromJson]）。
+  ///
+  /// ⚠️ 本方法**丢弃 `daily_budget`**（`unwrapItems` 只看 `items`）。需要预算
+  /// 时用 [listAllRunsWithBudget]。
   Future<List<HabitRun>> listAllRuns({
     int? days,
     int limit = 50,
@@ -179,24 +182,64 @@ class HabitApi {
   }) async {
     final res = await _get(
       '/api/habits/runs',
-      query: {
-        if (days != null) 'days': days,
-        'limit': limit,
-        if (triggerReason != null && triggerReason.isNotEmpty)
-          'trigger_reason': triggerReason,
-      },
+      query: _runsQuery(days: days, limit: limit, triggerReason: triggerReason),
     );
     return unwrapItems(res, HabitRun.fromJson);
   }
 
-  /// `GET /api/habits/:pattern_id/runs?limit=`
+  /// `GET /api/habits/runs?days=&limit=&trigger_reason=`，**保留 `daily_budget`**。
+  ///
+  /// 与 [listAllRuns] 打同一个端点、同一套查询参数，区别只在返回类型：
+  /// `daily_budget` 是「今日已用 / 上限」，`unwrapItems` 会把它静默丢掉
+  /// （见 [HabitDailyBudget] 的类文档）。
+  ///
+  /// ## 为什么不把 `unwrapItems` 改成通用地返回整包
+  ///
+  /// `unwrapItems` 是**全部**列表端点共用的工具（chat / agents / habits…），
+  /// 绝大多数响应没有附加字段。为了一处需求改它的返回类型，会让所有调用方
+  /// 被迫处理一个永远为空的附加字段——那是把局部需求扩散成全局复杂度。
+  Future<HabitRunsResult> listAllRunsWithBudget({
+    int? days,
+    int limit = 50,
+    String? triggerReason,
+  }) async {
+    final res = await _get(
+      '/api/habits/runs',
+      query: _runsQuery(days: days, limit: limit, triggerReason: triggerReason),
+    );
+    return HabitRunsResult.fromJson(res);
+  }
+
+  /// 执行记录的查询参数（两个端点共用，避免两处漂移）。
+  ///
+  /// `trigger_reason` 为空串时不发：服务端 `if triggerReason != ""` 才过滤，
+  /// 发空串等于「不过滤」但会多一个无意义参数。
+  static Map<String, dynamic> _runsQuery({
+    int? days,
+    int limit = 50,
+    String? triggerReason,
+  }) => {
+    if (days != null) 'days': days,
+    'limit': limit,
+    if (triggerReason != null && triggerReason.isNotEmpty)
+      'trigger_reason': triggerReason,
+  };
+
+  /// `GET /api/habits/:pattern_id/runs?limit=&offset=`
+  ///
+  /// ⚠️ **单规则端点只支持 `limit` / `offset`**（`ext_routes.go` 的 `runs`），
+  /// 没有 `days` / `trigger_reason`——那是全局端点 [listAllRuns] 的参数。
+  /// 服务端 SQL 是 `ListHabitRuns`（按 `habit_pattern_id` 过滤、无时间窗），
+  /// 多传的 query 参数会被**静默忽略**（不报错），故不要在调用方造「按天筛选
+  /// 单规则历史」的假象。
   Future<List<HabitRun>> listHabitRuns(
     String patternId, {
     int limit = 50,
+    int offset = 0,
   }) async {
     final res = await _get(
       '/api/habits/$patternId/runs',
-      query: {'limit': limit},
+      query: {'limit': limit, 'offset': offset},
     );
     return unwrapItems(res, HabitRun.fromJson);
   }

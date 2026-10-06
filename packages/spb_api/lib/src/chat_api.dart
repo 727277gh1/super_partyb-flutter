@@ -152,6 +152,32 @@ class ChatApi {
     );
   }
 
+  /// `PUT /chat/groups/:group_id/habit-suggest` —— 「习惯建议」开关。
+  ///
+  /// ## 与 [setGroupFollowUpSuggest] 逐行同构
+  ///
+  /// 服务端 handler（`chat_ext.go` 的 `setHabitSuggest`）是 `setFollowUpSuggest`
+  /// 的复制：同一套 CAS 读-改-写、关闭时 `delete(meta, 'habit_suggest')`
+  /// （「键缺失 = 关闭」），故这里也照抄同一形状。
+  ///
+  /// ## 为什么必须走专用端点而非 PATCH metadata
+  ///
+  /// `PATCH /chat/groups/:id` 是 metadata **整包替换**：只提交 `{habit_suggest}`
+  /// 会连带清掉 `metadata.tts` / `metadata.follow_up_suggest` / `goal_gate`
+  /// 等其它子系统写入的键（webapp 的历史 bug）。
+  ///
+  /// ## 与 goal gate 无依赖（与历史行为不同）
+  ///
+  /// 习惯引导曾经嵌在 goal 约定尾部，未开 goal gate 的群组永远拿不到。拆出后
+  /// 只要本开关 + 全局总闸 `HABIT_SUGGEST_ENABLED` 均为真即注入——故这是**双层
+  /// 开关**，面板文案不得承诺「已生效」。
+  Future<void> setGroupHabitSuggest(String groupId, bool enabled) async {
+    await _put(
+      '/chat/groups/$groupId/habit-suggest',
+      body: {'enabled': enabled},
+    );
+  }
+
   /// `PUT /chat/groups/:group_id/tts` —— 语音回复及其子开关。
   ///
   /// 全部参数可空，**只提交显式传入的键**（服务端要求至少传一个，否则 400）：
@@ -693,6 +719,16 @@ class ChatApi {
   /// - `defaultAgentId: ''` → 恢复「跟随系统默认」（服务端删记录）；
   /// - `replyLanguage: 'auto'` → 同上（删记录），**不是**空串。
   ///
+  /// ## 两个 bool 的语义
+  ///
+  /// [followUpSuggest] / [habitSuggest] 是**新建 group 的默认播种值**，仅影响
+  /// 之后新建的 group，不回溯修改既有 group（服务端 `user_preferences.go` 的
+  /// `FollowUpSuggest` / `HabitSuggest` 字段注释）。两者与群级同名开关是不同
+  /// 层次的东西：本处是「以后新建的默认」，群级那个是「这个对话现在开不开」。
+  ///
+  /// 同样只在非 null 时写入：传 `false` 是**有意义的显式关闭**，与「不传」
+  /// （保持原值）必须区分——若写成 `if (x == true)` 就会永远无法关闭。
+  ///
   /// ## 非法 `replyLanguage` 会 400（而非静默回落）
   ///
   /// 服务端对白名单外的语言值直接 400 并带上 `supported` 列表。这是**有意**的：
@@ -713,6 +749,8 @@ class ChatApi {
     String? replyLanguage,
     String? defaultAgentId,
     String? habitNotifyChannels,
+    bool? followUpSuggest,
+    bool? habitSuggest,
   }) async {
     final body = <String, dynamic>{
       if (displayName != null) 'display_name': displayName,
@@ -721,6 +759,8 @@ class ChatApi {
       if (defaultAgentId != null) 'default_agent_id': defaultAgentId,
       if (habitNotifyChannels != null)
         'habit_notify_channels': habitNotifyChannels,
+      if (followUpSuggest != null) 'follow_up_suggest': followUpSuggest,
+      if (habitSuggest != null) 'habit_suggest': habitSuggest,
     };
     final res = await _put('/me/preferences', body: body);
     return UserPreferences.fromJson(_asMap(res));

@@ -55,6 +55,7 @@ void main() {
     String replyLanguage = 'en',
     bool customized = true,
     bool followUpSuggest = false,
+    bool habitSuggest = false,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
@@ -71,6 +72,7 @@ void main() {
     },
     'customized': customized,
     'follow_up_suggest': followUpSuggest,
+    'habit_suggest': habitSuggest,
     'default_agent_id': defaultAgentId,
     'display_name': displayName,
     'avatar_url': avatarUrl,
@@ -139,6 +141,8 @@ void main() {
           200,
           prefsJson(
             replyLanguage: 'ja',
+            followUpSuggest: true,
+            habitSuggest: true,
             defaultAgentId: 'agent_1',
             displayName: '张三',
             avatarUrl: 'https://cdn.example.com/a.png',
@@ -153,7 +157,8 @@ void main() {
       expect(p.replyLanguage, 'ja');
       expect(p.availableLanguages, ['auto', 'zh-CN', 'en', 'ja']);
       expect(p.customized, isTrue);
-      expect(p.followUpSuggest, isFalse);
+      expect(p.followUpSuggest, isTrue);
+      expect(p.habitSuggest, isTrue);
       expect(p.defaultAgentId, 'agent_1');
       expect(p.displayName, '张三');
       expect(p.avatarUrl, 'https://cdn.example.com/a.png');
@@ -298,6 +303,63 @@ void main() {
       expect(calls.single.body, {
         'habit_notify_channels': 'wechat_ilink,feishu',
       });
+    });
+
+    test('只传 followUpSuggest → body 恰好只有 follow_up_suggest 一个键', () async {
+      // 验收明确要求：服务端是部分更新语义，多送一个键就会覆盖用户没改的项。
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson(followUpSuggest: true)),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(followUpSuggest: true);
+
+      expect(calls.single.body, {'follow_up_suggest': true});
+      expect(calls.single.body!.keys, hasLength(1));
+    });
+
+    test('只传 habitSuggest → body 恰好只有 habit_suggest 一个键', () async {
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson(habitSuggest: true)),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(habitSuggest: true);
+
+      expect(calls.single.body, {'habit_suggest': true});
+      expect(calls.single.body!.keys, hasLength(1));
+    });
+
+    test('两个 bool 的 false 会真的发出去（不是「不传」）', () async {
+      // 若写成 `if (x == true)` 就永远无法关闭这两个开关——
+      // false 是**有意义的显式关闭**，与「不传」（保持原值）必须区分。
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson()),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(followUpSuggest: false, habitSuggest: false);
+
+      expect(calls.single.body, {
+        'follow_up_suggest': false,
+        'habit_suggest': false,
+      });
+    });
+
+    test('两个 bool 不传时 body 不得出现对应键', () async {
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson(displayName: '张三')),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(displayName: '张三');
+
+      expect(calls.single.body!.containsKey('follow_up_suggest'), isFalse);
+      expect(calls.single.body!.containsKey('habit_suggest'), isFalse);
     });
 
     test('非法 reply_language → 400 抛 HttpError（不静默回落 auto）', () async {

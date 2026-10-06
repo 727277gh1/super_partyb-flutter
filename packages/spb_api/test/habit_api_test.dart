@@ -536,6 +536,82 @@ void main() {
       },
     );
 
+    test('listAllRuns 把 days / trigger_reason 放进 query string', () async {
+      // ⚠️ 回归锁：服务端 `allRuns` 只在 query 里读到这两个参数才过滤。
+      // 漏发（或发错名）不会报错——只是「筛选没生效」，用户以为没有记录。
+      adapter.onGet(
+        '/api/habits/runs',
+        (server) => server.reply(200, {'items': []}),
+        queryParameters: {'days': 7, 'limit': 50, 'trigger_reason': 'due_rule'},
+      );
+
+      expect(
+        await api.listAllRuns(days: 7, triggerReason: 'due_rule'),
+        isEmpty,
+      );
+    });
+
+    test('listAllRuns 的 trigger_reason 为空串时不发该参数', () async {
+      // 空串 = 「不筛」。发空串服务端也会当不筛，但会多一个无意义参数
+      // （且 mock 的 query 断言能揭出这类差异）。
+      adapter.onGet(
+        '/api/habits/runs',
+        (server) => server.reply(200, {'items': []}),
+        queryParameters: {'limit': 50},
+      );
+
+      expect(await api.listAllRuns(triggerReason: ''), isEmpty);
+    });
+
+    test('listAllRunsWithBudget 解析 daily_budget（今日已用/上限）', () async {
+      // ⚠️ 回归锁：`unwrapItems` 只看 `items`，会把 `daily_budget` **静默
+      // 丢掉**。丢掉的后果是「额度用完了但页面上看不到」，用户只能反复点
+      // 「立即执行」收 409。
+      adapter.onGet(
+        '/api/habits/runs',
+        (server) => server.reply(200, {
+          'items': [
+            {'run_id': 'run-1', 'trigger_reason': 'due_rule'},
+          ],
+          'daily_budget': {'limit': 20, 'used_today': 3},
+        }),
+        queryParameters: {'days': 30, 'limit': 50},
+      );
+
+      final result = await api.listAllRunsWithBudget(days: 30);
+      expect(result.items.single.id, 'run-1');
+      expect(result.dailyBudget, isNotNull);
+      expect(result.dailyBudget!.limit, 20);
+      expect(result.dailyBudget!.usedToday, 3);
+      expect(result.dailyBudget!.remaining, 17);
+      expect(result.dailyBudget!.exhausted, isFalse);
+    });
+
+    test('listAllRunsWithBudget 的 daily_budget 缺失时为 null', () async {
+      // 旧版服务端 / 端点变更时不造一个假的 0/0（那会渲染成「0 / 0 已用尽」）。
+      adapter.onGet(
+        '/api/habits/runs',
+        (server) => server.reply(200, {'items': []}),
+        queryParameters: {'limit': 50},
+      );
+
+      final result = await api.listAllRunsWithBudget();
+      expect(result.items, isEmpty);
+      expect(result.dailyBudget, isNull);
+    });
+
+    test('listHabitRuns 打 /api/habits/:id/runs 且只发 limit/offset', () async {
+      // ⚠️ 单规则端点**没有** days/trigger_reason（服务端 SQL `ListHabitRuns`
+      // 无时间窗）。多传会被静默忽略，故这里断言只发这两个参数。
+      adapter.onGet(
+        '/api/habits/hp-1/runs',
+        (server) => server.reply(200, {'items': []}),
+        queryParameters: {'limit': 20, 'offset': 40},
+      );
+
+      expect(await api.listHabitRuns('hp-1', limit: 20, offset: 40), isEmpty);
+    });
+
     test(
       'listSuggestions 吃 habitRunToMap 形状（id / trigger_context_json）',
       () async {
