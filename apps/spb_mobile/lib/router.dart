@@ -464,8 +464,14 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
     final api = ref.watch(habitApiProvider);
     return HabitsPage(
       loadHabits: () => api.listHabits(),
-      loadRuns: () async {
-        final runs = await api.listAllRuns();
+      loadRuns: (filter) async {
+        // 服务端 `GET /api/habits/runs?days=&trigger_reason=` 直接筛选，
+        // 且响应带 `daily_budget`（今日已用/上限）。
+        final result = await api.listAllRunsWithBudget(
+          days: filter.days,
+          triggerReason: filter.reason?.wire,
+        );
+        final runs = result.items;
         // 预取涉及的 group 标题（缺失则静默）。
         await Future.wait(
           runs.map((r) async {
@@ -479,7 +485,7 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
             }
           }),
         );
-        return runs;
+        return result;
       },
       groupTitleOf: (gid) => _titles[gid],
       onTrigger: (h) => api.triggerHabit(h.id),

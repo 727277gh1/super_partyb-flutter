@@ -478,8 +478,14 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
     final api = ref.watch(habitApiProvider);
     return HabitsPage(
       loadHabits: () => api.listHabits(),
-      loadRuns: () async {
-        final runs = await api.listAllRuns();
+      loadRuns: (filter) async {
+        // 服务端 `GET /api/habits/runs?days=&trigger_reason=` 直接筛选，
+        // 且响应带 `daily_budget`（今日已用/上限）。
+        final result = await api.listAllRunsWithBudget(
+          days: filter.days,
+          triggerReason: filter.reason?.wire,
+        );
+        final runs = result.items;
         // 预取涉及的 group 标题（缺失则静默，列表不展示标题）。
         //
         // 与 `_PendingConfirmationsPageState` 同策略：只查缺的、不重复查。
@@ -495,7 +501,7 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
             }
           }),
         );
-        return runs;
+        return result;
       },
       groupTitleOf: (gid) => _titles[gid],
       // 写操作统一走 `HabitApi`。异常由 `HabitsPage` 接住并翻成提示

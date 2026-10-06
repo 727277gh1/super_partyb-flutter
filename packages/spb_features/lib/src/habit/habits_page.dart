@@ -98,8 +98,8 @@ class HabitsPage extends StatefulWidget {
   /// 拉取规则列表（`GET /api/habits`）。
   final Future<List<UserHabit>> Function() loadHabits;
 
-  /// 拉取执行历史（`GET /api/habits/runs`）。
-  final Future<List<HabitRun>> Function() loadRuns;
+  /// 拉取执行历史（`GET /api/habits/runs`，服务端按 [HabitRunsFilter] 筛选）。
+  final LoadHabitRunsHistory loadRuns;
 
   /// 立即执行一次（服务端要求 `active`，否则 409）。
   final Future<void> Function(UserHabit habit)? onTrigger;
@@ -157,6 +157,19 @@ class HabitsPage extends StatefulWidget {
 class _HabitsPageState extends State<HabitsPage> {
   List<UserHabit>? _habits;
   List<HabitRun>? _runs;
+
+  /// 今日触发预算（`daily_budget`）；服务端未下发时为 null。
+  HabitDailyBudget? _dailyBudget;
+
+  /// 执行记录 Tab 的筛选条件（时间窗 + 触发原因）。
+  ///
+  /// 初值 30 天（[kHabitRunsDefaultDays]），不是服务端的 7 天默认——理由见该常量。
+  HabitRunsFilter _runsFilter = const HabitRunsFilter();
+
+  /// 仅执行记录 Tab 的加载态/错误（筛选切换时不整页转圈）。
+  bool _runsLoading = false;
+  Object? _runsError;
+
   Object? _error;
   bool _loading = true;
 
@@ -205,12 +218,12 @@ class _HabitsPageState extends State<HabitsPage> {
       // 两个查询互不依赖，并发发出（历史页首屏也需要它）。
       final results = await Future.wait([
         widget.loadHabits(),
-        widget.loadRuns(),
+        widget.loadRuns(_runsFilter),
       ]);
       if (!mounted) return;
       setState(() {
         _habits = results[0] as List<UserHabit>;
-        _runs = results[1] as List<HabitRun>;
+        _applyRuns(results[1] as HabitRunsResult);
         _loading = false;
       });
     } on Object catch (e) {
@@ -220,6 +233,48 @@ class _HabitsPageState extends State<HabitsPage> {
         _loading = false;
       });
     }
+  }
+
+  /// 把一次 `GET /api/habits/runs` 的结果落到状态（列表 + 预算）。
+  void _applyRuns(HabitRunsResult r) {
+    _runs = r.items;
+    _dailyBudget = r.dailyBudget;
+    _runsError = null;
+  }
+
+  /// 筛选条件变化时**只重拉执行记录**。
+  ///
+  /// 不调 [_load]：那会连规则列表一起重拉（多一个无谓请求），且整页进入加载态，
+  /// 用户会觉得「我只是换了个时间窗，怎么整个页面闪了一下」。
+  ///
+  /// 失败只影响该 Tab（`_runsError`），不把整页变成错误页——规则列表此时
+  /// 仍然可用。
+  Future<void> _loadRuns() async {
+    setState(() {
+      _runsLoading = true;
+      _runsError = null;
+    });
+    try {
+      final r = await widget.loadRuns(_runsFilter);
+      if (!mounted) return;
+      setState(() {
+        _applyRuns(r);
+        _runsLoading = false;
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _runsError = e;
+        _runsLoading = false;
+      });
+    }
+  }
+
+  /// 切换筛选条件并重拉。
+  void _onRunsFilterChanged(HabitRunsFilter f) {
+    if (f == _runsFilter) return;
+    setState(() => _runsFilter = f);
+    unawaited(_loadRuns());
   }
 
   /// 拉取建议列表。
@@ -677,24 +732,60 @@ class _HabitsPageState extends State<HabitsPage> {
   }
 
   Widget _buildRuns() {
-    final runs = _runs ?? const <HabitRun>[];
-    if (runs.isEmpty) {
-      return const HabitEmptyView(icon: Icons.history, text: '还没有执行记录。');
+    final budget = _dailyBudget;
+    final filterBar = HabitRunsFilterBar(
+      filter: _runsFilter,
+      onChanged: _onRunsFilterChanged,
+    );
+    // 预算条与筛选条固定在列表之上：它们描述的是「整段历史」的上下文，
+    // 跟着列表滚动会让人以为它们属于当前可见的那几条。
+    Widget chrome(Widget body) => Column(
+      children: [
+        if (budget != null) HabitDailyBudgetBar(budget: budget),
+        filterBar,
+        const Divider(height: 1),
+        Expanded(child: body),
+      ],
+    );
+
+    // 筛选重拉失败：只影响本 Tab，给出重试入口（保留旧列表会让人以为
+    // 「筛选没生效」，清空又会以为「真的没记录」）。
+    final runsErr = _runsError;
+    if (runsErr != null) {
+      return chrome(
+        HabitErrorView(
+          error: runsErr,
+          onRetry: _loadRuns,
+          retryKey: const ValueKey('habits-runs-retry'),
+        ),
+      );
     }
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView.separated(
-        padding: SpbSpacing.pagePadding,
-        itemCount: runs.length,
-        separatorBuilder: (_, _) => const Divider(height: SpbSpacing.xl),
-        itemBuilder: (context, i) => HabitRunTile(
-          run: runs[i],
-          // 优先投递对话（实际执行处），回退来源对话。
-          //
-          // 两者在 due_rule 类里通常相同；但 `delivery_group_id` 为空而
-          // `origin_group_id` 有值时（候选类记录），只看前者会丢掉上下文。
-          groupTitle: _groupTitleFor(runs[i]),
-          onOpenTurn: widget.onOpenTurn,
+
+    final runs = _runs ?? const <HabitRun>[];
+    if (_runsLoading && runs.isEmpty) {
+      return chrome(const Center(child: CircularProgressIndicator()));
+    }
+    if (runs.isEmpty) {
+      return chrome(
+        const HabitEmptyView(icon: Icons.history, text: '还没有执行记录。'),
+      );
+    }
+    return chrome(
+      RefreshIndicator(
+        onRefresh: _loadRuns,
+        child: ListView.separated(
+          padding: SpbSpacing.pagePadding,
+          itemCount: runs.length,
+          separatorBuilder: (_, _) => const Divider(height: SpbSpacing.xl),
+          itemBuilder: (context, i) => HabitRunTile(
+            run: runs[i],
+            // 优先投递对话（实际执行处），回退来源对话。
+            //
+            // 两者在 due_rule 类里通常相同；但 `delivery_group_id` 为空而
+            // `origin_group_id` 有值时（候选类记录），只看前者会丢掉上下文。
+            groupTitle: _groupTitleFor(runs[i]),
+            onOpenTurn: widget.onOpenTurn,
+          ),
         ),
       ),
     );
