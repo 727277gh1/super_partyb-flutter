@@ -37,6 +37,23 @@ enum TurnSource {
     _ => TurnSource.unknown,
   };
 
+  /// 服务端 `?source=` 过滤参数的取值（与 [fromServer] 严格互逆）。
+  ///
+  /// 需要它是因为枚举名与 wire 值**不是**同名映射：`toolAgent` ↔
+  /// `tool_agent`。写成 `source.name` 会发出 `toolAgent`，服务端 `switch source`
+  /// 落不到 `tool_agent` 分支 → 该过滤器静默失效（返回未过滤结果，不报错）。
+  ///
+  /// [unknown] 是「认不出的服务端值」占位，不是可筛选项，故返回空串
+  /// （调用方应据此跳过该参数）。
+  String get wire => switch (this) {
+    TurnSource.chat => 'chat',
+    TurnSource.mq => 'mq',
+    TurnSource.schedule => 'schedule',
+    TurnSource.habit => 'habit',
+    TurnSource.toolAgent => 'tool_agent',
+    TurnSource.unknown => '',
+  };
+
   /// 中文标签（列表徽标展示）。
   String get label => switch (this) {
     TurnSource.chat => '对话',
@@ -76,7 +93,11 @@ class ChatTurnSummary {
   /// 输入摘要（服务端截断到 200 字符）。
   final String inputPreview;
 
-  /// `queued` / `running` / `pending` / `completed` / `failed` / `canceled`。
+  /// `queued` / `running` / `pending` / `completed` / `failed` / `cancelled`。
+  ///
+  /// ⚠️ 取消态是**英式**拼写 `cancelled`（`domain.go` 的 `TurnStatusCanceled`
+  /// 与 schema CHECK 约束都是英式），不是 `canceled`。按美式拼写比较会永远
+  /// 落空，界面把已取消的轮次显示成「已完成」。
   final String status;
 
   /// 派生来源（展示用）。

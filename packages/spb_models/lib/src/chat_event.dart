@@ -130,6 +130,63 @@ class ChatEvent {
     return null;
   }
 
+  // ---------- queue_state / retry_scheduled 访问器 ----------
+  //
+  // 字段名取自 Go **真实写端**（非推测）：
+  //   - `chat/enqueue.go` / `chat/turn_worker.go` 的 queue_state：
+  //       {state, reason, priority, queue_class, retry_attempt, queue_total,
+  //        queue_user, enqueued_at|blocked_at}
+  //   - `chatgate/gate_impls.go` 的 retry_scheduled：
+  //       {attempt, max_retries, delay_ms, reason, http_status, exit_code}
+  //
+  // ⚠️ 两类事件都带 `reason`，而 gate 事件（adaptive_decision / goal_gate_decision）
+  // **也**用 `reason`，routing_selected 亦然。不加门禁的话，gate 的原因会被误读成
+  // 排队原因（同 turn_activity 访问器门禁的理由）。
+  //
+  // ⚠️ 注意 queue_state 用的是 `state` 而非 `status`——上面的 [status] getter
+  // 读的是 `status`，对它恒为 null，不要拿它判排队态。
+  //
+  // ⚠️ 上面的 [queuePosition] 读的是 `position` / `queue_position`，而 Go 两个
+  // 发射点**都不发这两个键**（只发 `queue_total` / `queue_user`）——它是历史遗留
+  // 的死访问器，勿据此判定排队位置。
+
+  /// `queue_state` 的状态值：`queued` / `cancelled`。
+  ///
+  /// 非 `queue_state` 事件返回 null。`cancelled` 是**终态**而非等待
+  /// （见 Go `TurnWorker.EmitCanceled`）。
+  String? get queueStateValue =>
+      eventType == EventTypes.queueState ? _str('state') : null;
+
+  /// 排队/重试原因。
+  ///
+  /// ⚠️ `retry_scheduled` 的该值是执行器 stderr 原文，可能很长，
+  /// **不要**直接当横幅文案（见 `ExecutionStatus.reason`）。
+  String? get queueReason =>
+      (eventType == EventTypes.queueState ||
+          eventType == EventTypes.retryScheduled)
+      ? _str('reason')
+      : null;
+
+  /// 队列中的总任务数（`queue_state.queue_total`）。
+  int? get queueTotal =>
+      eventType == EventTypes.queueState ? _intField('queue_total') : null;
+
+  /// 队列中属于当前用户的任务数（`queue_state.queue_user`）。
+  int? get queueUser =>
+      eventType == EventTypes.queueState ? _intField('queue_user') : null;
+
+  /// 第几次重试（`retry_scheduled.attempt`，服务端 1-based）。
+  int? get retryAttempt =>
+      eventType == EventTypes.retryScheduled ? _intField('attempt') : null;
+
+  /// 最大重试次数（`retry_scheduled.max_retries`）。
+  int? get retryMaxRetries =>
+      eventType == EventTypes.retryScheduled ? _intField('max_retries') : null;
+
+  /// 距下次重试的毫秒数（`retry_scheduled.delay_ms`）。
+  int? get retryDelayMs =>
+      eventType == EventTypes.retryScheduled ? _intField('delay_ms') : null;
+
   /// 续跑排程的下次触发时间（`schedule_created`）。
   DateTime? get scheduledAt {
     final raw = _str('scheduled_at') ?? _str('next_run_at') ?? _str('run_at');
@@ -139,6 +196,73 @@ class ChatEvent {
 
   /// TTS 音频地址（`tts_completed`）。
   String? get audioUrl => _str('audio_url') ?? _str('url');
+
+  // ---------- TTS 生命周期访问器（tts_started / tts_completed / tts_failed）----------
+  //
+  // 字段名取自 Go **真实写端**（非推测）：
+  //   - `tts/service.go:357` tts_started（message 模式）：{mode:"message", seq}
+  //   - `tts/service.go:607` tts_started（stream 模式）：{mode:"stream", reason:"first_delta"}
+  //   - `tts/service.go:367` tts_completed（message 模式）：{seq, parts:1}
+  //   - `tts/service.go:999` emitTerminal（stream 模式）：
+  //       completed → {parts, bytes, duration_ms}
+  //       failed    → {parts, bytes, duration_ms, reason, failed_part,
+  //                    completed_parts, lost_chars, message}
+  //   - `tts/service.go:361` tts_failed（message 模式）：
+  //       {reason:"synthesize_failed", seq, message}
+  //
+  // ⚠️ 必须按事件类型门禁：`reason` / `message` / `parts` / `seq` 都是**极通用**
+  // 的键名，不加门禁时 `error` 事件的 `message`、gate 事件的 `reason`、
+  // `user_message` 的 `seq` 都会被误读成播报字段。
+  //
+  // ⚠️ **Transient 不一致**（与任务描述不符）：只有 `tts_started` 是 Transient
+  // （`cmd/server/main.go:715` 的 `Transient: ev.EventType == tts.EventTTSStarted`），
+  // 两个终态事件是**落库**的（`tts/service.go:170` 注释：「started 仅实时广播，
+  // 终态事件持久化」）。故终态事件有有效 ID、会推进游标、会回放。
+
+  /// 本事件是否属 TTS 生命周期三事件之一。
+  bool get isTtsEvent =>
+      eventType == EventTypes.ttsStarted ||
+      eventType == EventTypes.ttsCompleted ||
+      eventType == EventTypes.ttsFailed;
+
+  /// 播报模式（`tts_started.mode`）：`message`（整段合成）/ `stream`（流式）。
+  String? get ttsMode => isTtsEvent ? _str('mode') : null;
+
+  /// 失败/启动原因（`tts_failed.reason` / `tts_started.reason`）。
+  ///
+  /// 值域：`synthesize_failed`（message 模式失败）、`first_delta`（stream 启动）、
+  /// 以及 stream 终态的各类内部原因。
+  String? get ttsReason => isTtsEvent ? _str('reason') : null;
+
+  /// 面向用户的失败文案（`tts_failed.message`）。
+  ///
+  /// 服务端已给出可直接展示的中文（如「语音生成失败，本次文本回复不受影响。」），
+  /// 故 UI 优先用它而不是自己拼。
+  String? get ttsMessage => isTtsEvent ? _str('message') : null;
+
+  /// 已生成的语音分段数。
+  ///
+  /// ⚠️ 两种语义不同、**不要混用**：`tts_completed` 用 `parts`（总段数）；
+  /// `tts_failed` 用 `completed_parts`（失败前已完成数）。
+  int? get ttsParts => isTtsEvent ? _intField('parts') : null;
+
+  /// 失败前已完成的语音分段数（`tts_failed.completed_parts`）。
+  int? get ttsCompletedParts =>
+      eventType == EventTypes.ttsFailed ? _intField('completed_parts') : null;
+
+  /// 失败发生在第几段（`tts_failed.failed_part`，1-based）。
+  int? get ttsFailedPart =>
+      eventType == EventTypes.ttsFailed ? _intField('failed_part') : null;
+
+  /// 因失败丢失的字符数（`tts_failed.lost_chars`）。
+  int? get ttsLostChars =>
+      eventType == EventTypes.ttsFailed ? _intField('lost_chars') : null;
+
+  /// 合成音频总字节数（stream 模式终态）。
+  int? get ttsBytes => isTtsEvent ? _intField('bytes') : null;
+
+  /// 合成耗时毫秒（stream 模式终态）。
+  int? get ttsDurationMs => isTtsEvent ? _intField('duration_ms') : null;
 
   /// 服务端编译的 UI 描述（`spec_schema`），供 spec 渲染器消费。
   ///
@@ -341,6 +465,21 @@ class ChatEvent {
       ? _intField('since_last_event_ms')
       : null;
 
+  // ---------- context_update 访问器 ----------
+  //
+  // ⚠️ 只做「按类型门禁 + 原样给出 payload」，**不在本层解析**成领域对象：
+  // 解析（含 Go `telemetry` / `compaction` 与遗留 `context` 三种形状的归一）
+  // 归 `ContextUsage.fromEventPayload`。门禁的理由同 turn_activity 的访问器：
+  // `used` / `size` / `cost` 都是极通用的键名，不加门禁时任何恰好带同名键的
+  // 事件都会被误读成用量数据。
+
+  /// `context_update` 的原始 payload；非该类型事件返回 null。
+  ///
+  /// 形状有两种（见 `ContextUsage` 类文档）：Go 的 `{telemetry}` /
+  /// `{compaction}`，以及遗留的 `{context}`。
+  Map<String, dynamic>? get contextUpdatePayload =>
+      eventType == EventTypes.contextUpdate ? payload : null;
+
   // ---------- habit 建议访问器 ----------
   //
   // 字段名取自 Go `internal/workers/habit/timeline_events.go` 的
@@ -423,6 +562,53 @@ class ChatEvent {
     return DateTime.tryParse(s)?.toLocal();
   }
 
+  // ---------- habit_auto_run_completed 访问器 ----------
+  //
+  // 载荷形状取自 Python 的 `build_habit_auto_run_completed_payload`
+  // （`apps/api/utilities/habit_internal/timeline_events.py:89`）——
+  // Go 侧暂无产出点（见 [EventTypes.habitAutoRunCompleted] 的说明），
+  // 故 Python 与 webapp 的解析器是仅有的两份契约依据：
+  // `{habit_pattern_id, habit_run_id, turn_id, delivery_group_id,
+  //   topic_key, summary}`。
+
+  /// 主题 key（`topic_key`）。
+  ///
+  /// 这是本卡片的**主要展示内容**（webapp 的摘要就是
+  /// `habit 提醒已送达 · <topic_key 下划线转空格>`）。
+  /// 非本事件或载荷缺失时返回 null。
+  String? get habitAutoRunTopicKey =>
+      eventType == EventTypes.habitAutoRunCompleted
+      ? _nonEmpty(_str('topic_key'))
+      : null;
+
+  /// 服务端生成的摘要文案（`summary`）。
+  ///
+  /// ⚠️ **不用它作主文案**：服务端文案是「给 IM 渠道的成句」（
+  /// 「X 习惯提醒已成功送达，完成本轮强化。」），而时间线卡片需要的是
+  /// 与 webapp 一致的短标签。保留访问器是为了排障时能看到服务端原话。
+  String? get habitAutoRunSummary =>
+      eventType == EventTypes.habitAutoRunCompleted
+      ? _nonEmpty(_str('summary'))
+      : null;
+
+  /// 本次执行记录 id（`habit_run_id`）。
+  ///
+  /// 供卡片深链到「习惯执行历史」时定位具体那一条。
+  String? get habitAutoRunRunId => eventType == EventTypes.habitAutoRunCompleted
+      ? _nonEmpty(_str('habit_run_id'))
+      : null;
+
+  /// 命中的习惯规则 id（`habit_pattern_id`）。
+  String? get habitAutoRunPatternId =>
+      eventType == EventTypes.habitAutoRunCompleted
+      ? _nonEmpty(_str('habit_pattern_id'))
+      : null;
+
+  /// 去空白后为空的串归为 null。
+  ///
+  /// 服务端可能下发空串（而非缺键），空串当「有值」会让卡片显示空白标题。
+  static String? _nonEmpty(String? v) => (v == null || v.isEmpty) ? null : v;
+
   // ---------- group_updated 访问器 ----------
   //
   // 字段名取自 Go `internal/chat/group_events.go` 的 `PublishGroupUpdated`：
@@ -442,6 +628,100 @@ class ChatEvent {
   /// `id` / `title` / `status` 等身份字段，需要完整字段时应重新拉列表。
   Map<String, dynamic>? get groupUpdateSnapshot =>
       eventType == EventTypes.groupUpdated ? _map('group') : null;
+
+  // ---------- group_metadata_updated 访问器 ----------
+  //
+  // 发射点：Go `chatgate/goal_gate.go:440`（目标达成）与 `:555`（max_auto_turns
+  // 熔断）。两处 payload 同为 `{reason, metadata}`。
+  //
+  // `metadata` 是**完整**的 group metadata：`updateGroupMetadata` 先 `loadGroupMetadata`
+  // 读出整个 map、`apply` 改动、再返回同一个 map（不是子树）。故客户端应**整体
+  // 替换**而非局部合并。
+  //
+  // ## 为什么需要它（事实性错误）
+  //
+  // goal gate 自动停用时（`markGoalGateCompleted` 写 `gate["enabled"] = false`，
+  // 熔断路径同理），服务端改了 `chat_groups.metadata` 但**没有任何 HTTP 响应**
+  // 回到客户端（这是后台 worker 的动作）。没有本事件，设置面板会继续显示
+  // 「自动实现目标：开」——用户以为还会自动续跑，实际已停。
+  //
+  // ## ⚠️ 与 goal_updated 相反：本事件**是落库的**
+  //
+  // `broker.go:82` 把它列在「持久化到 chat_events，前端可渲染」一组，且
+  // `emitEvent`（`goal_gate.go:619`）走 turn worker 的持久化 emit、未设
+  // `Transient`（它也确实有 turn，`turn_id` 可满足 NOT NULL）。
+  //
+  // 故它**会**带有效 eventId/globalSeq、**会**推进游标、**会**回放——客户端
+  // 无需（也**不应**）像 goal_updated 那样做游标豁免。历史回放时它会重新
+  // 套用同一份 metadata，幂等无害。
+
+  /// 停用原因（`group_metadata_updated.reason`）：
+  /// `goal_completed` / `max_auto_turns_reached`。
+  String? get groupMetadataReason =>
+      eventType == EventTypes.groupMetadataUpdated ? _str('reason') : null;
+
+  /// 变更后的**完整** group metadata（`group_metadata_updated.metadata`）。
+  ///
+  /// 形状与 `ChatGroup.metadata` 同（含 `goal_gate` / `tts` /
+  /// `follow_up_suggest` 等子对象），故可直接交给 `ChatGroup.withMetadata`。
+  Map<String, dynamic>? get groupMetadata =>
+      eventType == EventTypes.groupMetadataUpdated ? _map('metadata') : null;
+
+  // ---------- goal_updated 访问器 ----------
+  //
+  // 字段名取自 Go `internal/server/goal_api.go` 的 `emitGoalUpdated`：
+  // payload = `{op, goal, tasks, progress, task_id?}`，其中 goal/tasks/progress
+  // 由与 `GET /goals/current` **完全相同**的 DTO 函数生成（`goalToDTO` /
+  // `taskToDTO` / `progressFromTasks`）。这是服务端刻意的防漂移设计（见那里的
+  // 文件头注释：同一个函数生成的结构不可能对不上），故客户端解析事件与解析
+  // API 响应用同一套逻辑。
+  //
+  // ⚠️ 与 group_updated 的**致命**差异：`goal_updated` 在 Go 侧**漏设**
+  // `Transient: true`。`emitGoalUpdated` 的注释写着「不落库，仅广播」，但
+  // `chatbus.Event` 的 Transient 字段留了零值 false（对比 `PublishGroupUpdated`
+  // 与 `buildTitleUpdatedEvent` 都显式设了 true）。
+  //
+  // 于是它在线上表现为 `transient=false` + **有效 eventId**。若走通用路径，
+  // 控制器的 `if (!event.transient && event.eventId.isNotEmpty)` 会把它记作
+  // SSE 游标；而服务端 `replayUserEvents` 是按 `chat_events.id` 定位的，
+  // goal_updated 根本不在那张表里 → cursor 未命中 → `start < 0` → 返回 nil →
+  // **整个断线回放窗口丢失**。故控制器必须提前分流、绝不落到 recordEventId。
+  //
+  // 客户端无法修正服务端这个标志位（约束：Go API 一行不改），只能在消费侧
+  // 按「事件类型」而非「Transient 标志」判断该不该推进游标。
+
+  /// goal 变更操作（`goal_updated.op`）。
+  ///
+  /// 值域（`goal_api.go` 的 `emitGoalUpdated` 调用点）：`goal_create` /
+  /// `goal_switch` / `goal_status` / `task_create` / `task_update` /
+  /// `task_delete` / `task_status` / `task_reorder` / `task_reset_expand`。
+  ///
+  /// 保持 String 而非 enum：服务端新增 op 时不应静默走 default 分支丢掉刷新
+  /// （本事件的消费方只需知道「快照变了」）。
+  String? get goalUpdateOp =>
+      eventType == EventTypes.goalUpdated ? _str('op') : null;
+
+  /// goal 快照（`goal_updated.goal`，形状同 `goalToDTO`）。
+  Map<String, dynamic>? get goalUpdateGoal =>
+      eventType == EventTypes.goalUpdated ? _map('goal') : null;
+
+  /// 任务列表快照（`goal_updated.tasks`，每项形状同 `taskToDTO`）。
+  ///
+  /// 非 List / 元素非 Map 时跳过该项（异常载荷不应让整个快照解析失败）。
+  List<Map<String, dynamic>> get goalUpdateTasks =>
+      eventType == EventTypes.goalUpdated ? _listOfMaps('tasks') : const [];
+
+  /// 进度快照（`goal_updated.progress`，形状同 `progressFromTasks`）：
+  /// `{total, completed, in_progress, blocked, error_stopped, pending, percent?}`。
+  Map<String, dynamic>? get goalUpdateProgress =>
+      eventType == EventTypes.goalUpdated ? _map('progress') : null;
+
+  /// 本次操作涉及的任务 id（`goal_updated.task_id`）。
+  ///
+  /// 只有任务级操作带它（`goal_create` / `goal_switch` / `goal_status` /
+  /// `task_reorder` 等传空串，服务端便不加该键）。
+  String? get goalUpdateTaskId =>
+      eventType == EventTypes.goalUpdated ? _str('task_id') : null;
 
   // ---------- gate 决策访问器（adaptive_decision / goal_gate_decision）----------
   //
@@ -527,6 +807,24 @@ class ChatEvent {
     if (v is Map<String, dynamic>) return v;
     if (v is Map) return Map<String, dynamic>.from(v);
     return null;
+  }
+
+  /// 取「对象数组」字段；非 List 返回空列表，元素非 Map 的项跳过。
+  ///
+  /// 用于 `goal_updated.tasks` 这类载荷。宽松而非抛异常：一个畸形的任务项
+  /// 不应让整个快照（含 goal/progress）解析失败。
+  List<Map<String, dynamic>> _listOfMaps(String key) {
+    final v = payload?[key];
+    if (v is! List) return const [];
+    final out = <Map<String, dynamic>>[];
+    for (final item in v) {
+      if (item is Map<String, dynamic>) {
+        out.add(item);
+      } else if (item is Map) {
+        out.add(Map<String, dynamic>.from(item));
+      }
+    }
+    return out;
   }
 
   /// 从 JSON 构造。支持**两种字段命名形态**：

@@ -161,7 +161,27 @@ class EventTypes {
   /// **不要**据此在 UI 上做「重校准次数」的确定性展示。
   static const habitPatternRecalibrated = 'habit_pattern_recalibrated';
 
-  /// 自动执行的习惯跑完一轮。同 [habitPatternRecalibrated]，Go 侧无产出点。
+  /// 自动执行的习惯跑完一轮（习惯回环的 **Reward 环**）。
+  ///
+  /// ## ⚠️ Go 侧当前**不产出**该事件（契约漂移，客户端无法修正）
+  ///
+  /// Python 时代由 `apps/orchestrator/chat_turn_worker_internal/habit_postprocess.py`
+  /// 落库并广播；Go 迁移时**有意未补**：
+  ///
+  /// - `workers/habit/turn_terminal.go:35` 注释写明「属于奖励信号而非状态回写…
+  ///   不在本任务范围」；
+  /// - `workers/habit/projector.go:363` 只在**读取端**识别它（`reward` →
+  ///   `reward_count`），全仓**没有任何 `Emit` 调用**产出该类型。
+  ///
+  /// 本客户端仍然消费它，理由是**两侧都指向同一结论**：
+  ///
+  /// 1. webapp 已在渲染（`lib/habit-timeline.mts` 的「习惯强化」标签 +
+  ///    `chat-timeline.ts` 的 `formatHabitAutoRunCompletedSummary`）；
+  /// 2. 服务端 projector 的注释明说识别它是「以便未来补齐事件时直接生效」。
+  ///
+  /// 故这里按**已冻结的 payload 契约**实现（形状取自 Python 的
+  /// `build_habit_auto_run_completed_payload`），事件一旦补上即刻可见，
+  /// 无需再改客户端。
   static const habitAutoRunCompleted = 'habit_auto_run_completed';
 
   /// 本客户端已知的全部事件类型。
@@ -238,6 +258,10 @@ class EventTypes {
     goalGateStopped,
     habitSuggestionCreated,
     habitSuggestionResolved,
+    // 习惯自动执行完成。与两个 suggestion 事件同族（都是习惯回环的用户可见
+    // 节点），且 webapp 的时间线同样渲染它——见 [habitAutoRunCompleted] 的
+    // 说明：Go 侧暂无产出点，这里先按契约声明，补齐后即刻生效。
+    habitAutoRunCompleted,
   };
 
   /// 流式增量事件：收到时应「追加」而非「替换」。

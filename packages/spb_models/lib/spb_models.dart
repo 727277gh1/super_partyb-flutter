@@ -6,6 +6,7 @@ library;
 
 // 导出的契约类型（barrel 文件，便于检索与确认公共 API 面）：
 //   ChatEvent / EventTypes          —— 聊天事件与事件类型常量
+//   ContextUsage / ContextCost      —— 上下文用量与费用（context_update 归一）
 //   ChatGroup / ActiveSession       —— 对话分组与 agent 绑定会话
 //   ChatInboxMessage                —— 收件箱消息（pending 接口的真实返回）
 //   ChatTurn                        —— 对话轮次
@@ -19,6 +20,9 @@ library;
 //                                —— 用户偏好（回复语言 / 昵称 / 头像 / 默认 agent / 习惯推送渠道）
 //   Agent / GroupSession / GroupAgentSwitchResult
 //                                —— Agent 目录与对话内的 agent 会话绑定
+//   Goal / GoalTask / GoalProgress / GoalSnapshot / GoalResetForExpandResult
+//   GoalStatus / GoalTasksSource / GoalTaskStatus / GoalTaskOrigin
+//                                —— 结构化目标与任务（迁移 0022 的 chat_goals / chat_goal_tasks）
 export 'src/agent.dart';
 export 'src/chat_confirmation.dart';
 export 'src/chat_event.dart';
@@ -27,8 +31,10 @@ export 'src/chat_group.dart';
 export 'src/chat_inbox_message.dart' show ChatInboxMessage;
 export 'src/chat_search_hit.dart';
 export 'src/chat_turn.dart';
+export 'src/context_usage.dart';
 export 'src/chat_turn_summary.dart';
 export 'src/event_types.dart';
+export 'src/goal.dart';
 export 'src/habit.dart';
 export 'src/miniapp.dart';
 export 'src/pagination.dart';

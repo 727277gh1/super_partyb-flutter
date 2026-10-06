@@ -502,4 +502,476 @@ void main() {
       expect(ev.goalStopped, isFalse);
     });
   });
+
+  group('ContextUsage（context_update 归一）', () {
+    test('Go telemetry 形状：context_tokens → used，context_window → size', () {
+      final u = ContextUsage.fromEventPayload({
+        'telemetry': {
+          'turns': 3,
+          'truncation_count': 0,
+          'compaction_count': 1,
+          'context_utilization': 0.25,
+          'context_tokens': 50000,
+          'context_window': 200000,
+        },
+      });
+
+      expect(u, isNotNull);
+      expect(u!.used, 50000);
+      expect(u.size, 200000);
+      expect(u.remaining, 150000);
+      expect(u.cost, isNull, reason: 'Go 从不发射 cost');
+      expect(u.utilization, closeTo(0.25, 1e-9));
+    });
+
+    test('Go compaction 形状：tokens_after 优先，回退 tokens_before', () {
+      final done = ContextUsage.fromEventPayload({
+        'compaction': {
+          'status': 'completed',
+          'tokens_before': 180000,
+          'tokens_after': 42000,
+        },
+      });
+      expect(done!.used, 42000);
+
+      final started = ContextUsage.fromEventPayload({
+        'compaction': {'status': 'started', 'tokens_before': 190000},
+      });
+      expect(started!.used, 190000);
+    });
+
+    test('遗留 context 形状（webapp 解析的那份）：含 cost', () {
+      final u = ContextUsage.fromEventPayload({
+        'context': {
+          'used': 1234,
+          'size': 8000,
+          'remaining': 6766,
+          'cost': {'amount': 0.0123, 'currency': 'USD'},
+        },
+      });
+
+      expect(u!.used, 1234);
+      expect(u.size, 8000);
+      expect(u.remaining, 6766);
+      expect(u.cost!.amount, 0.0123);
+      expect(u.cost!.currency, 'USD');
+    });
+
+    test('cost 的 currency 缺失时兜底 USD（与 webapp 一致）', () {
+      final u = ContextUsage.fromEventPayload({
+        'context': {
+          'cost': {'amount': 1.5},
+        },
+      });
+
+      expect(u!.cost!.currency, 'USD');
+    });
+
+    test('扁平兜底（webapp debug 页口径）：context_tokens_used / token_used / used', () {
+      expect(
+        ContextUsage.fromEventPayload({
+          'context_tokens_used': 700,
+          'context_tokens_size': 9000,
+        })!.used,
+        700,
+      );
+      expect(ContextUsage.fromEventPayload({'token_used': 5})!.used, 5);
+      expect(ContextUsage.fromEventPayload({'used': 9})!.used, 9);
+    });
+
+    test('只有 context_utilization 时由 used 反推 size', () {
+      final u = ContextUsage.fromEventPayload({
+        'telemetry': {'context_tokens': 2500, 'context_utilization': 0.5},
+      });
+
+      expect(u!.used, 2500);
+      expect(u.size, 5000);
+      expect(u.remaining, 2500);
+    });
+
+    test('无任何可识别字段时返回 null（异常载荷不清空已知值）', () {
+      expect(ContextUsage.fromEventPayload(const {}), isNull);
+      expect(
+        ContextUsage.fromEventPayload(const {
+          'compaction': {'status': 'started'},
+        }),
+        isNull,
+      );
+    });
+
+    test('mergedWith：逐字段合并，used 更新后 remaining 重算', () {
+      const base = ContextUsage(used: 10000, size: 200000, remaining: 190000);
+      const newer = ContextUsage(used: 3000);
+
+      final merged = base.mergedWith(newer);
+      expect(merged.used, 3000);
+      expect(merged.size, 200000, reason: '窗口大小沿用旧值');
+      expect(merged.remaining, 197000, reason: '不得沿用过期 remaining');
+    });
+
+    test('mergedWith：newer 显式 remaining 优先于推导值', () {
+      const base = ContextUsage(used: 100, size: 1000);
+      const newer = ContextUsage(used: 200, remaining: 700);
+
+      final merged = base.mergedWith(newer);
+      expect(merged.remaining, 700);
+    });
+
+    test('hasData：全空为 false', () {
+      expect(const ContextUsage().hasData, isFalse);
+      expect(const ContextUsage(used: 1).hasData, isTrue);
+      expect(const ContextUsage(size: 1).hasData, isTrue);
+      expect(const ContextUsage(remaining: 1).hasData, isTrue);
+      // cost 不算「可展示的数据」——Go 后端下它恒为 null，单凭它不足以渲染。
+      expect(const ContextUsage(cost: ContextCost(amount: 1)).hasData, isFalse);
+    });
+
+    test('utilization：窗口未知或非正时为 null', () {
+      expect(const ContextUsage(used: 1).utilization, isNull);
+      expect(const ContextUsage(used: 1, size: 0).utilization, isNull);
+      expect(
+        const ContextUsage(used: 1, size: 10).utilization,
+        closeTo(0.1, 1e-9),
+      );
+    });
+
+    test('ChatEvent.contextUpdatePayload：按类型门禁', () {
+      final ev = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.contextUpdate
+          ..['payload'] = {
+            'telemetry': {'context_tokens': 1, 'context_window': 2},
+          },
+      );
+      expect(ev.contextUpdatePayload, isNotNull);
+      expect(ContextUsage.fromEventPayload(ev.contextUpdatePayload!)!.used, 1);
+
+      // 非 context_update 事件：即便 payload 带同名键也不得被读作用量。
+      final other = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.message
+          ..['payload'] = {'used': 999, 'size': 1000},
+      );
+      expect(other.contextUpdatePayload, isNull);
+    });
+  });
+
+  group('TTS 生命周期访问器（tts_started / tts_completed / tts_failed）', () {
+    /// 逐字对齐 Go 真实写端的载荷。
+    ChatEvent tts(String type, Map<String, dynamic> payload) =>
+        ChatEvent.fromJson(
+          sseShape()
+            ..['eventType'] = type
+            ..['payload'] = payload,
+        );
+
+    test('tts_started（message 模式）：mode + seq', () {
+      // `tts/service.go:357`：{mode:"message", seq}
+      final e = tts(EventTypes.ttsStarted, {'mode': 'message', 'seq': 2});
+
+      expect(e.isTtsEvent, isTrue);
+      expect(e.ttsMode, 'message');
+      expect(e.ttsReason, isNull);
+    });
+
+    test('tts_started（stream 模式）：mode=stream + reason=first_delta', () {
+      // `tts/service.go:607`：{mode:"stream", reason:"first_delta"}
+      final e = tts(EventTypes.ttsStarted, {
+        'mode': 'stream',
+        'reason': 'first_delta',
+      });
+
+      expect(e.ttsMode, 'stream');
+      expect(e.ttsReason, 'first_delta');
+    });
+
+    test('tts_completed（stream 模式）：parts / bytes / duration_ms', () {
+      // `tts/service.go:999` emitTerminal：{parts, bytes, duration_ms}
+      final e = tts(EventTypes.ttsCompleted, {
+        'parts': 4,
+        'bytes': 2048,
+        'duration_ms': 3210,
+      });
+
+      expect(e.isTtsEvent, isTrue);
+      expect(e.ttsParts, 4);
+      expect(e.ttsBytes, 2048);
+      expect(e.ttsDurationMs, 3210);
+    });
+
+    test('tts_completed（message 模式）：seq + parts=1', () {
+      // `tts/service.go:367`：{seq, parts:1}
+      final e = tts(EventTypes.ttsCompleted, {'seq': 2, 'parts': 1});
+
+      expect(e.ttsParts, 1);
+    });
+
+    test('tts_failed（message 模式）：reason + seq + message', () {
+      // `tts/service.go:361`：{reason:"synthesize_failed", seq, message}
+      final e = tts(EventTypes.ttsFailed, {
+        'reason': 'synthesize_failed',
+        'seq': 2,
+        'message': '语音生成失败，本次文本回复不受影响。',
+      });
+
+      expect(e.isTtsEvent, isTrue);
+      expect(e.ttsReason, 'synthesize_failed');
+      expect(e.ttsMessage, '语音生成失败，本次文本回复不受影响。');
+    });
+
+    test('tts_failed（stream 模式）：completed_parts 与诊断字段', () {
+      final e = tts(EventTypes.ttsFailed, {
+        'parts': 5,
+        'bytes': 900,
+        'duration_ms': 1000,
+        'reason': 'provider_error',
+        'failed_part': 3,
+        'completed_parts': 2,
+        'lost_chars': 42,
+        'message': '语音生成未完全成功，已生成的部分仍可播放。',
+      });
+
+      // ⚠️ parts 与 completed_parts 语义不同，不可混用。
+      expect(e.ttsParts, 5);
+      expect(e.ttsCompletedParts, 2);
+      expect(e.ttsFailedPart, 3);
+      expect(e.ttsLostChars, 42);
+    });
+
+    test('completed_parts 只在 tts_failed 上可读（类型门禁）', () {
+      final e = tts(EventTypes.ttsCompleted, {
+        'parts': 1,
+        'completed_parts': 99,
+      });
+
+      expect(
+        e.ttsCompletedParts,
+        isNull,
+        reason: 'completed 事件的 parts 才是总段数，不得误读 completed_parts',
+      );
+    });
+
+    test('非 TTS 事件：所有播报访问器返回 null（通用键不得误读）', () {
+      // `message` / `reason` / `seq` / `parts` 都是极通用的键名，
+      // 没有类型门禁时 error/gate/user_message 会被误读。
+      final e = tts(EventTypes.error, {
+        'message': '这不是语音失败',
+        'reason': 'boom',
+        'parts': 3,
+      });
+
+      expect(e.isTtsEvent, isFalse);
+      expect(e.ttsMode, isNull);
+      expect(e.ttsReason, isNull);
+      expect(e.ttsMessage, isNull);
+      expect(e.ttsParts, isNull);
+      expect(e.ttsCompletedParts, isNull);
+      expect(e.ttsFailedPart, isNull);
+      expect(e.ttsLostChars, isNull);
+      expect(e.ttsBytes, isNull);
+      expect(e.ttsDurationMs, isNull);
+    });
+
+    test('snake_case（timeline 回放形状）下同样可读', () {
+      final e = ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.ttsFailed
+          ..['payload'] = {
+            'reason': 'synthesize_failed',
+            'message': '语音生成失败，本次文本回复不受影响。',
+          },
+      );
+
+      expect(e.isTtsEvent, isTrue);
+      expect(e.ttsReason, 'synthesize_failed');
+      expect(e.ttsMessage, '语音生成失败，本次文本回复不受影响。');
+    });
+
+    test('缺少载荷时访问器返回 null 而不抛异常', () {
+      final e = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.ttsStarted
+          ..['payload'] = null,
+      );
+
+      expect(e.isTtsEvent, isTrue);
+      expect(e.ttsMode, isNull);
+      expect(e.ttsParts, isNull);
+    });
+  });
+
+  group('goal_updated 访问器', () {
+    /// 逐字对齐 Go `emitGoalUpdated` 的载荷：
+    /// `{op, goal, tasks, progress, task_id?}`，其中 goal/tasks/progress 由与
+    /// `GET /goals/current` 相同的 DTO 函数生成。
+    ChatEvent goal(String op, {Map<String, dynamic>? extra}) =>
+        ChatEvent.fromJson(
+          sseShape()
+            ..['eventType'] = EventTypes.goalUpdated
+            ..['payload'] = {
+              'op': op,
+              'goal': {
+                'id': 'goal_1',
+                'group_id': 'grp_1',
+                'goal_text': '把同步做稳',
+                'status': 'active',
+                'tasks_source': 'agent',
+              },
+              'tasks': [
+                {'task_id': 't1', 'status': 'completed', 'title': '写测试'},
+                {'task_id': 't2', 'status': 'in_progress', 'title': '修 bug'},
+              ],
+              'progress': {
+                'total': 2,
+                'completed': 1,
+                'in_progress': 1,
+                'blocked': 0,
+                'error_stopped': 0,
+                'pending': 0,
+              },
+              ...?extra,
+            },
+        );
+
+    test('goal_create：op / goal / tasks / progress 全部可读', () {
+      final e = goal('goal_create');
+
+      expect(e.goalUpdateOp, 'goal_create');
+      expect(e.goalUpdateGoal?['goal_text'], '把同步做稳');
+      expect(e.goalUpdateTasks, hasLength(2));
+      expect(e.goalUpdateProgress?['total'], 2);
+      expect(e.goalUpdateTaskId, isNull, reason: '非任务级操作不带 task_id');
+    });
+
+    test('task_status：带 task_id', () {
+      final e = goal('task_status', extra: {'task_id': 't2'});
+
+      expect(e.goalUpdateOp, 'task_status');
+      expect(e.goalUpdateTaskId, 't2');
+    });
+
+    test('非 goal_updated 事件：所有访问器返回 null / 空', () {
+      // `op` / `tasks` / `progress` / `task_id` 都可能出现在别的载荷里，
+      // 没有类型门禁时会被误读。
+      final e = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.groupUpdated
+          ..['payload'] = {
+            'op': 'created',
+            'tasks': [
+              {'task_id': 'x'},
+            ],
+            'progress': {'total': 1},
+            'task_id': 'x',
+          },
+      );
+
+      expect(e.goalUpdateOp, isNull);
+      expect(e.goalUpdateGoal, isNull);
+      expect(e.goalUpdateTasks, isEmpty);
+      expect(e.goalUpdateProgress, isNull);
+      expect(e.goalUpdateTaskId, isNull);
+    });
+
+    test('异常载荷：tasks 非 List / 元素非 Map 时不抛异常', () {
+      final e = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.goalUpdated
+          ..['payload'] = {'op': 'task_create', 'tasks': 'not-a-list'},
+      );
+
+      expect(e.goalUpdateTasks, isEmpty);
+
+      final mixed = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.goalUpdated
+          ..['payload'] = {
+            'tasks': [
+              'garbage',
+              {'task_id': 'ok'},
+            ],
+          },
+      );
+
+      expect(mixed.goalUpdateTasks, hasLength(1), reason: '跳过非 Map 项，保留可用项');
+    });
+
+    test('snake_case（timeline 回放形状）下同样可读', () {
+      final e = ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.goalUpdated
+          ..['payload'] = {
+            'op': 'goal_status',
+            'goal': {'goal_text': 'x'},
+            'tasks': <Map<String, dynamic>>[],
+          },
+      );
+
+      expect(e.goalUpdateOp, 'goal_status');
+      expect(e.goalUpdateGoal?['goal_text'], 'x');
+    });
+  });
+
+  /// `habit_auto_run_completed` 的载荷访问器。
+  ///
+  /// ## ⚠️ 契约来源
+  ///
+  /// Go 侧当前**不产出**本事件（见 `EventTypes.habitAutoRunCompleted` 的说明），
+  /// 载荷形状取自 Python 的 `build_habit_auto_run_completed_payload`
+  /// （`apps/api/utilities/habit_internal/timeline_events.py`）。这里钉住的是
+  /// 「字段名/空串语义不会静默漂移」——访问器读错键名不会报错，只会让卡片
+  /// 永远显示「未命名习惯」。
+  group('habit_auto_run_completed 访问器', () {
+    ChatEvent autoRun([Map<String, dynamic> extra = const {}]) =>
+        ChatEvent.fromJson(
+          eventToDictShape()
+            ..['event_type'] = EventTypes.habitAutoRunCompleted
+            ..['payload'] = <String, dynamic>{
+              'habit_pattern_id': 'hp-1',
+              'habit_run_id': 'run-1',
+              'turn_id': 'turn_1',
+              'delivery_group_id': 'grp_1',
+              'topic_key': 'daily_review',
+              'summary': 'daily review 习惯提醒已成功送达，完成本轮强化。',
+              ...extra,
+            },
+        );
+
+    test('是已知且 timeline 可见的事件（否则会被静默丢弃）', () {
+      final ev = autoRun();
+
+      expect(ev.isKnown, isTrue, reason: '漂移会让 isKnown=false');
+      expect(ev.isTimelineVisible, isTrue, reason: '它是用户可见的习惯回执，不是诊断事件');
+    });
+
+    test('读 topic_key / habit_run_id / habit_pattern_id / summary', () {
+      final ev = autoRun();
+
+      expect(ev.habitAutoRunTopicKey, 'daily_review');
+      expect(ev.habitAutoRunRunId, 'run-1');
+      expect(ev.habitAutoRunPatternId, 'hp-1');
+      expect(ev.habitAutoRunSummary, contains('完成本轮强化'));
+    });
+
+    test('空串 topic_key 归为 null（不渲染空白标题）', () {
+      final ev = autoRun({'topic_key': ''});
+
+      expect(ev.habitAutoRunTopicKey, isNull);
+    });
+
+    test('访问器对其他事件类型返回 null（不误读通用键）', () {
+      // topic_key 是 habit 专属键，但 summary 是较通用的名字；若不做类型门
+      // 就会从别的载荷上读到意外的值。
+      final ev = ChatEvent.fromJson(
+        eventToDictShape()
+          ..['event_type'] = EventTypes.habitSuggestionCreated
+          ..['payload'] = {'summary': '别的摘要', 'topic_key': '别的主题'},
+      );
+
+      expect(ev.habitAutoRunTopicKey, isNull);
+      expect(ev.habitAutoRunSummary, isNull);
+      expect(ev.habitAutoRunRunId, isNull);
+      expect(ev.habitAutoRunPatternId, isNull);
+    });
+  });
 }

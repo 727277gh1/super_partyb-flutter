@@ -43,6 +43,56 @@ class ChatGroup {
   /// 当前 goal 快照（`GET /goals/current` 同结构）。
   final Map<String, dynamic>? currentGoal;
 
+  /// 返回一个只替换 [metadata] 的副本。
+  ///
+  /// ## 为什么是整体替换（而不是深合并）
+  ///
+  /// `group_metadata_updated` 的 payload 带的是**完整** metadata
+  /// （Go `updateGroupMetadata` 先读出整个 map、改完再返回它，不是子树）。
+  /// 深合并反而会保留已被服务端删掉的键——服务端的删除语义就是「把键移除」
+  /// （如关闭 tts 时整块删 `metadata.tts`，见 [ttsEnabled] 的注释），
+  /// 合并会让「已关」的开关继续显示为开。
+  ///
+  /// 其余字段原样保留：该事件只描述 metadata，不携带 title/status/goal，
+  /// 用一份残缺快照整体替换会让面板显示假的「全部关闭」。
+  ChatGroup withMetadata(Map<String, dynamic>? next) => ChatGroup(
+    id: id,
+    userId: userId,
+    title: title,
+    status: status,
+    createdAt: createdAt,
+    updatedAt: updatedAt,
+    goal: goal,
+    metadata: next,
+    activeSession: activeSession,
+    currentGoal: currentGoal,
+  );
+
+  /// 返回一个只替换 [currentGoal] 的副本。
+  ///
+  /// ## 为什么需要它（而不是重新发一次 `GET /chat/groups/:id`）
+  ///
+  /// `goal_updated` 事件的 payload 携带与 `GET /goals/current` **逐字同构**的
+  /// 快照（服务端 `goalToDTO`/`taskToDTO`/`progressFromTasks` 同一套函数，见
+  /// Go `goal_api.go` 的文件头注释），故可以直接套进这里。重发 HTTP 只为拿
+  /// 已经在手里的数据是白费一次往返，且会打断面板里的草稿编辑
+  /// （见 `GroupSettingsPanel.didUpdateWidget` 的权威值对齐逻辑）。
+  ///
+  /// 其余字段原样保留：事件只描述 goal，**不**携带 group 的 title/status/
+  /// metadata，用一份残缺快照整体替换会让面板显示假的「全部关闭」状态。
+  ChatGroup withCurrentGoal(Map<String, dynamic>? next) => ChatGroup(
+    id: id,
+    userId: userId,
+    title: title,
+    status: status,
+    createdAt: createdAt,
+    updatedAt: updatedAt,
+    goal: goal,
+    metadata: metadata,
+    activeSession: activeSession,
+    currentGoal: next,
+  );
+
   bool get isArchived => status == 'archived';
 
   /// 后续提问建议是否对本 group 启用。
@@ -51,6 +101,19 @@ class ChatGroup {
   /// 客户端只反映 group 级状态，全局关闭时即使此处为 true 也不会收到事件。
   bool get followUpSuggestEnabled =>
       _subMap(metadata?['follow_up_suggest'])?['enabled'] == true;
+
+  /// 习惯建议是否对本 group 启用（`metadata.habit_suggest.enabled`）。
+  ///
+  /// 与 [followUpSuggestEnabled] 同构：键缺失 = 关闭（服务端关闭时
+  /// `delete(meta, 'habit_suggest')` 而非写 false）。
+  ///
+  /// 同样是**双层开关**：group 级 metadata 之外还有全局 `HABIT_SUGGEST_ENABLED`
+  /// （见 `chatexec.HabitSuggestReminderEnabled`）。客户端只反映 group 级状态。
+  ///
+  /// ⚠️ 与 goal gate **无依赖**：历史上习惯引导嵌在 goal 约定尾部，未开 goal gate
+  /// 的群组永远拿不到；拆出后本开关独立生效。故面板不得因 goal gate 关闭而禁用它。
+  bool get habitSuggestEnabled =>
+      _subMap(metadata?['habit_suggest'])?['enabled'] == true;
 
   /// 当前目标文本（**结构化 goal 优先**，旧列兜底）。
   ///

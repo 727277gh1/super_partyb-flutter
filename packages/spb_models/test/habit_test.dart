@@ -269,6 +269,67 @@ void main() {
     });
   });
 
+  group('HabitRunsResult / HabitDailyBudget（daily_budget 不能被丢掉）', () {
+    test('解析 items + daily_budget', () {
+      final r = HabitRunsResult.fromJson({
+        'items': [
+          {'run_id': 'run-1', 'trigger_reason': 'due_rule'},
+        ],
+        'daily_budget': {'limit': 20, 'used_today': 3},
+      });
+
+      expect(r.items.single.id, 'run-1');
+      expect(r.dailyBudget!.limit, 20);
+      expect(r.dailyBudget!.usedToday, 3);
+      expect(r.dailyBudget!.hasLimit, isTrue);
+      expect(r.dailyBudget!.remaining, 17);
+      expect(r.dailyBudget!.exhausted, isFalse);
+    });
+
+    test('daily_budget 缺失 → null（不造 0/0）', () {
+      final r = HabitRunsResult.fromJson({'items': []});
+      expect(r.dailyBudget, isNull);
+    });
+
+    test('daily_budget 不是对象时也当 null（不抛）', () {
+      expect(HabitDailyBudget.fromJson('nope'), isNull);
+      expect(HabitDailyBudget.fromJson(null), isNull);
+      expect(
+        HabitRunsResult.fromJson({'items': [], 'daily_budget': 3}).dailyBudget,
+        isNull,
+      );
+    });
+
+    test('裸数组形态也能吃（与 unwrapItems 同口径）', () {
+      final r = HabitRunsResult.fromJson([
+        {'run_id': 'run-9', 'trigger_reason': 'manual'},
+      ]);
+      expect(r.items.single.id, 'run-9');
+      expect(r.dailyBudget, isNull);
+    });
+
+    test('used_today 超上限时 remaining 不为负，且判定为用尽', () {
+      const b = HabitDailyBudget(limit: 5, usedToday: 8);
+      expect(b.remaining, 0);
+      expect(b.exhausted, isTrue);
+    });
+
+    test('limit=0（服务端未给上限）→ hasLimit=false 且不判定用尽', () {
+      // 若把 0 当成「上限 0」，usedToday=0 会算出 exhausted=true，
+      // 页面就会说「额度已用尽」——而真相是「服务端没给上限」。
+      const b = HabitDailyBudget(limit: 0, usedToday: 0);
+      expect(b.hasLimit, isFalse);
+      expect(b.exhausted, isFalse);
+      expect(b.remaining, 0);
+    });
+
+    test('恰用尽（used == limit）算 exhausted', () {
+      const b = HabitDailyBudget(limit: 5, usedToday: 5);
+      expect(b.exhausted, isTrue);
+      expect(b.remaining, 0);
+    });
+  });
+
   group('HabitSuggestion（事件 payload vs 列表项）', () {
     /// `BuildSuggestionCreatedPayload` 的真实输出（timeline_events.go）。
     Map<String, dynamic> createdPayload() => {

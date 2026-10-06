@@ -66,6 +66,7 @@ class UserPreferences {
     this.languageLabels = const {},
     this.customized = false,
     this.followUpSuggest = false,
+    this.habitSuggest = false,
     this.defaultAgentId = '',
     this.displayName = '',
     this.avatarUrl = '',
@@ -93,6 +94,16 @@ class UserPreferences {
   ///
   /// 仅影响**之后新建**的 group（建组时播种），不回溯修改既有 group。
   final bool followUpSuggest;
+
+  /// 新建 group 是否默认开启「习惯建议」（`habit_suggest`）。
+  ///
+  /// 与 [followUpSuggest] 完全同构：仅影响之后新建的 group（建组时播种到
+  /// `metadata.habit_suggest`），不回溯修改既有 group。实际生效还受 env
+  /// `HABIT_SUGGEST_ENABLED` 全局闸约束（能力总闸，本项只表达用户意愿）。
+  ///
+  /// ⚠️ 与群级同名开关（[ChatGroup.habitSuggestEnabled]）是**不同层次**：本处是
+  /// 「以后新建对话的默认值」，那个是「这个对话现在开不开」。
+  final bool habitSuggest;
 
   /// 用户默认 agent（chat_router 兜底值）。空串 = 跟随系统默认。
   final String defaultAgentId;
@@ -180,6 +191,7 @@ class UserPreferences {
         languageLabels: _stringMap(json['language_labels']),
         customized: json['customized'] == true,
         followUpSuggest: json['follow_up_suggest'] == true,
+        habitSuggest: json['habit_suggest'] == true,
         defaultAgentId: (json['default_agent_id'] ?? '').toString(),
         displayName: (json['display_name'] ?? '').toString(),
         avatarUrl: (json['avatar_url'] ?? '').toString(),

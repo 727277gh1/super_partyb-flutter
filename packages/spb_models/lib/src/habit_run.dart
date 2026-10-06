@@ -218,6 +218,86 @@ class HabitRun {
   String toString() => 'HabitRun($id, ${outcome.wire}, $topicKey)';
 }
 
+/// 今日 `due_rule` 触发预算（`GET /api/habits/runs` 的 `daily_budget`）。
+///
+/// 真源：`ext_routes.go` 的 `allRuns`——
+/// `gin.H{"limit": h.maxDueTriggersPerDay, "used_today": usedToday}`。
+///
+/// ## 为什么必须单独解析而不是只取 `items`
+///
+/// `unwrapItems` 只看 `items` 字段，会把 `daily_budget` **静默丢掉**。而预算
+/// 是「今天还能跑几次」的唯一展示来源：`limit` 与引擎里 `DueRule` 的每日上限
+/// **同源**（见服务端注释），展示值偏小会让用户误以为还有额度、偏大则以为
+/// 已耗尽。丢掉的后果是「额度用完了但页面上看不到」，用户只能反复点「立即执行」
+/// 收 409。
+///
+/// ## `used_today` 是 **UTC 日**口径
+///
+/// 服务端 `CountHabitRunsSince` 用 `datetime('now', '-0 days')`（SQLite 的 UTC
+/// 零点），**不是**本地零点。故这里不做任何时区换算，也不拿它和本地时间比较。
+class HabitDailyBudget {
+  const HabitDailyBudget({this.limit = 0, this.usedToday = 0});
+
+  /// 每日上限（来自服务端配置 `HabitMaxDueTriggersPerDay`）。
+  final int limit;
+
+  /// 今日（UTC）已用次数。
+  final int usedToday;
+
+  /// `limit <= 0` 表示服务端没给出可用上限（字段缺失 / 配置为 0）。
+  ///
+  /// 此时**不渲染进度条**：画一条恒满或恒空的条比不画更误导。
+  bool get hasLimit => limit > 0;
+
+  /// 剩余次数（不足计 0，不出现负数）。
+  int get remaining {
+    if (!hasLimit) return 0;
+    final r = limit - usedToday;
+    return r < 0 ? 0 : r;
+  }
+
+  /// 今日额度是否已用尽。
+  bool get exhausted => hasLimit && usedToday >= limit;
+
+  /// `limit` / `used_today` 缺失或类型不对时返回 null（不造一个假的 0/0）。
+  static HabitDailyBudget? fromJson(Object? v) {
+    if (v is! Map) return null;
+    final m = Map<String, dynamic>.from(v);
+    return HabitDailyBudget(
+      limit: habitInt(m, 'limit', 'limit') ?? 0,
+      usedToday: habitInt(m, 'used_today', 'used_today') ?? 0,
+    );
+  }
+
+  @override
+  String toString() => 'HabitDailyBudget($usedToday/$limit)';
+}
+
+/// `GET /api/habits/runs` 的**完整**响应：记录列表 + 今日预算。
+///
+/// 与 `listAllRuns`（只返回 `List<HabitRun>`）的区别就是那个 `daily_budget`。
+/// 保留旧方法是为了不破坏只关心列表的调用方（也保留了它的既有测试）。
+class HabitRunsResult {
+  const HabitRunsResult({this.items = const [], this.dailyBudget});
+
+  final List<HabitRun> items;
+
+  /// 服务端未下发 `daily_budget` 时为 null（旧版服务端 / 端点变更）。
+  final HabitDailyBudget? dailyBudget;
+
+  static HabitRunsResult fromJson(Object? json) {
+    // 兼容两种形态：`{items: [...]}` 与裸 `[...]`（与 `unwrapItems` 同口径）。
+    final meta = json is Map
+        ? Map<String, dynamic>.from(json)
+        : const <String, dynamic>{};
+    final raw = json is List ? json : meta['items'];
+    return HabitRunsResult(
+      items: _listOf<HabitRun>(raw, HabitRun.fromJson),
+      dailyBudget: HabitDailyBudget.fromJson(meta['daily_budget']),
+    );
+  }
+}
+
 /// `GET /api/chat/habit-insights/summary` 的响应。
 ///
 /// 真源：`habit_insights.go` 的 `habitInsightsHandlers.summary`。形状是
