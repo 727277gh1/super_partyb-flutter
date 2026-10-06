@@ -861,6 +861,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                     .toggleFollowUpSuggest(widget.groupId, enabled),
                 onChanged: setSheetState,
               ),
+              onToggleHabitSuggest: (enabled) => _runSetting(
+                () => ref
+                    .read(groupSettingsUseCaseProvider)
+                    .toggleHabitSuggest(widget.groupId, enabled),
+                onChanged: setSheetState,
+              ),
               onSaveTts:
                   ({enabled, narrateThinking, narrationMode, fileSummary}) =>
                       _runSetting(

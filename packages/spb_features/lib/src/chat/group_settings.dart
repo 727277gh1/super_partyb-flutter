@@ -50,6 +50,14 @@ class GroupSettingsUseCase {
   Future<ChatGroup> toggleFollowUpSuggest(String groupId, bool enabled) =>
       _write(() => _api.setGroupFollowUpSuggest(groupId, enabled), groupId);
 
+  /// 开关「习惯建议」。
+  ///
+  /// 走专用 CAS 端点（`PUT /chat/groups/:id/habit-suggest`），与
+  /// [toggleFollowUpSuggest] 同构。**不能**走 PATCH metadata：后者是整包替换，
+  /// 会连带清掉 `metadata.tts` / `follow_up_suggest` 等其它子系统的键。
+  Future<ChatGroup> toggleHabitSuggest(String groupId, bool enabled) =>
+      _write(() => _api.setGroupHabitSuggest(groupId, enabled), groupId);
+
   /// 保存语音回复配置（**只发显式传入的键**）。
   ///
   /// 见 [SaveGroupTts] 的说明：整包提交会在并发场景下回滚另一台设备的改动。

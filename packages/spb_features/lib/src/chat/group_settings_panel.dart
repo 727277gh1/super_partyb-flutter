@@ -16,6 +16,9 @@ typedef SaveGroupMaxAutoTurns = Future<void> Function(int maxAutoTurns);
 /// 开关「后续提问建议」。
 typedef ToggleGroupFollowUpSuggest = Future<void> Function(bool enabled);
 
+/// 开关「习惯建议」。
+typedef ToggleGroupHabitSuggest = Future<void> Function(bool enabled);
+
 /// 保存语音回复配置。
 ///
 /// ## 为什么是「可空字段」而不是一个完整的配置对象
@@ -81,6 +84,7 @@ class GroupSettingsPanel extends StatefulWidget {
     this.onToggleGoalGate,
     this.onSaveMaxAutoTurns,
     this.onToggleFollowUpSuggest,
+    this.onToggleHabitSuggest,
     this.onSaveTts,
     this.busy = false,
     this.showHeader = true,
@@ -95,6 +99,7 @@ class GroupSettingsPanel extends StatefulWidget {
   final ToggleGroupGoalGate? onToggleGoalGate;
   final SaveGroupMaxAutoTurns? onSaveMaxAutoTurns;
   final ToggleGroupFollowUpSuggest? onToggleFollowUpSuggest;
+  final ToggleGroupHabitSuggest? onToggleHabitSuggest;
   final SaveGroupTts? onSaveTts;
 
   /// 是否有写操作在途。为 true 时全部控件禁用（防止并发提交把 CAS 打成 409）。
@@ -170,6 +175,8 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
         _goalGateSection(context, theme),
         const Divider(height: SpbSpacing.lg),
         _followUpSection(context, theme),
+        const Divider(height: SpbSpacing.lg),
+        _habitSection(context, theme),
         const Divider(height: SpbSpacing.lg),
         _ttsSection(context, theme),
       ],
@@ -353,6 +360,32 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
         // 如实说明这是双层开关：全局总闸关闭时，本开关打开也不会有建议出现。
         // 客户端拿不到全局值，故文案不承诺「已生效」。
         _hint(context, '这是对话级开关，还需服务端已启用该能力才会生效'),
+      ],
+    );
+  }
+
+  // ==================== 习惯建议 ====================
+
+  Widget _habitSection(BuildContext context, ThemeData theme) {
+    final onToggle = widget.onToggleHabitSuggest;
+    if (onToggle == null) return const SizedBox.shrink();
+
+    return _section(
+      context,
+      children: [
+        _switchRow(
+          key: const ValueKey('group-habit-suggest-switch'),
+          title: '习惯建议',
+          subtitle: '检测到周期性行为时主动建议固化成习惯',
+          value: widget.group.habitSuggestEnabled,
+          onChanged: _busy ? null : onToggle,
+        ),
+        // 与 follow-up 同因：如实说明这是双层开关，全局总闸关闭时本开关打开也
+        // 不会有建议出现。客户端拿不到全局值，故文案不承诺「已生效」。
+        //
+        // 另外明确它与「自动实现目标」**无关**（历史上曾嵌在 goal 约定尾部）：
+        // 否则用户看到 goal gate 关闭会以为本开关也没用。
+        _hint(context, '这是对话级开关，还需服务端已启用该能力才会生效，与「自动实现目标」无关'),
       ],
     );
   }
