@@ -440,7 +440,13 @@ class _MyTurnsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
     return MyTurnsPage(
-      fetch: () => api.listMyTurns(),
+      // 透传页面上的筛选条件（days/source/status/groupId → 服务端 query）。
+      fetch: ({days, status, source, groupId}) => api.listMyTurns(
+        days: days,
+        status: status,
+        source: source,
+        groupId: groupId,
+      ),
       onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
     );
   }
