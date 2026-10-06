@@ -597,19 +597,24 @@ macOS runner 在 GitHub Actions 上**按 10× 计费倍数**，成本显著（�
 代价：产物未用 Developer ID 签名也未公证，用户首次打开被 Gatekeeper
 拦下，需右键→打开，或 `xattr -dr com.apple.quarantine <app>`。
 
-#### ⚠️ 已知缺陷：macOS 交付物同步写不进用户所选目录
+#### ✅ 已修复：macOS 交付物同步写用户所选目录
 
-`Release.entitlements` / `DebugProfile.entitlements` **都缺**：
+`Release.entitlements` / `DebugProfile.entitlements` **两份都已包含**：
 
 ```xml
 <key>com.apple.security.files.user-selected.read-write</key>
 <true/>
 ```
 
-而 `file_selector` 的 macOS README 明确要求它（沙箱下访问用户所选目录）。
-交付物同步会用 `LocalFileSink` 向用户选定的同步目录写文件，**沙箱会拒绝**，
-表现为「同步报写入失败」。debug 构建沙箱较松可能不暴露，**只在正式包上现形**。
-修法：两份 entitlements 各加上面两行。
+（修复于 commit `2f5d778`。此前两份 entitlements 均缺该键。）
+
+**为什么必须有这一项**（别删，删了就回退）：`file_selector` 的 macOS README
+明确要求它（沙箱下访问用户所选目录）。交付物同步会用 `LocalFileSink` 向用户
+选定的同步目录写文件，**缺这一项沙箱会拒绝**，表现为「同步报写入失败」。
+debug 构建沙箱较松可能不暴露，**只在正式包上现形**——与上面
+`network.client` 的陷阱同型。
+
+改动这两份文件后请顺手核对本段，避免再次出现「代码已修、文档说没修」的漂移。
 
 ### iOS：必须 Apple Developer 账号
 
@@ -744,7 +749,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | macOS 包未签名/未公证，首次打开需绕过 Gatekeeper | 已知限制（免签名分发） | §8 |
 | iOS 出包需 Apple Developer 账号 | 待决策 | §8、`super_partyb` issue #31 |
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
-| macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement | 已知缺陷，未修 | §8 |
+| ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
