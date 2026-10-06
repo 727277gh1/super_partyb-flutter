@@ -36,6 +36,7 @@ export 'group_management.dart';
 export 'group_settings.dart';
 export 'group_settings_panel.dart';
 export 'group_list_page.dart';
+export 'habit_auto_run_card.dart';
 export 'habit_suggestion_card.dart';
 export 'habit_suggestion_editor.dart';
 export 'my_turns_page.dart';

@@ -167,6 +167,9 @@ void main() {
     String? historyKey,
     VoidCallback? onReconnect,
     bool wireActivities = true,
+    bool wireContextUsage = true,
+    bool wireExecutionStatus = true,
+    bool wireTtsStatus = true,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -191,6 +194,23 @@ void main() {
           activities: wireActivities ? controller.activities : null,
           activitiesSnapshot: wireActivities
               ? controller.activitiesSnapshot
+              : null,
+          // 上下文用量同理：默认接上，wireContextUsage=false 验证未注入时不展示。
+          contextUsage: wireContextUsage ? controller.contextUsage : null,
+          contextUsageSnapshot: wireContextUsage
+              ? controller.contextUsageSnapshot
+              : null,
+          // 等待/重试状态同理。
+          executionStatus: wireExecutionStatus
+              ? controller.executionStatus
+              : null,
+          executionStatusSnapshot: wireExecutionStatus
+              ? controller.executionStatusSnapshot
+              : null,
+          // 播报状态同理。
+          ttsStatus: wireTtsStatus ? controller.ttsStatus : null,
+          ttsStatusSnapshot: wireTtsStatus
+              ? controller.ttsStatusSnapshot
               : null,
         ),
       ),
@@ -999,6 +1019,373 @@ void main() {
     });
   });
 
+  group('ConversationPage 执行等待/重试提示', () {
+    /// 推一条 queue_state（落库非 Transient，见 Go 五个发射点）。
+    Future<void> pushQueue(
+      WidgetTester tester, {
+      String reason = 'session_busy',
+      int? total = 3,
+      int? user = 1,
+      String state = 'queued',
+      String id = 'e_qs',
+      int seq = 40,
+    }) => pushEvent(
+      tester,
+      EventTypes.queueState,
+      sseEvent(
+        EventTypes.queueState,
+        id: id,
+        seq: seq,
+        payload: {
+          'state': state,
+          'reason': reason,
+          if (total != null) 'queue_total': total,
+          if (user != null) 'queue_user': user,
+        },
+      ),
+    );
+
+    testWidgets('session_busy 排队时展示等待文案', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushQueue(tester, reason: 'session_busy');
+
+      final bar = find.byKey(const ValueKey('conversation-execution-status'));
+      expect(bar, findsOneWidget, reason: '没有它，排队与「卡死」在 UI 上无法区分');
+      expect(find.textContaining('正在等待当前会话完成'), findsOneWidget);
+      expect(find.textContaining('队列：总计 3，你的 1'), findsOneWidget);
+    });
+
+    testWidgets('三种排队原因各自映射到对应文案', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushQueue(
+        tester,
+        reason: 'user_concurrency_limit',
+        id: 'e_q1',
+        seq: 40,
+      );
+      expect(find.textContaining('正在等待用户并发额度'), findsOneWidget);
+
+      await pushQueue(
+        tester,
+        reason: 'global_concurrency_limit',
+        id: 'e_q2',
+        seq: 41,
+      );
+      expect(find.textContaining('正在等待执行资源'), findsOneWidget);
+
+      await pushQueue(tester, reason: 'something_new', id: 'e_q3', seq: 42);
+      expect(
+        find.textContaining('正在等待执行'),
+        findsOneWidget,
+        reason: '未知原因退化为通用文案，不拼出原始 reason',
+      );
+    });
+
+    testWidgets('retry_scheduled 展示「正在安排第 N 次重试」', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushEvent(
+        tester,
+        EventTypes.retryScheduled,
+        sseEvent(
+          EventTypes.retryScheduled,
+          id: 'e_retry',
+          seq: 40,
+          payload: {
+            'attempt': 2,
+            'max_retries': 3,
+            'delay_ms': 5000,
+            'reason': 'exit status 1\n一大段 stderr 噪声',
+          },
+        ),
+      );
+
+      expect(find.textContaining('正在安排第 2 次重试'), findsOneWidget);
+      expect(
+        find.textContaining('stderr'),
+        findsNothing,
+        reason: 'reason 是执行器 stderr 原文，不得当横幅文案（webapp 同样不用）',
+      );
+    });
+
+    testWidgets('retry_scheduled 缺 attempt 时退化为「第 1 次」（不拼 null）', (
+      tester,
+    ) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushEvent(
+        tester,
+        EventTypes.retryScheduled,
+        sseEvent(
+          EventTypes.retryScheduled,
+          id: 'e_retry',
+          seq: 40,
+          payload: const {},
+        ),
+      );
+
+      expect(find.textContaining('正在安排第 1 次重试'), findsOneWidget);
+      expect(find.textContaining('null'), findsNothing);
+    });
+
+    testWidgets('message 事件到达后等待提示消失', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushQueue(tester);
+
+      final bar = find.byKey(const ValueKey('conversation-execution-status'));
+      expect(bar, findsOneWidget);
+
+      await pushEvent(
+        tester,
+        EventTypes.message,
+        sseEvent('message', id: 'e_msg', seq: 41, payload: {'text': '回复来了'}),
+      );
+
+      expect(bar, findsNothing, reason: '已有正文，等待显然结束，不得挂着过期提示');
+    });
+
+    testWidgets('start 事件后等待提示消失', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushQueue(tester);
+
+      final bar = find.byKey(const ValueKey('conversation-execution-status'));
+      expect(bar, findsOneWidget);
+
+      await pushEvent(
+        tester,
+        EventTypes.start,
+        sseEvent(
+          'start',
+          id: 'e_start',
+          seq: 41,
+          payload: {'status': 'running'},
+        ),
+      );
+
+      expect(bar, findsNothing, reason: '已起跑，名额已拿到');
+    });
+
+    testWidgets('无等待事件时不展示（不凭空造提示）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-execution-status')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('未注入 executionStatus 流时不展示（保持纯只读时间线）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, wireExecutionStatus: false);
+      await pushQueue(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-execution-status')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('等待提示优先于活动指示（两者共用槽位）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      // 先造出「已在跑但没正文」的空窗期：流式 thought + 活动心跳。
+      // （这两个 helper 定义在下方活动指示组内，作用域不跨组，故此处内联。）
+      await pushEvent(
+        tester,
+        EventTypes.thought,
+        sseEvent(
+          'thought',
+          id: 'e_thought',
+          transient: true,
+          seq: 39,
+          payload: {'text': '让我想想…'},
+        ),
+      );
+      await pushEvent(
+        tester,
+        EventTypes.turnActivity,
+        sseEvent(
+          EventTypes.turnActivity,
+          id: 'e_act',
+          transient: true,
+          seq: 39,
+          payload: {'elapsed_ms': 45000},
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsOneWidget,
+      );
+
+      // 等待事件到达：应让位给「在等」（对齐 webapp turn.activity && !turn.queueReason）。
+      await pushQueue(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-execution-status')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+        reason: '同一槽位只展示一条，等待状态胜出',
+      );
+    });
+  });
+
+  group('ConversationPage 上下文用量', () {
+    /// 推一条 `context_update`（Go telemetry 形状，落库非 Transient）。
+    Future<void> pushContext(
+      WidgetTester tester, {
+      int tokens = 50000,
+      int window = 200000,
+      int seq = 30,
+    }) => pushEvent(
+      tester,
+      EventTypes.contextUpdate,
+      sseEvent(
+        EventTypes.contextUpdate,
+        id: 'e_ctx',
+        seq: seq,
+        payload: {
+          'telemetry': {'context_tokens': tokens, 'context_window': window},
+        },
+      ),
+    );
+
+    testWidgets('telemetry 到达后展示「已用 / 窗口」', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushContext(tester, tokens: 50000, window: 200000);
+
+      final bar = find.byKey(const ValueKey('conversation-context-usage'));
+      expect(bar, findsOneWidget, reason: '用量是长对话里用户唯一能判断「何时会被压缩」的依据');
+      expect(find.textContaining('50K / 200K'), findsOneWidget);
+    });
+
+    testWidgets('用量渲染在时间线之外（不产生任何时间线条目）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushContext(tester);
+
+      // 时间线仍为空（没有任何 ConversationItem），但用量条已出现。
+      expect(find.byType(ListView), findsNothing, reason: '空时间线渲染的是空提示');
+      expect(
+        find.byKey(const ValueKey('conversation-context-usage')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('无用量数据时不展示（不凭空造 0）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-context-usage')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('未注入 contextUsage 流时不展示（保持纯只读时间线）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, wireContextUsage: false);
+      await pushContext(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-context-usage')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('cost 缺失时不渲染费用段（Go 后端从不发射 cost）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushContext(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-context-usage-cost')),
+        findsNothing,
+        reason: '不得用 0 伪造「未提供」与「花了 0 元」的区别',
+      );
+    });
+
+    testWidgets('cost.amount > 0 时展示费用（向前兼容遗留 context 形状）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushEvent(
+        tester,
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          id: 'e_ctx_cost',
+          seq: 31,
+          payload: {
+            'context': {
+              'used': 1000,
+              'size': 8000,
+              'cost': {'amount': 0.0123, 'currency': 'USD'},
+            },
+          },
+        ),
+      );
+
+      final cost = find.byKey(
+        const ValueKey('conversation-context-usage-cost'),
+      );
+      expect(cost, findsOneWidget);
+      expect(find.textContaining('0.0123'), findsOneWidget);
+    });
+
+    testWidgets('多条 context_update 合并：窗口保留、用量更新', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await pushContext(tester, tokens: 10000, window: 200000, seq: 30);
+      expect(find.textContaining('10K / 200K'), findsOneWidget);
+
+      // 压缩完成：只带 tokens_after，不带窗口大小。
+      await pushEvent(
+        tester,
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          id: 'e_ctx2',
+          seq: 32,
+          payload: {
+            'compaction': {'status': 'completed', 'tokens_after': 3000},
+          },
+        ),
+      );
+
+      expect(
+        find.textContaining('3K / 200K'),
+        findsOneWidget,
+        reason: '压缩后窗口大小不应丢失，否则退化成「3K / ?」',
+      );
+    });
+  });
+
   group('ConversationPage 执行中活动指示', () {
     /// 推一条 turn_activity（Transient，与 executor 心跳升级后的形态一致）。
     Future<void> pushActivity(
@@ -1178,6 +1565,16 @@ void main() {
       expect(formatTurnElapsed(60000), '1 分钟');
       expect(formatTurnElapsed(125000), '2 分 5 秒');
       expect(formatTurnElapsed(7325000), '122 分 5 秒');
+    });
+
+    test('formatTokenCount：与 webapp 口径逐字对齐（K 整数不带小数）', () {
+      expect(formatTokenCount(0), '0');
+      expect(formatTokenCount(-100), '0', reason: '异常载荷不产出负数读数');
+      expect(formatTokenCount(999), '999');
+      expect(formatTokenCount(1000), '1K');
+      expect(formatTokenCount(12000), '12K');
+      expect(formatTokenCount(12500), '12.5K');
+      expect(formatTokenCount(200000), '200K');
     });
   });
 
@@ -1564,4 +1961,240 @@ void main() {
       );
     });
   });
+
+  group(
+    'ConversationPage 语音播报状态（tts_started / tts_completed / tts_failed）',
+    () {
+      /// 推一个 TTS 生命周期事件。
+      ///
+      /// `tts_started` 是 Transient（Go `main.go:715` 只对它设 Transient），
+      /// 两个终态事件是**落库**的。
+      Future<void> pushTts(
+        WidgetTester tester,
+        String type,
+        Map<String, dynamic> payload, {
+        required String id,
+        required int seq,
+      }) => pushEvent(
+        tester,
+        type,
+        sseEvent(
+          type,
+          id: id,
+          seq: seq,
+          transient: type == EventTypes.ttsStarted,
+          payload: payload,
+        ),
+      );
+
+      testWidgets('tts_started 展示「正在生成语音…」', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsStarted,
+          {'mode': 'message', 'seq': 1},
+          id: 'e_tts_1',
+          seq: 10,
+        );
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsOneWidget,
+          reason: '没有它，用户不知道语音在合成还是没开语音',
+        );
+        expect(find.textContaining('正在生成语音'), findsOneWidget);
+      });
+
+      testWidgets('tts_completed 展示「语音已生成」并带段数', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsStarted,
+          {'mode': 'stream'},
+          id: 'e_tts_2',
+          seq: 10,
+        );
+        await pushTts(
+          tester,
+          EventTypes.ttsCompleted,
+          {'parts': 3, 'bytes': 1024},
+          id: 'e_tts_3',
+          seq: 11,
+        );
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsOneWidget,
+        );
+        expect(find.textContaining('语音已生成'), findsOneWidget);
+        expect(find.textContaining('3 段'), findsOneWidget);
+      });
+
+      testWidgets('tts_failed 展示服务端文案，不暴露内部 reason', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsFailed,
+          {'reason': 'synthesize_failed', 'message': '语音生成失败，本次文本回复不受影响。'},
+          id: 'e_tts_4',
+          seq: 10,
+        );
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsOneWidget,
+        );
+        expect(find.textContaining('语音生成失败，本次文本回复不受影响。'), findsOneWidget);
+        expect(
+          find.textContaining('synthesize_failed'),
+          findsNothing,
+          reason: 'reason 是诊断值，不是给用户看的文案',
+        );
+      });
+
+      testWidgets('tts_failed 缺 message 时兜底「语音生成失败。」', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsFailed,
+          {'reason': 'boom'},
+          id: 'e_tts_5',
+          seq: 10,
+        );
+
+        expect(find.textContaining('语音生成失败。'), findsOneWidget);
+      });
+
+      testWidgets('部分成功与全失败文案不同（由服务端区分）', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsFailed,
+          {
+            'parts': 5,
+            'failed_part': 3,
+            'completed_parts': 2,
+            'lost_chars': 42,
+            'message': '语音生成未完全成功，已生成的部分仍可播放。',
+          },
+          id: 'e_tts_6',
+          seq: 10,
+        );
+
+        expect(find.textContaining('已生成的部分仍可播放'), findsOneWidget);
+      });
+
+      testWidgets('started → completed 覆盖，不留两个指示条', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsStarted,
+          {'mode': 'stream'},
+          id: 'e_tts_7',
+          seq: 10,
+        );
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsOneWidget,
+        );
+
+        await pushTts(
+          tester,
+          EventTypes.ttsCompleted,
+          {'parts': 1},
+          id: 'e_tts_8',
+          seq: 11,
+        );
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsOneWidget,
+          reason: '状态条是单值指示，不得叠加',
+        );
+        expect(find.textContaining('正在生成语音'), findsNothing);
+      });
+
+      testWidgets('无播报事件时（idle）不占一行', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsNothing,
+          reason: 'idle 是默认态，不得为它占一行空白（否则每个对话都多一条）',
+        );
+      });
+
+      testWidgets('新 turn 的 user_message 后旧播报状态不再展示', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester);
+        await pushTts(
+          tester,
+          EventTypes.ttsCompleted,
+          {'parts': 1},
+          id: 'e_tts_a',
+          seq: 10,
+        );
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsOneWidget,
+        );
+
+        await pushEvent(
+          tester,
+          EventTypes.userMessage,
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'e_um_2',
+            turnId: 'turn_2',
+            seq: 20,
+            payload: {'input': '下一个问题'},
+          ),
+        );
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsNothing,
+          reason: '上一轮的「语音已生成」不该粘在新一轮上',
+        );
+      });
+
+      testWidgets('未接线 ttsStatus 时不展示状态条', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        await pumpPage(tester, wireTtsStatus: false);
+
+        sse.push(
+          EventTypes.ttsCompleted,
+          sseEvent(
+            EventTypes.ttsCompleted,
+            id: 'e_tts_9',
+            seq: 10,
+            payload: {'parts': 1},
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('conversation-tts-status')),
+          findsNothing,
+          reason: '未注入时本页不应展示播报状态',
+        );
+      });
+    },
+  );
 }

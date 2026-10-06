@@ -14,6 +14,7 @@ import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'feedback_request_card.dart';
 import 'follow_up_chips.dart';
+import 'habit_auto_run_card.dart';
 import 'habit_suggestion_card.dart';
 import 'message_composer.dart';
 import 'spec_ui_card.dart';
@@ -63,6 +64,12 @@ class ConversationPage extends StatefulWidget {
     this.pendingReloadKey,
     this.activities,
     this.activitiesSnapshot,
+    this.contextUsage,
+    this.contextUsageSnapshot,
+    this.executionStatus,
+    this.executionStatusSnapshot,
+    this.ttsStatus,
+    this.ttsStatusSnapshot,
     this.actions,
     this.emptyHint = '还没有对话，输入消息开始吧',
   });
@@ -272,6 +279,68 @@ class ConversationPage extends StatefulWidget {
   /// 会让指示器到下一次心跳（约 15s）才出现。
   final Map<String, TurnActivitySnapshot>? activitiesSnapshot;
 
+  /// 上下文用量流（`context_update` 归约输出）。
+  ///
+  /// ## 为什么渲染在顶部而不在时间线里
+  ///
+  /// 用量是**持续变化的一行状态数字**（每次压缩、每轮 pigo 收尾都会刷），
+  /// 不是对话正文。进时间线会不断插入/更新条目把对话冲散，而回看历史时
+  /// 旧值毫无意义。webapp 同样把它放在状态侧边栏（`WorkbenchStatusSidebar`）
+  /// 而非消息流。
+  ///
+  /// ## 与 [activities] 同取向
+  ///
+  /// 都是「调用方注入才订阅」的旁路状态：未注入时本页是纯只读时间线。
+  /// 为 null 时不展示用量区。
+  final Stream<ContextUsage?>? contextUsage;
+
+  /// 首帧用量快照（同步初值）。
+  ///
+  /// 读 `controller.contextUsageSnapshot` 是同步 getter，建立不了依赖，故首帧
+  /// 值必须由调用方显式传入（同 [activitiesSnapshot]）。
+  final ContextUsage? contextUsageSnapshot;
+
+  /// 执行等待/重试状态流（`queue_state` / `retry_scheduled` 归约输出）。
+  ///
+  /// ## 它回答什么
+  ///
+  /// 「我发了消息，为什么还没回复」——是**在排队等名额**，还是**在重试**。
+  /// 两者在时间线上都没有任何内容，没有它就只能干等。
+  ///
+  /// ## 与 [activities] 的关系：同一槽位，本流优先
+  ///
+  /// [activities] 是「已在跑但没正文」，本流是「还没开始跑」。两者不会同时
+  /// 有意义，故共用时间线底部那一条状态位，且本流胜出（对齐 webapp 的
+  /// `turn.activity && !turn.queueReason` 判定）。
+  ///
+  /// 为 null 时不展示。未注入时本页不展示等待提示（同 [activities]）。
+  final Stream<ExecutionStatus?>? executionStatus;
+
+  /// 首帧等待状态（同步初值，同 [contextUsageSnapshot]）。
+  final ExecutionStatus? executionStatusSnapshot;
+
+  /// 语音播报状态流（`tts_started` / `tts_completed` / `tts_failed` 归约输出）。
+  ///
+  /// ## 只做状态展示，不引入播放
+  ///
+  /// 客户端既有决策是「TTS 仅下载不播放」（AGENTS.md §11：无音频播放插件）。
+  /// 本参数只驱动一条状态文字，**不**持有可播放句柄、**不**触发播放；
+  /// 音频文件仍走交付物同步链路。
+  ///
+  /// ## 为什么贴顶而不进时间线
+  ///
+  /// 语音是文本回复的衍生物，不是独立的一条回复。它又是「最近一次播报」的
+  /// 单值状态（终态事件在 turn 结束后才到达，那时已无流式项可关联），故与
+  /// [contextUsage] 同属**常驻读数区**，不进时间线。
+  ///
+  /// 为 null 时不展示。未注入时本页不展示播报状态。
+  final Stream<TtsStatus?>? ttsStatus;
+
+  /// 首帧播报状态（同步初值，同 [contextUsageSnapshot]）。
+  ///
+  /// 非空：无播报事件时为 [TtsPhase.idle]，UI 用 [TtsStatus.hasStatus] 判断。
+  final TtsStatus? ttsStatusSnapshot;
+
   final String emptyHint;
 
   @override
@@ -349,6 +418,29 @@ class _ConversationPageState extends State<ConversationPage> {
   StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
   Map<String, TurnActivitySnapshot> _activities = const {};
 
+  /// `context_update` 订阅与最近一次用量快照。
+  ///
+  /// 与 [_activities] 同取向：存在 State 里 + 订阅推送时 setState。若在 build
+  /// 里读 `controller.contextUsageSnapshot`（同步 getter），事件到达时**不会**
+  /// 触发重建，用量区永远停在首帧值。
+  StreamSubscription<ContextUsage?>? _contextUsageSub;
+  ContextUsage? _contextUsage;
+
+  /// `queue_state` / `retry_scheduled` 订阅与最近一次等待状态。
+  ///
+  /// 与 [_contextUsage] 同取向：存 State + 订阅推送时 setState。
+  StreamSubscription<ExecutionStatus?>? _executionStatusSub;
+  ExecutionStatus? _executionStatus;
+
+  /// `tts_*` 订阅与最近一次播报状态。
+  ///
+  /// 与 [_executionStatus] 同取向：存 State + 订阅推送时 setState。
+  StreamSubscription<TtsStatus?>? _ttsStatusSub;
+
+  /// 最近一次播报状态；null 仅表示「尚未收到任何快照」，与 idle 区分开
+  /// （idle 是收到快照但无播报，null 是还没订阅到）。
+  TtsStatus? _ttsStatus;
+
   /// 是否跟随底部。
   ///
   /// ## 为什么用状态标志而不是每次重新测量位置
@@ -369,6 +461,9 @@ class _ConversationPageState extends State<ConversationPage> {
     _itemsSub = widget.controller.items.listen(_onItems);
     _scrollController.addListener(_onScroll);
     _subscribeActivities();
+    _subscribeContextUsage();
+    _subscribeExecutionStatus();
+    _subscribeTtsStatus();
   }
 
   /// 订阅活动流（仅在调用方传了 [ConversationPage.activities] 时）。
@@ -386,6 +481,41 @@ class _ConversationPageState extends State<ConversationPage> {
     _activities = widget.activitiesSnapshot ?? const {};
   }
 
+  /// 订阅用量流（仅在调用方传了 [ConversationPage.contextUsage] 时）。
+  ///
+  /// 与 [_subscribeActivities] 同一取向：未注入时本页不展示用量区，也不白订阅。
+  void _subscribeContextUsage() {
+    final stream = widget.contextUsage;
+    if (stream == null) return;
+    _contextUsageSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _contextUsage = snapshot);
+    });
+    _contextUsage = widget.contextUsageSnapshot;
+  }
+
+  /// 订阅等待/重试状态流（仅在调用方传了 [ConversationPage.executionStatus] 时）。
+  void _subscribeExecutionStatus() {
+    final stream = widget.executionStatus;
+    if (stream == null) return;
+    _executionStatusSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _executionStatus = snapshot);
+    });
+    _executionStatus = widget.executionStatusSnapshot;
+  }
+
+  /// 订阅播报状态流（仅在调用方传了 [ConversationPage.ttsStatus] 时）。
+  void _subscribeTtsStatus() {
+    final stream = widget.ttsStatus;
+    if (stream == null) return;
+    _ttsStatusSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _ttsStatus = snapshot);
+    });
+    _ttsStatus = widget.ttsStatusSnapshot;
+  }
+
   @override
   void didUpdateWidget(ConversationPage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -401,6 +531,27 @@ class _ConversationPageState extends State<ConversationPage> {
       _activities = const {};
       _subscribeActivities();
     }
+    // 用量流同理。
+    if (oldWidget.contextUsage != widget.contextUsage) {
+      unawaited(_contextUsageSub?.cancel());
+      _contextUsageSub = null;
+      _contextUsage = null;
+      _subscribeContextUsage();
+    }
+    // 等待/重试流同理。
+    if (oldWidget.executionStatus != widget.executionStatus) {
+      unawaited(_executionStatusSub?.cancel());
+      _executionStatusSub = null;
+      _executionStatus = null;
+      _subscribeExecutionStatus();
+    }
+    // 播报状态流同理。
+    if (oldWidget.ttsStatus != widget.ttsStatus) {
+      unawaited(_ttsStatusSub?.cancel());
+      _ttsStatusSub = null;
+      _ttsStatus = null;
+      _subscribeTtsStatus();
+    }
     // 换了对话就要重新给翻页一次机会：`_reachedOldest` 是上一个 group 的结论，
     // 沿用会让新对话永远翻不到历史（见 [historyKey] 的说明）。
     if (oldWidget.historyKey != widget.historyKey ||
@@ -413,6 +564,9 @@ class _ConversationPageState extends State<ConversationPage> {
   void dispose() {
     _itemsSub?.cancel();
     _activitiesSub?.cancel();
+    _contextUsageSub?.cancel();
+    _executionStatusSub?.cancel();
+    _ttsStatusSub?.cancel();
     _scrollController.dispose();
     _draft.dispose();
     super.dispose();
@@ -765,6 +919,20 @@ class _ConversationPageState extends State<ConversationPage> {
             ),
       body: Column(
         children: [
+          // 上下文用量：贴在时间线**上方**（顶部诊断区），不进时间线。
+          //
+          // 与下面两条状态条的位置差异是有意的：用量是「资源占用」的常驻读数，
+          // 与输入/待处理无关，故贴顶；而活动指示描述「正在跑的那个 turn」，
+          // 语义上贴时间线底部。
+          if (_contextUsage != null && _contextUsage!.hasData)
+            _ContextUsageBar(usage: _contextUsage!),
+          // 语音播报状态：同样贴顶（常驻读数区）。
+          //
+          // 与下面「等待/活动」槽位分开是有意的：那两个回答「为什么还没回复」，
+          // 而播报是**回复已生成之后**的异步衍生状态，与等待无关；挤进同一槽位
+          // 会让「在等重试」与「语音失败」互相遮挡。
+          if (_ttsStatus != null && _ttsStatus!.hasStatus)
+            _TtsStatusBar(status: _ttsStatus!),
           Expanded(
             child: _items.isEmpty
                 ? _EmptyHint(text: widget.emptyHint)
@@ -774,7 +942,16 @@ class _ConversationPageState extends State<ConversationPage> {
           // 执行中活动指示放在**时间线与待处理栏之间**：它描述的是「正在跑的
           // 那个 turn 的进度」，语义上属于时间线；而待处理栏的语义属于输入区，
           // 两者各贴各自的一端（见各自文档）。
-          if (_visibleActivity != null)
+          // 执行等待/重试提示（queue_state / retry_scheduled）：与活动指示
+          // **共用同一槽位**，且优先于它。
+          //
+          // 判定依据：两者语义互斥——本提示是「还没开始跑（等名额/等重试）」，
+          // 活动指示是「已在跑但没正文」。若同时存在（例如旧的排队事件尚未被
+          // 起跑事件清掉，而心跳已先到），显示「在等」比显示「在跑」更保守也
+          // 更准（对齐 webapp `turn.activity && !turn.queueReason`）。
+          if (_executionStatus != null)
+            _ExecutionStatusBar(status: _executionStatus!)
+          else if (_visibleActivity != null)
             _TurnActivityIndicator(activity: _visibleActivity!),
           if (widget.loadPending != null && widget.undoPending != null)
             PendingMessagesBar(
@@ -934,7 +1111,319 @@ class _ConversationPageState extends State<ConversationPage> {
       file: item,
       onDownload: widget.onDownloadAgentFile,
     ),
+    HabitAutoRunItem() => HabitAutoRunCard(item: item),
   };
+}
+
+/// 语音播报状态条：展示播报进行到哪一步 / 为什么失败。
+///
+/// ## 只做状态展示（不播放）
+///
+/// 客户端既有决策是「TTS 仅下载不播放」（AGENTS.md §11：无音频播放插件）。
+/// 本组件**只**渲染一行状态文字，不提供播放控件，也不持有音频句柄；
+/// 音频文件本身仍走交付物同步（见 `tts_audio_path.dart`）。
+///
+/// ## 三态文案
+///
+/// | 阶段 | 文案 | 来源 |
+/// |---|---|---|
+/// | idle | （不展示） | —— 由调用方 [TtsStatus.hasStatus] 拦住 |
+/// | started | 正在生成语音… | 逐字对齐 webapp `ChatMessageList` |
+/// | completed | 语音已生成 | 本轮额外展示（见下） |
+/// | failed | 服务端 `message`，兜底「语音生成失败。」 | webapp 同 |
+///
+/// ## ⚠️ 与 webapp 的**有意偏离**：completed 也展示
+///
+/// webapp 的注释写明「完成不额外提示」（`ttsStatus === "starting"` 与
+/// `"failed"` 两个分支，无 completed 分支）。本任务验收明确要求「三种状态
+/// 各自渲染」，且完成态确实承载信息（分段数），故这里显式展示。
+/// 若将来要求逐字对齐 webapp，删掉 completed 分支即可。
+class _TtsStatusBar extends StatelessWidget {
+  const _TtsStatusBar({required this.status});
+
+  final TtsStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final failed = status.phase == TtsPhase.failed;
+    final parts = status.parts;
+
+    return Material(
+      key: const ValueKey('conversation-tts-status'),
+      // 失败用 errorContainer 与其它状态条区分：它是**需要用户知道**的负面
+      // 结果（服务端文案也强调「本次文本回复不受影响」，即"别担心，但要知道"）；
+      // 进行中/完成用中性的 surfaceContainerHighest（同上下文用量条）。
+      color: failed ? scheme.errorContainer : scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            if (status.phase == TtsPhase.started)
+              SizedBox(
+                width: SpbSpacing.lg,
+                height: SpbSpacing.lg,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: scheme.onSurfaceVariant,
+                ),
+              )
+            else
+              Icon(
+                failed ? Icons.warning_amber_outlined : Icons.graphic_eq,
+                size: SpbSpacing.lg,
+                color: failed
+                    ? scheme.onErrorContainer
+                    : scheme.onSurfaceVariant,
+              ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                _text(status),
+                key: const ValueKey('conversation-tts-status-text'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: failed
+                      ? scheme.onErrorContainer
+                      : scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            // 已完成段数：只在有值时显示（started 阶段无从得知）。
+            if (parts != null && parts > 0 && status.phase != TtsPhase.failed)
+              Text(
+                '$parts 段',
+                key: const ValueKey('conversation-tts-status-parts'),
+                style: textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 状态文案。
+  ///
+  /// 失败优先用服务端给的 `message`（已是可直接展示的中文，且区分「全失败」与
+  /// 「部分成功」两种情形），缺失时兜底——与 webapp 的
+  /// `turn.ttsErrorMessage || "语音生成失败。"` 同口径。
+  static String _text(TtsStatus s) {
+    switch (s.phase) {
+      case TtsPhase.idle:
+        // 调用方用 hasStatus 拦住 idle，不应走到这里；给出空串而非抛异常，
+        // 避免上游漏判时把整页崩掉。
+        return '';
+      case TtsPhase.started:
+        return '正在生成语音…';
+      case TtsPhase.completed:
+        return '语音已生成';
+      case TtsPhase.failed:
+        final msg = s.message;
+        return (msg != null && msg.isNotEmpty) ? msg : '语音生成失败。';
+    }
+  }
+}
+
+/// 上下文用量条：展示「已用 / 窗口」与（若服务端提供）费用。
+///
+/// ## 为什么贴在时间线顶部
+///
+/// 它是**资源占用读数**（每次压缩 / 每轮收尾刷新），与「当前在聊什么」无关，
+/// 故贴顶常驻；而 `_TurnActivityIndicator` 描述的是「正在跑的那个 turn」，
+/// 语义上属于时间线底部。两者位置不同是**有意**的，不要为了对称把它们并排。
+///
+/// ## 对齐 webapp
+///
+/// `apps/webapp/messages/zh.json`：
+/// - `costAndUsage` = `成本与用量`
+/// - `tokenUsed` = `已使用`
+/// - `tokenCostLabel` = `费用`
+///
+/// 取值口径与 `WorkbenchStatusSidebar` 一致：只在 `used` 与 `size` 都已知时
+/// 显示 token 行；费用只在 `amount > 0` 时显示。
+class _ContextUsageBar extends StatelessWidget {
+  const _ContextUsageBar({required this.usage});
+
+  final ContextUsage usage;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final used = usage.used;
+    final size = usage.size;
+    final cost = usage.cost;
+
+    return Material(
+      key: const ValueKey('conversation-context-usage'),
+      // 与连接/活动条区分：用量是中性读数而非「临时状态」，用 surfaceContainer
+      // 而非 secondaryContainer，视觉上不与「正在执行」混淆。
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.data_usage,
+              size: SpbSpacing.lg,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                // 只在两端都已知时拼「X / Y」：只有 used 时拼出「12K / null」
+                // 比只显示「12K」更糟（用户会以为窗口未知是缺陷）。
+                (used != null && size != null)
+                    ? '上下文：${formatTokenCount(used)} / ${formatTokenCount(size)}'
+                    : '上下文：${formatTokenCount(used ?? size ?? 0)}',
+                key: const ValueKey('conversation-context-usage-tokens'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            // 费用：Go 后端从不发射（见 ContextUsage 类文档），故实际运行时
+            // 这一段不渲染。不用 0 伪造——「未提供」与「花了 0 元」是两回事。
+            if (cost != null && cost.amount > 0)
+              Text(
+                '费用：\$${cost.amount.toStringAsFixed(4)} ${cost.currency}',
+                key: const ValueKey('conversation-context-usage-cost'),
+                style: textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// token 数文案（与 webapp `formatTokenCount` 逐字对齐）。
+///
+/// webapp 口径：≥ 1000 时用 K，整数不带小数（`12K`）、非整数一位小数（`12.5K`）；
+/// < 1000 时直接输出数字。
+///
+/// 负数按 0 处理：服务端异常载荷不应产出「已用 -1」这种读数。
+@visibleForTesting
+String formatTokenCount(int n) {
+  if (n <= 0) return '0';
+  if (n >= 1000) {
+    final k = n / 1000;
+    return k % 1 == 0 ? '${k.toInt()}K' : '${k.toStringAsFixed(1)}K';
+  }
+  return '$n';
+}
+
+/// 执行等待/重试提示条：展示「尚未回复的原因」。
+///
+/// ## 为什么需要它
+///
+/// 「发了消息但迟迟没回复」有两种原因，而时间线上**都没有任何内容**：
+/// 排队等执行名额，或上一轮失败正在安排重试。没有本组件，两者与「卡死」
+/// 在 UI 上完全无法区分。
+///
+/// ## 文案逐字对齐 webapp
+///
+/// `apps/webapp/messages/zh.json` 与 `ChatMessageList.tsx` 的判定链：
+///
+/// | 条件 | 文案 |
+/// |---|---|
+/// | `retry_scheduled` | 正在安排第 {attempt} 次重试 |
+/// | `reason == session_busy` | 正在等待当前会话完成 |
+/// | `reason == user_concurrency_limit` | 正在等待用户并发额度 |
+/// | `reason == global_concurrency_limit` | 正在等待执行资源 |
+/// | 其余 | 正在等待执行 |
+///
+/// 另附 `队列：总计 {total}，你的 {user}`（webapp `queuePosition`）。
+///
+/// ## 视觉与 [_TurnActivityIndicator] 共用一套
+///
+/// 两者是同一槽位的互斥状态，故用同一颜色/圆角/旋转图标，只换文案与 Key
+/// ——用户看到的是「同一条提示位」在切换内容，而不是两套不相干的横幅。
+class _ExecutionStatusBar extends StatelessWidget {
+  const _ExecutionStatusBar({required this.status});
+
+  final ExecutionStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final total = status.queueTotal;
+    final user = status.queueUser;
+
+    return Material(
+      key: const ValueKey('conversation-execution-status'),
+      // 与活动指示同用 secondaryContainer（同一槽位的互斥状态，见类文档）。
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: SpbSpacing.lg,
+              height: SpbSpacing.lg,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                _text(status),
+                key: const ValueKey('conversation-execution-status-text'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+            // 队列规模只在两端都已知时显示：只给一个数字会让人以为它是
+            // 「总计」或「你的」中的某一个，反而歧义。
+            if (total != null && user != null)
+              Text(
+                '队列：总计 $total，你的 $user',
+                key: const ValueKey('conversation-execution-status-queue'),
+                style: textTheme.labelSmall?.copyWith(
+                  color: scheme.onSecondaryContainer.withValues(alpha: 0.7),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 横幅文案（判定链与 webapp `ChatMessageList.tsx` 一致）。
+  ///
+  /// ⚠️ 重试分支**不看** `reason`：Go 的 `retry_scheduled.reason` 是执行器
+  /// stderr 原文（可能很长、含路径与噪声），拿它当文案会把横幅变成一堆日志。
+  /// webapp 同样只用 `attempt`。
+  static String _text(ExecutionStatus s) {
+    if (s.kind == ExecutionStatusKind.retryScheduled) {
+      // attempt 缺失时退化为 1（与 webapp 的 `|| "1"` 一致）：
+      // 宁可说「第 1 次」也不要拼出「第 null 次」。
+      return '正在安排第 ${s.attempt ?? 1} 次重试';
+    }
+    return switch (s.reason) {
+      'session_busy' => '正在等待当前会话完成',
+      'user_concurrency_limit' => '正在等待用户并发额度',
+      'global_concurrency_limit' => '正在等待执行资源',
+      _ => '正在等待执行',
+    };
+  }
 }
 
 /// 执行中活动指示：在「已起跑但还没有正文」的空窗期展示「已运行 X · 最近：Y」。
