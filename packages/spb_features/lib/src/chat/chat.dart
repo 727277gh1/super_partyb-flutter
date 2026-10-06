@@ -27,6 +27,7 @@ export 'conversation_page.dart';
 export 'feedback_request_card.dart';
 export 'follow_up_chips.dart';
 export 'chat_sidebar.dart';
+export 'goal_tasks_panel.dart';
 export 'group_deliverables_panel.dart';
 export 'group_debug_panel.dart';
 export 'group_gate_panel.dart';
