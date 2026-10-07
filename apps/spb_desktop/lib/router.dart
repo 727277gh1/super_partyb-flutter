@@ -1902,6 +1902,16 @@ class _SettingsPage extends ConsumerWidget {
       // 「我是谁」重新加载而重建（会丢掉表单草稿）。
       loadPreferences: ref.watch(loadUserPreferencesProvider),
       savePreferences: ref.watch(saveUserPreferencesProvider),
+      // 默认 Agent 下拉的候选项。
+      //
+      // 用 `.value ?? const []` 而非把 `AsyncValue` 喂进页面：本页是
+      // ConsumerWidget，agent 列表晚到时只重建一次（下拉多出几项），
+      // 而 `UserPreferencesCard` 的 State 一直存活，**用户已填的草稿不丢**。
+      // 若在 loading 期间换成转圈占位，State 会被销毁重建，草稿全丢——
+      // 与设置页「改动不即时落盘」的约定冲突。理由详见
+      // `preferenceAgentOptionsProvider` 的文档。
+      preferenceAgentOptions:
+          ref.watch(preferenceAgentOptionsProvider).value ?? const [],
       preferenceFallbackDisplayName:
           ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),

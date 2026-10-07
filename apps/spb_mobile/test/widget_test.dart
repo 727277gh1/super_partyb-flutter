@@ -1210,6 +1210,56 @@ void main() {
     );
   });
 
+  testWidgets('设置页「默认 Agent」下拉拿到真实 agent 列表（调用点传参）', (tester) async {
+    // ## 这个用例防的是什么
+    //
+    // 与桌面端同名用例同一取向：`preferenceAgentOptions` 默认 `const []`，
+    // 此前两端调用点都没传（全仓 grep 零命中），用户在下拉里永远只能选到
+    // 「自动」。面板测试用手工 options，抓不到「router 忘了传」。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final h = await pumpApp(
+      tester,
+      loadAgents: () async => const [
+        Agent(id: 'agent_a', name: '写作助手'),
+        Agent(id: 'agent_b', name: '代码助手'),
+      ],
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/me/preferences',
+          (server) => server.reply(200, {
+            'reply_language': 'auto',
+            'available_languages': ['auto', 'zh-CN'],
+            'language_labels': {'auto': '跟随输入', 'zh-CN': '简体中文'},
+            'default_agent_id': '',
+            'display_name': '',
+            'avatar_url': '',
+          }),
+        );
+      },
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('settings-prefs-default-agent')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('写作助手'),
+      findsWidgets,
+      reason: '调用点必须传 preferenceAgentOptions，否则下拉里永远只有「自动」',
+    );
+    expect(find.text('代码助手'), findsWidgets);
+  });
+
   testWidgets('移动端设置页展示固定沙箱目录（用户需知道文件落在哪）', (tester) async {
     final h = await pumpApp(tester);
 

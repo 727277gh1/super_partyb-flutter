@@ -1136,6 +1136,64 @@ void _userPreferencesTests() {
       expect(find.text('u1@example.com'), findsOneWidget);
     });
 
+    testWidgets('agent 列表晚到：下拉出现具体项，且已填草稿不丢', (tester) async {
+      // ## 这个用例防的是什么
+      //
+      // 装配层把 agent 列表包成 `FutureProvider`，首帧给的是空列表
+      // （`.value ?? const []`），列表到货后才变非空。若实现改成「loading 时
+      // 换成转圈占位」，`UserPreferencesCard` 的 State 会被销毁重建，用户
+      // 已填的昵称会**静默消失**——而设置页的约定是「改动不即时落盘、只有点
+      // 保存才提交」，用户不会立刻发现草稿没了。
+      //
+      // 故这里断言两件事：列表到货后下拉确实多出选项，且草稿仍在。
+      Future<UserPreferences> save({
+        String? displayName,
+        String? avatarUrl,
+        String? replyLanguage,
+        String? defaultAgentId,
+        bool? followUpSuggest,
+        bool? habitSuggest,
+        String? habitNotifyChannels,
+      }) async => prefs();
+
+      await pumpPrefs(tester, load: () async => prefs(), save: save);
+      // 首帧：列表还没到，下拉只有「自动」。
+      expect(
+        find.byKey(const ValueKey('settings-prefs-default-agent')),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('settings-prefs-display-name')),
+        '小明',
+      );
+      await tester.pump();
+
+      // 列表到货 → 同一棵树重建（State 存活）。
+      await pumpPrefs(
+        tester,
+        load: () async => prefs(),
+        save: save,
+        agentOptions: const [PreferenceAgentOption(id: 'a1', name: '写作助手')],
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const ValueKey('settings-prefs-display-name')),
+            )
+            .controller
+            ?.text,
+        '小明',
+        reason: '一个可选下拉晚到不该清掉用户已填的昵称草稿',
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('settings-prefs-default-agent')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('写作助手'), findsWidgets);
+    });
+
     testWidgets('注入的 agent 列表出现在默认 Agent 下拉里', (tester) async {
       await pumpPrefs(
         tester,

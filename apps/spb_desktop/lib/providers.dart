@@ -1355,6 +1355,42 @@ final loadAgentsProvider = Provider<LoadAgents>((ref) {
   return api.listAgents;
 });
 
+/// 设置页「默认 Agent」下拉的候选项。
+///
+/// ## 为什么要单独包一层 FutureProvider
+///
+/// [loadAgentsProvider] 是同步 `Provider<LoadAgents>`（返回 `Future`），而
+/// `SettingsPage` 是 StatefulWidget、收的是**已解析**的
+/// `List<PreferenceAgentOption>`——不能直接喂 `AsyncValue`。这里做两件事：
+/// 把 Future 解析掉，并把 `Agent` 映射成卡片要求的最小类型
+/// （`PreferenceAgentOption(id, name)`，理由见 `user_preferences_card.dart`
+/// 的类文档：卡片不需要 provider / skills / status 这些字段）。
+///
+/// ## 调用点用 `.value ?? const []`，不因列表晚到而重建表单
+///
+/// 若改成把 `AsyncValue` 整体喂给页面（loading 时换成一个转圈占位），
+/// `UserPreferencesCard` 的 `State` 会被销毁重建，**用户已填的草稿全部丢失**
+/// ——这与设置页已确立的「草稿 vs 权威值」约定（改动不即时落盘、只有点保存
+/// 才提交）直接冲突。
+///
+/// 用 `.value ?? const []` 则**整棵树形状不变**：agent 列表晚到时只是下拉的
+/// `items` 多出几项，`State` 一直存活，草稿不受影响。代价是列表未就绪/加载
+/// 失败时下拉只有「自动」一项（与「本端确实没接」表现相同）——不谎报失败，
+/// 也不因一个可选下拉而阻塞整个表单。
+///
+/// ## 服务端只返回 active
+///
+/// `AgentsApi.listAgents` 走 `GET /api/agents`，服务端 `ListAgents` 已按
+/// `filterActive` 过滤。已归档/已删除的 agent 不在列表里，故若用户曾把它设为
+/// 默认值，卡片会用「（已失效）」那一项兜住（见 `_buildDefaultAgent`）。
+final preferenceAgentOptionsProvider =
+    FutureProvider<List<PreferenceAgentOption>>((ref) async {
+      final agents = await ref.watch(loadAgentsProvider)();
+      return [
+        for (final a in agents) PreferenceAgentOption(id: a.id, name: a.name),
+      ];
+    });
+
 /// 读取 `since_days`：缺失、非法、`<= 0` 都视为「不限」。
 Future<int?> _readSinceDays(PreferencesStore prefs) async {
   final raw = await prefs.getString(sinceDaysPrefKey);

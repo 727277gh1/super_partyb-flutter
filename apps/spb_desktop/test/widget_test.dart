@@ -612,6 +612,60 @@ void main() {
     expect(find.text('系统托盘'), findsOneWidget);
   });
 
+  testWidgets('设置页「默认 Agent」下拉拿到真实 agent 列表（调用点传参）', (tester) async {
+    // ## 这个用例防的是什么
+    //
+    // `SettingsPage.preferenceAgentOptions` 默认是 `const []`，此前两端调用点
+    // **都没传**（全仓 grep 零命中），于是用户在下拉里永远只能选到「自动」，
+    // 具体 agent 一个都看不到——功能齐全但无人调用，本仓库最常见的失败模式。
+    //
+    // 面板自身的测试用手工构造的 options，抓不到「router 忘了传」。故这里打
+    // 真实 router + 真实 HTTP。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final h = await pumpApp(
+      tester,
+      loadAgents: () async => const [
+        Agent(id: 'agent_a', name: '写作助手'),
+        Agent(id: 'agent_b', name: '代码助手'),
+      ],
+      beforePump: (adapter) {
+        // 偏好表单加载（`GET /me/preferences`）。
+        adapter.onGet(
+          '/me/preferences',
+          (server) => server.reply(200, {
+            'reply_language': 'auto',
+            'available_languages': ['auto', 'zh-CN'],
+            'language_labels': {'auto': '跟随输入', 'zh-CN': '简体中文'},
+            'default_agent_id': '',
+            'display_name': '',
+            'avatar_url': '',
+          }),
+        );
+      },
+    );
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('settings-prefs-default-agent')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('写作助手'),
+      findsWidgets,
+      reason: '调用点必须传 preferenceAgentOptions，否则下拉里永远只有「自动」',
+    );
+    expect(find.text('代码助手'), findsWidgets);
+  });
+
   testWidgets('从设置页进入 /settings/sync 并渲染同步页', (tester) async {
     final h = await pumpApp(tester);
 
