@@ -53,6 +53,29 @@ final devUserHeaderOverrideProvider = Provider<String?>((ref) {
   return v.isEmpty ? null : v;
 });
 
+/// 是否展示「诊断」侧边栏 tab（工具调用 + gate 决策）。
+///
+/// ## 为什么是 provider 而不是直接写 `if (!SpbEnv.isRelease)`
+///
+/// [SpbEnv.isRelease] 是 `bool.fromEnvironment('dart.vm.product')`——**编译期
+/// 常量**。若在 `router.dart` 里直接判定，widget test 无法切换它（测试跑在
+/// JIT 下，`isRelease` 恒为 false），于是「发布包里诊断 tab 真的消失了吗」
+/// 这个行为**无法被任何测试验证**。
+///
+/// 包一层 provider 后，测试可以 `showDebugPanelProvider.overrideWithValue(false)`
+/// 断言 tab 消失、其余 tab 仍在，同时生产路径仍读同一个 `isRelease`。
+///
+/// ## 为什么要门控它
+///
+/// 该面板展示**工具调用入参与 gate 决策明细**（含 prompt 片段、路由判定
+/// 理由）。它是开发/排查用的内部视图，不应出现在发布包里——普通用户既
+/// 看不懂，其中内容也不适合随包分发。
+///
+/// ## 为什么默认值就是 `!SpbEnv.isRelease`（而非默认 true）
+///
+/// 默认值即生产行为：忘改/新增调用点时不会意外把诊断入口带到发布包。
+final showDebugPanelProvider = Provider<bool>((ref) => !SpbEnv.isRelease);
+
 /// 会话凭证提供者（OIDC access token）。
 ///
 /// ## 认证形态（实测依据：`docs/oidc-verification.md`）

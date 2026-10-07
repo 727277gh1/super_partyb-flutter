@@ -201,6 +201,13 @@ Future<TestHarness> pumpApp(
   /// UFS API（交付物侧边栏用）。默认不 override：侧边栏默认不展开，
   /// 用不到的用例不应被它拖慢。
   UfsApi? ufsApi,
+
+  /// 「诊断」tab 的门控开关。默认不 override（即 `!SpbEnv.isRelease`）。
+  ///
+  /// 测试跑在 JIT 下，`SpbEnv.isRelease` 恒为 false → 诊断 tab 默认**可见**，
+  /// 与既有用例的期望一致。要验证发布包行为（tab 消失）的用例显式传 false
+  /// ——这正是把门控做成 provider 而非直接判 `isRelease` 的理由。
+  bool? showDebugPanel,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -321,6 +328,9 @@ Future<TestHarness> pumpApp(
         loadAgents ?? () async => const <Agent>[],
       ),
       if (ufsApi != null) ufsApiProvider.overrideWithValue(ufsApi),
+      // 仅显式传值时 override：默认走 provider 自己的 `!SpbEnv.isRelease`。
+      if (showDebugPanel != null)
+        showDebugPanelProvider.overrideWithValue(showDebugPanel),
       // 初始目录：写进内存库的绑定表，让 syncLocalRootProvider 读得到。
       if (syncLocalRoot != null)
         syncLocalRootProvider.overrideWith((ref) async => syncLocalRoot),
@@ -1581,6 +1591,142 @@ void main() {
       // 无待办 → 无徽标（badge 0 不渲染）。
       expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
       expect(find.text('0'), findsNothing);
+    });
+
+    testWidgets('门控关闭（发布构建）时「诊断」tab 整个消失，其余 tab 仍在', (tester) async {
+      // ## 这个用例防的是什么
+      //
+      // 诊断面板展示工具调用入参与 gate 决策明细，是内部视图，不应随发布包
+      // 分发。但此前全仓没有任何 `kReleaseMode` / `isRelease` 使用——发布包里
+      // 它照样在。
+      //
+      // ## 为什么能在这里断言
+      //
+      // 若门控写成 `if (!SpbEnv.isRelease)`，测试跑在 JIT 下 `isRelease` 恒为
+      // false，这个行为**根本无法验证**。故门控走 provider，测试可以把它置为
+      // false（等价于发布构建）。
+      final sse = _FakeSseClient();
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_x'),
+        mockGroups: false,
+        sseClient: sse,
+        ufsApi: _FakeUfsApi(),
+        showDebugPanel: false,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+        },
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('sidebar-tab-诊断')),
+        findsNothing,
+        reason: '发布包不该暴露工具调用与 gate 决策诊断',
+      );
+      expect(
+        find.byKey(const ValueKey('debug-panel')),
+        findsNothing,
+        reason: '面板本身也必须不在树里（不只是 tab 按钮隐藏）',
+      );
+      // 其余 tab 不受影响（门控只该拿掉诊断那一个）。
+      expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
+      expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
+      expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
+      // 默认落点仍是第一个 tab（删掉尾部 tab 不改索引语义）：
+      // IndexedStack 显示的是 index 0 的「交付物」，其空态已渲染。
+      final stack = tester.widget<IndexedStack>(
+        find.byKey(const ValueKey('sidebar-content')),
+      );
+      expect(
+        stack.index,
+        0,
+        reason: 'tabs 变短不该改变默认落点（initialIndex 语义与 tab 数量无关）',
+      );
+      expect(find.byKey(const ValueKey('deliverables-empty')), findsOneWidget);
+    });
+
+    testWidgets('门控打开（开发构建）时「诊断」tab 仍在', (tester) async {
+      // 与上一条成对：证明「tab 消失」确实来自门控，而不是别的原因（例如
+      // tab 被误删、或被挤出可视区而 find 不到——后者要靠滚动才可见，
+      // 但 `findsOneWidget` 检查的是挂载，不是可见）。
+      final sse = _FakeSseClient();
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_x'),
+        mockGroups: false,
+        sseClient: sse,
+        ufsApi: _FakeUfsApi(),
+        showDebugPanel: true,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+        },
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('sidebar-tab-诊断')),
+        findsOneWidget,
+        reason: '开发构建下诊断入口必须可用',
+      );
     });
 
     testWidgets('切到诊断 tab 显示工具调用 + gate 面板（两者空态）', (tester) async {

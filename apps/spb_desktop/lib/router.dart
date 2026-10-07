@@ -1465,14 +1465,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                   ),
                 ),
               ),
-              ChatSidebarTab(
-                label: '诊断',
-                icon: Icons.insights_outlined,
-                content: GroupDebugPanel(
-                  toolCalls: _toolCalls,
-                  decisions: _gateDecisions,
+              // 诊断 tab：仅在非发布构建展示。
+              //
+              // 面板内容含工具调用入参与 gate 决策明细，是开发/排查用的内部
+              // 视图，不应随发布包分发。门控走 provider 而非直接判
+              // `SpbEnv.isRelease`：后者是编译期常量，测试无法切换，也就无法
+              // 验证「发布包里它真的消失了」。
+              //
+              // ## 删掉这个 tab 不会让侧边栏默认落到别的 tab
+              //
+              // `ChatSidebar` 用 `initialIndex`（默认 0，即「交付物」）初始化
+              // `_index`，不依赖 tab 数量；且 `didUpdateWidget` 只在
+              // `_index` 越界时才夹取。少一个尾部 tab 不影响任何既有索引。
+              if (ref.watch(showDebugPanelProvider))
+                ChatSidebarTab(
+                  label: '诊断',
+                  icon: Icons.insights_outlined,
+                  content: GroupDebugPanel(
+                    toolCalls: _toolCalls,
+                    decisions: _gateDecisions,
+                  ),
                 ),
-              ),
             ],
           ),
         ),

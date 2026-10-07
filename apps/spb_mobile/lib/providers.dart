@@ -52,6 +52,22 @@ final devUserHeaderOverrideProvider = Provider<String?>((ref) {
   return v.isEmpty ? null : v;
 });
 
+/// 是否展示「诊断」面板（工具调用 + gate 决策）。
+///
+/// ## 当前**无消费方**，仅为两端装配同构而保留
+///
+/// 移动端没有「诊断」tab：`GroupDebugPanel` 只在桌面端侧边栏装配（桌面端有
+/// 侧边栏这个载体，移动端的小屏放不下这类内部视图）。故本端读它也无处可用。
+///
+/// 仍然定义它的理由：两端 `providers.dart` 刻意保持同构（同一批 provider
+/// 同名同义），使「某个 provider 只在一端存在」不会成为下次接线的意外。
+/// 若将来移动端加诊断入口，直接 watch 本 provider 即可，不必再补一次定义。
+///
+/// 判定方式与桌面端一致：包一层 provider 而非直接写 `!SpbEnv.isRelease`，
+/// 因为后者是编译期常量，widget test 无法切换（详见桌面端同名 provider 的
+/// 文档）。
+final showDebugPanelProvider = Provider<bool>((ref) => !SpbEnv.isRelease);
+
 /// 会话凭证提供者（OIDC access token）。
 ///
 /// ## 认证形态（实测依据：`docs/oidc-verification.md`）
