@@ -84,6 +84,7 @@ void main() {
     required GoalSnapshot snap,
     SetGoalTaskStatus? onSetStatus,
     CreateGoalTask? onCreate,
+    UpdateGoalTask? onUpdateTask,
     DeleteGoalTask? onDelete,
     ReorderGoalTasks? onReorder,
     ResetGoalTasksForExpand? onResetForExpand,
@@ -98,6 +99,7 @@ void main() {
             snapshot: snap,
             onSetStatus: onSetStatus,
             onCreate: onCreate,
+            onUpdateTask: onUpdateTask,
             onDelete: onDelete,
             onReorder: onReorder,
             onResetForExpand: onResetForExpand,
@@ -257,6 +259,11 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey('goal-task-delete-TASK-001')),
+        findsNothing,
+      );
+      // 没有编辑。
+      expect(
+        find.byKey(const ValueKey('goal-task-edit-TASK-001')),
         findsNothing,
       );
       // 没有新增行与重新展开。
@@ -611,6 +618,234 @@ void main() {
 
       expect(find.byKey(const ValueKey('goal-task-add-field')), findsOneWidget);
       expect(find.byKey(const ValueKey('goal-tasks-no-tasks')), findsNothing);
+    });
+  });
+
+  group('编辑：接线 updateTask（标题 + 描述）', () {
+    /// 打开某行的编辑对话框并等它稳定。
+    Future<void> openEditor(WidgetTester t, String taskId) async {
+      await t.tap(find.byKey(ValueKey('goal-task-edit-$taskId')));
+      await t.pumpAndSettle();
+    }
+
+    testWidgets('未注入 onUpdateTask 时不渲染编辑入口（不是禁用）', (t) async {
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-001')]),
+        onSetStatus: (_, _) async {},
+      );
+
+      // 有状态菜单（已注入 onSetStatus），但没有编辑。
+      expect(
+        find.byKey(const ValueKey('goal-task-status-menu-TASK-001')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('goal-task-edit-TASK-001')),
+        findsNothing,
+        reason: '禁用按钮会让用户以为「本端支持但暂时不可用」，真相是没装配该能力',
+      );
+    });
+
+    testWidgets('点编辑弹出对话框并预填当前标题', (t) async {
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', title: '修编译')]),
+        onUpdateTask: (_, {title, description}) async {},
+      );
+
+      await openEditor(t, 'TASK-001');
+
+      expect(
+        find.byKey(const ValueKey('goal-task-edit-dialog')),
+        findsOneWidget,
+      );
+      expect(
+        t
+            .widget<TextField>(
+              find.byKey(const ValueKey('goal-task-edit-title')),
+            )
+            .controller
+            ?.text,
+        '修编译',
+      );
+    });
+
+    testWidgets('改标题后保存，回调收到新标题（taskId 是 TASK-NNN）', (t) async {
+      final calls = <(String, String?, String?)>[];
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-007', title: '旧标题')]),
+        onUpdateTask: (taskId, {title, description}) async {
+          calls.add((taskId, title, description));
+        },
+      );
+
+      await openEditor(t, 'TASK-007');
+      await t.enterText(
+        find.byKey(const ValueKey('goal-task-edit-title')),
+        '新标题',
+      );
+      await t.pump();
+      await t.tap(find.byKey(const ValueKey('goal-task-edit-save')));
+      await t.pumpAndSettle();
+
+      expect(calls, hasLength(1));
+      expect(
+        calls.single.$1,
+        'TASK-007',
+        reason: '路径参数是 TASK-NNN，不是 chat_goal_tasks.id 行 id',
+      );
+      expect(calls.single.$2, '新标题');
+      // 描述原为空 → 保存后仍传空串（服务端 '' = 清除），而不是 null（= 不改）。
+      expect(calls.single.$3, '');
+    });
+
+    testWidgets('清空描述后保存传空串（不是 null——null 会被服务端当成「不修改」）', (t) async {
+      final calls = <(String, String?, String?)>[];
+      await pump(
+        t,
+        snap: snapshot(
+          tasks: [
+            task('TASK-001', title: '标题', extra: {'description': '原有描述'}),
+          ],
+        ),
+        onUpdateTask: (taskId, {title, description}) async {
+          calls.add((taskId, title, description));
+        },
+      );
+
+      await openEditor(t, 'TASK-001');
+      // 描述框预填了「原有描述」（与标题不同）。
+      expect(
+        t
+            .widget<TextField>(
+              find.byKey(const ValueKey('goal-task-edit-description')),
+            )
+            .controller
+            ?.text,
+        '原有描述',
+      );
+
+      await t.enterText(
+        find.byKey(const ValueKey('goal-task-edit-description')),
+        '',
+      );
+      await t.pump();
+      await t.tap(find.byKey(const ValueKey('goal-task-edit-save')));
+      await t.pumpAndSettle();
+
+      expect(
+        calls.single.$3,
+        '',
+        reason: '传 null 会让用户发现「描述还在」——服务端把 null 解释为「不改」',
+      );
+    });
+
+    testWidgets('描述与标题相同时不预填（服务端常把 title 复制进 description）', (t) async {
+      await pump(
+        t,
+        snap: snapshot(
+          tasks: [
+            task('TASK-001', title: '修编译', extra: {'description': '修编译'}),
+          ],
+        ),
+        onUpdateTask: (_, {title, description}) async {},
+      );
+
+      await openEditor(t, 'TASK-001');
+
+      expect(
+        t
+            .widget<TextField>(
+              find.byKey(const ValueKey('goal-task-edit-description')),
+            )
+            .controller
+            ?.text,
+        '',
+        reason: '预填会让用户以为描述本来就有一份内容，从而不敢清空',
+      );
+    });
+
+    testWidgets('标题为空时确定按钮禁用（服务端不拦空标题）', (t) async {
+      var called = 0;
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', title: '标题')]),
+        onUpdateTask: (_, {title, description}) async => called++,
+      );
+
+      await openEditor(t, 'TASK-001');
+      await t.enterText(
+        find.byKey(const ValueKey('goal-task-edit-title')),
+        '   ',
+      );
+      await t.pump();
+
+      final save = t.widget<FilledButton>(
+        find.byKey(const ValueKey('goal-task-edit-save')),
+      );
+      expect(save.onPressed, isNull);
+
+      // 点也没用（onPressed 为 null）。
+      await t.tap(find.byKey(const ValueKey('goal-task-edit-save')));
+      await t.pumpAndSettle();
+      expect(called, 0);
+    });
+
+    testWidgets('取消不提交（对话框关闭且无回调）', (t) async {
+      var called = 0;
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', title: '标题')]),
+        onUpdateTask: (_, {title, description}) async => called++,
+      );
+
+      await openEditor(t, 'TASK-001');
+      await t.enterText(
+        find.byKey(const ValueKey('goal-task-edit-title')),
+        '改了但不保存',
+      );
+      await t.pump();
+      await t.tap(find.byKey(const ValueKey('goal-task-edit-cancel')));
+      await t.pumpAndSettle();
+
+      expect(called, 0);
+      expect(find.byKey(const ValueKey('goal-task-edit-dialog')), findsNothing);
+    });
+
+    testWidgets('busy 时编辑按钮禁用（并发提交会互相覆盖）', (t) async {
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-001')]),
+        onUpdateTask: (_, {title, description}) async {},
+        busy: true,
+      );
+
+      expect(
+        t
+            .widget<IconButton>(
+              find.byKey(const ValueKey('goal-task-edit-TASK-001')),
+            )
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('编辑失败时提示且对话框已关闭（面板仍可交互）', (t) async {
+      await pump(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', title: '标题')]),
+        onUpdateTask: (_, {title, description}) async =>
+            throw StateError('网络断了'),
+      );
+
+      await openEditor(t, 'TASK-001');
+      await t.tap(find.byKey(const ValueKey('goal-task-edit-save')));
+      await t.pumpAndSettle();
+
+      expect(find.textContaining('操作失败'), findsOneWidget);
+      expect(find.byKey(const ValueKey('goal-tasks-list')), findsOneWidget);
     });
   });
 

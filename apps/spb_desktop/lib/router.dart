@@ -1436,6 +1436,22 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           origin: GoalTaskOrigin.manual,
                         ),
                   ),
+                  // 编辑任务标题/描述。
+                  //
+                  // ⚠️ 服务端语义：`''` = 清除、`null` = 不改。面板已把
+                  // 输入框的当前值（含空串）显式传下来，故这里**不能**再用
+                  // `?? ` 或条件判断把它转回 null——那会把「用户清空描述」
+                  // 变成「不修改描述」。
+                  onUpdateTask: (taskId, {title, description}) => _runGoalWrite(
+                    () => ref
+                        .read(goalApiProvider)
+                        .updateTask(
+                          _goalId,
+                          taskId,
+                          title: title,
+                          description: description,
+                        ),
+                  ),
                   onDelete: (taskId) => _runGoalWrite(
                     () => ref.read(goalApiProvider).deleteTask(_goalId, taskId),
                   ),

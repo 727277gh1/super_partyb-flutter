@@ -25,6 +25,26 @@ typedef CreateGoalTask = Future<void> Function({
   String? description,
 });
 
+/// 编辑任务内容（`PATCH /chat/goals/:goal_id/tasks/:task_id`）。
+///
+/// 参数是 `TASK-NNN` 形式的 **task_id**，不是 `chat_goal_tasks.id` 行 id。
+///
+/// ## `''` 与 `null` 的区别（服务端语义，调用方必须分清）
+///
+/// 服务端对这两个字段的语义是**传了就整体替换**：
+///
+/// - `null` = **不改**这个字段；
+/// - `''`   = **清除**它。
+///
+/// 故「保存」必须显式传当前输入框的值（空串表示清除描述），**不能**用 `null`
+/// 表达「清空」——那会变成「不修改」，用户删掉描述再保存会发现描述还在。
+/// 本面板的 [_GoalTasksPanelState._edit] 已按此约定构造参数。
+typedef UpdateGoalTask = Future<void> Function(
+  String taskId, {
+  String? title,
+  String? description,
+});
+
 /// 删除任务（`DELETE /chat/goals/:goal_id/tasks/:task_id`）。
 typedef DeleteGoalTask = Future<void> Function(String taskId);
 
@@ -90,6 +110,7 @@ class GoalTasksPanel extends StatefulWidget {
     required this.snapshot,
     this.onSetStatus,
     this.onCreate,
+    this.onUpdateTask,
     this.onDelete,
     this.onReorder,
     this.onResetForExpand,
@@ -105,9 +126,13 @@ class GoalTasksPanel extends StatefulWidget {
   /// 当前目标快照（含任务与进度）。由父层给出，面板不缓存副本。
   final GoalSnapshot snapshot;
 
-  /// 以下五个为 null 时对应的操作入口不渲染（见类文档「未注入回调 = 只读」）。
+  /// 以下六个为 null 时对应的操作入口不渲染（见类文档「未注入回调 = 只读」）。
   final SetGoalTaskStatus? onSetStatus;
   final CreateGoalTask? onCreate;
+
+  /// 编辑任务标题与描述。为 null 时行尾不渲染「编辑」入口。
+  final UpdateGoalTask? onUpdateTask;
+
   final DeleteGoalTask? onDelete;
   final ReorderGoalTasks? onReorder;
   final ResetGoalTasksForExpand? onResetForExpand;
@@ -218,6 +243,43 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
     );
     if (!yes) return;
     await _guard(() => cb(task.taskId));
+  }
+
+  /// 编辑任务的标题与描述。
+  ///
+  /// ## 为什么用对话框而不是行内编辑
+  ///
+  /// 行内编辑需要把「标题 + 描述」两个字段的草稿塞进行布局，而行已经被
+  /// task_id / 状态 / 来源 / 时间锚点等多个徽标占满（见 [_taskTile]）。
+  /// 对话框是**同一个面板里已验证的模式**（[_confirm] / 新增行都用它），
+  /// 且能容纳多行描述。
+  ///
+  /// ## 只做标题 + 描述
+  ///
+  /// `phase` / `notBefore` / `blockedBy` / `completionSemantics` 的语义复杂
+  /// （时间锚点涉及时区、依赖不校验引用存在、完成语义是枚举），照 webapp 的
+  /// `GoalTaskEditor` 取舍：它的人工编辑也只提交 `title`。这四个字段目前由
+  /// agent / LLM 展开产出，暂不开放人工入口。
+  ///
+  /// ## 描述的清空语义
+  ///
+  /// 保存时**显式传输入框的值**（包括空串）——服务端 `''` = 清除、`null` =
+  /// 不改。若这里传 `null` 表达「用户清空了描述」，服务端会当成「不修改」，
+  /// 用户会发现描述还在（见 [UpdateGoalTask] 的文档）。
+  Future<void> _edit(GoalTask task) async {
+    final cb = widget.onUpdateTask;
+    if (cb == null) return;
+
+    final result = await showDialog<({String title, String description})>(
+      context: context,
+      builder: (ctx) => _GoalTaskEditDialog(task: task),
+    );
+    if (result == null) return;
+
+    await _guard(
+      () =>
+          cb(task.taskId, title: result.title, description: result.description),
+    );
   }
 
   Future<void> _resetForExpand() async {
@@ -464,11 +526,23 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
   Widget? _rowActions(GoalTask task, int index, int total) {
     final canMove = widget.onReorder != null;
     final canDelete = widget.onDelete != null;
-    if (!canMove && !canDelete && widget.onSetStatus == null) return null;
+    final canEdit = widget.onUpdateTask != null;
+    if (!canMove && !canDelete && !canEdit && widget.onSetStatus == null) {
+      return null;
+    }
 
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // 编辑：与删除/重排同排（都是行级动作）。未注入时整个不渲染。
+        if (canEdit)
+          IconButton(
+            key: ValueKey('goal-task-edit-${task.taskId}'),
+            icon: const Icon(Icons.edit_outlined, size: SpbSpacing.lg),
+            tooltip: '编辑',
+            visualDensity: VisualDensity.compact,
+            onPressed: _locked ? null : () => _edit(task),
+          ),
         // 状态菜单：复选框只有两态，其余四种状态在这里（见类文档）。
         if (widget.onSetStatus != null)
           PopupMenuButton<GoalTaskStatus>(
@@ -632,5 +706,120 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
   static String _shortTime(DateTime t) {
     String p2(int v) => v.toString().padLeft(2, '0');
     return '${t.month}/${t.day} ${p2(t.hour)}:${p2(t.minute)}';
+  }
+}
+
+/// 任务编辑对话框：只含标题与描述两个字段。
+///
+/// ## 为什么是独立的 StatefulWidget 而不是在调用点内联
+///
+/// 内联需要两个 `TextEditingController`，而它们在 `showDialog` 的 builder 里
+/// 无法可靠释放（builder 可能被多次调用，`dispose` 却只在对话框真正关闭时发生）
+/// ——泄漏的 controller 会一直挂在 `TextEditingController` 的静态监听链上。
+/// 独立 State 的生命周期由 Flutter 管理，`dispose` 时机确定。
+///
+/// ## 为什么确定按钮在标题为空时禁用
+///
+/// 服务端 `updateTask` 的 `title` 走的是「传了就整体替换」，空标题会落库成
+/// 空串——任务在列表里变成一个没有文字的条目。而服务端**不校验**它（与
+/// `createTask` 的「title 与 description 都空则 400」不同）。故拦在客户端。
+///
+/// 描述允许为空（= 清除）。
+class _GoalTaskEditDialog extends StatefulWidget {
+  const _GoalTaskEditDialog({required this.task});
+
+  final GoalTask task;
+
+  @override
+  State<_GoalTaskEditDialog> createState() => _GoalTaskEditDialogState();
+}
+
+class _GoalTaskEditDialogState extends State<_GoalTaskEditDialog> {
+  late final TextEditingController _title;
+  late final TextEditingController _description;
+
+  @override
+  void initState() {
+    super.initState();
+    // 描述与标题相同时预填为空：服务端 `createTask` 在 title 缺省时回退用
+    // description，故列表里的 `description` 常常只是 title 的副本（webapp 也
+    // 专门过滤了这种情况，见 `task.description !== task.title`）。把它预填进
+    // 描述框会让用户以为「描述本来就有一份内容」，从而不敢清空。
+    final d = widget.task.description;
+    _title = TextEditingController(text: widget.task.title);
+    _description = TextEditingController(text: d == widget.task.title ? '' : d);
+    // 标题变化时刷新确定按钮的启用态。
+    _title.addListener(_onTitleChanged);
+  }
+
+  @override
+  void dispose() {
+    _title
+      ..removeListener(_onTitleChanged)
+      ..dispose();
+    _description.dispose();
+    super.dispose();
+  }
+
+  void _onTitleChanged() => setState(() {});
+
+  void _save() {
+    final title = _title.text.trim();
+    if (title.isEmpty) return;
+    Navigator.of(context).pop((
+      title: title,
+      // 不 trim 描述？——trim 掉首尾空白（用户从别处粘贴常带缩进），但保留
+      // 内部换行。空串在这里有明确含义（清除），故必须原样传下去。
+      description: _description.text.trim(),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canSave = _title.text.trim().isNotEmpty;
+
+    return AlertDialog(
+      key: const ValueKey('goal-task-edit-dialog'),
+      title: Text('编辑任务 ${widget.task.taskId}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const ValueKey('goal-task-edit-title'),
+            controller: _title,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: '标题',
+              isDense: true,
+              border: OutlineInputBorder(borderRadius: SpbRadius.inputAll),
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.sm),
+          TextField(
+            key: const ValueKey('goal-task-edit-description'),
+            controller: _description,
+            minLines: 2,
+            maxLines: 5,
+            decoration: const InputDecoration(
+              labelText: '描述（留空即清除）',
+              isDense: true,
+              border: OutlineInputBorder(borderRadius: SpbRadius.inputAll),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('goal-task-edit-cancel'),
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('goal-task-edit-save'),
+          onPressed: canSave ? _save : null,
+          child: const Text('保存'),
+        ),
+      ],
+    );
   }
 }

@@ -1479,6 +1479,150 @@ void main() {
     });
   });
 
+  group('任务编辑接线（updateTask 走真实 router 装配）', () {
+    /// 断言移动端的底部弹层真的把 `onUpdateTask` 接上了。
+    ///
+    /// 与桌面端同名用例同一取向：面板自身测试用手工回调，无法发现「router
+    /// 忘了注入」——而那正是本仓库最常见的失败模式（`updateTask` 此前全仓
+    /// 零引用）。故这里打 HTTP 断言请求真的发出去了。
+    testWidgets('任务清单弹层里点编辑改标题保存 → PATCH 带新标题', (tester) async {
+      final patch = <({String path, Object? body})>[];
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_x'),
+        mockGroups: false,
+        sseClient: _FakeSseClient(),
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x',
+            (server) => server.reply(200, {
+              'id': 'grp_x',
+              'user_id': 'usr_REAL',
+              'title': '测试对话',
+              'active_session': {
+                'agent_id': 'agent_a',
+                'session_id': 'up_1',
+                'role': 'owner',
+              },
+              'current_goal': {
+                'goal': {
+                  'id': 'goal_1',
+                  'group_id': 'grp_x',
+                  'goal_text': '把 CI 修绿',
+                  'status': 'active',
+                  'tasks_source': 'manual',
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'updated_at': '2024-03-05T08:00:00Z',
+                },
+                'tasks': [
+                  {
+                    'id': 'row_1',
+                    'goal_id': 'goal_1',
+                    'task_id': 'TASK-001',
+                    'order_index': 0,
+                    'title': '旧标题',
+                    'description': '',
+                    'status': 'pending',
+                    'origin': 'llm',
+                    'edited_by_user': false,
+                    'created_at': '2024-03-05T08:00:00Z',
+                    'updated_at': '2024-03-05T08:00:00Z',
+                  },
+                ],
+                'progress': {
+                  'total': 1,
+                  'completed': 0,
+                  'in_progress': 0,
+                  'blocked': 0,
+                  'error_stopped': 0,
+                  'pending': 1,
+                  'percent': 0,
+                },
+              },
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+          adapter.onPatch(
+            '/chat/goals/goal_1/tasks/TASK-001',
+            (server) => server.replyCallback(200, (options) {
+              patch.add((path: options.path, body: options.data));
+              return {
+                'task': {
+                  'id': 'row_1',
+                  'goal_id': 'goal_1',
+                  'task_id': 'TASK-001',
+                  'order_index': 0,
+                  'title': '新标题',
+                  'description': '',
+                  'status': 'pending',
+                  'origin': 'llm',
+                  'edited_by_user': true,
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'updated_at': '2024-03-05T08:00:00Z',
+                },
+              };
+            }),
+            data: Matchers.any,
+          );
+        },
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      // 打开任务清单底部弹层。
+      await tester.tap(find.byKey(const ValueKey('open-goal-tasks')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('goal-task-edit-TASK-001')),
+        findsOneWidget,
+        reason: '未注入 onUpdateTask 时该按钮整个不渲染',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('goal-task-edit-TASK-001')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-task-edit-title')),
+        '新标题',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('goal-task-edit-save')));
+      await tester.pumpAndSettle();
+
+      expect(patch, hasLength(1), reason: 'updateTask 必须真的发出请求');
+      expect(patch.single.path, '/chat/goals/goal_1/tasks/TASK-001');
+      final body = patch.single.body as Map<String, dynamic>;
+      expect(body['title'], '新标题');
+      expect(body['description'], '');
+      expect(tester.takeException(), isNull);
+    });
+  });
+
   group('未认证重定向（登录页 + /login 路由）', () {
     testWidgets('未认证访问 / 被重定向到 /login（且不带标签栏）', (tester) async {
       // 回归防线：守卫必须真的生效。若没接上，未登录用户会看到列表页，

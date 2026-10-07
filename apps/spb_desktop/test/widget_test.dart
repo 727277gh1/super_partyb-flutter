@@ -1629,6 +1629,169 @@ void main() {
   });
 
   // =========================================================================
+  group('任务编辑接线（updateTask 走真实 router 装配）', () {
+    /// 断言「router 真的把 onUpdateTask 接上了」。
+    ///
+    /// ## 为什么必须打真实 router
+    ///
+    /// 面板自身的测试（`goal_tasks_panel_test.dart`）用的是**手工构造的**
+    /// 回调——它能验证面板行为，但无法发现「router 忘了注入 onUpdateTask」
+    /// 这种错误，而那正是本仓库最常见的失败模式（能力实现了但没人调用：
+    /// `updateTask` 此前全仓零引用）。故这里打 HTTP，断言请求真的发出去了。
+    testWidgets('点编辑改标题保存 → PATCH 带新标题', (tester) async {
+      final patch = <({String path, Object? body})>[];
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_x'),
+        mockGroups: false,
+        sseClient: _FakeSseClient(),
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          // 带 current_goal + 一条任务的 group（任务 tab 才有内容可编辑）。
+          adapter.onGet(
+            '/chat/groups/grp_x',
+            (server) => server.reply(200, {
+              'id': 'grp_x',
+              'user_id': 'usr_REAL',
+              'title': '测试对话',
+              'active_session': {
+                'agent_id': 'agent_a',
+                'session_id': 'up_1',
+                'role': 'owner',
+              },
+              'current_goal': {
+                'goal': {
+                  'id': 'goal_1',
+                  'group_id': 'grp_x',
+                  'goal_text': '把 CI 修绿',
+                  'status': 'active',
+                  'tasks_source': 'manual',
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'updated_at': '2024-03-05T08:00:00Z',
+                },
+                'tasks': [
+                  {
+                    'id': 'row_1',
+                    'goal_id': 'goal_1',
+                    'task_id': 'TASK-001',
+                    'order_index': 0,
+                    'title': '旧标题',
+                    'description': '',
+                    'status': 'pending',
+                    'origin': 'llm',
+                    'edited_by_user': false,
+                    'created_at': '2024-03-05T08:00:00Z',
+                    'updated_at': '2024-03-05T08:00:00Z',
+                  },
+                ],
+                'progress': {
+                  'total': 1,
+                  'completed': 0,
+                  'in_progress': 0,
+                  'blocked': 0,
+                  'error_stopped': 0,
+                  'pending': 1,
+                  'percent': 0,
+                },
+              },
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+          adapter.onPatch(
+            '/chat/goals/goal_1/tasks/TASK-001',
+            (server) => server.replyCallback(200, (options) {
+              patch.add((path: options.path, body: options.data));
+              return {
+                'task': {
+                  'id': 'row_1',
+                  'goal_id': 'goal_1',
+                  'task_id': 'TASK-001',
+                  'order_index': 0,
+                  'title': '新标题',
+                  'description': '',
+                  'status': 'pending',
+                  'origin': 'llm',
+                  'edited_by_user': true,
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'updated_at': '2024-03-05T08:00:00Z',
+                },
+              };
+            }),
+            data: Matchers.any,
+          );
+        },
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      // 切到「任务」tab（它在 320px 侧边栏里落在可视区外，需先横滚）。
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('sidebar-tab-任务')),
+        80,
+        scrollable: find.descendant(
+          of: find.byKey(const ValueKey('sidebar-tabbar')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('sidebar-tab-任务')));
+      await tester.pumpAndSettle();
+
+      // 编辑入口存在（证明 router 注入了 onUpdateTask）。
+      expect(
+        find.byKey(const ValueKey('goal-task-edit-TASK-001')),
+        findsOneWidget,
+        reason: '未注入 onUpdateTask 时该按钮整个不渲染',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('goal-task-edit-TASK-001')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-task-edit-title')),
+        '新标题',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('goal-task-edit-save')));
+      await tester.pumpAndSettle();
+
+      expect(patch, hasLength(1), reason: 'updateTask 必须真的发出请求');
+      expect(patch.single.path, '/chat/goals/goal_1/tasks/TASK-001');
+      final body = patch.single.body as Map<String, dynamic>;
+      expect(body['title'], '新标题');
+      // '' = 清除（不是 null = 不改）。
+      expect(body['description'], '');
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  // =========================================================================
   group('交付物「已同步则直接打开」（同步索引打通）', () {
     /// 最近一次 [seedSyncState] 建好的库（供 pumpApp 的 database 参数使用）。
     late AppDatabase seededDb;

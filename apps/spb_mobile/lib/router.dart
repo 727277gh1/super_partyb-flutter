@@ -1028,6 +1028,21 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                     ),
                 onChanged: setSheetState,
               ),
+              // 编辑任务标题/描述。
+              //
+              // ⚠️ 服务端语义：`''` = 清除、`null` = 不改。面板已把输入框的
+              // 当前值（含空串）显式传下来，故这里不能再转回 null。
+              onUpdateTask: (taskId, {title, description}) => _runGoalWrite(
+                () => ref
+                    .read(goalApiProvider)
+                    .updateTask(
+                      _goalId,
+                      taskId,
+                      title: title,
+                      description: description,
+                    ),
+                onChanged: setSheetState,
+              ),
               onDelete: (taskId) => _runGoalWrite(
                 () => ref.read(goalApiProvider).deleteTask(_goalId, taskId),
                 onChanged: setSheetState,
