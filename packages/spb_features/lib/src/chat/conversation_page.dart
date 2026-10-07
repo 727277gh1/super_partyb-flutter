@@ -13,6 +13,7 @@ import 'agent_file_card.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'feedback_request_card.dart';
+import 'flush_strategy_dialog.dart';
 import 'follow_up_chips.dart';
 import 'habit_auto_run_card.dart';
 import 'habit_suggestion_card.dart';
@@ -53,6 +54,7 @@ class ConversationPage extends StatefulWidget {
     this.onSelectAgent,
     this.onSend,
     this.onFlush,
+    this.onFlushWithStrategy,
     this.onCancelTurn,
     this.onLoadOlder,
     this.onReconnect,
@@ -167,7 +169,13 @@ class ConversationPage extends StatefulWidget {
   ///
   /// 与 [onSend] 的区别见 `MessageComposer` 的类文档：前者发**新的一条**，
   /// 本回调推**已经排队的那批**。
-  final Future<void> Function()? onFlush;
+  ///
+  /// 返回 [FlushResult] 而非 `void`：服务端可能回 `confirmation_required`
+  /// （HTTP 200 但**什么都没提交**），需要选策略后重试。
+  final FlushPending? onFlush;
+
+  /// 按用户选定的冲突策略重新提交（[onFlush] 返回待确认时才会用到）。
+  final FlushWithStrategy? onFlushWithStrategy;
 
   /// 下载 agent 文件产物的回调。null 时下载按钮禁用。
   ///
@@ -957,11 +965,16 @@ class _ConversationPageState extends State<ConversationPage> {
             PendingMessagesBar(
               load: widget.loadPending!,
               undo: widget.undoPending!,
+              // 本栏也提供发送入口：它展示的正是「将要被提交的那几条」，
+              // 多条 pending 时的策略选择需要这个上下文。
+              flush: widget.onFlush,
+              flushWithStrategy: widget.onFlushWithStrategy,
               reloadKey: widget.pendingReloadKey ?? '',
             ),
           MessageComposer(
             onSubmit: _handleSubmit,
             onFlush: widget.onFlush,
+            onFlushWithStrategy: widget.onFlushWithStrategy,
             draft: _draft,
           ),
         ],

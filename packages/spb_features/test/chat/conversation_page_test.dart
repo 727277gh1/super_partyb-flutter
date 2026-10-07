@@ -164,6 +164,10 @@ void main() {
     Future<void> Function(String)? onSend,
     Future<void> Function(String)? onCancelTurn,
     Future<bool> Function()? onLoadOlder,
+    FlushPending? onFlush,
+    FlushWithStrategy? onFlushWithStrategy,
+    LoadPendingMessages? loadPending,
+    UndoPendingMessage? undoPending,
     String? historyKey,
     VoidCallback? onReconnect,
     bool wireActivities = true,
@@ -186,6 +190,11 @@ void main() {
           onSend: onSend,
           onCancelTurn: onCancelTurn,
           onLoadOlder: onLoadOlder,
+          onFlush: onFlush,
+          onFlushWithStrategy: onFlushWithStrategy,
+          loadPending: loadPending,
+          undoPending: undoPending,
+          pendingReloadKey: historyKey,
           historyKey: historyKey,
           onReconnect: onReconnect,
           // 活动流由 app 层注入（与 onCancelTurn 等同取向）。默认接上
@@ -2291,4 +2300,83 @@ void main() {
       });
     },
   );
+
+  /// 「立即发送」的透传：本页只是把注入的回调交给两个子组件。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 本页有**两个**入口会触发 flush（输入框的闪电按钮、待处理栏的发送按钮），
+  /// 而它们各自的回调是分开的两个构造参数。漏透传任何一个都会造成「一端能选
+  /// 策略、另一端死锁」——且两者都能编译通过，只有真实点击才会暴露。
+  group('ConversationPage 立即发送透传', () {
+    testWidgets('输入框的「立即发送」走注入的 onFlush', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      var flushes = 0;
+      await pumpPage(
+        tester,
+        onFlush: () async {
+          flushes++;
+          return FlushResult.fromJson({'turn_id': 'turn_1'});
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(flushes, 1);
+    });
+
+    testWidgets('待处理栏的「立即发送」也走同一个 onFlush（并透传选策略回调）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      final strategies = <String>[];
+      await pumpPage(
+        tester,
+        onFlush: () async => FlushResult.fromJson({
+          'status': 'confirmation_required',
+          'options': ['latest_only', 'merge_all'],
+        }),
+        onFlushWithStrategy: (strategy) async {
+          strategies.add(strategy);
+          return FlushResult.fromJson({'turn_id': 'turn_1'});
+        },
+        loadPending: () async => [
+          ChatInboxMessage.fromJson({
+            'id': 'inbox_1',
+            'user_id': 'usr_1',
+            'group_id': 'grp_1',
+            'input': '第一条',
+            'status': 'pending',
+            'created_at': '2024-03-05T08:09:10Z',
+            'updated_at': '2024-03-05T08:09:10Z',
+          }),
+          ChatInboxMessage.fromJson({
+            'id': 'inbox_2',
+            'user_id': 'usr_1',
+            'group_id': 'grp_1',
+            'input': '第二条',
+            'status': 'pending',
+            'created_at': '2024-03-05T08:09:11Z',
+            'updated_at': '2024-03-05T08:09:11Z',
+          }),
+        ],
+        undoPending: (_) async {},
+        historyKey: 'grp_1',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('有多条待处理消息'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('flush-strategy-merge_all')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(strategies, ['merge_all'], reason: '待处理栏的入口也必须能选策略，否则它仍是死锁');
+    });
+  });
 }

@@ -525,34 +525,59 @@ final searchChatProvider = Provider<SearchChat>((ref) {
 
 /// 「立即发送」：把服务端缓冲区里 pending 的消息立即合并提交。
 ///
-/// ## 为什么不用 [ChatApi.flushMessages]（那个返回 void）
+/// 返回 [FlushResult]：服务端在「有多条 pending 且未指定冲突策略」时返回
+/// **HTTP 200** 加 `confirmation_required`（**什么都没提交**），必须让调用方
+/// 拿到这个状态才能继续走「选策略 → 重试」。
 ///
-/// 服务端在「有多条 pending 且未指定冲突策略」时返回 **HTTP 200** 加
-/// `confirmation_required`（**什么都没提交**）。返回 void 的版本会把这种
-/// 「待确认」当成成功，用户点完以为发好了。故这里用 `flushMessagesTyped`
-/// 并自己处理待确认分支。
+/// ## 为什么不再把「待确认」抛成错误
 ///
-/// ## 待确认时抛错而不是静默
+/// 原实现 `throw ValidationError`，而注入点签名是 `Future<void>`——**用户永远
+/// 走不到提交成功那条路**（功能性死锁）：服务端说「请选策略」，客户端把这句话
+/// 当失败上报，没有任何入口能选策略，于是每次点「立即发送」都失败。
 ///
-/// 本 Provider 的注入点签名是 `Future<void>`（`MessageComposer.onFlush`），
-/// 没有返回值可以承载「需要用户选策略」。把它当成失败上报（带可操作的文案）
-/// 是安全的一侧：用户会重试/查看待处理栏，而不是以为已发送。
+/// 现在策略选择由 `MessageComposer` / `PendingMessagesBar` 的
+/// `runFlushFlow` 完成（弹窗选项按服务端返回的 `options` 动态渲染）。
 ///
-/// 真正的「选策略」UI 属后续增强（服务端的 `options` 已解析进 `FlushResult`）。
-final flushMessagesProvider = Provider<Future<void> Function(String)>((ref) {
-  return (String groupId) async {
+/// 唯一的例外：`!committed` 且 `!needsConfirmation`（既无 turn_id 也无待确认）
+/// 确实是异常响应，仍抛 [ValidationError]——否则调用方会以为提交成功了。
+/// ## 为什么是 `family`（而不是在闭包里收 groupId）
+///
+/// `FlushPending` 是无参的（页面不知道 groupId，与 `onSend` 同一约定），
+/// 故 groupId 在**装配层**（router）通过 family 参数绑定。
+final flushMessagesProvider = Provider.family<FlushPending, String>((
+  ref,
+  groupId,
+) {
+  return () async {
     final userId = await ref.read(currentUserIdProvider.future);
     final result = await ref
         .read(chatApiProvider)
         .flushMessages(userId, groupId: groupId);
-    if (result.needsConfirmation) {
-      throw ValidationError(
-        '有多条待处理消息，需要先选择合并方式（${result.options.join(' / ')}）',
-      );
-    }
-    if (!result.committed) {
+    if (!result.needsConfirmation && !result.committed) {
       throw const ValidationError('没有可立即发送的待处理消息');
     }
+    return result;
+  };
+});
+
+/// 按指定冲突策略提交（`flushMessagesDetailed` 的装配）。
+///
+/// `message_ids` 透传服务端在待确认响应里回的那批 id（`result.message_ids`
+/// 未被 [FlushResult] 建模，但重试时可不带——服务端会重新枚举当前 pending，
+/// 而这段时间内待处理集合并未变化）。
+final flushWithStrategyProvider = Provider.family<FlushWithStrategy, String>((
+  ref,
+  groupId,
+) {
+  return (String strategy) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    return ref
+        .read(chatApiProvider)
+        .flushMessagesDetailed(
+          userId,
+          groupId: groupId,
+          conflictStrategy: strategy,
+        );
   };
 });
 

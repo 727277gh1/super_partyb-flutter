@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -82,13 +83,21 @@ void main() {
   Future<void> pumpBar(
     WidgetTester tester, {
     String reloadKey = 'grp_1',
+    FlushPending? flush,
+    FlushWithStrategy? flushWithStrategy,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: Column(
             children: [
-              PendingMessagesBar(load: load, undo: undo, reloadKey: reloadKey),
+              PendingMessagesBar(
+                load: load,
+                undo: undo,
+                flush: flush,
+                flushWithStrategy: flushWithStrategy,
+                reloadKey: reloadKey,
+              ),
             ],
           ),
         ),
@@ -97,6 +106,42 @@ void main() {
     await tester.pump();
     await tester.pump();
   }
+
+  /// 推进若干帧（**不能用 `pumpAndSettle`**）。
+  ///
+  /// ## 为什么本文件不能 pumpAndSettle
+  ///
+  /// 「立即发送」在途时按钮换成 `CircularProgressIndicator`，而它是**无限
+  /// 动画**；流程中还要 `await showDialog(...)` 等用户决策，期间该动画一直在
+  /// 跑。`pumpAndSettle` 会一直等到「没有待处理帧」，于是直接超时。
+  ///
+  /// 用固定时长推进既确定又能覆盖对话框的入场动画（`SpbDuration.normal` 为
+  /// 220ms，这里给足 400ms）。
+  Future<void> settle(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+  }
+
+  /// 服务端在「多条 pending 且未指定策略」时的响应形态。
+  ///
+  /// 见 `apps/go-api/internal/server/chat_inbox.go` 的 `flush`：HTTP **200** +
+  /// `status=confirmation_required`，且**什么都没提交**。`new_group` 仅在最新
+  /// 一条已归属 group 时才出现。
+  FlushResult needsConfirmation({
+    List<String> options = const ['latest_only', 'merge_all', 'new_group'],
+  }) => FlushResult.fromJson({
+    'status': 'confirmation_required',
+    'reason': 'multiple_pending_messages',
+    'options': options,
+    'preview': {'latest_input': '第二条', 'merged_input': '第一条\n第二条'},
+  });
+
+  FlushResult committed({String strategy = 'merge_all'}) =>
+      FlushResult.fromJson({
+        'turn_id': 'turn_1',
+        'flush_strategy': strategy,
+        'consumed_message_ids': ['inbox_1', 'inbox_2'],
+      });
 
   group('待处理消息：撤销', () {
     testWidgets('展示待处理消息正文与 agent_type', (tester) async {
@@ -239,6 +284,231 @@ void main() {
       gate.complete();
       await tester.pump();
       await tester.pump();
+    });
+  });
+
+  /// 「立即发送」的冲突策略选择。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 服务端在「有多条 pending 且未指定策略」时返回 **HTTP 200** 加
+  /// `confirmation_required`——**什么都没提交**。修复前两个 app 的
+  /// `flushMessagesProvider` 把这个状态抛成 `ValidationError`，而注入点签名是
+  /// `Future<void>`，**没有任何入口能选策略**：用户每次点「立即发送」都失败，
+  /// 永远走不到提交成功那条路（功能性死锁）。
+  ///
+  /// 故本组用例必须证明：待确认**不是终点**，而是「弹选项 → 选中 → 真的提交」。
+  group('待处理消息：立即发送的冲突策略', () {
+    testWidgets('多条 pending 时出现发送入口，单条也能发', (tester) async {
+      useStubs(messages: () => [msg('inbox_1'), msg('inbox_2')]);
+      await pumpBar(tester, flush: () async => committed());
+
+      expect(
+        find.byKey(const ValueKey('pending-flush')),
+        findsOneWidget,
+        reason: '本栏展示的正是「将要被提交的那几条」，发送入口应在这里',
+      );
+    });
+
+    testWidgets('未接线时不显示发送入口（不误导用户点空按钮）', (tester) async {
+      useStubs(messages: () => [msg('inbox_1')]);
+      await pumpBar(tester);
+
+      expect(find.byKey(const ValueKey('pending-flush')), findsNothing);
+    });
+
+    testWidgets('提交成功（无待确认）直接完成，不弹策略窗', (tester) async {
+      var flushes = 0;
+      useStubs(messages: () => [msg('inbox_1')]);
+      await pumpBar(
+        tester,
+        flush: () async {
+          flushes++;
+          return committed(strategy: 'latest_only');
+        },
+        flushWithStrategy: (_) async => committed(),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+
+      expect(flushes, 1);
+      expect(find.text('有多条待处理消息'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('待确认时弹策略选择，选中后用该策略重新提交', (tester) async {
+      final strategies = <String>[];
+      var flushes = 0;
+      useStubs(messages: () => [msg('inbox_1'), msg('inbox_2')]);
+      await pumpBar(
+        tester,
+        flush: () async {
+          flushes++;
+          return needsConfirmation();
+        },
+        flushWithStrategy: (strategy) async {
+          strategies.add(strategy);
+          return committed(strategy: strategy);
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+
+      // 第一步：默认策略被拒，弹窗出现（三个选项都在）。
+      expect(flushes, 1, reason: '默认策略只提交一次，不能循环重试');
+      expect(find.text('有多条待处理消息'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('flush-strategy-merge_all')),
+        findsOneWidget,
+      );
+
+      // 第二步：选中「合并全部为一条」→ 用该策略重试。
+      await tester.tap(find.byKey(const ValueKey('flush-strategy-merge_all')));
+      await settle(tester);
+
+      expect(strategies, ['merge_all'], reason: '必须把用户选的策略传给服务端；不传就是修复前的死锁');
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('选项按服务端 options 动态渲染（不硬编码三项）', (tester) async {
+      // 服务端仅在「最新一条已归属 group」时才追加 new_group。
+      useStubs(messages: () => [msg('inbox_1'), msg('inbox_2')]);
+      await pumpBar(
+        tester,
+        flush: () async =>
+            needsConfirmation(options: ['latest_only', 'merge_all']),
+        flushWithStrategy: (_) async => committed(),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+
+      expect(
+        find.byKey(const ValueKey('flush-strategy-merge_all')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('flush-strategy-new_group')),
+        findsNothing,
+        reason: '硬编码三项会让用户选到一个必然 400 的选项',
+      );
+    });
+
+    testWidgets('选项文案与 webapp 一致（三端同一句话）', (tester) async {
+      useStubs(messages: () => [msg('inbox_1'), msg('inbox_2')]);
+      await pumpBar(
+        tester,
+        flush: () async => needsConfirmation(),
+        flushWithStrategy: (_) async => committed(),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+
+      // 逐条对齐 apps/webapp/messages/zh.json 的 outboxStrategy*。
+      expect(find.text('合并全部为一条'), findsOneWidget);
+      expect(find.text('在新会话中发送'), findsOneWidget);
+      expect(find.text('只发最新一条'), findsOneWidget);
+    });
+
+    testWidgets('取消策略选择不提交、不报错（用户主动放弃不是失败）', (tester) async {
+      var retried = 0;
+      useStubs(messages: () => [msg('inbox_1'), msg('inbox_2')]);
+      await pumpBar(
+        tester,
+        flush: () async => needsConfirmation(),
+        flushWithStrategy: (_) async {
+          retried++;
+          return committed();
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+      // 点遮罩关闭对话框。
+      await tester.tapAt(const Offset(10, 10));
+      await settle(tester);
+
+      expect(retried, 0);
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('立即发送失败'), findsNothing);
+    });
+
+    testWidgets('无选策略回调时把待确认上报为错误（不能假装成功）', (tester) async {
+      useStubs(messages: () => [msg('inbox_1'), msg('inbox_2')]);
+      await pumpBar(tester, flush: () async => needsConfirmation());
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+
+      // 服务端一条都没提交，必须让用户知道；静默会让用户以为发好了。
+      expect(find.textContaining('立即发送失败'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('提交成功后重新加载（已提交的不能再挂在待处理里）', (tester) async {
+      var calls = 0;
+      var items = [msg('inbox_1'), msg('inbox_2')];
+      load = () async {
+        calls++;
+        return items;
+      };
+      undo = (_) async {};
+      await pumpBar(tester, flush: () async => committed());
+      expect(calls, 1);
+
+      // 模拟服务端把这两条标为 committed。
+      items = [];
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(calls, 2, reason: '不刷新会让已提交的消息继续显示为待处理');
+      expect(find.byKey(const ValueKey('pending-messages-bar')), findsNothing);
+    });
+
+    testWidgets('在途时禁用发送入口（防重复提交）', (tester) async {
+      final gate = Completer<FlushResult>();
+      var flushes = 0;
+      useStubs(messages: () => [msg('inbox_1')]);
+      await pumpBar(
+        tester,
+        flush: () {
+          flushes++;
+          return gate.future;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await tester.pump();
+
+      expect(flushes, 1);
+      expect(
+        find.byKey(const ValueKey('pending-flush')),
+        findsNothing,
+        reason: '在途应换成进度圈，避免连点发多次请求',
+      );
+
+      gate.complete(committed());
+      await tester.pump();
+      await tester.pump();
+    });
+
+    testWidgets('提交失败时提示且复位（不永久禁用）', (tester) async {
+      useStubs(messages: () => [msg('inbox_1')]);
+      await pumpBar(
+        tester,
+        flush: () async => throw const NetworkError('连接超时'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('pending-flush')));
+      await settle(tester);
+
+      expect(find.text('立即发送失败：连接超时'), findsOneWidget);
+      expect(find.byKey(const ValueKey('pending-flush')), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 

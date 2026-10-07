@@ -5,8 +5,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
+
+/// 构造一个「提交成功」的 [FlushResult]。
+///
+/// 成功分支必有 `turn_id`——[FlushResult.committed] 以它非空为判据，
+/// 故测试里的「成功」不能省略它，否则会被当成异常响应。
+FlushResult _okFlush() => FlushResult.fromJson({
+  'turn_id': 'turn_1',
+  'flush_strategy': 'latest_only',
+});
 
 /// 包一层 MaterialApp（组件依赖 Theme 与 Directionality）。
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
@@ -156,7 +166,15 @@ void main() {
     testWidgets('点「立即发送」触发注入回调一次', (tester) async {
       var flushed = 0;
       await tester.pumpWidget(
-        _host(MessageComposer(onSubmit: null, onFlush: () async => flushed++)),
+        _host(
+          MessageComposer(
+            onSubmit: null,
+            onFlush: () async {
+              flushed++;
+              return _okFlush();
+            },
+          ),
+        ),
       );
 
       await tester.tap(find.byKey(const ValueKey('composer-flush')));
@@ -168,7 +186,15 @@ void main() {
     testWidgets('输入框为空时「立即发送」仍可用（它推的是已排队的消息）', (tester) async {
       var flushed = 0;
       await tester.pumpWidget(
-        _host(MessageComposer(onSubmit: null, onFlush: () async => flushed++)),
+        _host(
+          MessageComposer(
+            onSubmit: null,
+            onFlush: () async {
+              flushed++;
+              return _okFlush();
+            },
+          ),
+        ),
       );
 
       // 关键区别：与「发送」不同，本入口不以输入框内容为条件。
@@ -192,6 +218,7 @@ void main() {
             onFlush: () async {
               flushed++;
               await gate.future;
+              return _okFlush();
             },
           ),
         ),
@@ -272,6 +299,72 @@ void main() {
       );
     });
 
+    testWidgets('待确认时弹策略选择，选中后按该策略重试（修复前是死锁）', (tester) async {
+      final strategies = <String>[];
+      await tester.pumpWidget(
+        _host(
+          MessageComposer(
+            onSubmit: null,
+            onFlush: () async => FlushResult.fromJson({
+              'status': 'confirmation_required',
+              'options': ['latest_only', 'merge_all', 'new_group'],
+            }),
+            onFlushWithStrategy: (strategy) async {
+              strategies.add(strategy);
+              return _okFlush();
+            },
+          ),
+        ),
+      );
+
+      // ⚠️ 这里**不能**用 `pumpAndSettle`：待确认时本组件仍在「在途」状态
+      // （按钮位置是无限旋转的 `CircularProgressIndicator`），而流程在
+      // `await showDialog(...)` 上等用户决策，动画不会停，`pumpAndSettle`
+      // 会一直等到超时。固定时长推进既确定又覆盖对话框入场动画。
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // 服务端 HTTP 200 + confirmation_required = 什么都没提交，必须弹窗。
+      expect(find.text('有多条待处理消息'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.byKey(const ValueKey('flush-strategy-new_group')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(strategies, ['new_group'], reason: '不把用户选的策略传下去，用户就永远走不到提交成功');
+    });
+
+    testWidgets('待确认但未接线选策略回调 → 报错而非静默（不能假装成功）', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MessageComposer(
+              onSubmit: null,
+              onFlush: () async => FlushResult.fromJson({
+                'status': 'confirmation_required',
+                'options': ['merge_all'],
+              }),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-flush')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('立即发送失败'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      // 按钮复位，用户可以重试。
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const ValueKey('composer-flush')))
+            .onPressed,
+        isNotNull,
+      );
+    });
+
     testWidgets('未接线时不显示「立即发送」入口', (tester) async {
       await tester.pumpWidget(_host(MessageComposer(onSubmit: null)));
 
@@ -284,7 +377,9 @@ void main() {
       // 必须给一个非 null 的 onSubmit：否则输入框本身是 disabled 的，
       // 无法用 enterText 写入草稿。
       await tester.pumpWidget(
-        _host(MessageComposer(onSubmit: (_) {}, onFlush: () async {})),
+        _host(
+          MessageComposer(onSubmit: (_) {}, onFlush: () async => _okFlush()),
+        ),
       );
 
       await tester.enterText(find.byType(TextField), '还没写完的草稿');

@@ -1133,10 +1133,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onCancelTurn: (turnId) => api.cancelTurn(turnId),
       // 「立即发送」：把服务端缓冲区里 pending 的消息立即合并成 turn。
       //
-      // 用带类型的 flush：服务端在「多条 pending 且未指定策略」时返回
-      // **HTTP 200 + confirmation_required**（什么都没提交），返回 void 的
-      // 版本会把这种待确认当成成功（见 `flushMessagesProvider`）。
-      onFlush: () => ref.read(flushMessagesProvider)(widget.groupId),
+      // 返回 FlushResult：服务端在「多条 pending 且未指定策略」时返回
+      // **HTTP 200 + confirmation_required**（什么都没提交），组件层据此弹
+      // 策略选择（选项来自服务端的 `options`，不硬编码）。
+      onFlush: ref.read(flushMessagesProvider(widget.groupId)),
+      onFlushWithStrategy: ref.read(flushWithStrategyProvider(widget.groupId)),
       // 执行中活动指示（turn_activity）：长 turn 的静默期给用户可见进展。
       //
       // 传「流 + 首帧快照」两份：快照是同步初值（避免事件在订阅前已到达时

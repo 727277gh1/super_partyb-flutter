@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+
+import 'flush_strategy_dialog.dart';
 
 /// 消息输入框。
 ///
@@ -54,6 +57,7 @@ class MessageComposer extends StatefulWidget {
     this.autofocus = false,
     this.draft,
     this.onFlush,
+    this.onFlushWithStrategy,
   });
 
   /// 提交回调。参数是去除首尾空白后的文本。
@@ -85,7 +89,23 @@ class MessageComposer extends StatefulWidget {
   /// 它要等一个网络往返，期间按钮必须禁用（防重复点）并向用户反馈结果
   /// （服务端可能返回「多条待确认，请选策略」——那不是成功）。这些都需要
   /// 一个可 await 的返回值，页面自己管理在途状态。
-  final Future<void> Function()? onFlush;
+  ///
+  /// ## 为什么返回 [FlushResult] 而不是 `void`
+  ///
+  /// 服务端在「有**多条** pending 且未指定 `conflict_strategy`」时返回
+  /// **HTTP 200** 加 `confirmation_required`——**什么都没提交**，要求调用方
+  /// 选一个策略后重试。返回 `void` 会把这种「待确认」当成成功，用户点完以为
+  /// 发好了（这正是修复前的功能性死锁）。
+  ///
+  /// 选策略与重试由本组件自己完成（见 [onFlushWithStrategy] 与
+  /// `runFlushFlow`），故调用方只需实现「发一次请求」。
+  final FlushPending? onFlush;
+
+  /// 按用户选定的冲突策略重新提交（[onFlush] 返回待确认时才会用到）。
+  ///
+  /// null = 不提供选策略能力，此时待确认会作为错误上报（用户至少知道
+  /// 「一条都没发出去」）。
+  final FlushWithStrategy? onFlushWithStrategy;
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -182,7 +202,13 @@ class _MessageComposerState extends State<MessageComposer> {
     if (cb == null || _flushing) return;
     setState(() => _flushing = true);
     try {
-      await cb();
+      // 完整流程（含「待确认 → 选策略 → 重试」）在共享函数里，因为
+      // `PendingMessagesBar` 有第二个入口，两者行为必须一致。
+      await runFlushFlow(
+        context,
+        flush: cb,
+        flushWithStrategy: widget.onFlushWithStrategy,
+      );
     } on SpbError catch (e) {
       _showFlushError('立即发送失败：${e.message}');
     } on Object catch (e, st) {

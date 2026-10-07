@@ -1328,7 +1328,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onCancelTurn: (turnId) => api.cancelTurn(turnId),
       // 「立即发送」：把服务端缓冲区里 pending 的消息立即合并成 turn。
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
-      onFlush: () => ref.read(flushMessagesProvider)(widget.groupId),
+      onFlush: ref.read(flushMessagesProvider(widget.groupId)),
+      onFlushWithStrategy: ref.read(flushWithStrategyProvider(widget.groupId)),
       // 执行中活动指示（turn_activity）：长 turn 的静默期给用户可见进展。
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       activities: controller.activities,

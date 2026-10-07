@@ -523,22 +523,40 @@ final previewRoutingProvider = Provider<PreviewRouting>((ref) {
 
 /// 「立即发送」：把服务端缓冲区里 pending 的消息立即合并提交。
 ///
-/// 用带类型的 flush 并处理 `confirmation_required`（服务端用 **HTTP 200**
-/// 返回它，但**什么都没提交**）。详见桌面端同名 provider。
-final flushMessagesProvider = Provider<Future<void> Function(String)>((ref) {
-  return (String groupId) async {
+/// 返回 [FlushResult]：服务端在「有多条 pending 且未指定冲突策略」时返回
+/// **HTTP 200** 加 `confirmation_required`（**什么都没提交**），调用方需要这个
+/// 状态才能继续走「选策略 → 重试」。详见桌面端同名 provider。
+final flushMessagesProvider = Provider.family<FlushPending, String>((
+  ref,
+  groupId,
+) {
+  return () async {
     final userId = await ref.read(currentUserIdProvider.future);
     final result = await ref
         .read(chatApiProvider)
         .flushMessages(userId, groupId: groupId);
-    if (result.needsConfirmation) {
-      throw ValidationError(
-        '有多条待处理消息，需要先选择合并方式（${result.options.join(' / ')}）',
-      );
-    }
-    if (!result.committed) {
+    if (!result.needsConfirmation && !result.committed) {
       throw const ValidationError('没有可立即发送的待处理消息');
     }
+    return result;
+  };
+});
+
+/// 按指定冲突策略提交（`flushMessagesDetailed` 的装配）。
+/// 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+final flushWithStrategyProvider = Provider.family<FlushWithStrategy, String>((
+  ref,
+  groupId,
+) {
+  return (String strategy) async {
+    final userId = await ref.read(currentUserIdProvider.future);
+    return ref
+        .read(chatApiProvider)
+        .flushMessagesDetailed(
+          userId,
+          groupId: groupId,
+          conflictStrategy: strategy,
+        );
   };
 });
 

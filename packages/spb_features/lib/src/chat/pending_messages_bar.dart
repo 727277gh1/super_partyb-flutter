@@ -4,6 +4,8 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'flush_strategy_dialog.dart';
+
 /// 加载某个 group 的待处理收件箱消息。
 ///
 /// 生产实现是 `ChatApi.pendingMessages(userId, groupId: groupId)`。
@@ -42,6 +44,8 @@ class PendingMessagesBar extends StatefulWidget {
     super.key,
     required this.load,
     required this.undo,
+    this.flush,
+    this.flushWithStrategy,
     this.reloadKey = '',
     this.title = '待处理消息',
   });
@@ -51,6 +55,14 @@ class PendingMessagesBar extends StatefulWidget {
 
   /// 撤销一条消息。
   final UndoPendingMessage undo;
+
+  /// 「立即发送」（按服务端默认策略）。
+  ///
+  /// null = 不显示发送入口（未接线时）。
+  final FlushPending? flush;
+
+  /// 按用户选定的冲突策略重新提交（[flush] 返回待确认时才用到）。
+  final FlushWithStrategy? flushWithStrategy;
 
   /// 变化时重新加载。
   ///
@@ -75,6 +87,9 @@ class _PendingMessagesBarState extends State<PendingMessagesBar> {
 
   /// 正在撤销的消息 id（逐条标记，不用全局 busy——撤销一条不该禁用其它条）。
   final _undoing = <String>{};
+
+  /// 「立即发送」是否在途（防重复点）。
+  bool _flushing = false;
 
   @override
   void initState() {
@@ -174,6 +189,34 @@ class _PendingMessagesBarState extends State<PendingMessagesBar> {
       );
   }
 
+  /// 「立即发送」：与 `MessageComposer` 的闪电按钮走**同一条**流程
+  /// （见 `runFlushFlow` 的说明——两者行为必须一致，否则会出现「一个入口
+  /// 能选策略、另一个入口死锁」的形态）。
+  ///
+  /// 成功后重新加载：提交会把消息标为 committed，本栏的列表必须跟着变，
+  /// 否则用户会看到已提交的消息还挂在「待处理」里。
+  Future<void> _flush() async {
+    final cb = widget.flush;
+    if (cb == null || _flushing) return;
+    setState(() => _flushing = true);
+    try {
+      final result = await runFlushFlow(
+        context,
+        flush: cb,
+        flushWithStrategy: widget.flushWithStrategy,
+      );
+      // result == null = 用户取消了策略选择，什么都没提交，不动列表。
+      if (result != null && mounted) await _reload();
+    } on SpbError catch (e) {
+      _showMessage('立即发送失败：${e.message}');
+    } on Object catch (e, st) {
+      SpbLog.warn('立即发送抛非 SpbError 异常', {'error': '$e', 'stack': '$st'});
+      _showMessage('立即发送失败');
+    } finally {
+      if (mounted) setState(() => _flushing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -229,6 +272,30 @@ class _PendingMessagesBarState extends State<PendingMessagesBar> {
                     ?.copyWith(color: scheme.onSecondaryContainer),
               ),
               const Spacer(),
+              // 「立即发送」：把本栏这几条 pending 立即提交。
+              //
+              // ## 为什么放在本栏而不是只靠输入框的闪电按钮
+              //
+              // 本栏展示的正是「将要被提交的那几条」，在这里点发送的意图最
+              // 明确；而且多条 pending 时本栏是用户唯一能看见「要合并什么」的
+              // 地方——策略选择（合并全部 / 在新会话中发送）需要这个上下文。
+              if (widget.flush != null) ...[
+                if (_flushing)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: SpbSpacing.sm),
+                    child: SizedBox(
+                      width: SpbSpacing.lg,
+                      height: SpbSpacing.lg,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else
+                  TextButton(
+                    key: const ValueKey('pending-flush'),
+                    onPressed: _flush,
+                    child: const Text('立即发送'),
+                  ),
+              ],
               // 刷新入口：dispatcher 消费后本栏不会自动感知，给用户一个手动的。
               IconButton(
                 key: const ValueKey('pending-refresh'),
