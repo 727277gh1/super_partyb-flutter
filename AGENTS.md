@@ -228,6 +228,10 @@ Go API 有**四套**前缀，**不是** `/api/chat`：
 | `/users/:user_id/chat/*` | 用户消息流 + **SSE** | `internal/server/chat_stream.go` |
 | `/me/*` | 跨 group 用户级端点：turns / habits / preferences | `internal/server/router.go` |
 
+> ⚠️ `/api/*` 下**并非全部**都有客户端实现：`api-keys` / `variables` /
+> `memories` / `skills` / `router-preferences` 属管理面，客户端**有意不做**，
+> 见 §6.9。
+
 ### 5.3 响应格式
 
 Go API 返回**裸 JSON**（如 `{items: [...]}`），**不是** Python 时代的 `{success, data, error}` 包装。
@@ -405,17 +409,28 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 
 Windows 交叉编译不可行的根因：`my_app.exe` 是 **MSVC 编译的 C++ runner**，Linux 无 MSVC。Flutter 官方 [issue #110585](https://github.com/flutter/flutter/issues/110585) 开放 3 年未实现。详见 §8。
 
-### 6.7 无归属入口：两条路径（quick-capture vs enqueue）
+### 6.7 无归属入口：两端统一走 enqueue
 
-桌面端有两类「没有对话 UI 的入口」，**走不同端点，返回语义不同**：
+无归属入口（没有对话 UI 的入口）**两端只有一条路径**，走 `OverlayQuickCapturePage`：
 
-| | `QuickCapturePage` | `OverlayQuickCapturePage` |
-|---|---|---|
-| 端点 | `POST /me/quick-capture` | `POST /me/quick-capture/enqueue` |
-| 附件 | ❌ | ✅ |
-| 返回 | **同步**返回归属 `group_id`（可导航） | **异步**投递，只有 `{id, provider}` |
-| 落点 | `router_preferences` | 同左（worker 消费后写） |
-| 路由 | `/quick-capture` | `/overlay` |
+| | `OverlayQuickCapturePage` |
+|---|---|
+| 端点 | `POST /me/quick-capture/enqueue`（附件先经 `POST /me/quick-capture/attachments` 上传） |
+| 附件 | ✅ |
+| 返回 | **异步**投递，只有受理结果，**无 `group_id`** |
+| 路由 | `/overlay`（桌面端 `Alt+Space` / 移动端 AppBar） |
+| 落点 | `router_preferences`（worker 消费后写） |
+
+**为什么删掉了同步端点那条路径**：`ChatApi.quickCapture`（同步返回归属
+`group_id`、**无附件**）是 enqueue 的**功能子集**，却单独占一条客户端路由。
+两端都已删除该路由（桌面端 commit `1866b14`；移动端见
+`apps/spb_mobile/lib/router.dart` 中 `SpbRoutes` 的文档与 `providers.dart` 里
+`quickCaptureEnqueueUseCaseProvider` 的说明）。
+
+⚠️ `spb_features` 里仍保留 `QuickCapturePage` 组件（走同步端点、展示服务端
+归属判定结果、由 `onQueued` 交出导航目标），但**当前无生产调用点**，只被自身
+测试覆盖。这是**有意保留**而非遗漏：将来若需要「提交后立即导航」的场景
+（enqueue 拿不到 `groupId`，做不到），再把它接回去。
 
 **附件只能走 enqueue**：附件的「落用户级暂存区 → 建 turn 时搬进 workspace」
 这条链路只存在于 MQ 渠道（`mq-server` 的通用入站口）。
@@ -450,6 +465,36 @@ Flutter → POST /me/quick-capture/enqueue      → PartyB Go API → mq-server 
 降级路径仍在：channel 未注册（如单元测试环境、或将来新增未实现平台）时
 抛 `MissingPluginException`，函数**静默返回空**——不影响文本粘贴。
 原生侧刻意不回 error，避免用户从网页复制文件时看到报错弹窗。
+
+### 6.9 有意不做的管理面端点族（**是决策，不是缺口**）
+
+Go API 还有一批**运营 / 排障面**端点，Flutter 客户端**有意不实现**：
+
+| 端点族 | 内容 |
+|---|---|
+| `/api/api-keys` | 用户自助 API Key 的签发 / 吊销 / scope |
+| `/api/users/:user_id/variables`、`/api/admin/variable-defs` | 用户变量与变量定义 |
+| `/api/memories` | 记忆条目 CRUD（按 API Key scope 读写分级） |
+| `/api/skills` | 技能注册 / 启停（服务端扫描 `SkillsDir`） |
+| `/api/router-preferences` | 决策链分层配置（catalog / editable / bands） |
+| `/me/im-bindings` | IM 绑定（代理 idp） |
+| `/api/admin/llm-providers` | 管理员 LLM 线路 CRUD（含密钥引用） |
+| `/api/admin/runtime-settings` | 管理员运行时配置（Admission / turn 生命周期） |
+
+**为什么不接**：这些不是「聊天」的组成部分，而是**配置与运维**面——签发密钥、
+调 LLM 线路、改准入参数、绑 IM 账号。它们的承载点是 **webapp dashboard**
+（`super_partyb/apps/webapp`），那里有完整表单、校验与确认流。客户端（桌面 /
+移动）是**使用**面：发起对话、看时间线、同步交付物。
+
+**判据**（避免后来者把「有意不做」读成「漏了」）：
+
+- 只影响**服务端配置 / 凭据**，且改错会波及所有用户 → 留在 dashboard；
+- 属于**用户自己的一次对话行为**（发消息、取消 turn、反馈、目标、交付物）→ 客户端做。
+
+**对照**：`/api/agents`、`/api/habits`、`/chat/*`（含 goals / confirmations /
+feedback）、`/me/preferences`、`/users/:user_id/chat/*` 虽是 CRUD，但直接决定
+「我这次的对话怎么跑」，故客户端**已实现**（见 §5.2 前缀表与
+`packages/spb_api/lib/src/*_api.dart`）。
 
 ---
 
