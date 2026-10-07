@@ -1047,6 +1047,54 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     );
   }
 
+  /// 打开目标版本历史底部弹层。
+  ///
+  /// 同 [_openGoalTasks]：用弹层而非新路由，共享同一份 State（`_group` /
+  /// `_settingsBusy`），否则写成功后回写的是另一个 `_ChatPage` 实例。
+  Future<void> _openGoalHistory() async {
+    if (_group == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+          ),
+          child: SizedBox(
+            height: MediaQuery.of(sheetContext).size.height * 0.8,
+            child: GoalHistoryPanel(
+              // 历史列表是独立端点，与 `_group.currentGoal` 快照不同源。
+              load: () => ref.read(goalApiProvider).listGoals(widget.groupId),
+              currentGoalId: _goalId.isEmpty ? null : _goalId,
+              busy: _settingsBusy,
+              // 弹层自带拖拽条，不再重复面板标题。
+              showHeader: false,
+              reloadToken: widget.groupId,
+              // ⚠️ requireGoal: false —— 切回必须允许「当前无目标」：那正是它
+              // 存在的场景（用户清除了目标后，历史面板是唯一恢复入口）。
+              // 若也拦 `_goalId` 为空，就形成「有历史但回不去」的死局。
+              onSwitch: (goalId) => _runGoalWrite(
+                () => ref
+                    .read(goalApiProvider)
+                    .switchGoal(widget.groupId, goalId),
+                requireGoal: false,
+                onChanged: setSheetState,
+              ),
+              onSetStatus: (goalId, status) => _runGoalWrite(
+                () =>
+                    ref.read(goalApiProvider).updateGoalStatus(goalId, status),
+                requireGoal: false,
+                onChanged: setSheetState,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// 执行一个任务写操作（`action` 为 null 时只重拉）。
   ///
   /// 与桌面端 `_runGoalWrite` 同一取舍：写端点响应形状各异（`{task,progress}`
@@ -1054,10 +1102,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// `goal_updated` 事件路径产生两套真相，故统一 write → re-read。
   Future<void> _runGoalWrite(
     Future<void> Function()? action, {
+    bool requireGoal = true,
     StateSetter? onChanged,
   }) async {
     if (_settingsBusy) return;
-    if (_goalId.isEmpty) {
+    if (requireGoal && _goalId.isEmpty) {
       _showSettingsError('当前对话没有目标，无法操作任务');
       return;
     }
@@ -1312,6 +1361,21 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           icon: const Icon(Icons.checklist_outlined),
           tooltip: '任务清单',
           onPressed: _group == null ? null : _openGoalTasks,
+        ),
+        // 目标版本历史入口。
+        //
+        // ## 为什么要与任务清单分开
+        //
+        // 两者维度不同：任务面板操作的是**当前目标的任务**，历史面板操作的
+        // 是**目标本身的版本与状态**（切回 / 完成 / 归档）。合成一个弹层会让
+        // 「当前目标」这个上下文在两层列表间变得含糊。
+        //
+        // 未就绪时**禁用而非隐藏**（与设置/任务按钮同一取舍）。
+        IconButton(
+          key: const ValueKey('open-goal-history'),
+          icon: const Icon(Icons.history),
+          tooltip: '目标历史',
+          onPressed: _group == null ? null : _openGoalHistory,
         ),
       ],
       // 待处理收件箱消息（可撤销）。

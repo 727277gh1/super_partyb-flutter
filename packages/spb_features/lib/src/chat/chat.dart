@@ -13,6 +13,18 @@
 /// （响应形状归一化 + 错误分类），且 `spb_features` 已经依赖 `spb_api`。
 /// 真正的领域规则（如「失败项不写状态」）仍在 `spb_domain`。
 ///
+/// ## 目标（goal）相关的三个面板
+///
+/// 它们是**三个不同维度**，不要合并：
+///
+/// - [GroupSettingsPanel] —— 目标**文本**与群级开关（新建/清除目标文本）；
+/// - [GoalTasksPanel] —— **当前**目标的**任务**（增删改查 + 重排 + 重新展开）；
+/// - [GoalHistoryPanel] —— **目标本身**的**版本与状态**（切回 / 标记完成 / 归档）。
+///
+/// 合并会破坏各自的定位：把版本切换塞进任务面板，会让「当前目标」这个上下文
+/// 在两层列表间变得含糊；把任务增删塞进设置面板，会让实时刷新的任务表与表单
+/// 草稿互相干扰。
+///
 /// ## 设计令牌
 ///
 /// 所有间距/圆角/动效时长一律取 `spb_design` 的 `SpbSpacing` / `SpbRadius` /
@@ -28,6 +40,7 @@ export 'feedback_request_card.dart';
 export 'flush_strategy_dialog.dart';
 export 'follow_up_chips.dart';
 export 'chat_sidebar.dart';
+export 'goal_history_panel.dart';
 export 'goal_tasks_panel.dart';
 export 'group_deliverables_panel.dart';
 export 'group_debug_panel.dart';

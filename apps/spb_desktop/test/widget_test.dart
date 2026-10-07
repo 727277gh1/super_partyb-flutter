@@ -1389,7 +1389,7 @@ void main() {
     });
   });
 
-  group('侧边栏（桌面端接线：交付物 / 待办 / 诊断）', () {
+  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 诊断）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。
     Future<_FakeUfsApi> openChat(
@@ -1480,7 +1480,7 @@ void main() {
       expect(find.text('交付物'), findsNothing);
     });
 
-    testWidgets('展开后三个 tab 齐全（交付物 / 待办 / 诊断）', (tester) async {
+    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 诊断）', (tester) async {
       final sse = _FakeSseClient();
       await openChat(tester, sse);
 
@@ -1489,8 +1489,33 @@ void main() {
 
       expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
       expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
+      // 后两个在 320px 侧边栏里落在可视区外（tab 条横向可滚），但已挂载。
+      expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
       expect(find.byKey(const ValueKey('sidebar-tab-诊断')), findsOneWidget);
     });
+
+    /// 把 tab 条横向滚到露出 [label] 那个 tab，然后点它。
+    ///
+    /// ## 为什么必须滚动
+    ///
+    /// 侧边栏宽 320px，tab 条是**横向可滚的** `ListView`（见 `ChatSidebar`
+    /// 的类文档：自定义行而非 TabBar，因为侧边栏不能嵌 Scaffold）。tab 增多后
+    /// 后面的 tab 会落在可视区外，直接 `tap` 会因命中不到而失败——那是
+    /// **测试驱动方式的问题，不是 UI 缺陷**：真实用户横向滚动一下就能看到。
+    Future<void> tapTab(WidgetTester tester, String label) async {
+      final finder = find.byKey(ValueKey('sidebar-tab-$label'));
+      await tester.scrollUntilVisible(
+        finder,
+        80,
+        scrollable: find.descendant(
+          of: find.byKey(const ValueKey('sidebar-tabbar')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+    }
 
     testWidgets('无待确认项时待办 tab 显示空提示，且不带徽标', (tester) async {
       final sse = _FakeSseClient();
@@ -1510,13 +1535,82 @@ void main() {
 
       await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('sidebar-tab-诊断')));
-      await tester.pumpAndSettle();
+      await tapTab(tester, '诊断');
 
       // 诊断 tab = 工具调用 + gate 决策上下分栏（对齐 webapp 的 debug tab）。
       expect(find.byKey(const ValueKey('debug-panel')), findsOneWidget);
       expect(find.byKey(const ValueKey('toolcalls-empty')), findsOneWidget);
       expect(find.byKey(const ValueKey('gate-empty')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('目标历史 tab 已接线（列出历史目标）', (tester) async {
+      final sse = _FakeSseClient();
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_x'),
+        mockGroups: false,
+        sseClient: sse,
+        ufsApi: _FakeUfsApi(),
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+          // 历史目标列表（`GET /chat/groups/:id/goals`）——独立于 group 快照。
+          adapter.onGet(
+            '/chat/groups/grp_x/goals',
+            (server) => server.reply(200, {
+              'items': [
+                {
+                  'id': 'goal_1',
+                  'group_id': 'grp_x',
+                  'goal_text': '把 CI 修绿',
+                  'status': 'active',
+                  'tasks_source': 'manual',
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'updated_at': '2024-03-05T08:00:00Z',
+                },
+              ],
+            }),
+            queryParameters: {'limit': 50},
+          );
+        },
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      await tapTab(tester, '目标');
+
+      expect(
+        find.text('把 CI 修绿'),
+        findsOneWidget,
+        reason: 'listGoals 已接线（此前全仓零引用）',
+      );
       expect(tester.takeException(), isNull);
     });
 

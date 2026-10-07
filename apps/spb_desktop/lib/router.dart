@@ -934,10 +934,22 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   ///
   /// 与设置写入共享一个 busy 位：两者都会触发 `_group` 替换，并发会让面板在
   /// 中途看到不一致的快照（且都会重写 metadata / 任务表）。粒度过细没有收益。
-  Future<void> _runGoalWrite(Future<void> Function() action) async {
+  ///
+  /// ## [requireGoal]：目标历史面板必须能跳过 `_goalId` 校验
+  ///
+  /// 任务类写操作都以 `_goalId` 为路径参数，无 goal 时路径会拼成空串
+  /// （服务端 404），故默认拦在客户端。
+  ///
+  /// 但**切回历史目标恰恰发生在「当前没有目标」时**：用户先清除了目标
+  /// （`ChatApi.setGroupGoal` 置 archived），`_goalId` 变空，此时历史面板的
+  /// 「切回」是唯一的恢复入口。若也拦，就形成了一个死局——有历史但回不去。
+  /// 故历史面板显式传 `requireGoal: false`。
+  Future<void> _runGoalWrite(
+    Future<void> Function() action, {
+    bool requireGoal = true,
+  }) async {
     if (_settingsBusy) return;
-    // 无 goal 时任务端点的路径参数是空串，服务端会 404。拦截在客户端更早。
-    if (_goalId.isEmpty) {
+    if (requireGoal && _goalId.isEmpty) {
       _showSettingsError('当前对话没有目标，无法操作任务');
       return;
     }
@@ -1357,6 +1369,38 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                                   ),
                             ),
                       ),
+              ),
+              ChatSidebarTab(
+                label: '目标',
+                icon: Icons.history,
+                content: GoalHistoryPanel(
+                  // 历史列表是**独立端点**（`GET /chat/groups/:id/goals`），
+                  // 与 `_group.currentGoal` 快照不同源。故不用 `_group`，
+                  // 由面板自己拉；写完后它也会自己回读（见面板的 `_run`）。
+                  load: () =>
+                      ref.read(goalApiProvider).listGoals(widget.groupId),
+                  currentGoalId: _goalId.isEmpty ? null : _goalId,
+                  busy: _settingsBusy,
+                  // tab 标签已命名「目标」，不重复面板标题。
+                  showHeader: false,
+                  // 切对话时重拉（Flutter 会复用面板 State）。
+                  reloadToken: widget.groupId,
+                  onSwitch: (goalId) => _runGoalWrite(
+                    // 切回必须允许「当前无目标」——那正是它存在的场景。
+                    () => ref
+                        .read(goalApiProvider)
+                        .switchGoal(widget.groupId, goalId),
+                    requireGoal: false,
+                  ),
+                  onSetStatus: (goalId, status) => _runGoalWrite(
+                    // 同上：给一个无当前目标的对话归档旧目标，是清理历史的
+                    // 正常用法。
+                    () => ref
+                        .read(goalApiProvider)
+                        .updateGoalStatus(goalId, status),
+                    requireGoal: false,
+                  ),
+                ),
               ),
               ChatSidebarTab(
                 label: '任务',
