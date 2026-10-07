@@ -50,7 +50,7 @@ typedef PreviewRouting = Future<RoutingPreview?> Function(String input);
 /// | `Enter` | 提交 |
 /// | `Esc` | 取消（关窗，不提交） |
 ///
-/// ## 页面不导航
+/// ## 页面不导航，但**展示**归属判定结果
 ///
 /// 归属判定结果（`queued` 时的 groupId）通过 [onQueued] **交给上层**，本页
 /// 不做路由跳转。理由有二：
@@ -58,6 +58,11 @@ typedef PreviewRouting = Future<RoutingPreview?> Function(String input);
 /// 1. **可测**：页面自身不依赖路由/导航器，widget test 只需断言回调收到什么；
 /// 2. **职责**：悬浮窗是一个独立窗口，导航要发生在主窗口（切到该对话并聚焦），
 ///    这需要跨窗口协调——那是 app 装配层的事，不是本页的事。
+///
+/// 但「交给上层导航」不等于「用户看不到判定结果」：服务端响应里的
+/// `matched_title` / `created_group` 正是本次归属的产出（调用方没给 group_id，
+/// 归属完全由服务端分类链判定），不展示的话用户会不知道消息去了哪。故本页在
+/// 状态行里给一条内联提示，见 [_QuickCapturePageState._queuedNotice]。
 ///
 /// ## 与确认卡（`confirmation_required`）无关
 ///
@@ -183,6 +188,39 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
 
   bool get _canSubmit => !_busy && _controller.text.trim().isNotEmpty;
 
+  /// 把服务端的归属判定结果转成一行提示文案。null = 无可展示的信息。
+  ///
+  /// ## 为什么必须展示它
+  ///
+  /// `POST /me/quick-capture` 的**核心产出**就是「这句话属于哪个对话」——
+  /// 调用方没给 group_id，归属由服务端分类链判定（与 MQ inbound 同一条链，
+  /// 见 AGENTS.md §5.5）。此前这两个字段只被用来拼导航目标，用户看不到
+  /// 「判到了哪」或「是不是新建了对话」——静默切组时用户会找不到自己的消息。
+  ///
+  /// ## 文案对齐 webapp
+  ///
+  /// webapp 的对应提示是 `ChatPage.groupSwitchNotice.switched`（「消息已发送到
+  /// 更匹配的对话：{title}」）与 `.created`（「已开启新对话并发送消息」）。
+  /// 本处是同一信息的**更短**版本：悬浮窗只有一行状态区（见 [_buildStatusLine]），
+  /// 长文案会被 ellipsis 截掉后半句。
+  ///
+  /// ## 两个字段都可能缺失
+  ///
+  /// - `matched_title` 是服务端 `omitempty` 字段，只在切到**别的既有**对话时
+  ///   填充（见 Go `pipeline_classify.go` 的 `target.MatchedTitle = chosen.Title`）；
+  /// - `created_group` 为 true 表示服务端**新建**了对话。
+  ///
+  /// 两者皆无（落到既有对话且服务端没回标题）时返回 null——渲染一个只有图标
+  /// 没有信息的空壳会让用户以为出了错。此时状态行回到快捷键说明。
+  static String? _queuedNotice(QuickCaptureQueued outcome) {
+    final title = outcome.matchedTitle;
+    final parts = <String>[
+      if (title != null && title.isNotEmpty) '已归入「$title」',
+      if (outcome.createdGroup) '已新建对话',
+    ];
+    return parts.isEmpty ? null : parts.join('，');
+  }
+
   Future<void> _handleSubmit() async {
     if (!_canSubmit) return;
     final text = _controller.text.trim();
@@ -198,11 +236,15 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
 
       switch (outcome) {
         case QuickCaptureQueued():
-          // 成功：清空输入并交出导航目标。
+          // 成功：清空输入、交出导航目标，并在状态行留下归属判定结果。
+          //
+          // 提示用内联文案而非 SnackBar：本窗口只有 132px 高，SnackBar 会盖住
+          // 输入框（与 [_hint] 的既有说明同一理由）。
           _controller.clear();
+          final notice = _queuedNotice(outcome);
           setState(() {
             _busy = false;
-            _hint = null;
+            _hint = notice == null ? null : Hint(notice, HintKind.info);
           });
           widget.onQueued?.call(outcome);
 

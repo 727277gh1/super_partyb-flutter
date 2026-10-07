@@ -32,9 +32,14 @@ class _FakeUseCase {
   }
 
   /// 构造一个 queued 结果。
+  ///
+  /// [matchedTitle] / [createdGroup] 是服务端的**归属判定产出**（调用方没给
+  /// group_id，归属完全由服务端分类链决定），页面据此展示「这条消息去了哪」。
   static QuickCaptureQueued queued({
     String groupId = 'grp_1',
     String turnId = 'turn_1',
+    String? matchedTitle,
+    bool createdGroup = false,
   }) => QuickCaptureQueued(
     groupId: groupId,
     turnId: turnId,
@@ -42,6 +47,8 @@ class _FakeUseCase {
       turnId: turnId,
       groupId: groupId,
       status: 'queued',
+      matchedTitle: matchedTitle,
+      createdGroup: createdGroup,
     ),
   );
 
@@ -200,6 +207,87 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(useCase.calls, hasLength(1));
+    });
+  });
+
+  group('QuickCapturePage queued：展示服务端归属判定结果', () {
+    /// 提交一句话并等页面稳定。
+    Future<void> submit(WidgetTester tester, String text) async {
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('matched_title 非空 → 展示「已归入「<title>」」', (tester) async {
+      // ## 这个用例防的是什么
+      //
+      // `matched_title` 是服务端「静默切组」时唯一的解释来源：调用方没指定
+      // 归属，服务端把消息判给了**另一个**既有对话。不展示的话用户在原对话
+      // 里等回答，永远等不到，也找不到消息去哪了（webapp 为此专门弹 toast）。
+      final useCase = _FakeUseCase(_FakeUseCase.queued(matchedTitle: '日志排查'));
+      await tester.pumpWidget(_host(QuickCapturePage(submit: useCase.submit)));
+
+      await submit(tester, '帮我看看这个报错');
+
+      expect(find.text('已归入「日志排查」'), findsOneWidget);
+    });
+
+    testWidgets('created_group=true → 展示「已新建对话」', (tester) async {
+      final useCase = _FakeUseCase(_FakeUseCase.queued(createdGroup: true));
+      await tester.pumpWidget(_host(QuickCapturePage(submit: useCase.submit)));
+
+      await submit(tester, '一个全新话题');
+
+      expect(find.text('已新建对话'), findsOneWidget);
+    });
+
+    testWidgets('两者皆有 → 合并成一行展示（状态行只有一行）', (tester) async {
+      // 悬浮窗高 132px，状态行只有一行（见 _buildStatusLine）：两条信息必须
+      // 合并，否则后者会把前者挤出可视区。
+      final useCase = _FakeUseCase(
+        _FakeUseCase.queued(matchedTitle: '日志排查', createdGroup: true),
+      );
+      await tester.pumpWidget(_host(QuickCapturePage(submit: useCase.submit)));
+
+      await submit(tester, 'x');
+
+      expect(find.text('已归入「日志排查」，已新建对话'), findsOneWidget);
+    });
+
+    testWidgets('两者皆无 → 不渲染空壳提示（回到快捷键说明）', (tester) async {
+      // 落到既有对话、且服务端没回标题时两个字段都是空的。此时渲染一条只有
+      // 图标没有信息的提示会让用户以为出了错。
+      final useCase = _FakeUseCase(_FakeUseCase.queued());
+      await tester.pumpWidget(_host(QuickCapturePage(submit: useCase.submit)));
+
+      await submit(tester, 'x');
+
+      expect(find.text('已归入「」'), findsNothing);
+      expect(find.text('已新建对话'), findsNothing);
+      expect(
+        find.text('Enter 提交 · Esc 取消'),
+        findsOneWidget,
+        reason: '无可展示信息时状态行应回到快捷键说明，而不是留一个空壳',
+      );
+    });
+
+    testWidgets('展示归属提示不影响交出导航目标', (tester) async {
+      // 展示与导航是两件事：页面既要让用户看到判定结果，也要把 groupId 交给
+      // 上层去导航（回归保护，防止改动时把 onQueued 一并去掉）。
+      final useCase = _FakeUseCase(
+        _FakeUseCase.queued(groupId: 'grp_detected', matchedTitle: '日志排查'),
+      );
+      final queued = <QuickCaptureQueued>[];
+      await tester.pumpWidget(
+        _host(QuickCapturePage(submit: useCase.submit, onQueued: queued.add)),
+      );
+
+      await submit(tester, 'x');
+
+      expect(queued, hasLength(1));
+      expect(queued.single.groupId, 'grp_detected');
+      expect(find.text('已归入「日志排查」'), findsOneWidget);
     });
   });
 
