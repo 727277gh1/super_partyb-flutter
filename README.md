@@ -56,7 +56,6 @@ cd apps/spb_mobile  && flutter build apk --release
 flutter build linux --release \
   --dart-define=SPB_API_BASE_URL=https://api.example.com/pba \
   --dart-define=SPB_UFS_BASE_URL=https://api.example.com/ufs \
-  --dart-define=SPB_WEBAPP_BASE_URL=https://example.com/pbw \
   --dart-define=SPB_OIDC_ISSUER=https://example.com/idp \
   --dart-define=SPB_OIDC_CLIENT_ID=client_xxxxxxxx \
   --dart-define=SPB_ENV=prod

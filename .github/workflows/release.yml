@@ -52,10 +52,6 @@ on:
         description: 'UFS 文件服务基地址（如 https://api.example.com/ufs）'
         required: false
         type: string
-      webapp_base_url:
-        description: 'webapp 基地址（「用浏览器打开」跳转用）'
-        required: false
-        type: string
       oidc_issuer:
         description: 'OIDC issuer（IdP 基地址，含 basePath）'
         required: false
@@ -91,7 +87,6 @@ jobs:
     outputs:
       api: ${{ steps.defines.outputs.api }}
       ufs: ${{ steps.defines.outputs.ufs }}
-      web: ${{ steps.defines.outputs.web }}
       iss: ${{ steps.defines.outputs.iss }}
       cid: ${{ steps.defines.outputs.cid }}
     steps:
@@ -103,12 +98,10 @@ jobs:
         env:
           IN_API: ${{ inputs.api_base_url }}
           IN_UFS: ${{ inputs.ufs_base_url }}
-          IN_WEB: ${{ inputs.webapp_base_url }}
           IN_ISS: ${{ inputs.oidc_issuer }}
           IN_CID: ${{ inputs.oidc_client_id }}
           VAR_API: ${{ vars.SPB_API_BASE_URL }}
           VAR_UFS: ${{ vars.SPB_UFS_BASE_URL }}
-          VAR_WEB: ${{ vars.SPB_WEBAPP_BASE_URL }}
           VAR_ISS: ${{ vars.SPB_OIDC_ISSUER }}
           VAR_CID: ${{ vars.SPB_OIDC_CLIENT_ID }}
         run: |
@@ -117,7 +110,6 @@ jobs:
 
           api=$(pick "$IN_API" "$VAR_API")
           ufs=$(pick "$IN_UFS" "$VAR_UFS")
-          web=$(pick "$IN_WEB" "$VAR_WEB")
           iss=$(pick "$IN_ISS" "$VAR_ISS")
           cid=$(pick "$IN_CID" "$VAR_CID")
 
@@ -126,7 +118,6 @@ jobs:
           write_out() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')" >> "$GITHUB_OUTPUT"; }
           write_out api "$api"
           write_out ufs "$ufs"
-          write_out web "$web"
           write_out iss "$iss"
           write_out cid "$cid"
 
@@ -134,7 +125,6 @@ jobs:
           # 日志会长期留档。
           echo "API  base   : $([ -n "$api" ] && echo set || echo 'unset (默认 127.0.0.1:8000)')"
           echo "UFS  base   : $([ -n "$ufs" ] && echo set || echo 'unset (默认 127.0.0.1:9000/ufs)')"
-          echo "webapp base : $([ -n "$web" ] && echo set || echo 'unset (默认 127.0.0.1:3030/pbw)')"
           echo "OIDC issuer : $([ -n "$iss" ] && echo set || echo unset)"
           echo "OIDC cid    : $([ -n "$cid" ] && echo set || echo 'unset (登录不可用，其余功能正常)')"
 
@@ -154,8 +144,8 @@ jobs:
       - run: flutter pub get
 
       # 只把**非空**的 define 传给 flutter：空串会覆盖掉 SpbEnv 里的
-      # defaultValue，让「没配」变成「配成了空」——例如 webappBaseUrl 会从
-      # http://127.0.0.1:3030/pbw 变成 ''，点「用浏览器打开」就打开空白页。
+      # defaultValue，让「没配」变成「配成了空」——例如 apiBaseUrl 会从
+      # http://127.0.0.1:8000 变成 ''，所有请求都打到空地址。
       - name: Build Windows release
         shell: pwsh
         working-directory: apps/spb_desktop
@@ -164,14 +154,12 @@ jobs:
         env:
           DEF_API: ${{ needs.config.outputs.api }}
           DEF_UFS: ${{ needs.config.outputs.ufs }}
-          DEF_WEB: ${{ needs.config.outputs.web }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
         run: |
           $defines = @()
           if ($env:DEF_API) { $defines += "--dart-define=SPB_API_BASE_URL=$env:DEF_API" }
           if ($env:DEF_UFS) { $defines += "--dart-define=SPB_UFS_BASE_URL=$env:DEF_UFS" }
-          if ($env:DEF_WEB) { $defines += "--dart-define=SPB_WEBAPP_BASE_URL=$env:DEF_WEB" }
           if ($env:DEF_ISS) { $defines += "--dart-define=SPB_OIDC_ISSUER=$env:DEF_ISS" }
           if ($env:DEF_CID) { $defines += "--dart-define=SPB_OIDC_CLIENT_ID=$env:DEF_CID" }
           $defines += '--dart-define=SPB_ENV=prod'
@@ -257,7 +245,6 @@ jobs:
         env:
           DEF_API: ${{ needs.config.outputs.api }}
           DEF_UFS: ${{ needs.config.outputs.ufs }}
-          DEF_WEB: ${{ needs.config.outputs.web }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
         run: |
@@ -267,7 +254,6 @@ jobs:
           args=()
           [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
           [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
-          [ -n "$DEF_WEB" ] && args+=("--dart-define=SPB_WEBAPP_BASE_URL=$DEF_WEB")
           [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
           [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
           args+=("--dart-define=SPB_ENV=prod")
@@ -363,7 +349,6 @@ jobs:
         env:
           DEF_API: ${{ needs.config.outputs.api }}
           DEF_UFS: ${{ needs.config.outputs.ufs }}
-          DEF_WEB: ${{ needs.config.outputs.web }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
         run: |
@@ -372,7 +357,6 @@ jobs:
           args=()
           [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
           [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
-          [ -n "$DEF_WEB" ] && args+=("--dart-define=SPB_WEBAPP_BASE_URL=$DEF_WEB")
           [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
           [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
           args+=("--dart-define=SPB_ENV=prod")
@@ -449,7 +433,6 @@ jobs:
         env:
           DEF_API: ${{ needs.config.outputs.api }}
           DEF_UFS: ${{ needs.config.outputs.ufs }}
-          DEF_WEB: ${{ needs.config.outputs.web }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
         run: |
@@ -458,7 +441,6 @@ jobs:
           args=()
           [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
           [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
-          [ -n "$DEF_WEB" ] && args+=("--dart-define=SPB_WEBAPP_BASE_URL=$DEF_WEB")
           [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
           [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
           args+=("--dart-define=SPB_ENV=prod")

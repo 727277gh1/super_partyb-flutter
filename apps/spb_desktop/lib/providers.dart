@@ -885,22 +885,18 @@ final pickDirectoryProvider = Provider<PickSyncDirectory>((ref) {
   return ({String? title}) => caps.pickDirectory(title: title);
 });
 
-/// 同步过滤配置（媒体开关 / 单文件上限）。
-///
-/// 默认值对齐 Tauri 端：媒体**关**（生产媒体占体积 94.5%）、上限 10 MB。
-/// 表单编辑在设置页任务里补；这里先把持久化读取接通，使「同步」真正可用。
-final syncFilterConfigProvider = FutureProvider<SyncFilterConfig>((ref) async {
-  final prefs = ref.watch(preferencesStoreProvider);
-  return SyncFilterConfig(
-    includeMedia: await prefs.getBool(includeMediaPrefKey, defaultValue: false),
-    maxFileSize: await prefs.getInt(
-      maxFileSizePrefKey,
-      defaultValue: defaultMaxFileSize,
-    ),
-  );
-});
-
 /// 偏好键：是否同步媒体。
+///
+/// ## 为什么没有对应的「过滤配置」provider
+///
+/// 本文件曾有一个「同步过滤配置」provider（读本键 + [maxFileSizePrefKey]
+/// 拼成 `SyncFilterConfig`），但它**没有任何 watch 点**——只有
+/// `saveSyncSettingsProvider` 里一句 `ref.invalidate`，而 invalidate 一个无人
+/// 订阅的 provider 是空操作。真正同步走 [_runSync]，它直接读
+/// `loadSyncSettingsProvider` 的 `settings.filter`。
+///
+/// 过滤配置的真源就是 **`SyncSettings.filter`**（经 `saveSyncSettingsProvider`
+/// 落盘到下面这两个键）。
 const String includeMediaPrefKey = 'sync.include_media';
 
 /// 偏好键：单文件体积上限（字节）。
@@ -1218,8 +1214,11 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
     }
 
     // 让同步相关 provider 重新读取（设置已变）。
+    //
+    // 只 invalidate 目录：过滤配置没有独立 provider，它的真源是
+    // `SyncSettings.filter`（[loadSyncSettingsProvider] 每次现读），故无需
+    // 在此额外通知。
     ref.invalidate(syncLocalRootProvider);
-    ref.invalidate(syncFilterConfigProvider);
   };
 });
 

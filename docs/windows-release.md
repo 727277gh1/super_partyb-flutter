@@ -94,7 +94,6 @@ Actions → `release` → **Run workflow**，可填：
 |---|---|---|
 | `api_base_url` | PartyB Go API 基地址（含网关前缀 `/pba`） | 取仓库 Variable，再回落本地默认 |
 | `ufs_base_url` | UFS 文件服务基地址 | 同上 |
-| `webapp_base_url` | webapp 基地址（「用浏览器打开」用） | 同上 |
 | `oidc_issuer` | OIDC issuer（IdP 基地址，含 basePath） | 同上 |
 | `oidc_client_id` | OIDC client_id | 同上 |
 
@@ -112,7 +111,6 @@ Settings → Secrets and variables → Actions → **Variables** 标签页，按
 |---|---|
 | `SPB_API_BASE_URL` | `https://api.example.com/pba` |
 | `SPB_UFS_BASE_URL` | `https://api.example.com/ufs` |
-| `SPB_WEBAPP_BASE_URL` | `https://example.com/pbw` |
 | `SPB_OIDC_ISSUER` | `https://example.com/idp` |
 | `SPB_OIDC_CLIENT_ID` | `client_xxxxxxxx` |
 

@@ -24,12 +24,6 @@ class SpbEnv {
     defaultValue: 'http://127.0.0.1:8000',
   );
 
-  /// 网关上的 webapp 基地址，用于「用浏览器打开」类跳转。
-  static const String webappBaseUrl = String.fromEnvironment(
-    'SPB_WEBAPP_BASE_URL',
-    defaultValue: 'http://127.0.0.1:3030/pbw',
-  );
-
   /// UFS 文件服务基地址（交付物同步用）。
   ///
   /// 与 [apiBaseUrl] 分开：UFS 有独立的服务端，网关前缀也不同（`/ufs`）。

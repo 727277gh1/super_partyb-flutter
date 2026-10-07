@@ -802,6 +802,16 @@ final pickDirectoryProvider = Provider<PickSyncDirectory>((ref) {
 });
 
 /// 偏好键（与桌面端保持一致，便于将来跨端迁移偏好）。
+///
+/// ## 为什么没有对应的「过滤配置」provider
+///
+/// 本文件曾有一个「同步过滤配置」provider（读这两个键拼成
+/// `SyncFilterConfig`），但它**没有任何 watch 点**——只有
+/// `saveSyncSettingsProvider` 里一句 `ref.invalidate`，而 invalidate 一个无人
+/// 订阅的 provider 是空操作。真正同步走 [runSyncActionProvider]，它直接读
+/// `loadSyncSettingsProvider` 的 `settings.filter`。
+///
+/// 过滤配置的真源就是 **`SyncSettings.filter`**。
 const String includeMediaPrefKey = 'sync.include_media';
 const String maxFileSizePrefKey = 'sync.max_file_size';
 
@@ -810,18 +820,6 @@ const String scopePrefKey = 'sync.scope';
 
 /// 偏好键：拉取范围（天）。缺省 = 不限历史。
 const String sinceDaysPrefKey = 'sync.since_days';
-
-/// 同步过滤配置。
-final syncFilterConfigProvider = FutureProvider<SyncFilterConfig>((ref) async {
-  final prefs = ref.watch(preferencesStoreProvider);
-  return SyncFilterConfig(
-    includeMedia: await prefs.getBool(includeMediaPrefKey, defaultValue: false),
-    maxFileSize: await prefs.getInt(
-      maxFileSizePrefKey,
-      defaultValue: defaultMaxFileSize,
-    ),
-  );
-});
 
 /// 触发一轮同步。
 final runSyncActionProvider = Provider<RunSyncAction>((ref) {
@@ -1024,7 +1022,13 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
       await prefs.setInt(sinceDaysPrefKey, value: days);
     }
 
-    ref.invalidate(syncFilterConfigProvider);
+    // 无需 invalidate：过滤/范围/天数的真源是 `SyncSettings`，而
+    // `loadSyncSettingsProvider` 是个普通 `Provider`（不是 FutureProvider），
+    // 每次调用都现读偏好表。
+    //
+    // 尤其**不要** invalidate `syncLocalRootProvider`：移动端目录由系统分配
+    // （`getApplicationSupportDirectory`），本方法从不写目录，invalidate 它
+    // 只会白跑一次 IO。
   };
 });
 
