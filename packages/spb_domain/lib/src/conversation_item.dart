@@ -136,6 +136,47 @@ final class ErrorItem extends ConversationItem {
   final bool isRecoverable;
 }
 
+/// 会话绑定失效诊断（`pigo_session_missing`）。
+///
+/// ## 它为什么必须渲染（而不是当噪声丢掉）
+///
+/// Go 侧 `chatexec/pigo_session_file.go` 在执行**前**校验 binding 携入的
+/// `session_id` 是否有对应会话文件；幽灵 id 时清空它并让 pigo 自产新会话，
+/// 同时发本事件。这不是「又一条内部日志」——它解释了用户会直接感知到的现象：
+/// **同一个对话里 agent 突然不记得前面聊过什么**。
+///
+/// 若不渲染，用户只能看到「上下文莫名丢失」，没有任何可归因的线索；而这条
+/// 事件恰恰是唯一说明「服务端已检测到并主动重建了会话」的凭据。
+///
+/// ## ⚠️ 它是诊断事件，默认**不广播**、但**会落库**
+///
+/// `Diagnostic: true` 使它受 `runtime.diagnostics_*` 三个开关控制（见 Go
+/// `chat/turn_worker.go` 的 `emit`）：默认 `persist=true` / `broadcast=false`。
+/// 故它主要在**拉 timeline 历史**时出现，实时 SSE 流里通常看不到。本项的
+/// 渲染价值集中在「翻历史时能解释那段上下文为什么断了」。
+///
+/// 身份键用 [id]（= `ChatEvent.eventId`）：本事件是落库事件，有有效 eventId，
+/// 且同一次执行只会产出一条，按事件粒度去重即可（与 [HabitAutoRunItem] 同取向）。
+final class DiagnosticNoticeItem extends ConversationItem {
+  const DiagnosticNoticeItem({
+    required super.id,
+    required super.createdAt,
+    required this.content,
+    super.turnId,
+    this.sessionId,
+  });
+
+  /// 服务端给出的可读说明（`payload.content`）。
+  ///
+  /// Go 侧原文是「检测到失效的会话绑定（历史会话文件未落盘），本次将新建会话
+  /// 继续」。**原样透传而非客户端另写一句**：服务端最清楚本次降级的具体情形，
+  /// 重写会把「为什么」替换成一句泛泛的「会话已重建」。
+  final String content;
+
+  /// 失效的会话 id（`payload.session_id`），供排障对日志。
+  final String? sessionId;
+}
+
 /// 归属判定提示（`routing_selected`）。
 final class RoutingNoticeItem extends ConversationItem {
   const RoutingNoticeItem({
@@ -318,6 +359,97 @@ final class GoalProgressItem extends ConversationItem {
   /// 解析后的 spec 文档；服务端产出损坏（解析返回 null 的情形）时为 null，
   /// UI 据此跳过渲染。
   final SpecUiDocument? spec;
+}
+
+/// 目标自动推进停止（`goal_gate_stopped`）。
+///
+/// ## 为什么它必须渲染
+///
+/// 这是 Goal Gate **终止**的唯一用户可见信号：目标达成、达到自动轮次上限、
+/// 任务受阻/出错——任何一种都意味着「agent 不会再自己往下跑了」。若不渲染，
+/// 用户看到的是「它突然不动了」，只能靠猜。
+///
+/// 与 [GoalProgressItem] 的分工：进度卡回答「跑到哪了」（每轮一条），本项回答
+/// 「为什么停」。两者是同一 turn 上的不同事件，各自成项、互不替换。
+///
+/// ## 与 `goal_gate_decision` 的关键区别：本事件**不保证**带 spec
+///
+/// `goal_gate_decision` 走 `buildTaskSpec` 编译出 JsonUiSchema，故能用
+/// [GoalProgressItem] 渲染成卡片。而 `goal_gate_stopped` 的 payload 只有
+/// `reason` / `auto_turn_count` / `max_auto_turns` / `detail` 这类扁平字段
+/// （见 Go `chatgate/goal_gate.go` 的三处 emit），**没有** `spec_schema`。
+/// 故文案必须由客户端按 [reason] 映射（服务端 payload 无通用 `content` 字段，
+/// 照抄 miniapp `timeline/normalize.ts` 的 `goalGateStoppedContent`）。
+///
+/// ## 幂等
+///
+/// 事件是落库的（非 Transient，`emitEvent` 走持久化 emit），有有效 eventId。
+/// 同一次判定只会产出一条，按事件 id 去重即可。
+final class GoalGateStoppedItem extends ConversationItem {
+  const GoalGateStoppedItem({
+    required super.id,
+    required super.createdAt,
+    required this.reason,
+    super.turnId,
+    this.detail,
+    this.autoTurnCount,
+    this.maxAutoTurns,
+  });
+
+  /// 停止原因（`payload.reason`）。
+  ///
+  /// 值域与 Go `chatgate/goal_gate.go` 的三处 emit 对齐：
+  /// `goal_completed`（:435 目标达成）、`max_auto_turns_reached`
+  /// （:549 熔断暂停）、以及 :416 的 `stopReason`（`no_tasks` /
+  /// `task_blocked` / `task_error_stopped`）。
+  ///
+  /// **保持 String 而非 enum**：服务端可能新增原因，归入 [unknown] 枚举会让
+  /// 新原因静默走 default（表现为「停止原因不显示」），而本项的价值恰在文案。
+  final String reason;
+
+  /// 判定详情（`payload.detail`，只有 :416 的停止态分支带）。
+  final String? detail;
+
+  /// 已自动推进的轮次（`payload.auto_turn_count`）。
+  final int? autoTurnCount;
+
+  /// 熔断上限（`payload.max_auto_turns`）。
+  final int? maxAutoTurns;
+
+  /// 用户可读文案。
+  ///
+  /// 映射规则与 miniapp `goalGateStoppedContent()` 逐条一致——两端对同一份
+  /// payload 必须给出同一句话，否则「同一个目标达成」在手机上和在桌面上
+  /// 显示不同结论，排障时会互相矛盾。
+  ///
+  /// 兜底文案（未识别 reason）**不吞掉原因本身**：保留「自动推进已停止」
+  /// 作为结论，让用户至少知道当前状态，而不是什么都不显示。
+  String get message {
+    switch (reason) {
+      case 'goal_completed':
+        return '目标已实现，自动推进已停用';
+      case 'max_auto_turns_reached':
+        return '已达自动推进轮次上限，发送新消息后可继续';
+      case 'no_tasks':
+        return '目标尚无任务列表，请先拆解任务后再启用自动推进';
+      case 'task_blocked':
+        return '存在受阻任务，自动推进已暂停，需人工介入';
+      case 'task_error_stopped':
+        return '存在出错停止的任务，自动推进已暂停，需人工介入';
+      default:
+        return '自动推进已停止';
+    }
+  }
+
+  /// 轮次进度文案（`已自动推进 3/10 轮`）；两个计数都缺时返回 null。
+  String? get turnCountLabel {
+    final count = autoTurnCount;
+    final max = maxAutoTurns;
+    if (count == null && max == null) return null;
+    if (count == null) return '上限 $max 轮';
+    if (max == null) return '已自动推进 $count 轮';
+    return '已自动推进 $count/$max 轮';
+  }
 }
 
 /// 习惯候选建议卡（`habit_suggestion_created` / `habit_suggestion_resolved`）。

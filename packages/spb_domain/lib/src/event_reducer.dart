@@ -557,16 +557,67 @@ class EventReducer {
             ),
           );
 
+        case EventTypes.goalGateStopped:
+          // Goal Gate 终止（目标达成 / 达到自动轮次上限 / 任务受阻或出错）。
+          //
+          // 之前该事件落到 `default:` 分支被静默丢弃，尽管
+          // `EventTypes.timelineVisible` 早已收录它（见 event_types.dart 的集合）
+          // ——即「集合说它可见、实现却把它丢了」。后果是用户看到 agent 不再
+          // 自动续跑却没有任何解释。
+          //
+          // payload 无通用 `content` 字段，文案由 [GoalGateStoppedItem.message]
+          // 按 reason 映射（与 miniapp `goalGateStoppedContent()` 逐条一致）。
+          // reason 缺失（异常载荷）时仍**照常产出**：兜底文案「自动推进已停止」
+          // 仍传达结论，比整条事件消失好得多（与 [HabitAutoRunItem] 同取向）。
+          items.add(
+            GoalGateStoppedItem(
+              id: ev.eventId,
+              createdAt: ev.createdAt,
+              turnId: ev.turnId,
+              reason: ev.payload?['reason']?.toString() ?? '',
+              detail: _nonEmptyString(ev.payload?['detail']),
+              autoTurnCount: _intOrNull(ev.payload?['auto_turn_count']),
+              maxAutoTurns: _intOrNull(ev.payload?['max_auto_turns']),
+            ),
+          );
+
+        case EventTypes.pigoSessionMissing:
+          // 会话绑定失效（幽灵 session_id）：服务端已清空绑定、本轮新建会话。
+          //
+          // 这是**诊断事件**（Go 侧 `Diagnostic: true`），默认只落库不广播，
+          // 故主要在拉 timeline 历史时到达——但它的价值恰恰在历史里：用户
+          // 回头看会发现「这里开始 agent 不记得上下文了」，本条是唯一解释。
+          //
+          // content 为空时仍产出：正文缺失说明载荷异常，但「会话绑定失效」
+          // 这个结论本身仍值得展示（用兜底文案，不编造 session_id）。
+          items.add(
+            DiagnosticNoticeItem(
+              id: ev.eventId,
+              createdAt: ev.createdAt,
+              turnId: ev.turnId,
+              content:
+                  _nonEmptyString(ev.payload?['content']) ??
+                  '检测到失效的会话绑定，本次将新建会话继续',
+              sessionId: _nonEmptyString(ev.payload?['session_id']),
+            ),
+          );
+
         default:
-          // heartbeat / queue_state / gate_evaluated / gate_completed /
-          // gate_error / tts_* / goal_gate_stopped / schedule_created 等控制事件
-          // 不进入对话列表，也不进 gate 决策通道。
+          // heartbeat / gate_evaluated / gate_completed / gate_error / tts_* /
+          // schedule_created 等控制事件不进入对话列表，也不进 gate 决策通道。
           //
           // ⚠️ `adaptive_decision` / `goal_gate_decision` **不在**本分支的
           // 「丢弃」之列：它们已在循环顶部经 `gateDecisionFrom(ev)` 收进 gate
           // 决策通道（见 ReductionResult.gateDecisions）。这正是修复前的缺口——
           // 常量已在 EventTypes 声明，但归约器把这两类连同上面的噪声事件一起
           // 静默丢弃了。
+          //
+          // ⚠️ `goal_gate_stopped` 与 `pigo_session_missing` **也不再**在本
+          // 分支的「丢弃」之列（此前它们确实落在这里）：前者是 Goal Gate 终止的
+          // 唯一可见信号，后者解释了「上下文为何莫名丢失」。两者都在上方有显式
+          // case——`EventTypes.timelineVisible` 早已收录 goal_gate_stopped，
+          // 而实现漏了分支，这正是「集合与实现单侧漂移」的形态（由
+          // `event_types_consistency_test.dart` 守卫）。
           //
           // ⚠️ 该分支也**不**包含 `agent.file.*`（已在上方 case 处理）。
           // 在 agent 文件卡接入前，本分支曾吞掉 2927 条 agent 产物事件——
@@ -853,6 +904,21 @@ class EventReducer {
     if (v is! List) return const [];
     return v.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
   }
+
+  /// 取非空字符串，空串/空白串/非字符串均归 null。
+  ///
+  /// 服务端用 `omitempty` 与空串两种方式表达「没有」，故不能只判 null——
+  /// 把空串当「有值」会让 UI 渲染出空白行（如 `detail: ""`）。
+  static String? _nonEmptyString(Object? v) {
+    if (v is! String) return null;
+    final t = v.trim();
+    return t.isEmpty ? null : t;
+  }
+
+  /// 取整数，非 num / 非有限值归 null。
+  ///
+  /// JSON 解码可能给出 `double`（如 `3.0`），故不能直接 `as int?`。
+  static int? _intOrNull(Object? v) => v is num ? v.toInt() : null;
 
   /// TTS 语音产物路径前缀（复用 `deliverable_sync.ttsRelPrefix` 的同一约定）。
   //

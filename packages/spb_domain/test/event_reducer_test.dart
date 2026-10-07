@@ -2026,4 +2026,189 @@ void main() {
       expect(labels, containsAll(['daily review', 'weekly report']));
     });
   });
+
+  /// 目标自动推进停止（`goal_gate_stopped`）——Goal Gate 终止的唯一可见信号。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// `EventTypes.timelineVisible` **早已**收录 `goalGateStopped`，但归约器没有
+  /// 对应 case，事件落到 `default:` 被静默丢弃——即「集合说它可见、实现却把它
+  /// 丢了」。用户看到 agent 不再自动续跑却没有任何解释。
+  ///
+  /// 文案映射必须与 miniapp `goalGateStoppedContent()` 逐条一致，否则同一个
+  /// 停止原因在手机与桌面上显示不同结论。
+  group('goal_gate_stopped → GoalGateStoppedItem', () {
+    test('产出停止项（不再被 default 分支丢弃）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.goalGateStopped,
+          payload: {'reason': 'goal_completed', 'auto_turn_count': 3},
+        ),
+      ]);
+
+      expect(r.items, isNotEmpty, reason: '事件必须产出可见反馈');
+      final item = r.items.single;
+      expect(item, isA<GoalGateStoppedItem>());
+      final s = item as GoalGateStoppedItem;
+      expect(s.reason, 'goal_completed');
+      expect(s.message, '目标已实现，自动推进已停用');
+      expect(s.turnCountLabel, '已自动推进 3 轮');
+    });
+
+    test('五种 reason 的文案与 miniapp 逐条一致', () {
+      // 取值来源：Go chatgate/goal_gate.go 的三处 emit（:416 停止态、:435 目标
+      // 达成、:549 熔断）与 miniapp normalize.ts:146 的映射表。
+      const expected = {
+        'goal_completed': '目标已实现，自动推进已停用',
+        'max_auto_turns_reached': '已达自动推进轮次上限，发送新消息后可继续',
+        'no_tasks': '目标尚无任务列表，请先拆解任务后再启用自动推进',
+        'task_blocked': '存在受阻任务，自动推进已暂停，需人工介入',
+        'task_error_stopped': '存在出错停止的任务，自动推进已暂停，需人工介入',
+      };
+      for (final entry in expected.entries) {
+        final r = EventReducer.reduce([
+          ev(EventTypes.goalGateStopped, payload: {'reason': entry.key}),
+        ]);
+        expect(
+          (r.items.single as GoalGateStoppedItem).message,
+          entry.value,
+          reason: 'reason=${entry.key} 的文案漂移了',
+        );
+      }
+    });
+
+    test('未知 reason 走兜底但保留结论（不静默消失）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.goalGateStopped, payload: {'reason': 'brand_new_reason'}),
+      ]);
+
+      expect(r.items, hasLength(1));
+      expect(
+        (r.items.single as GoalGateStoppedItem).message,
+        '自动推进已停止',
+        reason: '服务端新增原因时不能什么都不显示',
+      );
+    });
+
+    test('payload 完全缺失时仍产出项（兜底文案）', () {
+      final r = EventReducer.reduce([ev(EventTypes.goalGateStopped)]);
+
+      expect(r.items, hasLength(1));
+      final s = r.items.single as GoalGateStoppedItem;
+      expect(s.reason, '');
+      expect(s.message, '自动推进已停止');
+      expect(s.turnCountLabel, isNull, reason: '无计数时不渲染轮次行');
+    });
+
+    test('轮次文案覆盖「只有计数」「只有上限」「两者都有」', () {
+      String? label(Map<String, dynamic> payload) =>
+          (EventReducer.reduce([
+                    ev(EventTypes.goalGateStopped, payload: payload),
+                  ]).items.single
+                  as GoalGateStoppedItem)
+              .turnCountLabel;
+
+      expect(label({'auto_turn_count': 2}), '已自动推进 2 轮');
+      expect(label({'max_auto_turns': 10}), '上限 10 轮');
+      expect(
+        label({'auto_turn_count': 2, 'max_auto_turns': 10}),
+        '已自动推进 2/10 轮',
+      );
+      expect(label({}), isNull);
+    });
+
+    test('detail 与 sessionId 类字段：空白串归 null（不渲染空白行）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.goalGateStopped,
+          payload: {'reason': 'task_blocked', 'detail': '   '},
+        ),
+      ]);
+      expect((r.items.single as GoalGateStoppedItem).detail, isNull);
+    });
+
+    test('重放同一事件不产生重复项（SSE 回放 + 回填交叠窗口）', () {
+      final e = ev(
+        EventTypes.goalGateStopped,
+        id: 'evt_stop_1',
+        payload: {'reason': 'goal_completed'},
+      );
+      // 本项不按身份键 upsert（与 HabitAutoRunItem 同取向：终态通知），
+      // 但控制器层的 seen 去重会滤掉同一 eventId，故归约器只保证「有产出」。
+      final r = EventReducer.reduce([e]);
+      expect(r.items, hasLength(1));
+    });
+  });
+
+  /// 会话绑定失效（`pigo_session_missing`）——诊断事件，但解释了用户可感知的
+  /// 「上下文莫名丢失」。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 该常量只在 `EventTypes` 声明（`pigoSessionMissing`），全仓零消费——事件
+  /// 落到 `default:` 被静默丢弃。它虽标 `Diagnostic: true`（默认不广播、只落库），
+  /// 但**会在拉 timeline 历史时到达**，那时它是唯一能解释「这段对话为什么断了
+  /// 上下文」的线索。
+  group('pigo_session_missing → DiagnosticNoticeItem', () {
+    test('产出诊断项并原样透传服务端说明', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.pigoSessionMissing,
+          payload: {
+            'content': '检测到失效的会话绑定（历史会话文件未落盘），本次将新建会话继续',
+            'session_id': 'sess-ghost-1',
+            'expected_path': '/home/u/.pigo/sessions/sess-ghost-1.jsonl',
+          },
+        ),
+      ]);
+
+      expect(r.items, isNotEmpty, reason: '事件必须产出可见反馈');
+      final item = r.items.single;
+      expect(item, isA<DiagnosticNoticeItem>());
+      final d = item as DiagnosticNoticeItem;
+      expect(d.content, contains('失效的会话绑定'));
+      expect(d.sessionId, 'sess-ghost-1');
+    });
+
+    test('content 缺失时用兜底文案仍产出（结论不丢）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.pigoSessionMissing, payload: {'session_id': 's1'}),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final d = r.items.single as DiagnosticNoticeItem;
+      expect(d.content, '检测到失效的会话绑定，本次将新建会话继续');
+      expect(d.sessionId, 's1');
+    });
+
+    test('payload 完全缺失时不编造 session_id', () {
+      final r = EventReducer.reduce([ev(EventTypes.pigoSessionMissing)]);
+
+      expect(r.items, hasLength(1));
+      final d = r.items.single as DiagnosticNoticeItem;
+      expect(d.sessionId, isNull);
+      expect(d.content, isNotEmpty);
+    });
+
+    test('诊断事件不污染时间线顺序（与用户消息共存且各成一项）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.userMessage,
+          id: 'evt_u',
+          payload: {'input': '继续'},
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.pigoSessionMissing,
+          id: 'evt_d',
+          payload: {'content': '会话已重建'},
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2));
+      expect(r.items[0], isA<UserMessageItem>());
+      expect(r.items[1], isA<DiagnosticNoticeItem>());
+    });
+  });
 }

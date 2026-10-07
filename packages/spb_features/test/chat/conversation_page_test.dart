@@ -483,6 +483,100 @@ void main() {
     });
   });
 
+  group('ConversationPage 目标自动推进停止（goal_gate_stopped）', () {
+    testWidgets('渲染停止提示与轮次副文案', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.goalGateStopped,
+        sseEvent(
+          'goal_gate_stopped',
+          id: 'evt_gate_stop',
+          payload: {
+            'reason': 'max_auto_turns_reached',
+            'auto_turn_count': 5,
+            'max_auto_turns': 5,
+          },
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('goal-gate-stopped-notice')),
+        findsOneWidget,
+        reason: 'goal_gate_stopped 必须渲染（此前落到 default 被静默丢弃）',
+      );
+      expect(find.text('已达自动推进轮次上限，发送新消息后可继续'), findsOneWidget);
+      expect(find.text('已自动推进 5/5 轮'), findsOneWidget);
+    });
+
+    testWidgets('目标达成用中性样式，不误渲染为错误卡', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.goalGateStopped,
+        sseEvent(
+          'goal_gate_stopped',
+          id: 'evt_gate_done',
+          payload: {'reason': 'goal_completed'},
+        ),
+      );
+
+      expect(find.text('目标已实现，自动推进已停用'), findsOneWidget);
+      // goal_completed 是**成功终态**，用错误红底会让用户以为失败了。
+      expect(find.byType(Card), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('ConversationPage 会话绑定失效诊断（pigo_session_missing）', () {
+    testWidgets('渲染诊断提示并透传服务端说明', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.pigoSessionMissing,
+        sseEvent(
+          'pigo_session_missing',
+          id: 'evt_ghost',
+          payload: {
+            'content': '检测到失效的会话绑定（历史会话文件未落盘），本次将新建会话继续',
+            'session_id': 'sess-ghost-1',
+          },
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('diagnostic-notice')),
+        findsOneWidget,
+        reason: 'pigo_session_missing 必须渲染（此前全仓零消费）',
+      );
+      expect(find.textContaining('失效的会话绑定'), findsOneWidget);
+    });
+
+    testWidgets('载荷缺 content 时用兜底文案，不渲染空壳', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.pigoSessionMissing,
+        sseEvent('pigo_session_missing', id: 'evt_ghost2', payload: {}),
+      );
+
+      expect(find.byKey(const ValueKey('diagnostic-notice')), findsOneWidget);
+      expect(find.text('检测到失效的会话绑定，本次将新建会话继续'), findsOneWidget);
+    });
+  });
+
   group('ConversationPage 归属反馈卡', () {
     testWidgets('routing_feedback_request 渲染为卡片，点击回调收到 token 与 bool', (
       tester,

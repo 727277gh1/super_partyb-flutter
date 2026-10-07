@@ -1064,6 +1064,8 @@ class _ConversationPageState extends State<ConversationPage> {
       onAction: _handleSpecAction,
     ),
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
+    GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
+    DiagnosticNoticeItem() => _DiagnosticNotice(item: item),
     ErrorItem(:final message) => _ErrorNotice(message: message),
     FeedbackRequestItem() => FeedbackRequestCard(
       question: item.question,
@@ -1628,6 +1630,99 @@ class _ErrorNotice extends StatelessWidget {
                 message,
                 style: Theme.of(context).textTheme.bodySmall
                     ?.copyWith(color: scheme.onErrorContainer),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 目标自动推进停止提示（`goal_gate_stopped`）。
+///
+/// ## 为什么用窄条而不是错误卡
+///
+/// 「自动推进停止」不是错误：`goal_completed` 是**成功终态**。用
+/// `_ErrorNotice` 的红底会让「目标已实现」看起来像失败。故与
+/// [_RoutingNotice] 同一形式（居中窄条 + 弱化色），只在有轮次信息时补一行副文案。
+///
+/// ## 文案来自领域层，不在这里 switch reason
+///
+/// 映射规则（reason → 中文）属于领域知识，且需与 miniapp 逐条一致，故放在
+/// [GoalGateStoppedItem.message]（可无头单测）。本组件只负责排版。
+class _GoalGateStoppedNotice extends StatelessWidget {
+  const _GoalGateStoppedNotice({required this.item});
+
+  final GoalGateStoppedItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final turns = item.turnCountLabel;
+
+    return Align(
+      alignment: Alignment.center,
+      child: Column(
+        key: const ValueKey('goal-gate-stopped-notice'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            item.message,
+            textAlign: TextAlign.center,
+            style: textTheme.labelSmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          if (turns != null)
+            Text(
+              turns,
+              textAlign: TextAlign.center,
+              style: textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 诊断提示（`pigo_session_missing`）。
+///
+/// ## 为什么单独一个组件而不是复用 [_RoutingNotice]
+///
+/// 两者的可见度不同：归属判定是每次路由都可能出现的常规信息，而「会话绑定
+/// 失效」是**罕见且重要**的降级事件（用户会直接感知为上下文丢失）。用同一
+/// 弱化样式会让这条关键线索在长对话里被忽略。故用带图标的浅色窄条，但**不用**
+/// 错误红底——服务端已经处理了（新建会话继续），用户需要的是解释而非告警。
+class _DiagnosticNotice extends StatelessWidget {
+  const _DiagnosticNotice({required this.item});
+
+  final DiagnosticNoticeItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      key: const ValueKey('diagnostic-notice'),
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Row(
+          children: [
+            Icon(
+              Icons.info_outline,
+              size: SpbSpacing.lg,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: SelectableText(
+                item.content,
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ),
           ],
