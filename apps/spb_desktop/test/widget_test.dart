@@ -506,7 +506,7 @@ void main() {
     // ## 为什么没有 `/quick-capture` 的对应用例
     //
     // 那条路由已删：它无任何导航调用点（`Alt+Space` 与托盘都指向本路由），
-    // 且走的是无附件的同步端点。`SpbRoutes.quickCapture` 这个常量也不存在了
+    // 且走的是无附件的同步端点。那个 quick-capture 路径常量也不存在了
     // ——重加一条死路由会先在编译期报 `undefined_getter`。
     final h = await pumpApp(tester);
 

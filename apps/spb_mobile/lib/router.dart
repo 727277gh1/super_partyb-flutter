@@ -23,18 +23,22 @@ class SpbRoutes {
 
   static const conversations = '/';
   static const settings = '/settings';
-  static const quickCapture = '/quick-capture';
 
-  /// 带附件的无归属输入窗。
+  /// 无归属输入窗（带附件，走 `/me/quick-capture/enqueue`）。
   ///
-  /// 与 [quickCapture] 并存而不是取代它：两者走不同端点，返回语义不同
-  /// （前者同步返回归属可导航、无附件；本路由异步投递、支持附件）。
   /// 见 `OverlayQuickCapturePage` 的类文档。
+  ///
+  /// ## 为什么没有「无附件的同步版」路由
+  ///
+  /// 本端曾并存一条 `/quick-capture`（走 `/me/quick-capture`，同步返回归属、
+  /// 无附件）。它已被删除：**无任何导航调用点**（唯一的入口
+  /// `onOpenQuickCapture` 指向本路由），而纯文本场景两者行为等价——保留功能
+  /// 更弱的那个反而误导用户。桌面端已先做过同一删除（commit 1866b14）。
   static const overlay = '/overlay';
 
   /// 小程序工作台：工作列表。
   ///
-  /// 挂在 shell **之外**（整屏页，无底部标签栏），沿用 [quickCapture] 的先例。
+  /// 挂在 shell **之外**（整屏页，无底部标签栏）。
   static const works = '/miniapp/works';
 
   /// 工作详情。
@@ -237,20 +241,14 @@ List<RouteBase> buildMobileRoutes() {
         ),
       ],
     ),
-    // 悬浮输入窗在 shell **之外**：它是一个整屏的临时页面，不应带标签栏，
+    // 无归属输入窗在 shell **之外**：它是一个整屏的临时页面，不应带标签栏，
     // 也不应占据某个标签的导航栈。
-    GoRoute(
-      path: SpbRoutes.quickCapture,
-      builder: (context, state) => const _QuickCapturePage(),
-    ),
-    // 带附件的无归属输入窗。同样挂在 shell 之外（整屏临时页）。
     GoRoute(
       path: SpbRoutes.overlay,
       builder: (context, state) => const _OverlayQuickCapturePage(),
     ),
     // 小程序工作台同样在 shell **之外**：工作列表与详情都是整屏页（详情页
-    // 底部有消息输入框，再叠一层标签栏会挤掉内容）。沿用 [SpbRoutes.quickCapture]
-    // 已确立的先例。
+    // 底部有消息输入框，再叠一层标签栏会挤掉内容）。
     //
     // 两条路由**不会互相抢匹配**：`/miniapp/works` 是 2 段，`/miniapp/works/:workId`
     // 是 3 段，段数不同（实测：即使把 `:workId` 那条写在前面，`/miniapp/works`
@@ -357,6 +355,9 @@ class _ConversationsTab extends ConsumerWidget {
       // 此前 `/overlay` 与 `/quick-capture` 两条路由都注册了、页面与测试也在，
       // 但**没有任何导航调用点**——用户碰不到（桌面端靠 Alt+Space 与托盘，
       // 移动端没有快捷键也没有托盘）。移动端只能从列表页进入，故用 FAB。
+      //
+      // 后来 `/quick-capture` 那条被彻底删除（无导航点且功能是它的子集），
+      // 本 FAB 就是**唯一**入口。
       //
       // 用 `push` 而非 `go`：悬浮窗是临时页，`go` 会把它替换进列表所在的
       // 分支栈，返回时列表的滚动位置会丢。
@@ -1647,29 +1648,6 @@ class _WorkDetailPage extends ConsumerWidget {
       stop: ref.watch(stopMiniappWorkProvider(workId)),
       resolveConfirmation: ref.watch(resolveMiniappConfirmationProvider),
       onUploadFile: ref.watch(uploadMiniappFileProvider(workId)),
-    );
-  }
-}
-
-class _QuickCapturePage extends ConsumerWidget {
-  const _QuickCapturePage();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final useCase = ref.watch(quickCaptureUseCaseProvider);
-
-    return QuickCapturePage(
-      submit: (input) => useCase.submit(input: input),
-      // 路由预览（服务端当前只返回**兜底默认 agent**，且响应里没有 group_id）。
-      previewRouting: ref.watch(previewRoutingProvider),
-      onQueued: (outcome) {
-        // 提交成功后导航到服务端判定的对话。不回显（不传 echoInto）：
-        // 本页没有可见的对话，回显由目标对话页的 timeline 回填完成。
-        if (context.mounted) context.go(SpbRoutes.chat(outcome.groupId));
-      },
-      onCancel: () {
-        if (context.mounted) context.go(SpbRoutes.conversations);
-      },
     );
   }
 }

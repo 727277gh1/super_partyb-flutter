@@ -502,25 +502,6 @@ final searchChatProvider = Provider<SearchChat>((ref) {
   };
 });
 
-/// 路由预览（供悬浮输入窗的「预览」入口注入）。
-///
-/// ## 它预览的是 **agent**，不是归属 group
-///
-/// 服务端响应里**没有 `group_id`**，且当前只走**兜底默认 agent**（embedding
-/// 级联已下线）。UI 文案必须如实反映（见 `QuickCapturePage._previewLine`）。
-///
-/// 实现细节与理由见桌面端 `providers.dart` 的同名 provider（两端共用同一套
-/// 端点，装配同构）。
-final previewRoutingProvider = Provider<PreviewRouting>((ref) {
-  return (String input) async {
-    final userId = await ref.read(currentUserIdProvider.future);
-    final raw = await ref
-        .read(chatApiProvider)
-        .routingPreview(userId, input: input);
-    return RoutingPreview.fromJson(raw);
-  };
-});
-
 /// 「立即发送」：把服务端缓冲区里 pending 的消息立即合并提交。
 ///
 /// 返回 [FlushResult]：服务端在「有多条 pending 且未指定冲突策略」时返回
@@ -656,21 +637,26 @@ final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
   return controller.groupUpdates;
 });
 
-/// 无归属入口用例（悬浮输入窗用）。
-///
-/// 纯文本、同步返回归属，故提交后可以导航到目标对话。带附件的场景用
-/// [quickCaptureEnqueueUseCaseProvider]（异步投递，拿不到 groupId）。
-final quickCaptureUseCaseProvider = Provider<QuickCaptureUseCase>((ref) {
-  return QuickCaptureUseCase(ref.watch(chatApiProvider));
-});
-
 /// 带附件的无归属入口用例（悬浮输入窗用）。
 ///
-/// ## 与 [quickCaptureUseCaseProvider] 的关系
+/// ## 为什么**只**保留这一条链路
 ///
-/// 走 `/me/quick-capture/enqueue`（异步投递，**支持附件**），而后者走
-/// `/me/quick-capture`（同步返回归属，无附件）。两条链路都保留：纯文本场景
-/// 下前者能直接导航到服务端判定的对话，体验更好。
+/// 服务端有两条无归属入口：
+///
+/// | 端点 | 返回 | 附件 |
+/// |---|---|---|
+/// | `/me/quick-capture` | 同步返回归属 group_id | ❌ |
+/// | `/me/quick-capture/enqueue` | 异步投递，拿不到 groupId | ✅ |
+///
+/// 本端曾把两条都接上（各自一个页面、一个 provider、一个路由）。现在只留
+/// enqueue：同步那条的**唯一入口早已指向本链路**（对话列表的 FAB），而纯文本
+/// 场景下两者行为等价（都落到服务端分类链判定的同一个 group，差别只是
+/// 「本页能否立刻导航过去」）。保留功能更弱的那个反而误导用户。
+///
+/// 桌面端已先做过同一取舍（commit 1866b14），本端此前只删了页面与路由、
+/// 遗留了 provider，故一并清掉。共享库里的 `QuickCapturePage` /
+/// `QuickCaptureUseCase` **不动**——它们仍被 `spb_features` 自己的测试覆盖，
+/// 属共享能力。
 ///
 /// ## 为什么不需要 userId
 ///

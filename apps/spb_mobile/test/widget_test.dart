@@ -432,19 +432,6 @@ void main() {
     expect(find.text('设置'), findsOneWidget);
   });
 
-  testWidgets('/quick-capture 可导航且渲染悬浮输入窗（不带标签栏）', (tester) async {
-    // 该页不请求数据（提交才发请求），故无需 mock 任何端点。
-    final h = await pumpApp(tester);
-
-    h.router.go(SpbRoutes.quickCapture);
-    await tester.pumpAndSettle();
-
-    expect(find.text('Enter 提交 · Esc 取消'), findsOneWidget);
-    expect(find.byKey(const ValueKey('quick-capture-submit')), findsOneWidget);
-    // 悬浮窗在 shell 之外：不应带底部标签栏（它是整屏临时页）。
-    expect(find.byType(NavigationBar), findsNothing, reason: '悬浮输入窗不应占据标签分支');
-  });
-
   testWidgets('对话列表的 FAB 进入 /overlay（无归属入口在移动端可达）', (tester) async {
     // ## 本用例防的是什么
     //
@@ -453,6 +440,13 @@ void main() {
     // 也无托盘，于是这个功能在手机上完全不可达。光测「路由能渲染」抓不到
     // 这类缺口（那种用例直接 `router.go(...)`，绕过了入口），故本用例从
     // **首页的入口**出发。
+    //
+    // ## 为什么没有 `/quick-capture` 的对应用例
+    //
+    // 那条路由已删：它无任何导航调用点（本 FAB 与桌面端的 Alt+Space / 托盘
+    // 都指向 `/overlay`），且走的是无附件的同步端点——纯文本场景两者等价，
+    // 保留功能更弱的那个反而误导用户。那个 quick-capture 路径常量也不存在
+    // 了——重加一条死路由会先在编译期报 `undefined_getter`。
     final h = await pumpApp(tester);
     await tester.pumpAndSettle();
 
