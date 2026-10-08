@@ -288,6 +288,26 @@ data: <json>
 
 **cursor 只记录落库事件的 ID**——Transient 事件无有效 ID（`globalSeq` 为 0），用它作游标会跳过其后的权威帧。
 
+**`schedule_created` 已进时间线**（`EventTypes.timelineVisible` + 归约器显式 case + `_ScheduleCreatedNotice`）。
+
+它与 `goal_gate_stopped` 是**一对**：前者说「即将继续」，后者说「已停止」。用户
+看到界面静止时需要知道是「它过一会儿会自己接着跑」还是「它已经停了」——只渲染
+其中一个都会让人误判当前状态。
+
+payload 只有 `{schedule_id, reason, status, delay_seconds, source,
+auto_turn_count, max_auto_turns}`（唯一产出点 `chatgate/goal_gate.go`），
+**没有绝对时间**（`scheduled_at` / `next_run_at` / `run_at` 一个都不发）。这是
+有意的：绝对时刻在 cursor 回放 / 历史回填时会变成过期信息，而相对秒数在回放时
+仍可读（「当时说 30 秒后继续」）。故客户端文案是「将在 30 秒后自动继续
+（第 2/5 轮）」，`delay_seconds` 缺失时退化为「已排入下一轮自动继续」，
+**不编造秒数**。
+
+⚠️ **`executor_started` / `executor_completed` / `gate_evaluated` /
+`gate_completed` / `gate_error` 是 `Diagnostic: true` 事件，设计上不进时间线**
+（`chatbus.Event.Diagnostic`）。它们默认只落库不广播（由运行时配置
+`runtime.diagnostics_*` 控制），语义是「服务端内部排障」而非用户可读的对话内容
+——**不要把它们当成缺失的渲染分支去补**。
+
 ### 5.5 无归属入口（**桌面端悬浮窗的核心语义**）
 
 `POST /users/:user_id/chat/messages` 的 `group_id` **可省略**。省略时服务端跑完整分类链判定归属，响应里的 `group_id` 是判定结果。
@@ -495,6 +515,78 @@ Go API 还有一批**运营 / 排障面**端点，Flutter 客户端**有意不�
 feedback）、`/me/preferences`、`/users/:user_id/chat/*` 虽是 CRUD，但直接决定
 「我这次的对话怎么跑」，故客户端**已实现**（见 §5.2 前缀表与
 `packages/spb_api/lib/src/*_api.dart`）。
+
+#### 6.9.1 非端点族的「有意不做」
+
+上表是**端点族**层面的取舍。另有几项是 UI / 能力层面的，同样**是决策不是缺口**：
+
+| 项 | 理由 |
+|---|---|
+| 对话页附件 / `file_context` | Go 的 `sendChatToAgentRequest`（`chat_stream.go:46`）只有 `agent_id` / `input` / `request_id` / `group_id` / `agent_type` / `options` / `routing`，**没有**附件字段。带附件的无归属入口走 `/me/quick-capture/enqueue`（见 §6.7），不是对话页。受「Go API 一行不改」约束，补齐需服务端先加字段。 |
+| 移动端打开已下载文件 | 移动端注入 `NoopDesktopCapabilities`，`openFile` / `revealPath` 恒 false。要真正打开需引入 `open_filex` / `share_plus` + Android FileProvider 配置 + 真机验证（模拟器在本机不可用，见 §9）。当前退化为「只读浏览 + 下载」。 |
+| 桌面端「通知订阅」区块 | 该区块（`NotificationSubscriptionsCard`）的语义是**微信小程序订阅消息额度**（`miniapp_subscriptions` 表 + `wx.requestSubscribeMessage` 的配额消耗模型）。桌面端没有小程序运行环境，展示它无法兑现；故只在移动端装配（`settings_page.dart` 按 `loadNotifications` 是否注入决定展示）。是否给桌面端一个只读「额度查看」视图需产品确认。 |
+| P2 端点族：`fork` / `canvas` / `plan-import` / `decisions` / `file-evolution` / `semantic-search` | 本轮范围外。它们是**考古 / 分析 / 分叉**类能力（`chat_ext.go` 的 `POST /turns/:turn_id/fork`、`GET /groups/:group_id/canvas`、`POST /groups/:group_id/plan/import`；`ext_routes.go:530` 的 `/groups/:group_id/decisions`；`misc_extra.go:649` 的 `file-evolution` 与 `:650` 的 `semantic-search`），承载点是 webapp 的分析视图。留待后续轮次。 |
+
+### 6.10 两端 UI 面板族的不对称（**有意保留的差异**）
+
+同一个「查看这次对话的产出」诉求，两端的载体不同：
+
+| 面板 | 桌面端 | 移动端 |
+|---|---|---|
+| 交付物（`GroupDeliverablesPanel`） | 侧边栏 tab | AppBar 按钮 → `showModalBottomSheet` |
+| 待办（`GroupTodosPanel`） | 侧边栏 tab | AppBar 按钮 → `showModalBottomSheet` |
+| 设置（`GroupSettingsPanel`） | 侧边栏 tab | 底部弹层 |
+| 任务清单 / 目标历史 | 侧边栏 tab | 底部弹层 |
+| **诊断（`GroupDebugPanel`：工具调用 + gate 决策）** | 侧边栏 tab | **无** |
+
+桌面端有侧边栏这个载体（宽屏常驻），移动端没有——小屏放不下常驻侧栏，故移动端
+一律走「AppBar 按钮 + 底部弹层」。
+
+**为什么移动端用 `showModalBottomSheet` 而不是新路由**（见
+`apps/spb_mobile/lib/router.dart` 的 `_open*` 系列）：
+
+1. **State 共享**：新路由会得到**另一个 `_ChatPage` 实例**，`_group` /
+   `_resolvingConfirmations` / 刷新令牌都不共享。设置弹层尤其明显——写成功后
+   回写的是那个实例的 `_group`，关掉弹层回到对话页又变回旧值。
+2. **busy 态一致**：待办弹层里提交确认卡，时间线内联卡的 busy 态必须同步
+   （同一个 `_resolvingConfirmations` 集合）。
+
+**为什么移动端只接 `onDownload`，不接 `onOpen` / `onReveal` / `resolveLocalPath`**：
+移动端注入的是 `NoopDesktopCapabilities`，`openFile` / `revealPath` 恒返回 false。
+接上会让用户点「打开」得到「无法打开文件」——比不展示该项更让人困惑（面板在回调
+为 null 时不渲染对应菜单项）。`resolveLocalPath` 查的是**同步目录**索引，而弹层
+回答的是「这个对话产出了什么」（远端），两者用途不同。
+
+**仍不对称：诊断面板**（`GroupDebugPanel`：工具调用 + gate 决策）**目前仅桌面端，
+属有意保留**。它是内部排障视图（含工具入参与 gate 决策明细），发布包下由
+`showDebugPanelProvider` 关闭；移动端的小屏不适合承载这类高密度内部视图。
+`apps/spb_mobile/lib/providers.dart` 里仍定义了同名 `showDebugPanelProvider`，只为
+两端 `providers.dart` 同构（避免「某个 provider 只在一端存在」成为下次接线的意外），
+当前**无消费方**。
+
+### 6.11 桌面端托盘菜单（6 项）
+
+`apps/spb_desktop/lib/desktop_integration.dart` 的 `_installTrayMenu` 推送 6 个可点项：
+
+| 项 | 动作 |
+|---|---|
+| 显示主窗口 | `showWindow(main)` |
+| 快速输入（Alt+Space） | 进悬浮模式（见 §6.5） |
+| 立即同步交付物 | `onSyncNow`（未注入回调时禁用） |
+| 打开同步目录 | `caps.revealPath(同步目录)`（**未配置同步目录时禁用**） |
+| 同步设置… | `SpbRouter.go(SpbRoutes.sync)` |
+| 退出 | `PlatformDesktopQuit.quit` |
+
+**「打开同步目录」为什么在未配置时禁用**：此时 `revealPath` 拿到空串，文件管理器
+会落到用户主目录——看起来像「功能坏了」而不是「还没配」。
+
+**「同步设置…」为什么走 `SpbRouter.sync` 而不是 `showWindow(settings)`**：
+`WindowRole` 只有 main / settings / quickCapture，没有 sync 这个角色——同步设置是
+`/settings/sync` 这个**子页面**，不是独立窗口。`showWindow(settings)` 只会落到设置
+页首个 tab，用户还得自己再点一次「同步」，而托盘项的标签承诺的是直达。
+
+**「同步设置…」为什么始终可用**：它正是**配置入口**，禁用会让未配置的用户无法
+完成配置（死锁）。
 
 ---
 
