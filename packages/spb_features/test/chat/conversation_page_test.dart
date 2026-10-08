@@ -543,6 +543,85 @@ void main() {
     });
   });
 
+  group('ConversationPage 自动续跑排程（schedule_created）', () {
+    testWidgets('渲染「多久后继续」与轮次进度', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.scheduleCreated,
+        sseEvent(
+          'schedule_created',
+          id: 'evt_sched_1',
+          payload: {
+            'schedule_id': 'sched_1',
+            'reason': 'done',
+            'status': 'pending',
+            'delay_seconds': 30,
+            'source': 'goal_gate',
+            'auto_turn_count': 2,
+            'max_auto_turns': 5,
+          },
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('schedule-created-notice')),
+        findsOneWidget,
+        reason: 'schedule_created 必须渲染（此前落到 default 被静默丢弃）',
+      );
+      expect(find.text('将在 30 秒后自动继续（第 2/5 轮）'), findsOneWidget);
+    });
+
+    testWidgets('缺 delay_seconds 时不编造秒数', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.scheduleCreated,
+        sseEvent('schedule_created', id: 'evt_sched_2', payload: {}),
+      );
+
+      expect(
+        find.byKey(const ValueKey('schedule-created-notice')),
+        findsOneWidget,
+      );
+      expect(find.text('已排入下一轮自动继续'), findsOneWidget);
+      // 兜底文案里不能出现任何秒数（编造的时间会让用户真的去等它）。
+      expect(find.textContaining('秒'), findsNothing);
+    });
+
+    testWidgets('与「已停止」提示视觉可区分（不是同一个 key）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.scheduleCreated,
+        sseEvent(
+          'schedule_created',
+          id: 'evt_sched_3',
+          payload: {'delay_seconds': 10},
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('schedule-created-notice')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('goal-gate-stopped-notice')),
+        findsNothing,
+        reason: '「即将继续」与「已停止」是两个相反结论，不能长得一样',
+      );
+    });
+  });
+
   group('ConversationPage 会话绑定失效诊断（pigo_session_missing）', () {
     testWidgets('渲染诊断提示并透传服务端说明', (tester) async {
       mockTimeline();

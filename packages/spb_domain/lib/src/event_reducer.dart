@@ -581,6 +581,28 @@ class EventReducer {
             ),
           );
 
+        case EventTypes.scheduleCreated:
+          // 自动续跑已排程（Goal Gate 即将继续）。
+          //
+          // 与上面的 `goal_gate_stopped` 是**一对**：本项说「即将继续」，后者说
+          // 「已停止」。此前它落在 `default:` 分支被静默丢弃，用户看到界面静止
+          // 时无法区分「在等一会儿接着跑」与「已经停了」。
+          //
+          // delay_seconds 缺失（异常载荷）时仍**照常产出**：文案退化为
+          // 「已排入下一轮自动继续」而不编造秒数（见 [ScheduleCreatedItem.userText]），
+          // 比整条事件消失好得多（与 [HabitAutoRunItem] 同取向）。
+          items.add(
+            ScheduleCreatedItem(
+              id: ev.eventId,
+              createdAt: ev.createdAt,
+              turnId: ev.turnId,
+              delaySeconds: ev.scheduleDelaySeconds,
+              reason: ev.payload?['reason']?.toString() ?? '',
+              autoTurnCount: _intOrNull(ev.payload?['auto_turn_count']),
+              maxAutoTurns: _intOrNull(ev.payload?['max_auto_turns']),
+            ),
+          );
+
         case EventTypes.pigoSessionMissing:
           // 会话绑定失效（幽灵 session_id）：服务端已清空绑定、本轮新建会话。
           //
@@ -603,8 +625,8 @@ class EventReducer {
           );
 
         default:
-          // heartbeat / gate_evaluated / gate_completed / gate_error / tts_* /
-          // schedule_created 等控制事件不进入对话列表，也不进 gate 决策通道。
+          // heartbeat / gate_evaluated / gate_completed / gate_error / tts_* 等
+          // 控制事件不进入对话列表，也不进 gate 决策通道。
           //
           // ⚠️ `adaptive_decision` / `goal_gate_decision` **不在**本分支的
           // 「丢弃」之列：它们已在循环顶部经 `gateDecisionFrom(ev)` 收进 gate
@@ -612,12 +634,12 @@ class EventReducer {
           // 常量已在 EventTypes 声明，但归约器把这两类连同上面的噪声事件一起
           // 静默丢弃了。
           //
-          // ⚠️ `goal_gate_stopped` 与 `pigo_session_missing` **也不再**在本
-          // 分支的「丢弃」之列（此前它们确实落在这里）：前者是 Goal Gate 终止的
-          // 唯一可见信号，后者解释了「上下文为何莫名丢失」。两者都在上方有显式
-          // case——`EventTypes.timelineVisible` 早已收录 goal_gate_stopped，
-          // 而实现漏了分支，这正是「集合与实现单侧漂移」的形态（由
-          // `event_types_consistency_test.dart` 守卫）。
+          // ⚠️ `goal_gate_stopped` / `pigo_session_missing` / `schedule_created`
+          // **都不再**在本分支的「丢弃」之列（此前它们确实落在这里）：前两者
+          // 是 Goal Gate 终止与上下文丢失的唯一可见信号，后者是「即将继续」
+          // 的唯一信号。三者都在上方有显式 case——`EventTypes.timelineVisible`
+          // 早已收录它们，而实现漏了分支，这正是「集合与实现单侧漂移」的形态
+          // （由 `event_types_consistency_test.dart` 守卫）。
           //
           // ⚠️ 该分支也**不**包含 `agent.file.*`（已在上方 case 处理）。
           // 在 agent 文件卡接入前，本分支曾吞掉 2927 条 agent 产物事件——

@@ -256,8 +256,15 @@ class EventTypes {
     followUpSuggested,
     goalGateDecision,
     goalGateStopped,
-    habitSuggestionCreated,
-    habitSuggestionResolved,
+    // 自动续跑排程（`chatgate/goal_gate.go:519` 的 emitScheduleCreated）。
+    //
+    // 与 [goalGateStopped] 是**一对**：本项说「即将继续」，后者说「已停止」。
+    // 用户看到界面静止时需要知道是「它过多久会自己接着跑」还是「它已经停了」
+    // ——只渲染其中一个都会让人误判当前状态。
+    //
+    // 安全进时间线：该事件属 `chatbus/broker.go` 的「持久化到 chat_events」
+    // 一组（`Transient` 未设，零值 false），故会落库、会被 cursor 回放。
+    scheduleCreated,
     // 习惯自动执行完成。与两个 suggestion 事件同族（都是习惯回环的用户可见
     // 节点），且 webapp 的时间线同样渲染它——见 [habitAutoRunCompleted] 的
     // 说明：Go 侧暂无产出点，这里先按契约声明，补齐后即刻生效。

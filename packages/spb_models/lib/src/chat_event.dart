@@ -187,12 +187,23 @@ class ChatEvent {
   int? get retryDelayMs =>
       eventType == EventTypes.retryScheduled ? _intField('delay_ms') : null;
 
-  /// 续跑排程的下次触发时间（`schedule_created`）。
-  DateTime? get scheduledAt {
-    final raw = _str('scheduled_at') ?? _str('next_run_at') ?? _str('run_at');
-    if (raw == null) return null;
-    return DateTime.tryParse(raw);
-  }
+  /// 距下次自动继续的秒数（`schedule_created.delay_seconds`）。
+  ///
+  /// ## 为什么是秒而不是时间戳
+  ///
+  /// 唯一产出点（`chatgate/goal_gate.go:519`）发的是
+  /// `{schedule_id, reason, status, delay_seconds, source, auto_turn_count,
+  /// max_auto_turns}`——**没有** `scheduled_at` / `next_run_at` / `run_at`。
+  /// 服务端给的是**相对时长**而非绝对时刻，因为绝对时刻会随重放/回放变得
+  /// 无意义（回放一条昨天的 `schedule_created`，它说的绝对时间已经过去了）。
+  /// 相对时长在回放时仍然可读：「当时说 30 秒后继续」。
+  ///
+  /// 本访问器替换了原先一个读 `scheduled_at` / `next_run_at` / `run_at` 的
+  /// `DateTime?` 访问器——那三个字段 Go 侧一个都不发，它永远不会非 null，
+  /// 是死访问器（对照 `gate_decision.dart` 对「永远不被命中的分支」的批评）。
+  int? get scheduleDelaySeconds => eventType == EventTypes.scheduleCreated
+      ? _intField('delay_seconds')
+      : null;
 
   /// TTS 音频地址（`tts_completed`）。
   String? get audioUrl => _str('audio_url') ?? _str('url');

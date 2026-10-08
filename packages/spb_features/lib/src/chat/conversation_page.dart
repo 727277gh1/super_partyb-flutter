@@ -1078,6 +1078,7 @@ class _ConversationPageState extends State<ConversationPage> {
     ),
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
     GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
+    ScheduleCreatedItem() => _ScheduleCreatedNotice(item: item),
     DiagnosticNoticeItem() => _DiagnosticNotice(item: item),
     ErrorItem(:final message) => _ErrorNotice(message: message),
     FeedbackRequestItem() => FeedbackRequestCard(
@@ -1696,6 +1697,58 @@ class _GoalGateStoppedNotice extends StatelessWidget {
                 color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
               ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 自动续跑排程提示（`schedule_created`）。
+///
+/// ## 为什么与 [_GoalGateStoppedNotice] 同形式但分开一个组件
+///
+/// 两者语义相反（即将继续 vs 已停止），且**可能交替出现**（一轮排程 → 下轮
+/// 熔断停止）。用同一组件会让「停止」与「继续」看起来一模一样，而那正是用户
+/// 最需要分清的两个结论。故文案与图标都不同，排版形式保持一致（都是居中窄条）。
+///
+/// ## 为什么用 timer 图标而不是 info
+///
+/// 「过多久会接着跑」是**时间**语义，timer 能直接传达「等待中」。
+/// 用 info 会与 [_DiagnosticNotice] 的图标撞车。
+///
+/// ## 文案来自领域层
+///
+/// 秒数与轮次的拼接规则属领域知识（且需处理字段缺失的退化），故放在
+/// [ScheduleCreatedItem.userText]（可无头单测）。本组件只负责排版。
+class _ScheduleCreatedNotice extends StatelessWidget {
+  const _ScheduleCreatedNotice({required this.item});
+
+  final ScheduleCreatedItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Align(
+      alignment: Alignment.center,
+      child: Row(
+        key: const ValueKey('schedule-created-notice'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.timer_outlined,
+            size: SpbSpacing.lg,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: SpbSpacing.xs),
+          Text(
+            item.userText,
+            textAlign: TextAlign.center,
+            style: textTheme.labelSmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
         ],
       ),
     );

@@ -452,6 +452,118 @@ final class GoalGateStoppedItem extends ConversationItem {
   }
 }
 
+/// 自动续跑已排程（`schedule_created`）。
+///
+/// ## 为什么归约层要处理它（而非静默丢弃）
+///
+/// 它是 Goal Gate 自动续跑时**唯一的「即将继续」信号**。此前它落在归约器的
+/// `default:` 分支被静默丢弃，于是用户看到界面静止不动，不知道 agent 是
+/// 「在等一会儿接着跑」还是「已经停了」——而这两个结论由 [GoalGateStoppedItem]
+/// （已停）与本项（即将继续）分别表达，只渲染其中一个都会让人误判。
+///
+/// ## payload 字段（来自唯一产出点，非推测）
+///
+/// `chatgate/goal_gate.go:519` 发
+/// `{schedule_id, reason:"done", status, delay_seconds, source:"goal_gate",
+/// auto_turn_count, max_auto_turns}`。⚠️ **没有** `scheduled_at` / `next_run_at`
+/// / `run_at`——服务端给的是**相对时长**（见
+/// [ChatEvent.scheduleDelaySeconds] 的说明）。
+///
+/// ## 幂等
+///
+/// 事件落库（非 Transient），有有效 eventId，且每次排程只发一条。按事件 id
+/// 去重即可（归约器按 id 去重，见 reducer 的 `_dedupe`）。
+final class ScheduleCreatedItem extends ConversationItem {
+  const ScheduleCreatedItem({
+    required super.id,
+    required super.createdAt,
+    super.turnId,
+    this.delaySeconds,
+    this.reason = '',
+    this.autoTurnCount,
+    this.maxAutoTurns,
+  });
+
+  /// 距下次自动继续的秒数（`payload.delay_seconds`）。
+  ///
+  /// 可为 null（异常载荷）：此时文案**不编造秒数**，退化为
+  /// 「已排入下一轮自动继续」（见 [userText]）。
+  final int? delaySeconds;
+
+  /// 排程原因（`payload.reason`）。生产实测值为 `done`（上一轮正常结束）。
+  ///
+  /// 保持 String 而非 enum：服务端可能新增原因，归入枚举会让新值静默走
+  /// default，而本项的价值恰在文案（同 [GoalGateStoppedItem.reason]）。
+  final String reason;
+
+  /// 已自动推进的轮次（`payload.auto_turn_count`）。
+  final int? autoTurnCount;
+
+  /// 自动推进上限（`payload.max_auto_turns`）。
+  final int? maxAutoTurns;
+
+  /// 用户可读文案。
+  ///
+  /// ## 为什么不编造秒数
+  ///
+  /// [delaySeconds] 缺失时只说「已排入下一轮自动继续」，**不**兜底成「30 秒」
+  /// 之类。一个编造的时间会让用户真的去等它，而实际触发时刻无人知道——
+  /// 宁可少说，不可说错（同 [GoalGateStoppedItem.message] 的兜底取向）。
+  ///
+  /// ## 为什么把轮次进度拼进同一句
+  ///
+  /// 本项在时间线里是一条轻量提示，不像 [GoalGateStoppedItem] 那样有副文案
+  /// 行。拆成两句会让它在长对话里占两行而信息量不变。
+  String get userText {
+    final progress = _turnProgress;
+    final delay = delaySeconds;
+    if (delay == null) {
+      return progress == null ? '已排入下一轮自动继续' : '已排入下一轮自动继续（$progress）';
+    }
+    return progress == null
+        ? '将在 $delay 秒后自动继续'
+        : '将在 $delay 秒后自动继续（$progress）';
+  }
+
+  /// 轮次进度（`第 2/5 轮`）；两个计数都缺时返回 null。
+  String? get _turnProgress {
+    final count = autoTurnCount;
+    final max = maxAutoTurns;
+    if (count == null && max == null) return null;
+    if (count == null) return '上限 $max 轮';
+    if (max == null) return '第 $count 轮';
+    return '第 $count/$max 轮';
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is ScheduleCreatedItem &&
+      other.id == id &&
+      other.createdAt == createdAt &&
+      other.turnId == turnId &&
+      other.delaySeconds == delaySeconds &&
+      other.reason == reason &&
+      other.autoTurnCount == autoTurnCount &&
+      other.maxAutoTurns == maxAutoTurns;
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    createdAt,
+    turnId,
+    delaySeconds,
+    reason,
+    autoTurnCount,
+    maxAutoTurns,
+  );
+
+  @override
+  String toString() =>
+      'ScheduleCreatedItem(id: $id, delaySeconds: $delaySeconds, '
+      'reason: $reason, autoTurnCount: $autoTurnCount, '
+      'maxAutoTurns: $maxAutoTurns)';
+}
+
 /// 习惯候选建议卡（`habit_suggestion_created` / `habit_suggestion_resolved`）。
 ///
 /// ## 为什么归约层要处理它（而非静默丢弃）

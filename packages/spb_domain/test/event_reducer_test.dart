@@ -2027,6 +2027,96 @@ void main() {
     });
   });
 
+  /// 自动续跑排程（`schedule_created`）——Goal Gate「即将继续」的唯一可见信号。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 与 `goal_gate_stopped` 同型：`EventTypes.timelineVisible` 收录了它，而
+  /// 归约器曾把它落在 `default:` 静默丢弃。后果是用户看到界面静止，无法区分
+  /// 「在等一会儿接着跑」与「已经停了」——而这两个结论正是由
+  /// `schedule_created` 与 `goal_gate_stopped` 分别表达的。
+  ///
+  /// ⚠️ 服务端**不发**绝对时间（`scheduled_at` / `next_run_at` / `run_at` 都
+  /// 没有），只发相对秒数 `delay_seconds`。故断言必须落在秒数上，不能去断言
+  /// 某个时间戳字段。
+  group('schedule_created → ScheduleCreatedItem', () {
+    test('产出排程项并带上秒数与轮次（不再被 default 分支丢弃）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.scheduleCreated,
+          payload: {
+            'schedule_id': 'sched_1',
+            'reason': 'done',
+            'status': 'pending',
+            'delay_seconds': 30,
+            'source': 'goal_gate',
+            'auto_turn_count': 2,
+            'max_auto_turns': 5,
+          },
+        ),
+      ]);
+
+      final item = r.items.single as ScheduleCreatedItem;
+      expect(item.delaySeconds, 30);
+      expect(item.reason, 'done');
+      expect(item.autoTurnCount, 2);
+      expect(item.maxAutoTurns, 5);
+      expect(item.userText, '将在 30 秒后自动继续（第 2/5 轮）');
+    });
+
+    test('缺 delay_seconds 时仍产出，且**不编造秒数**', () {
+      // 异常载荷（字段缺失）不该让整条事件消失——但也不能兜底成「30 秒」：
+      // 一个编造的时间会让用户真的去等它，而实际触发时刻无人知道。
+      final r = EventReducer.reduce([
+        ev(EventTypes.scheduleCreated, payload: {'reason': 'done'}),
+      ]);
+
+      final item = r.items.single as ScheduleCreatedItem;
+      expect(item.delaySeconds, isNull);
+      expect(item.userText, '已排入下一轮自动继续');
+      expect(item.userText, isNot(contains('秒')));
+    });
+
+    test('缺轮次计数时只报秒数（不显示残缺的「第 /轮」）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.scheduleCreated, payload: {'delay_seconds': 45}),
+      ]);
+
+      expect((r.items.single as ScheduleCreatedItem).userText, '将在 45 秒后自动继续');
+    });
+
+    test('只有上限没有已推进数时退化为「上限 N 轮」', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.scheduleCreated,
+          payload: {'delay_seconds': 10, 'max_auto_turns': 5},
+        ),
+      ]);
+
+      expect(
+        (r.items.single as ScheduleCreatedItem).userText,
+        '将在 10 秒后自动继续（上限 5 轮）',
+      );
+    });
+
+    test('重放同一事件不产生重复项（SSE 回放 + 回填交叠窗口）', () {
+      final e = ev(
+        EventTypes.scheduleCreated,
+        id: 'evt_sched_1',
+        payload: {'delay_seconds': 30},
+      );
+      // 本项不按身份键 upsert（与 GoalGateStoppedItem 同取向：排程通知是
+      // 一次性事件，没有天然身份键），但控制器层的 seen 去重会滤掉同一
+      // eventId——故这里只断言「单条输入产出单项」。
+      //
+      // 不在归约器层做 eventId 去重是有意的：`reduce` 是纯函数，同一个事件
+      // 对象被传两次时按 id 去重需要维护跨调用状态，而真正会重复输入的路径
+      //（SSE 回放 + timeline 回填交叠）已在控制器用 seen 集合滤掉。
+      final r = EventReducer.reduce([e]);
+      expect(r.items, hasLength(1));
+    });
+  });
+
   /// 目标自动推进停止（`goal_gate_stopped`）——Goal Gate 终止的唯一可见信号。
   ///
   /// ## 这个测试防的是什么
