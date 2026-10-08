@@ -81,6 +81,37 @@ class _FakeSseClient extends SseClient {
   @override
   void recordEventId(String eventId) {}
 
+  /// 推一帧（camelCase，同 `chatbus.Event` 的 SSE 形态）。
+  ///
+  /// ## 为什么手写 JSON 而不 import `dart:convert`
+  ///
+  /// `SseFrame.data` 是 JSON 字符串，本文件已 import `dart:io`（它的
+  /// `jsonEncode` 不在此）——手写一个极简编码即可，payload 只有字符串/数字/
+  /// 列表，无需完整实现。
+  void push(String event, Map<String, dynamic> data) {
+    framesController.add(SseFrame(event: event, data: _encode(data), id: null));
+  }
+
+  static String _encode(Map<String, dynamic> m) =>
+      '{${m.entries.map((e) => '"${e.key}":${_jsonValue(e.value)}').join(',')}}';
+
+  static String _jsonValue(Object? v) {
+    if (v == null) return 'null';
+    if (v is num || v is bool) return v.toString();
+    if (v is String) {
+      final escaped = v
+          .replaceAll(r'\', r'\\')
+          .replaceAll('"', r'\"')
+          .replaceAll('\n', r'\n');
+      return '"$escaped"';
+    }
+    if (v is List) return '[${v.map(_jsonValue).join(',')}]';
+    if (v is Map) {
+      return '{${v.entries.map((e) => '"${e.key}":${_jsonValue(e.value)}').join(',')}}';
+    }
+    return '"$v"';
+  }
+
   @override
   Future<void> dispose() async {
     disposed = true;
@@ -153,6 +184,16 @@ Future<TestHarness> pumpApp(
   ///
   /// 默认空列表会让切换入口**隐藏**，既有用例的 AppBar 宽度不变。
   LoadAgents? loadAgents,
+
+  /// 是否注册默认的 `/chat/confirmations` mock。
+  ///
+  /// 需要**计数**该端点请求次数的用例（角标自动刷新）传 false 并自己在
+  /// `beforePump` 里注册计数版——否则默认 mock 会覆盖它（见该处注释）。
+  bool mockPendingConfirmations = true,
+
+  /// UFS API（交付物弹层用）。默认不 override：弹层默认不打开，用不到的用例
+  /// 不应被它拖慢（同桌面端同名参数的理由）。
+  UfsApi? ufsApi,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -200,11 +241,17 @@ Future<TestHarness> pumpApp(
     );
   }
   // 待确认角标 provider 在首页首帧即拉取，与 mockGroups 无关。
-  adapter.onGet(
-    '/chat/confirmations',
-    (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-    queryParameters: {'status': 'pending', 'limit': 50},
-  );
+  //
+  // 可关掉：需要**计数**该端点请求次数的用例（角标自动刷新）要在
+  // `beforePump` 里注册自己的 mock，而本默认值注册在 `beforePump` **之后**
+  // 会把它覆盖掉——那样计数永远是 0，用例会以与实现无关的理由失败。
+  if (mockPendingConfirmations) {
+    adapter.onGet(
+      '/chat/confirmations',
+      (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+      queryParameters: {'status': 'pending', 'limit': 50},
+    );
+  }
 
   // ## 为什么用 `UncontrolledProviderScope` + 显式 container
   //
@@ -275,6 +322,7 @@ Future<TestHarness> pumpApp(
       loadAgentsProvider.overrideWithValue(
         loadAgents ?? () async => const <Agent>[],
       ),
+      if (ufsApi != null) ufsApiProvider.overrideWithValue(ufsApi),
     ],
   );
   addTearDown(container.dispose);
@@ -351,6 +399,58 @@ class _FakeSecureStoragePlatform extends FlutterSecureStoragePlatform
   Future<void> deleteAll({required Map<String, String> options}) async =>
       data.clear();
 }
+
+/// `UfsApi` 的内存桩：记录 `listFiles` 调用并返回可配条目。
+///
+/// 用子类重写而不是 mock 框架（与桌面端同名桩同取向）：`UfsApi` 的方法都是
+/// 虚方法，重写 `listFiles`/`download` 即可，无需引入 mockito 依赖。
+class _FakeUfsApi extends UfsApi {
+  _FakeUfsApi() : super(Dio());
+
+  List<UfsFileEntry> entries = const [];
+
+  /// `listFiles` 收到的 `pathPrefix`（按调用顺序）。
+  final listCalls = <String?>[];
+
+  /// `download` 收到的 file id（按调用顺序）。
+  final downloadCalls = <String>[];
+
+  @override
+  Future<UfsDownload> download(String fileId, {String? ifNoneMatch}) async {
+    downloadCalls.add(fileId);
+    return UfsDownload(
+      notModified: false,
+      bytes: const [1, 2, 3],
+      etag: 'W/"test"',
+    );
+  }
+
+  @override
+  Future<UfsFilePage> listFiles({
+    String? pathPrefix,
+    String? updatedSince,
+    bool includeDeleted = false,
+    List<String> excludePrefix = const [],
+    int page = 1,
+    int pageSize = 20,
+    String ownerType = 'user',
+  }) async {
+    listCalls.add(pathPrefix);
+    return UfsFilePage(items: entries, total: entries.length);
+  }
+}
+
+/// 构造一条 UFS 条目（路径按 group workspace 前缀拼）。
+UfsFileEntry _ufsFile(String gid, String rel, {String? id}) =>
+    UfsFileEntry.fromJson({
+      'id': id ?? 'uf-$rel',
+      'path': '/workspace/groups/$gid/$rel/',
+      'size': 1024,
+      'name': rel.split('/').last,
+      'mime_type': 'text/markdown',
+      'is_directory': false,
+      'updated_at': '2026-01-01T00:00:00Z',
+    });
 
 void main() {
   testWidgets('首页渲染对话列表 + 底部标签栏', (tester) async {
@@ -1177,6 +1277,377 @@ void main() {
       expect(body.containsKey('agent_id'), isFalse);
     },
   );
+
+  testWidgets('对话页交付物入口：AppBar 按钮打开弹层并按 path_prefix 拉本对话清单', (tester) async {
+    // ## 本用例验证什么
+    //
+    // 移动端没有侧边栏，「按对话浏览交付物」是 AppBar 上的独立入口。
+    // `GroupDeliverablesPanel` 自身行为由 spb_features 的测试覆盖，但那个
+    // 测试用**手工构造的取数闭包**，发现不了「router 忘了注入」——而那正是
+    // 本仓库最常见的失败模式（功能实现了但没人调用）。
+    //
+    // 这里还额外锁住两件事：
+    // 1. 取数必须带本 group 的 `path_prefix`（写成全局拉取会让手机上白耗流量）；
+    // 2. **不注入** `onOpen`/`onReveal`：移动端 `openFile`/`revealPath` 恒为
+    //    false，接了会让用户点「打开」得到「无法打开文件」。面板在回调为
+    //    null 时不渲染该菜单项，故断「菜单里没有「打开」」。
+    final ufs = _FakeUfsApi()
+      ..entries = [
+        _ufsFile('grp_m', 'reports/a.md'),
+        _ufsFile('grp_m', 'notes/b.txt'),
+      ];
+    final h = await pumpApp(
+      tester,
+      sseClient: _FakeSseClient(),
+      ufsApi: ufs,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_m',
+          (server) => server.reply(200, {
+            'id': 'grp_m',
+            'user_id': 'usr_REAL',
+            'title': '测试对话',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_m/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_m', 'limit': 20},
+        );
+      },
+    );
+
+    h.router.go(SpbRoutes.chat('grp_m'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('open-group-deliverables')),
+      findsOneWidget,
+      reason: 'router 必须注入交付物入口，否则手机上无法按对话看产出',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('open-group-deliverables')));
+    await tester.pumpAndSettle();
+
+    // 取数必须限定在本 group 的 workspace 子树。
+    expect(ufs.listCalls, isNotEmpty, reason: '打开弹层必须真的取数');
+    expect(
+      ufs.listCalls,
+      everyElement('/workspace/groups/grp_m'),
+      reason: 'path_prefix 必须带 groupId，否则会把整个 workspace 拉下来',
+    );
+
+    // 清单内容渲染（含子目录文件名）。
+    expect(find.text('a.md'), findsWidgets);
+    expect(find.text('b.txt'), findsWidgets);
+
+    // 下载入口在（移动端唯一可用的文件动作）。
+    expect(
+      find.byKey(const ValueKey('agent-file-download')),
+      findsNothing,
+      reason: '那是时间线内联卡的 key，侧边栏面板用行尾菜单',
+    );
+    await tester.tap(find.byIcon(Icons.more_vert).first);
+    await tester.pumpAndSettle();
+    expect(find.text('下载'), findsOneWidget);
+    expect(
+      find.text('打开'),
+      findsNothing,
+      reason: '移动端 openFile 恒为 false，不得提供「打开」入口',
+    );
+    expect(find.text('定位'), findsNothing, reason: '移动端 revealPath 恒为 false');
+  });
+
+  testWidgets('对话页待办入口：聚合未解决确认卡并提交动作词（非状态词）', (tester) async {
+    // ## 本用例验证什么
+    //
+    // 移动端没有侧边栏，「现在有什么在等我」靠 AppBar 的待办入口。
+    // `GroupTodosPanel` 自身行为由 spb_features 覆盖，但那个测试用**手工
+    // 构造的 turns**，发现不了「router 忘了把归约结果接上」——而那正是本仓库
+    // 最常见的失败模式。
+    //
+    // 这里还锁住两条极易错的契约：
+    // 1. `confirmationId` 必须取自 payload 的 `confirmation_id`，**不是**
+    //    `eventId`（两者由服务端独立生成；用 eventId 去 resolve 会 404，
+    //    且**无任何报错**）；
+    // 2. body 里的 `action` 必须是**动作词**（`approve`/`reject`），写成
+    //    `resolved` 这类状态词会被服务端拒绝。
+    final hit = <({String path, Object? body})>[];
+    final sse = _FakeSseClient();
+    final h = await pumpApp(
+      tester,
+      sseClient: sse,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_t',
+          (server) => server.reply(200, {
+            'id': 'grp_t',
+            'user_id': 'usr_REAL',
+            'title': '待办测试',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_t/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_t', 'limit': 20},
+        );
+        adapter.onPost(
+          '/api/chat/groups/grp_t/confirmations/conf_row_1/resolve',
+          (server) => server.replyCallback(200, (options) {
+            hit.add((path: options.path, body: options.data));
+            return {'ok': true};
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+
+    h.router.go(SpbRoutes.chat('grp_t'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    // 推一帧 confirmation_required。
+    //
+    // ⚠️ payload 的 `confirmation_id` 与帧的 `eventId` **刻意不同**：实现若
+    // 误用 eventId 当卡行 id，下面的 POST 路径断言会失败（真实环境则是静默
+    // 404）。`eventId` 为 `evt_1`，卡行 id 为 `conf_row_1`。
+    sse.push('confirmation_required', {
+      'eventId': 'evt_1',
+      'eventType': 'confirmation_required',
+      'groupId': 'grp_t',
+      'turnId': 'turn_1',
+      'userId': 'usr_REAL',
+      'seq': 1,
+      'createdAt': '2026-01-01T00:00:00Z',
+      // ⚠️ `text` 必须放在 **payload 里**：归约器读的是 `ev.text`，而它取的是
+      // payload 的字段（不是帧顶层）。真实服务端 `BuildConfirmationRequiredPayload`
+      // 只给 confirmation_id 与 recommendation，故线上问题文案常是兜底的
+      // 「需要确认」——这里给一个独特字符串，用来证明面板渲染的确实是本帧。
+      'payload': {
+        'confirmation_id': 'conf_row_1',
+        'text': '要删除这三个文件吗？',
+        // 选项文案用「继续/取消」：`_optionToAction` 正是把它们映射成
+        // approve/reject。用「批准/拒绝」会走 `_ => option` 直通分支，
+        // 就测不到这层映射了。
+        'options': ['继续', '取消'],
+      },
+    });
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('open-group-todos')),
+      findsOneWidget,
+      reason: 'router 必须注入待办入口，否则手机上无法跨轮次看到待确认',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('open-group-todos')));
+    await tester.pumpAndSettle();
+
+    // 问题文案出现在聚合面板里（说明归约结果真的接上了）。
+    expect(find.text('要删除这三个文件吗？'), findsWidgets, reason: '待办面板必须渲染归约出的确认卡问题');
+
+    // 点「继续」→ 断言打到正确端点且 action 是动作词。
+    //
+    // ⚠️ 必须**限定在弹层那张卡内**：同一张确认卡在时间线里也有一份内联渲染，
+    // 而弹层是模态的（barrier 盖住时间线）。直接 `find.byKey(...).first` 会命中
+    // 时间线里那份，点击落到 barrier 上——请求不会发出，用例会以一个与实现
+    // 无关的理由失败。
+    final optFinder = find.descendant(
+      of: find.byKey(const ValueKey('todo-conf-conf_row_1')),
+      matching: find.byKey(const ValueKey('confirmation-option-继续')),
+    );
+    // ⚠️ `tap` 本身必须在 `runAsync` 内（同本文件「切 agent」用例）：dio 的
+    // mock 响应靠**真实**事件循环完成。在 FakeAsync 时区里点击，请求会发出
+    // 但响应永不结算——表现为「断言 hit 为空」而看不出原因。
+    await tester.runAsync(() async {
+      await tester.tap(optFinder);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+
+    expect(hit, hasLength(1), reason: '必须真的发出一次 resolve 请求');
+    expect(
+      hit.single.path,
+      '/api/chat/groups/grp_t/confirmations/conf_row_1/resolve',
+      reason: 'confirmation_id 必须取自 payload，不能用 eventId（evt_1）',
+    );
+    final body = hit.single.body! as Map<String, dynamic>;
+    expect(
+      body['action'],
+      'approve',
+      reason: '⚠️ action 必须是动作词；写成 resolved 这类状态词会被服务端拒绝',
+    );
+    expect(body['action'], isNot('resolved'));
+  });
+
+  testWidgets('收到确认卡事件后待确认角标自动重拉（不是等用户打开待确认页）', (tester) async {
+    // ## 这个用例防的是什么
+    //
+    // 对话列表页的角标读 `pendingConfirmationCountProvider`，它派生自
+    // `pendingConfirmationsProvider`。此前对话页在 items 变化时调的是
+    // `ref.invalidate(pendingConfirmationCountProvider)`——**失效的**：count
+    // 重建后读到的仍是被缓存的被依赖者，角标纹丝不动。
+    //
+    // 故观测点是**网络请求次数**：SSE 推来一帧确认卡后，
+    // `/chat/confirmations` 必须被重新请求一次。只断言「角标数字变了」抓不到
+    // 这个缺陷——数字可能因为其它 provider 重算而恰好正确。
+    var confirmationRequests = 0;
+    final sse = _FakeSseClient();
+    // 从首页（对话列表 tab）起步再导航进对话页：角标 provider 的读取点是
+    // `_ConversationsTab`。
+    //
+    // ⚠️ 导航进 chat 后该 tab **会卸载**——`StatefulShellRoute.indexedStack`
+    // 保活的是**分支**，而分支内部的 Navigator 仍然换页。故与桌面端同型：
+    // invalidate 把 provider 标脏，重算推迟到用户回到列表页时。
+    final h = await pumpApp(
+      tester,
+      sseClient: sse,
+      mockPendingConfirmations: false,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_c',
+          (server) => server.reply(200, {
+            'id': 'grp_c',
+            'user_id': 'usr_REAL',
+            'title': '角标测试',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_c/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_c', 'limit': 20},
+        );
+        // 计数版：覆盖 pumpApp 注册的默认 mock（后者覆盖前者）。
+        adapter.onGet(
+          '/chat/confirmations',
+          (server) => server.replyCallback(200, (_) {
+            confirmationRequests++;
+            return {'items': <Map<String, dynamic>>[]};
+          }),
+          queryParameters: {'status': 'pending', 'limit': 50},
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(confirmationRequests, 1, reason: '首页挂载时角标 provider 已拉过一次');
+
+    h.router.go(SpbRoutes.chat('grp_c'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      confirmationRequests,
+      1,
+      reason: '进入对话页本身不该再拉一次（首次同步建基线时故意不 invalidate）',
+    );
+
+    sse.push('confirmation_required', {
+      'eventId': 'evt_c1',
+      'eventType': 'confirmation_required',
+      'groupId': 'grp_c',
+      'turnId': 'turn_c1',
+      'userId': 'usr_REAL',
+      'seq': 1,
+      'createdAt': '2026-01-01T00:00:00Z',
+      'payload': {
+        'confirmation_id': 'conf_row_c1',
+        'options': ['继续', '取消'],
+      },
+    });
+
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    await tester.pumpAndSettle();
+
+    // 对话页里没有角标的读取点，重算推迟到回到列表页（见上方注释）。
+    expect(confirmationRequests, 1, reason: '对话页里没有角标的读取点，重算推迟到回到列表页时');
+
+    // 回到对话列表 tab：角标被重新读取，provider 因已标脏而重拉。
+    h.router.go(SpbRoutes.conversations);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      confirmationRequests,
+      2,
+      reason:
+          '确认卡事件到达后，回到列表页必须看到**已更新**的角标（即重拉了一次）。'
+          '此前 invalidate 的是 count provider：它重建后读到的仍是被缓存的'
+          'pendingConfirmationsProvider，于是这里仍是 1 —— 这条断言正是那个'
+          '缺陷的回归防线',
+    );
+  });
 
   testWidgets('切到设置标签渲染完整设置页', (tester) async {
     // ## 为什么要把测试窗口调高

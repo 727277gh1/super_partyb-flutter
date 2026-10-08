@@ -396,7 +396,16 @@ class _PendingConfirmationsPageState
             } on Object catch (_) {}
           }),
         );
-        ref.invalidate(pendingConfirmationCountProvider);
+        // 刷新计数角标。
+        //
+        // ## 为什么 invalidate 被依赖者而不是 count
+        //
+        // `pendingConfirmationCountProvider` 是
+        // `await ref.watch(pendingConfirmationsProvider.future)` 的派生值。
+        // 只 invalidate count 时它重建后读到的仍是被缓存的
+        // `pendingConfirmationsProvider` 结果——角标不会变（本行原先正是
+        // 这个失效调用）。invalidate 被依赖者，count 会因 watch 依赖自动重算。
+        ref.invalidate(pendingConfirmationsProvider);
         return items;
       },
       groupTitleOf: (gid) => _titles[gid],
@@ -740,6 +749,70 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 最近一次归约出的播报状态；null 表示本群未开语音/尚无事件。
   TtsStatus? _ttsStatus;
 
+  /// controller.items 的订阅（交付物弹层的刷新令牌用）。
+  ///
+  /// ## 为什么要订阅（本页此前只订阅独立流）
+  ///
+  /// 交付物弹层的内容由 UFS 取数，与时间线无关；但 agent 新产出文件时
+  /// **时间线不会自己刷新**——`agent.file.*` 事件只改变归约结果。若不监听
+  /// `items`，用户必须手动点刷新才能看到刚产出的文件。
+  StreamSubscription<List<ConversationItem>>? _itemsSub;
+
+  /// 最近一次归约出的对话项（供交付物弹层的刷新令牌与后续待办弹层复用）。
+  List<ConversationItem> _items = const [];
+
+  /// 交付物弹层的刷新令牌：出现新的 agent 文件时自增。
+  ///
+  /// 面板按令牌值变化重拉，而不是比较取数闭包的函数身份（后者每次 build
+  /// 都是新闭包，会变成每次 rebuild 都重拉）。见 `GroupDeliverablesPanel`
+  /// 的「刷新模型」类文档。
+  int _deliverablesReloadToken = 0;
+
+  /// 「见过的文件 id」基线，用于判断新文件（与桌面端同取向）。
+  final _seenFileItemIds = <String>{};
+
+  /// 上次见过的确认卡身份集合：用于判定「待确认集合是否变了」。
+  ///
+  /// 元素形如 `'<confirmation_id>:<resolved>'`——把 `resolved` 也编进身份，
+  /// 因为「一张卡被解决」同样是待确认集合的变化（角标要减 1）。
+  ///
+  /// ## 为什么是可空（null 表示「从未同步」）而不是空集合
+  ///
+  /// 用 `isEmpty` 判定首次同步有个错：**一个本来就没有确认卡的对话**，
+  /// 首次同步后集合仍是空的，于是第二张卡真的到来时也会被当成「首次」而跳过
+  /// 刷新。null 把「没同步过」与「同步过且为空」区分开。
+  Set<String>? _seenConfirmationIds;
+
+  /// 正在提交作答的确认卡行 id（与桌面端同名集合，两端共享 busy 语义）。
+  ///
+  /// ## 为什么按卡行 id 去重
+  ///
+  /// 同一张卡可能在两处可点（时间线内联渲染 + 待办弹层）。若只靠按钮自身
+  /// 禁用，两处的 busy 状态互不相知，用户可以在弹层点一下、又回时间线再点
+  /// 一下。集合按 `confirmationId`（**卡行 id，不是事件 id**，见
+  /// `ConfirmationItem` 的类文档）去重。
+  final _resolvingConfirmations = <String>{};
+
+  /// 本对话时间线里已出现的 agent 文件数（去重后），供 AppBar 徽标。
+  ///
+  /// 与 `_seenFileItemIds` 不同：后者是「刷新令牌的基线」，切对话时会清空；
+  /// 本值直接反映 `_items`，切对话后由 `_onItemsChanged` 重新填入。
+  int get _agentFileCount => _items
+      .whereType<AgentFileItem>()
+      .where((f) => !f.isDeleted)
+      .map((f) => f.ufsFileId ?? f.relativePath)
+      .where((id) => id.isNotEmpty)
+      .toSet()
+      .length;
+
+  /// 本对话待处理的确认卡数（供 AppBar 徽标）。
+  ///
+  /// 用 [ConfirmationItem.canResolve] 而非 `!resolved`：前者额外要求
+  /// `confirmationId` 与 `groupId` 齐备。只统计能真正提交的卡——否则用户点开
+  /// 弹层会看到一张按钮点不动、也没解释的卡（异常载荷的卡）。
+  int get _pendingConfirmationCount =>
+      _items.whereType<ConfirmationItem>().where((c) => c.canResolve).length;
+
   @override
   void initState() {
     super.initState();
@@ -751,6 +824,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   @override
   void dispose() {
+    _itemsSub?.cancel();
     _activitiesSub?.cancel();
     _contextUsageSub?.cancel();
     _executionStatusSub?.cancel();
@@ -861,6 +935,122 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     } finally {
       _loadingGroup = false;
     }
+  }
+
+  /// 打开交付物底部弹层（按对话浏览本次产出）。
+  ///
+  /// ## 为什么用 `showModalBottomSheet` 而不是新路由
+  ///
+  /// 与 [_openSettings] / [_openGoalTasks] 同一理由：新路由会得到另一个
+  /// `_ChatPage` 实例（State 不共享），刷新令牌与 `_group` 都不一致。
+  /// 弹层共享同一份 State。
+  ///
+  /// ## 为什么只接下载，不接打开 / 定位
+  ///
+  /// 移动端注入的是 `NoopDesktopCapabilities`（见 providers.dart），
+  /// `openFile` / `revealPath` 恒返回 false。若接上，用户点「打开」会得到
+  /// 「无法打开文件」——比一开始就不展示该项更让人困惑。面板在 `onOpen` /
+  /// `onReveal` 为 null 时不渲染对应菜单项，故这里只传 `onDownload`，退化为
+  /// 「只读浏览 + 下载」（与 `_downloadAgentFile` 的既有取舍一致）。
+  ///
+  /// 同理不传 `resolveLocalPath`：它查的是**同步目录**索引，而本弹层回答的是
+  /// 「这个对话产出了什么」（远端），两者用途不同。
+  Future<void> _openDeliverables() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * 0.8,
+          child: GroupDeliverablesPanel(
+            // groupId 变化时面板自行清空本地路径并重拉（见其类文档）。
+            groupId: widget.groupId,
+            // 弹层自带拖拽条，面板标题会与它重复；只保留工具条（刷新 + 计数）。
+            title: '',
+            loadFiles: () =>
+                ref.read(groupDeliverablesProvider(widget.groupId).future),
+            onDownload: (file) => ref.read(downloadDeliverableProvider)(file),
+            // SSE 推送新文件时 bump（见 _onItemsChanged）。
+            reloadToken: _deliverablesReloadToken,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 打开待办底部弹层（跨轮次聚合未解决确认卡）。
+  ///
+  /// ## 它解决什么（与时间线内联卡的边界）
+  ///
+  /// 确认卡在时间线里已有内联渲染（`ConfirmationCard`）。本弹层不是替代，
+  /// 而是**跨轮次的聚合视图**：时间线里确认卡夹在对话流中，用户在手机上
+  /// 向上滚几屏后就看不到「还有一张卡在等我」。弹层把所有未处理的卡按轮次
+  /// 集中呈现，最新轮次在最上。
+  ///
+  /// ## 为什么用 `showModalBottomSheet` 而不是新路由
+  ///
+  /// 与 [_openSettings] / [_openGoalTasks] 同一理由：新路由会得到另一个
+  /// `_ChatPage` 实例（State 不共享），`_resolvingConfirmations` 的 busy 态
+  /// 与时间线内联卡就不一致了。
+  Future<void> _openTodos() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * 0.8,
+          child: GroupTodosPanel(
+            // 按轮次聚合（纯函数在领域层，见 TurnGroup 类文档）。
+            turns: groupItemsByTurn(_items),
+            onResolveConfirmation: _resolveConfirmation,
+            resolvingIds: _resolvingConfirmations,
+            // 切 group 时清空折叠状态（旧对话的展开位置对新对话无意义）。
+            reloadKey: widget.groupId,
+            // 弹层自带拖拽条，不再重复面板标题。
+            showHeader: false,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 提交确认卡作答。
+  ///
+  /// ## 动作文案 → 服务端 action
+  ///
+  /// 真实路径：`POST /api/chat/groups/:group_id/confirmations/:id/resolve`。
+  /// 服务端把 `action` 写进 `resolved_action`，`status` 固定为 `resolved`
+  /// （受 CHECK 约束：pending|resolved|expired|cancelled）。故必须传**动作**
+  /// 而非状态词，映射见 [_optionToAction]。
+  ///
+  /// ## 成功与失败都解锁
+  ///
+  /// 失败时应允许重试（不重抛、不弹错误打断阅读，与内联路径的既有行为
+  /// 一致）。服务端 CAS 保证重复请求无数据错误。
+  void _resolveConfirmation(
+    String groupId,
+    String confirmationId,
+    String option,
+  ) {
+    if (_resolvingConfirmations.contains(confirmationId)) return;
+    setState(() => _resolvingConfirmations.add(confirmationId));
+    ref
+        .read(chatApiProvider)
+        .resolveConfirmation(
+          groupId,
+          confirmationId,
+          action: _optionToAction(option),
+        )
+        .whenComplete(() {
+          if (mounted) {
+            setState(() => _resolvingConfirmations.remove(confirmationId));
+          }
+        })
+        .catchError((Object e) {
+          debugPrint('确认提交失败: $e');
+        });
   }
 
   /// 打开设置底部弹层。
@@ -1194,6 +1384,17 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     _focused = key;
 
     final controller = ref.read(chatStreamControllerProvider(userId));
+    // 交付物刷新令牌的基线：切对话时清空「见过的文件 id」，否则上一个对话里
+    // 见过的文件会把新对话的文件当成「旧文件」而不触发刷新。
+    _seenFileItemIds.clear();
+    // 同理重置确认卡基线（见该字段文档：null = 从未同步）。
+    _seenConfirmationIds = null;
+    if (_itemsSub == null) {
+      // 只订阅一次（controller 是 user 级单例，切 group 复用同一实例）。
+      // 立即同步一次当前快照，避免错过订阅前已存在的文件。
+      _itemsSub = controller.items.listen(_onItemsChanged);
+      _onItemsChanged(controller.snapshot);
+    }
     if (_activitiesSub == null) {
       // 执行中活动快照走独立流（见领域层 TurnActivitySnapshot 类文档）。
       // 先订阅再同步一次快照，避免错过订阅前已到达的事件。
@@ -1251,6 +1452,64 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     if (!mounted) return;
     setState(() => _contextUsage = usage);
   }
+
+  /// 监听 controller.items：出现新的 agent 文件时 bump 交付物刷新令牌。
+  ///
+  /// ## 为什么只 bump 令牌，不直接调 provider
+  ///
+  /// 弹层可能未打开（`groupDeliverablesProvider` 是 autoDispose，无人监听时
+  /// 本就不该取数）。bump 令牌是无副作用的；打开弹层后首帧会拉到最新。
+  void _onItemsChanged(List<ConversationItem> items) {
+    final ids = <String>{};
+    for (final item in items) {
+      if (item is AgentFileItem && !item.isDeleted) {
+        final id = item.ufsFileId;
+        if (id != null && id.isNotEmpty) ids.add(id);
+      }
+    }
+    // 首次建立基线：不 bump（避免刚打开页面就多拉一次——首帧本就要拉）。
+    final isFirstSync = _seenFileItemIds.isEmpty;
+    final hasNew = ids.difference(_seenFileItemIds).isNotEmpty;
+    _seenFileItemIds
+      ..clear()
+      ..addAll(ids);
+
+    if (!mounted) return;
+    setState(() {
+      _items = items;
+      if (!isFirstSync && hasNew) _deliverablesReloadToken++;
+    });
+
+    // ## 为什么要刷新待确认角标
+    //
+    // 确认卡事件（`confirmation_required` / `confirmation_resolved`）会进入
+    // 归约结果，但对话列表页的角标读的是另一个 provider
+    //（`pendingConfirmationCountProvider`）。不刷新的话，用户要等下次进入
+    // 列表页或打开待确认页才能看到角标变化。
+    //
+    // ## 为什么 invalidate 被依赖者而不是 count
+    //
+    // count provider 是 `await ref.watch(pendingConfirmationsProvider.future)`
+    // 的**派生值**。只 invalidate count 时，它重建后读到的仍是被缓存的
+    // `pendingConfirmationsProvider` 结果——角标纹丝不动（本文件 :399 处那个
+    // 失效调用就是这个根因）。刷新被依赖者则两条都生效：前者重拉，后者因
+    // watch 依赖被自动重算。
+    //
+    // 首次建基线不刷新：对话列表页本就在拉，再刷一次是重复请求。
+    final confIds = <String>{
+      for (final item in items)
+        if (item is ConfirmationItem) '${item.confirmationId}:${item.resolved}',
+    };
+    final baseline = _seenConfirmationIds;
+    _seenConfirmationIds = confIds;
+    if (baseline != null && !_setEquals(baseline, confIds)) {
+      ref.invalidate(pendingConfirmationsProvider);
+    }
+  }
+
+  /// 集合内容相等（`Set` 的 `==` 是**引用**相等，不能用）。
+  static bool _setEquals(Set<String> a, Set<String> b) =>
+      a.length == b.length && a.containsAll(b);
 
   /// 监听 controller.executionStatus：驱动对话页的等待/重试提示。
   void _onExecutionStatusChanged(ExecutionStatus? status) {
@@ -1369,6 +1628,59 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           icon: const Icon(Icons.tune),
           tooltip: '对话设置',
           onPressed: _group == null ? null : _openSettings,
+        ),
+        // 交付物入口（按对话浏览本次产出的文件）。
+        //
+        // ## 为什么与设置/任务分开
+        //
+        // 它是**只读浏览 + 下载**，而设置弹层是表单、任务弹层是可编辑列表。
+        // 混在一起会让弹层变成多套交互的堆叠，且交付物的刷新（`agent.file.*`
+        // 事件）会与表单草稿编辑互相干扰。
+        //
+        // ## 为什么徽标是「本对话已出现的 agent 文件数」而不是权威文件数
+        //
+        // 权威值要跑一轮 UFS 分页（生产实测单 group 可达数千条），而 AppBar
+        // 在首帧就要渲染。徽标只回答「这个对话有没有产出」这个粗粒度问题，
+        // 精确计数在弹层里（面板工具条）。取不到时（未就绪 / 事件未到）
+        // 不显示徽标，不谎报 0。
+        //
+        // 与「任务清单」不同，本入口**不要求** `_group` 就绪：交付物取数只用
+        // `widget.groupId`（URL 里已有），group 拉取失败不该连带屏蔽它。
+        IconButton(
+          key: const ValueKey('open-group-deliverables'),
+          icon: Badge.count(
+            count: _agentFileCount,
+            isLabelVisible: _agentFileCount > 0,
+            child: const Icon(Icons.folder_outlined),
+          ),
+          tooltip: '交付物',
+          onPressed: _openDeliverables,
+        ),
+        // 待办入口（跨轮次聚合未解决确认卡）。
+        //
+        // ## 为什么与交付物分开
+        //
+        // 交付物回答「这个对话产出了什么」（只读浏览），待办回答「现在有什么
+        // 在等我」（可作答）。两者数据源不同（UFS 远端 vs 时间线归约），且
+        // 待办需要 busy 态与写端点，合成一个弹层会让两套交互堆叠。
+        //
+        // ## 徽标是「未解决确认卡数」
+        //
+        // 它就是弹层里列表的长度，可直接从归约结果算，无需额外请求。为 0 时
+        // 不显示徽标（`isLabelVisible`）——显示一个恒为 0 的徽标会让用户以为
+        // 功能坏了。
+        //
+        // 与交付物同理，**不要求** `_group` 就绪：确认卡来自时间线归约，
+        // 与 group 快照无关。
+        IconButton(
+          key: const ValueKey('open-group-todos'),
+          icon: Badge.count(
+            count: _pendingConfirmationCount,
+            isLabelVisible: _pendingConfirmationCount > 0,
+            child: const Icon(Icons.pending_actions_outlined),
+          ),
+          tooltip: '待办',
+          onPressed: _openTodos,
         ),
         // 任务清单入口。
         //

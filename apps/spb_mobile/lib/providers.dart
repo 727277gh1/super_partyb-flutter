@@ -860,6 +860,102 @@ final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
   return (String? root) async => false;
 });
 
+// ==================== 交付物浏览 ====================
+//
+// 与桌面端同名同构（`apps/spb_desktop/lib/providers.dart` 的「交付物侧边栏」
+// 一节），装配理由见那里的类文档。
+//
+// ## 为什么移动端也需要这两个 Provider（此前只有桌面端有）
+//
+// 移动端此前只有**同步页**（把 workspace 全量拉到沙箱目录），没有「按对话
+// 浏览本次产出」的入口。两者用途不同：同步页回答「本地有哪些文件」，本组
+// Provider 回答「这个对话产出了什么」——后者是手机上最常问的问题，且不必先
+// 跑一轮全量同步。
+
+/// 拉取当前 group 的 workspace 交付物清单（UFS `/api/files` 分页汇总）。
+///
+/// ## 为什么分页拉全量而不是只拉一页
+///
+/// 面板要展示完整的目录树与准确的计数。只拉第一页会让「reports 目录 12 个
+/// 文件」变成「只看到 20 条里的那部分」，且目录聚合数会偏小——一个**看起来
+/// 正常但错误**的结果。
+///
+/// ## 为什么按 `path_prefix` 而不是按 group 过滤
+///
+/// UFS 的 `path_prefix` 让服务端只返回该子树下的条目（对齐 webapp
+/// `listGroupWorkspaceFiles`）。客户端过滤需要先拉全量（生产 workspace 实测
+/// 5666 条），流量与延迟都不可接受——移动端尤其如此。
+///
+/// ## 为什么是 autoDispose
+///
+/// 弹层只在一个对话页可见。`autoDispose` 让离开该 group 后释放缓存，避免长
+/// 时间挂着每个打开过的 group 的清单（移动端内存比桌面端更紧张）。
+final groupDeliverablesProvider = FutureProvider.autoDispose
+    .family<List<UfsFileEntry>, String>((ref, groupId) async {
+      if (groupId.isEmpty) return const [];
+      final ufs = ref.watch(ufsApiProvider);
+
+      const pageSize = 100;
+      final all = <UfsFileEntry>[];
+      var page = 1;
+      // 上限防御：即使服务端 total 异常（例如恒大于已拉数），也不会无限循环。
+      // 单 group 的交付物远超 100 页（1 万条）在现实中不存在，触顶即停并记日志。
+      const maxPages = 100;
+      while (page <= maxPages) {
+        final res = await ufs.listFiles(
+          pathPrefix: '$workspaceGroupsPrefix$groupId',
+          page: page,
+          pageSize: pageSize,
+        );
+        all.addAll(res.items);
+        if (!res.hasMore(page: page, pageSize: pageSize)) break;
+        page++;
+      }
+      if (page > maxPages) {
+        SpbLog.warn('交付物分页达到上限，可能未拉全', {
+          'group': groupId,
+          'pages': maxPages,
+          'count': all.length,
+        });
+      }
+      return all;
+    });
+
+/// 下载一个交付物到本地，返回**用户可见的落地路径**。
+///
+/// ## 为什么落到应用支持目录而不是弹保存对话框
+///
+/// 与 `_downloadAgentFile`（时间线内联卡）同一取舍：保存对话框需要额外的
+/// 平台插件与权限面，而「下载」本身只需要一个稳定的本地路径。落盘目录用
+/// `downloads/deliverables/`，与时间线的 `downloads/agent/` 隔离——后者会被
+/// 清理计划动，用户手动下载的不能被带上（与同步目录也隔离）。
+///
+/// ## 文件名防御
+///
+/// 用 `p.basename` 取最后一段：UFS 的 `name` 是服务端可控输入，若含 `../`
+/// 或绝对路径就能写到目标目录之外。这与同步链路的 `groupRelativePath` 防御
+/// 同源（那是目录内相对路径，这里是单文件名）。
+final downloadDeliverableProvider = Provider<DownloadDeliverable>((ref) {
+  return (UfsFileEntry file) async {
+    final ufs = ref.read(ufsApiProvider);
+    final res = await ufs.download(file.id);
+    // 304 或空正文：内容未变/无内容，不覆盖本地（对齐同步链路的语义）。
+    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) {
+      return '';
+    }
+    final dir = await getApplicationSupportDirectory();
+    final target = Directory(p.join(dir.path, 'downloads', 'deliverables'));
+    if (!await target.exists()) {
+      await target.create(recursive: true);
+    }
+    final rawName = file.name.isNotEmpty ? file.name : file.path;
+    final safeName = p.basename(rawName);
+    final out = p.join(target.path, safeName.isEmpty ? file.id : safeName);
+    await File(out).writeAsBytes(res.bytes!, flush: true);
+    return out;
+  };
+});
+
 // ==================== 交付物回传 ====================
 //
 // 与桌面端同名同构（装配逻辑见桌面端 providers.dart 的说明）：把 ChatApi/UfsApi
