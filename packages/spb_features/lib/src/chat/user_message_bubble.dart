@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 用户发出的消息气泡（右对齐）。
 ///
-/// 纯展示组件：无状态、无回调。用户消息在发出后不可编辑，故不需要交互。
+/// 纯展示组件：无状态、无回调。用户消息在发出后不可编辑，故不需要交互——
+/// 唯一的例外是复制（只读操作，不改变消息本身）。
 class UserMessageBubble extends StatelessWidget {
   const UserMessageBubble({super.key, required this.text});
 
@@ -29,11 +31,31 @@ class UserMessageBubble extends StatelessWidget {
             color: scheme.primaryContainer,
             borderRadius: SpbRadius.bubbleAll,
           ),
-          child: SelectableText(
-            text,
-            style: textTheme.bodyMedium?.copyWith(
-              color: scheme.onPrimaryContainer,
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              SelectableText(
+                text,
+                style: textTheme.bodyMedium?.copyWith(
+                  color: scheme.onPrimaryContainer,
+                ),
+              ),
+              // 整条正文的复制入口。
+              //
+              // ## 为什么放在气泡**内**而不是下方
+              //
+              // 用户气泡是右对齐的窄条，气泡下方是页面的留白。把按钮放在气泡外
+              // 会让它看起来像下一条消息的一部分；放在气泡内、右对齐，视觉上
+              // 归属于这条消息。
+              //
+              // ## 为什么无条件是可用（不判流式）
+              //
+              // 用户消息发出即定稿，没有「还在变」的窗口。
+              Align(
+                alignment: Alignment.centerRight,
+                child: CopyIconButton(text: text),
+              ),
+            ],
           ),
         ),
       ),

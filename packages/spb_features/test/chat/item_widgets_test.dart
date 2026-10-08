@@ -6,8 +6,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 构造一个「提交成功」的 [FlushResult]。
 ///
@@ -20,6 +22,36 @@ FlushResult _okFlush() => FlushResult.fromJson({
 
 /// 包一层 MaterialApp（组件依赖 Theme 与 Directionality）。
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
+
+/// 捕获剪贴板写入内容的盒子。
+///
+/// ## 为什么不用 `Clipboard.getData` 回读
+///
+/// `Clipboard` 走 `SystemChannels.platform` 平台通道，测试环境没有真实剪贴板
+/// 后端——回读只会拿到 null，于是「写入是否发生」根本无法断言。改为拦截通道
+/// 调用本身，直接看 `Clipboard.setData` 收到的参数。
+class _ClipboardCapture {
+  String? text;
+}
+
+/// 装一个假的平台通道，捕获后续的 `Clipboard.setData`。
+///
+/// 用例结束自动复位（`addTearDown`），避免影响其它用例。
+_ClipboardCapture _captureClipboard(WidgetTester tester) {
+  final capture = _ClipboardCapture();
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+    if (call.method == 'Clipboard.setData') {
+      capture.text = (call.arguments as Map)['text'] as String?;
+    }
+    return null;
+  });
+  addTearDown(() {
+    messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+  });
+  return capture;
+}
 
 /// 收集子树里所有文本节点的纯文本，拼接后返回。
 ///
@@ -404,6 +436,23 @@ void main() {
       final align = tester.widget<Align>(find.byType(Align).first);
       expect(align.alignment, Alignment.centerRight);
     });
+
+    testWidgets('复制按钮把完整原文写入剪贴板', (tester) async {
+      // ⚠️ 复制的是**组件入参的原文**，不是渲染后的富文本。用一段带换行的
+      // 文本，能同时发现「只复制了首行」这类截断错误。
+      const original = '第一行\n第二行 with **markdown**';
+      final copied = _captureClipboard(tester);
+
+      await tester.pumpWidget(_host(const UserMessageBubble(text: original)));
+      await tester.tap(find.byType(CopyIconButton));
+      await tester.pump();
+
+      expect(copied.text, original, reason: '必须复制完整原文（含换行与语法字符）');
+
+      // 「已复制」反馈靠一个延迟定时器复位。不推进时间的话，测试结束时它仍是
+      // pending，flutter_test 直接报「A Timer is still pending...」。
+      await tester.pump(SpbDuration.copyFeedback);
+    });
   });
 
   group('AssistantMessageBubble', () {
@@ -444,6 +493,40 @@ void main() {
 
       // 让动画控制器停下，避免 pending timer 警告。
       await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('流式中不提供复制入口（文本仍在变，会复制到半截）', (tester) async {
+      await tester.pumpWidget(
+        _host(const AssistantMessageBubble(text: '半句话', isStreaming: true)),
+      );
+      await tester.pump();
+
+      expect(
+        find.byType(CopyIconButton),
+        findsNothing,
+        reason: '流式中复制会拿到半截内容，此时必须没有入口',
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('完成后提供复制入口，且复制完整原文', (tester) async {
+      const original = '第一段\n\n第二段 with `code`';
+      final copied = _captureClipboard(tester);
+
+      await tester.pumpWidget(
+        _host(const AssistantMessageBubble(text: original)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CopyIconButton), findsOneWidget);
+      await tester.tap(find.byType(CopyIconButton));
+      await tester.pump();
+
+      expect(copied.text, original, reason: '必须复制完整原文而非渲染后的富文本');
+
+      // 同上：把「已复制」的复位定时器跑完，避免 pending timer。
+      await tester.pump(SpbDuration.copyFeedback);
     });
 
     testWidgets('流式透传 isStreaming 给渲染器，完成后用 SelectionArea 包裹', (tester) async {

@@ -55,6 +55,13 @@ class SpbDuration {
   static const Duration fast = Duration(milliseconds: 150);
   static const Duration normal = Duration(milliseconds: 220);
   static const Duration slow = Duration(milliseconds: 320);
+
+  /// 「已复制」反馈的保持时长。
+  ///
+  /// 与上面几个**不是同类**：它们描述动画时长，本项描述「状态显示多久」。
+  /// 放这里而非写在使用处，是因为它是一条**跨端一致**的交互约定——两端若各写
+  /// 一个数，同一次操作在两端的反馈节奏就会不同。
+  static const Duration copyFeedback = Duration(seconds: 2);
 }
 
 /// 断点（响应式布局）。

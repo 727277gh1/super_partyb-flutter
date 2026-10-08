@@ -10,9 +10,10 @@
 /// 「谁在用这个组件」变得难以追查。
 ///
 /// 当前收录：
-///   errorBanner  —— 错误提示条（登录页 / 同步页各一份，仅测试 key 不同）
-///   hintLine     —— 内联提示行 + 其数据对象 Hint（悬浮输入窗 / 快速提交页逐字节重复）
-///   sectionTitle —— 小节标题（设置页 / 工作详情页各一份，样式不同故可传参）
+///   errorBanner     —— 错误提示条（登录页 / 同步页各一份，仅测试 key 不同）
+///   hintLine        —— 内联提示行 + 其数据对象 Hint（悬浮输入窗 / 快速提交页逐字节重复）
+///   sectionTitle    —— 小节标题（设置页 / 工作详情页各一份，样式不同故可传参）
+///   copyIconButton  —— 复制到剪贴板（用户气泡 / 助手气泡各一份）
 ///
 /// ## 与 `spb_design` 的分工
 ///
@@ -20,6 +21,7 @@
 /// `spb_ui` 是**组件**（由令牌拼装而成）。故本包依赖 `spb_design`，反之不然。
 library;
 
+export 'src/copy_icon_button.dart';
 export 'src/error_banner.dart';
 export 'src/hint_line.dart';
 export 'src/section_title.dart';

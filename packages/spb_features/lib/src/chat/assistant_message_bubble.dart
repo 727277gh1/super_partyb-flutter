@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// Agent 回复气泡（左对齐），用 [GptMarkdown] 渲染 Markdown。
 ///
@@ -100,13 +101,32 @@ class AssistantMessageBubble extends StatelessWidget {
 
     return Align(
       alignment: Alignment.centerLeft,
-      child: Container(
-        padding: SpbSpacing.bubblePadding,
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest,
-          borderRadius: SpbRadius.bubbleAll,
-        ),
-        child: isStreaming ? md : SelectionArea(child: md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: SpbSpacing.bubblePadding,
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest,
+              borderRadius: SpbRadius.bubbleAll,
+            ),
+            child: isStreaming ? md : SelectionArea(child: md),
+          ),
+          // 整条正文的复制入口。
+          //
+          // ## 为什么**仅**非流式显示
+          //
+          // 流式中 [text] 每帧都在变，此时复制拿到的是半截内容：用户以为复制了
+          // 完整回复，粘出来却是残句。宁可此时没有入口——`SelectionArea` 在流式中
+          // 也刻意不包（同一取舍，见类文档）。
+          //
+          // ## 为什么在气泡**下方**而不是内部
+          //
+          // 助手气泡占满宽度且内含 Markdown（可能有表格/代码块），把按钮放进
+          // 气泡内会与内容挤在一起，也会被 `SelectionArea` 圈进去（选中文本时
+          // 连按钮一起选）。放外侧下方，左对齐，视觉上仍归属于这条消息。
+          if (!isStreaming) CopyIconButton(text: text),
+        ],
       ),
     );
   }
