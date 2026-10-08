@@ -23,6 +23,16 @@ class TrayActionIds {
 
   static const show = 'tray.show';
   static const quickCapture = 'tray.quickCapture';
+
+  /// 立即跑一轮交付物同步。
+  static const syncNow = 'tray.syncNow';
+
+  /// 在文件管理器里打开当前同步目录。
+  static const openSyncDir = 'tray.openSyncDir';
+
+  /// 跳到同步设置页（选目录 / 范围 / 媒体开关）。
+  static const syncSettings = 'tray.syncSettings';
+
   static const quit = 'tray.quit';
 }
 
@@ -49,11 +59,34 @@ class DesktopIntegration {
   DesktopIntegration({
     required DesktopCapabilities capabilities,
     required GoRouter router,
+    this.onSyncNow,
+    this.onOpenSyncDirectory,
+    this.isSyncConfigured,
   }) : _capabilities = capabilities,
        _router = router;
 
   final DesktopCapabilities _capabilities;
   final GoRouter _router;
+
+  /// 托盘「立即同步交付物」的动作。null 时该项 `enabled: false`。
+  final Future<void> Function()? onSyncNow;
+
+  /// 托盘「打开同步目录」的动作（通常是 `revealPath`）。null 时该项禁用。
+  final Future<void> Function()? onOpenSyncDirectory;
+
+  /// 是否已配置同步目录。
+  ///
+  /// ## 为什么是回调而不是构造时的布尔快照
+  ///
+  /// 目录可以在设置页随时被改（或首次配置）。若构造时取一次快照，
+  /// 应用启动时未配置 → 之后配好了，「打开同步目录」仍会永久禁用，
+  /// 直到重启。回调在**推送菜单时**取值，与
+  /// `TrayTooltipController.syncConfigured` 同一取向。
+  ///
+  /// ⚠️ 它只在 [_installTrayMenu] 时被调用一次。菜单推送之后目录再变，
+  /// 需要重新推送菜单才能反映（本类不主动监听——那属于同步状态广播的
+  /// 职责，见 `app.dart` 的托盘提示接线）。
+  final bool Function()? isSyncConfigured;
 
   bool _attached = false;
 
@@ -206,12 +239,40 @@ class DesktopIntegration {
   /// 必须先 `setTrayMenu` 再 `registerTrayAction`：前者会清空回调表
   /// （菜单整体替换，旧 id 失效），见 `registerTrayAction` 的文档。
   void _installTrayMenu(TrayActionTarget tray, DesktopCapabilities caps) {
+    // 同步相关三项的可用性。
+    //
+    // ## 为什么用 `enabled: false` 而不是「不渲染」或「点了没反应」
+    //
+    // 不渲染会让菜单项随配置变化而出现/消失，用户找不到它去哪了；而「点了
+    // 没反应」是最差的一种——用户会反复点、以为应用卡死。置灰是唯一能同时
+    // 表达「这里有这个功能」与「现在还不能用」的形态。
+    final syncReady = isSyncConfigured?.call() ?? false;
+
     final items = [
       const TrayMenuItem(id: TrayActionIds.show, label: '显示主窗口'),
       const TrayMenuItem(
         id: TrayActionIds.quickCapture,
         label: '快速输入（Alt+Space）',
       ),
+      TrayMenuItem.separator(),
+      // 同步三项：这是原 Tauri 薄壳的托盘能力（迁移时漏掉的部分）。
+      // 独立成组是因为它们作用于「交付物同步」这个子系统，与上面的窗口
+      // 动作不同类；退出单独一组（避免误点）。
+      TrayMenuItem(
+        id: TrayActionIds.syncNow,
+        label: '立即同步交付物',
+        enabled: onSyncNow != null,
+      ),
+      TrayMenuItem(
+        id: TrayActionIds.openSyncDir,
+        label: '打开同步目录',
+        // 未配置目录时禁用：此时 `revealPath` 拿到的是空串，打开文件管理器
+        // 会落到用户主目录——看起来像「功能坏了」，而不是「还没配」。
+        enabled: onOpenSyncDirectory != null && syncReady,
+      ),
+      // 「同步设置…」始终可用：它正是**配置入口**，禁用会让未配置的用户
+      // 无法完成配置（死锁）。
+      const TrayMenuItem(id: TrayActionIds.syncSettings, label: '同步设置…'),
       TrayMenuItem.separator(),
       const TrayMenuItem(id: TrayActionIds.quit, label: '退出'),
     ];
@@ -225,6 +286,35 @@ class DesktopIntegration {
     });
     tray.registerTrayAction(TrayActionIds.quickCapture, () {
       caps.showWindow(WindowRole.quickCapture);
+    });
+    tray.registerTrayAction(TrayActionIds.syncNow, () {
+      // 未注入时菜单项已置灰，正常点不到；这里再判一次是防御——托盘实现
+      // 对 `enabled` 的处理不完全一致（某些 Linux 托盘忽略该字段）。
+      final action = onSyncNow;
+      if (action == null) {
+        SpbLog.warn('托盘「立即同步」未注入回调，忽略本次点击');
+        return;
+      }
+      // 不 await：同步可能跑很久，托盘回调必须立刻返回（否则托盘线程被占）。
+      // 失败已在动作内部处理（`runSyncActionProvider` 自己记日志）。
+      unawaited(action());
+    });
+    tray.registerTrayAction(TrayActionIds.openSyncDir, () {
+      final action = onOpenSyncDirectory;
+      if (action == null) {
+        SpbLog.warn('托盘「打开同步目录」未注入回调，忽略本次点击');
+        return;
+      }
+      unawaited(action());
+    });
+    tray.registerTrayAction(TrayActionIds.syncSettings, () {
+      // ## 为什么不走 `showWindow(WindowRole.settings)`
+      //
+      // `WindowRole` 只有 main / settings / quickCapture，没有 sync 这个角色
+      // （同步设置是 `/settings/sync` 这个**子页面**，不是独立窗口）。用
+      // `showWindow(settings)` 只会落到设置页的首个 tab，用户还得自己再点
+      // 一次「同步」——托盘项的标签承诺的是直达。
+      unawaited(_openSyncSettings());
     });
     tray.registerTrayAction(TrayActionIds.quit, () {
       // 退出需要先摘监听器、注销快捷键、销毁托盘图标，见
@@ -251,6 +341,28 @@ class DesktopIntegration {
     // appindicator、Flatpak 沙箱等），关窗后用户**没有任何办法唤回应用**
     // ——进程还在，窗口没了。故托盘不可用时保持「关窗即退出」。
     tray.setHideOnClose(tray.trayAvailable);
+  }
+
+  /// 跳到同步设置页。
+  ///
+  /// ## 为什么必须先 `leaveOverlay()`
+  ///
+  /// 从悬浮窗（720×360 置顶）直接导航，设置页会挤在那个小窗里，且窗口仍是
+  /// 置顶——用户既看不全也放不大。这与 [_navigateToRole] 里「非 quickCapture
+  /// 角色先还原窗口」是同一件事，只是这条路径不经过那个方法（因为它的入参是
+  /// `WindowRole`，而这里没有对应的角色）。
+  Future<void> _openSyncSettings() async {
+    await _exitOverlayWindow();
+
+    // 已在同步设置页时不重复导航：`go` 到同一路径会重建页面，清掉用户正在
+    // 编辑的表单草稿（与 [_navigateToRole] 的守卫同一理由）。
+    if (_router.state.uri.path == SpbRoutes.sync) {
+      SpbLog.debug('已在同步设置页，跳过导航');
+      return;
+    }
+
+    SpbLog.debug('托盘触发导航', {'path': SpbRoutes.sync});
+    _router.go(SpbRoutes.sync);
   }
 
   /// 摘除接线（应用退出时调用）。

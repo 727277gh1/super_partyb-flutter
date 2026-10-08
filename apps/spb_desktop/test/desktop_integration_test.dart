@@ -158,6 +158,7 @@ GoRouter _testRouter({String initialLocation = SpbRoutes.home}) {
     routes: [
       GoRoute(path: SpbRoutes.home, builder: (_, _) => stub('home')),
       GoRoute(path: SpbRoutes.settings, builder: (_, _) => stub('settings')),
+      GoRoute(path: SpbRoutes.sync, builder: (_, _) => stub('sync')),
       GoRoute(path: SpbRoutes.overlay, builder: (_, _) => stub('overlay')),
     ],
   );
@@ -199,7 +200,7 @@ void main() {
       expect(caps.showCallback, isNotNull);
       expect(caps.hideCallback, isNotNull);
 
-      // 托盘菜单必须含三项动作（显示/快速输入/退出）+ 一条分隔线。
+      // 托盘菜单必须含全部动作项 + 分隔线。
       await tester.pump();
       expect(caps.trayMenu, isNotNull);
       expect(
@@ -207,6 +208,9 @@ void main() {
         containsAll(<String>[
           TrayActionIds.show,
           TrayActionIds.quickCapture,
+          TrayActionIds.syncNow,
+          TrayActionIds.openSyncDir,
+          TrayActionIds.syncSettings,
           TrayActionIds.quit,
         ]),
       );
@@ -240,8 +244,9 @@ void main() {
 
       await tester.pump();
       // 回调被覆盖三次仍是同一个（无重复注册的副作用）。
+      // 6 = 显示 / 快速输入 / 立即同步 / 打开同步目录 / 同步设置 / 退出。
       expect(caps.showCallback, isNotNull);
-      expect(caps.trayActions, hasLength(3));
+      expect(caps.trayActions, hasLength(6));
     });
 
     testWidgets('detach 摘除回调', (tester) async {
@@ -536,6 +541,193 @@ void main() {
 
       caps.trayActions[TrayActionIds.show]!();
       expect(caps.shown, [WindowRole.main]);
+    });
+  });
+
+  group('托盘同步三项', () {
+    testWidgets('菜单含三个新 id', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+      await tester.pump();
+
+      final ids = caps.trayMenu!
+          .where((e) => e.type != TrayMenuItemType.separator)
+          .map((e) => e.id);
+      expect(
+        ids,
+        containsAll(<String>[
+          TrayActionIds.syncNow,
+          TrayActionIds.openSyncDir,
+          TrayActionIds.syncSettings,
+        ]),
+      );
+    });
+
+    testWidgets('未注入回调时三项置灰（不是「点了没反应」）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+      await tester.pump();
+
+      TrayMenuItem item(String id) =>
+          caps.trayMenu!.firstWhere((e) => e.id == id);
+
+      expect(item(TrayActionIds.syncNow).enabled, isFalse);
+      expect(item(TrayActionIds.openSyncDir).enabled, isFalse);
+      // 「同步设置」是配置入口，禁用会让未配置的用户无法完成配置（死锁）。
+      expect(
+        item(TrayActionIds.syncSettings).enabled,
+        isTrue,
+        reason: '配置入口不能依赖「已配置」',
+      );
+    });
+
+    testWidgets('isSyncConfigured 返回 false 时「打开同步目录」置灰', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(
+        capabilities: caps,
+        router: router,
+        onOpenSyncDirectory: () async {},
+        // 目录未配置。此时 revealPath 拿到空串会打开用户主目录，看起来像坏了。
+        isSyncConfigured: () => false,
+      ).attach();
+      await tester.pump();
+
+      final openDir = caps.trayMenu!.firstWhere(
+        (e) => e.id == TrayActionIds.openSyncDir,
+      );
+      expect(openDir.enabled, isFalse);
+    });
+
+    testWidgets('已配置目录时「打开同步目录」可用', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(
+        capabilities: caps,
+        router: router,
+        onOpenSyncDirectory: () async {},
+        isSyncConfigured: () => true,
+      ).attach();
+      await tester.pump();
+
+      final openDir = caps.trayMenu!.firstWhere(
+        (e) => e.id == TrayActionIds.openSyncDir,
+      );
+      expect(openDir.enabled, isTrue);
+    });
+
+    testWidgets('触发「立即同步交付物」→ 注入的动作被调用一次', (tester) async {
+      var calls = 0;
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(
+        capabilities: caps,
+        router: router,
+        onSyncNow: () async => calls++,
+      ).attach();
+      await tester.pump();
+
+      caps.trayActions[TrayActionIds.syncNow]!();
+      await tester.pump();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('触发「打开同步目录」→ 注入的动作被调用一次', (tester) async {
+      var calls = 0;
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(
+        capabilities: caps,
+        router: router,
+        onOpenSyncDirectory: () async => calls++,
+        isSyncConfigured: () => true,
+      ).attach();
+      await tester.pump();
+
+      caps.trayActions[TrayActionIds.openSyncDir]!();
+      await tester.pump();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('触发「同步设置…」→ 导航到 SpbRoutes.sync', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.trayActions[TrayActionIds.syncSettings]!();
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.sync);
+      expect(find.text('sync'), findsOneWidget);
+    });
+
+    testWidgets('从悬浮窗点「同步设置…」→ 先还原窗口再导航', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+      expect(caps.isOverlayModeActive, isTrue);
+
+      caps.trayActions[TrayActionIds.syncSettings]!();
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.sync);
+      expect(
+        caps.isOverlayModeActive,
+        isFalse,
+        reason: '不还原的话，设置页会挤在 720x360 置顶窗里且再也放不大',
+      );
+    });
+
+    testWidgets('已在同步设置页时重复触发 → 不重复导航（避免清掉草稿）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter(initialLocation: SpbRoutes.sync);
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      var builds = 0;
+      final countingRouter = GoRouter(
+        initialLocation: SpbRoutes.sync,
+        routes: [
+          GoRoute(
+            path: SpbRoutes.sync,
+            builder: (_, _) => _CountingPage(onBuild: () => builds++),
+          ),
+        ],
+      );
+      addTearDown(countingRouter.dispose);
+
+      final countingCaps = _WiringCapabilities();
+      DesktopIntegration(
+        capabilities: countingCaps,
+        router: countingRouter,
+      ).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: countingRouter));
+      await tester.pumpAndSettle();
+      final before = builds;
+
+      countingCaps.trayActions[TrayActionIds.syncSettings]!();
+      await tester.pumpAndSettle();
+
+      expect(countingRouter.state.uri.path, SpbRoutes.sync);
+      expect(builds, before, reason: '同路径重复 go 会重建页面并清空表单草稿');
     });
   });
 

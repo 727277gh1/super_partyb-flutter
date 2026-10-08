@@ -82,8 +82,23 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     // 但移动端连 spb_desktop 都不该走，故这里只在桌面端接线。
     final caps = ref.read(desktopCapabilitiesProvider);
     if (caps.isSupported) {
-      _integration = DesktopIntegration(capabilities: caps, router: _router)
-        ..attach();
+      _integration = DesktopIntegration(
+        capabilities: caps,
+        router: _router,
+        // ## 为什么都是**读 provider** 而不是捕获当前值
+        //
+        // 目录与配置都可能随时被改（同步页）。`onSyncNow` 走的
+        // `runSyncActionProvider` 本就读最新值；目录同理——每次调用时现读。
+        onSyncNow: () => ref.read(runSyncActionProvider)(),
+        onOpenSyncDirectory: () async {
+          final root = ref.read(syncLocalRootProvider).value;
+          if (root == null || root.trim().isEmpty) return;
+          await caps.revealPath(root);
+        },
+        // 托盘菜单推送时取值（见该字段文档：快照会让「先启动后配置」永久禁用）。
+        isSyncConfigured: () =>
+            ref.read(syncLocalRootProvider).value?.trim().isNotEmpty ?? false,
+      )..attach();
       _installTrayTooltip(caps);
     }
   }
