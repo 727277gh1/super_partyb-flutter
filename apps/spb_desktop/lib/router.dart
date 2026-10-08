@@ -418,7 +418,15 @@ class _PendingConfirmationsPageState
           }),
         );
         // 刷新计数角标。
-        ref.invalidate(pendingConfirmationCountProvider);
+        //
+        // ## 为什么 invalidate 被依赖者而不是 count
+        //
+        // `pendingConfirmationCountProvider` 是
+        // `await ref.watch(pendingConfirmationsProvider.future)` 的派生值。
+        // 只 invalidate count 时它重建后读到的仍是**被缓存的**
+        // `pendingConfirmationsProvider` 结果——角标不会变（本行原先正是
+        // 这个失效调用）。invalidate 被依赖者，count 会因 watch 依赖自动重算。
+        ref.invalidate(pendingConfirmationsProvider);
         return items;
       },
       groupTitleOf: (gid) => _titles[gid],
@@ -726,6 +734,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 让长度变化但不代表新文件。
   Set<String> _seenFileItemIds = {};
 
+  /// 上次见过的确认卡身份集合：用于判定「待确认集合是否变了」。
+  ///
+  /// 元素形如 `'<confirmation_id>:<resolved>'`——把 `resolved` 也编进身份，
+  /// 因为「一张卡被解决」同样是待确认集合的变化（角标要减 1）。只比较
+  /// `confirmation_id` 会漏掉这条路径。
+  ///
+  /// ## 为什么是可空（null 表示「从未同步」）而不是空集合
+  ///
+  /// 用 `isEmpty` 判定首次同步有个错：**一个本来就没有确认卡的对话**，
+  /// 首次同步后集合仍是空的，于是第二张卡真的到来时也会被当成「首次」而跳过
+  /// 刷新。null 把「没同步过」与「同步过且为空」区分开。
+  Set<String>? _seenConfirmationIds;
+
   /// 已加载 group 的 groupId（防重复拉取）。
   bool _loadingGroup = false;
 
@@ -1028,6 +1049,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     // 聚焦新 group 时重置「见过的文件 id」基线：切对话不应把旧对话里看到的
     // 文件当作「新出现」去刷新新对话的面板。
     _seenFileItemIds = {};
+    // 同理重置确认卡基线（见该字段文档：null = 从未同步）。
+    _seenConfirmationIds = null;
     if (_itemsSub == null) {
       // 只订阅一次（controller 是 user 级单例，切 group 复用同一实例）：
       // 监听 items 流，出现新的 AgentFileItem 时 bump 交付物刷新令牌。
@@ -1774,6 +1797,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final hasNew = ids.difference(_seenFileItemIds).isNotEmpty;
     _seenFileItemIds = ids;
 
+    // 待确认集合的身份（见 `_seenConfirmationIds` 的文档）。
+    final confIds = <String>{
+      for (final item in items)
+        if (item is ConfirmationItem) '${item.confirmationId}:${item.resolved}',
+    };
+    final baseline = _seenConfirmationIds;
+    _seenConfirmationIds = confIds;
+    // 首次建基线不刷新（对话列表页本就在拉，再刷一次是重复请求）；
+    // 之后只要集合有增/减/状态变化就刷新角标。
+    final confirmationsChanged =
+        baseline != null && !_setEquals(baseline, confIds);
+
     if (!mounted) return;
     // 同一次 setState 里同时更新待办面板的数据与交付物刷新令牌：
     // items 流推送时两者都要变，分开 setState 会多一次重建。
@@ -1782,7 +1817,24 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       _toolCalls = items.whereType<ToolCallItem>().toList(growable: false);
       if (!isFirstSync && hasNew) _deliverablesReloadToken++;
     });
+
+    // ## 为什么 invalidate 的是 `pendingConfirmationsProvider` 而不是 count
+    //
+    // count provider 的实现是 `await ref.watch(pendingConfirmationsProvider
+    // .future)`——它的值**派生**自被依赖者。只 invalidate count 时，它重建
+    // 后读到的仍是被缓存的 `pendingConfirmationsProvider` 结果，角标纹丝不动
+    // （这正是本文件 :421 处那个失效调用的根因）。
+    //
+    // 刷新被依赖者则两条都生效：`pendingConfirmationsProvider` 重拉，count
+    // 因 watch 依赖被自动重算。
+    if (confirmationsChanged) {
+      ref.invalidate(pendingConfirmationsProvider);
+    }
   }
+
+  /// 集合内容相等（`Set` 的 `==` 是**引用**相等，不能用）。
+  static bool _setEquals(Set<String> a, Set<String> b) =>
+      a.length == b.length && a.containsAll(b);
 
   /// 下载 agent 文件产物到本地并反馈落地路径。
   //

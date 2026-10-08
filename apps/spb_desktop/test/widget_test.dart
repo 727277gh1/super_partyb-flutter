@@ -107,6 +107,35 @@ class _FakeSseClient extends SseClient {
   @override
   void recordEventId(String eventId) {}
 
+  /// 推一帧（camelCase，同 `chatbus.Event` 的 SSE 形态）。
+  ///
+  /// 手写极简 JSON 编码而不是 import `dart:convert`：本文件已 import `dart:io`
+  /// （它的 `jsonEncode` 不在此），而 payload 只含字符串/数字/列表，无需完整
+  /// 实现。（移动端同名 fake 有同一处 helper。）
+  void push(String event, Map<String, dynamic> data) {
+    framesController.add(SseFrame(event: event, data: _encode(data), id: null));
+  }
+
+  static String _encode(Map<String, dynamic> m) =>
+      '{${m.entries.map((e) => '"${e.key}":${_jsonValue(e.value)}').join(',')}}';
+
+  static String _jsonValue(Object? v) {
+    if (v == null) return 'null';
+    if (v is num || v is bool) return v.toString();
+    if (v is String) {
+      final escaped = v
+          .replaceAll(r'\', r'\\')
+          .replaceAll('"', r'\"')
+          .replaceAll('\n', r'\n');
+      return '"$escaped"';
+    }
+    if (v is List) return '[${v.map(_jsonValue).join(',')}]';
+    if (v is Map) {
+      return '{${v.entries.map((e) => '"${e.key}":${_jsonValue(e.value)}').join(',')}}';
+    }
+    return '"$v"';
+  }
+
   @override
   Future<void> dispose() async {
     await framesController.close();
@@ -185,6 +214,12 @@ Future<TestHarness> pumpApp(
   /// 搜索实现（搜索页用）。默认返回空结果。
   SearchChat? searchChat,
 
+  /// 是否注册默认的 `/chat/confirmations` mock。
+  ///
+  /// 需要**计数**该端点请求次数的用例（角标自动刷新）传 false 并自己在
+  /// `beforePump` 里注册计数版——否则默认 mock 会覆盖它（见该处注释）。
+  bool mockPendingConfirmations = true,
+
   /// 可选 agent 列表（对话页 AppBar 的 agent 切换入口用）。
   ///
   /// ## 为什么必须默认 override，不能让它走真实实现
@@ -254,11 +289,17 @@ Future<TestHarness> pumpApp(
   }
   // 待确认角标 provider 在首页首帧即拉取，与 mockGroups 无关（即使列表不 mock，
   // 角标 provider 仍会触发）。无条件 mock 以免留下未结算 Timer。
-  adapter.onGet(
-    '/chat/confirmations',
-    (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-    queryParameters: {'status': 'pending', 'limit': 50},
-  );
+  //
+  // 可关掉：需要**计数**该端点请求次数的用例（角标自动刷新）要在
+  // `beforePump` 里注册自己的 mock，而本默认值注册在 `beforePump` **之后**
+  // 会把它覆盖掉——那样计数永远是 0，用例会以与实现无关的理由失败。
+  if (mockPendingConfirmations) {
+    adapter.onGet(
+      '/chat/confirmations',
+      (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+      queryParameters: {'status': 'pending', 'limit': 50},
+    );
+  }
 
   final container = ProviderContainer(
     overrides: [
@@ -783,6 +824,143 @@ void main() {
       SpbRoutes.chat('grp_42'),
       reason: '搜索的用途是「找到那句话然后回到它的上下文」',
     );
+  });
+
+  testWidgets('收到确认卡事件后待确认角标自动重拉（不是等用户打开待确认页）', (tester) async {
+    // ## 这个用例防的是什么
+    //
+    // 对话列表页的角标读 `pendingConfirmationCountProvider`，它派生自
+    // `pendingConfirmationsProvider`。此前对话页在 items 变化时调的是
+    // `ref.invalidate(pendingConfirmationCountProvider)`——**失效的**：count
+    // 重建后读到的仍是被缓存的被依赖者，角标纹丝不动。
+    //
+    // 故本用例的观测点是**网络请求次数**：SSE 推来一帧确认卡后，
+    // `/chat/confirmations` 必须被**重新请求**一次。只断言「角标数字变了」
+    // 抓不到这个缺陷——数字可能因为其它 provider 重算而恰好正确。
+    var confirmationRequests = 0;
+    final sse = _FakeSseClient();
+    // ⚠️ 必须**从首页起步**再导航进对话页，不能直接深链到 /chat/grp_c。
+    //
+    // 角标 provider 的**唯一读取点**是首页（`_HomePage` 里的 `ref.watch`）。
+    // 直接深链时首页从不挂载 → 无人读它 → 它从未初始化 → 首次请求根本不发
+    // 生，「推一帧后重新请求」也就无从观测。这也正是本缺陷在生产里的暴露
+    // 条件：用户**先进列表页看到角标**，再点进某个对话，此时收到确认卡事件
+    // 角标才该变。
+    final h = await pumpApp(
+      tester,
+      sseClient: sse,
+      mockPendingConfirmations: false,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_c',
+          (server) => server.reply(200, {
+            'id': 'grp_c',
+            'user_id': 'usr_REAL',
+            'title': '角标测试',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_c/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_c', 'limit': 20},
+        );
+        // 计数版：覆盖 pumpApp 注册的默认 mock（后者覆盖前者）。
+        adapter.onGet(
+          '/chat/confirmations',
+          (server) => server.replyCallback(200, (_) {
+            confirmationRequests++;
+            return {'items': <Map<String, dynamic>>[]};
+          }),
+          queryParameters: {'status': 'pending', 'limit': 50},
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(confirmationRequests, 1, reason: '首页挂载时角标 provider 已拉过一次');
+
+    // 进对话页（provider 是常驻的，不会被 dispose）。
+    h.router.go(SpbRoutes.chat('grp_c'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      confirmationRequests,
+      1,
+      reason: '进入对话页本身不该再拉一次（首次同步建基线时故意不 invalidate）',
+    );
+
+    // 推一帧 confirmation_required。
+    sse.push('confirmation_required', {
+      'eventId': 'evt_c1',
+      'eventType': 'confirmation_required',
+      'groupId': 'grp_c',
+      'turnId': 'turn_c1',
+      'userId': 'usr_REAL',
+      'seq': 1,
+      'createdAt': '2026-01-01T00:00:00Z',
+      'payload': {
+        'confirmation_id': 'conf_row_c1',
+        'options': ['继续', '取消'],
+      },
+    });
+
+    // 归约 → items 流 → invalidate。每步都要一轮 pump 让微任务与 mock 响应的
+    // Timer 结算。
+    for (var i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    await tester.pumpAndSettle();
+
+    // ## 为什么此时请求数仍是 1（而不是 2）
+    //
+    // 角标 provider 的唯一读取点是**首页**，而用户此刻在对话页——首页已卸载，
+    // 无人监听。invalidate 把 provider 标脏，但重算要等到有人再读它。
+    // 这不是缺陷，是 Riverpod 的正常语义；下面的「回到首页」才是观测点。
+    expect(confirmationRequests, 1, reason: '对话页里没有角标的读取点，重算推迟到回到列表页时');
+
+    // 回到列表页：角标被重新读取，provider 因已标脏而重拉。
+    h.router.go(SpbRoutes.home);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      confirmationRequests,
+      2,
+      reason:
+          '确认卡事件到达后，回到列表页必须看到**已更新**的角标（即重拉了一次）。'
+          '此前 invalidate 的是 count provider：它重建后读到的仍是被缓存的'
+          'pendingConfirmationsProvider，于是这里仍是 1 —— 这条断言正是那个'
+          '缺陷的回归防线',
+    );
+
+    // 收尾：避免 SSE 相关的 pending timer。
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('同步页展示注入的初始目录（从数据库绑定读入）', (tester) async {
