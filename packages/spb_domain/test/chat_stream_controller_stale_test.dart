@@ -350,6 +350,173 @@ void main() {
     });
   });
 
+  group('看门狗：回填场景（issue #9 / B1b）', () {
+    /// 建一个带 mock timeline 的控制器并回填 `grp_1`。
+    ///
+    /// 与 [boot] 的区别：这里**必须**有 timeline 回填，因为本组测的正是
+    /// 「重开对话时回填出来的历史里，服务端是否还在跑」。
+    ///
+    /// 用 `DioAdapter`（非真实 HTTP）故在假时区里也能 resolve；
+    /// `turnTimeoutOverride` 仍注入以避免 `turn-runtime` 请求。
+    ChatStreamController bootWithTimeline(
+      FakeAsync async,
+      _FakeSseClient sse,
+      List<Map<String, dynamic>> history,
+    ) {
+      final dio = createDio(baseUrl: 'https://api.test/pba');
+      final adapter = DioAdapter(dio: dio);
+      adapter.onGet(
+        '/chat/groups/grp_1/timeline',
+        (server) =>
+            server.reply(200, {'items': history, 'next_before_global_seq': ''}),
+        queryParameters: {'limit': 200},
+      );
+      final controller = ChatStreamController(
+        sse: sse,
+        api: ChatApi(dio),
+        userId: 'usr_1',
+        turnTimeoutOverride: timeout,
+      );
+      unawaited(controller.start(groupId: 'grp_1'));
+      async.flushMicrotasks();
+      // `http_mock_adapter` 的 mock 响应靠一个零延时 timer 兑现，而 `fake_async`
+      // 里 timer 必须显式推进才会跑（`flushMicrotasks` 只跑 microtask）。故
+      // `elapse(Duration.zero)` 是让 `_backfill` 真正完成的必要一步——
+      // 推进 0 不会触发 30s 的看门狗。
+      async.elapse(Duration.zero);
+      return controller;
+    }
+
+    test('回填只有权威帧、无 done → 武装看门狗，到期判 stale', () {
+      // 这是 B1b 缺口的端到端形态：全非 Transient，故流式标记为空；
+      // 修好之前这里永远不会 stale（界面静止骗人）。
+      fakeAsync((async) {
+        final sse = _FakeSseClient();
+        final c = bootWithTimeline(async, sse, [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'hist_1',
+            payload: {'input': '重开前发的'},
+            globalSeq: 1,
+          ),
+          sseEvent(
+            EventTypes.message,
+            id: 'hist_2',
+            payload: {'text': '已产出但服务端可能还在跑'},
+            globalSeq: 2,
+          ),
+        ]);
+
+        expect(c.snapshot, hasLength(2), reason: '回填应已生效');
+        expect(async.pendingTimers, isNotEmpty, reason: '回填后应已武装看门狗（修复前这里为空）');
+        expect(c.staleTurnIdsSnapshot, isEmpty, reason: '刚回填不该立刻判 stale');
+
+        async.elapse(timeout + const Duration(seconds: 1));
+        expect(c.staleTurnIdsSnapshot, {'turn_1'});
+
+        c.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('回填已终结的对话（有 done）→ 不武装、不判 stale', () {
+      // 反向防线：若不做终态记录，每个历史对话都会被判成「仍在跑」并转圈。
+      fakeAsync((async) {
+        final sse = _FakeSseClient();
+        final c = bootWithTimeline(async, sse, [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'hist_1',
+            payload: {'input': '历史用户消息'},
+            globalSeq: 1,
+          ),
+          sseEvent(
+            EventTypes.message,
+            id: 'hist_2',
+            payload: {'text': '历史回答'},
+            globalSeq: 2,
+          ),
+          sseEvent(
+            EventTypes.done,
+            id: 'hist_3',
+            payload: {'status': 'completed'},
+            globalSeq: 3,
+          ),
+        ]);
+
+        expect(c.snapshot, hasLength(2));
+        expect(async.pendingTimers, isEmpty, reason: '已终结的历史对话不得武装看门狗');
+
+        async.elapse(timeout + const Duration(seconds: 1));
+        expect(c.staleTurnIdsSnapshot, isEmpty, reason: '不得把所有历史对话都判成「仍在跑」');
+
+        c.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('回填后 SSE 补上 done → 脱出并取消计时器', () {
+      // 回填时判为可能在跑，随后服务端补发 done：应回到「已结束」。
+      fakeAsync((async) {
+        final sse = _FakeSseClient();
+        final c = bootWithTimeline(async, sse, [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'hist_1',
+            payload: {'input': 'x'},
+            globalSeq: 1,
+          ),
+          sseEvent(
+            EventTypes.message,
+            id: 'hist_2',
+            payload: {'text': '回复'},
+            globalSeq: 2,
+          ),
+        ]);
+        expect(async.pendingTimers, isNotEmpty);
+
+        push(
+          async,
+          sse,
+          EventTypes.done,
+          sseEvent(
+            'done',
+            id: 'done_1',
+            payload: {'status': 'completed'},
+            globalSeq: 3,
+          ),
+        );
+
+        expect(async.pendingTimers, isEmpty, reason: '终态到达后应取消计时器');
+        expect(c.staleTurnIdsSnapshot, isEmpty);
+
+        c.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('回填只有用户消息（agent 未动）→ 同样武装（preparing）', () {
+      fakeAsync((async) {
+        final sse = _FakeSseClient();
+        final c = bootWithTimeline(async, sse, [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'hist_1',
+            payload: {'input': '刚发出就断了'},
+            globalSeq: 1,
+          ),
+        ]);
+
+        expect(async.pendingTimers, isNotEmpty);
+        async.elapse(timeout + const Duration(seconds: 1));
+        expect(c.staleTurnIdsSnapshot, {'turn_1'});
+
+        c.dispose();
+        async.flushMicrotasks();
+      });
+    });
+  });
+
   group('看门狗：终态与生命周期', () {
     test('done 到达 → 脱出 stale，且计时器被取消', () {
       fakeAsync((async) {

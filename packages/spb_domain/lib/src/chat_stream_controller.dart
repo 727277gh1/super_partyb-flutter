@@ -401,10 +401,32 @@ class ChatStreamController {
   /// 这是**刻意的**：心跳只说明 SSE 连接活着，而 turn worker 崩了心跳照样在
   /// 流。若让它续期，超时兜底在「worker 崩溃但连接正常」这个主要场景下
   /// 永不触发。
+  ///
+  /// ## 回填场景：流式标记为空时用结构推断兜底（issue #9）
+  ///
+  /// [EventReducer.inFlightTurnIds] 只看**流式标记**，而流式标记只由 Transient
+  /// 增量帧产生。重开对话时回填的全是落库权威帧 → 集合为空 → 一个仍在服务端
+  /// 运行的 turn 不会被武装，界面静止而用户毫不知情。
+  ///
+  /// 故这里把判据扩为两者之并：
+  /// - 流式标记（实时路径，B1 原有）；
+  /// - [EventReducer.lastTurnMayBeRunning] 的结构推断（回填路径，本轮新增）。
+  ///
+  /// 两者都**只**产出「可能需要兜底」的 turn id 集合，不改归约结果。
   void _syncStaleWatch({String? touchedTurnId}) {
     if (_disposed || _staleTurnIdsController.isClosed) return;
 
-    final inFlight = EventReducer.inFlightTurnIds(_reduction.items);
+    final reduction = _reduction;
+    final inFlight = <String>{...EventReducer.inFlightTurnIds(reduction.items)};
+    // 回填路径的兜底判据：流式标记为空时，用「最后一个 turn 有 agent 产物且无
+    // 终态」补上。仅当流式标记没给出任何结论时才加，避免与实时路径重复武装
+    // （实时路径已经覆盖了「增量帧到达」的情形，且那时 lastTurnMayBeRunning
+    // 同样为真，两者取并集不会改变结果，但显式分开让意图可读）。
+    final lastRunning = EventReducer.lastRunningTurnId(
+      reduction.items,
+      terminalTurnIds: reduction.terminalTurnIds,
+    );
+    if (lastRunning.isNotEmpty) inFlight.add(lastRunning);
 
     // 已结束的 turn：取消它的计时器（不再续期），并从 stale 集合脱出。
     for (final id in _staleTimers.keys.toList()) {
@@ -433,12 +455,29 @@ class ChatStreamController {
   void _markTurnStale(String turnId) {
     _staleTimers.remove(turnId);
     if (_disposed || _staleTurnIdsController.isClosed) return;
-    if (!EventReducer.inFlightTurnIds(_reduction.items).contains(turnId)) {
+    if (!_isTurnWatchable(turnId)) {
       return;
     }
     if (_staleTurnIds.contains(turnId)) return;
     _staleTurnIds.add(turnId);
     _pushStaleTurnIds();
+  }
+
+  /// 某个 turn 当前是否仍需要看门狗（到期确认与武装共用同一判据）。
+  ///
+  /// 必须与 [_syncStaleWatch] 的武装条件完全一致，否则会出现「武装了却立刻
+  /// 被自己撤销」或「到期了却不认」的不一致。
+  bool _isTurnWatchable(String turnId) {
+    if (turnId.isEmpty) return false;
+    final reduction = _reduction;
+    if (EventReducer.inFlightTurnIds(reduction.items).contains(turnId)) {
+      return true;
+    }
+    return EventReducer.lastRunningTurnId(
+          reduction.items,
+          terminalTurnIds: reduction.terminalTurnIds,
+        ) ==
+        turnId;
   }
 
   void _pushStaleTurnIds() {

@@ -8,6 +8,34 @@ import 'tts_audio_path.dart';
 import 'tts_status.dart';
 import 'turn_activity.dart';
 
+/// 最后一个 turn 的运行状态（webapp `deriveStreamLifecycle` 的客户端等价物）。
+///
+/// ## 为什么需要它（而不是只有 [EventReducer.inFlightTurnIds]）
+///
+/// [EventReducer.inFlightTurnIds] 的判据是**流式标记**（`isStreaming` / 未配对的
+/// `tool_call`），而流式标记只由**增量帧**（Transient）产生。重开对话时回填的
+/// 全是落库的权威帧 → 流式标记恒为空 → 一个仍在服务端运行的 turn 被当成静止。
+///
+/// 故需要一条与「有没有流式标记」无关的结构推断：**最后一个 turn 有没有终态
+/// 事件**（`done` / `error`）。见 [EventReducer.lastTurnRunState]。
+///
+/// 四种状态与 webapp 的 `StreamLifecycle` 对齐：`idle`（无 turn）/ `preparing`
+/// （只有用户消息，agent 还没动）/ `streaming`（已有 agent 侧产物）/
+/// `terminal`（收到过终态事件）。**只有前两者之外的两种需要看门狗**。
+enum LastTurnRunState {
+  /// 时间线里没有任何可归属的 turn。
+  idle,
+
+  /// 最后一个 turn 只有用户消息（已提交，agent 尚未产出）。
+  preparing,
+
+  /// 最后一个 turn 已有 agent 侧产物（可能仍在跑）。
+  streaming,
+
+  /// 最后一个 turn 收到过终态事件（`done` / `error`）。
+  terminal,
+}
+
 /// 把服务端事件流归约成可渲染的对话项列表。
 ///
 /// ## 核心不变式
@@ -103,6 +131,23 @@ class EventReducer {
 
     // tool_call_id → items 中的索引，用于把 tool_result 合并回对应的 call。
     final toolIdxById = <String, int>{};
+
+    // 收到过终态事件（`done` / `error`）的 turn 集合。
+    //
+    // ## 为什么必须在归约时收集（不能事后从 items 反推）
+    //
+    // `done` **不产出任何 item**：它只把流式段落标记为完成（见 [_sealStreaming]）。
+    // 因此「一个已完成的 turn」与「一个回填出来、仍在跑的 turn」在归约结果里
+    // **完全一致**（都是 `[UserMessageItem, AssistantMessageItem(isStreaming:false)]`）。
+    // 想区分二者，只能在遍历事件时顺手记下终态——这正是本集合的用途。
+    //
+    // ## 为什么是派生数据而不是新增 item
+    //
+    // 与 [ReductionResult.activities] / [ReductionResult.executionStatus] 同取向：
+    // 终态是**控制信息**而非对话正文，塞一个 item 进去会在时间线上多渲染一条
+    // 用户没发过的内容。故只作为 [ReductionResult] 的附加字段派生出来，
+    // `reduce` 的签名（只收事件）保持不变。
+    final terminalTurnIds = <String>{};
 
     for (final ev in events) {
       if (!ev.transient && ev.eventId.isNotEmpty) {
@@ -360,6 +405,9 @@ class EventReducer {
           }
 
         case EventTypes.error:
+          // error 与 done 同属终态：服务端在超时/执行异常时会先发 error 再发 done，
+          // 两者都意味着「本轮不会再产出」。对齐 webapp `terminalLifecycleFromEvent`。
+          if (ev.turnId.isNotEmpty) terminalTurnIds.add(ev.turnId);
           items.add(
             ErrorItem(
               id: ev.eventId,
@@ -371,6 +419,11 @@ class EventReducer {
 
         case EventTypes.done:
           // 终态：闭合所有流式段落。
+          //
+          // 同时登记到 terminalTurnIds——`done` 本身不产 item，若不在这里记录，
+          // 归约结果就无法区分「已完成的 turn」与「回填出来仍在跑的 turn」
+          // （见 terminalTurnIds 的说明）。
+          if (ev.turnId.isNotEmpty) terminalTurnIds.add(ev.turnId);
           currentAssistantIdx = null;
           currentThoughtIdx = null;
           _sealStreaming(items);
@@ -664,6 +717,7 @@ class EventReducer {
       contextUsage: contextUsage,
       executionStatus: executionStatus,
       ttsStatus: ttsStatus,
+      terminalTurnIds: terminalTurnIds,
     );
   }
 
@@ -938,7 +992,7 @@ class EventReducer {
   ///
   /// 流式增量是 Transient（不落库），timeline 回填拿到的 `message` 全是权威帧
   /// （`isStreaming == false`）。故「重开对话时服务端仍在跑」本函数返回空。
-  /// 这与客户端当前不显示流式态的既有行为一致，不是本函数引入的缺口。
+  /// 这个形态由 [lastTurnRunState] 覆盖（判据不同：结构推断而非流式标记）。
   static Set<String> inFlightTurnIds(Iterable<ConversationItem> items) {
     final ids = <String>{};
     for (final it in items) {
@@ -953,6 +1007,134 @@ class EventReducer {
       if (inFlight) ids.add(it.turnId);
     }
     return ids;
+  }
+
+  /// 最后一个 turn 的运行状态（**结构推断**，与流式标记无关）。
+  ///
+  /// ## 它解决什么问题（issue #9 / AGENTS.md §5.8 的「B1b」）
+  ///
+  /// [inFlightTurnIds] 判的是**流式标记**，而流式标记只由增量帧产生。重开一个
+  /// 对话时，回填的事件全是落库的权威帧 → 标记恒为空 → 一个仍在服务端运行的
+  /// turn 被渲染成静止。本函数按 webapp `deriveStreamLifecycle` 的判据换成
+  /// **结构推断**，从而覆盖该场景。
+  ///
+  /// ## 判据（逐条对齐 webapp）
+  ///
+  /// 1. 取时间线里**最后一个非空 turnId**（跳过 `router` 伪 turn）；
+  /// 2. 该 turn 命中 [ReductionResult.terminalTurnIds] → [LastTurnRunState.terminal]；
+  /// 3. 该 turn 有 agent 侧项 → [LastTurnRunState.streaming]；
+  /// 4. 只有用户项 → [LastTurnRunState.preparing]；
+  /// 5. 无任何可归属项 → [LastTurnRunState.idle]。
+  ///
+  /// ## 为什么「有 agent 侧项」就够，不需要看流式标记
+  ///
+  /// agent 侧项（正文 / 思考 / 工具调用 / 错误 / 文件产物）意味着服务端**至少
+  /// 开始产出了**。若没有终态，它就可能仍在跑。这比「有没有流式标记」更可靠：
+  /// 后者依赖 Transient 增量帧是否恰好在本连接上到达过。
+  ///
+  /// ## 为什么要把 [ReductionResult.terminalTurnIds] 作为入参
+  ///
+  /// 终态（`done` / `error`）**不产出 item**，故无法从 [items] 反推。必须由
+  /// 归约器在遍历事件时记录（见该字段的说明）。不传它时视为「没有任何 turn
+  /// 收到过终态」——那会把所有历史 turn 都判成可能在跑，**不要**在生产路径上
+  /// 省略该参数。
+  ///
+  /// ## 为什么是「最后一个 turn」而不是「所有 turn」
+  ///
+  /// 同一 group 的 turn 是排队串行执行的（Go `chat/queue_state` 语义），不会
+  /// 有两个 turn 同时跑。取最后一个即可回答「现在是不是还在跑」，且避免了
+  /// 「很久以前那个没收到的 done」把当前对话永远判成运行中。
+  static LastTurnRunState lastTurnRunState(
+    Iterable<ConversationItem> items, {
+    Set<String> terminalTurnIds = const {},
+  }) {
+    // 1) 最后一个非空 turnId。
+    //
+    // `router` 是服务端用于归属判定的伪 turn，不代表一次执行。
+    final list = items.toList();
+    var lastTurnId = '';
+    for (final it in list.reversed) {
+      if (it.turnId.isEmpty) continue;
+      if (it.turnId == 'router') continue;
+      lastTurnId = it.turnId;
+      break;
+    }
+    if (lastTurnId.isEmpty) return LastTurnRunState.idle;
+
+    var hasAgentSide = false;
+    var hasUserSide = false;
+    for (final it in list) {
+      if (it.turnId != lastTurnId) continue;
+      switch (it) {
+        case AssistantMessageItem():
+        case ThoughtItem():
+        case ToolCallItem():
+        case ErrorItem():
+        case AgentFileItem():
+        case GoalProgressItem():
+        case HabitAutoRunItem():
+          hasAgentSide = true;
+        case UserMessageItem():
+          hasUserSide = true;
+        case _:
+          break;
+      }
+    }
+
+    // 2) 终态优先：有终态事件即「本轮不会再产出」。
+    if (terminalTurnIds.contains(lastTurnId)) {
+      return LastTurnRunState.terminal;
+    }
+    // 3) 已有 agent 产物且无终态 → 可能仍在跑（这正是重开对话的场景）。
+    if (hasAgentSide) return LastTurnRunState.streaming;
+    // 4) 只有用户消息 → 已提交，agent 尚未动。
+    if (hasUserSide) return LastTurnRunState.preparing;
+    return LastTurnRunState.idle;
+  }
+
+  /// 最后一个 turn 是否**可能仍在服务端运行**（重开对话场景的看门狗判据）。
+  ///
+  /// 等价于「[lastTurnRunState] 为 [LastTurnRunState.streaming] 或
+  /// [LastTurnRunState.preparing]」。
+  ///
+  /// ## 为什么 `preparing` 也算
+  ///
+  /// `preparing` 是「用户消息已落库、agent 还没产出任何东西」——这正是
+  /// 排队/起跑的空窗期，**最需要**兜底（服务端可能已崩且永远不会发 `done`）。
+  /// 对齐 webapp：`deriveStreamLifecycle` 的 `preparing` 同样不是终态。
+  ///
+  /// ## 语义是提示，不是终态
+  ///
+  /// 返回 true **不**意味着 turn 一定在跑，只意味着「没有证据说明它停了」。
+  /// 消费方（看门狗）据此武装计时器，**不得**据此写库或禁用取消
+  /// （与 [inFlightTurnIds] 同一取向，见 AGENTS.md §5.8 的三条不变式）。
+  static bool lastTurnMayBeRunning(
+    Iterable<ConversationItem> items, {
+    Set<String> terminalTurnIds = const {},
+  }) {
+    final state = lastTurnRunState(items, terminalTurnIds: terminalTurnIds);
+    return state == LastTurnRunState.streaming ||
+        state == LastTurnRunState.preparing;
+  }
+
+  /// 最后一个可能仍在跑的 turn 的 id；无则空串。
+  ///
+  /// 看门狗需要它来武装**那一个**计时器（与 [inFlightTurnIds] 返回集合不同：
+  /// 这里只关心最后一个 turn，因为同 group 的 turn 串行执行）。
+  static String lastRunningTurnId(
+    Iterable<ConversationItem> items, {
+    Set<String> terminalTurnIds = const {},
+  }) {
+    final state = lastTurnRunState(items, terminalTurnIds: terminalTurnIds);
+    if (state != LastTurnRunState.streaming &&
+        state != LastTurnRunState.preparing) {
+      return '';
+    }
+    for (final it in items.toList().reversed) {
+      if (it.turnId.isEmpty || it.turnId == 'router') continue;
+      return it.turnId;
+    }
+    return '';
   }
 
   /// 把仍在 streaming 的段落标记为完成（收到 done 或流中断时调用）。
@@ -1129,6 +1311,7 @@ class ReductionResult {
     this.contextUsage,
     this.executionStatus,
     this.ttsStatus = const TtsStatus.idle(),
+    this.terminalTurnIds = const {},
   });
 
   final List<ConversationItem> items;
@@ -1210,4 +1393,18 @@ class ReductionResult {
   ///
   /// 非空：无播报事件时为 [TtsPhase.idle]（UI 用 [TtsStatus.hasStatus] 判断）。
   final TtsStatus ttsStatus;
+
+  /// 收到过终态事件（`done` / `error`）的 turn 集合。
+  ///
+  /// ## 为什么必须由归约器派生（不能从 [items] 反推）
+  ///
+  /// `done` 不产出任何 item——它只把流式段落标记为完成。故「已完成的 turn」与
+  /// 「回填出来、仍在跑的 turn」在 [items] 里**完全一致**，无法区分。想回答
+  /// 「重开对话时服务端是不是还在跑」（issue #9），只能靠这里记录的终态。
+  ///
+  /// ## 消费方
+  ///
+  /// [EventReducer.lastTurnMayBeRunning] 把它作为「该 turn 是否仍在跑」的判据，
+  /// 供 `ChatStreamController` 的超时看门狗在流式标记为空时兜底。
+  final Set<String> terminalTurnIds;
 }
