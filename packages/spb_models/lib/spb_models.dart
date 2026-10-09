@@ -12,6 +12,7 @@ library;
 //   ChatTurn                        —— 对话轮次
 //   ListResponse / CursorPage / StreamCursor —— 分页与 SSE 续接游标
 //   ChatSearchHit                —— 搜索命中项（turn 摘要，**不是** ChatEvent）
+//   TurnRuntime                  —— turn 运行时参数（超时兜底阈值，只读）
 //   UfsFileEntry / UfsFilePage   —— UFS 文件条目与分页响应（交付物同步用）
 //   Miniapp*                     —— 小程序工作台 BFF 契约（work/artifact/confirmation/通知）
 //   UserHabit / HabitRun / HabitSuggestion / HabitInsightsSummary
@@ -32,6 +33,7 @@ export 'src/chat_inbox_message.dart' show ChatInboxMessage;
 export 'src/chat_search_hit.dart';
 export 'src/chat_turn.dart';
 export 'src/context_usage.dart';
+export 'src/turn_runtime.dart';
 export 'src/chat_turn_summary.dart';
 export 'src/event_types.dart';
 export 'src/goal.dart';
