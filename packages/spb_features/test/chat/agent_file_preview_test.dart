@@ -1,0 +1,369 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_features/spb_features.dart';
+
+/// [showAgentFilePreview] 的渲染分支测试（issue #8：text / image / external）。
+///
+/// ## 这里防的是什么
+///
+/// 预览的失败模式**不会抛异常**，只会「用错的方式展示」：
+///
+/// - 大文本静默截断 → 用户以为报告完整（本组有专门用例断言提示条存在）；
+/// - external 类型误走取数 → 卡在转圈（没有 `openExternal` 时也应有可读说明）；
+/// - 未注入能力时仍渲染入口 → 点了没反应。
+///
+/// 取数走注入回调，不发起真实网络（无头环境无法验证真实渲染）。
+AgentFileItem _file({
+  String action = 'created',
+  String? ufsFileId = 'ufs_001',
+  String? mimeType = 'text/markdown',
+  String displayName = 'report.md',
+  String fileName = 'report.md',
+  String relativePath = 'out/report.md',
+  TtsStreamKind? ttsKind,
+}) => AgentFileItem(
+  id: relativePath,
+  createdAt: DateTime.utc(2024, 3, 5),
+  relativePath: relativePath,
+  fileName: fileName,
+  displayName: displayName,
+  action: action,
+  ufsFileId: ufsFileId,
+  mimeType: mimeType,
+  ttsKind: ttsKind,
+);
+
+/// 一个 1x1 的合法 PNG（最小可解码图片，用于 `Image.memory` 分支）。
+final _pngBytes = Uint8List.fromList(
+  base64Decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/'
+    'q842iQAAAABJRU5ErkJggg==',
+  ),
+);
+
+/// 挂一个能弹出对话框的宿主，并立即调用 [showAgentFilePreview]。
+Future<void> _pumpPreview(
+  WidgetTester t, {
+  required AgentFileItem file,
+  AgentFilePreviewCallbacks? onPreview,
+}) async {
+  await t.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => ElevatedButton(
+            onPressed: () => showAgentFilePreview(
+              context: context,
+              file: file,
+              onPreview: onPreview,
+            ),
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    ),
+  );
+  await t.tap(find.text('open'));
+  await t.pumpAndSettle();
+}
+
+void main() {
+  group('未注入能力：入口不渲染 / 不弹窗', () {
+    testWidgets('onPreview 为 null 时不弹对话框', (t) async {
+      await _pumpPreview(t, file: _file(), onPreview: null);
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('两个回调都为 null（hasAny 假）时不弹对话框', (t) async {
+      // 关键：`hasAny` 为假必须**拦住**，否则会弹出一个永远取不到内容的框。
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: const AgentFilePreviewCallbacks(),
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        findsNothing,
+      );
+    });
+  });
+
+  group('text 分支', () {
+    testWidgets('渲染文本内容与等宽字体，无截断提示', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('# 标题\n正文'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        findsOneWidget,
+      );
+      expect(find.text('report.md'), findsOneWidget);
+      expect(find.text('文本'), findsOneWidget);
+      final text = t.widget<SelectableText>(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+      );
+      expect(text.data, '# 标题\n正文');
+      // 小内容不显示截断提示。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-truncated')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('大文本：截断且**显示**提示（不静默截断）', (t) async {
+      // 这是 issue 的核心验收项。用 maxChars 之上的内容驱动默认上限分支。
+      final big = 'x' * (kTextPreviewMaxChars + 500);
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(big),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-truncated')),
+        findsOneWidget,
+      );
+      // 提示必须说清规模（只说「已截断」用户无法判断漏了多少）。
+      expect(find.textContaining('共 ${big.length} 字符'), findsOneWidget);
+      expect(find.textContaining('省略 500 字符'), findsOneWidget);
+      expect(find.textContaining('完整内容请下载查看'), findsOneWidget);
+
+      final text = t.widget<SelectableText>(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+      );
+      expect(text.data!.length, kTextPreviewMaxChars);
+    });
+
+    testWidgets('非法 UTF-8 字节不崩，退化为可读文本（allowMalformed）', (t) async {
+      // 服务端把二进制报成 text/* 是常见误报。不加 allowMalformed 会抛
+      // FormatException，用户看到「加载失败」而不是「文件里有乱码」。
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => [0xFF, 0xFE, 0x41],
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-error')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('image 分支', () {
+    testWidgets('mime 是 image/* 时渲染 Image.memory', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'image/png',
+          fileName: 'a.png',
+          relativePath: 'a.png',
+        ),
+        onPreview: AgentFilePreviewCallbacks(loadBytes: (_) async => _pngBytes),
+      );
+
+      expect(find.text('图片'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image')),
+        findsOneWidget,
+      );
+      // 图片分支不该出现文本框。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('图片字节损坏时退化为错误提示，不抛异常', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'image/png',
+          fileName: 'a.png',
+          relativePath: 'a.png',
+        ),
+        onPreview: AgentFilePreviewCallbacks(loadBytes: (_) async => [1, 2, 3]),
+      );
+      await t.pumpAndSettle();
+
+      // errorBuilder 产出的提示（具体文案见实现）。
+      expect(find.textContaining('无法解码'), findsOneWidget);
+    });
+  });
+
+  group('external 分支', () {
+    testWidgets('html 类型直接给跳转入口，不取数', (t) async {
+      var loaded = false;
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'text/html',
+          fileName: 'page.html',
+          relativePath: 'page.html',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async {
+            loaded = true;
+            return utf8.encode('x');
+          },
+          openExternal: (_) async => true,
+        ),
+      );
+
+      expect(find.text('外部预览'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-external')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-open-external')),
+        findsOneWidget,
+      );
+      expect(loaded, isFalse, reason: 'external 不该发起取数');
+    });
+
+    testWidgets('点击跳转按钮调用 openExternal 且只一次', (t) async {
+      var calls = 0;
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/pdf',
+          fileName: 'a.pdf',
+          relativePath: 'a.pdf',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          openExternal: (_) async {
+            calls++;
+            return true;
+          },
+        ),
+      );
+
+      await t.tap(
+        find.byKey(const ValueKey('agent-file-preview-open-external')),
+      );
+      await t.pumpAndSettle();
+      expect(calls, 1);
+    });
+
+    testWidgets('openExternal 返回 false 时给 SnackBar 反馈（不静默）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/pdf',
+          fileName: 'a.pdf',
+          relativePath: 'a.pdf',
+        ),
+        onPreview: AgentFilePreviewCallbacks(openExternal: (_) async => false),
+      );
+
+      await t.tap(
+        find.byKey(const ValueKey('agent-file-preview-open-external')),
+      );
+      await t.pumpAndSettle();
+      expect(find.text('无法打开预览页'), findsOneWidget);
+    });
+
+    testWidgets('未注入 openExternal 时不给按钮，改为可读说明', (t) async {
+      // 只接了 loadBytes 的移动端场景：external 类型没有出路，
+      // 但也不能弹一个点了没反应的按钮。
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/pdf',
+          fileName: 'a.pdf',
+          relativePath: 'a.pdf',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('x'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-open-external')),
+        findsNothing,
+      );
+      expect(find.textContaining('未提供外部预览入口'), findsOneWidget);
+      expect(find.textContaining('下载'), findsOneWidget);
+    });
+  });
+
+  group('取数失败', () {
+    testWidgets('loadBytes 返回 null → 错误提示（不是无限转圈）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(loadBytes: (_) async => null),
+      );
+      await t.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-error')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('未能取到文件内容'), findsOneWidget);
+      expect(find.textContaining('可改用「下载」后查看'), findsOneWidget);
+    });
+
+    testWidgets('loadBytes 抛异常 → 错误提示（异常不冒泡）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => throw StateError('boom'),
+        ),
+      );
+      await t.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-error')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('加载失败'), findsOneWidget);
+    });
+  });
+
+  group('关闭', () {
+    testWidgets('点关闭按钮收起对话框', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('hi'),
+        ),
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        findsOneWidget,
+      );
+
+      await t.tap(find.byKey(const ValueKey('agent-file-preview-close')));
+      await t.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        findsNothing,
+      );
+    });
+  });
+}

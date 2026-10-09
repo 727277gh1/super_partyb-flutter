@@ -9,7 +9,9 @@ import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'agent_file_batch_card.dart';
 import 'agent_file_card.dart';
+import 'agent_file_preview.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'feedback_request_card.dart';
@@ -59,6 +61,10 @@ class ConversationPage extends StatefulWidget {
     this.onLoadOlder,
     this.onReconnect,
     this.onDownloadAgentFile,
+    this.onLoadThumbnailAgentFile,
+    this.onOpenAgentFile,
+    this.onRevealAgentFile,
+    this.onPreviewAgentFile,
     this.onOpenLink,
     this.historyKey,
     this.loadPending,
@@ -183,6 +189,38 @@ class ConversationPage extends StatefulWidget {
   ///
   /// 页面不直接依赖 `spb_api`：真实下载（`UfsApi.download` + 落盘）由 app 层注入。
   final Future<void> Function(AgentFileItem file)? onDownloadAgentFile;
+
+  /// 加载 agent 文件缩略图（仅图片类有意义）。返回字节则内联渲染，null/失败退化为图标。
+  ///
+  /// 与 [onDownloadAgentFile] 同取向：页面不依赖 `spb_api`，真实请求
+  /// （`UfsApi.thumbnail`）由 app 层注入。
+  ///
+  /// **未注入时卡片完全不发请求**（`AgentFileCard._maybeLoadThumbnail` 在
+  /// loader 为 null 时直接返回），故只读时间线用法不受影响。
+  final Future<List<int>?> Function(AgentFileItem file)?
+  onLoadThumbnailAgentFile;
+
+  /// 用系统默认程序打开 agent 文件（的本地副本）。
+  ///
+  /// 与 [onDownloadAgentFile] 同取向：页面不碰平台 IO，真实动作
+  /// （解析本地路径 → 必要时先下载 → `caps.openFile`）由 app 层注入。
+  ///
+  /// **为 null 时卡片不渲染该菜单项**（而非渲染一个点了没反应的项）。
+  /// 移动端就是这样：它注入 `NoopDesktopCapabilities`，`openFile` 恒 false，
+  /// 接上只会让用户点「打开」得到「无法打开文件」。
+  final OpenAgentFile? onOpenAgentFile;
+
+  /// 在系统文件管理器中定位 agent 文件。null 时不渲染该菜单项（同
+  /// [onOpenAgentFile]）。
+  final RevealAgentFile? onRevealAgentFile;
+
+  /// 文件预览能力（文本 / 图片 / 外部跳转）。
+  ///
+  /// 与 [onDownloadAgentFile] 同取向：页面不依赖 `spb_api`，真实取数
+  /// （`UfsApi.download`）与 URL 拼接由 app 层注入。
+  ///
+  /// **为 null 时卡片不渲染预览按钮**——只读时间线用法完全不受影响。
+  final AgentFilePreviewCallbacks? onPreviewAgentFile;
 
   /// 打开 Markdown 回复里的链接。null 时链接不响应点击（仅保留样式）。
   ///
@@ -1053,7 +1091,22 @@ class _ConversationPageState extends State<ConversationPage> {
     );
   }
 
+  /// 时间线展示行（聚合后的结果）。
+  ///
+  /// ## 为什么在渲染前算一次，而不是在 `itemBuilder` 里
+  ///
+  /// 聚合是**全量**的（分组需要看到整段才能判断「连续同秒」），且 `ListView`
+  /// 会多次调用 `itemBuilder`（滚动/重建）。在 builder 里算会把 O(n) 的分组
+  /// 变成 O(n·可见项) 次重复计算，且每次得到新对象会让 `ValueKey` 失效。
+  ///
+  /// 放在 `_buildTimeline` 里（每次 build 算一次）而不缓存进 State：分组是
+  /// 纯函数且很快（一次线性扫描），而缓存需要在 `_onItems` 里同步维护——
+  /// 多一处可忘的地方。
+  List<TimelineDisplayRow> _displayRows() => groupFileEventsForDisplay(_items);
+
   Widget _buildTimeline() {
+    final rows = _displayRows();
+
     return ScrollConfiguration(
       // 桌面端：Flutter 默认的 dragDevices **不含鼠标**，不加这个
       // 鼠标拖拽无法滚动时间线（滚轮不受影响）。
@@ -1070,18 +1123,32 @@ class _ConversationPageState extends State<ConversationPage> {
         controller: _scrollController,
         padding: SpbSpacing.pagePadding,
         // itemCount +1 给底部留白，避免最后一项紧贴输入框。
-        itemCount: _items.length + 1,
+        itemCount: rows.length + 1,
         itemBuilder: (context, index) {
-          if (index == _items.length) {
+          if (index == rows.length) {
             return const SizedBox(height: SpbSpacing.xxl);
           }
-          final item = _items[index];
+          final row = rows[index];
           return Padding(
-            // 稳定 Key：归约层保证 item.id 在同一逻辑项上不变，
-            // Flutter 据此复用 Element，避免流式更新时整列重建。
-            key: ValueKey(item.id),
+            // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
+            // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
+            // 避免流式更新时整列重建。
+            key: ValueKey(switch (row) {
+              SingleItemRow(:final item) => item.id,
+              AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
+            }),
             padding: const EdgeInsets.only(bottom: SpbSpacing.md),
-            child: _buildItem(item),
+            child: switch (row) {
+              SingleItemRow(:final item) => _buildItem(item),
+              AgentFileBatchRow() => AgentFileBatchCard(
+                batch: row,
+                onDownload: widget.onDownloadAgentFile,
+                onLoadThumbnail: widget.onLoadThumbnailAgentFile,
+                onOpen: widget.onOpenAgentFile,
+                onReveal: widget.onRevealAgentFile,
+                onPreview: widget.onPreviewAgentFile,
+              ),
+            },
           );
         },
       ),
@@ -1201,6 +1268,25 @@ class _ConversationPageState extends State<ConversationPage> {
     AgentFileItem() => AgentFileCard(
       file: item,
       onDownload: widget.onDownloadAgentFile,
+      // 缩略图回调是**按 file 绑定**的：卡片侧 `onLoadThumbnail` 无参，
+      // 故在此把 item 闭包进去。
+      //
+      // `ufsFileId` 为空时传 null：卡片自己只判 `isImage` / `isDeleted`，
+      // 不判「有没有可拉的 id」。不在此拦住就会发出
+      // `GET /api/files//thumbnails/256`（一个 404），对每张无 id 的卡白跑一趟。
+      //
+      // ⚠️ 该闭包每次 build 都是新实例，`AgentFileCard.didUpdateWidget` 据此
+      // 重置缩略图缓存——这是必要的：同一张卡被更新到另一个文件时必须重拉。
+      onLoadThumbnail:
+          widget.onLoadThumbnailAgentFile == null ||
+              (item.ufsFileId ?? '').isEmpty
+          ? null
+          : () => widget.onLoadThumbnailAgentFile!(item),
+      // 直接透传（不包闭包）：卡片侧这两个回调本来就收 file 入参。
+      // 未注入时传 null，卡片据此不渲染对应菜单项。
+      onOpen: widget.onOpenAgentFile,
+      onReveal: widget.onRevealAgentFile,
+      onPreview: widget.onPreviewAgentFile,
     ),
     HabitAutoRunItem() => HabitAutoRunCard(item: item),
   };

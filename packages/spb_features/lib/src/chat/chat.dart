@@ -31,7 +31,9 @@
 /// `SpbDuration`，**不写魔法数**。这样主题调整只需改令牌文件。
 library;
 
+export 'agent_file_batch_card.dart';
 export 'agent_file_card.dart';
+export 'agent_file_preview.dart';
 export 'agent_switcher.dart';
 export 'assistant_message_bubble.dart';
 export 'confirmation_card.dart';
