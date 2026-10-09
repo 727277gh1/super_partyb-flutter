@@ -344,6 +344,69 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 
 排序与分页**必须用 `globalSeq`**，而非 `seq`（per-turn，每 turn 从 1 重来）或 `createdAt`（仅毫秒精度）。
 
+### 5.8 超时兜底（**客户端看门狗，派生信号不改归约**）
+
+流式标记（`isStreaming`）只有两条清除路径：`done` 与 `start`。一旦 `done` 丢失
+（turn worker 崩溃、长断线、回放窗口被打穿），UI 会**永久**停在流式态：光标
+不停闪、取消按钮永久可点（点下去得到 409 `turn not cancellable`）。
+
+客户端因此维护一条「距最后一条事件」的看门狗，把**长时间无进展**的 turn 集合
+推给 UI。阈值**不硬编码**，从 `GET /api/chat/turn-runtime` 的
+`client_turn_timeout_seconds` 取（服务端可配，生产 600s）；解析失败/为 0 时退化
+为 `TurnRuntime.fallback`（5 分钟，对齐 Go env 默认值）。
+
+| 位置 | 职责 |
+|---|---|
+| `spb_models` `turn_runtime.dart` | 契约 + 阈值防御（`0`/负数 → 不可用，上限 24h） |
+| `spb_api` `ChatApi.turnRuntime()` | 只读拉取 |
+| `spb_domain` `EventReducer.inFlightTurnIds` | 纯查询：哪些 turn 仍在进行中 |
+| `spb_domain` `ChatStreamController` | per-turn 一次性计时器 + `staleTurnIds` 流 |
+| `spb_features` `conversation_page.dart` | 停光标 + `_StaleTurnNotice` 提示条 |
+
+#### 不改归约结果（**别退回「强制封段」**）
+
+曾经的设计是给 `reduce` 加 `sealedTurnIds` 强制封段，被否决，两个真实缺陷：
+
+1. **重复气泡**：封段后 `isStreaming=false`，若 turn 仍在跑、增量帧恢复到达，
+   归约器从头重建 `currentAssistantIdx` 会**新建**一个 `AssistantMessageItem`
+   ——一个 turn 两个气泡；
+2. **撒谎**：`_sealStreaming` 会把未配对工具调用写成 `isComplete: true,
+   output: '(无输出)'`，而 turn 仍在后台跑时这属编造。
+
+故 `reduce` 签名不变，stale 只是**派生提示信号**。webapp 的做法同型（不动
+timeline，只派生 lifecycle）。
+
+#### 三条不得违反的不变式
+
+1. **取消按钮保持可点**。stale 只说明客户端没再收到进展，turn 可能真在跑，而
+   取消是用户此时唯一的出路。禁用会让用户彻底失去出路。
+2. **计时器必须在控制器、不能放页面**。`turn_activity` 是「执行器还活着」的
+   直接证据，但它**不进 `items`**（走 activities 通道）。页面只看得见 items，
+   据此计时会把「只有工具心跳、尚无正文」的长 turn 误判成卡死——而这恰是
+   `turn_activity` 存在的意义。
+3. **心跳（SSE 注释帧）不续期**。`_onFrame` 对 `frame.isComment` 提前 return；
+   若让心跳续期，「worker 崩溃但连接正常」这一主场景下兜底永不触发。
+
+#### 两个实现细节（易写错）
+
+- **per-turn 计时器，不是一个共享的**：共享的话，别的 turn 的活动会把本 turn
+  的到期时刻也推后——已卡死的 turn 会因「旁边那个还在跑」而永不被判 stale。
+  故 `_syncStaleWatch` 收 `touchedTurnId`，只重排触发者的到期时刻。
+- **`inFlightTurnIds` 必须包含未完成的 `ToolCallItem`**：长工具（构建/下载/
+  检索）期间既无正文也无思考，只有一条 `tool_call`。
+
+#### 边界（**有意不做**）
+
+- **stale 不是终态**：不写库、不改 `items`、不禁用取消。文案只说「可能仍在
+  后台运行，或已中断」——不写「已中断」（没有终态事件就没有证据）、不写
+  「正在重试」（客户端不跟踪重试）。
+- **不自动重拉 timeline 自愈**：`_backfill` 会 `clear()` 丢本地乐观回显，且
+  解决不了「服务端根本没发 `done`」这一主因。
+- **B1b（相邻独立缺口）**：重开对话时服务端仍在跑 → 回填只有权威帧、无流式
+  项 → 既不显示流式态也不武装看门狗（**既有行为**）。修它需把
+  `inFlightTurnIds` 换成 webapp 的「最后一个 turn 有 agent 事件且无终态」，
+  影响面更大，留单独一轮。
+
 ---
 
 ## 6. 关键设计决策
