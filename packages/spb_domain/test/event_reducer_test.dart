@@ -2301,4 +2301,156 @@ void main() {
       expect(r.items[1], isA<DiagnosticNoticeItem>());
     });
   });
+
+  /// [EventReducer.inFlightTurnIds] 的测试。
+  ///
+  /// 它是「超时兜底」的判据来源：算漏一个 turn，那个 turn 卡死时 UI 就不会被
+  /// 兜底；算多一个，已完成的 turn 会被误标成「无进展」。
+  group('inFlightTurnIds', () {
+    test('流式助手段落算进行中', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.message, payload: {'text': '正在生成'}, transient: true),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), {'turn_1'});
+    });
+
+    test('流式思考段落算进行中（长思考期没有任何正文）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.thought, payload: {'text': '想想'}, transient: true),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), {'turn_1'});
+    });
+
+    test('未配对的 tool_call 算进行中（长工具静默期）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {'tool_call_id': 'call_1', 'name': 'bash'},
+        ),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), {
+        'turn_1',
+      }, reason: '只看 isStreaming 会漏掉这一段——而它最容易长时间静默');
+    });
+
+    test('已配对的 tool_call 不算进行中', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {'tool_call_id': 'call_1', 'name': 'bash'},
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.toolResult,
+          payload: {'tool_call_id': 'call_1', 'output': 'ok'},
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), isEmpty);
+    });
+
+    test('done 之后不算进行中', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.message,
+          payload: {'text': '回复'},
+          transient: true,
+          globalSeq: 1,
+        ),
+        ev(EventTypes.done, payload: {'status': 'completed'}, globalSeq: 2),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), isEmpty);
+    });
+
+    test('多个 turn 并存时都被列出（per-turn 计时器的前提）', () {
+      // 第二个 turn 必须带 `start`：归约器靠它重置「当前累积段落」的索引
+      // （`currentAssistantIdx`），否则增量帧会被**追加进上一个 turn 的段落**
+      // ——这是归约层的既有语义，不是本函数的问题。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.message,
+          id: 'evt_a',
+          turnId: 'turn_a',
+          payload: {'text': 'A'},
+          transient: true,
+          globalSeq: 1,
+        ),
+        ev(EventTypes.start, id: 'evt_start_b', turnId: 'turn_b', globalSeq: 2),
+        ev(
+          EventTypes.message,
+          id: 'evt_b',
+          turnId: 'turn_b',
+          payload: {'text': 'B'},
+          transient: true,
+          globalSeq: 3,
+        ),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), {
+        'turn_a',
+        'turn_b',
+      }, reason: '两者都要在集合里，控制器才能各自武装计时器');
+    });
+
+    test('done 闭合全部流式段落（归约层的既有语义，按 turn 无关）', () {
+      // ⚠️ 归约层的 `_sealStreaming` 是**全局**的（一个 done 闭合所有流式段），
+      // 不是按 turnId 闭合。这在实践中不咬人：同一 group 的 turn 是排队串行
+      // 执行的（见 Go `chat/queue_state` 语义），不会有两个 turn 同时在跑。
+      // 记录在此是为了让「per-turn 计时器」的后来者知道：本函数与归约层的
+      // 闭合粒度**不同**，不要据此以为归约层也按 turn 处理。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.message,
+          id: 'evt_a',
+          turnId: 'turn_a',
+          payload: {'text': 'A'},
+          transient: true,
+          globalSeq: 1,
+        ),
+        ev(
+          EventTypes.message,
+          id: 'evt_b',
+          turnId: 'turn_b',
+          payload: {'text': 'B'},
+          transient: true,
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.done,
+          id: 'evt_done_a',
+          turnId: 'turn_a',
+          payload: {'status': 'completed'},
+          globalSeq: 3,
+        ),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), isEmpty);
+    });
+
+    test('turnId 为空的项目被跳过（无法关联到任何 turn）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.message,
+          turnId: '',
+          payload: {'text': '异常载荷'},
+          transient: true,
+        ),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), isEmpty);
+    });
+
+    test('非流式的权威帧不算进行中（历史回填场景）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.message, payload: {'text': '完整回复'}),
+      ]);
+
+      expect(EventReducer.inFlightTurnIds(r.items), isEmpty);
+    });
+  });
 }

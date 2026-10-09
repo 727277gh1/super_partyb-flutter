@@ -31,6 +31,7 @@ class ChatStreamController {
     required SseClient sse,
     required ChatApi api,
     required this.userId,
+    Duration? turnTimeoutOverride,
   }) : assert(
          userId != '',
          // WHY 断言而非静默容忍：空 userId 会拼出 `/users//chat/stream` 这种
@@ -41,7 +42,9 @@ class ChatStreamController {
          '空值会拼出 /users//chat/stream（见 issue #2）',
        ),
        _sse = sse,
-       _api = api;
+       _api = api,
+       _turnTimeoutOverride = turnTimeoutOverride,
+       _turnTimeout = turnTimeoutOverride;
 
   final SseClient _sse;
   final ChatApi _api;
@@ -248,6 +251,203 @@ class ChatStreamController {
     return _cachedReduction ??= EventReducer.reduce(_buffer);
   }
 
+  // ==================== 超时兜底（长时间无进展） ====================
+  //
+  // ## 它解决什么问题
+  //
+  // 流式标记（`isStreaming`）只有两条清除路径：`done` 事件与 `start` 事件。
+  // 一旦 `done` 丢失（turn worker 崩溃、长断线、回放窗口被打穿），UI 会**永久**
+  // 停在流式态：光标不停闪、取消按钮永久可点（点下去得到 409）。
+  //
+  // 这里维护一条「距最后一条事件」的看门狗，把「长时间无进展」的 turn 集合
+  // 推送出去，由 UI 停掉光标并给出提示。
+  //
+  // ## 为什么不直接改归约结果（强制封段）
+  //
+  // 详见 [EventReducer.inFlightTurnIds] 的说明：强制封段会制造重复气泡与
+  // 虚假的「工具调用无输出」。故归约结果保持权威，stale 只是一个**派生的
+  // 提示信号**，消费方不得据此写库、不得据此禁用取消。
+
+  /// 生效的超时阈值；null = 尚未解析出（此时**不武装**计时器）。
+  ///
+  /// 解析完成前保持 null 而不是先用 [TurnRuntime.fallback]：一旦先武装，
+  /// 服务端真实值更大时会多一次「判早了又撤销」的抖动。而判 stale 需要分钟级，
+  /// 一次 HTTP 往返的窗口不可观测。
+  Duration? _turnTimeout;
+
+  /// 测试注入的阈值；非 null 时跳过 HTTP 拉取。
+  final Duration? _turnTimeoutOverride;
+
+  /// 一次性看门狗计时器（**按 turnId 一个**）。
+  ///
+  /// ## 为什么是「一次性 + 每条事件重排」而不是周期 tick
+  ///
+  /// 判据是「距最后一次活动」，等价于「每条事件把到期时刻往后推」。一次性
+  /// 计时器天然表达这一点，且**不读墙钟**——测试可以用 `fake_async` 直接
+  /// `elapse` 到到期时刻，无需注入 Clock（周期 tick 要读 `DateTime.now()`，
+  /// 而 `fake_async` 不伪造它）。
+  ///
+  /// ## 为什么是 per-turn 而不是一个共享计时器
+  ///
+  /// 共享的话，别的 turn 的活动会把本 turn 的到期时刻也推后——一个已经卡死的
+  /// turn 会因「旁边那个还在跑」而永远不被判 stale，兜底等于失效。归约器按
+  /// turnId 去重、单连接下多 turn 并存不常见，但 `done` 只到一半时完全可能。
+  final Map<String, Timer> _staleTimers = {};
+
+  /// 阈值解析完成的信号（仅测试用）。
+  ///
+  /// 生产代码不 await 它：解析是异步的，而判 stale 需要分钟级，不存在可观测
+  /// 竞态。但测试需要一个同步点——在假时区里跑真实 dio 请求永不 resolve
+  /// （见测试文件头说明）。
+  Completer<void>? _turnTimeoutResolved;
+
+  /// 被判定为「长时间无进展」的 turn 集合。
+  final Set<String> _staleTurnIds = {};
+
+  final _staleTurnIdsController = StreamController<Set<String>>.broadcast();
+
+  /// 「长时间无进展」的 turn 集合流（推送全量副本）。
+  ///
+  /// ## 语义是提示，不是终态
+  ///
+  /// turn 可能仍在后台跑。消费方：
+  /// - **可以**据此停掉流式光标、让位提示条；
+  /// - **不得**据此写库、**不得**据此禁用取消——取消正是用户此时唯一的出路。
+  ///
+  /// ## 为什么推送全量集合而不是逐条通知
+  ///
+  /// 与 [activities] / [contextUsage] 同取向：它是「当前状态快照」（哪些 turn
+  /// 现在无进展），而状态快照的全量重建比增量合并简单且不会漂移。集合通常
+  /// 只有 0 或 1 个元素。
+  Stream<Set<String>> get staleTurnIds => _staleTurnIdsController.stream;
+
+  /// 当前 stale 集合快照（供 UI 首帧渲染，避免等下一次推送）。
+  Set<String> get staleTurnIdsSnapshot => Set.unmodifiable(_staleTurnIds);
+
+  /// 当前生效的兜底阈值；null = 尚未解析出（仅测试/诊断用）。
+  @visibleForTesting
+  Duration? get turnTimeout => _turnTimeout;
+
+  /// 阈值解析完成（仅测试用）。
+  @visibleForTesting
+  Future<void> get turnTimeoutResolved =>
+      _turnTimeoutResolved?.future ?? Future<void>.value();
+
+  /// 重置看门狗（[start] / [switchGroup] 调用：换了 group，旧结论无意义）。
+  void _resetStaleWatch() {
+    for (final t in _staleTimers.values) {
+      t.cancel();
+    }
+    _staleTimers.clear();
+    _turnTimeout = _turnTimeoutOverride;
+    if (_staleTurnIds.isNotEmpty) {
+      _staleTurnIds.clear();
+      _pushStaleTurnIds();
+    }
+    // 测试注入了阈值就无需拉取（也避免测试意外的 HTTP 请求）。
+    if (_turnTimeoutOverride != null) {
+      _turnTimeoutResolved = Completer<void>()..complete();
+      return;
+    }
+    final resolved = Completer<void>();
+    _turnTimeoutResolved = resolved;
+    unawaited(_resolveTurnTimeout(resolved));
+  }
+
+  /// 拉取服务端生效的兜底阈值。
+  ///
+  /// 不 await 进 [start]：那会让首屏渲染白等一次往返。
+  Future<void> _resolveTurnTimeout(Completer<void> resolved) async {
+    try {
+      final rt = await _api.turnRuntime();
+      // 已 dispose 或已切到别的 group：本次结果属于上一个上下文，丢弃。
+      //
+      // ⚠️ 不能只判 `_disposed`：切 group 会重新发起一次解析，而旧请求可能
+      // 后返回——它会用上一个 group 的阈值覆盖刚重置的状态，并把已清空的
+      // stale 集合又填回来。
+      if (_disposed || !identical(_turnTimeoutResolved, resolved)) return;
+      final next = rt.effectiveClientTurnTimeout;
+      // 先前若已用较小值判过 stale，而真实阈值更大，说明判早了——撤销。
+      final grew = _turnTimeout != null && next > _turnTimeout!;
+      _turnTimeout = next;
+      if (grew && _staleTurnIds.isNotEmpty) {
+        _staleTurnIds.clear();
+        _pushStaleTurnIds();
+      }
+    } catch (e) {
+      if (_disposed || !identical(_turnTimeoutResolved, resolved)) return;
+      SpbLog.warn('turn 运行时参数拉取失败，使用兜底阈值', {'error': e.toString()});
+      _turnTimeout ??= TurnRuntime.fallback;
+    } finally {
+      if (!resolved.isCompleted) resolved.complete();
+    }
+    _syncStaleWatch();
+  }
+
+  /// 同步看门狗（每次缓冲变更后调用）。
+  ///
+  /// ## 续期只针对「本次事件所属的那个 turn」
+  ///
+  /// [touchedTurnId] 是刚被接受的那条事件的 turnId。只有它的计时器重排：
+  /// 若任意事件都重排全部 turn，一个已卡死的 turn 会被旁边还在跑的 turn
+  /// （或全局模式下**别的 group** 的事件）无限续期，兜底等于失效。
+  ///
+  /// 为 null 表示「不是由具体事件触发的同步」（如回填、乐观回显）：此时只
+  /// 为新出现的进行中 turn 武装，不重置已有的。
+  ///
+  /// ## 心跳（SSE 注释帧）**不**续期
+  ///
+  /// [_onFrame] 对 `frame.isComment` 提前 return，故 `: heartbeat` 走不到这里。
+  /// 这是**刻意的**：心跳只说明 SSE 连接活着，而 turn worker 崩了心跳照样在
+  /// 流。若让它续期，超时兜底在「worker 崩溃但连接正常」这个主要场景下
+  /// 永不触发。
+  void _syncStaleWatch({String? touchedTurnId}) {
+    if (_disposed || _staleTurnIdsController.isClosed) return;
+
+    final inFlight = EventReducer.inFlightTurnIds(_reduction.items);
+
+    // 已结束的 turn：取消它的计时器（不再续期），并从 stale 集合脱出。
+    for (final id in _staleTimers.keys.toList()) {
+      if (!inFlight.contains(id)) _staleTimers.remove(id)?.cancel();
+    }
+    final dropped = _staleTurnIds.difference(inFlight);
+    if (dropped.isNotEmpty) {
+      _staleTurnIds.removeAll(dropped);
+      _pushStaleTurnIds();
+    }
+
+    final timeout = _turnTimeout;
+    if (timeout == null) return;
+    for (final id in inFlight) {
+      final isNew = !_staleTimers.containsKey(id);
+      if (touchedTurnId != null && id != touchedTurnId && !isNew) continue;
+      _staleTimers.remove(id)?.cancel();
+      _staleTimers[id] = Timer(timeout, () => _markTurnStale(id));
+    }
+  }
+
+  /// 看门狗到期：把该 turn 标为「长时间无进展」。
+  ///
+  /// 到期时**确认它仍在进行中**：这中间可能已收到 `done`（那时计时器已被
+  /// [_syncStaleWatch] 取消，但取消与回调触发之间存在竞争窗口）。
+  void _markTurnStale(String turnId) {
+    _staleTimers.remove(turnId);
+    if (_disposed || _staleTurnIdsController.isClosed) return;
+    if (!EventReducer.inFlightTurnIds(_reduction.items).contains(turnId)) {
+      return;
+    }
+    if (_staleTurnIds.contains(turnId)) return;
+    _staleTurnIds.add(turnId);
+    _pushStaleTurnIds();
+  }
+
+  void _pushStaleTurnIds() {
+    if (_staleTurnIdsController.isClosed) return;
+    // 推不可变副本：页面 State 会直接持有它，共享可变集合会在下次变更时
+    // 静默改写它已持有的快照。
+    _staleTurnIdsController.add(Set.unmodifiable(_staleTurnIds));
+  }
+
   /// 开始：回填历史 → 建立 SSE 连接。
   ///
   /// [groupId] 为 null 时进入「全局模式」，接收所有 group 的事件（用于通知中心）。
@@ -255,6 +455,7 @@ class ChatStreamController {
     _groupId = groupId;
     _buffer.clear();
     _oldestLoadedGlobalSeq = null;
+    _resetStaleWatch();
 
     if (groupId != null) {
       await _backfill(groupId);
@@ -315,6 +516,7 @@ class ChatStreamController {
     _groupId = groupId;
     _buffer.clear();
     _oldestLoadedGlobalSeq = null;
+    _resetStaleWatch();
     if (groupId != null) {
       await _backfill(groupId);
     }
@@ -637,6 +839,19 @@ class ChatStreamController {
       SpbLog.debug('收到未知事件类型（可能是服务端新增）', {'eventType': event.eventType});
     }
 
+    // 该 turn 又活过来了：撤销超时判定。
+    //
+    // ## 为什么必须在这里（而非归约后按 items 判断）
+    //
+    // `turn_activity` 是「执行器仍在跑」的直接证据，但它**不进 items**
+    // （走 activities 通道，见 [TurnActivitySnapshot] 类文档）。只按 items
+    // 撤销，会让「只有工具心跳、没有正文」的长 turn 永久停在 stale。
+    //
+    // 放在 group 过滤**之后**：其他 group 的事件不得续期本 group 的看门狗。
+    if (event.turnId.isNotEmpty && _staleTurnIds.remove(event.turnId)) {
+      _pushStaleTurnIds();
+    }
+
     _buffer.add(event);
     _trimBuffer();
 
@@ -645,7 +860,7 @@ class ChatStreamController {
       _sse.recordEventId(event.eventId);
     }
 
-    _emit();
+    _emit(touchedTurnId: event.turnId);
   }
 
   void _onStreamError(Object error) {
@@ -656,7 +871,7 @@ class ChatStreamController {
     if (!_errorController.isClosed) _errorController.add(mapped);
   }
 
-  void _emit() {
+  void _emit({String? touchedTurnId}) {
     if (_itemsController.isClosed) return;
     _cachedReduction = EventReducer.reduce(_buffer);
     _itemsController.add(_cachedReduction!.items);
@@ -675,6 +890,9 @@ class ChatStreamController {
     if (!_ttsStatusController.isClosed) {
       _ttsStatusController.add(_cachedReduction!.ttsStatus);
     }
+    // 每次缓冲变更都同步看门狗：判据是「距最后一次活动」，故只有
+    // [touchedTurnId] 的到期时刻被推后（见 [_syncStaleWatch]）。
+    _syncStaleWatch(touchedTurnId: touchedTurnId);
   }
 
   /// 发送消息（经完整前置链）。
@@ -728,12 +946,16 @@ class ChatStreamController {
   /// ——表现为「看起来连上了，其实一条事件都没有」。
   ///
   /// 故这里只取消**自己的**订阅（`_frameSub` / `_stateSub`）并关闭**自己的**
-  /// 九个 StreamController（`_items` / `_gateDecisions` / `_activities` /
-  /// `_contextUsage` / `_executionStatus` / `_ttsStatus` / `_groupUpdates` /
-  /// `_goalUpdates` / `_error` / `_state`）。
+  /// 十个 StreamController（`_items` / `_gateDecisions` / `_activities` /
+  /// `_contextUsage` / `_executionStatus` / `_ttsStatus` / `_staleTurnIds` /
+  /// `_groupUpdates` / `_goalUpdates` / `_error` / `_state`）。
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    for (final t in _staleTimers.values) {
+      t.cancel();
+    }
+    _staleTimers.clear();
     await _frameSub?.cancel();
     await _stateSub?.cancel();
     await _itemsController.close();
@@ -742,6 +964,7 @@ class ChatStreamController {
     await _contextUsageController.close();
     await _executionStatusController.close();
     await _ttsStatusController.close();
+    await _staleTurnIdsController.close();
     await _groupUpdatesController.close();
     await _goalUpdatesController.close();
     await _errorController.close();

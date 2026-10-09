@@ -907,6 +907,54 @@ class EventReducer {
     return null;
   }
 
+  /// 仍在进行中的 turn id 集合。
+  ///
+  /// ## 它解决什么问题
+  ///
+  /// 「超时兜底」（距最后一条事件过久仍未收到 `done` 时停掉流式光标）需要知道
+  /// **哪些 turn 还在跑**。归约结果本身不携带这个答案：`done` 丢失后流式标记
+  /// 永远为 true，而 UI 无从区分「刚起跑」与「卡死十分钟」。
+  ///
+  /// ## 为什么算「未完成的工具调用」也算进行中
+  ///
+  /// 长工具（构建 / 大范围检索 / 下载）期间既没有正文也没有思考，只有一条
+  /// `tool_call`。只看 [AssistantMessageItem.isStreaming] 会漏掉这一段——而它
+  /// 恰恰是最容易长时间静默、最需要兜底的情形。
+  ///
+  /// ## 为什么是纯查询而不是给 [reduce] 加参数
+  ///
+  /// 「强制封段」会制造两个真实缺陷：
+  ///
+  /// 1. **重复气泡**：该段 `isStreaming` 变 false 后，若 turn 其实仍在跑、增量帧
+  ///    恢复到达，归约器的段落索引是从头重建的，会新建一个
+  ///    [AssistantMessageItem]——同一个 turn 渲染出两个气泡。
+  /// 2. **编造**：[`_sealStreaming`] 会把未配对的工具调用写成
+  ///    `isComplete: true, output: '(无输出)'`，而 turn 可能还在后台跑。
+  ///
+  /// 故归约结果保持不变，只把「谁在跑」这个事实**派生**出来，由消费方决定
+  /// 怎么呈现（webapp 的 `deriveStreamLifecycle` 同一取向）。
+  ///
+  /// ## 回填出来的历史 turn 不在其中（已知边界）
+  ///
+  /// 流式增量是 Transient（不落库），timeline 回填拿到的 `message` 全是权威帧
+  /// （`isStreaming == false`）。故「重开对话时服务端仍在跑」本函数返回空。
+  /// 这与客户端当前不显示流式态的既有行为一致，不是本函数引入的缺口。
+  static Set<String> inFlightTurnIds(Iterable<ConversationItem> items) {
+    final ids = <String>{};
+    for (final it in items) {
+      // turnId 为空无法关联到任何 turn（历史数据或异常载荷）。
+      if (it.turnId.isEmpty) continue;
+      final inFlight = switch (it) {
+        AssistantMessageItem(:final isStreaming) => isStreaming,
+        ThoughtItem(:final isStreaming) => isStreaming,
+        ToolCallItem(:final isComplete) => !isComplete,
+        _ => false,
+      };
+      if (inFlight) ids.add(it.turnId);
+    }
+    return ids;
+  }
+
   /// 把仍在 streaming 的段落标记为完成（收到 done 或流中断时调用）。
   static void _sealStreaming(List<ConversationItem> items) {
     for (var i = 0; i < items.length; i++) {
