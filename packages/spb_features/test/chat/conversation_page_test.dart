@@ -77,7 +77,15 @@ void main() {
   late _FakeSseClient sse;
   late ChatStreamController controller;
 
+  /// 超时兜底集合的推送通道。
+  ///
+  /// 不用 controller 真实的那条流：判 stale 需要等分钟级阈值，测试不可能真等。
+  /// 这里直接推集合，验证「页面拿到 stale 信号后的表现」——阈值与判定逻辑本身
+  /// 由 `spb_domain` 的 `chat_stream_controller_stale_test.dart` 覆盖。
+  late StreamController<Set<String>> staleController;
+
   setUp(() {
+    staleController = StreamController<Set<String>>.broadcast();
     dio = createDio(baseUrl: 'https://api.test/pba');
     adapter = DioAdapter(dio: dio);
     api = ChatApi(dio);
@@ -85,7 +93,10 @@ void main() {
     controller = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
   });
 
-  tearDown(() async => controller.dispose());
+  tearDown(() async {
+    await staleController.close();
+    await controller.dispose();
+  });
 
   /// 挂 timeline 回填的 mock。
   void mockTimeline() {
@@ -96,6 +107,17 @@ void main() {
         'next_before_global_seq': '',
       }),
       queryParameters: {'limit': 200},
+    );
+    // 控制器起连时会拉一次 turn 运行时参数（超时兜底阈值）。不挂这条 mock 也
+    // 能跑（失败只记 warn 并退化为兜底值），但会在每个用例里刷一行 warning，
+    // 掩盖真正的异常。
+    adapter.onGet(
+      '/api/chat/turn-runtime',
+      (server) => server.reply(200, {
+        'request_timeout_seconds': 300,
+        'inactivity_timeout_seconds': 0,
+        'client_turn_timeout_seconds': 300,
+      }),
     );
   }
 
@@ -174,6 +196,8 @@ void main() {
     bool wireContextUsage = true,
     bool wireExecutionStatus = true,
     bool wireTtsStatus = true,
+    bool wireStaleTurnIds = true,
+    Set<String> staleTurnIds = const {},
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -221,6 +245,10 @@ void main() {
           ttsStatusSnapshot: wireTtsStatus
               ? controller.ttsStatusSnapshot
               : null,
+          // 超时兜底同理：默认接上 controller 的流，并用 staleTurnIds 注入
+          // 初始集合（测试不必真等分钟级超时）。
+          staleTurnIds: wireStaleTurnIds ? staleController.stream : null,
+          staleTurnIdsSnapshot: wireStaleTurnIds ? staleTurnIds : null,
         ),
       ),
     );
@@ -2456,6 +2484,154 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
 
       expect(strategies, ['merge_all'], reason: '待处理栏的入口也必须能选策略，否则它仍是死锁');
+    });
+  });
+
+  group('ConversationPage 超时兜底', () {
+    /// 推一个 stale 集合（页面订阅的是 [staleController]）。
+    Future<void> pushStale(WidgetTester tester, Set<String> ids) async {
+      await tester.runAsync(() async {
+        staleController.add(ids);
+        await Future<void>.delayed(Duration.zero);
+      });
+      await tester.pump();
+    }
+
+    testWidgets('stale turn → 展示提示条', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onCancelTurn: (id) async {},
+        staleTurnIds: {'turn_1'},
+      );
+      await pushStreamingMessage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-stale-turn')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('stale turn → 停止按钮仍可点（用户唯一的出路）', (tester) async {
+      // 这是本方案最关键的一条不变式：stale 只是「客户端没再收到进展」，
+      // turn 可能仍在后台跑。禁用取消会让用户彻底失去出路。
+      final cancelled = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onCancelTurn: (id) async => cancelled.add(id),
+        staleTurnIds: {'turn_1'},
+      );
+      await pushStreamingMessage(tester);
+
+      final button = find.byKey(const ValueKey('conversation-cancel-turn'));
+      expect(tester.widget<IconButton>(button).onPressed, isNotNull);
+
+      await tester.tap(button);
+      await tester.pump();
+      await tester.pump();
+
+      expect(cancelled, ['turn_1']);
+    });
+
+    testWidgets('stale turn → 活动指示器让位（不显示「执行中」）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, staleTurnIds: {'turn_1'});
+      // 先推一条活动快照，再推流式正文（有正文时活动指示本就不显示，
+      // 故这里只推活动 + 空正文的流式 thought）。
+      await pushEvent(
+        tester,
+        EventTypes.turnActivity,
+        sseEvent(
+          'turn_activity',
+          id: 'e_act',
+          payload: {'elapsed_ms': 60000},
+          transient: true,
+        ),
+      );
+      await pushEvent(
+        tester,
+        EventTypes.thought,
+        sseEvent(
+          'thought',
+          id: 'e_thought',
+          payload: {'text': '想想'},
+          transient: true,
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-activity')),
+        findsNothing,
+        reason: '「执行中 · 已运行 1 分」与「长时间无进展」自相矛盾',
+      );
+      expect(
+        find.byKey(const ValueKey('conversation-stale-turn')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('stale 解除（集合变空）→ 提示条消失', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onCancelTurn: (id) async {},
+        staleTurnIds: {'turn_1'},
+      );
+      await pushStreamingMessage(tester);
+      expect(
+        find.byKey(const ValueKey('conversation-stale-turn')),
+        findsOneWidget,
+      );
+
+      await pushStale(tester, const {});
+
+      expect(
+        find.byKey(const ValueKey('conversation-stale-turn')),
+        findsNothing,
+        reason: 'turn 又动了（或已终结）时应立刻恢复',
+      );
+    });
+
+    testWidgets('未注入 staleTurnIds 时不展示提示（纯只读时间线）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, wireStaleTurnIds: false);
+      await pushStreamingMessage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-stale-turn')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('stale 的是别的 turn 时不影响本 turn 的流式态', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onCancelTurn: (id) async {},
+        staleTurnIds: {'turn_other'},
+      );
+      await pushStreamingMessage(tester, turnId: 'turn_1');
+
+      expect(
+        find.byKey(const ValueKey('conversation-stale-turn')),
+        findsNothing,
+        reason: '集合按 turnId 匹配，不得把无关 turn 判成 stale',
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('conversation-cancel-turn')),
+            )
+            .onPressed,
+        isNotNull,
+      );
     });
   });
 }

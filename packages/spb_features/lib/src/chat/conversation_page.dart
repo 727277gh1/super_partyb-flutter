@@ -72,6 +72,8 @@ class ConversationPage extends StatefulWidget {
     this.executionStatusSnapshot,
     this.ttsStatus,
     this.ttsStatusSnapshot,
+    this.staleTurnIds,
+    this.staleTurnIdsSnapshot,
     this.actions,
     this.emptyHint = '还没有对话，输入消息开始吧',
   });
@@ -349,6 +351,26 @@ class ConversationPage extends StatefulWidget {
   /// 非空：无播报事件时为 [TtsPhase.idle]，UI 用 [TtsStatus.hasStatus] 判断。
   final TtsStatus? ttsStatusSnapshot;
 
+  /// 「长时间无进展」的 turn 集合流（见 `ChatStreamController.staleTurnIds`）。
+  ///
+  /// ## 为什么由 app 层注入而不是页面自己计时
+  ///
+  /// 判据是「距最后一次事件」——而 `turn_activity` 是「执行器仍在跑」的直接
+  /// 证据却**不进 [controller.items]**（走 activities 通道）。页面只看得见
+  /// items，据此计时会把「只有工具心跳、尚无正文」的长 turn 误判成卡死。
+  ///
+  /// ## 语义是提示，不是终态
+  ///
+  /// 收到某个 turnId 时，本页**只**做两件事：停掉它的流式光标、让位提示条。
+  /// **不**禁用取消——turn 可能真在跑，而取消是用户此时唯一的出路。
+  ///
+  /// 未注入时不展示超时提示——保持本页在未接线时仍是纯只读时间线
+  /// （同 [onCancelTurn] / [activities] 的取向）。
+  final Stream<Set<String>>? staleTurnIds;
+
+  /// 超时集合的同步初值（同 [contextUsageSnapshot]）。
+  final Set<String>? staleTurnIdsSnapshot;
+
   final String emptyHint;
 
   @override
@@ -449,6 +471,13 @@ class _ConversationPageState extends State<ConversationPage> {
   /// （idle 是收到快照但无播报，null 是还没订阅到）。
   TtsStatus? _ttsStatus;
 
+  /// `staleTurnIds` 订阅与最近一次超时集合。
+  ///
+  /// 与 [_activities] / [_contextUsage] 同取向：存在 State 里 + 订阅推送时
+  /// setState（在 build 里读一个同步 getter 建立不了依赖）。
+  StreamSubscription<Set<String>>? _staleTurnIdsSub;
+  Set<String> _staleTurnIds = const {};
+
   /// 是否跟随底部。
   ///
   /// ## 为什么用状态标志而不是每次重新测量位置
@@ -472,6 +501,7 @@ class _ConversationPageState extends State<ConversationPage> {
     _subscribeContextUsage();
     _subscribeExecutionStatus();
     _subscribeTtsStatus();
+    _subscribeStaleTurnIds();
   }
 
   /// 订阅活动流（仅在调用方传了 [ConversationPage.activities] 时）。
@@ -524,6 +554,20 @@ class _ConversationPageState extends State<ConversationPage> {
     _ttsStatus = widget.ttsStatusSnapshot;
   }
 
+  /// 订阅超时集合流（仅在调用方传了 [ConversationPage.staleTurnIds] 时）。
+  ///
+  /// 与 [_subscribeActivities] 同一取向：未注入时本页不展示超时提示，也不
+  /// 白订阅一条无人消费的流。
+  void _subscribeStaleTurnIds() {
+    final stream = widget.staleTurnIds;
+    if (stream == null) return;
+    _staleTurnIdsSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _staleTurnIds = snapshot);
+    });
+    _staleTurnIds = widget.staleTurnIdsSnapshot ?? const {};
+  }
+
   @override
   void didUpdateWidget(ConversationPage oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -560,6 +604,13 @@ class _ConversationPageState extends State<ConversationPage> {
       _ttsStatus = null;
       _subscribeTtsStatus();
     }
+    // 超时集合流同理。
+    if (oldWidget.staleTurnIds != widget.staleTurnIds) {
+      unawaited(_staleTurnIdsSub?.cancel());
+      _staleTurnIdsSub = null;
+      _staleTurnIds = const {};
+      _subscribeStaleTurnIds();
+    }
     // 换了对话就要重新给翻页一次机会：`_reachedOldest` 是上一个 group 的结论，
     // 沿用会让新对话永远翻不到历史（见 [historyKey] 的说明）。
     if (oldWidget.historyKey != widget.historyKey ||
@@ -575,6 +626,7 @@ class _ConversationPageState extends State<ConversationPage> {
     _contextUsageSub?.cancel();
     _executionStatusSub?.cancel();
     _ttsStatusSub?.cancel();
+    _staleTurnIdsSub?.cancel();
     _scrollController.dispose();
     _draft.dispose();
     super.dispose();
@@ -733,6 +785,17 @@ class _ConversationPageState extends State<ConversationPage> {
     return null;
   }
 
+  /// 当前处于超时兜底态的进行中项；null 表示没有。
+  ///
+  /// 「长时间无进展」与「流式」是两个不同的概念：stale 只说明客户端没再收到
+  /// 进展，turn 可能仍在后台跑。故它**不**改变 [ConversationItem]（不改文本、
+  /// 不改 `isComplete`），只让 UI 停掉光标并给出提示。
+  ConversationItem? get _staleTurnItem {
+    final streaming = _streamingItem;
+    if (streaming == null) return null;
+    return _staleTurnIds.contains(streaming.turnId) ? streaming : null;
+  }
+
   /// 停止当前轮次。
   Future<void> _handleCancelTurn() async {
     final handler = widget.onCancelTurn;
@@ -873,6 +936,12 @@ class _ConversationPageState extends State<ConversationPage> {
     final streaming = _streamingItem;
     if (streaming == null || streaming.turnId.isEmpty) return null;
 
+    // 已判超时 → 让位给 [_StaleTurnNotice]。
+    //
+    // 活动快照是 Transient（不落库），断线后可能停在 State 里；继续显示
+    // 「执行中 · 已运行 12 分」会与「长时间无进展」自相矛盾。
+    if (_staleTurnIds.contains(streaming.turnId)) return null;
+
     final activity = _activities[streaming.turnId];
     if (activity == null) return null;
 
@@ -957,7 +1026,9 @@ class _ConversationPageState extends State<ConversationPage> {
           // 活动指示是「已在跑但没正文」。若同时存在（例如旧的排队事件尚未被
           // 起跑事件清掉，而心跳已先到），显示「在等」比显示「在跑」更保守也
           // 更准（对齐 webapp `turn.activity && !turn.queueReason`）。
-          if (_executionStatus != null)
+          if (_staleTurnItem != null)
+            const _StaleTurnNotice()
+          else if (_executionStatus != null)
             _ExecutionStatusBar(status: _executionStatus!)
           else if (_visibleActivity != null)
             _TurnActivityIndicator(activity: _visibleActivity!),
@@ -1019,15 +1090,19 @@ class _ConversationPageState extends State<ConversationPage> {
 
   Widget _buildItem(ConversationItem item) => switch (item) {
     UserMessageItem(:final text) => UserMessageBubble(text: text),
+    // `isStreaming` 与超时集合求交：判超时后停掉光标。
+    //
+    // ⚠️ 只影响光标，**不改归约结果**——若 turn 其实仍在跑、增量帧随后到达，
+    // 段落会自然恢复流式态（不会出现重复气泡，因为归约输入未变）。
     AssistantMessageItem(:final text, :final isStreaming) =>
       AssistantMessageBubble(
         text: text,
-        isStreaming: isStreaming,
+        isStreaming: isStreaming && !_staleTurnIds.contains(item.turnId),
         onLinkTap: widget.onOpenLink,
       ),
     ThoughtItem(:final text, :final isStreaming) => ThoughtTile(
       text: text,
-      isStreaming: isStreaming,
+      isStreaming: isStreaming && !_staleTurnIds.contains(item.turnId),
     ),
     ToolCallItem(:final name, :final args, :final output, :final isComplete) =>
       ToolCallTile(
@@ -1450,6 +1525,64 @@ class _ExecutionStatusBar extends StatelessWidget {
 /// 一动不动，用户唯一的判断依据是「它是不是死了」。本组件把服务端 `turn_activity`
 /// 里的「已运行多久 + 上一步是什么」呈现出来，让等待有可见的进展。
 ///
+/// 超时兜底提示条：长时间未收到进展。
+///
+/// ## 它解决什么问题
+///
+/// 流式标记只有 `done` / `start` 两条清除路径。一旦 `done` 丢失（turn worker
+/// 崩溃、长断线、回放窗口被打穿），UI 会**永久**停在流式态：光标不停闪、活动
+/// 指示器常驻、取消按钮永久可点（点下去得到 409）。
+///
+/// ## 为什么必须显式提示（而不是像 webapp 那样静默回 idle）
+///
+/// webapp 把 lifecycle 悄悄回 `idle` 即可——它没有常驻的取消按钮。本客户端有，
+/// 且 stale 时**故意保持可点**（turn 可能真在跑，而取消是用户唯一的出路）。
+/// 若同时把光标停掉又不解释，用户会看到「界面静止 + 一个可以点的停止按钮」，
+/// 无从判断到底是哪种状态。
+///
+/// ## 文案不编造
+///
+/// 只说「可能仍在后台运行，或已中断」——这是客户端**唯一能确证**的事：
+/// - 不写「已中断」：没有终态事件就没有证据（后端可能仍在跑）；
+/// - 不写「正在重试」：客户端不跟踪重试（`retry_scheduled` 走另一条通道）。
+class _StaleTurnNotice extends StatelessWidget {
+  const _StaleTurnNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      key: const ValueKey('conversation-stale-turn'),
+      // 与活动指示 / 等待提示同用 secondaryContainer：三者都是「临时状态条」，
+      // 视觉上应属同一族而非各造一套。
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.hourglass_disabled_outlined,
+              size: SpbSpacing.lg,
+              color: scheme.onSecondaryContainer,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                '长时间未收到新进展 · 任务可能仍在后台运行，或已中断',
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSecondaryContainer),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// ## 文案对齐 webapp
 ///
 /// `apps/webapp/messages/zh.json`：
