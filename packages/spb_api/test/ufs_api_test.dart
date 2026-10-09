@@ -365,4 +365,89 @@ void main() {
       await expectLater(api.getFile('nope'), throwsA(isA<HttpError>()));
     });
   });
+
+  group('UFS thumbnail', () {
+    test('200：返回图片字节，且用 bytes 响应类型与默认 256 档位', () async {
+      adapter.onGet(
+        '/api/files/file_1/thumbnails/256',
+        (server) => server.reply(
+          200,
+          Uint8List.fromList([137, 80, 78, 71]), // PNG magic
+          headers: {
+            'content-type': ['image/png'],
+            'x-thumbnail-width': ['256'],
+          },
+        ),
+      );
+
+      final bytes = await api.thumbnail('file_1');
+
+      expect(bytes, [137, 80, 78, 71]);
+      // 用 bytes 响应类型：默认 json 会拿 PNG 去按 JSON 解析并破坏内容。
+      expect(recorder.last.responseType, ResponseType.bytes);
+    });
+
+    test('size 参数拼进路径（合法档位由服务端把关）', () async {
+      adapter.onGet(
+        '/api/files/file_1/thumbnails/64',
+        (server) => server.reply(200, Uint8List.fromList([1])),
+      );
+
+      await api.thumbnail('file_1', size: 64);
+
+      expect(recorder.last.path, '/api/files/file_1/thumbnails/64');
+    });
+
+    test('304：返回 null（无正文可渲染，不是错误）', () async {
+      // `validateStatus` 放行所有 <500，304 会带空正文正常返回。不显式判
+      // 就会变成「取到 0 字节图片」→ `Image.memory` 抛异常。
+      adapter.onGet(
+        '/api/files/file_1/thumbnails/256',
+        (server) => server.reply(304, Uint8List(0)),
+      );
+
+      expect(await api.thumbnail('file_1'), isNull);
+    });
+
+    test('501 缩略图服务未启用：返回 null 而非抛错', () async {
+      // 这是本任务的关键断言：501 是部署未启用该能力时的**正常**响应。
+      // 抛错会让一张图就让整卡显示失败，且可能被误当成「下载失败」。
+      adapter.onGet(
+        '/api/files/file_1/thumbnails/256',
+        (server) => server.reply(501, {'error': '缩略图服务未启用'}),
+      );
+
+      expect(await api.thumbnail('file_1'), isNull);
+    });
+
+    test('400 尺寸无效：抛 HttpError（带状态码便于定位）', () async {
+      adapter.onGet(
+        '/api/files/file_1/thumbnails/999',
+        (server) => server.reply(400, {'error': '缩略图尺寸无效'}),
+      );
+
+      await expectLater(
+        api.thumbnail('file_1', size: 999),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 400),
+        ),
+      );
+    });
+
+    test('404 显式抛 HttpError（不静默当成无缩略图）', () async {
+      // 404 与 501 语义不同：501 是「本部署没这能力」（预期内），
+      // 404 是「文件不在了」（异常）。混为一谈会掩盖真实问题。
+      adapter.onGet(
+        '/api/files/missing/thumbnails/256',
+        (server) => server.reply(404, {'error': '文件不存在'}),
+      );
+
+      await expectLater(
+        api.thumbnail('missing'),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 404),
+        ),
+      );
+    });
+  });
 }

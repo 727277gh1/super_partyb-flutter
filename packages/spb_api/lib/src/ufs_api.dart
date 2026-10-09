@@ -147,6 +147,62 @@ class UfsApi {
     }
   }
 
+  /// `GET /api/files/{file_id}/thumbnails/{size}`
+  ///
+  /// 服务端在缺失或内容已变更时**同步补生成**（`internal/service/thumbnail.go`），
+  /// 响应带 `Cache-Control: private, max-age=3600` 与 `ETag`。
+  ///
+  /// ## 合法 size 只有四档
+  ///
+  /// `thumbnailSizes = []int{64, 128, 256, 512}`（`thumbnail.go`）。传其它值
+  /// 服务端返回 **400 缩略图尺寸无效**——这里不做客户端白名单校验：服务端才是
+  /// 权威，而 400 会被下面的非 2xx 分支翻译成带状态码的 [HttpError]，比本地
+  /// 抛一个语义模糊的 `ArgumentError` 更好定位。
+  ///
+  /// ## 返回 null 的两种情形（都不是错误）
+  ///
+  /// - **501 缩略图服务未启用**：部署未开该能力时的正常响应。绝不能抛错，
+  ///   否则一张图就能让整卡显示失败（用户还以为文件坏了），且可能被上层
+  ///   误当成「下载失败」而阻断下载。
+  /// - **304**：内容未变。本方法**不发送** `If-None-Match`（缩略图是短时缓存
+  ///   的展示件，不值得为它维护条件请求状态），故正常不会出现；但 `createDio`
+  ///   的 `validateStatus` 放行所有 <500，304 会带空正文正常返回——不显式判
+  ///   就会变成「取到一个 0 字节图片」，`Image.memory` 抛异常。
+  ///
+  /// 调用方拿到 null 或空字节时**退化为图标**（`AgentFileCard._leading`）。
+  ///
+  /// ## 为什么用 `ResponseType.bytes`
+  ///
+  /// 同 [download]：默认的 `ResponseType.json` 会拿 PNG 去按 JSON 解析，
+  /// 直接失败或把内容破坏掉。
+  Future<List<int>?> thumbnail(String fileId, {int size = 256}) async {
+    try {
+      final res = await _dio.get<List<int>>(
+        '/api/files/$fileId/thumbnails/$size',
+        options: Options(responseType: ResponseType.bytes),
+      );
+
+      final status = res.statusCode ?? 0;
+
+      // 304：无正文可渲染（见上）。放在 2xx 判定之前，否则会被下面的
+      // 非 2xx 分支当成错误抛出去。
+      if (status == 304) return null;
+
+      if (status < 200 || status >= 300) {
+        throw HttpError(status, 'HTTP $status', body: _bodyPreview(res.data));
+      }
+
+      return res.data;
+    } on DioException catch (e) {
+      // 501 **不**走上面的分支：`validateStatus` 只放行 <500，故 501 由 dio
+      // 抛成 DioException，在错误拦截器里被映射成 HttpError(501)。要在此处
+      // 把它捞回来，而不是让它冒泡到卡片。
+      final err = _toSpbError(e);
+      if (err is HttpError && err.statusCode == 501) return null;
+      throw err;
+    }
+  }
+
   /// 从响应头取 ETag。
   ///
   /// 服务端可能返回强 etag（`"abc"`）或弱 etag（`W/"abc"`）；**原样保留**，
