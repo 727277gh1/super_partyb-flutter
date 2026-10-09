@@ -726,6 +726,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// controller.ttsStatus 的订阅（tts_started / tts_completed / tts_failed）。
   StreamSubscription<TtsStatus?>? _ttsStatusSub;
 
+  /// controller.staleTurnIds 的订阅（超时兜底：长时间无进展的 turn）。
+  ///
+  /// 判据（「距最后一次事件」）与计时都在控制器里：它看得见 `turn_activity`
+  /// 这类**不进 items** 的续期信号。本页只消费结果，不自建计时。
+  StreamSubscription<Set<String>>? _staleTurnIdsSub;
+
+  /// 最近一次超时集合（同上，存在 State 里才能触发重建）。
+  Set<String> _staleTurnIds = const {};
+
   /// controller.goalUpdates 的订阅（goal_updated）。
   ///
   /// 事件携带与 `GET /goals/current` 同构的完整快照，故直接套进 _group
@@ -829,6 +838,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     _contextUsageSub?.cancel();
     _executionStatusSub?.cancel();
     _ttsStatusSub?.cancel();
+    _staleTurnIdsSub?.cancel();
     _goalUpdatesSub?.cancel();
     _groupUpdatesSub?.cancel();
     super.dispose();
@@ -1418,6 +1428,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 语音播报状态走独立流（见 TtsStatus 类文档）。
       _ttsStatusSub = controller.ttsStatus.listen(_onTtsStatusChanged);
       _onTtsStatusChanged(controller.ttsStatusSnapshot);
+      if (_staleTurnIdsSub == null) {
+        // 超时兜底集合走独立流（见 ChatStreamController.staleTurnIds）。
+        // 与 activities 同取向：先订阅再同步一次快照。
+        _staleTurnIdsSub = controller.staleTurnIds.listen(
+          _onStaleTurnIdsChanged,
+        );
+        _onStaleTurnIdsChanged(controller.staleTurnIdsSnapshot);
+      }
     }
     // 目标变更通知走独立流（见 GoalUpdate 类文档）。
     //
@@ -1437,6 +1455,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       await controller.start(groupId: widget.groupId);
       _connectedUserId = userId;
     }
+  }
+
+  /// 监听 controller.staleTurnIds：驱动对话页的超时兜底提示。
+  ///
+  /// 集合通常只有 0 或 1 个元素（同一 group 的 turn 串行执行）。
+  void _onStaleTurnIdsChanged(Set<String> ids) {
+    if (!mounted) return;
+    setState(() => _staleTurnIds = ids);
   }
 
   /// 监听 controller.activities：驱动对话页的空窗期进度指示。
@@ -1746,6 +1772,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       ttsStatus: controller.ttsStatus,
       ttsStatusSnapshot: _ttsStatus,
+      // 超时兜底（长时间无进展）：停掉流式光标 + 提示条，但**不禁用**取消。
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      staleTurnIds: controller.staleTurnIds,
+      staleTurnIdsSnapshot: _staleTurnIds,
       // 向上翻页：加载更早历史。
       //
       // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，
