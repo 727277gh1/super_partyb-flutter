@@ -359,7 +359,9 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 |---|---|
 | `spb_models` `turn_runtime.dart` | 契约 + 阈值防御（`0`/负数 → 不可用，上限 24h） |
 | `spb_api` `ChatApi.turnRuntime()` | 只读拉取 |
-| `spb_domain` `EventReducer.inFlightTurnIds` | 纯查询：哪些 turn 仍在进行中 |
+| `spb_domain` `EventReducer.inFlightTurnIds` | 纯查询：哪些 turn 仍在进行中（**流式标记**判据，实时路径） |
+| `spb_domain` `EventReducer.lastTurnRunState` / `lastTurnMayBeRunning` / `lastRunningTurnId` | 纯查询：**结构推断**判据（回填路径，见下方「B1b 的修法」） |
+| `spb_domain` `ReductionResult.terminalTurnIds` | 归约时记录的终态 turn（`done` / `error` 不产出 item，只能这样派生） |
 | `spb_domain` `ChatStreamController` | per-turn 一次性计时器 + `staleTurnIds` 流 |
 | `spb_features` `conversation_page.dart` | 停光标 + `_StaleTurnNotice` 提示条 |
 
@@ -402,10 +404,41 @@ timeline，只派生 lifecycle）。
   「正在重试」（客户端不跟踪重试）。
 - **不自动重拉 timeline 自愈**：`_backfill` 会 `clear()` 丢本地乐观回显，且
   解决不了「服务端根本没发 `done`」这一主因。
-- **B1b（相邻独立缺口）**：重开对话时服务端仍在跑 → 回填只有权威帧、无流式
+- **B1b（相邻独立缺口）**：~~重开对话时服务端仍在跑 → 回填只有权威帧、无流式
   项 → 既不显示流式态也不武装看门狗（**既有行为**）。修它需把
   `inFlightTurnIds` 换成 webapp 的「最后一个 turn 有 agent 事件且无终态」，
-  影响面更大，留单独一轮。
+  影响面更大，留单独一轮。~~ → **已修复**（issue #9）。修法**不是**改
+  `inFlightTurnIds`，而是与它平行新增结构推断查询（见下）。
+
+#### B1b 的修法（issue #9，**不改 `reduce` 签名**）
+
+B1b 的判据不能是「流式标记」，因为 `done` **不产出任何 item**——实测一个已完成的
+turn 与一个回填出来仍在跑的 turn，归约结果**完全一致**
+（都是 `[UserMessageItem, AssistantMessageItem(isStreaming:false)]`）。故终态必须
+在遍历事件时顺手记录，作为 `ReductionResult.terminalTurnIds` 派生出来（与
+`activities` / `executionStatus` 同一「附加字段」取向，`reduce` 只收事件、签名不变）。
+
+在此之上新增纯查询（与 `inFlightTurnIds` 平行）：
+
+| 查询 | 判据 | 用途 |
+|---|---|---|
+| `EventReducer.lastTurnRunState(items, {terminalTurnIds})` | 最后一个非空 turnId（跳过 `router` 伪 turn）→ 终态 / agent 侧项 / 仅用户项 / 无 | 四态 `idle` / `preparing` / `streaming` / `terminal`（对齐 webapp `deriveStreamLifecycle`） |
+| `EventReducer.lastTurnMayBeRunning(...)` | 上者为 `streaming` 或 `preparing` | 看门狗「是否需要兜底」 |
+| `EventReducer.lastRunningTurnId(...)` | 上者为真时的那个 turnId | 武装**那一个**计时器 |
+
+`ChatStreamController._syncStaleWatch` / `_markTurnStale` 把判据扩为
+「`inFlightTurnIds` ∪ `lastRunningTurnId`」，故实时路径（B1）与回填路径（B1b）
+共用同一条看门狗。
+
+**为什么只取「最后一个 turn」**：同 group 的 turn 排队串行执行，取最后一个即可回答
+「现在是不是还在跑」；若遍历所有 turn，一个很久以前丢过 `done` 的 turn 会把当前对话
+**永远**判成运行中。
+
+**为什么 `preparing` 也算**：它是「用户消息已落库、agent 还没产出」的排队/起跑空窗期，
+服务端可能已崩且永远不会发 `done`——恰是最需要兜底的情形。
+
+**调用方注意**：`lastTurnRunState` 等查询的 `terminalTurnIds` 参数**不可省**（生产路径）。
+省略时终态信息丢失，会把所有历史 turn 判成可能在跑（有一条测试专门钉住这个陷阱）。
 
 ---
 
@@ -563,6 +596,11 @@ Go API 还有一批**运营 / 排障面**端点，Flutter 客户端**有意不�
 | `/me/im-bindings` | IM 绑定（代理 idp） |
 | `/api/admin/llm-providers` | 管理员 LLM 线路 CRUD（含密钥引用） |
 | `/api/admin/runtime-settings` | 管理员运行时配置（Admission / turn 生命周期） |
+| `/api/tool-agents`、`/toolsets`、`/:name/invoke[/stream]` | Tool Agent 列表 / toolset 元信息 / 直接调用（含 SSE） |
+| `/api/chat/inbox-messages` | group 级收件箱消息列表（webapp 只在 debug 页用） |
+| `workspace-sync` 其余 6 个（`files` / `local-files` / `files/content` / `ignored-paths` / `ignored-paths/remove` / `ufs-download`） | 浏览器侧 workspace 视图与黑名单管理（客户端只用了 `ufs-upload`） |
+| `/chat/groups/:id/auto-schedules` | 列出 pending 自动续跑排程（**含停用入口**，见下「逐项依据」） |
+| `/chat/groups/:id/sessions/managed` | 创建 managed session（**死端点**，见下「逐项依据」） |
 
 **为什么不接**：这些不是「聊天」的组成部分，而是**配置与运维**面——签发密钥、
 调 LLM 线路、改准入参数、绑 IM 账号。它们的承载点是 **webapp dashboard**
@@ -589,6 +627,56 @@ feedback）、`/me/preferences`、`/users/:user_id/chat/*` 虽是 CRUD，但直�
 | 移动端打开已下载文件 | 移动端注入 `NoopDesktopCapabilities`，`openFile` / `revealPath` 恒 false。要真正打开需引入 `open_filex` / `share_plus` + Android FileProvider 配置 + 真机验证（模拟器在本机不可用，见 §9）。当前退化为「只读浏览 + 下载」。 |
 | 桌面端「通知订阅」区块 | 该区块（`NotificationSubscriptionsCard`）的语义是**微信小程序订阅消息额度**（`miniapp_subscriptions` 表 + `wx.requestSubscribeMessage` 的配额消耗模型）。桌面端没有小程序运行环境，展示它无法兑现；故只在移动端装配（`settings_page.dart` 按 `loadNotifications` 是否注入决定展示）。是否给桌面端一个只读「额度查看」视图需产品确认。 |
 | P2 端点族：`fork` / `canvas` / `plan-import` / `decisions` / `file-evolution` / `semantic-search` | 本轮范围外。它们是**考古 / 分析 / 分叉**类能力（`chat_ext.go` 的 `POST /turns/:turn_id/fork`、`GET /groups/:group_id/canvas`、`POST /groups/:group_id/plan/import`；`ext_routes.go:530` 的 `/groups/:group_id/decisions`；`misc_extra.go:649` 的 `file-evolution` 与 `:650` 的 `semantic-search`），承载点是 webapp 的分析视图。留待后续轮次。 |
+| 语义 / 图谱搜索四项面板（`SemanticSearchPanel` / `GraphSearchDialog` / `FileEvolutionPanel` / `DecisionEvolutionPanel`） | 同上——它们正是 P2 端点族的 UI 载体。客户端已有**关键词**搜索（`ChatApi.search` → `SearchPage`），语义/图谱是**另一种检索方式**而非「搜索缺失」。详见 §6.9.3 |
+| `SkillPanel`（`dashboard/agents/[id]/chat`） | 属管理面，已被 §6.9 的 `/api/skills` 一行覆盖，无需重复实现 |
+
+#### 6.9.2 未接端点族的逐项依据（issue #11 收口）
+
+上表把「不接」的端点族并排列出。本节记**逐项依据**——尤其有两项，issue #11
+的原始判断与实测不符，照抄会把错误的理由固化下来。
+
+| 项 | 结论 | 实测依据 |
+|---|---|---|
+| `tool-agents` 族的 `listToolsets` | ❌ 不接 | 仅 `dashboard/agents/create` 与 `agents/[id]/edit` 使用——确属**管理面** |
+| `tool-agents` 族的 `invoke` / `invoke/stream` | ❌ 不接 | **全仓零调用者**（webapp 自己也没接）——服务端为将来留的接口 |
+| `tool-agents` 族的 `listToolAgents` | ⚠️ **不是**「只在 dashboard」 | 它喂给 `ChatInputArea`（`chat/[groupId]/page.tsx:638`），选中后经 `setToolAgentForGroup` + `startNewConversation` 以 `agent_type=tool_agent` 发起会话。**这是聊天面行为**，只是客户端已有 `AgentSwitcher`（`/api/agents` + `sessions/switch`）覆盖了「换 agent」这一诉求，且 `switchGroupAgent` / `sendMessage` 都不发 `agent_type`——补齐需两端都动，故本轮不接 |
+| `inbox-messages` | ❌ 不接 | webapp 唯一消费者是 `workbench/[groupId]/debug/page.tsx`（排障），与 §6.10「移动端不接诊断面板」同取向。客户端已有**用户级** `PendingMessagesBar`（`/users/:uid/chat/messages/pending`），覆盖了「我的消息还卡着吗」这个真实诉求 |
+| `workspace-sync` 其余 6 个 | ❌ 不接 | 5 个只出现在 debug 页；`files/content` 服务 webapp 的**本地 workspace 文件预览**（`file-preview.ts` 的 `!file.fileId && file.filePath` 分支）——客户端时间线的 `AgentFileItem` 本就带 `ufsFileId`，没有「无 id 的本地 workspace 文件」这个概念；`ufs-download` 只在 `group-chat.ts:1308` 内部编排。**客户端的交付物同步走 `UfsApi.listFiles` + `download`（另一条路径），这一族不是「同步缺失」** |
+| `auto-schedules` | ✅ **该接（另开 issue）** | issue #11 称「无 UI 调用者」——**与实测不符**。`listGroupAutoSchedules` → `WorkbenchGroupDetailDialog.tsx:160`，`stopGroupAutoSchedule` → 同文件 `:221`，而该 Dialog 由 `chat/[groupId]/page.tsx:588` 的按钮打开，即**聊天页**。语义是「看 pending 排程 + 一键停用」。客户端**已**渲染 `ScheduleCreatedItem`（「将在 30 秒后自动继续」）却**无法查看与停用**——用户看得见它在跑，却没有刹车。⚠️ 分两部分：**停用**（`POST /chat/groups/:id/auto-schedule/stop`，`chat_ext.go:100`）实现完整（按 `policy_json.meta.group_id` 过滤 + `requireOwnedGroup`，返回 `{group_id, disabled_count}`）；**列表**（`admin.go:103`）**静态读码存疑**——handler 取 `c.Query("agent_id")` 而 webapp 只传 `limit`，SQL 又是 `WHERE agent_id = ?`，即实际是 `WHERE agent_id = ''`，可能恒返空（handler 注释自称「Python 通过 group_id 查 agent 再查 schedules」，Go 移植似丢了那一步）。客户端只依赖**停用**即可；列表需服务端先修 |
+| `sessions/managed` | ❌ 不接（死端点） | `createManagedChatGroupSession` 在 `group-chat.ts:1365` 是**非 export** 的函数，全仓零调用者。issue #11 此处的判断正确 |
+
+**「有意不做」与「未做」的区分**：上表除 `auto-schedules` 外全部是**有意不做**
+（不是缺口）。`auto-schedules` 是唯一实测出的**真缺口**，已另开 issue #13 跟踪。
+
+#### 6.9.3 webapp 十个分析/管理面板的逐项结论（issue #12 收口）
+
+issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实后的结论——
+**其中一项（`WorkbenchBacklogCard`）客户端其实已经做了，只是载体不同**：
+
+| 面板 | 面 | 结论 | 依据 |
+|---|---|---|---|
+| `WorkbenchBacklogCard` | workbench | ✅ **已实现（载体不同）** | 客户端 `PendingMessagesBar` 消费 `/users/:uid/chat/messages/pending`，同样做「pending 收件箱 + 单条撤销 + 批量合并发送」（webapp 的 `use-pending-messages.ts` 是同一个共享 hook 语义）。它在对话页输入区上方，不在侧边栏——与 §6.10 的载体差异同一取向 |
+| `SemanticSearchPanel` / `GraphSearchDialog` / `FileEvolutionPanel` / `DecisionEvolutionPanel` | 聊天 | ❌ 不接（本轮） | 对应 P2 端点族，已登记。**语义搜索是四项里最可行的一项**（端点 `semantic-search` 已在用且被 webapp 命令菜单复用），但仍属新检索面，需单独排期 |
+| `WorkbenchGroupCanvas` | workbench | ❌ 不接 | 是**独立路由** `/workbench/[groupId]/canvas`；客户端没有 workbench 路由概念（`SpbRoutes` 只有 chat / search / settings / confirmations 等） |
+| `PlanImportPanel` | workbench | ❌ 不接 | 计划导入是 goal 系统的**批量录入**入口，属 webapp 分析视图 |
+| `WorkbenchNotificationCenter` | workbench | ❌ 不接 | 「系统通知 / 确认请求 / 新消息提醒」聚合器。客户端已有各自的原生载体（确认页、待处理栏、SSE 实时流），再加一个聚合层需先有产品需求 |
+| `SkillPanel` | dashboard | ❌ 不接 | §6.9 已覆盖 |
+
+**关于 `DashboardRenderer` 与 #8 的 `spec` / `dashboard` / `map`**（issue #12 决策点 1）：
+这三类**不是一个决策**，不要捆绑——
+
+| 类型 | 客户端现状 | 结论 |
+|---|---|---|
+| `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`（12 个白名单 type，消费 `spec_ui` 事件） | 文件预览复用它是**可行的**，但需补一层「从任意 JSON 里提取 schema」（webapp `extractSchemaFromUnknown` 会深度下探，客户端 `parseSpecUi` 只认裸 `{root, elements}`）。属**小活**，已另开 issue #14 |
+| `dashboard` | 无渲染器（webapp `DashboardRenderer` 508 行，`{type:"dashboard",components:[...]}` 形状，与 `{root,elements}` **不兼容**） | ⚠️ **待决策** |
+| `map` | 无渲染器（webapp `normalizeMapSchema`，`type:"map"` + 坐标） | ⚠️ **待决策** |
+
+故 issue #12 的决策点 1 应缩小为「**是否引入 dashboard / map 渲染器**」（`spec` 已有
+基础，不需与它们捆绑）。**本轮不引入**，待产品确认后在独立 issue 中处理。
+
+**有意不做的标记**：上表除 `spec`（小活，见 issue #14）与 `dashboard`/`map`（待决策）外，
+其余均为**有意不做**。`auto-schedules`（issue #13）与 `spec` 文件预览（issue #14）
+是两个实测出的真缺口。
 
 ### 6.10 两端 UI 面板族的不对称（**有意保留的差异**）
 
