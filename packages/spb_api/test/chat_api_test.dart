@@ -1530,4 +1530,83 @@ void main() {
       expect(receivedPaths.single, isNot(contains('habit-suggestions')));
     });
   });
+
+  group('turnRuntime', () {
+    test('GET /api/chat/turn-runtime 解析三个字段', () async {
+      adapter.onGet(
+        '/api/chat/turn-runtime',
+        (server) => server.reply(200, {
+          'request_timeout_seconds': 600,
+          'inactivity_timeout_seconds': 0,
+          'client_turn_timeout_seconds': 600,
+        }),
+      );
+
+      final rt = await api.turnRuntime();
+
+      expect(rt.requestTimeoutSeconds, 600);
+      expect(rt.inactivityTimeoutSeconds, 0);
+      expect(rt.clientTurnTimeoutSeconds, 600);
+      expect(rt.effectiveClientTurnTimeout, const Duration(minutes: 10));
+    });
+
+    test('client_turn_timeout_seconds=0 时退化为兜底阈值（不当成零秒超时）', () async {
+      adapter.onGet(
+        '/api/chat/turn-runtime',
+        (server) => server.reply(200, {
+          'request_timeout_seconds': 0,
+          'inactivity_timeout_seconds': 0,
+          'client_turn_timeout_seconds': 0,
+        }),
+      );
+
+      final rt = await api.turnRuntime();
+
+      expect(rt.clientTurnTimeout, isNull);
+      expect(rt.effectiveClientTurnTimeout, TurnRuntime.fallback);
+    });
+  });
+
+  /// 路径真伪测试（真起 server）。
+  ///
+  /// ## 为什么必须真发一次
+  ///
+  /// Go API 有**两套**前缀且都以 `/chat` 结尾/开头：
+  ///
+  /// | 注册位置 | 前缀 |
+  /// |---|---|
+  /// | `router.go` 的 `apiv1.Group("/chat")` | `/api/chat/*` |
+  /// | `router.go` 的 `r.Group("/chat")` | `/chat/*` |
+  ///
+  /// `turn-runtime` 挂在**前者**（`registerChatRuntimeRoutes(apiv1.Group("/chat"), ...)`）。
+  /// 拼成 `/chat/turn-runtime` 不会报错——服务端只会 404，而 mock 适配器按注册
+  /// 路径匹配，写错的测试照样「通过」（断言的是同一个错值）。真起 server 才能
+  /// 确认请求真的到了 `/api/chat/turn-runtime`。
+  group('turnRuntime 真实请求路径', () {
+    late HttpServer server;
+    late ChatApi realApi;
+    late List<String> receivedPaths;
+
+    setUp(() async {
+      receivedPaths = [];
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      realApi = ChatApi(createDio(baseUrl: 'http://127.0.0.1:${server.port}'));
+      server.listen((req) async {
+        receivedPaths.add(req.uri.path);
+        req.response
+          ..statusCode = 200
+          ..headers.contentType = ContentType.json
+          ..write('{"client_turn_timeout_seconds":300}');
+        await req.response.close();
+      });
+    });
+
+    tearDown(() async => server.close(force: true));
+
+    test('打到 /api/chat/turn-runtime（不是 /chat/turn-runtime）', () async {
+      await realApi.turnRuntime();
+
+      expect(receivedPaths, ['/api/chat/turn-runtime']);
+    });
+  });
 }

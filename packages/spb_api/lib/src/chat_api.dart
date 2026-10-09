@@ -863,6 +863,27 @@ class ChatApi {
     return _asMap(res);
   }
 
+  // ==================== 运行时参数 ====================
+
+  /// `GET /api/chat/turn-runtime` —— 只读的 turn 运行时参数。
+  ///
+  /// ## 为什么客户端要拉它（而不是硬编码阈值）
+  ///
+  /// 客户端的「超时兜底」（距最后一条事件过久仍未收到 `done` 时停掉流式光标）
+  /// 需要一个阈值，而服务端是可配置的：生产
+  /// `CHAT_TURN_REQUEST_TIMEOUT_SECONDS=600`，客户端若写 300 就会把长 turn
+  /// 提前判成静止。故这里拉取**服务端生效值**，避免两侧常量漂移
+  /// （详见 [TurnRuntime] 类文档）。
+  ///
+  /// ## 权限
+  ///
+  /// 与其它 `/api/*` 端点一致，只要求登录态（不要求管理员）——超时时长不是
+  /// 机密，而要求管理员会让普通用户拿不到值、只能回落硬编码，等于没修。
+  Future<TurnRuntime> turnRuntime() async {
+    final res = await _get('/api/chat/turn-runtime');
+    return TurnRuntime.fromJson(_asMap(res));
+  }
+
   // ==================== 确认卡 ====================
 
   /// `GET /chat/confirmations` —— 跨 group 的待确认列表。
