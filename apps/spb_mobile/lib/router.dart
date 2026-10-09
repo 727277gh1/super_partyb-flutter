@@ -1806,6 +1806,33 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onReconnect: () =>
           ref.read(chatStreamControllerProvider(userId)).reconnect(),
       onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
+      // 图片类交付物在时间线内联显示缩略图（与桌面端同源，走 `UfsApi.thumbnail`）。
+      onLoadThumbnailAgentFile: (file) => _loadAgentFileThumbnail(file),
+      // 文件预览（text / image / external 三类）。
+      //
+      // 与桌面端的**关键差异**：移动端能接 `openExternal`，但不能接
+      // #6 的 `onOpenAgentFile` / `onRevealAgentFile`。两者不是同一件事：
+      // - 打开/定位需要「本地副本 + 系统文件管理器」→ 移动端无此能力
+      //   （`NoopDesktopCapabilities` 恒 false）；
+      // - 预览是**应用内渲染**（text/image），external 走 `url_launcher`
+      //   跳系统浏览器——两者都不需要桌面能力。
+      //
+      // 故「移动端完全不做文件能力」是错的：预览恰恰是移动端最该有的（屏幕
+      // 小、下载后更不方便找）。
+      onPreviewAgentFile: AgentFilePreviewCallbacks(
+        loadBytes: _loadAgentFileBytes,
+        openExternal: _openAgentFileExternal,
+      ),
+      // ⚠️ **有意不装配**打开/定位回调（issue #6）：
+      //
+      // 本端注入的是 `NoopDesktopCapabilities`（见 `providers.dart`），
+      // `openFile` / `revealPath` 恒返回 false。接上会让用户点「打开」得到
+      // 「无法打开文件」——比菜单项根本不出现更困惑（回调为 null 时
+      // `AgentFileCard` 不渲染对应项）。
+      //
+      // 要真正支持需引入 `open_filex` / `share_plus` + Android FileProvider
+      // 配置 + 真机验证（本机无 `/dev/kvm`，模拟器不可用），见 AGENTS.md §6.9.1。
+      // 当前退化为「只读浏览 + 下载」。
       // 打开 Markdown 回复里的链接。失败只记日志（点不开不该打断阅读）。
       //
       // 用 `unawaited` 而非 `await`：回调签名是 void（发起即返回），
@@ -1934,6 +1961,44 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     );
     await File(p.join(target.path, safeName))
         .writeAsBytes(res.bytes!, flush: true);
+  }
+
+  /// 拉取 agent 文件缩略图（仅图片类）。详见桌面端同名方法。
+  Future<List<int>?> _loadAgentFileThumbnail(AgentFileItem file) async {
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return null;
+    return ref.read(ufsApiProvider).thumbnail(fileId);
+  }
+
+  /// 取文件**原始字节**供预览。与桌面端同名方法同源（不落盘、用原图非缩略图）。
+  Future<List<int>?> _loadAgentFileBytes(AgentFileItem file) async {
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return null;
+    final res = await ref.read(ufsApiProvider).download(fileId);
+    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return null;
+    return res.bytes;
+  }
+
+  /// 在系统浏览器中打开 UFS 预览页（external 类）。
+  ///
+  /// 与桌面端的差异：移动端用 `url_launcher` 而非 `openInBrowser`
+  /// （后者在 `spb_platform` 里只实现桌面三平台）。这与 `onOpenLink` 的
+  /// 做法一致。
+  ///
+  /// URL 拼接同样留在装配层（页面不掌握 UFS 基地址与预览页路由）。
+  Future<bool> _openAgentFileExternal(AgentFileItem file) async {
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return false;
+    final url = Uri.parse(
+      '${SpbEnv.ufsBaseUrl}/preview.html'
+      '?file_id=${Uri.encodeQueryComponent(fileId)}',
+    );
+    try {
+      return await launchUrl(url, mode: LaunchMode.externalApplication);
+    } on Object catch (e) {
+      SpbLog.warn('打开 UFS 预览页失败', {'error': '$e'});
+      return false;
+    }
   }
 
   static String _optionToAction(String option) => switch (option) {

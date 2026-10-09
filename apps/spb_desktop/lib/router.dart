@@ -1243,6 +1243,35 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onReconnect: () =>
           ref.read(chatStreamControllerProvider(userId)).reconnect(),
       onDownloadAgentFile: (file) => _downloadAgentFile(file, userId),
+      // 图片类交付物在时间线内联显示缩略图。走 `UfsApi.thumbnail`（默认 256，
+      // 服务端合法档位之一）。未注入时卡片退化为图标——见
+      // `ConversationPage.onLoadThumbnailAgentFile`。
+      //
+      // 失败/501 由 `UfsApi.thumbnail` 归一为 null，卡片侧再退化为图标；
+      // 这里不再包一层 try/catch（抛出的都是真异常，卡片自己会接住并记日志）。
+      onLoadThumbnailAgentFile: (file) => _loadAgentFileThumbnail(file),
+      // 打开 / 定位**本地副本**。桌面端注入真实平台能力（`xdg-open` / `open`
+      // / `explorer`，见 `bootstrap.dart` 的 `PlatformDesktopCapabilities`）。
+      //
+      // ⚠️ 移动端**有意不装配**这两个回调：它注入的是
+      // `NoopDesktopCapabilities`，`openFile` / `revealPath` 恒 false，接上只会
+      // 让用户点「打开」得到「无法打开文件」。回调为 null 时卡片不渲染菜单项
+      // ——这正是 issue #6 要求的「菜单不出现，而不是出现后失败」。
+      onOpenAgentFile: (file) => _openAgentFile(file),
+      onRevealAgentFile: (file) => _revealAgentFile(file),
+      // 文件预览（text / image / external 三类）。取数与「打开本地副本」
+      // 走**不同**的链路：
+      // - `loadBytes` 取**原始字节**（text 解码 / image 渲染），复用
+      //   `UfsApi.download`，**不落盘**（预览是看内容，不是拿文件）；
+      // - `openExternal` 拼 UFS 预览页 URL 并交给系统浏览器。
+      //
+      // 两者都不复用 `_ensureAgentFileLocal`：那条链路会写盘（为了给
+      // `xdg-open` 一个真实路径），而预览不应该在用户只是「看一眼」时
+      // 往磁盘上留副本。
+      onPreviewAgentFile: AgentFilePreviewCallbacks(
+        loadBytes: _loadAgentFileBytes,
+        openExternal: _openAgentFileExternal,
+      ),
       // 打开 Markdown 回复里的链接。
       //
       // 走与 OIDC 登录同一个入口（`openInBrowser`，三平台分派在
@@ -1866,21 +1895,53 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   static bool _setEquals(Set<String> a, Set<String> b) =>
       a.length == b.length && a.containsAll(b);
 
-  /// 下载 agent 文件产物到本地并反馈落地路径。
+  /// 下载 agent 文件产物到本地（时间线卡片的「下载」按钮）。
   //
-  // 走 `UfsApi.download`（`GET /api/files/{file_id}/download`）。落地目录用
-  // 应用支持目录下的 `downloads/agent/`——与交付物同步目录隔离（同步目录
-  // 会被清理计划动，用户手动下载的不能被带上）。
-  //
-  // 这里的下载是「拉取 + 落盘」的最小可用实现：不弹系统文件选择框（桌面
-  // 端的保存对话框需要 `desktop_drop`/原生插件，本轮不在范围内），直接落到
-  // 固定目录并以 basename 命名（防御路径穿越）。
+  // 落地路径由 [_ensureAgentFileLocal] 决定；本方法只丢掉路径（用户点「下载」
+  // 后自己去找文件，与打开/定位不同）。
   Future<void> _downloadAgentFile(AgentFileItem file, String userId) async {
+    await _ensureAgentFileLocal(file);
+  }
+
+  /// 用默认程序打开 agent 文件；本地没有则先下载再打开。
+  //
+  // ## 为什么是「先下载再打开」而不是「未下载就报错」
+  //
+  // 交付物面板靠**同步目录索引**判断可打开性（`resolveLocalPath`），而时间线
+  // 卡不掌握那个索引（见 `AgentFileCard` 的类文档：**有意不接**
+  // `resolveLocalPath`）。若因此要求「必须先手动点一次下载」，用户看到的就是
+  // 一个永远报「无法打开文件」的菜单项。自动补下载让这个动作真正可用，
+  // 且复用同一条下载链路（同一落地目录、同一路径穿越防御）。
+  //
+  // 返回 false = 未能发起（无 id / 已删除 / 下载不到字节 / 平台不支持），
+  // 卡片据此给一句反馈，不静默无响应。
+  Future<bool> _openAgentFile(AgentFileItem file) async {
+    final path = await _ensureAgentFileLocal(file);
+    if (path == null) return false;
+    return ref.read(desktopCapabilitiesProvider).openFile(path);
+  }
+
+  /// 在文件管理器中定位 agent 文件（同样本地没有则先下载）。
+  Future<bool> _revealAgentFile(AgentFileItem file) async {
+    final path = await _ensureAgentFileLocal(file);
+    if (path == null) return false;
+    return ref.read(desktopCapabilitiesProvider).revealPath(path);
+  }
+
+  /// 确保文件已在本地，返回其绝对路径；不可用（无 id / 已删除 / 无字节）返回 null。
+  //
+  // ## 为什么每次都重新下载而不缓存路径
+  //
+  // 卡片是**无状态透传**的（不持有本地路径），且落地目录可能被清理计划动。
+  // 每次重拉由服务端 etag/304 与本地小文件写盘兑底，换来的是「不缓存就不会
+  // 指向一个已被删掉的位置」（与 `resolveLocalDeliverableProvider` 校验
+  // `existsSync` 同一理由）。
+  Future<String?> _ensureAgentFileLocal(AgentFileItem file) async {
     final fileId = file.ufsFileId;
-    if (fileId == null || fileId.isEmpty || file.isDeleted) return;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return null;
     final ufs = ref.read(ufsApiProvider);
     final res = await ufs.download(fileId);
-    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return;
+    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return null;
     final dir = await getApplicationSupportDirectory();
     final target = Directory(p.join(dir.path, 'downloads', 'agent'));
     if (!await target.exists()) {
@@ -1889,8 +1950,69 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final safeName = p.basename(
       file.fileName.isEmpty ? 'agent-file' : file.fileName,
     );
-    await File(p.join(target.path, safeName))
-        .writeAsBytes(res.bytes!, flush: true);
+    final out = p.join(target.path, safeName);
+    await File(out).writeAsBytes(res.bytes!, flush: true);
+    return out;
+  }
+
+  /// 拉取 agent 文件缩略图（仅图片类）。
+  //
+  // 返回 null 表示「无缩略图可渲染」，卡片退化为图标。两种来源：
+  // - 文件不可用（无 id / 已删除）—— 与 `_downloadAgentFile` 同一套前置判据；
+  // - 服务端未启用缩略图能力（501）或返回 304 —— 由 `UfsApi.thumbnail` 归一。
+  Future<List<int>?> _loadAgentFileThumbnail(AgentFileItem file) async {
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return null;
+    return ref.read(ufsApiProvider).thumbnail(fileId);
+  }
+
+  /// 取文件**原始字节**供预览（text 解码 / image 渲染）。
+  //
+  // ## 为什么不复用 `_loadAgentFileThumbnail`
+  //
+  // 缩略图是 256px 的小图，是给**列表内联**用的；把它放大到全屏对话框会糊。
+  // 预览是用户主动点开的单文件，要用原图。
+  //
+  // ## 为什么走 `download` 而 `_ensureAgentFileLocal`
+  //
+  // 后者会写盘（为了给系统「打开」一个真实路径）。预览只是看一眼，不应该
+  // 在用户没要求时往磁盘留副本。`download` 直接返回内存字节。
+  //
+  // 返回 null = 取不到（无 id / 已删除 / 304 / 空字节），由对话框退化为
+  // 「未能取到文件内容」提示。
+  Future<List<int>?> _loadAgentFileBytes(AgentFileItem file) async {
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return null;
+    final res = await ref.read(ufsApiProvider).download(fileId);
+    if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return null;
+    return res.bytes;
+  }
+
+  /// 在系统浏览器中打开该文件的 UFS 预览页（external 类的唯一出路）。
+  //
+  // ## URL 拼接为什么在这里而不在页面
+  //
+  // 页面只收集意图（「预览这个文件」），它不掌握 UFS 基地址，也不该知道
+  // 预览页的路由形状（`/preview.html?file_id=…`）。把拼接留在装配层，
+  // 将来换部署/换路由只改这一处。
+  //
+  // ## 为什么用 `SpbEnv.ufsBaseUrl` 而不是某个 provider
+  //
+  // 基地址是**编译期常量**（`--dart-define=SPB_UFS_BASE_URL`），没有运行时
+  // 变更路径，故直接读常量即可，不必为它建一个 provider。
+  Future<bool> _openAgentFileExternal(AgentFileItem file) async {
+    final fileId = file.ufsFileId;
+    if (fileId == null || fileId.isEmpty || file.isDeleted) return false;
+    final url =
+        '${SpbEnv.ufsBaseUrl}/preview.html'
+        '?file_id=${Uri.encodeQueryComponent(fileId)}';
+    try {
+      await openInBrowser(url);
+      return true;
+    } on Object catch (e) {
+      SpbLog.warn('打开 UFS 预览页失败', {'error': '$e'});
+      return false;
+    }
   }
 
   /// 选项文案映射为服务端 action。
