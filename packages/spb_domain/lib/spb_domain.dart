@@ -48,6 +48,11 @@ library;
 //   TtsStatus / TtsPhase          —— 语音播报状态（tts_started / tts_completed / tts_failed 归约输出）
 //   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
+//   resolvePreviewKind / FilePreviewKind —— 文件预览类型判定（text/image/external，纯逻辑）
+//   buildTextPreview / TextPreview     —— 文本预览裁剪（大文件截断 + 明确提示）
+//   groupFileEventsForDisplay / FILE_BATCH_MIN_COUNT —— 时间线 → 展示行（同 turn 同秒批量聚合，纯逻辑）
+//   TimelineDisplayRow / SingleItemRow / AgentFileBatchRow —— 展示行 sealed 家族（不改归约结果）
+export 'src/agent_file_batch.dart';
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
 export 'src/conversation_item.dart';
@@ -58,6 +63,7 @@ export 'src/deliverable_upload_adapters.dart';
 export 'src/deliverable_upload_usecase.dart';
 export 'src/event_reducer.dart';
 export 'src/execution_status.dart';
+export 'src/file_preview.dart';
 export 'src/gate_decision.dart';
 export 'src/goal_update.dart';
 export 'src/local_deliverable_path.dart';
