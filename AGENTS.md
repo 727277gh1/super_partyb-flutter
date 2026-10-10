@@ -678,17 +678,40 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 类型 | 客户端现状 | 结论 |
 |---|---|---|
 | `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`（12 个白名单 type，消费 `spec_ui` 事件） | 文件预览复用它是**可行的**，但需补一层「从任意 JSON 里提取 schema」（webapp `extractSchemaFromUnknown` 会深度下探，客户端 `parseSpecUi` 只认裸 `{root, elements}`）。属**小活**，已另开 issue #14 |
-| `dashboard` | 无渲染器（webapp `DashboardRenderer` 508 行，`{type:"dashboard",components:[...]}` 形状，与 `{root,elements}` **不兼容**） | ⚠️ **待决策** |
-| `map` | 无渲染器（webapp `normalizeMapSchema`，`type:"map"` + 坐标） | ⚠️ **待决策** |
+| `dashboard` | ⚠️ **上游有「两个不同」的渲染器，别混为一谈**（详见下节） | ⚠️ **待决策** |
+| `map` | ⚠️ **不需要 SDK / 底图**（详见下节） | ⚠️ **待决策** |
 
 故 issue #12 的决策点 1 应缩小为「**是否引入 dashboard / map 渲染器**」（`spec` 已有
 基础，不需与它捆绑）。三种渲染器与两个实测真缺口的去向：
 
 | 类型 | 去向 |
 |---|---|
-| `spec` | 已拆到 **issue #14**（小活，需补 schema 提取） |
+| `spec` | 已拆到 **issue #14**（小活，需补 schema 提取）——⚠️ 但 #14 **引入了一个回归**，见 issue #27 |
 | `auto-schedules` | 已拆到 **issue #13**（实测出的真缺口） |
 | `dashboard` / `map` | **唯一待决策项**。产品确认前 **issue #12 保持 open** 承载该决策；若确认要做，再另开独立 issue 落地（届时关闭 #12） |
+
+#### 6.9.4 `dashboard` / `map` 的真实成本（**核实后修正早期判断**）
+
+`#14` 的代码注释曾写「`dashboard` / `map` 需**各自的渲染技术栈**」「`map` 需
+**底图**」——**与上游实测不符**，会把小活估成引 SDK 的大活。核实结果：
+
+| 判断 | 实测事实 | 证据 |
+|---|---|---|
+| 「`map` 需底图 / 渲染技术栈」 | ❌ **错**。webapp `MapSchemaRenderer.tsx` 自称「一期轻量实现：**SVG 归一化轨迹图（无底图、无高德 JS key 依赖）**」，实现是 ~25 行投影数学（经纬度 → SVG 坐标，等比缩放 + 居中）+ marker 列表 + 「在高德地图打开」外链。**没有 SDK、没有瓦片、没有密钥** | `super_partyb` `apps/webapp/src/components/features/workbench-ui/MapSchemaRenderer.tsx:6`、`buildProjection` `:43` |
+| 「`dashboard` 需重型渲染组件」 | ⚠️ **要分两个渲染器**。① `DashboardRenderer.tsx`（`{type:"dashboard",components:[{type,layout}]}` 网格）只认 **3 个**类型：`stat-cards` / `table` / `chart`，共 **364 行**；② `JsonUiSchemaRenderer.tsx`（`{root,elements}`，即本客户端的 `spec`）。「重型」主要指 ②（`chart` 的 pie/bar/line/area 需图表库，webapp 用 `recharts`） | `DashboardRenderer.tsx:76/124/297`、`package.json` 的 `recharts` |
+| 「`dashboard.spec.json` 是网格格式」 | ❌ **错**。上游**真实产出**的 `dashboard.spec.json` 是 **②的 `{root,elements}` 形状**（`Stack`/`Grid`/`Metric`/`Chart`/`Alert`/`Table`） | `super_partyb` `apps/miniapp/src/lib/spec-demo-fixtures.ts` 的 `realDashboardDoc`（注释自称「bcc 工作区实际产出的 dashboard.spec.json 回归基准」）；生产者是 `agent-skills` 的 `json-spec-builder`（其 SKILL.md 明写产出 `root`/`elements`） |
+| 网格格式有生产者吗 | **未找到**。全仓搜 `{type:"dashboard", components:[...]}` 只命中一个**测试用例**（`mapspec_test.go:84` 的「非 map 类型」负例） | `super_partyb` `apps/go-api/internal/workers/agentfilerender/mapspec_test.go:84` |
+
+**推论**：`dashboard` / `map` 的决策比原先设想的**轻得多**——
+
+- `map`：**纯 SVG，零新依赖**，Flutter 用 `CustomPaint` 或 `Transform` + `Positioned` 即可；
+- `dashboard`：**真实产出走的是 `spec` 路径**（客户端已识别），缺的是**白名单覆盖**
+  与**未知容器下钻**，不是新渲染器。网格格式（`DashboardRenderer`）**没有已知生产者**，
+  可按「不做」处理。
+
+⚠️ 但核实同时暴露了 **issue #27**（`#14` 的回归）：真实看板虽被识别为 `spec`，
+却因 `unknown` 分支不递归 `children` 而退化成一行占位符——**修 #27 比做网格
+`dashboard` 渲染器更紧要**（前者影响现存真实产物，后者无生产者）。
 
 **有意不做的标记**：10 个面板的逐项去向 = **1 已实现**（`WorkbenchBacklogCard`，载体
 不同）+ **8 有意不做**（4 个聊天面 P2 面板 + `WorkbenchGroupCanvas` /
