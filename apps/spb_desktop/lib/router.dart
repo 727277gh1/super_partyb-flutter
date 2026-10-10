@@ -1539,6 +1539,35 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                   ),
                 ),
               ),
+              // 续跑 tab：查看 / 停用 Goal Gate 自动续跑排程。
+              //
+              // ## 为什么与「任务」分开而不是并入
+              //
+              // 「任务」是当前目标的任务清单（`chat_goal_tasks`），本 tab 是
+              // **到点自动接着跑**的排程（`chat_turn_schedules`）。前者回答
+              // 「还剩什么事」，后者回答「它接下来还要自己跑几次、怎么叫停」
+              // ——不同实体、不同端点、不同时间方向（将来时 vs 现在时）。
+              ChatSidebarTab(
+                label: '续跑',
+                icon: Icons.schedule_outlined,
+                content: AutoSchedulesPanel(
+                  // 列表是独立端点（`GET /api/chat/groups/:id/auto-schedules`），
+                  // 与 `_group` 快照不同源。用例内部会先取 `_group` 的
+                  // activeSession.agentId，再本地按 group 过滤（见其类文档）。
+                  load: () => ref
+                      .read(autoSchedulesUseCaseProvider)
+                      .load(widget.groupId),
+                  onStopAll: () async =>
+                      (await ref
+                              .read(autoSchedulesUseCaseProvider)
+                              .stopAll(widget.groupId))
+                          .items,
+                  // tab 标签已命名「续跑」，不重复面板标题。
+                  showHeader: false,
+                  // 切对话时重拉（Flutter 会复用面板 State）。
+                  reloadToken: widget.groupId,
+                ),
+              ),
               // 诊断 tab：仅在非发布构建展示。
               //
               // 面板内容含工具调用入参与 gate 决策明细，是开发/排查用的内部

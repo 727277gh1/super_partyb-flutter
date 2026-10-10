@@ -1631,7 +1631,7 @@ void main() {
     });
   });
 
-  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 诊断）', () {
+  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 续跑 / 诊断）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。
     Future<_FakeUfsApi> openChat(
@@ -1680,6 +1680,30 @@ void main() {
       return ufs;
     }
 
+    /// 把 tab 条横向滚到露出 [label] 那个 tab。
+    ///
+    /// ## 为什么必须滚动
+    ///
+    /// 侧边栏宽 320px，tab 条是**横向可滚的** `ListView.builder`。它的子项是
+    /// **懒构建**的：超出 `cacheExtent`（默认 250px）的 tab 根本不在树里，
+    /// `find.byKey` 会得到 0 个——那不是「tab 被删了」，而是「还没构建」。
+    /// tab 数量增加到 7 个后，「诊断」正好落到可视区 + cacheExtent 之外。
+    ///
+    /// 故断言尾部 tab 之前必须先滚到它——`scrollUntilVisible` 会驱动
+    /// `ListView` 构建出目标项。真实用户横向滚动一下也能看到，这是
+    /// **测试驱动方式的问题，不是 UI 缺陷**。
+    Future<void> revealTab(WidgetTester tester, String label) async {
+      await tester.scrollUntilVisible(
+        find.byKey(ValueKey('sidebar-tab-$label')),
+        80,
+        scrollable: find.descendant(
+          of: find.byKey(const ValueKey('sidebar-tabbar')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
     testWidgets('默认不展开：开关存在但侧边栏不可见，未取数', (tester) async {
       final sse = _FakeSseClient();
       final ufs = await openChat(tester, sse);
@@ -1722,7 +1746,9 @@ void main() {
       expect(find.text('交付物'), findsNothing);
     });
 
-    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 诊断）', (tester) async {
+    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 续跑 / 诊断）', (
+      tester,
+    ) async {
       final sse = _FakeSseClient();
       await openChat(tester, sse);
 
@@ -1731,31 +1757,20 @@ void main() {
 
       expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
       expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
-      // 后两个在 320px 侧边栏里落在可视区外（tab 条横向可滚），但已挂载。
+      // 尾部 tab 在 320px 侧边栏里落在可视区外（tab 条横向可滚且懒构建），
+      // 断言前先滚到它们。
+      await revealTab(tester, '目标');
       expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
+      await revealTab(tester, '续跑');
+      expect(find.byKey(const ValueKey('sidebar-tab-续跑')), findsOneWidget);
+      await revealTab(tester, '诊断');
       expect(find.byKey(const ValueKey('sidebar-tab-诊断')), findsOneWidget);
     });
 
     /// 把 tab 条横向滚到露出 [label] 那个 tab，然后点它。
-    ///
-    /// ## 为什么必须滚动
-    ///
-    /// 侧边栏宽 320px，tab 条是**横向可滚的** `ListView`（见 `ChatSidebar`
-    /// 的类文档：自定义行而非 TabBar，因为侧边栏不能嵌 Scaffold）。tab 增多后
-    /// 后面的 tab 会落在可视区外，直接 `tap` 会因命中不到而失败——那是
-    /// **测试驱动方式的问题，不是 UI 缺陷**：真实用户横向滚动一下就能看到。
     Future<void> tapTab(WidgetTester tester, String label) async {
-      final finder = find.byKey(ValueKey('sidebar-tab-$label'));
-      await tester.scrollUntilVisible(
-        finder,
-        80,
-        scrollable: find.descendant(
-          of: find.byKey(const ValueKey('sidebar-tabbar')),
-          matching: find.byType(Scrollable),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(finder);
+      await revealTab(tester, label);
+      await tester.tap(find.byKey(ValueKey('sidebar-tab-$label')));
       await tester.pumpAndSettle();
     }
 
@@ -1839,7 +1854,13 @@ void main() {
       // 其余 tab 不受影响（门控只该拿掉诊断那一个）。
       expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
       expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
-      expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
+      await revealTab(tester, '续跑');
+      expect(find.byKey(const ValueKey('sidebar-tab-续跑')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('sidebar-tab-诊断')),
+        findsNothing,
+        reason: '滚到尾部后诊断仍不该存在',
+      );
       // 默认落点仍是第一个 tab（删掉尾部 tab 不改索引语义）：
       // IndexedStack 显示的是 index 0 的「交付物」，其空态已渲染。
       final stack = tester.widget<IndexedStack>(
@@ -1900,6 +1921,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
       await tester.pumpAndSettle();
 
+      // 诊断在 tab 条尾部，懒构建，先滚到它。
+      await revealTab(tester, '诊断');
       expect(
         find.byKey(const ValueKey('sidebar-tab-诊断')),
         findsOneWidget,

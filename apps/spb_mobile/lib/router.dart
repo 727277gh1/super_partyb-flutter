@@ -1087,55 +1087,103 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           ),
           child: SizedBox(
             height: MediaQuery.of(sheetContext).size.height * 0.8,
-            child: GroupSettingsPanel(
-              group: _group ?? group,
-              busy: _settingsBusy,
-              // 弹层自带拖拽条，不再重复面板标题。
-              showHeader: false,
-              onSaveGoal: (text) => _runSetting(
-                () => ref
-                    .read(groupSettingsUseCaseProvider)
-                    .saveGoal(widget.groupId, text),
-                onChanged: setSheetState,
-              ),
-              onToggleGoalGate: (enabled) => _runSetting(
-                () => ref
-                    .read(groupSettingsUseCaseProvider)
-                    .toggleGoalGate(widget.groupId, enabled),
-                onChanged: setSheetState,
-              ),
-              onSaveMaxAutoTurns: (turns) => _runSetting(
-                () => ref
-                    .read(groupSettingsUseCaseProvider)
-                    .saveMaxAutoTurns(widget.groupId, turns),
-                onChanged: setSheetState,
-              ),
-              onToggleFollowUpSuggest: (enabled) => _runSetting(
-                () => ref
-                    .read(groupSettingsUseCaseProvider)
-                    .toggleFollowUpSuggest(widget.groupId, enabled),
-                onChanged: setSheetState,
-              ),
-              onToggleHabitSuggest: (enabled) => _runSetting(
-                () => ref
-                    .read(groupSettingsUseCaseProvider)
-                    .toggleHabitSuggest(widget.groupId, enabled),
-                onChanged: setSheetState,
-              ),
-              onSaveTts:
-                  ({enabled, narrateThinking, narrationMode, fileSummary}) =>
-                      _runSetting(
-                        () => ref
-                            .read(groupSettingsUseCaseProvider)
-                            .saveTts(
-                              widget.groupId,
-                              enabled: enabled,
-                              narrateThinking: narrateThinking,
-                              narrationMode: narrationMode,
-                              fileSummary: fileSummary,
-                            ),
-                        onChanged: setSheetState,
-                      ),
+            // 设置与「自动续跑」共用同一弹层（而不是新加第 7 个 AppBar 入口——
+            // AppBar 已有 6 个，再加会挤压标题，见 AGENTS.md §6.10）。
+            //
+            // 两块各自可滚（都是 ListView），故用 Column + Expanded 给它们
+            // 有界高度：弹层总高固定，两块按 3:2 分。
+            child: Column(
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: GroupSettingsPanel(
+                    group: _group ?? group,
+                    busy: _settingsBusy,
+                    // 弹层自带拖拽条，不再重复面板标题。
+                    showHeader: false,
+                    onSaveGoal: (text) => _runSetting(
+                      () => ref
+                          .read(groupSettingsUseCaseProvider)
+                          .saveGoal(widget.groupId, text),
+                      onChanged: setSheetState,
+                    ),
+                    onToggleGoalGate: (enabled) => _runSetting(
+                      () => ref
+                          .read(groupSettingsUseCaseProvider)
+                          .toggleGoalGate(widget.groupId, enabled),
+                      onChanged: setSheetState,
+                    ),
+                    onSaveMaxAutoTurns: (turns) => _runSetting(
+                      () => ref
+                          .read(groupSettingsUseCaseProvider)
+                          .saveMaxAutoTurns(widget.groupId, turns),
+                      onChanged: setSheetState,
+                    ),
+                    onToggleFollowUpSuggest: (enabled) => _runSetting(
+                      () => ref
+                          .read(groupSettingsUseCaseProvider)
+                          .toggleFollowUpSuggest(widget.groupId, enabled),
+                      onChanged: setSheetState,
+                    ),
+                    onToggleHabitSuggest: (enabled) => _runSetting(
+                      () => ref
+                          .read(groupSettingsUseCaseProvider)
+                          .toggleHabitSuggest(widget.groupId, enabled),
+                      onChanged: setSheetState,
+                    ),
+                    onSaveTts:
+                        ({
+                          enabled,
+                          narrateThinking,
+                          narrationMode,
+                          fileSummary,
+                        }) => _runSetting(
+                          () => ref
+                              .read(groupSettingsUseCaseProvider)
+                              .saveTts(
+                                widget.groupId,
+                                enabled: enabled,
+                                narrateThinking: narrateThinking,
+                                narrationMode: narrationMode,
+                                fileSummary: fileSummary,
+                              ),
+                          onChanged: setSheetState,
+                        ),
+                  ),
+                ),
+                const Divider(height: 1),
+                // 「自动续跑」section。
+                //
+                // ## 为什么放在设置弹层里而不是单独一个 AppBar 入口
+                //
+                // 它是**当前对话的配置类信息**（「它接下来还要自己跑几次、
+                // 怎么叫停」），与设置同属「调整这个对话」的语境；且 AppBar
+                // 已有 6 个入口，再加会挤压标题（AGENTS.md §6.10）。
+                //
+                // ## 为什么用同一份 State 而不开新路由
+                //
+                // 同 `_openSettings` 的理由：新路由会得到另一个 `_ChatPage`
+                // 实例，`_settingsBusy` 不共享，两处写操作会互相覆盖。
+                Expanded(
+                  flex: 2,
+                  child: AutoSchedulesPanel(
+                    // 列表是独立端点，与 `_group` 快照不同源。用例内部会先取
+                    // `activeSession.agentId`，再本地按 group 过滤（见其类文档）。
+                    load: () => ref
+                        .read(autoSchedulesUseCaseProvider)
+                        .load(widget.groupId),
+                    onStopAll: () async =>
+                        (await ref
+                                .read(autoSchedulesUseCaseProvider)
+                                .stopAll(widget.groupId))
+                            .items,
+                    // 弹层自带拖拽条，且本 section 上方已有分割线，不重复标题。
+                    showHeader: false,
+                    // 切对话时重拉（Flutter 会复用面板 State）。
+                    reloadToken: widget.groupId,
+                  ),
+                ),
+              ],
             ),
           ),
         ),

@@ -186,6 +186,15 @@ final groupSettingsUseCaseProvider = Provider<GroupSettingsUseCase>((ref) {
   return GroupSettingsUseCase(ref.watch(chatApiProvider));
 });
 
+/// 自动续跑排程（auto-schedules）的读用例。
+///
+/// 两个 app 共用本 provider 保证语义一致：先取 `activeSession.agentId` 再列出，
+/// 并**本地按 group 过滤**（服务端 handler 忽略 `:group_id`，只按 agent 查），
+/// 停用后**回读列表**。详见 `AutoSchedulesUseCase` 类文档。
+final autoSchedulesUseCaseProvider = Provider<AutoSchedulesUseCase>((ref) {
+  return AutoSchedulesUseCase(ref.watch(chatApiProvider));
+});
+
 /// 对话管理动作的执行入口（供 `GroupListPage.onGroupAction` 注入）。
 ///
 /// ## 为什么在这里把异常翻译成 [GroupActionRejected]
