@@ -449,6 +449,10 @@ class _MyTurnsPage extends ConsumerWidget {
         source: source,
         groupId: groupId,
       ),
+      // 关键词搜索（issue #18）。与 fetch 分开注入：两个端点的参数集不相交，
+      // 合并会让「搜索时也把筛选条件发下去」变成容易顺手写出的 bug，而服务端
+      // 会静默忽略它们。
+      search: (query) => api.searchMyTurns(query: query),
       // 点击一行 → 弹轮次详情（issue #19）。
       //
       // 不再只是 `context.go(chat(groupId))`：那样只能跳到对话列表，

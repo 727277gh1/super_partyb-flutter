@@ -801,6 +801,48 @@ class ChatApi {
     return unwrapItems(res, ChatTurnSummary.fromJson);
   }
 
+  /// `GET /me/turns/search?q=&limit=` —— 跨 group 按输入文本关键字搜索轮次。
+  ///
+  /// ## 响应形状与 [listMyTurns] **完全相同**
+  ///
+  /// 服务端 `user_turns.go` 的 `search` 与 `list` 尾部都调
+  /// `turnToListItem(t, groupTitle, habitTurnIDs)`，故这里同样是
+  /// `{items: [...]}` 的 [ChatTurnSummary] 投影。
+  ///
+  /// ⚠️ **不要**改用 [ChatSearchHit]：那是
+  /// `/users/:uid/chat/search`（`chat_stream.go` 的 `search`）的投影，字段是
+  /// `input_text` / `agent_id`，与本端点不同。误用的后果见 [ChatSearchHit]
+  /// 类文档（每个命中项都退化成空对象，不报错）。
+  ///
+  /// ## 服务端不认筛选条件
+  ///
+  /// `search` 只读 `q` 与 `limit`（`parseLimit(c.Query("limit"), 20, 50)`）；
+  /// **没有** `days` / `status` / `source` / `group_id`。调用方不要在搜索模式下
+  /// 继续展示筛选器为「生效中」（UI 侧必须显式提示或禁用）。
+  ///
+  /// ## 空 [query] 直接返回空列表，**不发请求**
+  ///
+  /// 服务端对 trim 后为空的 `q` 返回 **400** `{"error":"q is required"}`
+  /// （`user_turns.go:169`）。这里拦在客户端：一个必然失败的往返对调用方没有
+  /// 价值，且 400 会被 [_unwrap] 抛成 `SpbError`——调用方得为一个「输入还没打
+  /// 完」的正常中间态去处理异常。
+  ///
+  /// 这是本文件里少有的「客户端主动拦下请求」的方法，与其余方法的「照实转发」
+  /// 惯例不同，故显式记录。
+  ///
+  /// ## limit 的语义
+  ///
+  /// 服务端默认 20、上限 50（超限静默夹到 50，不报错），故客户端不必自己夹。
+  Future<List<ChatTurnSummary>> searchMyTurns({
+    required String query,
+    int limit = 20,
+  }) async {
+    final q = query.trim();
+    if (q.isEmpty) return const [];
+    final res = await _get('/me/turns/search', query: {'q': q, 'limit': limit});
+    return unwrapItems(res, ChatTurnSummary.fromJson);
+  }
+
   /// `GET /users/:user_id/chat/search?q=&limit=`
   ///
   /// ## 返回的是 turn 摘要，**不是** `ChatEvent`

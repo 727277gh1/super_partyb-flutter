@@ -771,6 +771,141 @@ void main() {
   });
 
   // =========================================================================
+  group('searchMyTurns（GET /me/turns/search）', () {
+    /// `turnToListItem` 的真实输出形状（`internal/server/user_turns.go:291`）。
+    ///
+    /// ## 这个测试防的是什么
+    ///
+    /// `/me/turns/search` 与 `/users/:uid/chat/search` 名字极像，但响应形状
+    /// **不同**：前者是 `turnToListItem`（`input_preview` / `derived_source`），
+    /// 后者是 `ChatSearchHit` 的形状（`input_text` / `agent_id`）。
+    ///
+    /// 用 `ChatSearchHit.fromJson` 解析前者**不报错**——`input_text` 缺失
+    /// 退化成空串，`displayTitle` 退化成「（未命名对话）」。列表里全是空行，
+    /// 而不会有一句错误提示。故这里显式钉住两种形状的差异。
+    Map<String, dynamic> turnListItemShape({
+      String turnId = 'turn_01HZ',
+      String groupId = 'grp_1',
+      Object? groupTitle = '报错排查',
+      String inputPreview = '帮我看一下这个报错',
+      String status = 'completed',
+      String derivedSource = 'chat',
+      String source = 'desktop',
+      String createdAt = '2024-03-05T08:09:10Z',
+      Object? startedAt,
+      Object? endedAt,
+      bool hasError = false,
+      int messageCount = 2,
+    }) => {
+      'turn_id': turnId,
+      'group_id': groupId,
+      'group_title': groupTitle,
+      'input_preview': inputPreview,
+      'status': status,
+      'derived_source': derivedSource,
+      'source': source,
+      'created_at': createdAt,
+      'started_at': startedAt,
+      'ended_at': endedAt,
+      'has_error': hasError,
+      'message_count': messageCount,
+    };
+
+    test('路径是 /me/turns/search，query 带 q 与 limit', () async {
+      adapter.onGet(
+        '/me/turns/search',
+        (server) => server.reply(200, {
+          'items': [turnListItemShape()],
+        }),
+        queryParameters: {'q': '报错', 'limit': 20},
+      );
+
+      final items = await api.searchMyTurns(query: '报错');
+
+      expect(items, hasLength(1));
+      final t = items.single;
+      expect(t.turnId, 'turn_01HZ');
+      expect(t.groupId, 'grp_1');
+      expect(t.groupTitle, '报错排查');
+      expect(t.inputPreview, '帮我看一下这个报错');
+      expect(t.status, 'completed');
+      expect(t.source, TurnSource.chat);
+      expect(t.createdAt.toUtc().hour, 8);
+    });
+
+    test('limit 显式透传（服务端默认 20 / 上限 50）', () async {
+      adapter.onGet(
+        '/me/turns/search',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        queryParameters: {'q': 'x', 'limit': 5},
+      );
+
+      expect(await api.searchMyTurns(query: 'x', limit: 5), isEmpty);
+    });
+
+    test('q 为空时**不发请求**，直接返回空列表', () async {
+      // 不注册任何 mock：一旦真的发出请求，DioAdapter 会因找不到匹配路由而抛错。
+      // 这正是本用例想证明的——服务端对空 q 返回 400，客户端必须拦在本地。
+      expect(await api.searchMyTurns(query: ''), isEmpty);
+    });
+
+    test('q 只有空白时也不发请求（服务端先 TrimSpace 再判空）', () async {
+      expect(await api.searchMyTurns(query: '   '), isEmpty);
+    });
+
+    test('q 两端空白被 trim 后才发（服务端也 trim，避免空往返）', () async {
+      adapter.onGet(
+        '/me/turns/search',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        // 若发的是未 trim 的 ' 报错 '，下面的 mock 不匹配 → 抛错。
+        queryParameters: {'q': '报错', 'limit': 20},
+      );
+
+      await api.searchMyTurns(query: ' 报错 ');
+    });
+
+    test('group_title 为 null（归档 group）不抛异常', () async {
+      adapter.onGet(
+        '/me/turns/search',
+        (server) => server.reply(200, {
+          'items': [turnListItemShape(groupTitle: null)],
+        }),
+        queryParameters: {'q': 'x', 'limit': 20},
+      );
+
+      final t = (await api.searchMyTurns(query: 'x')).single;
+
+      expect(t.groupTitle, isNull);
+    });
+
+    test('用 ChatSearchHit 解析同一份 JSON 会丢光 inputPreview（钉住契约差异）', () {
+      // 两个端点名字像、实现文件不同、形状不同。误用不会报错，只会得到空列表行。
+      final json = turnListItemShape();
+
+      final asSummary = ChatTurnSummary.fromJson(json);
+      final asHit = ChatSearchHit.fromJson(json);
+
+      expect(asSummary.inputPreview, '帮我看一下这个报错');
+      expect(
+        asHit.inputText,
+        isEmpty,
+        reason: 'ChatSearchHit 读 input_text，而本端点发的是 input_preview',
+      );
+      expect(asHit.turnId, 'turn_01HZ', reason: 'turn_id 两者同名，故错误更隐蔽');
+    });
+
+    test('空结果返回空列表', () async {
+      adapter.onGet(
+        '/me/turns/search',
+        (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+        queryParameters: {'q': 'nohit', 'limit': 20},
+      );
+
+      expect(await api.searchMyTurns(query: 'nohit'), isEmpty);
+    });
+  });
+
+  // =========================================================================
   group('uploadWorkspaceFile（交付物回传）', () {
     /// ufsUpload 的真实响应形状（`workspace_sync.go` 尾部 + `fileEntryToMap`）。
     Map<String, dynamic> ufsUploadShape({
