@@ -1612,6 +1612,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       ..clear()
       ..addAll(ids);
 
+    // 新确认卡到达时发 OS 通知（issue #21）。理由同桌面端：副作用、与
+    // setState 无关，且页面已卸载时**更需要**通知。
+    unawaited(ref.read(confirmationNotifierProvider).handleItems(items));
+
     if (!mounted) return;
     setState(() {
       _items = items;

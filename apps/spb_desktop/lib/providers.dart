@@ -29,6 +29,59 @@ final desktopCapabilitiesProvider = Provider<DesktopCapabilities>((ref) {
   return const NoopDesktopCapabilities();
 });
 
+/// 本地通知发送能力（issue #21）。
+///
+/// 默认是 [NoopNotificationSink]：`flutter test` 里没有平台通道，
+/// 真实实现会在 `initialize()` 时抛 `MissingPluginException`（已捕获并降级，
+/// 但默认 Noop 更明确）。生产在 `main.dart` 覆盖为 [LocalNotificationSink]。
+///
+/// ## 为什么非 autoDispose
+///
+/// 它持有平台插件的实例与「权限是否已请求」的缓存——随页面重建会重复请求权限。
+final notificationSinkProvider = Provider<NotificationSink>((ref) {
+  return const NoopNotificationSink();
+});
+
+/// 主窗口/应用当前是否聚焦（可写）。
+///
+/// ## 为什么是 `NotifierProvider` 而不是 `StateProvider`
+///
+/// Riverpod 3 移除了顶层 `StateProvider` 构造函数（只剩 `NotifierProvider`）。
+/// 本文件其余可写状态也都用 `NotifierProvider`（见 [authStateProvider]）。
+class WindowFocusedNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  /// 设置聚焦状态（平台事件推送）。
+  ///
+  /// 相同值时不触发重建（焦点事件可能密集）。
+  void set(bool value) {
+    if (state == value) return;
+    state = value;
+  }
+}
+
+/// 见 [WindowFocusedNotifier] 的文档。初始 true（保守：启动时不打扰）。
+final windowFocusedProvider = NotifierProvider<WindowFocusedNotifier, bool>(
+  WindowFocusedNotifier.new,
+);
+
+/// 确认卡到达时发 OS 通知（issue #21）。
+///
+/// 判定逻辑（判重 / 前台不打扰 / 权限幂等）在 `spb_domain` 的
+/// [ConfirmationNotifier]，此处只做装配：注入 sink 与聚焦状态、接上点击导航。
+///
+/// ## 为什么非 autoDispose（判重集合必须跨页面重建存活）
+///
+/// 判重集合若随对话页重建而丢失，SSE 重连回放会让同一张确认卡重复弹通知。
+/// 故本 provider 的生命周期与 app 一致。
+final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
+  return ConfirmationNotifier(
+    sink: ref.watch(notificationSinkProvider),
+    isWindowFocused: () => ref.read(windowFocusedProvider),
+  );
+});
+
 // ==================== 传输层 ====================
 
 /// 开发态手工指定的 `X-User-ID`。

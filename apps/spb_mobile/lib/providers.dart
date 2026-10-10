@@ -28,6 +28,48 @@ final desktopCapabilitiesProvider = Provider<DesktopCapabilities>((ref) {
   return const NoopDesktopCapabilities();
 });
 
+/// 本地通知发送能力（issue #21）。
+///
+/// 默认 [NoopNotificationSink]；生产在 `main.dart` 覆盖为
+/// [LocalNotificationSink]（Android 走 `NotificationManager` + 运行时权限，
+/// iOS 走 `UNUserNotificationCenter`）。见 [notificationSinkProvider] 的桌面端
+/// 同名字段文档（两侧保持同构）。
+final notificationSinkProvider = Provider<NotificationSink>((ref) {
+  return const NoopNotificationSink();
+});
+
+/// 主窗口/应用当前是否聚焦（可写）。
+///
+/// ## 为什么是 `NotifierProvider` 而不是 `StateProvider`
+///
+/// Riverpod 3 移除了顶层 `StateProvider` 构造函数（只剩 `NotifierProvider`）。
+/// 本文件其余可写状态也都用 `NotifierProvider`（见 [authStateProvider]）。
+class WindowFocusedNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  /// 设置聚焦状态（平台事件推送）。
+  ///
+  /// 相同值时不触发重建（焦点事件可能密集）。
+  void set(bool value) {
+    if (state == value) return;
+    state = value;
+  }
+}
+
+/// 见 [WindowFocusedNotifier] 的文档。初始 true（保守：启动时不打扰）。
+final windowFocusedProvider = NotifierProvider<WindowFocusedNotifier, bool>(
+  WindowFocusedNotifier.new,
+);
+
+/// 确认卡到达时发 OS 通知（issue #21）。见桌面端同名 provider 的文档。
+final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
+  return ConfirmationNotifier(
+    sink: ref.watch(notificationSinkProvider),
+    isWindowFocused: () => ref.read(windowFocusedProvider),
+  );
+});
+
 // ==================== 传输层 ====================
 
 /// 开发态手工指定的 `X-User-ID`。

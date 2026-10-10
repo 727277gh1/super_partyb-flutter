@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'providers.dart';
 import 'router.dart';
@@ -44,8 +47,52 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   /// 外部传入的 router 由传入方负责 dispose。
   late final bool _ownsRouter = widget.router == null;
 
+  /// 生命周期观察者（把 `AppLifecycleState` 归一到「是否该打扰用户」）。
+  ///
+  /// ## 为什么用 `WidgetsBindingObserver` 而不是 `AppLifecycleListener`
+  ///
+  /// 两者都能拿到生命周期。选 `WidgetsBindingObserver` 是因为它同时给出
+  /// `didChangeAppLifecycleState`（resumed/inactive/paused），而
+  /// `AppLifecycleListener` 的回调按平台分得更细（`onResume`/`onInactive`/
+  /// `onHide`/`onShow`…），我们需要的是「是否在前台」这一个布尔，粗粒度即可。
+  late final _LifecycleFocusObserver _lifecycleObserver;
+
+  @override
+  void initState() {
+    super.initState();
+    _installNotifications();
+  }
+
+  /// 接线本地通知（issue #21）。与桌面端 `_installNotifications` 同构。
+  ///
+  /// 差异只在「前台判定」的来源：桌面端是窗口焦点事件，移动端是
+  /// `AppLifecycleState`。两者都归一到 [windowFocusedProvider]。
+  void _installNotifications() {
+    final sink = ref.read(notificationSinkProvider);
+    final notifier = ref.read(confirmationNotifierProvider);
+
+    if (sink is LocalNotificationSink) {
+      unawaited(sink.initialize());
+    }
+
+    // 点击通知 → 跳到该对话（payload 是 `/chat/{groupId}`）。
+    //
+    // ## 为什么用 `go` 而不是 `push`
+    //
+    // 用户点通知的意图是「去那里」。`push` 会在当前栈上再压一层，返回键要按
+    // 好几次才回到用户原来的位置——而用户根本没在这个应用里。
+    notifier.attach(onNavigate: (payload) => _router.go(payload));
+
+    _lifecycleObserver = _LifecycleFocusObserver(
+      onChanged: (focused) =>
+          ref.read(windowFocusedProvider.notifier).set(focused),
+    );
+    WidgetsBinding.instance.addObserver(_lifecycleObserver);
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(_lifecycleObserver);
     if (_ownsRouter) _router.dispose();
     super.dispose();
   }
@@ -62,5 +109,29 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
       themeMode: ref.watch(themeModeProvider),
       routerConfig: _router,
     );
+  }
+}
+
+/// 把 `AppLifecycleState` 归一到「应用是否在前台」。
+///
+/// ## 判定为什么是「只认 resumed」
+///
+/// `inactive` 是一个**过渡态**：iOS 上拉下通知中心、切到应用切换器、甚至
+/// 收到来电，都会先经过它。把它当作「在前台」会让这些场景下不弹通知——
+/// 而那时用户恰恰看不到应用内容。
+///
+/// 反之把它当「在后台」会让「用户只是滑了一下控制中心」也弹通知。两者都不对，
+/// 但**多弹一条**比**漏弹**更烦人，且本应用的通知是「有事等你处理」（可容忍
+/// 一次多余提示），故选择「只认 resumed」= 保守地多发。
+///
+/// 桌面端同理（`window_manager` 的 blur 也包含「被其他窗口遮挡」）。
+class _LifecycleFocusObserver with WidgetsBindingObserver {
+  _LifecycleFocusObserver({required this.onChanged});
+
+  final void Function(bool focused) onChanged;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    onChanged(state == AppLifecycleState.resumed);
   }
 }

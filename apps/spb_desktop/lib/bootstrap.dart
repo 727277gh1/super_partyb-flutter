@@ -85,6 +85,7 @@ class PlatformDesktopCapabilities
         DesktopCapabilities,
         WindowDisplayTarget,
         TrayActionTarget,
+        WindowFocusTarget,
         PlatformDesktopQuit,
         OverlayWindowController {
   PlatformDesktopCapabilities({this.trayIconAsset = 'assets/tray_icon.png'});
@@ -540,6 +541,25 @@ class PlatformDesktopCapabilities
     if (!_hideOnClose) return;
     windowManager.hide();
   }
+
+  // ---------------------------------------------------------------------------
+  // WindowFocusTarget
+  // ---------------------------------------------------------------------------
+
+  void Function()? _onFocus;
+  void Function()? _onBlur;
+
+  @override
+  set onFocus(void Function()? callback) => _onFocus = callback;
+
+  @override
+  set onBlur(void Function()? callback) => _onBlur = callback;
+
+  @override
+  void onWindowFocus() => _onFocus?.call();
+
+  @override
+  void onWindowBlur() => _onBlur?.call();
 
   bool _hideOnClose = false;
 

@@ -1958,6 +1958,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final confirmationsChanged =
         baseline != null && !_setEquals(baseline, confIds);
 
+    // 新确认卡到达时发 OS 通知（issue #21）。
+    //
+    // ## 为什么放在 `mounted` 检查之前、且不 await
+    //
+    // 通知是**副作用**，与本次 setState 无关：用户可能在页面已卸载（切走）
+    // 时仍需收到通知——那正是通知存在的意义。await 会把它排进本帧之后，
+    // 但判定本身是同步的（只有真正的 show 是异步），故不 await 即可。
+    unawaited(ref.read(confirmationNotifierProvider).handleItems(items));
+
     if (!mounted) return;
     // 同一次 setState 里同时更新待办面板的数据与交付物刷新令牌：
     // items 流推送时两者都要变，分开 setState 会多一次重建。

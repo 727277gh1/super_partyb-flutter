@@ -234,6 +234,27 @@ abstract interface class WindowDisplayTarget {
   set onHideWindow(void Function(WindowRole role)? callback);
 }
 
+/// 「窗口聚焦状态变化」的可接线能力。
+///
+/// ## 为什么单独一个接口，而不是加进 [DesktopCapabilities]
+///
+/// 与 [WindowDisplayTarget] 同一理由：这是**接线点**（把事件抛给谁），不是
+/// 「平台有没有这个能力」。Noop 实现与测试桩都不需要它。
+///
+/// ## 为什么是「推送」而不是「查询」
+///
+/// 消费方（`ConfirmationNotifier` 的前台判定，见 issue #21）需要**同步**答案，
+/// 而 `windowManager.isFocused()` 是异步的平台通道调用——每次判定都 await
+/// 一次往返既慢，又会在 `flutter test` 里因没有平台通道而挂住。故由实现方在
+/// 焦点事件到达时推送，消费方只存最后已知值。
+abstract interface class WindowFocusTarget {
+  /// 窗口获得焦点。设为 null 表示摘除接线。
+  set onFocus(void Function()? callback);
+
+  /// 窗口失去焦点。设为 null 表示摘除接线。
+  set onBlur(void Function()? callback);
+}
+
 /// 托盘菜单的可接线能力。
 ///
 /// 与 [WindowDisplayTarget] 同一理由：托盘菜单项是**纯数据**

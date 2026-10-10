@@ -89,6 +89,18 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // ## 为什么必须开 core library desugaring
+        //
+        // `flutter_local_notifications`（issue #21 的 OS 通知）在 Android 侧用了
+        // `java.time` 等 Java 8+ API，而 `minSdk` 低于 26 时这些 API 在旧设备上
+        // 不存在——插件因此声明 `coreLibraryDesugaring` 依赖，构建期强制要求
+        // 宿主应用开启它。不开就**构建失败**：
+        //
+        //   Dependency ':flutter_local_notifications' requires core library
+        //   desugaring to be enabled for :app.
+        //
+        // 这是插件的硬性要求（不是可选优化），故不能靠降级版本绕开。
+        isCoreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -145,4 +157,12 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // 与上面的 `isCoreLibraryDesugaringEnabled` 配套（缺一个都会构建失败）。
+    //
+    // 版本取 2.1.4：Android Gradle Plugin 8.x 兼容的最低稳定线附近；更高的
+    // 2.1.x 也可用，但没必要追新（desugar 的 API 集不会因此变化）。
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

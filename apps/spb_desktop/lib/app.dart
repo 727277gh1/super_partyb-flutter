@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -78,6 +80,7 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
   @override
   void initState() {
     super.initState();
+    _installNotifications();
     // 移动端的能力是 NoopDesktopCapabilities，attach 会自行跳过。
     // 但移动端连 spb_desktop 都不该走，故这里只在桌面端接线。
     final caps = ref.read(desktopCapabilitiesProvider);
@@ -137,8 +140,65 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     });
   }
 
+  /// 接线本地通知（issue #21）。
+  ///
+  /// ## 三件事
+  ///
+  /// 1. **初始化插件**（Android 需 Activity 已就绪、iOS 需在 runApp 之后设置
+  ///    delegate，故不能更早）；
+  /// 2. **接上点击导航**：点通知跳到该对话（payload 是 `/chat/{groupId}`）；
+  /// 3. **订阅窗口焦点**：通知判定要「窗口在后台才发」。
+  ///
+  /// ## 为什么在 `initState` 里而不是 `main`
+  ///
+  /// 导航需要 `_router`，而它在 `initState` 才创建（见类文档：不能放 `build`
+  /// 里，否则热重载会重置导航栈）。
+  void _installNotifications() {
+    final sink = ref.read(notificationSinkProvider);
+    final notifier = ref.read(confirmationNotifierProvider);
+
+    // 插件初始化是异步的（平台通道）；失败时内部已静默降级（见
+    // `LocalNotificationSink.initialize`），故不需要 await 后再判断。
+    if (sink is LocalNotificationSink) {
+      unawaited(sink.initialize());
+    }
+
+    // 点击通知 → 跳到该对话。用 `go`（不是 `push`）：用户点通知的意图是
+    // 「去那里」，而不是「在当前栈上再压一层」。
+    //
+    // ## 为什么用 `context.go` 而不是 `_router.go`
+    //
+    // 两者等价（本组件是 `MaterialApp.router` 的根，`context` 就在路由树下）。
+    // 用 `_router` 更直接，但需要把 `initState` 里的接线推迟到首帧后
+    // （`_router` 此时已存在，故其实可以）——选择 `_router` 是为了不依赖
+    // `context` 在 `initState` 阶段的可用性（`GoRouter.of(context)` 在
+    // `initState` 里拿不到 InheritedWidget）。
+    notifier.attach(onNavigate: (payload) => _router.go(payload));
+
+    // 窗口焦点 → 通知判定。真实实现会推送；Noop/测试桩不推（保持初始 true）。
+    final caps = ref.read(desktopCapabilitiesProvider);
+    if (caps is WindowFocusTarget) {
+      // 先提升成局部变量：Dart 的类型提升不穿透 `is` 检查到后续的 cascade
+      // （与 `desktop_integration.dart` 里 `WindowDisplayTarget` 同一原因）。
+      final focus = caps as WindowFocusTarget;
+      focus.onFocus = () => ref.read(windowFocusedProvider.notifier).set(true);
+      focus.onBlur = () => ref.read(windowFocusedProvider.notifier).set(false);
+      _focusTarget = focus;
+    }
+  }
+
+  /// 焦点接线点（dispose 时摘除）。
+  WindowFocusTarget? _focusTarget;
+
   @override
   void dispose() {
+    // 先摘焦点接线（它引用 `ref`，容器可能先于组件销毁）。
+    final focus = _focusTarget;
+    if (focus != null) {
+      focus
+        ..onFocus = null
+        ..onBlur = null;
+    }
     _syncInFlightSub?.close();
     _trayTooltip?.dispose();
     _integration?.detach();

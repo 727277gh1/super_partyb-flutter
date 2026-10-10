@@ -194,6 +194,17 @@ Future<TestHarness> pumpApp(
   /// UFS API（交付物弹层用）。默认不 override：弹层默认不打开，用不到的用例
   /// 不应被它拖慢（同桌面端同名参数的理由）。
   UfsApi? ufsApi,
+
+  /// 本地通知发送桩（issue #21）。默认 [NoopNotificationSink]。
+  ///
+  /// 真实实现是 `LocalNotificationSink`，走平台通道——`flutter test` 里没有
+  /// 通道（内部已捕获并降级，但那样观测不到「发了什么」）。
+  NotificationSink? notificationSink,
+
+  /// 应用初始是否在前台（issue #21）。默认 true（启动时不打扰）。
+  ///
+  /// 传 false 模拟「应用切到后台」——通知只在该状态下发。
+  bool appForeground = true,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -266,6 +277,13 @@ Future<TestHarness> pumpApp(
         const NoopDesktopCapabilities(),
       ),
       dioProvider.overrideWithValue(dio),
+      if (notificationSink != null)
+        notificationSinkProvider.overrideWithValue(notificationSink),
+      // 初始前后台状态。`_SpbMobileAppState` 通过 `AppLifecycleState` 推送
+      // 变化，而 flutter test 不会派发生命周期事件，故这个初始值就是全程的值。
+      windowFocusedProvider.overrideWith(
+        () => _FixedWindowFocused(appForeground),
+      ),
       // 默认注入「已登录」的内存存储：否则 restore() 会读真实的
       // SecureTokenStore（走平台通道，测试环境必然抛 MissingPluginException），
       // 得到「未登录」后被守卫重定向到 /login——那么所有期望「列表渲染」
@@ -2664,6 +2682,186 @@ void main() {
     });
   });
 
+  group('确认卡到达时发 OS 通知（issue #21）', () {
+    void pushConfirmation(
+      _FakeSseClient sse, {
+      String eventId = 'evt_n1',
+      String confirmationId = 'conf_n1',
+      String groupId = 'grp_n',
+      String question = '要部署到生产吗？',
+    }) {
+      sse.push('confirmation_required', {
+        'eventId': eventId,
+        'eventType': 'confirmation_required',
+        'groupId': groupId,
+        'turnId': 'turn_n1',
+        'userId': 'usr_REAL',
+        'seq': 1,
+        'createdAt': '2026-01-01T00:00:00Z',
+        'payload': {
+          'confirmation_id': confirmationId,
+          'question': question,
+          'options': ['继续', '取消'],
+        },
+      });
+    }
+
+    /// 起一个「已进入某对话页」的测试环境。
+    Future<TestHarness> pumpInChat(
+      WidgetTester tester, {
+      required _FakeSseClient sse,
+      required NotificationSink sink,
+      bool foreground = false,
+      String groupId = 'grp_n',
+    }) async {
+      final h = await pumpApp(
+        tester,
+        sseClient: sse,
+        notificationSink: sink,
+        appForeground: foreground,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/$groupId',
+            (server) => server.reply(200, {
+              'id': groupId,
+              'user_id': 'usr_REAL',
+              'title': '通知测试',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/$groupId/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': groupId, 'limit': 20},
+          );
+        },
+      );
+      h.router.go(SpbRoutes.chat(groupId));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      return h;
+    }
+
+    Future<void> settle(WidgetTester tester) async {
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    testWidgets('新的确认卡到达 → 发一条通知（应用在后台）', (tester) async {
+      final sse = _FakeSseClient();
+      final sink = _RecordingNotificationSink();
+      await pumpInChat(tester, sse: sse, sink: sink, foreground: false);
+
+      pushConfirmation(sse);
+      await settle(tester);
+
+      expect(sink.sent, hasLength(1));
+      expect(sink.sent.single.title, '需要你确认');
+      expect(sink.sent.single.body, '要部署到生产吗？');
+      expect(sink.sent.single.payload, '/chat/grp_n');
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('应用在前台 → 不发通知', (tester) async {
+      final sse = _FakeSseClient();
+      final sink = _RecordingNotificationSink();
+      await pumpInChat(tester, sse: sse, sink: sink, foreground: true);
+
+      pushConfirmation(sse);
+      await settle(tester);
+
+      expect(sink.sent, isEmpty);
+      expect(sink.permissionCalls, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('同 id 重复推送（SSE 重连回放）→ 只发一次', (tester) async {
+      final sse = _FakeSseClient();
+      final sink = _RecordingNotificationSink();
+      await pumpInChat(tester, sse: sse, sink: sink, foreground: false);
+
+      pushConfirmation(sse, eventId: 'evt_n1');
+      await settle(tester);
+      pushConfirmation(sse, eventId: 'evt_n1_replay');
+      await settle(tester);
+
+      expect(sink.sent, hasLength(1));
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('权限被拒 → 不发通知（静默降级，不崩）', (tester) async {
+      final sse = _FakeSseClient();
+      final sink = _RecordingNotificationSink(granted: false);
+      await pumpInChat(tester, sse: sse, sink: sink, foreground: false);
+
+      pushConfirmation(sse);
+      await settle(tester);
+
+      expect(sink.sent, isEmpty);
+      expect(sink.permissionCalls, 1);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('普通消息（非确认卡）不触发通知', (tester) async {
+      final sse = _FakeSseClient();
+      final sink = _RecordingNotificationSink();
+      await pumpInChat(tester, sse: sse, sink: sink, foreground: false);
+
+      sse.push('message', {
+        'eventId': 'evt_msg',
+        'eventType': 'message',
+        'groupId': 'grp_n',
+        'turnId': 'turn_n1',
+        'userId': 'usr_REAL',
+        'seq': 1,
+        'createdAt': '2026-01-01T00:00:00Z',
+        'payload': {'text': '普通回复'},
+      });
+      // 收尾 `done`：`message` 会让 turn 进入进行中，控制器据此武装看门狗
+      // 计时器；不收尾会留下 pending timer（同桌面端用例的说明）。
+      sse.push('done', {
+        'eventId': 'evt_done',
+        'eventType': 'done',
+        'groupId': 'grp_n',
+        'turnId': 'turn_n1',
+        'userId': 'usr_REAL',
+        'seq': 2,
+        'createdAt': '2026-01-01T00:00:01Z',
+        'payload': <String, dynamic>{},
+      });
+      await settle(tester);
+
+      expect(sink.sent, isEmpty);
+      expect(sink.permissionCalls, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  });
+
   group('导入会话（粘贴凭证 → 落盘 → 请求带 Bearer）', () {
     testWidgets('导入合法会话后状态变为已登录', (tester) async {
       // 移动端登录闭环的唯一入口：IdP 未注册 `partyb://oidc/callback`
@@ -2865,4 +3063,35 @@ void main() {
       expect(restored.pkce.verifier, 'v_restart');
     });
   });
+}
+
+/// 固定值的前后台状态（测试用：不随生命周期事件变化）。
+class _FixedWindowFocused extends WindowFocusedNotifier {
+  _FixedWindowFocused(this._value);
+
+  final bool _value;
+
+  @override
+  bool build() => _value;
+}
+
+/// 记录发出的通知（并模拟权限结果）。见 `notificationSink` 参数说明。
+class _RecordingNotificationSink implements NotificationSink {
+  _RecordingNotificationSink({this.granted = true});
+
+  final bool granted;
+  int permissionCalls = 0;
+  final sent = <LocalNotification>[];
+  void Function(String? payload)? onSelect;
+
+  @override
+  Future<bool> requestPermission() async {
+    permissionCalls++;
+    return granted;
+  }
+
+  @override
+  Future<void> show(LocalNotification notification) async {
+    sent.add(notification);
+  }
 }

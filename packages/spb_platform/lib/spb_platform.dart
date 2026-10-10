@@ -12,6 +12,7 @@ library;
 ///   DesktopCapabilities        —— 平台能力接口（窗口/托盘/快捷键/目录选择）
 ///   NoopDesktopCapabilities     —— 移动端/不支持平台的空实现
 ///   LocalFileSink               —— 原子写入 + 路径穿越防御的落盘实现（同时实现 LocalFileReader）
+///   LocalNotificationSink       —— flutter_local_notifications 支撑的通知发送（契约在 spb_domain）
 ///   DragDropCapability          —— 文件拖入抽象（桌面实现 / 移动端空实现）
 ///   DroppedFile                 —— 拖入文件的归一形态（惰性读字节）
 ///   scanLocalGroups / scanLocalStats —— 本地同步目录扫描（只认 group_id 形状）
@@ -22,6 +23,7 @@ export 'src/desktop_capabilities.dart';
 export 'src/directory_picker.dart';
 export 'src/drag_drop.dart';
 export 'src/file_sink.dart';
+export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
 export 'src/overlay_files.dart';
 export 'src/system_open.dart';
