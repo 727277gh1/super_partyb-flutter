@@ -577,9 +577,21 @@ class _AttachmentChip extends StatelessWidget {
           ),
           if (onRemove != null) ...[
             const SizedBox(width: SpbSpacing.xs),
-            InkWell(
-              onTap: onRemove,
-              child: Icon(Icons.close, size: SpbSpacing.md, color: color),
+            // ## 为什么必须包 Semantics（issue #24）
+            //
+            // 这个按钮**没有任何可见文本**（只是一个 ✕ 图标），屏幕阅读器
+            // 在它上面只会念出「按钮」——用户不知道移除的是哪个附件。
+            //
+            // `label` 带上文件名：一个 chip 一个节点，逐个念出来才分得清。
+            // 不能用 `tooltip` 代替——那个 ✕ 只有 `SpbSpacing.md`（16px），
+            // 悬浮提示的触控目标太小，且移动端没有悬停。
+            Semantics(
+              button: true,
+              label: '移除附件 $name',
+              child: InkWell(
+                onTap: onRemove,
+                child: Icon(Icons.close, size: SpbSpacing.md, color: color),
+              ),
             ),
           ],
         ],

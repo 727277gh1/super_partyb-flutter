@@ -224,6 +224,71 @@ spb_desktop 133 / spb_mobile 86。
     可能不暴露，只在正式包上现形**——务必用 release 包验证。
   - 路径穿越被拒 → 属预期防御（服务端返回的路径不应逃出同步目录）。
 
+### 2.7 可访问性与键盘可达性（issue #24）
+
+**本项无法在本机验证**（无 `DISPLAY`、无 `/dev/kvm`），必须真机/真实桌面环境。
+
+#### 自动化已覆盖的部分（本机可跑）
+
+```bash
+export PATH="$HOME/.local/opt/flutter/bin:$PATH"
+cd packages/spb_features
+flutter test test/chat/accessibility_test.dart   # 期望：+6 All tests passed!
+```
+
+这 6 例锁住三类**屏幕阅读器读不出内容**的场景（每例都对应一个真实会读错的
+情形，不是「全仓扫描 + 批量加标签」）：
+
+| 场景 | 锁住的不变式 |
+|---|---|
+| `SpecUiCard` 的 progress 元素 | `label` 非空时进度条的 `semanticsLabel` 等于它；为空时**不编造**「进度」 |
+| `GoalTasksPanel` 的进度条 | `semanticsLabel` 为「目标任务完成进度」——它上面那行「已完成 3/5」是**另一个**节点，屏幕阅读器不会自动关联 |
+| `GroupListPage` 条目的长按/右键菜单 | 有 `onGroupAction` 时暴露 `customSemanticsActions`；为 null 时不暴露 |
+| `OverlayQuickCapturePage` 附件 chip 的 ✕ | 每个 chip 的 `Semantics.label` 带**自己的**文件名 |
+
+#### 仍需人工验证的部分（**不要用 Xvfb 结果当证据**，见 §0）
+
+**桌面端（Linux / Windows / macOS）**
+
+- [ ] **Tab 顺序**：从主窗口顶部开始按 `Tab`，焦点依次经过 AppBar 按钮 →
+      对话列表条目 → 输入框 → 发送按钮，**不跳过**也不乱序。
+- [ ] **Shift+Tab 反向**：顺序与正向相反。
+- [ ] **Enter / Space 激活**：焦点在 `IconButton` / `FilledButton` 上时两者都能触发。
+- [ ] **Esc 关闭**：对话框（如「新建目标」`goal-create-dialog`）、底部弹层、
+      悬浮输入窗均可用 `Esc` 关闭。
+- [ ] **自定义滚动区的键盘滚动**：`conversation_page.dart` 与
+      `group_list_page.dart` 覆盖了 `ScrollConfiguration.dragDevices`——确认
+      `PageUp/PageDown`、方向键、`Home/End` 仍能滚动（自定义 `dragDevices`
+      只影响指针，理论上不影响键盘，但**需实测**）。
+- [ ] **焦点可见性**：焦点在图标按钮上时有可见的焦点环（不能只有颜色变化）。
+- [ ] **`Alt+Space` 悬浮窗的焦点**：进入悬浮模式后输入框自动聚焦；`Esc` 退出后
+      焦点回到主窗口（见 §2.3）。
+
+**移动端（Android / iOS）**
+
+- [ ] **TalkBack / VoiceOver 逐项朗读**：
+  - 图标按钮读出的**是 tooltip 文案**（如「对话设置」），不是「按钮」；
+  - 进度条读出「目标任务完成进度，60%」（标签 + 值），不是孤零零的「60%」；
+  - 附件 chip 的 ✕ 读出「移除附件 报告.pdf」，不是「按钮」。
+- [ ] **触摸探索（explore by touch）**：手指扫过页面，每个可交互元素都有非空名称。
+- [ ] **自定义手势不夺焦**：对话页的 `InkWell` 重连指示器（`conversation-connection-indicator`）
+      在 TalkBack 下可聚焦、可双击触发。
+
+**已知未覆盖（有意不做，见 issue #24 备注）**
+
+- 纯装饰图标**不加** `Semantics(label: '图标')`——那类标签对用户零信息，反而
+  降低可用性（屏幕阅读器会念一堆无意义的「图标」）。
+- spec 卡的图表/metric 元素未逐个补语义：它们是**视觉化**呈现，语义化需要
+  「读出来该是什么」的逐元素判断（如 metric 应读「标签：值」），属后续单独一轮。
+
+#### 失败时排查点
+
+- 「屏幕阅读器念不出某个图标按钮」 → 先查 `tooltip` 是否为 null。Flutter 会把
+  `Tooltip.message` 注入语义树（`tooltip.dart` 的 `semanticsTooltip`），**没写
+  tooltip 的 `IconButton` 在语义树上只有「按钮」**。
+- 「语义测试找不到标签」 → 确认测试里调了 `tester.ensureSemantics()`。
+  `flutter_test` 默认**关闭**语义树，不开的话断言永远落空。
+
 ---
 
 ## 3. 阻塞条件（跨仓生产配置，本仓无法完成）

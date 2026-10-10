@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
@@ -815,13 +816,34 @@ class _GroupTile extends StatelessWidget {
     // 用 GestureDetector 包一层而不是 ListTile.onLongPress：
     // 需要同时拿到右键的**指针位置**（菜单要出现在鼠标处），而
     // ListTile 的 onLongPress 不带位置参数。
-    return GestureDetector(
-      onLongPressStart: (details) => _openMenu(context, details.globalPosition),
-      onSecondaryTapDown: (details) =>
-          _openMenu(context, details.globalPosition),
-      // 让 ListTile 自己处理点击：GestureDetector 的 opaque 会吃掉手势，
-      // 故只挂长按/右键，不设 onTap。
-      child: tile,
+    //
+    // ## 为什么包 Semantics（issue #24）
+    //
+    // 重命名/归档/删除这三个动作**只能**从长按或右键菜单到达，键盘用户
+    // 与屏幕阅读器用户没有任何入口。Flutter 不会从「包了一个
+    // GestureDetector」推断出「这里有自定义动作」——必须显式声明
+    // `customSemanticsActions`。
+    //
+    // 用 `Semantics` 而非 `onLongPress` 参数：后者会挂上真正的长按手势，
+    // 与上面只挂 onLongPressStart 的意图冲突。这里只补语义动作（屏幕阅读器
+    // 的「长按」手势会触发它），手势层仍归 GestureDetector。
+    return Semantics(
+      customSemanticsActions: <CustomSemanticsAction, VoidCallback>{
+        const CustomSemanticsAction(label: '对话操作（重命名/归档/删除）'): () {
+          // 无指针位置：菜单出现在屏幕中心（`showMenu` 在 position 为
+          // 零尺寸矩形时的行为）。屏幕阅读器用户看不到菜单贴在哪里。
+          _openMenu(context, Offset.zero);
+        },
+      },
+      child: GestureDetector(
+        onLongPressStart: (details) =>
+            _openMenu(context, details.globalPosition),
+        onSecondaryTapDown: (details) =>
+            _openMenu(context, details.globalPosition),
+        // 让 ListTile 自己处理点击：GestureDetector 的 opaque 会吃掉手势，
+        // 故只挂长按/右键，不设 onTap。
+        child: tile,
+      ),
     );
   }
 

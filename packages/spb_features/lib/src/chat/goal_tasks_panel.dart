@@ -450,10 +450,14 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
               ),
             ),
             const SizedBox(height: SpbSpacing.xs),
+            // `semanticsLabel` 给出「这是什么进度」——进度条自身无可读文本。
+            // 上面的「已完成 3/5（60%）」是**另一个**文本节点，屏幕阅读器
+            // 不会自动把它和进度条关联起来（两个并列节点）。
             LinearProgressIndicator(
               key: const ValueKey('goal-tasks-progress-bar'),
               value: progress.ratio,
               minHeight: SpbSpacing.xs,
+              semanticsLabel: '目标任务完成进度',
             ),
             if (progress.needsAttention) ...[
               const SizedBox(height: SpbSpacing.xs),

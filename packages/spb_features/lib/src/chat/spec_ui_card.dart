@@ -132,9 +132,21 @@ class _SpecElementView extends StatelessWidget {
           children: [
             if (label.isNotEmpty) Text(label, style: textTheme.bodySmall),
             const SizedBox(height: SpbSpacing.xs),
+            // 进度条对屏幕阅读器是**完全空白**的：它是个自绘的圆角矩形，
+            // 没有可读文本。`value` 非空时 Flutter 会把比例当 `value` 念出来
+            // （如「已完成 60%」的 60%），但**念不出这是什么的 60%**。
+            // 故必须给 `semanticsLabel`。
+            //
+            // 不传 `semanticsValue`：`value != null` 时 Flutter 已把它算成
+            // 百分比并交给屏幕阅读器，手写一份只会多一个需要同步的真源。
+            //
+            // `label` 为空时**不编一个「进度」**：那种标签对用户零信息（同
+            // issue #24 备注里的「不给装饰图标加 label: '图标'」）。此时保留
+            // Flutter 默认的百分比读数即可。
             LinearProgressIndicator(
               key: const ValueKey('spec-progress-bar'),
               value: value / 100,
+              semanticsLabel: label.isEmpty ? null : label,
             ),
           ],
         );
