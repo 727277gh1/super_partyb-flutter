@@ -1,0 +1,275 @@
+# M0 交互能力人工验证 runbook（issue #4）
+
+> 本仓库的 M0 骨架（工作区 / 分层 / 9 packages + 2 apps / Linux release 构建 /
+> 核心契约与归约）已在**无头环境**完成自动化验证。本文覆盖**自动化验证不到**的
+> 交互能力——多窗口、托盘、全局快捷键、OIDC 回跳、剪贴板文件、交付物同步写盘。
+>
+> 相关：`AGENTS.md` §6.5（多窗口结论）、§6.8（剪贴板文件）、§6.11（托盘菜单）、
+> §8（macOS entitlements）、§9（无头验证的边界）、§11（已知问题）；
+> `docs/rfc8252-loopback-signin.md`（桌面 OIDC）、
+> `docs/mobile-oidc-deeplink.md`（移动 OIDC）。
+
+---
+
+## 0. 为什么需要人工验证
+
+本机（Debian 12 LXC 容器）**无法验证任何交互行为**：
+
+| 限制 | 影响 | 根因 |
+|---|---|---|
+| 无 `DISPLAY` | 无法验证点击、拖拽、焦点、托盘菜单 | 容器无 X/Wayland 会话 |
+| 无 `/dev/kvm` | Android 模拟器不可用 | LXC 未透传设备节点（宿主 `kvm_amd` 已加载且 `nested=1`，CPU 有 `svm`——**只是设备节点缺失**） |
+| 无 Windows / macOS | 无法出对应安装包 | Flutter 要求原生主机（见 `super_partyb#31`） |
+
+### ⚠️ Xvfb 下的「窗口出现了」**不是**渲染正确的证据
+
+`xvfb-run` 下渲染**不稳定**：实测同一命令有时窗口创建成功，有时停在 10x10
+占位窗。因此：
+
+```
+❌ 不要用「xvfb-run 下窗口出现了」当作渲染正确的证据
+✅ xvfb-run 只能证明「进程能启动并存活」（`timeout 15 ./spb_desktop` 退出码 124）
+```
+
+`Xvfb` 验证的边界与可/不可验证项，见 `AGENTS.md` §9。
+
+---
+
+## 1. 自动化前置门禁（本机可跑，先全绿再上人工）
+
+在**仓库根**逐条执行。任何一条不绿都不必开始人工项——那些问题人工也复现不了
+更精确的原因。
+
+```bash
+# 0) Flutter SDK 需显式在 PATH（否则 dart 不在 PATH）
+export PATH="$HOME/.local/opt/flutter/bin:$PATH"
+
+# 1) 分层规则（纯 Dart 包禁止依赖 Flutter；单向依赖）
+bash tools/check_layering.sh
+# 期望：✅ 分层规则检查通过
+
+# 2) 静态分析（含 info 级）
+dart analyze --fatal-infos .
+# 期望：No issues found!
+
+# 3) 格式门禁
+bash tools/check_format.sh
+# 期望：✅ 格式检查通过
+
+# 4) 逐包测试
+#    ⚠️ spb_domain / spb_features 必须在**各自目录**下跑
+#    （event_types_consistency_test 用相对路径读 lib/src/event_reducer.dart）
+for p in spb_core spb_models spb_api spb_data spb_design spb_ui spb_platform; do
+  (cd packages/$p && dart test)
+done
+(cd packages/spb_domain   && dart test)     # +665
+(cd packages/spb_features && flutter test)  # +932
+(cd apps/spb_desktop      && flutter test)  # +133
+(cd apps/spb_mobile       && flutter test)  # +86
+# 期望：全部 `All tests passed!`
+
+# 5) Linux release 构建
+cd apps/spb_desktop && flutter build linux --release
+# 期望：exit 0
+
+# 6) 分发依赖打包（把非系统库打进 bundle + 修 RUNPATH）
+cd /home/jim/git.atjog.com/dever/super_partyb-flutter
+bash tools/bundle_linux_deps.sh
+# 期望：复制 libkeybinder-3.0.so.0 等；无错误
+
+# 7) 自包含校验
+cd apps/spb_desktop/build/linux/x64/release/bundle
+LD_LIBRARY_PATH= ldd spb_desktop | grep "not found"     # 期望：无输出
+for f in lib/*.so*; do patchelf --print-rpath "$f"; done # 期望：无 /home/
+patchelf --print-rpath spb_desktop                       # 期望：$ORIGIN/lib
+
+# 8) 进程能启动并存活（唯一能自动化的运行时证据）
+cd /home/jim/git.atjog.com/dever/super_partyb-flutter/apps/spb_desktop
+timeout 15 ./build/linux/x64/release/bundle/spb_desktop
+# 期望：退出码 124（存活到超时 = 正常）
+```
+
+**基线计数**（2026-10 实测，供对照；数量随开发增长，只需关注「是否全绿」）：
+spb_core 30 / spb_models 234 / spb_api 343 / spb_domain 665 / spb_data 49 /
+spb_design 24 / spb_ui 9 / spb_platform 67 / spb_features 932 /
+spb_desktop 133 / spb_mobile 86。
+
+---
+
+## 2. 人工项清单
+
+> 前置：在一台**有真实桌面环境**的 Linux 机器上，用 §1 构建出的
+> `bundle/` 运行 `./spb_desktop`（或对应平台包）。
+>
+> 每项格式：**前置 / 操作 / 期望 / 失败时排查点**。
+
+### 2.1 多窗口语义（**主窗口临时变身**，M0 头号风险）
+
+**背景**：`window_manager` **做不到**真多窗口（`get_window()` 是
+`gtk_widget_get_toplevel(view)`，一个 engine 只有一个 view；公开 API 里没有
+创建窗口的方法）。当前实现是「主窗口临时变身」——按 `Alt+Space` 时保存几何、
+改尺寸为主 `quickCaptureWithAttachments` 规格、置顶、居中，导航到 `/overlay`；
+提交或 `Esc` 后还原。详见 `AGENTS.md` §6.5。
+
+- **前置**：主窗口已打开且显示某个对话；`~/.pigo` 或同步目录不要求。
+- **操作**：按 `Alt+Space` 进入悬浮模式；按 `Esc` 退出。
+- **期望**：
+  - [ ] 窗口变为 `720×360`（`WindowSpec.quickCaptureWithAttachments`，允许拖高）、
+        置顶（其它窗口盖不住它）、不出现在任务栏。
+  - [ ] `Esc` 后窗口几何、置顶标志、任务栏可见性**全部还原**为进入前的状态。
+  - [ ] 反复进出 10 次不出现尺寸漂移（每次还原回同一个几何）。
+  - [ ] **已知差异**：悬浮期间**看不到背后的对话**——主窗口被「顶替」了。
+        这是单窗口约束下的有意取舍（真多窗口需换 `desktop_multi_window`，
+        每个窗口是独立 isolate，Riverpod/认证/Dio 都不共享）。**看到这一点
+        不是 bug**。
+- **失败时排查点**：
+  - 窗口不置顶 → 检查合成器是否允许 `alwaysOnTop`（Wayland 下部分合成器
+    忽略 `skipTaskbar`）。
+  - `Esc` 后没还原 → `PlatformDesktopCapabilities.exitOverlayMode` 是否被调用；
+    `isOverlayModeActive` 是否为 true（该 getter 是唯一真相，见其文档）。
+  - 尺寸漂移 → `enterOverlayMode` 是否在导航**前**完成（否则会先看到全尺寸
+    主窗闪一下再缩，见 `_navigateToRole` 的注释）。
+
+### 2.2 托盘菜单（6 项，见 `AGENTS.md` §6.11）
+
+- **前置**：Linux 需 `libayatana-appindicator3`（§7 的系统依赖）；桌面环境
+  需支持系统托盘/状态栏（GNOME 需 AppIndicator 扩展）。
+- **操作**：点托盘图标展开菜单，逐项点击。
+- **期望**（6 项，顺序见 `_installTrayMenu`）：
+  - [ ] **显示主窗口** → 主窗口显示并置前。
+  - [ ] **快速输入（Alt+Space）** → 与 §2.1 同一路径进悬浮模式。
+  - [ ] **立即同步交付物** → 触发一次同步（未注入回调时应**置灰**）。
+  - [ ] **打开同步目录** → 文件管理器打开配置的同步目录；
+        **未配置目录时应置灰**（此时 `revealPath` 拿到空串会落到用户主目录，
+        看起来像「功能坏了」而不是「还没配」）。
+  - [ ] **同步设置…** → 直达 `/settings/sync` 页（**不是**设置页首个 tab）。
+        该项**始终可用**（它正是配置入口，禁用会让未配置用户死锁）。
+  - [ ] **退出** → 应用完整退出（先摘监听器、注销快捷键、销毁托盘图标）。
+- **失败时排查点**：
+  - 菜单不显示 → AppIndicator 依赖是否装上；`caps is TrayActionTarget`
+    是否为真（`attach()` 按接口判能力，Noop 实现会跳过接线）。
+  - 「打开同步目录」点了没反应 → 该 Linux 托盘忽略 `enabled` 字段时，
+    动作内部还有一层防御（`SpbLog.warn('未注入回调')`），看日志确认。
+
+### 2.3 `Alt+Space` 全局快捷键进出悬浮模式
+
+- **前置**：`hotkey_manager` 依赖 `libkeybinder-3.0`（§7）。⚠️ 该组合在部分
+  桌面环境**已被系统占用**（GNOME 窗口菜单、Windows 系统菜单）。
+- **操作**：在**非**应用窗口获得焦点时按 `Alt+Space`；再按 `Esc`。
+- **期望**：
+  - [ ] 全局生效（焦点在别的程序上也能唤出悬浮输入）。
+  - [ ] 与 §2.1 的进/出行为一致。
+  - [ ] **冲突时**：若系统已占用该组合，注册应失败并**降级**（记日志、
+        不崩溃、不影响其它功能）——确认没有「按了没反应且无任何提示」。
+- **失败时排查点**：
+  - 注册失败 → 换一个未被占用的组合（`HotkeyBinding` 用字符串键名，
+    便于扩展），或改系统快捷键设置。
+  - `libkeybinder-3.0.so.0` 加载失败 → 是否跑了 `tools/bundle_linux_deps.sh`
+    （未跑会把开发机绝对路径写进 RUNPATH，见 §7）。
+
+### 2.4 OIDC loopback 全流程（M0 阻塞项）
+
+- **前置**：IdP 生产已注册**桌面 public client**（loopback，
+  `tokenEndpointAuthMethod=none`，`requirePkce=true`）——**当前未完成**，
+  见 §3。在此之前登录只能走「粘贴导入会话」降级路径。
+- **操作**：登录页 → 点登录 → 系统浏览器打开 IdP 授权页 → 完成认证 →
+  浏览器回跳 `http://127.0.0.1:<随机端口>/callback`。
+- **期望**：
+  - [ ] 客户端 bind 一个 loopback 随机端口成功（`LoopbackRedirectServer`）。
+  - [ ] 授权 URL 带 `code_challenge`（S256）与 `state`（CSRF）。
+  - [ ] 回跳后 `state` 校验通过，用 `code` + `code_verifier` 换到 token。
+  - [ ] 登录态落盘（`SecureTokenStore`，`flutter_secure_storage`）。
+  - [ ] 重启应用后仍是登录态；过期后能刷新/重登。
+- **失败时排查点**：
+  - `400 invalid_request` → IdP 未注册该 `redirect_uri`（loopback 端口是
+    通配的，fosite 原生支持；**client 必须存在**）。
+  - 换 token 401 → client 不是 public（`token_endpoint_auth_methods_supported`
+    只有 `client_secret_basic`/`post`），见 §3。
+  - 回跳后无反应 → 浏览器是否真的回到了 loopback 端口（防火墙/浏览器拦截）。
+  - 完整链路与设计依据见 `docs/rfc8252-loopback-signin.md`。
+
+### 2.5 剪贴板文件粘贴（三平台原生 channel，见 `AGENTS.md` §6.8）
+
+- **前置**：三平台原生侧**均已注册** `MethodChannel('com.atjog.spb/clipboard_files')`
+  （Linux `my_application.cc` / Windows `flutter_window.cpp` /
+  macOS `AppDelegate.swift`）。
+- **操作**：在文件管理器里复制若干文件 → 切到应用 → 在输入区按 `Ctrl+V`。
+- **期望**：
+  - [ ] 文件被识别为附件 chip（不是粘贴成一串路径文本）。
+  - [ ] **多文件**都能贴上（逐个 chip）。
+  - [ ] 从网页复制文件（而非本地文件）时**不弹错误弹窗**——原生侧刻意不回
+        error，函数静默返回空，只是不产生 chip。
+  - [ ] 纯文本粘贴不受影响。
+- **失败时排查点**：
+  - channel 名写错 → **不会报错**，只会静默返回空（三平台原生源码顶部都有
+    「写错不会报错」的注释）。逐个核对 channel 名。
+  - `MissingPluginException` → channel 未注册（单元测试环境或将来新增平台），
+    函数静默返回空——这是**设计如此**，不是缺陷。
+
+### 2.6 交付物同步写用户所选目录（macOS entitlements）
+
+- **前置**：macOS 包（`Release.entitlements` / `DebugProfile.entitlements`
+  **两份均已含** `com.apple.security.files.user-selected.read-write`）。
+  该键是 `file_selector` 的 macOS 要求——沙箱下访问用户所选目录。
+- **操作**：设置里选一个同步目录 → 触发同步 → 确认文件真的落盘。
+- **期望**：
+  - [ ] 能选中目录且**写入成功**（不是「同步报写入失败」）。
+  - [ ] 同步语义与 Tauri 迁移版一致（见 `AGENTS.md` §10「交付物同步的既有
+        语义」）：单向 UFS→本地、`updated_since` 增量、感知 `deleted_at`
+        远端删除、`.part` + rename 原子写入、路径穿越防御、失败项不写状态。
+  - [ ] 「全部 group」与「选中若干」共用状态键 `__workspace__`：切换范围
+        **不**全量重拉；**换目录才重置**状态。
+- **失败时排查点**：
+  - 「同步报写入失败」 → 极可能是 entitlements 缺该键。**debug 构建沙箱较松
+    可能不暴露，只在正式包上现形**——务必用 release 包验证。
+  - 路径穿越被拒 → 属预期防御（服务端返回的路径不应逃出同步目录）。
+
+---
+
+## 3. 阻塞条件（跨仓生产配置，本仓无法完成）
+
+以下两项在 **IdP（`id-provider`）侧**，属生产配置变更，**本仓库无法闭合**：
+
+### 3.1 桌面端 public client（loopback）
+
+需在 IdP 新增一个**桌面专用 public client**：
+
+- `redirectUris` 含 loopback（`http://127.0.0.1:<任意端口>/callback`，
+  fosite 原生支持端口通配）；
+- `token_endpoint_auth_method = none`（public client，客户端无 `client_secret`）；
+- `requirePkce = true`（客户端已发 S256 challenge，但不靠服务端兜底）。
+
+在此之前桌面登录只能走「粘贴导入会话」降级路径。
+
+### 3.2 移动端 public client（`partyb://oidc/callback`）
+
+Android `<intent-filter>` 与 iOS `CFBundleURLTypes` **已注册**（
+`docs/mobile-oidc-deeplink.md` §0），回调接收/解析/state 校验/换 token
+**已实现并单测**（21 例）。但**仍不能真正登录**，缺两个 IdP 侧配置：
+
+1. 把 `partyb://oidc/callback` 加进该 client 的 `oauth_clients.redirectUris`
+   （当前只有三个网关回调）；
+2. 新建一个 **public client**（`token_endpoint_auth_method=none`）+ 强制 PKCE。
+
+> IdP Go 版已支持 public client（`oauthclient.Create` 接受
+> `tokenEndpointAuthMethod=none`，`oidc.Client.GetTokenEndpointAuthMethod`
+> 读真实列值）并强制 public client 使用 PKCE（`EnforcePKCEForPublicClients`）。
+> 故**只差注册这一步**。
+
+### 3.3 其它环境阻塞
+
+| 项 | 状态 | 参考 |
+|---|---|---|
+| Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb#30` |
+| Windows / macOS 出包需原生主机 | 已知限制 | `AGENTS.md` §8 |
+| iOS 出包需 Apple Developer 账号（$99/年） | 待决策 | `super_partyb#31` |
+
+---
+
+## 4. 验证结果记录
+
+人工验证完成后，请在本节追加一行（便于 issue #4 收口时对照）：
+
+| 日期 | 平台/桌面环境 | 结果 | 备注 |
+|---|---|---|---|
+| — | — | — | 待填 |
