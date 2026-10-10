@@ -13,13 +13,43 @@
 /// | `image` | ✅ 已实现 |
 /// | `external`（跳 UFS 预览页） | ✅ 已实现 |
 /// | `spec`（`{root, elements}` 结构化表单） | ✅ 已实现（内容层判定，见 [resolveTextPreview]） |
-/// | `dashboard` / `map` | ❌ **需重型渲染组件，属 issue #12 的待决策点** |
+/// | `dashboard` / `map` | ❌ 未实现（issue #12 决策点，见下） |
 ///
 /// `spec` 与另两类**不是一个决策**：客户端已有 `SpecUiCard` + [parseSpecUi]，
 /// 缺的只是「从任意 JSON 里把 schema 提取出来」，故由
 /// [extractSpecSchemaFromUnknown] 补上，**不需要**引入新的渲染器。
-/// `dashboard`（`{type, components[]}` 网格布局）与 `map`（坐标 + 底图）的形状与
-/// `{root, elements}` **不兼容**，需各自的渲染技术栈，留待 issue #12 决策。
+///
+/// ## ⚠️ `dashboard` / `map` 的真实成本（2026-10 核实，修正早期判断）
+///
+/// 早期注释写的是「需**各自的渲染技术栈**」「`map` 需**底图**」——**与上游实测
+/// 不符**，容易把一件小活估成需要引 SDK 的大活：
+///
+/// - **`map`**：webapp `MapSchemaRenderer.tsx` 自称「一期轻量实现：SVG 归一化
+///   轨迹图（**无底图、无高德 JS key 依赖**）」，实现只有 ~25 行投影数学
+///   （经纬度 → SVG 坐标，等比缩放 + 居中）＋ marker 列表 ＋「在高德地图打开」
+///   外链。**没有地图 SDK，没有瓦片，没有密钥。** Flutter 侧用 `CustomPaint`
+///   或 `Transform` + `Positioned` 即可，**不需要任何新依赖**。
+/// - **`dashboard`**：webapp 有**两个不同**的渲染器，别混为一谈——
+///   ① `DashboardRenderer.tsx`（`{type:"dashboard", components:[{type,layout}]}`
+///   网格布局）只认 **3 个**组件类型（`stat-cards` / `table` / `chart`，共 364 行）；
+///   ② `JsonUiSchemaRenderer.tsx`（`{root, elements}`，即本客户端的 `spec`）。
+///   且**上游真实产出的 `dashboard.spec.json` 用的是 ②的形状**（见 `super_partyb`
+///   `apps/miniapp/src/lib/spec-demo-fixtures.ts` 的 `realDashboardDoc`，注释自称
+///   「bcc 工作区实际产出的 dashboard.spec.json 回归基准」，里面是
+///   `Stack`/`Grid`/`Metric`/`Chart`/`Alert`/`Table` 的 `root`/`elements` 结构）——
+///   **不是** ①的网格格式。
+///
+/// ## 由此暴露的真实缺陷（已另开 issue #27）
+///
+/// 上述真实看板**已被本客户端识别为 `spec`**（`resolveTextPreview` 命中），但
+/// 渲染结果是**一行「（不支持的组件类型：unknown）」**——因为它的容器类型
+/// `Stack` / `Grid` 与叶子 `Chart` / `Table` 都不在本客户端的 12 个白名单里，
+/// 而 [SpecUiCard] 的 `unknown` 分支**不递归 children**，于是连白名单内的
+/// `Metric`（「上证指数 3864.37」）也一起被吞掉。
+///
+/// 对照 webapp `JsonUiSchemaRenderer.renderFallback`：它在未知类型时**会**渲染
+/// `element.children`（`element.children.length > 0 && renderChildren(...)`）。
+/// 故这不是「webapp 也不支持」，而是**本客户端的降级策略比上游更保守**。
 ///
 /// 识别不出来时**一律退化为 `text`**（见 [resolveTextPreview]），而不是假装
 /// 识别出来推给 `external`——后者会让用户从「能看原文」退化成「跳出去」。
