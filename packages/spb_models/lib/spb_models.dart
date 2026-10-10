@@ -10,6 +10,7 @@ library;
 //   ChatGroup / ActiveSession       —— 对话分组与 agent 绑定会话
 //   ChatInboxMessage                —— 收件箱消息（pending 接口的真实返回）
 //   ChatTurn                        —— 对话轮次
+//   ChatTurnSchedule                —— 自动续跑排程（camelCase；policyJson 取 group 归属）
 //   ListResponse / CursorPage / StreamCursor —— 分页与 SSE 续接游标
 //   ChatSearchHit                —— 搜索命中项（turn 摘要，**不是** ChatEvent）
 //   TurnRuntime                  —— turn 运行时参数（超时兜底阈值，只读）
@@ -32,6 +33,7 @@ export 'src/chat_group.dart';
 export 'src/chat_inbox_message.dart' show ChatInboxMessage;
 export 'src/chat_search_hit.dart';
 export 'src/chat_turn.dart';
+export 'src/chat_turn_schedule.dart';
 export 'src/context_usage.dart';
 export 'src/turn_runtime.dart';
 export 'src/chat_turn_summary.dart';
