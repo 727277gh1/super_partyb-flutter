@@ -757,6 +757,162 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 **「同步设置…」为什么始终可用**：它正是**配置入口**，禁用会让未配置的用户无法
 完成配置（死锁）。
 
+### 6.12 i18n：**当前不做**（决策记录，issue #23）
+
+**结论：客户端暂不接入国际化（i18n），界面文案保持硬编码中文。**
+
+这是一个**决策**，不是缺口。本节存在的意义就是让后来者不必重新论证一遍——
+若要推翻，请先读完下面「重新评估条件」并给出满足其中一条的事实。
+
+#### 当前硬编码量（可复核）
+
+```bash
+# 决策时（issue #23 创建于 f446250）的基线：782
+# 当前（HEAD）量：808 —— 随 #15–#22 的实现自然增长
+cd packages/spb_features && grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart lib | wc -l
+
+# 全仓（9 个 packages + 2 个 apps 的 lib/）
+grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
+
+# 是否已接入 i18n（应为空输出）
+grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
+grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
+```
+
+量级分布（HEAD，字符串字面量数）：`spb_features` 808、`spb_desktop` 144、
+`spb_domain` 143、`spb_models` 97、`spb_mobile` 81、`spb_api` 60、`spb_platform` 49、
+`spb_data` 23、`spb_ui` 4、`spb_design` 3、`spb_core` 0。
+
+#### 为什么不做
+
+1. **真正的成本不在 Widget 层，而在纯 Dart 层**。文案并非只出现在 `build()` 里：
+   `SpbError.message`（`spb_core`）、`GoalGateStoppedItem.message`（`spb_domain`，
+   reason → 中文的映射，且需与 miniapp 逐条一致）、`ConfirmationNotificationText`
+   （`spb_domain`，OS 通知标题/正文）、`TextPreviewPayload` 的失败原因等都是
+   **纯 Dart 生成的字符串**——这正是它们能被无头单测的原因（见 §4）。
+   做 i18n 就得把这些文案改成「消息码 + 参数」，并把 locale 穿进 `spb_domain` /
+   `spb_core`。那是一次**跨包重构**，不是「加几个 ARB 文件」；而把 locale 穿进去
+   会让这四个纯 Dart 包第一次依赖「当前语言」这个环境态，可测性与分层约束
+   （§4）都要重新论证。
+2. **成本此刻并不「最便宜」**。issue #23 正文的判断是「越晚越贵」，这对
+   「文案只活在 Widget 里」的项目成立；但本仓库的文案有一半在领域层，晚做的
+   边际成本主要来自**领域层文案的耦合**，而那一层是稳定的（reason 枚举、错误
+   分类不随 UI 迭代变化）。UI 层字符串增长快但提取机械、可增量做。
+3. **无明确目标语言**。webapp 有完整的 `next-intl` 国际化（`messages/en.json` +
+   `zh.json`，各约 1830 条），但那是**浏览器场景**：locale 来自 HTTP 头/URL，
+   且已有双语用户。客户端是原生 App，locale 来自 OS 设置，而当前产品用户群是
+   中文用户——引入 en 只会得到一个**没人验证过的英文界面**（比中文硬编码更糟：
+   用户以为有英文支持，点进去发现是半成品）。
+4. **局部「不引 `intl`」的三处**（`spb_domain` 的 `artifact_tree.dart` 的 locale
+   排序、`goal_history_panel.dart` / `auto_schedules_panel.dart` 的固定日期格式）
+   **不构成**本决策的理由——它们只是「为一种固定格式不引整套 locale 数据」的
+   局部取舍，与本节的结论无关。不要拿它们当依据。
+
+#### 重新评估条件（满足**任一条**即可重开）
+
+| # | 条件 | 为什么是它 |
+|---|---|---|
+| 1 | 产品**进入非中文市场**，且有明确目标语言与验收人 | 无目标语言时引入 i18n 只会产出无人验证的翻译 |
+| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 808） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
+| 3 | 出现「**同一文案在 ≥3 处需按语境改写**」的实际需求 | 说明缺的是 message key 机制而非翻译；此时直译方案已不够用 |
+
+#### 若将来要做（供重开时参考，**不要现在就动手**）
+
+- 方案取舍：`flutter_localizations` + ARB（官方、`gen-l10n`、支持复数/性别）vs
+  自研轻量 `Map<String, String>`。倾向官方方案，但**必须先解决第 1 条的领域层
+  文案问题**（否则两套机制并存）。
+- **「界面语言」与「Agent 回复语言」是两个独立维度**：后者已有
+  `replyLanguage` 偏好（`user_preferences_card.dart`，`'auto'` 表示跟随输入，
+  非法值服务端 400 而非静默回落）。webapp 的 `ReplyLanguagePanel` 注释专门强调过
+  「两者独立，勿合并」——重开时不要顺手把它们合成一个设置。
+- 分期建议：先做 UI 层（`spb_features` / `spb_ui` / `spb_design`），领域层文案
+  作为独立一期（需先定「消息码 + 参数」契约）。
+
+### 6.13 覆盖率与 golden 测试（issue #25）
+
+#### 覆盖率：`tools/coverage.sh`
+
+```bash
+bash tools/coverage.sh                # 全包，产物 coverage/lcov.info + 汇总表
+bash tools/coverage.sh spb_domain     # 单包（调试用）
+bash tools/coverage.sh --summary-only # 不跑测试，只汇总已有产物（CI summary 用）
+```
+
+**为什么需要脚本而不是直接 `flutter test --coverage`**：两种包的产物格式**不同**。
+
+| 包类型 | 命令 | 原始产物 | 要 lcov 还得跑 |
+|---|---|---|---|
+| 纯 Dart（`spb_core/models/api/domain`） | `dart test --coverage` | `coverage/test/*.json` | `dart run coverage:format_coverage --lcov ...` |
+| 含 UI（其余 + 两个 app） | `flutter test --coverage` | **直接就是** `coverage/lcov.info` | 不需要 |
+
+踩过的坑：对 `flutter test` 的产物再跑一次 `format_coverage` 会报「in 目录里没有可
+解析的文件」——因为 `lcov.info` 不是它的输入格式。
+
+`format_coverage` 的 `--report-on` 必须传**绝对路径**（`$PWD/lib`）：传相对路径会让
+`SF:` 前缀随工作目录变化，同一文件在合并时被算两次。
+
+**当前基线（2026-10，本机实测）**：
+
+| 包 | 覆盖率 | 包 | 覆盖率 |
+|---|---|---|---|
+| `spb_features` | **93.7%** | `spb_api` | 71.7% |
+| `spb_domain` | 86.5% | `spb_desktop` | 58.2% |
+| `spb_core` | 84.5% | `spb_mobile` | 53.4% |
+| `spb_design` | 80.0% | `spb_platform` | 52.5% |
+| `spb_ui` | 73.6% | `spb_models` | 50.6% |
+| | | `spb_data` | **42.2%** |
+| | | **总计** | **76.3%**（13482/17677） |
+
+⚠️ issue #25 曾猜「90% 集中在 `spb_domain`，`spb_features` 可能大量是挂载即通过的
+烟雾测试」——**实测相反**：`spb_features` 是最高的 93.7%。要补测试的是 **`spb_data`
+（42.2%）与 `spb_models`（50.6%）**。数据会随代码变动，用上面的命令重跑而不是
+引用本表。
+
+> 本表曾标「当前基线」却已漂移（总计 76.6% → 76.3%，`spb_models` 49.6% → 50.6%）
+> ——漂移与 `#26` 切片 A 的新增代码/测试同批出现（`spb_models` 上升的合理解释是
+> `ChatGroup.toJson` 的 round-trip 用例，未逐行归因）。**改完代码顺手重跑一次**，
+> 别让「当前」二字失真。
+
+#### golden：只给「稳定 + 纯展示 + 改错代价高」的组件加
+
+```bash
+cd packages/spb_ui       && flutter test --update-goldens test/golden_test.dart
+cd packages/spb_features && flutter test --update-goldens test/chat/golden_test.dart
+```
+
+**为什么不铺到全仓**：golden 是**维护负担**——每次有意改样式都要更新基线，且基线
+PNG 占仓库体积。当前只给 5 个 `spb_ui` 组件（`ErrorBanner` / `ErrorState` /
+`EmptyState` / `HintLine` / `SectionTitle`，共 8 张）与 `spb_features` 的
+`SpecUiCard`（3 张）加。
+
+**`CopyIconButton` 有意不加**：它有异步状态（复制中/已复制/复位），渲染结果依赖
+计时器，基线会 flaky。它的逻辑已有单测。
+
+#### 两条容易踩的 golden 约定
+
+1. **字体必须显式装载**（`test/support/golden_fonts.dart`）。`flutter test` 默认用
+   **Ahem**（每个字形渲染成实心方块）——基线无法人工审阅（一张全是方块的 PNG 看
+   不出「按钮是不是错位了」）。装载 Roboto + MaterialIcons 后图标与拉丁字母真实渲染。
+   **不装载系统字体**：本机 Debian 与 CI 的 ubuntu-latest 字体集不同 → 基线必然有
+   一边失败。字体从 `FLUTTER_ROOT/bin/cache/artifacts/material_fonts/` 取，**随
+   Flutter 版本锁定**（本仓锁 3.47.5），故本机与 CI 拿到逐字节相同的字体。
+2. **中文基线是 tofu（空心方块）——预期行为**。SDK 不带 CJK 字体。golden 锁的是
+   **布局**（位置/尺寸/间距/颜色/换行点），tofu 与真字形在这些维度上一致。看懂文案
+   的断言用 `find.text`（两者分工明确）。
+
+#### 跨包重复的测试辅助文件有守卫
+
+Dart 的 import 只能引用包内的 `lib/`，测试辅助代码**无法**跨包 import。故
+`golden_fonts.dart` 在 `spb_ui` 与 `spb_features` 各有一份，由
+`tools/check_test_support_sync.sh` 保证逐字节相同（CI 已接入）。
+
+**风险是真实的**：两份若行为不一致，本机与 CI 装载不同字体，golden 基线必然有一边
+失败——而报错只说「像素不匹配」，指不到根因。
+
+> ⚠️ 写这类守卫脚本时，变量名**不能**叫 `GROUPS`——那是 bash 的**特殊变量**（当前
+> 用户的组 ID 数组）。赋值会被静默忽略，循环里拿到组 ID 而不是路径。踩过一次，
+> 故这里用 `SYNC_GROUPS`。
+
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
