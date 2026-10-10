@@ -455,7 +455,49 @@ class _MyTurnsPage extends ConsumerWidget {
         source: source,
         groupId: groupId,
       ),
-      onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
+      // 点击一行 → 弹轮次详情（issue #19）。
+      //
+      // 不再只是 `context.go(chat(groupId))`：那样只能跳到对话列表，
+      // 用户看不到「这一轮到底发生了什么」。turnId 现在会传进来，
+      // 故可以直接拉详情。
+      onOpenTurn: (groupId, turnId) =>
+          _showTurnDetail(context, ref, groupId, turnId),
+    );
+  }
+
+  /// 弹「轮次详情」对话框。
+  ///
+  /// ## 为什么用对话框（桌面端）而不是底部弹层
+  ///
+  /// 与 AGENTS.md §6.10 的两端载体约定一致：桌面端有宽屏空间，对话框能一次
+  /// 展示更多事件；移动端走底部弹层（见 `spb_mobile` 的同名方法）。
+  Future<void> _showTurnDetail(
+    BuildContext context,
+    WidgetRef ref,
+    String groupId,
+    String turnId,
+  ) async {
+    final loader = ref.read(loadTurnDetailProvider);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        key: const ValueKey('turn-detail-dialog'),
+        contentPadding: EdgeInsets.zero,
+        // 固定尺寸：详情是长列表，随内容撑开会让对话框抖到超出屏幕。
+        content: SizedBox(
+          width: 560,
+          height: MediaQuery.sizeOf(dialogContext).height * 0.75,
+          child: TurnDetailSheet(
+            groupId: groupId,
+            turnId: turnId,
+            load: loader.call,
+            // 不注入文件回调：下载 / 打开 / 预览的实现是 `_ChatPageState` 的
+            // 私有方法（`_ensureAgentFileLocal` 等），从本页取不到；把它们
+            // 提成 provider 属独立重构，不在本 issue 范围。未注入时
+            // `AgentFileCard` 只渲染文件信息、不渲染菜单项（其既有约定）。
+          ),
+        ),
+      ),
     );
   }
 }

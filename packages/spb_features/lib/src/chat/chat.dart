@@ -66,4 +66,5 @@ export 'search_page.dart';
 export 'spec_ui_card.dart';
 export 'thought_tile.dart';
 export 'tool_call_tile.dart';
+export 'turn_detail_panel.dart';
 export 'user_message_bubble.dart';

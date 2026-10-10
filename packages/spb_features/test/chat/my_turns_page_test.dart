@@ -47,7 +47,7 @@ void main() {
   Widget host({
     List<ChatTurnSummary>? items,
     Object? error,
-    void Function(String)? onOpenTurn,
+    void Function(String groupId, String turnId)? onOpenTurn,
     MyTurnsFilter initialFilter = const MyTurnsFilter(),
     String? groupLabel,
     List<FetchArgs>? calls,
@@ -99,26 +99,50 @@ void main() {
     expect(find.text('定时'), findsOneWidget);
   });
 
-  testWidgets('点击轮次跳转携带正确的 groupId', (t) async {
-    String? openedGroupId;
+  testWidgets('点击轮次跳转携带 groupId + turnId 两个参数（issue #19）', (t) async {
+    // ## 这个测试防的是什么
+    //
+    // 回调签名曾经是 `void Function(String groupId)`——**turnId 被丢弃**，
+    // 调用方无法拉取该轮详情（只能跳到对话列表）。签名改宽后，若调用处仍只传
+    // groupId，编译期不会报错（多余参数在 Dart 里是编译错误，但**少**传会——
+    // 故这里断言两个值都真的到位，而不是只看「回调被调了」）。
+    final opened = <(String, String)>[];
     await t.pumpWidget(
       host(
         items: [
-          _turn(groupId: 'grp_x'),
-          _turn(turnId: 'turn_2', groupId: 'grp_y', inputPreview: '整理周报'),
+          _turn(turnId: 'turn_a', groupId: 'grp_x'),
+          _turn(turnId: 'turn_b', groupId: 'grp_y', inputPreview: '整理周报'),
         ],
-        onOpenTurn: (gid) => openedGroupId = gid,
+        onOpenTurn: (gid, tid) => opened.add((gid, tid)),
       ),
     );
     await t.pumpAndSettle();
 
     await t.tap(find.text('帮我看看这个报错'));
     await t.pump();
-    expect(openedGroupId, 'grp_x');
+    expect(opened, [('grp_x', 'turn_a')]);
 
     await t.tap(find.text('整理周报'));
     await t.pump();
-    expect(openedGroupId, 'grp_y');
+    expect(opened, [('grp_x', 'turn_a'), ('grp_y', 'turn_b')]);
+  });
+
+  testWidgets('未注入 onOpenTurn 时行不可点（不渲染 chevron）', (t) async {
+    await t.pumpWidget(host(items: [_turn()]));
+    await t.pumpAndSettle();
+
+    expect(
+      t
+          .widget<ListTile>(
+            // key 挂在 `_TurnTile` 上，ListTile 是它的子项。
+            find.descendant(
+              of: find.byKey(const ValueKey('my-turn-turn_1')),
+              matching: find.byType(ListTile),
+            ),
+          )
+          .onTap,
+      isNull,
+    );
   });
 
   testWidgets('空态友好提示', (t) async {

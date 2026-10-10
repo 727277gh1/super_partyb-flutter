@@ -1,5 +1,6 @@
 import 'package:spb_models/spb_models.dart';
 
+import 'deliverable_sync.dart' show ttsRelPrefix;
 import 'spec_ui.dart';
 import 'tts_audio_path.dart';
 
@@ -860,6 +861,85 @@ final class AgentFileItem extends ConversationItem {
 
   /// 是否已被删除（UFS 软删，下载入口应禁用）。
   bool get isDeleted => action == 'deleted';
+
+  /// 从一条 `agent.file.*` 事件构造文件项。
+  ///
+  /// ## 为什么需要它（而不是让调用方自己拼）
+  ///
+  /// 判据不止「读几个字段」：路径要归一化（`\\` → `/`、折叠重复斜杠、去首尾
+  /// 斜杠）才能得到与归约器**一致**的身份键，还要判 TTS 产物前缀、算展示名
+  /// 回退。详情面板（[TurnDetailPanel]）逐事件渲染、不走归约，若自己拼一份，
+  /// 两份规则就会各自漂移——典型症状是「同一个文件在对话页显示已删除，在详情
+  /// 页还能下载」。故把它作为**唯一工厂**暴露出来，归约器与本工厂共用实现。
+  ///
+  /// ## 返回 null 的两种情形（都是异常载荷，不是正常删除）
+  ///
+  /// 1. 路径归一化后为空（无 `relative_path` / `path` / `name` 可用）；
+  /// 2. **非删除**事件缺 `ufs_file_id`（删除事件本就没有该字段，不算异常）。
+  ///
+  /// 与归约器 [_mergeAgentFile] 的判据逐条一致：归约时这两种情况是 `return`
+  /// （丢弃该事件），本工厂用 null 表达同一语义，由调用方决定丢弃还是兜底。
+  static AgentFileItem? fromEvent(ChatEvent ev) {
+    final action = ev.agentFileAction;
+    if (action == null) return null;
+
+    final identity = _normalizeRelPath(ev.relativePath);
+    if (identity.isEmpty) return null;
+
+    final isDeleted = action == 'deleted';
+    if (!isDeleted && (ev.ufsFileId == null || ev.ufsFileId!.isEmpty)) {
+      return null;
+    }
+
+    final fileName = _basename(identity);
+    final displayName = ev.displayName.isEmpty ? fileName : ev.displayName;
+    final relPath = ev.relativePath;
+
+    return AgentFileItem(
+      id: identity,
+      createdAt: ev.createdAt,
+      turnId: ev.turnId,
+      relativePath: relPath,
+      fileName: fileName,
+      displayName: displayName,
+      action: action,
+      ufsFileId: ev.ufsFileId,
+      mimeType: ev.mimeType,
+      sizeBytes: ev.sizeBytes,
+      ttsKind: relPath.startsWith(_ttsProductPrefix)
+          ? parseTTSAudioPath(relPath)?.kind
+          : null,
+      modifiedAt: action == 'modified' ? ev.createdAt : null,
+      deletedAt: action == 'deleted' ? ev.createdAt : null,
+    );
+  }
+
+  /// 归一化相对路径作身份键。
+  ///
+  /// 与归约器（`EventReducer` 的 `_normalizeRelPath`）逐条一致：`\\` → `/`、
+  /// 折叠重复斜杠、去首尾斜杠。对齐 webapp `normalizeRelPath`。
+  ///
+  /// 单独定义而不从归约器取：`conversation_item.dart` 是归约器的**依赖**（归约
+  /// 器 `import 'conversation_item.dart'`），反向引用会形成循环 import。两处
+  /// 各一行纯字符串处理，且都有测试钉住同一组用例。
+  static String _normalizeRelPath(String path) => path
+      .replaceAll('\\', '/')
+      .replaceAll(RegExp(r'/+'), '/')
+      .replaceFirst(RegExp(r'^/+'), '')
+      .replaceFirst(RegExp(r'/+$'), '');
+
+  static String _basename(String identity) {
+    if (identity.isEmpty) return '';
+    final i = identity.lastIndexOf('/');
+    return i >= 0 ? identity.substring(i + 1) : identity;
+  }
+
+  /// TTS 产物目录前缀。
+  ///
+  /// 复用 `ttsRelPrefix`（`deliverable_sync.dart`）——它锚定路径**开头**，与
+  /// 后端 `groupsync.turnIDFromPath` 的 `HasPrefix` 一致。写死字面量会与
+  /// 归约器各留一份，改一处漏一处。
+  static const _ttsProductPrefix = ttsRelPrefix;
 
   /// 是否为图片（缩略图自动内联渲染的依据）。
   bool get isImage {

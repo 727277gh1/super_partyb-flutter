@@ -155,7 +155,17 @@ class MyTurnsPage extends StatefulWidget {
   final FetchMyTurns fetch;
 
   /// 点击某轮次时跳转到对应对话。
-  final void Function(String groupId)? onOpenTurn;
+  ///
+  /// ## 为什么带 [turnId]（issue #19）
+  ///
+  /// 只给 groupId 的话，点击只能跳到对话列表，用户**看不到「这一轮到底发生
+  /// 了什么」**——而「最近轮次」页的存在意义正是回看某一轮。带上 turnId 后
+  /// 调用方才能拉该轮的详情（`LoadTurnDetail`）。
+  ///
+  /// 签名与 `HabitsPage.onOpenTurn` / `HabitRunsPage.onOpenTurn` 对齐
+  /// （`void Function(String groupId, String turnId)`）——两处语义相同，不应
+  /// 各自一套。
+  final void Function(String groupId, String turnId)? onOpenTurn;
 
   final String title;
 
@@ -437,7 +447,7 @@ class _MyTurnsPageState extends State<MyTurnsPage> {
           turn: items[i],
           onTap: widget.onOpenTurn == null
               ? null
-              : () => widget.onOpenTurn!(items[i].groupId),
+              : () => widget.onOpenTurn!(items[i].groupId, items[i].turnId),
         ),
       ),
     );

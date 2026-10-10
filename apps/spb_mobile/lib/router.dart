@@ -449,7 +449,51 @@ class _MyTurnsPage extends ConsumerWidget {
         source: source,
         groupId: groupId,
       ),
-      onOpenTurn: (groupId) => context.go(SpbRoutes.chat(groupId)),
+      // 点击一行 → 弹轮次详情（issue #19）。
+      //
+      // 不再只是 `context.go(chat(groupId))`：那样只能跳到对话列表，
+      // 用户看不到「这一轮到底发生了什么」。turnId 现在会传进来，
+      // 故可以直接拉详情。
+      onOpenTurn: (groupId, turnId) =>
+          _showTurnDetail(context, ref, groupId, turnId),
+    );
+  }
+
+  /// 弹「轮次详情」底部弹层。
+  ///
+  /// ## 为什么用 `showModalBottomSheet`（与 AGENTS.md §6.10 的两端载体差异一致）
+  ///
+  /// 移动端小屏放不下桌面端那种常驻/大尺寸对话框，底部弹层是既有载体选择
+  /// （`_openDeliverables` / `_openSettings` 等同款）。桌面端用 `showDialog`。
+  ///
+  /// ## 为什么只接 `onDownload`
+  ///
+  /// 移动端注入 `NoopDesktopCapabilities`，`openFile` / `revealPath` 恒 false。
+  /// 接上会让用户点「打开」得到「无法打开文件」——比不展示该项更困惑（面板在
+  /// 回调为 null 时不渲染对应菜单项）。与 `_openDeliverables` 的既有取舍一致。
+  Future<void> _showTurnDetail(
+    BuildContext context,
+    WidgetRef ref,
+    String groupId,
+    String turnId,
+  ) async {
+    final loader = ref.read(loadTurnDetailProvider);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.85,
+        child: TurnDetailSheet(
+          groupId: groupId,
+          turnId: turnId,
+          load: loader.call,
+          // 不注入文件回调：下载 / 打开 / 预览的实现是 `_ChatPageState` 的
+          // 私有方法（`_ensureAgentFileLocal` 等），从本页取不到；把它们提成
+          // provider 属独立重构，不在本 issue 范围。未注入时 `AgentFileCard`
+          // 只渲染文件信息、不渲染菜单项（其既有约定）。
+        ),
+      ),
     );
   }
 }

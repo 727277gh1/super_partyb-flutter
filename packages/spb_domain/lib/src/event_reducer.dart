@@ -4,7 +4,6 @@ import 'conversation_item.dart';
 import 'execution_status.dart';
 import 'gate_decision.dart';
 import 'spec_ui.dart';
-import 'tts_audio_path.dart';
 import 'tts_status.dart';
 import 'turn_activity.dart';
 
@@ -1172,13 +1171,6 @@ class EventReducer {
   /// JSON 解码可能给出 `double`（如 `3.0`），故不能直接 `as int?`。
   static int? _intOrNull(Object? v) => v is num ? v.toInt() : null;
 
-  /// TTS 语音产物路径前缀（复用 `deliverable_sync.ttsRelPrefix` 的同一约定）。
-  //
-  // 这类文件渲染为**语音条目**（而非普通文件卡）：回复正文（reply）展开显示，
-  // 思考填充语（narration）默认折叠——全部展开会淹没对话。
-  // 详见 [parseTTSAudioPath] 与 [AgentFileItem.ttsKind]。
-  static const _ttsProductPrefix = 'reports/tts/';
-
   /// 阶段优先级（action 取最新态）：deleted > modified > created。
   static const _fileStageRank = {'created': 0, 'modified': 1, 'deleted': 2};
 
@@ -1204,82 +1196,46 @@ class EventReducer {
   //    而非跳过。前缀匹配仅识别 `reports/tts/` 下的音频；parseTTSAudioPath
   //    解析不出（如 turn_id 含非法字符）的回落为普通文件卡（ttsKind=null）。
   static void _mergeAgentFile(List<ConversationItem> items, ChatEvent ev) {
-    final action = ev.agentFileAction;
-    if (action == null) return; // 未来新增的 agent.file.* 子类型：暂不处理
+    // 构造交给 [AgentFileItem.fromEvent]（**唯一**工厂）：详情面板逐事件渲染、
+    // 不走归约，若两边各拼一份，规则会各自漂移。这里只负责「合并进列表」。
+    final fresh = AgentFileItem.fromEvent(ev);
+    if (fresh == null) return; // 异常载荷 / 未来新增子类型：暂不处理
 
-    final relPath = ev.relativePath;
-    final identity = _normalizeRelPath(relPath);
-    if (identity.isEmpty) return;
-
-    // TTS 产物判定（前缀锚定开头）。解析不出 kind 则标记为语音条目；
-    // 解析不出（异常路径）回落为普通文件卡，不丢弃。
-    final TtsStreamKind? ttsKind = relPath.startsWith(_ttsProductPrefix)
-        ? parseTTSAudioPath(relPath)?.kind
-        : null;
-
-    // 删除事件无 fileId 是正常的；created/modified 无 fileId 则是异常载荷，跳过。
-    final isDeleted = action == 'deleted';
-    if (!isDeleted && (ev.ufsFileId == null || ev.ufsFileId!.isEmpty)) return;
-
-    final fileName = _basename(identity);
-    final displayName = ev.displayName.isEmpty ? fileName : ev.displayName;
-
-    final existingIdx = _indexOfAgentFile(items, identity);
+    final existingIdx = _indexOfAgentFile(items, fresh.id);
     if (existingIdx == null) {
       // 首次出现：插入新卡。
-      items.add(
-        AgentFileItem(
-          id: identity,
-          createdAt: ev.createdAt,
-          turnId: ev.turnId,
-          relativePath: relPath,
-          fileName: fileName,
-          displayName: displayName,
-          action: action,
-          ufsFileId: ev.ufsFileId,
-          mimeType: ev.mimeType,
-          sizeBytes: ev.sizeBytes,
-          ttsKind: ttsKind,
-          modifiedAt: action == 'modified' ? ev.createdAt : null,
-          deletedAt: action == 'deleted' ? ev.createdAt : null,
-        ),
-      );
+      items.add(fresh);
       return;
     }
 
     // 原地合并：保持首次出现的位置锚点与 createdAt，更新最新态。
     final prev = items[existingIdx] as AgentFileItem;
     final prevRank = _fileStageRank[prev.action] ?? 0;
-    final nextRank = _fileStageRank[action] ?? 0;
-    final mergedAction = nextRank >= prevRank ? action : prev.action;
+    final nextRank = _fileStageRank[fresh.action] ?? 0;
+    final mergedAction = nextRank >= prevRank ? fresh.action : prev.action;
 
     items[existingIdx] = AgentFileItem(
       id: prev.id,
       createdAt: prev.createdAt,
       turnId: prev.turnId,
-      relativePath: relPath.isEmpty ? prev.relativePath : relPath,
-      fileName: fileName.isEmpty ? prev.fileName : fileName,
-      displayName: displayName.isEmpty ? prev.displayName : displayName,
+      relativePath: fresh.relativePath.isEmpty
+          ? prev.relativePath
+          : fresh.relativePath,
+      fileName: fresh.fileName.isEmpty ? prev.fileName : fresh.fileName,
+      displayName: fresh.displayName.isEmpty
+          ? prev.displayName
+          : fresh.displayName,
       action: mergedAction,
       // 取最新非空（删除事件无 fileId，不冲掉创建时的 id）。
-      ufsFileId: (ev.ufsFileId != null && ev.ufsFileId!.isNotEmpty)
-          ? ev.ufsFileId
+      ufsFileId: (fresh.ufsFileId != null && fresh.ufsFileId!.isNotEmpty)
+          ? fresh.ufsFileId
           : prev.ufsFileId,
-      mimeType: ev.mimeType ?? prev.mimeType,
-      sizeBytes: ev.sizeBytes ?? prev.sizeBytes,
-      ttsKind: ttsKind ?? prev.ttsKind,
-      modifiedAt: action == 'modified' ? ev.createdAt : prev.modifiedAt,
-      deletedAt: action == 'deleted' ? ev.createdAt : prev.deletedAt,
+      mimeType: fresh.mimeType ?? prev.mimeType,
+      sizeBytes: fresh.sizeBytes ?? prev.sizeBytes,
+      ttsKind: fresh.ttsKind ?? prev.ttsKind,
+      modifiedAt: fresh.modifiedAt ?? prev.modifiedAt,
+      deletedAt: fresh.deletedAt ?? prev.deletedAt,
     );
-  }
-
-  /// 取路径 basename（`a/b.md` → `b.md`）。与 `ChatEvent.displayName` 不同，
-  /// 这里**不读 nice_name**：[AgentFileItem.fileName] 始终是真实文件名，
-  /// 给预览类型判定 / UFS 跳转用；展示名另走 [AgentFileItem.displayName]。
-  static String _basename(String identity) {
-    if (identity.isEmpty) return '';
-    final i = identity.lastIndexOf('/');
-    return i >= 0 ? identity.substring(i + 1) : identity;
   }
 
   /// 取最近一张。
@@ -1289,15 +1245,6 @@ class EventReducer {
       if (it is AgentFileItem && it.id == identity) return i;
     }
     return null;
-  }
-
-  /// 归一化相对路径（对齐 webapp `normalizeRelPath`）。
-  static String _normalizeRelPath(String path) {
-    return path
-        .replaceAll('\\', '/')
-        .replaceAll(RegExp(r'/+'), '/')
-        .replaceFirst(RegExp(r'^/+'), '')
-        .replaceFirst(RegExp(r'/+$'), '');
   }
 }
 

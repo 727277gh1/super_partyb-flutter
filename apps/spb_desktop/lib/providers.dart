@@ -182,6 +182,23 @@ final goalApiProvider = Provider<GoalApi>((ref) {
   return GoalApi(ref.watch(dioProvider));
 });
 
+/// 轮次详情加载用例（issue #19）。
+///
+/// ## 为什么是「用例」provider 而不是在页面里直接拼两次请求
+///
+/// 上游 `GET /chat/turns/:id` 不返回 events（`super_partyb#56`），故要
+/// `getTurn` + `groupTimeline` 过滤两趟——这个组合是**领域规则**（含分页停止
+/// 条件与排序），不是渲染细节。放在 `spb_domain` 的 `LoadTurnDetailUseCase`
+/// 里可脱离 Flutter 单测；两端只负责把它接到 provider 上。
+///
+/// ## 为什么不用 `Provider.family`
+///
+/// 它无参（groupId / turnId 由调用处传入），family 的键会无谓地把用例按
+/// group 复制多份——而用例本身无可变状态（`ChatApi` 已由 [dioProvider] 共享）。
+final loadTurnDetailProvider = Provider<LoadTurnDetailUseCase>((ref) {
+  return LoadTurnDetailUseCase(ref.watch(chatApiProvider));
+});
+
 // ==================== 对话管理（改名 / 归档 / 删除）====================
 
 /// 对话管理用例。
