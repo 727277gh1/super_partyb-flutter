@@ -45,6 +45,7 @@ void main() {
   late int loadCalls;
   late List<String> switched;
   late List<(String, GoalStatus)> statusChanges;
+  late List<String> created;
   SpbError? loadError;
 
   void useStubs({List<Goal>? initial, SpbError? error}) {
@@ -53,6 +54,7 @@ void main() {
     loadCalls = 0;
     switched = [];
     statusChanges = [];
+    created = [];
   }
 
   Future<void> pumpPanel(
@@ -60,6 +62,7 @@ void main() {
     String? currentGoalId,
     bool wireSwitch = true,
     bool wireSetStatus = true,
+    bool wireCreate = false,
     bool busy = false,
     Object? reloadToken = 'grp_1',
   }) async {
@@ -76,6 +79,7 @@ void main() {
             onSetStatus: wireSetStatus
                 ? (id, status) async => statusChanges.add((id, status))
                 : null,
+            onCreate: wireCreate ? (text) async => created.add(text) : null,
             currentGoalId: currentGoalId,
             busy: busy,
             reloadToken: reloadToken,
@@ -273,6 +277,148 @@ void main() {
       expect(find.text('归档'), findsNothing);
       // 「切回」仍可用（两个回调独立）。
       expect(find.text('切回'), findsOneWidget);
+    });
+  });
+
+  group('目标历史：新建（issue #17）', () {
+    testWidgets('未注入 onCreate 时不渲染「新建目标」（不是禁用）', (tester) async {
+      // 与 onSwitch / onSetStatus 同一约定：不渲染一个点了没反应的入口。
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(tester, currentGoalId: 'goal_1');
+
+      expect(find.byKey(const ValueKey('goal-create')), findsNothing);
+      expect(find.text('新建目标'), findsNothing);
+    });
+
+    testWidgets('未注入 onCreate 时，空列表也不渲染入口', (tester) async {
+      // 空态是**唯一**能看到「还没有历史目标」的场景，很容易被漏掉。
+      useStubs(initial: const []);
+      await pumpPanel(tester);
+
+      expect(find.byKey(const ValueKey('goal-history-empty')), findsOneWidget);
+      expect(find.byKey(const ValueKey('goal-create')), findsNothing);
+    });
+
+    testWidgets('注入后空列表也渲染入口（没有历史时最需要新建）', (tester) async {
+      useStubs(initial: const []);
+      await pumpPanel(tester, wireCreate: true);
+
+      expect(find.byKey(const ValueKey('goal-create')), findsOneWidget);
+    });
+
+    testWidgets('点击入口 → 填文本 → 提交，回调收到目标文本', (tester) async {
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(tester, currentGoalId: 'goal_1', wireCreate: true);
+
+      await tester.tap(find.byKey(const ValueKey('goal-create')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('goal-create-dialog')), findsOneWidget);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-create-field')),
+        '把 CI 修绿并补上回归测试',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('goal-create-submit')));
+      await tester.pumpAndSettle();
+
+      expect(created, ['把 CI 修绿并补上回归测试']);
+      // 新建会改变列表（新行 + 旧 active 被归档），必须回读。
+      expect(loadCalls, 2, reason: '不回读会留下与真相不符的列表');
+    });
+
+    testWidgets('空文本时确定按钮禁用（服务端对空 goal_text 返回 400）', (tester) async {
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(tester, currentGoalId: 'goal_1', wireCreate: true);
+
+      await tester.tap(find.byKey(const ValueKey('goal-create')));
+      await tester.pumpAndSettle();
+
+      final submit = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('goal-create-submit')),
+      );
+      expect(submit.onPressed, isNull, reason: '空文本必然 400，不该让用户白跑一次');
+
+      // 只输空白也不算（服务端会 trim）。
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-create-field')),
+        '   ',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('goal-create-submit')),
+            )
+            .onPressed,
+        isNull,
+      );
+
+      // 填了有效内容才可提交。
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-create-field')),
+        '有效目标',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('goal-create-submit')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('取消对话框不调回调', (tester) async {
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(tester, currentGoalId: 'goal_1', wireCreate: true);
+
+      await tester.tap(find.byKey(const ValueKey('goal-create')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-create-field')),
+        '写了但不提交',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('goal-create-cancel')));
+      await tester.pumpAndSettle();
+
+      expect(created, isEmpty);
+      expect(loadCalls, 1, reason: '没提交就不该回读');
+    });
+
+    testWidgets('busy 时新建入口禁用（并发提交会互相覆盖）', (tester) async {
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(
+        tester,
+        currentGoalId: 'goal_1',
+        wireCreate: true,
+        busy: true,
+      );
+
+      final btn = tester.widget<TextButton>(
+        find.byKey(const ValueKey('goal-create')),
+      );
+      expect(btn.onPressed, isNull);
+    });
+
+    testWidgets('提交文本被 trim（前后空白不发给服务端）', (tester) async {
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(tester, currentGoalId: 'goal_1', wireCreate: true);
+
+      await tester.tap(find.byKey(const ValueKey('goal-create')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-create-field')),
+        '  两端有空白  ',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('goal-create-submit')));
+      await tester.pumpAndSettle();
+
+      expect(created, ['两端有空白']);
     });
   });
 

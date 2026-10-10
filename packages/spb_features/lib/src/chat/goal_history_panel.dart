@@ -17,6 +17,13 @@ typedef SwitchGoal = Future<void> Function(String goalId);
 /// 本面板只用 [GoalStatus.completed] 与 [GoalStatus.archived] 两个取值。
 typedef SetGoalStatus = Future<void> Function(String goalId, GoalStatus status);
 
+/// 新建目标（`POST /chat/groups/:group_id/goals`）。
+///
+/// 入参是用户填的**目标文本**；`groupId` / `tasksSource` 由装配层补齐——
+/// 面板不掌握「当前是哪个 group」，也不该替用户选 `tasks_source`（见
+/// [GoalHistoryPanel.onCreate] 的说明）。
+typedef CreateGoal = Future<void> Function(String goalText);
+
 /// 目标版本历史面板：查看历史目标 / 切回 / 标记完成 / 归档。
 ///
 /// ## 它解决什么（为什么必须有这个面板）
@@ -57,15 +64,27 @@ typedef SetGoalStatus = Future<void> Function(String goalId, GoalStatus status);
 ///
 /// ## 「未注入回调 = 只读」
 ///
-/// [onSwitch] / [onSetStatus] 为 null 时**对应的操作入口整个不渲染**（不是
-/// 禁用）：禁用按钮会让用户以为「本端支持但暂时不可用」，而真相是这一端没
-/// 装配该能力。两者都为 null 时本面板退化为只读历史清单。
+/// [onSwitch] / [onSetStatus] / [onCreate] 为 null 时**对应的操作入口整个
+/// 不渲染**（不是禁用）：禁用按钮会让用户以为「本端支持但暂时不可用」，而
+/// 真相是这一端没装配该能力。三者都为 null 时本面板退化为只读历史清单。
+///
+/// ## 为什么需要「新建目标」（issue #17）
+///
+/// 本面板原先只能切回/完成/归档**已有**目标，不能新建——而「换一个目标」正是
+/// 用户最常做的事。在此之前只能去设置 tab 的目标文本框（走
+/// `ChatApi.setGroupGoal`，固定 `tasks_source=manual`），那条路径**无法从
+/// Markdown 文档导入并自动展开任务**（webapp 的 `createGoalFromMarkdown`）。
+///
+/// 本轮只接「纯文本新建」（`tasks_source=manual`）；「从 Markdown 导入 +
+/// `llm_expand`」的 UI 载体（从哪个文档来？预览对话框里加入口？）尚未确认，
+/// 留给后续（见 issue #17 正文的「建议拆两个 PR」）。
 class GoalHistoryPanel extends StatefulWidget {
   const GoalHistoryPanel({
     super.key,
     required this.load,
     this.onSwitch,
     this.onSetStatus,
+    this.onCreate,
     this.currentGoalId,
     this.busy = false,
     this.showHeader = true,
@@ -81,6 +100,16 @@ class GoalHistoryPanel extends StatefulWidget {
 
   /// 改目标状态。null 时不渲染「完成」/「归档」入口。
   final SetGoalStatus? onSetStatus;
+
+  /// 新建目标。null 时不渲染「新建目标」入口。
+  ///
+  /// ## `tasks_source` 由装配层显式传 `manual`
+  ///
+  /// 服务端 `tasks_source` 决定**重新展开时能否覆盖**这份任务清单
+  /// （见 `goal.dart` 的 [GoalTasksSource]）：`manual` = 人工创建/编辑过，
+  /// LLM 重新展开时**不会**覆盖它。若这里不传、任服务端取默认值，将来服务端
+  /// 默认值一改，用户手工写的目标就可能被一次「重新展开」抹掉。
+  final CreateGoal? onCreate;
 
   /// 当前目标的行 id，用于高亮与禁用「切回」。
   ///
@@ -116,6 +145,9 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
   /// 正在提交的那条 goal id（展示 spinner；禁用由 [GoalHistoryPanel.busy]
   /// 统一负责，故这里只用于定位）。
   String? _actingId;
+
+  /// 新建提交在途（与 [_actingId] 分开：新建没有 goal id 可定位）。
+  bool _creating = false;
 
   @override
   void initState() {
@@ -181,6 +213,32 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
       await _reload();
     } finally {
       if (mounted) setState(() => _actingId = null);
+    }
+  }
+
+  /// 弹输入框收集目标文本，确认后新建。
+  ///
+  /// ## 为什么用对话框而不是像 [GoalTasksPanel] 那样做行内输入
+  ///
+  /// 目标文本通常是**一整句意图**（「把 CI 修绿并补上回归测试」），行内单行
+  /// 输入框在侧边栏宽度下只能看到开头几个字。对话框能容纳多行，也能在提交前
+  /// 让用户看到全文。
+  Future<void> _create() async {
+    if (widget.busy || _creating) return;
+    final text = await showDialog<String>(
+      context: context,
+      builder: (_) => const _CreateGoalDialog(),
+    );
+    if (text == null || text.isEmpty) return;
+
+    setState(() => _creating = true);
+    try {
+      await widget.onCreate!(text);
+      // 新建会改变列表（新行 + 旧 active 被归档），必须回读——
+      // 与 [_run] 同一理由：不回读会留下与真相不符的列表。
+      await _reload();
+    } finally {
+      if (mounted) setState(() => _creating = false);
     }
   }
 
@@ -256,6 +314,12 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
+              // 「没有历史目标」正是最需要新建入口的场景（全新对话）。
+              // 不在这里渲染等于把用户逼到设置 tab 的文本框去。
+              if (widget.onCreate != null) ...[
+                const SizedBox(height: SpbSpacing.md),
+                _createButton(theme),
+              ],
             ],
           ),
         ),
@@ -265,9 +329,24 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
     return ListView.builder(
       key: const ValueKey('goal-history-list'),
       padding: SpbSpacing.pagePadding,
-      itemCount: _goals.length + (widget.showHeader ? 1 : 0),
+      itemCount:
+          _goals.length +
+          (widget.showHeader ? 1 : 0) +
+          (widget.onCreate != null ? 1 : 0),
       itemBuilder: (context, index) {
-        if (widget.showHeader && index == 0) {
+        // 新建入口放**列表顶部**：目标是「越新越靠前」的语义（服务端按
+        // created_at DESC），用户来这里多半是想换一个新目标。
+        if (widget.onCreate != null && index == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _createButton(theme),
+            ),
+          );
+        }
+        final offset = widget.onCreate != null ? 1 : 0;
+        if (widget.showHeader && index == offset) {
           return Padding(
             padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
             child: Text(
@@ -278,7 +357,7 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
             ),
           );
         }
-        final goal = _goals[widget.showHeader ? index - 1 : index];
+        final goal = _goals[index - offset - (widget.showHeader ? 1 : 0)];
         return _GoalHistoryRow(
           goal: goal,
           isCurrent: _isCurrent(goal),
@@ -296,6 +375,25 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
     );
   }
 
+  /// 「新建目标」入口。
+  ///
+  /// [widget.onCreate] 为 null 时**整个不渲染**（见 [GoalHistoryPanel.onCreate]
+  /// 的「未注入回调 = 只读」约定）——故调用方必须先判非 null。
+  Widget _createButton(ThemeData theme) {
+    return TextButton.icon(
+      key: const ValueKey('goal-create'),
+      icon: _creating
+          ? const SizedBox(
+              width: SpbSpacing.lg,
+              height: SpbSpacing.lg,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.add, size: SpbSpacing.lg),
+      label: const Text('新建目标'),
+      onPressed: (widget.busy || _creating) ? null : _create,
+    );
+  }
+
   /// 该条是否即当前目标。
   ///
   /// [GoalHistoryPanel.currentGoalId] 为空时**一律返回 false**（见其文档：
@@ -304,6 +402,105 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
     final current = widget.currentGoalId;
     if (current == null || current.isEmpty) return false;
     return goal.id == current;
+  }
+}
+
+/// 新建目标的输入对话框。
+///
+/// ## 空文本时确定按钮**禁用**（而不是点了报错）
+///
+/// 服务端对空 `goal_text` 返回 400。把校验放在提交前，用户不会为一次必然失败的
+/// 往返买单，也不会看到一句「操作失败：HTTP 400」这种看不出错在哪的提示。
+/// 与 [_GoalTaskEditDialog] 同一做法。
+///
+/// ## 为什么多行
+///
+/// 目标常是一整句意图，单行输入框在窄侧边栏里看不全。`minLines: 2` 让用户能
+/// 在提交前确认自己写了什么。
+class _CreateGoalDialog extends StatefulWidget {
+  const _CreateGoalDialog();
+
+  @override
+  State<_CreateGoalDialog> createState() => _CreateGoalDialogState();
+}
+
+class _CreateGoalDialogState extends State<_CreateGoalDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // 文本变化时刷新确定按钮的启用态。
+    _controller.addListener(_onChanged);
+  }
+
+  @override
+  void dispose() {
+    _controller
+      ..removeListener(_onChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onChanged() => setState(() {});
+
+  /// 提交：trim 后非空才 pop（服务端也会 trim，本地先做可避免空往返）。
+  void _submit() {
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+    Navigator.of(context).pop(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canSubmit = _controller.text.trim().isNotEmpty;
+
+    return AlertDialog(
+      key: const ValueKey('goal-create-dialog'),
+      title: const Text('新建目标'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            key: const ValueKey('goal-create-field'),
+            controller: _controller,
+            autofocus: true,
+            minLines: 2,
+            maxLines: 6,
+            decoration: const InputDecoration(
+              labelText: '目标',
+              hintText: '例如：把 CI 修绿并补上回归测试',
+              isDense: true,
+              border: OutlineInputBorder(borderRadius: SpbRadius.inputAll),
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.xs),
+          // 说清「新建」的真实语义：服务端会归档旧 active goal（保留历史行）。
+          // 用户以为「改目标」是覆盖时，会担心旧目标的内容丢——它没有丢，
+          // 就在下面的历史列表里。
+          Text(
+            '新建会归档当前目标并切换指针，旧目标仍保留在历史中。',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('goal-create-cancel'),
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('goal-create-submit'),
+          // 空文本不可提交（见类文档）。
+          onPressed: canSubmit ? _submit : null,
+          child: const Text('新建'),
+        ),
+      ],
+    );
   }
 }
 

@@ -1474,6 +1474,21 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                         .updateGoalStatus(goalId, status),
                     requireGoal: false,
                   ),
+                  // 新建目标（issue #17）。`requireGoal: false`：正是**没有**
+                  // 当前目标时才最需要它。
+                  //
+                  // `tasksSource: manual` 必须显式传：它决定重新展开时能否
+                  // 覆盖任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
+                  onCreate: (goalText) => _runGoalWrite(
+                    () => ref
+                        .read(goalApiProvider)
+                        .createGoal(
+                          widget.groupId,
+                          goalText: goalText,
+                          tasksSource: GoalTasksSource.manual,
+                        ),
+                    requireGoal: false,
+                  ),
                 ),
               ),
               ChatSidebarTab(
