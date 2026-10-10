@@ -35,6 +35,7 @@ class DeliverableSyncUseCase {
     required this.sink,
     required this.downloader,
     this.pageSize = 100,
+    this.concurrency = SyncEngine.defaultConcurrency,
   });
 
   final UfsApi ufs;
@@ -44,6 +45,12 @@ class DeliverableSyncUseCase {
 
   /// 每页条数。服务端上限 100（超过会被拒或截断），故取上限以减少往返。
   final int pageSize;
+
+  /// 落盘阶段的并发上限（在途 IO 数）。默认见 [SyncEngine.defaultConcurrency]。
+  ///
+  /// 暴露到编排层是为了让「限流严格的服务端」能把它调小，而不用改 domain 代码。
+  /// `1` = 串行（旧行为）。
+  final int concurrency;
 
   /// 执行一轮同步。
   ///
@@ -83,7 +90,11 @@ class DeliverableSyncUseCase {
       updatedSince: cursor,
     );
 
-    final engine = SyncEngine(downloader: downloader, sink: sink);
+    final engine = SyncEngine(
+      downloader: downloader,
+      sink: sink,
+      concurrency: concurrency,
+    );
     final result = await engine.run(
       remote: remote,
       state: state,

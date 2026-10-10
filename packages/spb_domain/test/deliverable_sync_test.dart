@@ -108,6 +108,86 @@ class _MemoryStateStore implements SyncStateStore {
 
 const _gid = 'g1';
 
+/// 记录**在途重叠**的下载桩（验证并发是真的发生了）。
+///
+/// ## 为什么不能只看「调用了 N 次」
+///
+/// 串行实现同样会调用 N 次——次数无法区分串行与并发。真正要断言的是
+/// **同时有多个在途**（`maxInFlight > 1`）。故每个 `download` 在返回前等待
+/// 一个外部释放的 gate，调用方按需放行。
+class _ConcurrencyProbeDownloader implements FileDownloader {
+  _ConcurrencyProbeDownloader();
+
+  int inFlight = 0;
+  int maxInFlight = 0;
+
+  /// 进入 `download` 的顺序（用于断言「是否按计划顺序发起」）。
+  final started = <String>[];
+
+  /// 完成顺序（用于断言合并顺序**不**取决于它）。
+  final finished = <String>[];
+
+  /// 每个 fileId 的延迟毫秒数（制造「先发起后完成」的乱序）。
+  final delays = <String, int>{};
+
+  /// 每个 fileId 实际收到的 `If-None-Match`（验证条件请求判据）。
+  final conditionalEtags = <String, String?>{};
+
+  final errors = <String, String>{};
+
+  @override
+  Future<SyncDownloadResult> download(
+    String fileId, {
+    String? ifNoneMatch,
+  }) async {
+    inFlight++;
+    if (inFlight > maxInFlight) maxInFlight = inFlight;
+    started.add(fileId);
+    conditionalEtags[fileId] = ifNoneMatch;
+    try {
+      // ## 为什么**总是**至少让出一次事件循环
+      //
+      // 没有 await 的 async 函数体会同步跑完（含 `finally` 里的 `inFlight--`），
+      // 于是每个下载在下一个 worker 启动前就已经结束——`maxInFlight` 恒为 1，
+      // 测试就退化成「只看调用次数」（串行也满足）。真实下载必然有 I/O 挂起，
+      // 这里用 `Duration.zero` 复现那个挂起点。
+      await Future<void>.delayed(Duration(milliseconds: delays[fileId] ?? 0));
+      final err = errors[fileId];
+      if (err != null) throw Exception(err);
+      finished.add(fileId);
+      return SyncDownloadResult.downloaded([1, 2, 3, 4, 5]);
+    } finally {
+      inFlight--;
+    }
+  }
+}
+
+/// 记录写入顺序的落盘桩（并发测试用；不模拟磁盘存在性）。
+class _OrderedSink implements FileSink {
+  final writtenOrder = <String>[];
+  final deletedOrder = <String>[];
+  final failWrite = <String>{};
+
+  /// 删除的延迟毫秒数（用于制造「删除比下载慢」的完成顺序）。
+  final deleteDelays = <String, int>{};
+
+  @override
+  Future<void> write(String relPath, List<int> bytes) async {
+    if (failWrite.contains(relPath)) throw Exception('磁盘满了');
+    writtenOrder.add(relPath);
+  }
+
+  @override
+  Future<void> delete(String relPath) async {
+    final ms = deleteDelays[relPath];
+    if (ms != null) await Future<void>.delayed(Duration(milliseconds: ms));
+    deletedOrder.add(relPath);
+  }
+
+  @override
+  Future<bool> exists(String relPath) async => false;
+}
+
 /// 构造远端条目。
 ///
 /// `path` 默认带**尾斜杠**——这是 UFS 实测行为（`buildMaterializedPath`
@@ -1135,6 +1215,319 @@ void main() {
 
       expect(result.report.notModified, 1);
       expect(result.state.files['a.md']!.contentHash, isNull);
+    });
+  });
+
+  // =========================================================================
+  group('同步执行：并发 IO + 串行合并（issue #20）', () {
+    List<UfsFileEntry> manyRemote(int n) => [
+      for (var i = 0; i < n; i++)
+        _remote('f$i.md', updatedAt: '2026-01-0${(i % 9) + 1}T00:00:00Z'),
+    ];
+
+    test('N 个文件真的并发发起（不是「调用 N 次」这种串行也满足的断言）', () async {
+      final downloader = _ConcurrencyProbeDownloader();
+      final sink = _OrderedSink();
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: sink,
+        concurrency: 4,
+      );
+
+      await engine.run(
+        remote: manyRemote(12),
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(downloader.maxInFlight, 4, reason: '上限 4 时应有 4 个同时在途');
+      expect(downloader.started, hasLength(12));
+    });
+
+    test('并发上限生效（同时最多 N 个在途）', () async {
+      final downloader = _ConcurrencyProbeDownloader();
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: _OrderedSink(),
+        concurrency: 2,
+      );
+
+      await engine.run(
+        remote: manyRemote(10),
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(downloader.maxInFlight, 2);
+    });
+
+    test('并发上限为 1 时退化为串行（maxInFlight == 1）', () async {
+      final downloader = _ConcurrencyProbeDownloader();
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: _OrderedSink(),
+        concurrency: 1,
+      );
+
+      await engine.run(
+        remote: manyRemote(6),
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(downloader.maxInFlight, 1);
+    });
+
+    test('上限 < 1 被当作 1（而不是 0 个 worker 死锁）', () async {
+      final downloader = _ConcurrencyProbeDownloader();
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: _OrderedSink(),
+        concurrency: 0,
+      );
+
+      final result = await engine.run(
+        remote: manyRemote(3),
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(result.report.downloaded, 3);
+      expect(downloader.maxInFlight, 1);
+    });
+
+    test('并发完成顺序乱序时，状态合并仍按计划顺序（游标取最大 updatedAt）', () async {
+      // ## 这个测试防的是什么
+      //
+      // `advanceCursor` 取 `updatedAt` 的**最大值**，故结果与顺序无关；但
+      // `markSynced` 逐条写入、`forget` 逐条移除——若合并顺序随完成顺序变化，
+      // 同一 relPath 的「先删后写」等场景就会不确定。
+      //
+      // 这里刻意让**先发起的后完成**（f0 慢、f2 快），断言：
+      // 1. 完成顺序确实是乱的（否则测试没测到东西）；
+      // 2. 结果状态与串行实现逐字段相等。
+      final downloader = _ConcurrencyProbeDownloader()
+        ..delays['id-f0.md'] = 40
+        ..delays['id-f1.md'] = 20;
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: _OrderedSink(),
+        concurrency: 3,
+      );
+
+      final concurrent = await engine.run(
+        remote: manyRemote(3),
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      // 完成顺序被刻意打乱（f2 先于 f1 先于 f0）。
+      expect(
+        downloader.finished.first,
+        'id-f2.md',
+        reason: '若完成顺序没乱，本用例就没验证到「顺序无关」',
+      );
+
+      // 串行基线：同一份输入，concurrency = 1。
+      final serial =
+          await SyncEngine(
+            downloader: _ConcurrencyProbeDownloader(),
+            sink: _OrderedSink(),
+            concurrency: 1,
+          ).run(
+            remote: manyRemote(3),
+            state: SyncState.empty,
+            scope: const SyncGroupScope(_gid),
+            filter: _permissive,
+          );
+
+      expect(concurrent.state, serial.state, reason: '状态必须逐字段相等');
+      expect(concurrent.state.cursor, serial.state.cursor);
+      expect(concurrent.state.files.keys, serial.state.files.keys);
+      expect(concurrent.report.downloaded, serial.report.downloaded);
+    });
+
+    test('并发下单个失败不影响其余文件的状态写入（既有语义保持）', () async {
+      final downloader = _ConcurrencyProbeDownloader()
+        ..errors['id-f3.md'] = '网络超时';
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: _OrderedSink(),
+        concurrency: 4,
+      );
+
+      final result = await engine.run(
+        remote: manyRemote(8),
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(result.report.downloaded, 7);
+      expect(result.report.failed, hasLength(1));
+      expect(result.report.failed.single.relPath, 'f3.md');
+      expect(result.state.contains('f3.md'), isFalse);
+      expect(result.state.contains('f4.md'), isTrue, reason: '失败不阻断其余文件');
+    });
+
+    test('失败项不推进游标（并发下同样成立）', () async {
+      // 失败项的 updated_at **最晚**：若游标由「计划里的最大时间」推进（而不是
+      // 由成功项推进），就会越过它，下轮再也拉不到这个文件。
+      final downloader = _ConcurrencyProbeDownloader()
+        ..errors['id-late.md'] = '网络超时';
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: _OrderedSink(),
+        concurrency: 4,
+      );
+
+      final result = await engine.run(
+        remote: [
+          _remote('ok.md', updatedAt: '2026-01-01T00:00:00Z'),
+          _remote('late.md', updatedAt: '2026-06-01T00:00:00Z'),
+        ],
+        state: SyncState.empty,
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      expect(result.state.cursor, '2026-01-01T00:00:00Z');
+    });
+
+    test('条件请求判据用本轮开始前的状态（并发下 If-None-Match 照常带上）', () async {
+      // ## 这个测试防的是什么
+      //
+      // 并发化最容易犯的错是「把判据也一起并发掉」——即让每个动作在**自己的
+      // 完成时刻**去读那个正在被改写的状态。`ifNoneMatch` 的判据是
+      // 「状态里有记录 **且** 磁盘上有文件」，读错时机会让它变成 null（少一次
+      // 条件请求，白下一份没变的文件）或误带（首次同步被 304 骗成「未变更」，
+      // 文件永不落盘）。
+      //
+      // 构造：状态里**已有** a.md / b.md，磁盘上也真有（条件请求的两个前提都
+      // 满足），远端给出新版本。b.md 先完成、a.md 慢——断言两者的请求都带上了
+      // 自己的 etag，即判据取自「本轮开始前」的确定事实。
+      final downloader = _ConcurrencyProbeDownloader()..delays['id-a.md'] = 30;
+      final sink = _StubSink(preExisting: {'a.md', 'b.md'});
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: sink,
+        concurrency: 4,
+      );
+
+      final result = await engine.run(
+        remote: [
+          _remote('a.md', id: 'id-a.md', etag: 'W/"2"'),
+          _remote('b.md', id: 'id-b.md', etag: 'W/"9"'),
+        ],
+        state: _stateWith({
+          'a.md': SyncedFile(etag: 'W/"1"', size: 5),
+          'b.md': SyncedFile(etag: 'W/"8"', size: 5),
+        }),
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      // b.md 先完成（a.md 慢 30ms）——完成顺序与计划顺序相反。
+      expect(downloader.finished.first, 'id-b.md');
+      expect(
+        downloader.conditionalEtags['id-a.md'],
+        'W/"2"',
+        reason: 'a.md 的 etag 来自本轮开始前的状态，不因 b.md 先完成而丢失',
+      );
+      expect(downloader.conditionalEtags['id-b.md'], 'W/"9"');
+      expect(result.report.downloaded, 2);
+    });
+
+    test('同一路径「先删后写」时结果取决于计划顺序（并发不得打乱它）', () async {
+      // ## 这个测试是「顺序确定性」唯一**可观测**的地方
+      //
+      // `markSynced` / `advanceCursor` 对不同 relPath 是可交换的，故「合并顺序」
+      // 在大多数输入下看不出来。唯一暴露它的是**同一路径出现多次**——而
+      // `buildSyncPlan` 的 `[...deletes, ...downloads]` 恰好能产出这种计划：
+      // 同一 relPath 既被删（旧条目带 `deleted_at`）又被下（新条目）。
+      //
+      // 语义要求「远端为准」：下载在删除之后执行，最终状态必须是**已同步**。
+      // 若合并按**完成顺序**而非计划顺序，删除就会盖掉下载（或反之），
+      // 最终状态随网络快慢变化——不可复现。
+      //
+      // 这里让**删除比下载慢**：完成顺序与计划顺序**相反**（删除在计划里在前，
+      // 却最后完成）。若合并按完成顺序，删除会盖掉下载。
+      final downloader = _ConcurrencyProbeDownloader();
+      final sink = _OrderedSink()..deleteDelays['a.md'] = 30;
+      final engine = SyncEngine(
+        downloader: downloader,
+        sink: sink,
+        concurrency: 4,
+      );
+
+      final result = await engine.run(
+        remote: [
+          // 软删除条目（旧版本）。
+          _remote('a.md', id: 'id-old.md', deleted: true),
+          // 重建后的条目（新版本）。
+          _remote('a.md', id: 'id-new.md', etag: 'W/"new"'),
+        ],
+        state: _stateWith({'a.md': SyncedFile(etag: 'W/"old"', size: 5)}),
+        scope: const SyncGroupScope(_gid),
+        filter: _permissive,
+      );
+
+      // 完成顺序确实被反转（删除慢、下载快）——否则本用例没测到东西。
+      expect(sink.deletedOrder, ['a.md'], reason: '删除在计划里在前、却最后完成，正是要覆盖的乱序');
+
+      // 计划顺序：删除在前、下载在后（见 SyncPlan.actions 的说明）。
+      expect(result.report.deleted, 1);
+      expect(result.report.downloaded, 1);
+      expect(
+        result.state.files['a.md']?.etag,
+        'W/"new"',
+        reason: '远端为准：下载在删除之后，最终状态必须是新版本（顺序被打乱就会变）',
+      );
+      expect(result.state.contains('a.md'), isTrue);
+    });
+
+    test('大量文件的并发结果与串行逐字段相等（回归基线）', () async {
+      final remote = [
+        for (var i = 0; i < 30; i++)
+          _remote(
+            'f$i.md',
+            etag: 'W/"$i"',
+            updatedAt: '2026-01-${(i % 28) + 1}T00:00:00Z',
+          ),
+      ];
+
+      final concurrent =
+          await SyncEngine(
+            downloader: _StubDownloader(),
+            sink: _StubSink(),
+            concurrency: 5,
+          ).run(
+            remote: remote,
+            state: SyncState.empty,
+            scope: const SyncGroupScope(_gid),
+            filter: _permissive,
+          );
+
+      final serial =
+          await SyncEngine(
+            downloader: _StubDownloader(),
+            sink: _StubSink(),
+            concurrency: 1,
+          ).run(
+            remote: remote,
+            state: SyncState.empty,
+            scope: const SyncGroupScope(_gid),
+            filter: _permissive,
+          );
+
+      expect(concurrent.state, serial.state);
+      expect(concurrent.report.downloaded, serial.report.downloaded);
+      expect(concurrent.report.failed, serial.report.failed);
     });
   });
 }
