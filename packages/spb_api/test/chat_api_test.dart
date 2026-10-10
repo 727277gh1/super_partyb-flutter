@@ -1609,4 +1609,131 @@ void main() {
       expect(receivedPaths, ['/api/chat/turn-runtime']);
     });
   });
+
+  // ==================== #13 自动续跑排程 ====================
+
+  /// `listAutoSchedules` 的契约与请求形状。
+  group('listAutoSchedules', () {
+    test('解析 items 为 ChatTurnSchedule（camelCase）', () async {
+      adapter.onGet(
+        '/api/chat/groups/grp_1/auto-schedules',
+        (server) => server.reply(200, {
+          'items': [
+            {
+              'id': 'sch_1',
+              'agentId': 'agt_1',
+              'sessionId': 'sess_1',
+              'agentType': 'pigo',
+              'triggerReason': 'goal_gate',
+              'triggerStatus': {'String': 'pending', 'Valid': true},
+              'message': '继续',
+              'policyJson': '{"meta":{"group_id":"grp_1"}}',
+              'dedupeKey': 'goal_gate:grp_1:t_1',
+              'enabled': true,
+              'runCount': 1,
+              'maxRuns': 5,
+              'nextRunAt': {'Time': '2026-10-04T09:00:00Z', 'Valid': true},
+              'lastRunAt': {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
+              'lastErrorJson': null,
+              'createdAt': '2026-10-04T08:00:00Z',
+              'updatedAt': '2026-10-04T08:30:00Z',
+            },
+          ],
+        }),
+      );
+
+      final list = await api.listAutoSchedules('grp_1', agentId: 'agt_1');
+
+      expect(list, hasLength(1));
+      final s = list.single;
+      expect(s.agentId, 'agt_1');
+      expect(s.triggerReason, 'goal_gate');
+      expect(s.triggerStatus, 'pending');
+      expect(s.runCount, 1);
+      expect(s.groupId, 'grp_1');
+      expect(s.isPending, isTrue);
+      expect(s.nextRunAt?.toUtc(), DateTime.utc(2026, 10, 4, 9));
+      expect(s.lastRunAt, isNull);
+    });
+
+    test('空列表不报错', () async {
+      adapter.onGet(
+        '/api/chat/groups/grp_1/auto-schedules',
+        (server) => server.reply(200, {'items': []}),
+      );
+
+      expect(await api.listAutoSchedules('grp_1'), isEmpty);
+    });
+  });
+
+  /// `stopAutoSchedule` 的返回解析（服务端 `{group_id, disabled_count}`）。
+  group('stopAutoSchedule', () {
+    test('返回 disabled_count', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/auto-schedule/stop',
+        data: null,
+        (server) =>
+            server.reply(200, {'group_id': 'grp_1', 'disabled_count': 3}),
+      );
+
+      expect(await api.stopAutoSchedule('grp_1'), 3);
+    });
+
+    test('缺 disabled_count → 0（不抛异常）', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/auto-schedule/stop',
+        data: null,
+        (server) => server.reply(200, {'group_id': 'grp_1'}),
+      );
+
+      expect(await api.stopAutoSchedule('grp_1'), 0);
+    });
+  });
+
+  /// 真实请求路径测试。
+  ///
+  /// ## 为什么必须真发一次
+  ///
+  /// 这两个端点的前缀**故意不一致**（不是笔误）：
+  ///
+  /// | 端点 | 实际路径 |
+  /// |---|---|
+  /// | 列出 | `/api/chat/groups/…/auto-schedules`（**复数**，带 `/api`） |
+  /// | 停用 | `/chat/groups/…/auto-schedule/stop`（**单数**，无 `/api`） |
+  ///
+  /// 统一成同一个前缀、或把复数写成单数，都会 404。而 mock adapter 是
+  /// **按我写的路径注册**的——写错了它照样通过，所以必须打真 server 验证。
+  group('auto-schedules 真实请求路径', () {
+    late HttpServer server;
+    late ChatApi realApi;
+    late List<String> received;
+
+    setUp(() async {
+      received = [];
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      realApi = ChatApi(createDio(baseUrl: 'http://127.0.0.1:${server.port}'));
+      server.listen((req) async {
+        received.add('${req.method} ${req.uri.path}');
+        req.response
+          ..statusCode = 200
+          ..headers.contentType = ContentType.json
+          ..write('{"items":[],"disabled_count":0}');
+        await req.response.close();
+      });
+    });
+
+    tearDown(() async => server.close(force: true));
+
+    test('列出打到 /api/chat/groups/:id/auto-schedules（复数，带 /api）', () async {
+      await realApi.listAutoSchedules('grp_1', agentId: 'agt_1');
+
+      expect(received, ['GET /api/chat/groups/grp_1/auto-schedules']);
+    });
+
+    test('停用打到 /chat/groups/:id/auto-schedule/stop（单数，无 /api）', () async {
+      await realApi.stopAutoSchedule('grp_1');
+
+      expect(received, ['POST /chat/groups/grp_1/auto-schedule/stop']);
+    });
+  });
 }

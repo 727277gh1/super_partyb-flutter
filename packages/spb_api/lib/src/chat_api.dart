@@ -884,6 +884,65 @@ class ChatApi {
     return TurnRuntime.fromJson(_asMap(res));
   }
 
+  // ==================== 自动续跑排程 ====================
+
+  /// `GET /api/chat/groups/:group_id/auto-schedules` —— 列出排程。
+  ///
+  /// ## ⚠️ 路径带 `/api` 前缀（与下面的停用端点不同）
+  ///
+  /// 两个端点注册在不同的路由组：
+  ///
+  /// | 端点 | 注册位置 | 实际路径 |
+  /// |---|---|---|
+  /// | 列出 | `ext_routes.go` 的 `registerScheduleRoutes(api.Group("/chat/groups"))` | `/api/chat/groups/…/auto-schedules`（**复数**） |
+  /// | 停用 | `chat_ext.go` 的 `rg.POST("/groups/:group_id/auto-schedule/stop")`（`/chat` 组） | `/chat/groups/…/auto-schedule/stop`（**单数**） |
+  ///
+  /// 写错任一即 404。客户端已有同类先例（[turnRuntime] 也走 `/api`）。
+  ///
+  /// ## ⚠️ 必须传 `agent_id` 并本地按 group 过滤
+  ///
+  /// 服务端 handler（`admin.go` 的 `listByAgent`）**忽略路径里的 `:group_id`**，
+  /// 只读 `c.Query("agent_id")`，SQL 是 `WHERE agent_id = ?`。不传 `agent_id`
+  /// 会得到空集；传了则得到「该 agent 的全部排程」（可能跨多个 group）。
+  /// 故调用方需再用 [ChatTurnSchedule.groupId] 本地过滤出当前 group——
+  /// 那层过滤由 spb_domain 的用例做（本层只负责传输）。
+  ///
+  /// `agent_id` 取 `ChatGroup.activeSession.agentId`（`GET /chat/groups/:id`
+  /// 已填）。
+  Future<List<ChatTurnSchedule>> listAutoSchedules(
+    String groupId, {
+    String? agentId,
+    int limit = 50,
+  }) async {
+    final res = await _get(
+      '/api/chat/groups/$groupId/auto-schedules',
+      query: {if (agentId != null) 'agent_id': agentId, 'limit': limit},
+    );
+    return unwrapItems(res, ChatTurnSchedule.fromJson);
+  }
+
+  /// `POST /chat/groups/:group_id/auto-schedule/stop` —— 撤销该 group 下所有
+  /// 未触发的 goal_gate 续跑排程。
+  ///
+  /// ⚠️ 路径**不带** `/api` 前缀，且是**单数** `auto-schedule/stop`
+  /// （与 [listAutoSchedules] 的复数 `auto-schedules` 不同）。
+  ///
+  /// 返回被撤销的条数（服务端 `{group_id, disabled_count}`）。服务端谓词是
+  /// `enabled=1 AND run_count < max_runs AND dedupe_key LIKE 'goal_gate:%'`
+  /// 且按 `policy_json.meta.group_id` 过滤，故**不会**误伤 retry / fastpath，
+  /// 也**不会**碰别的 group。
+  ///
+  /// 调用方写完应**回读列表**（而非回读 group）——停用改变的是排程集合。
+  Future<int> stopAutoSchedule(String groupId) async {
+    final res = await _post('/chat/groups/$groupId/auto-schedule/stop');
+    final map = _asMap(res);
+    final raw = map['disabled_count'];
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    if (raw is String) return int.tryParse(raw) ?? 0;
+    return 0;
+  }
+
   // ==================== 确认卡 ====================
 
   /// `GET /chat/confirmations` —— 跨 group 的待确认列表。
