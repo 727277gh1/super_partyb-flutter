@@ -4,8 +4,11 @@ import 'package:spb_design/spb_design.dart';
 
 /// 侧边栏的一个 tab 定义。
 ///
-/// [content] 在 `IndexedStack` 中**始终被挂载**（不只切到的那个），保证切换
-/// 时各 tab 的内部状态（展开的目录、折叠的轮次等）不丢失。
+/// [content] 在 `IndexedStack` 中**被激活后始终挂载**（不只切到的那个），保证
+/// 切换时各 tab 的内部状态（展开的目录、折叠的轮次等）不丢失。
+///
+/// ⚠️ 未被切到过的 tab **不构建**（见 [ChatSidebar] 的惰性加载说明，issue #16）：
+/// 故依赖 `initState` 发请求的面板不会在侧边栏一打开时就跑。
 @immutable
 class ChatSidebarTab {
   const ChatSidebarTab({
@@ -50,6 +53,17 @@ class ChatSidebarTab {
 /// Flutter 默认的 TabBarView 用懒加载，切换 tab 时前一个被销毁。对于侧边栏
 /// 这种场景，用户可能在「文件」展开了一个目录树，切到「待办」处理一张卡，
 /// 再切回来——这时目录树的展开状态应保留。`IndexedStack` 保持所有子项挂载。
+///
+/// ## 但挂载 ≠ 立即构建（issue #16）
+///
+/// `IndexedStack` 会把**所有**子项挂载进树，于是每个面板的 `initState` 都会在
+/// 侧边栏一打开时就跑——`GroupDeliverablesPanel` / `GoalHistoryPanel` /
+/// `AutoSchedulesPanel` 各自发请求，用户还没点过任何一个 tab 就已经付了 3 个
+/// HTTP 往返（加上当前 tab 自己那个，共 4 个）。
+///
+/// 故未激活过的 tab 先放一个 [SizedBox.shrink] 占位，**首次切到时**才换成真实
+/// 面板。既保留了「切回来状态不丢」（已挂载的不会被卸载），又不再为从没看过的
+/// tab 付构建与取数成本。
 class ChatSidebar extends StatefulWidget {
   const ChatSidebar({
     super.key,
@@ -79,10 +93,23 @@ class ChatSidebar extends StatefulWidget {
 class _ChatSidebarState extends State<ChatSidebar> {
   late int _index;
 
+  /// 已被激活过（被切到过）的 tab 下标。
+  ///
+  /// ## 为什么不能靠 `initState` 判可见性
+  ///
+  /// `IndexedStack` 的不可见子项**仍在树里**，它们的 `initState` 照样会跑。
+  /// 所以「是否可见」这件事必须由**父层**显式记录——这就是本集合的职责。
+  ///
+  /// 一旦下标进来就永不移除：已激活的 tab 要保持挂载（滚动位置、展开的
+  /// 目录树、折叠的轮次），这正是选 `IndexedStack` 而非 `TabBarView` 的理由。
+  final Set<int> _visited = <int>{};
+
   @override
   void initState() {
     super.initState();
     _index = widget.initialIndex.clamp(0, (widget.tabs.length - 1).clamp(0, 1));
+    // 初始 tab 当然算已激活——不记的话首屏会渲染成空占位。
+    _visited.add(_index);
   }
 
   @override
@@ -92,6 +119,9 @@ class _ChatSidebarState extends State<ChatSidebar> {
     if (_index >= widget.tabs.length) {
       _index = (widget.tabs.length - 1).clamp(0, 1);
     }
+    // 钳制可能把当前下标换成一个从没访问过的值（如 tabs 从 2 个缩到 1 个时
+    // 从 1 变 0）。当前 tab **必须**是已激活的，否则首屏变成空占位。
+    _visited.add(_index);
   }
 
   @override
@@ -195,7 +225,10 @@ class _ChatSidebarState extends State<ChatSidebar> {
             child: InkWell(
               key: ValueKey<String>('sidebar-tab-${tab.label}'),
               borderRadius: BorderRadius.circular(SpbRadius.sm),
-              onTap: () => setState(() => _index = i),
+              onTap: () => setState(() {
+                _index = i;
+                _visited.add(i);
+              }),
               child: Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: SpbSpacing.sm,
@@ -260,11 +293,21 @@ class _ChatSidebarState extends State<ChatSidebar> {
     );
   }
 
+  /// tab 内容区。
+  ///
+  /// 未激活过的下标用 [SizedBox.shrink] 占位（不构建面板 = 不发请求）；
+  /// 激活过的渲染真实面板并**一直保留**（见 [_visited] 的说明）。
   Widget _tabContent() {
     return IndexedStack(
       key: const ValueKey('sidebar-content'),
       index: _index,
-      children: widget.tabs.map((t) => t.content).toList(),
+      children: [
+        for (var i = 0; i < widget.tabs.length; i++)
+          if (_visited.contains(i))
+            widget.tabs[i].content
+          else
+            const SizedBox.shrink(),
+      ],
     );
   }
 }
