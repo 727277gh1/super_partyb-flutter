@@ -7,6 +7,8 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 
+import 'spec_ui_card.dart';
+
 /// 取文件**原始字节**（预览用）。null 表示取不到（无 id / 已删除 / 下载失败）。
 ///
 /// 与 [AgentFileCard.onLoadThumbnail] 的分工：
@@ -145,9 +147,16 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
           // 实际是二进制（如 .log 里混了控制字节）。不加这个参数，
           // `utf8.decode` 会抛 FormatException，用户看到的是「加载失败」
           // 而不是「文件里有乱码」——后者信息量大得多。
-          return _TextPayload(
-            buildTextPreview(utf8.decode(bytes, allowMalformed: true)),
-          );
+          //
+          // 解码后交给内容层判定（issue #14）：命中 spec schema 则渲染结构化
+          // 卡片，否则照旧展示原文。**解析失败必落原文**——`resolveTextPreview`
+          // 只在 `elements[root]` 确实存在时才返回 spec（空对话框比原文更差）。
+          return switch (resolveTextPreview(
+            utf8.decode(bytes, allowMalformed: true),
+          )) {
+            SpecTextPreview(:final doc) => _SpecPayload(doc),
+            PlainTextPreview(:final text) => _TextPayload(text),
+          };
         case FilePreviewKind.external:
           throw const _PreviewUnavailable('此类型不可内联预览');
       }
@@ -281,12 +290,24 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
         final payload = snap.data;
         return switch (payload) {
           _TextPayload(:final text) => _textBody(text),
+          _SpecPayload(:final doc) => _specBody(doc),
           _ImagePayload(:final bytes) => _imageBody(bytes),
           null => _errorBody('加载失败'),
         };
       },
     );
   }
+
+  /// spec：复用 `SpecUiCard`（只读展示——预览对话框无动作通道，不传 `onAction`）。
+  ///
+  /// 包一层滚动容器：spec 文档可能比对话框高（服务端产出的 card 列表）。
+  /// `SpecUiCard` 在 root 悬空时渲染 `SizedBox.shrink()`，但 `resolveTextPreview`
+  /// 已保证走到这里时 `root` 非空（否则会落到 [_textBody]）。
+  Widget _specBody(SpecUiDocument doc) => SingleChildScrollView(
+    key: const ValueKey('agent-file-preview-spec'),
+    padding: const EdgeInsets.all(SpbSpacing.lg),
+    child: SpecUiCard(doc: doc),
+  );
 
   /// 文本：等宽、可选中、可滚动。截断提示**常驻**在内容上方。
   Widget _textBody(TextPreview preview) {
@@ -456,6 +477,12 @@ sealed class _PreviewPayload {
 class _TextPayload extends _PreviewPayload {
   const _TextPayload(this.text);
   final TextPreview text;
+}
+
+/// spec 结构化内容（`resolveTextPreview` 命中 `{root, elements}` 时）。
+class _SpecPayload extends _PreviewPayload {
+  const _SpecPayload(this.doc);
+  final SpecUiDocument doc;
 }
 
 class _ImagePayload extends _PreviewPayload {

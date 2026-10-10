@@ -309,6 +309,83 @@ void main() {
     });
   });
 
+  group('spec 分支（issue #14：内容层识别）', () {
+    testWidgets('文本内容是 spec schema → 渲染 SpecUiCard（不渲染原文）', (t) async {
+      // `{root, elements}` 形状：root 指向 elements 里存在的元素。
+      const spec =
+          '{"root":"r","elements":{"r":{"type":"card",'
+          '"props":{"title":"报告"},'
+          '"children":["t"]},"t":{"type":"text",'
+          '"props":{"content":"正文"}}}}';
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(spec),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-spec')),
+        findsOneWidget,
+      );
+      // SpecUiCard 按 type 分派渲染出 title 与正文。
+      expect(find.text('报告'), findsOneWidget);
+      expect(find.text('正文'), findsOneWidget);
+      // 识别为 spec 时不该同时展示原文。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('JSON 非法（非 spec）→ 仍渲染原文，不空白', (t) async {
+      // 关键回归：spec 识别失败**必须**退回原文。若误走 _SpecPayload 分支，
+      // 用户看到的是空对话框（SpecUiCard 对 null/悬空 root 渲染 shrink）。
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('{"a":1,"b":[2,3]}'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-spec')),
+        findsNothing,
+      );
+      final text = t.widget<SelectableText>(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+      );
+      expect(text.data, '{"a":1,"b":[2,3]}');
+    });
+
+    testWidgets('悬空 root 的 schema → 原文（不退化成空对话框）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(
+            '{"root":"missing","elements":{"x":{"type":"card"}}}',
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-spec')),
+        findsNothing,
+      );
+    });
+  });
+
   group('取数失败', () {
     testWidgets('loadBytes 返回 null → 错误提示（不是无限转圈）', (t) async {
       await _pumpPreview(
