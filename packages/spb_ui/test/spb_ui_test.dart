@@ -138,4 +138,129 @@ void main() {
       expect(padding.padding, const EdgeInsets.only(bottom: SpbSpacing.sm));
     });
   });
+
+  group('EmptyState', () {
+    testWidgets('渲染文案', (tester) async {
+      await tester.pumpWidget(_host(const EmptyState(message: '还没有对话')));
+
+      expect(find.text('还没有对话'), findsOneWidget);
+    });
+
+    testWidgets('icon 为 null 时不渲染图标（对话页的空提示刻意不带图标）', (tester) async {
+      // ## 这个断言防的是什么
+      //
+      // 对话页的空提示出现在输入框正上方，加图标会让「引导输入」看起来像
+      // 「页面出错」。若组件给 icon 一个非空默认值，那个页面就会悄悄多出一个
+      // 图标——而它的测试只断言文案，抓不到。
+      await tester.pumpWidget(_host(const EmptyState(message: '还没有对话')));
+
+      expect(
+        find.descendant(
+          of: find.byType(EmptyState),
+          matching: find.byType(Icon),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('icon 非空时渲染图标', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const EmptyState(message: '还没有对话', icon: Icons.chat_bubble_outline),
+        ),
+      );
+
+      expect(find.byIcon(Icons.chat_bubble_outline), findsOneWidget);
+    });
+
+    testWidgets('图标用弱化色 outline（空状态不是错误）', (tester) async {
+      await tester.pumpWidget(
+        _host(const EmptyState(message: 'x', icon: Icons.inbox)),
+      );
+
+      final scheme = Theme.of(tester.element(find.byType(EmptyState)))
+          .colorScheme;
+      final icon = tester.widget<Icon>(find.byIcon(Icons.inbox));
+      expect(icon.color, scheme.outline, reason: '用 error 色会让用户以为页面出错了');
+    });
+
+    testWidgets('长文案居中换行（不溢出）', (tester) async {
+      const long = '这是一段相当长的空状态提示文案，需要换行显示而不能溢出屏幕边界';
+      await tester.pumpWidget(_host(const EmptyState(message: long)));
+
+      final text = tester.widget<Text>(find.text(long));
+      expect(text.textAlign, TextAlign.center);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('ErrorState', () {
+    testWidgets('渲染消息与重试按钮', (tester) async {
+      var retried = 0;
+      await tester.pumpWidget(
+        _host(ErrorState(message: '加载失败', onRetry: () => retried++)),
+      );
+
+      expect(find.text('加载失败'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
+
+      await tester.tap(find.text('重试'));
+      expect(retried, 1);
+    });
+
+    testWidgets('onRetry 为 null 时不渲染按钮（不可重试的错误不该给按钮）', (tester) async {
+      // 有些错误不可重试（参数非法、权限不足）。渲染一个按了也没用的「重试」
+      // 比不渲染更糟——用户会反复点它。
+      await tester.pumpWidget(_host(const ErrorState(message: '权限不足')));
+
+      expect(find.text('权限不足'), findsOneWidget);
+      expect(find.text('重试'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(ErrorState),
+          matching: find.byType(FilledButton),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('图标用 error 色（与 EmptyState 的弱化色区分开）', (tester) async {
+      await tester.pumpWidget(_host(const ErrorState(message: 'x')));
+
+      final scheme = Theme.of(tester.element(find.byType(ErrorState)))
+          .colorScheme;
+      final icon = tester.widget<Icon>(find.byIcon(Icons.error_outline));
+      expect(icon.color, scheme.error);
+    });
+
+    testWidgets('retryLabel 可定制', (tester) async {
+      await tester.pumpWidget(
+        _host(ErrorState(message: 'x', onRetry: () {}, retryLabel: '重新加载')),
+      );
+
+      expect(find.text('重新加载'), findsOneWidget);
+      expect(find.text('重试'), findsNothing);
+    });
+
+    testWidgets('与 ErrorBanner 的差别：整页居中而非内联卡片', (tester) async {
+      // 两者都是「错误」，但排版必须不同——Banner 是嵌在别的布局里的一块
+      // 底色，State 是占据整页的居中块。混用会让「局部错误」把整页顶掉。
+      await tester.pumpWidget(_host(const ErrorState(message: 'x')));
+
+      expect(
+        find.descendant(
+          of: find.byType(ErrorState),
+          matching: find.byType(Center),
+        ),
+        findsAtLeastNWidgets(1),
+      );
+      expect(
+        find.descendant(
+          of: find.byType(ErrorState),
+          matching: find.byType(ErrorBanner),
+        ),
+        findsNothing,
+      );
+    });
+  });
 }

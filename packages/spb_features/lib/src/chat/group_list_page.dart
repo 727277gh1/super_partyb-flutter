@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 
@@ -556,11 +557,23 @@ class _GroupListPageState extends State<GroupListPage> {
 
     // 首次加载失败：整页错误 + 重试。
     if (_groups.isEmpty && _error != null) {
-      return _FullPageError(error: _error!, onRetry: _loadMore);
+      return ErrorState(message: _error!.message, onRetry: _loadMore);
     }
 
     if (_groups.isEmpty) {
-      return const _EmptyState();
+      // 用 ListView 而非 Center：让 RefreshIndicator 在空列表上仍可下拉。
+      //
+      // ## 为什么空态要能下拉刷新
+      //
+      // 空列表的常见成因是「刚建完对话但列表还没刷出来」或「另一台设备上建的」。
+      // 不能下拉的话用户只能杀进程重开。
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          SizedBox(height: MediaQuery.sizeOf(context).height * 0.3),
+          const EmptyState(message: '还没有对话', icon: Icons.chat_bubble_outline),
+        ],
+      );
     }
 
     return ScrollConfiguration(
@@ -941,72 +954,6 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
                 ? null
                 : () => Navigator.of(context).pop(_controller.text),
             child: const Text('创建'),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// 整页错误。
-class _FullPageError extends StatelessWidget {
-  const _FullPageError({required this.error, required this.onRetry});
-
-  final SpbError error;
-  final VoidCallback onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: SpbSpacing.pagePadding,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.error_outline,
-              size: SpbSpacing.xxxl,
-              color: scheme.error,
-            ),
-            const SizedBox(height: SpbSpacing.md),
-            Text(error.message, textAlign: TextAlign.center),
-            const SizedBox(height: SpbSpacing.lg),
-            FilledButton.tonal(onPressed: onRetry, child: const Text('重试')),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 空状态。
-class _EmptyState extends StatelessWidget {
-  const _EmptyState();
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    // 用 ListView 而非 Center：让 RefreshIndicator 在空列表上仍可下拉。
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      children: [
-        SizedBox(height: MediaQuery.sizeOf(context).height * 0.3),
-        Center(
-          child: Column(
-            children: [
-              Icon(
-                Icons.chat_bubble_outline,
-                size: SpbSpacing.xxxl,
-                color: scheme.outline,
-              ),
-              const SizedBox(height: SpbSpacing.md),
-              Text(
-                '还没有对话',
-                style: Theme.of(context).textTheme.bodyMedium
-                    ?.copyWith(color: scheme.onSurfaceVariant),
-              ),
-            ],
           ),
         ),
       ],

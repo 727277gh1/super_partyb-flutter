@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
 import 'package:spb_models/spb_models.dart';
 
 /// 搜索执行的签名（由 app 层注入真实实现）。
@@ -198,11 +199,17 @@ class _SearchPageState extends State<SearchPage> {
     }
 
     if (_error != null) {
-      return _ErrorState(error: _error!, onRetry: () => _run(_lastQuery));
+      return ErrorState(
+        message: _error!.message,
+        onRetry: () => _run(_lastQuery),
+      );
     }
 
     if (_hits.isEmpty) {
-      return _EmptyState(searched: _searched, query: _lastQuery);
+      return EmptyState(
+        icon: Icons.search_outlined,
+        message: _searched ? '没有找到「$_lastQuery」' : '输入关键字搜索消息内容',
+      );
     }
 
     return ListView.separated(
@@ -349,73 +356,6 @@ class _HighlightedText extends StatelessWidget {
       TextSpan(children: spans),
       maxLines: 3,
       overflow: TextOverflow.ellipsis,
-    );
-  }
-}
-
-/// 空状态：区分「还没搜」与「搜了没结果」。
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.searched, required this.query});
-
-  final bool searched;
-  final String query;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: SpbSpacing.pagePadding,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.search_outlined,
-              size: SpbSpacing.xxxl,
-              color: scheme.outline,
-            ),
-            const SizedBox(height: SpbSpacing.md),
-            Text(
-              searched ? '没有找到「$query」' : '输入关键字搜索消息内容',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium
-                  ?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 错误状态 + 重试。
-class _ErrorState extends StatelessWidget {
-  const _ErrorState({required this.error, required this.onRetry});
-
-  final SpbError error;
-  final VoidCallback onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: SpbSpacing.pagePadding,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.error_outline,
-              size: SpbSpacing.xxxl,
-              color: scheme.error,
-            ),
-            const SizedBox(height: SpbSpacing.md),
-            Text(error.message, textAlign: TextAlign.center),
-            const SizedBox(height: SpbSpacing.lg),
-            FilledButton.tonal(onPressed: onRetry, child: const Text('重试')),
-          ],
-        ),
-      ),
     );
   }
 }

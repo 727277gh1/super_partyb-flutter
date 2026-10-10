@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 
@@ -724,7 +725,7 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 到达顶部附近时加载更早的一页（带并发与终止保护）。
   ///
   /// 只在 [_onScroll] 里调用，而那里已确认 `_scrollController.hasClients`；
-  /// 空列表时渲染的是 [_EmptyHint] 而非 `ListView`，控制器没有 client，
+  /// 空列表时渲染的是 [EmptyState] 而非 `ListView`，控制器没有 client，
   /// 滚动通知根本不会产生。故这里不需要再判 `_items.isEmpty`。
   ///
   /// ## 已知边界：前插后不补偿滚动位置
@@ -1050,7 +1051,7 @@ class _ConversationPageState extends State<ConversationPage> {
             _TtsStatusBar(status: _ttsStatus!),
           Expanded(
             child: _items.isEmpty
-                ? _EmptyHint(text: widget.emptyHint)
+                ? EmptyState(message: widget.emptyHint)
                 : _buildTimeline(),
           ), // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
           // 的那条」，语义上与输入区相邻而非与时间线相邻。
@@ -1222,7 +1223,7 @@ class _ConversationPageState extends State<ConversationPage> {
     GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
     ScheduleCreatedItem() => _ScheduleCreatedNotice(item: item),
     DiagnosticNoticeItem() => _DiagnosticNotice(item: item),
-    ErrorItem(:final message) => _ErrorNotice(message: message),
+    ErrorItem(:final message) => ErrorBanner(message: message),
     FeedbackRequestItem() => FeedbackRequestCard(
       question: item.question,
       options: item.options,
@@ -1842,42 +1843,12 @@ class _RoutingNotice extends StatelessWidget {
 }
 
 /// 错误项。
-class _ErrorNotice extends StatelessWidget {
-  const _ErrorNotice({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      color: scheme.errorContainer,
-      child: Padding(
-        padding: SpbSpacing.cardPadding,
-        child: Row(
-          children: [
-            Icon(Icons.error_outline, size: SpbSpacing.lg, color: scheme.error),
-            const SizedBox(width: SpbSpacing.sm),
-            Expanded(
-              child: SelectableText(
-                message,
-                style: Theme.of(context).textTheme.bodySmall
-                    ?.copyWith(color: scheme.onErrorContainer),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 /// 目标自动推进停止提示（`goal_gate_stopped`）。
 ///
 /// ## 为什么用窄条而不是错误卡
 ///
 /// 「自动推进停止」不是错误：`goal_completed` 是**成功终态**。用
-/// `_ErrorNotice` 的红底会让「目标已实现」看起来像失败。故与
+/// `ErrorBanner` 的红底会让「目标已实现」看起来像失败。故与
 /// [_RoutingNotice] 同一形式（居中窄条 + 弱化色），只在有轮次信息时补一行副文案。
 ///
 /// ## 文案来自领域层，不在这里 switch reason
@@ -2012,25 +1983,6 @@ class _DiagnosticNotice extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// 空列表提示。
-class _EmptyHint extends StatelessWidget {
-  const _EmptyHint({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Text(
-        text,
-        style: Theme.of(context).textTheme.bodyMedium
-            ?.copyWith(color: scheme.onSurfaceVariant),
       ),
     );
   }
