@@ -9,16 +9,25 @@
 ///
 /// | 类型 | 本客户端 |
 /// |---|---|
-/// | `text` | ✅ 本轮实现 |
-/// | `image` | ✅ 本轮实现 |
-/// | `external`（跳 UFS 预览页） | ✅ 本轮实现 |
-/// | `spec` / `dashboard` / `map` | ❌ **需 JSON 结构化渲染器，本轮有意不做** |
+/// | `text` | ✅ 已实现 |
+/// | `image` | ✅ 已实现 |
+/// | `external`（跳 UFS 预览页） | ✅ 已实现 |
+/// | `spec`（`{root, elements}` 结构化表单） | ✅ 已实现（内容层判定，见 [resolveTextPreview]） |
+/// | `dashboard` / `map` | ❌ **需重型渲染组件，属 issue #12 的待决策点** |
 ///
-/// 后三类需要仪表盘 / 地图 / 结构化表单这类重型渲染组件，且要先决定
-/// 「是否引入 JSON 结构化渲染器」——那是 issue #12 的决策点，**不属于本 issue**。
-/// 故本轮对 JSON 内容**一律退化为 `text`**（见 [resolveTextPreviewKind]），
-/// 而不是假装识别不出来（那样会把它推给 `external`，用户反而看不到内容）。
+/// `spec` 与另两类**不是一个决策**：客户端已有 `SpecUiCard` + [parseSpecUi]，
+/// 缺的只是「从任意 JSON 里把 schema 提取出来」，故由
+/// [extractSpecSchemaFromUnknown] 补上，**不需要**引入新的渲染器。
+/// `dashboard`（`{type, components[]}` 网格布局）与 `map`（坐标 + 底图）的形状与
+/// `{root, elements}` **不兼容**，需各自的渲染技术栈，留待 issue #12 决策。
+///
+/// 识别不出来时**一律退化为 `text`**（见 [resolveTextPreview]），而不是假装
+/// 识别出来推给 `external`——后者会让用户从「能看原文」退化成「跳出去」。
 library;
+
+import 'dart:convert';
+
+import 'spec_ui.dart';
 
 /// 预览形态。三态即本轮全部能力（见库文档的六类对照表）。
 enum FilePreviewKind {
@@ -232,27 +241,209 @@ FilePreviewKind resolvePreviewKind({
   return FilePreviewKind.external;
 }
 
-/// 内容层判定：文本内容的**呈现形态**。
+/// 文本内容层判定的结果：原文，或识别出的 spec 文档。
 ///
-/// ## 本轮恒为 [FilePreviewKind.text]（有意为之）
+/// ## 为什么不是给 [FilePreviewKind] 加一个 `spec` 值
 ///
-/// webapp 的 `resolveTextPreview` 会尝试 JSON 解析并依次识别地图 →
-/// 仪表盘 → 通用结构化表单 schema，命中则交给对应渲染器。
-/// 本客户端**没有**这些渲染器（见库文档的六类对照表），故本轮一律返回
-/// `text`——把 JSON 原样展示给用户。
+/// [resolvePreviewKind] 判的是 **mime / 扩展名**（这个文件是什么格式），
+/// 本类型判的是**内容**（这段字节里装的是什么）。两者是不同维度：一个
+/// `.json` 文件既可能是 spec 也可能只是一份配置。塞进同一枚举会让
+/// [resolvePreviewKind] 的穷尽 switch 也被迫处理 spec，语义错位。
 ///
-/// ## 为什么保留这个函数而不是直接写死 text
+/// ## 为什么是 sealed 而不是「nullable 字段」
 ///
-/// 它把「内容层判定」这个**扩展点**显式留在代码里：将来接入 JSON 结构化渲染器时，
-/// 改动落在这一个函数内（返回值扩展为结构化表单 / 仪表盘 / 地图），调用方与类型判定的
-/// 上层逻辑都不用动。若现在不写，接线的人得重新推导「判定链该在哪一层」。
+/// 调用方（预览对话框）必须对两种形态**都**给出渲染分支，且两者互斥。
+/// sealed + 穷尽 switch 让「将来新增一种形态」变成编译错误，而不是运行时空白。
+sealed class TextPreviewPayload {
+  const TextPreviewPayload();
+}
+
+/// 原文呈现（spec 识别失败时的**唯一**出路）。
+final class PlainTextPreview extends TextPreviewPayload {
+  const PlainTextPreview(this.text);
+
+  /// 已裁剪的原文（见 [buildTextPreview]）。
+  final TextPreview text;
+}
+
+/// spec 结构化呈现（交给 `SpecUiCard`）。
+final class SpecTextPreview extends TextPreviewPayload {
+  const SpecTextPreview(this.doc);
+
+  /// 已解析的文档。构造时保证 `doc.root != null`（见 [resolveTextPreview]）。
+  final SpecUiDocument doc;
+}
+
+/// 内容层判定：把解码后的文本分成「spec 文档」或「原文」。
 ///
-/// ⚠️ **不要**在没有渲染器的情况下让它返回 `external`：那会让 JSON 文件从
-/// 「能看原文」退化成「跳到 UFS 预览页」——比现在更差。
-FilePreviewKind resolveTextPreviewKind(String content) {
-  // 预留：JSON.parse → 地图 schema → 仪表盘 schema → 通用结构化表单 schema。
-  // 本轮无渲染器，故无论内容是什么都按纯文本呈现。
-  return FilePreviewKind.text;
+/// 对齐 webapp `file-preview.ts` 的 `resolveTextPreview`（**去掉** dashboard / map
+/// 两类——它们归 issue #12 的待决策点，见库文档）。
+///
+/// ## 识别失败必须退回原文
+///
+/// ⚠️ 这是本函数的**硬约束**：spec 解析失败绝不能变成空白对话框。
+/// `SpecUiCard` 在 `doc` 为 null 或 `root` 悬空时渲染 `SizedBox.shrink()`，
+/// 用户看到的是空对话框——比原文差得多。故这里只在 `root` 确实存在时返回
+/// [SpecTextPreview]（[extractSpecSchemaFromUnknown] 已校验），否则一律
+/// [PlainTextPreview]。
+///
+/// ## 为什么识别失败不退 `external`
+///
+/// 那会让 JSON 文件从「能看原文」退化成「跳 UFS 预览页」——比识别不出来更差。
+TextPreviewPayload resolveTextPreview(String content) {
+  final schema = extractSpecSchemaFromUnknown(content);
+  if (schema != null) {
+    final doc = parseSpecUi(schema);
+    // `root != null`：悬空 root 会让 SpecUiCard 渲染空对话框，不如给原文。
+    if (doc != null && doc.root != null) return SpecTextPreview(doc);
+  }
+  return PlainTextPreview(buildTextPreview(content));
+}
+
+/// 从字符串里抽取 schema 时，扫描的字符上限。
+///
+/// 与 [kTextPreviewMaxChars] 同值：超过这个长度时深度遍历一个巨型 JSON
+/// 只是白烧 CPU（用户的注意力也不在末尾）。webapp 用独立的
+/// `MAX_JSON_SCAN_CHARS = 120_000`；此处复用文本上限，避免多一个需要单独
+/// 解释的常量。
+const int _kSpecScanMaxChars = kTextPreviewMaxChars;
+
+/// 提取 schema 时的深度上限（对齐 webapp `extractSchemaFromUnknown`）。
+const int _kSpecExtractMaxDepth = 5;
+
+/// 优先尝试的键（对齐 webapp 的 `priorityKeys`）。
+///
+/// 命中顺序即优先级：先试这些语义明确的容器键，未命中再遍历其余键
+/// （覆盖嵌套在自定义字段下的 schema）。
+const List<String> _specPriorityKeys = [
+  'schema',
+  'ui_schema',
+  'uiSchema',
+  'json',
+  'data',
+  'result',
+  'output',
+  'content',
+  'text',
+  'value',
+];
+
+/// 从任意 JSON 值里深度下探，提取 `{root, elements}` 形状的 spec schema。
+///
+/// 对齐 webapp `json-ui-schema.ts` 的 `extractSchemaFromUnknown`。返回**原始
+/// Map**（而非 [SpecUiDocument]），以便与 [parseSpecUi] 的输入形态一致。
+///
+/// ## 判定顺序
+///
+/// 1. `depth > 5` 或 null → 放弃（防止损坏数据导致无限下探）；
+/// 2. 字符串 → 抽 JSON 候选（整体 / ```json 围栏 / 首尾大括号切片），逐个递归；
+/// 3. 数组 → 逐项递归（取第一个命中的）；
+/// 4. 当前值本身是合法 schema → 返回；
+/// 5. 按 [_specPriorityKeys] 递归；
+/// 6. 遍历其余键递归。
+///
+/// ## 「合法 schema」的判据
+///
+/// 必须能通过 [parseSpecUi]，**且** `elements[root]` 存在。后者是对齐 webapp
+/// 的关键：`parseSpecUi` 容忍悬空 root（返回 document 但 `root` 为 null），
+/// 而那样的 document 交给 `SpecUiCard` 会渲染成空对话框——比原文更差。
+Map<String, Object?>? extractSpecSchemaFromUnknown(
+  Object? value, {
+  int depth = 0,
+}) {
+  if (depth > _kSpecExtractMaxDepth || value == null) return null;
+
+  if (value is String) {
+    for (final candidate in _jsonCandidatesFromString(value)) {
+      final schema = extractSpecSchemaFromUnknown(candidate, depth: depth + 1);
+      if (schema != null) return schema;
+    }
+    return null;
+  }
+
+  if (value is List) {
+    for (final item in value) {
+      final schema = extractSpecSchemaFromUnknown(item, depth: depth + 1);
+      if (schema != null) return schema;
+    }
+    return null;
+  }
+
+  final direct = _normalizeSpecSchema(value);
+  if (direct != null) return direct;
+
+  if (value is Map) {
+    for (final key in _specPriorityKeys) {
+      if (!value.containsKey(key)) continue;
+      final schema = extractSpecSchemaFromUnknown(value[key], depth: depth + 1);
+      if (schema != null) return schema;
+    }
+    for (final key in value.keys) {
+      if (_specPriorityKeys.contains(key)) continue;
+      final schema = extractSpecSchemaFromUnknown(value[key], depth: depth + 1);
+      if (schema != null) return schema;
+    }
+  }
+
+  return null;
+}
+
+/// 当前值是否本身就是一个合法 schema；是则返回其 `Map<String, Object?>` 形态。
+Map<String, Object?>? _normalizeSpecSchema(Object? candidate) {
+  if (candidate is! Map) return null;
+  final doc = parseSpecUi(candidate);
+  // 悬空 root 不算命中（见 extractSpecSchemaFromUnknown 的说明）。
+  if (doc == null || doc.root == null) return null;
+  return candidate.map((key, value) => MapEntry(key.toString(), value));
+}
+
+/// 从字符串里抽取可能的 JSON 候选（对齐 webapp `extractJsonCandidatesFromString`）。
+///
+/// 三种来源，按可靠性排序：
+/// 1. 整串就是一个 JSON；
+/// 2. Markdown 围栏 ```json ... ``` 里的内容（LLM 产出常见）；
+/// 3. 首尾大括号之间的切片（前后夹了说明文字时）。
+List<Object?> _jsonCandidatesFromString(String value) {
+  final text = value.trim();
+  if (text.isEmpty) return const [];
+
+  final clipped = text.length > _kSpecScanMaxChars
+      ? text.substring(0, _kSpecScanMaxChars)
+      : text;
+  final candidates = <Object?>[];
+
+  final direct = _tryParseJson(clipped);
+  if (direct != null) candidates.add(direct);
+
+  for (final match in _fencedJsonPattern.allMatches(clipped)) {
+    final inner = (match.group(1) ?? '').trim();
+    final parsed = _tryParseJson(inner);
+    if (parsed != null) candidates.add(parsed);
+  }
+
+  final firstBrace = clipped.indexOf('{');
+  final lastBrace = clipped.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    final parsed = _tryParseJson(clipped.substring(firstBrace, lastBrace + 1));
+    if (parsed != null) candidates.add(parsed);
+  }
+
+  return candidates;
+}
+
+/// ```json ... ``` 围栏（大小写不敏感，`json` 标记可省）。
+final RegExp _fencedJsonPattern = RegExp(
+  r'```(?:json)?\s*([\s\S]*?)```',
+  caseSensitive: false,
+);
+
+/// JSON 解析，失败返回 null（**不抛异常**：候选里混着非 JSON 是常态）。
+Object? _tryParseJson(String text) {
+  try {
+    return jsonDecode(text);
+  } on FormatException {
+    return null;
+  }
 }
 
 /// 文本预览的裁剪结果。

@@ -254,33 +254,158 @@ void main() {
     });
   });
 
-  group('resolveTextPreviewKind：本轮一律退化 text（无 JSON-UI 渲染器）', () {
-    test('合法 JSON 仍按 text 呈现（不是 external、不是 spec）', () {
-      // 这是本轮**有意**的退化：webapp 会把命中 schema 的 JSON 交给
-      // DashboardRenderer/MonacoEditorLazy；客户端没有这些渲染器，
-      // 故把原文交给用户看。若误返回 external，JSON 文件会从
-      // 「能看原文」退化成「跳 UFS 预览页」——比现在更差。
-      expect(resolveTextPreviewKind('{"a":1}'), FilePreviewKind.text);
+  group('resolveTextPreview：内容层判定（spec 文档 or 原文）', () {
+    test('裸 spec schema → SpecTextPreview', () {
+      final payload = resolveTextPreview(
+        '{"root":"page","elements":{"page":{"type":"page"}}}',
+      );
+      expect(payload, isA<SpecTextPreview>());
+      expect((payload as SpecTextPreview).doc.root?.id, 'page');
     });
 
-    test('形似 map / dashboard / spec 的 JSON 也仍是 text', () {
+    test('嵌套在 content 字段里的 schema 也能识别（深度下探）', () {
+      final payload = resolveTextPreview(
+        '{"content":"{\\"root\\":\\"r\\",\\"elements\\":{\\"r\\":{\\"type\\":\\"card\\"}}}"}',
+      );
+      expect(payload, isA<SpecTextPreview>());
+    });
+
+    test('markdown 围栏里的 schema 能识别（LLM 产出形态）', () {
+      final payload = resolveTextPreview(
+        '说明文字\n```json\n{"root":"r","elements":{"r":{"type":"card"}}}\n```\n尾巴',
+      );
+      expect(payload, isA<SpecTextPreview>());
+    });
+
+    test('合法 JSON 但不是 spec → 原文（不退 external）', () {
+      final payload = resolveTextPreview('{"a":1}');
+      expect(payload, isA<PlainTextPreview>());
+      expect((payload as PlainTextPreview).text.content, '{"a":1}');
+    });
+
+    test('形似 map / dashboard 的 JSON → 原文（归 issue #12 待决策）', () {
       expect(
-        resolveTextPreviewKind('{"type":"map","center":[1,2],"markers":[]}'),
-        FilePreviewKind.text,
+        resolveTextPreview('{"type":"map","center":[1,2],"markers":[]}'),
+        isA<PlainTextPreview>(),
       );
       expect(
-        resolveTextPreviewKind('{"widgets":[{"x":0,"y":0,"w":2,"h":1}]}'),
-        FilePreviewKind.text,
-      );
-      expect(
-        resolveTextPreviewKind('{"root":{"type":"page"},"elements":[]}'),
-        FilePreviewKind.text,
+        resolveTextPreview('{"widgets":[{"x":0,"y":0,"w":2,"h":1}]}'),
+        isA<PlainTextPreview>(),
       );
     });
 
-    test('非 JSON 与空串也是 text', () {
-      expect(resolveTextPreviewKind('hello'), FilePreviewKind.text);
-      expect(resolveTextPreviewKind(''), FilePreviewKind.text);
+    test('悬空 root 的 schema → 原文（空对话框比原文更差）', () {
+      // `parseSpecUi` 容忍悬空 root（root 为 null），但那样的文档交给
+      // SpecUiCard 会渲染 SizedBox.shrink()——用户看到空白对话框。
+      final payload = resolveTextPreview(
+        '{"root":"missing","elements":{"other":{"type":"card"}}}',
+      );
+      expect(payload, isA<PlainTextPreview>());
+    });
+
+    test('elements 是 List（旧用例形态）→ 原文', () {
+      // 既有用例：`{"root":{"type":"page"},"elements":[]}` 的 elements
+      // 是 List，parseSpecUi 本就会返回 null。
+      expect(
+        resolveTextPreview('{"root":{"type":"page"},"elements":[]}'),
+        isA<PlainTextPreview>(),
+      );
+    });
+
+    test('非 JSON 与空串 → 原文', () {
+      expect(resolveTextPreview('hello'), isA<PlainTextPreview>());
+      expect(resolveTextPreview(''), isA<PlainTextPreview>());
+    });
+
+    test('大文本截断在原文分支仍生效（不静默截断）', () {
+      final payload = resolveTextPreview('a' * (kTextPreviewMaxChars + 10));
+      expect(payload, isA<PlainTextPreview>());
+      final text = (payload as PlainTextPreview).text;
+      expect(text.truncated, isTrue);
+      expect(text.originalLength, kTextPreviewMaxChars + 10);
+    });
+  });
+
+  group('extractSpecSchemaFromUnknown：深度下探与边界', () {
+    test('直接命中的 schema 原样返回', () {
+      final schema = extractSpecSchemaFromUnknown(
+        '{"root":"r","elements":{"r":{"type":"card"}}}',
+      );
+      expect(schema, isNotNull);
+      expect(schema!['root'], 'r');
+    });
+
+    test('priorityKeys 优先：content 里的 schema 先于其它键被找到', () {
+      final schema = extractSpecSchemaFromUnknown(
+        '{"other":{"root":"x","elements":{"x":{"type":"card"}}},'
+        '"content":{"root":"r","elements":{"r":{"type":"text"}}}}',
+      );
+      // content 在 priorityKeys 里，other 不在；故应命中 content 的那个。
+      expect(schema, isNotNull);
+      expect(schema!['root'], 'r');
+    });
+
+    test('priorityKeys 未命中时遍历其余键（fallback）', () {
+      final schema = extractSpecSchemaFromUnknown(
+        '{"customField":{"root":"r","elements":{"r":{"type":"card"}}}}',
+      );
+      expect(schema, isNotNull);
+      expect(schema!['root'], 'r');
+    });
+
+    test('数组里逐项下探，取第一个命中的', () {
+      final schema = extractSpecSchemaFromUnknown(
+        '[{"a":1},{"root":"r","elements":{"r":{"type":"card"}}}]',
+      );
+      expect(schema, isNotNull);
+    });
+
+    test('深度超过 5 截断（第 6 层放弃）', () {
+      // 构造 depth=6 的嵌套：每层一个键，最内层才是 schema。
+      // depth 从 0 起算，故 6 层包裹后内层 schema 位于 depth=6 > 5 → 放弃。
+      Object? nested = '{"root":"r","elements":{"r":{"type":"card"}}}';
+      for (var i = 0; i < 6; i++) {
+        nested = {'k$i': nested};
+      }
+      expect(extractSpecSchemaFromUnknown(nested), isNull);
+    });
+
+    test('深度 5 以内可达（边界内）', () {
+      Object? nested = '{"root":"r","elements":{"r":{"type":"card"}}}';
+      for (var i = 0; i < 4; i++) {
+        nested = {'k$i': nested};
+      }
+      expect(extractSpecSchemaFromUnknown(nested), isNotNull);
+    });
+
+    test('null 与标量 → null', () {
+      expect(extractSpecSchemaFromUnknown(null), isNull);
+      expect(extractSpecSchemaFromUnknown(42), isNull);
+      expect(extractSpecSchemaFromUnknown(''), isNull);
+    });
+
+    test('悬空 root 不算命中', () {
+      expect(
+        extractSpecSchemaFromUnknown(
+          '{"root":"missing","elements":{"x":{"type":"card"}}}',
+        ),
+        isNull,
+      );
+    });
+
+    test('围栏与首尾大括号切片两种字符串形态', () {
+      expect(
+        extractSpecSchemaFromUnknown(
+          '前言\n```\n{"root":"r","elements":{"r":{"type":"card"}}}\n```',
+        ),
+        isNotNull,
+      );
+      expect(
+        extractSpecSchemaFromUnknown(
+          '前言 {"root":"r","elements":{"r":{"type":"card"}}} 后语',
+        ),
+        isNotNull,
+      );
     });
   });
 

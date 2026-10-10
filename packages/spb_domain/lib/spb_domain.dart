@@ -49,6 +49,8 @@ library;
 //   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
 //   resolvePreviewKind / FilePreviewKind —— 文件预览类型判定（text/image/external，纯逻辑）
+//   resolveTextPreview / TextPreviewPayload —— 内容层判定（spec 文档 or 原文，纯逻辑）
+//   extractSpecSchemaFromUnknown          —— 从任意 JSON 深度下探提取 spec schema
 //   buildTextPreview / TextPreview     —— 文本预览裁剪（大文件截断 + 明确提示）
 //   groupFileEventsForDisplay / FILE_BATCH_MIN_COUNT —— 时间线 → 展示行（同 turn 同秒批量聚合，纯逻辑）
 //   TimelineDisplayRow / SingleItemRow / AgentFileBatchRow —— 展示行 sealed 家族（不改归约结果）
