@@ -2,6 +2,7 @@ import 'dart:convert' show utf8;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
@@ -155,7 +156,15 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
             utf8.decode(bytes, allowMalformed: true),
           )) {
             SpecTextPreview(:final doc) => _SpecPayload(doc),
-            PlainTextPreview(:final text) => _TextPayload(text),
+            PlainTextPreview(:final text) => _TextPayload(
+              text,
+              // 渲染器选择在**取数时**定一次（而非每帧判定）：文件名/mime 不变，
+              // 重复判定只是浪费。
+              isMarkdown: isMarkdownTextPreview(
+                mimeType: f.mimeType,
+                fileName: f.relativePath.isEmpty ? f.fileName : f.relativePath,
+              ),
+            ),
           };
         case FilePreviewKind.external:
           throw const _PreviewUnavailable('此类型不可内联预览');
@@ -289,7 +298,10 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
         }
         final payload = snap.data;
         return switch (payload) {
-          _TextPayload(:final text) => _textBody(text),
+          _TextPayload(:final text, :final isMarkdown) => _textBody(
+            text,
+            isMarkdown: isMarkdown,
+          ),
           _SpecPayload(:final doc) => _specBody(doc),
           _ImagePayload(:final bytes) => _imageBody(bytes),
           null => _errorBody('加载失败'),
@@ -309,64 +321,113 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
     child: SpecUiCard(doc: doc),
   );
 
-  /// 文本：等宽、可选中、可滚动。截断提示**常驻**在内容上方。
-  Widget _textBody(TextPreview preview) {
+  /// 文本：Markdown 用 [GptMarkdown]，其余等宽、可选中、可滚动。
+  ///
+  /// 截断提示**常驻**在内容上方（两种渲染方式都有）。
+  Widget _textBody(TextPreview preview, {required bool isMarkdown}) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // 截断提示：不静默截断是本 issue 的验收项。它必须**可见**——
-        // 只在日志里记一笔等于没提示（用户看不到日志）。
-        if (preview.truncated)
-          Container(
-            key: const ValueKey('agent-file-preview-truncated'),
-            width: double.infinity,
-            color: scheme.tertiaryContainer,
-            padding: const EdgeInsets.symmetric(
-              horizontal: SpbSpacing.lg,
-              vertical: SpbSpacing.sm,
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.content_cut_outlined,
-                  size: SpbSpacing.lg,
-                  color: scheme.onTertiaryContainer,
-                ),
-                const SizedBox(width: SpbSpacing.sm),
-                Expanded(
-                  child: Text(
-                    // 说清「截了多少」而不只是「截了」：只报已截断，
-                    // 用户无法判断是漏了一行还是漏了 10 万行。
-                    '内容过大，仅显示前 ${preview.content.length} 字符'
-                    '（共 ${preview.originalLength} 字符，'
-                    '省略 ${preview.omittedLength} 字符）。'
-                    '完整内容请下载查看。',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: scheme.onTertiaryContainer,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        if (preview.truncated) _truncatedBanner(preview),
         Flexible(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(SpbSpacing.lg),
-            child: SelectableText(
-              key: const ValueKey('agent-file-preview-text'),
-              preview.content,
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
-                fontFamilyFallback: const ['Menlo', 'Consolas', 'monospace'],
-              ),
-            ),
+            child: isMarkdown
+                ? _markdownBody(preview, theme)
+                : SelectableText(
+                    key: const ValueKey('agent-file-preview-text'),
+                    preview.content,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                      fontFamilyFallback: const [
+                        'Menlo',
+                        'Consolas',
+                        'monospace',
+                      ],
+                    ),
+                  ),
           ),
         ),
       ],
+    );
+  }
+
+  /// Markdown 正文。
+  ///
+  /// ## 为什么不用 `isStreaming` / `animation`
+  ///
+  /// 预览是**一次性取完**的静态内容，没有 token 流。开着 reveal 动画会让用户
+  /// 打开对话框后先看到半截、再逐字补全——那是「正在生成」的错误暗示。
+  /// `GptMarkdownAnimation.none` + `isStreaming: false` 直接渲染全文。
+  ///
+  /// ## 为什么包 `SelectionArea`
+  ///
+  /// `GptMarkdown` 内部用 `RichText`，默认不可选中；纯文本分支的
+  /// `SelectableText` 可选中。不包会让「Markdown 能选、txt 不能选」——
+  /// 同一对话框两种行为。
+  ///
+  /// ## 链接不可点
+  ///
+  /// 预览对话框**没有** `onLinkTap` 注入通道（与 `_specBody` 不传 `onAction`
+  /// 同一约定：预览是只读展示，不引入动作）。故不传 `onLinkTap`——
+  /// `GptMarkdown` 在它为 null 时只渲染样式、不响应点击，与
+  /// `AssistantMessageBubble` 的可点行为刻意区分。
+  Widget _markdownBody(TextPreview preview, ThemeData theme) {
+    return SelectionArea(
+      child: GptMarkdown(
+        key: const ValueKey('agent-file-preview-markdown'),
+        preview.content,
+        animation: GptMarkdownAnimation.none,
+        style: theme.textTheme.bodyMedium,
+      ),
+    );
+  }
+
+  /// 截断提示条：不静默截断是本 issue 的验收项。它必须**可见**——
+  /// 只在日志里记一笔等于没提示（用户看不到日志）。
+  ///
+  /// ## 为什么 Markdown 分支更需要它
+  ///
+  /// 渲染成 Markdown 后，页面看起来「很完整」（有标题、有排版），比等宽纯文本
+  /// 更容易让人以为「这就是全部」。故提示不能因为换了渲染器就省掉。
+  Widget _truncatedBanner(TextPreview preview) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Container(
+      key: const ValueKey('agent-file-preview-truncated'),
+      width: double.infinity,
+      color: scheme.tertiaryContainer,
+      padding: const EdgeInsets.symmetric(
+        horizontal: SpbSpacing.lg,
+        vertical: SpbSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.content_cut_outlined,
+            size: SpbSpacing.lg,
+            color: scheme.onTertiaryContainer,
+          ),
+          const SizedBox(width: SpbSpacing.sm),
+          Expanded(
+            child: Text(
+              // 说清「截了多少」而不只是「截了」：只报已截断，
+              // 用户无法判断是漏了一行还是漏了 10 万行。
+              '内容过大，仅显示前 ${preview.content.length} 字符'
+              '（共 ${preview.originalLength} 字符，'
+              '省略 ${preview.omittedLength} 字符）。'
+              '完整内容请下载查看。',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onTertiaryContainer,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -475,8 +536,11 @@ sealed class _PreviewPayload {
 }
 
 class _TextPayload extends _PreviewPayload {
-  const _TextPayload(this.text);
+  const _TextPayload(this.text, {required this.isMarkdown});
   final TextPreview text;
+
+  /// 用 Markdown 渲染器还是等宽纯文本（取数时按 mime/扩展名判定一次）。
+  final bool isMarkdown;
 }
 
 /// spec 结构化内容（`resolveTextPreview` 命中 `{root, elements}` 时）。

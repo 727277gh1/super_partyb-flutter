@@ -254,6 +254,45 @@ void main() {
     });
   });
 
+  group('isMarkdownTextPreview：渲染器选择（Markdown vs 等宽纯文本）', () {
+    // 表驱动：(描述, mime, fileName, 期望)
+    final cases = <(String, String?, String, bool)>[
+      ('md 按扩展名', 'text/plain', 'README.md', true),
+      ('mdx 按扩展名', null, 'page.mdx', true),
+      ('markdown 扩展名不在文本白名单 → 非 markdown', null, 'doc.markdown', false),
+      ('大写扩展名', null, 'README.MD', true),
+      ('text/markdown 按 mime', 'text/markdown', 'noext', true),
+      ('带 charset 的 mime', 'text/markdown; charset=utf-8', 'noext', true),
+      ('text/x-markdown 按 mime', 'text/x-markdown', 'noext', true),
+      ('mime 是 text/plain 且无 md 后缀', 'text/plain', 'a.txt', false),
+      ('json 不是 markdown', 'application/json', 'a.json', false),
+      ('log 不是 markdown', 'text/plain', 'a.log', false),
+      ('csv 不是 markdown', 'text/csv', 'a.csv', false),
+      ('无扩展名且无 mime', null, 'noext', false),
+      ('mime 为 null 时按扩展名兜底', null, 'guide.md', true),
+      ('复合扩展名末段命中', null, 'notes.md.bak', false),
+    ];
+
+    for (final (desc, mime, name, expected) in cases) {
+      test('$desc → $expected', () {
+        expect(isMarkdownTextPreview(mimeType: mime, fileName: name), expected);
+      });
+    }
+
+    test('markdown 必须是可内联文本的子集（否则渲染器选不到）', () {
+      // 不变量：能 Markdown 渲染的文件，必然先通过 text 判定。
+      // 若两者脱钩，会出现「选了 Markdown 渲染但压根走不到 text 分支」。
+      for (final name in ['a.md', 'a.mdx']) {
+        expect(
+          isInlineTextPreviewable(mimeType: null, fileName: name),
+          isTrue,
+          reason: '$name 应在文本白名单里',
+        );
+        expect(isMarkdownTextPreview(mimeType: null, fileName: name), isTrue);
+      }
+    });
+  });
+
   group('resolveTextPreview：内容层判定（spec 文档 or 原文）', () {
     test('裸 spec schema → SpecTextPreview', () {
       final payload = resolveTextPreview(

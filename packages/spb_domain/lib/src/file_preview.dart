@@ -208,6 +208,39 @@ bool isInlineTextPreviewable({String? mimeType, required String fileName}) {
   return fileExtensionsOf(name).any(_inlineTextExtensions.contains);
 }
 
+/// Markdown 的 MIME 白名单（判定是否用 Markdown 渲染器呈现文本）。
+const Set<String> _markdownMimeTypes = {'text/markdown', 'text/x-markdown'};
+
+/// Markdown 扩展名（小写，含点）。
+///
+/// 必须与 [_inlineTextExtensions] 的 Markdown 项**保持一致**：`.markdown` 不在
+/// 文本白名单里（对齐 webapp `INLINE_TEXT_FILE_EXTENSIONS`），故也不能在这里——
+/// 否则会出现「判为 Markdown 渲染但压根走不到 text 分支」的死项。
+const Set<String> _markdownExtensions = {'.md', '.mdx'};
+
+/// 是否应以 **Markdown 渲染**（而不是等宽纯文本）呈现该文本内容。
+///
+/// ## 为什么是独立函数而不是并进 [isInlineTextPreviewable]
+///
+/// 两者判的是不同问题：[isInlineTextPreviewable] 答「能不能内联看」，本函数答
+/// 「看的时候用什么渲染器」。`.md` 两者都命中，但 `.txt` 只命中前者——若合并，
+/// 就再也分不出该用哪种渲染方式。
+///
+/// ## 为什么判 mime **或**扩展名
+///
+/// 服务端报的 mime 常是通用的 `text/plain`（尤其 UFS 上传时未探测），此时只能
+/// 靠扩展名。反之扩展名可能被剥（无后缀的下载），此时只能靠 mime。任一命中即可。
+///
+/// 与 webapp `WorkbenchFeed.tsx` 对 `text` 预览一律走 `MarkdownRenderer` 的做法
+/// **不完全相同**：webapp 是无条件 Markdown 渲染，客户端保留等宽纯文本分支——
+/// 对 `.log` / `.csv` 这类内容，Markdown 渲染会把 `#`、`*` 当语法吃掉，反而不如
+/// 纯文本忠实。故只在确实声明是 Markdown 时才切渲染器。
+bool isMarkdownTextPreview({String? mimeType, required String fileName}) {
+  if (_markdownMimeTypes.contains(normalizeMimeType(mimeType))) return true;
+  return fileExtensionsOf(fileName.toLowerCase())
+      .any(_markdownExtensions.contains);
+}
+
 /// 判定预览形态。**这是本轮对外的唯一入口。**
 ///
 /// 顺序即语义（对齐 webapp `loadAgentFilePreview`）：

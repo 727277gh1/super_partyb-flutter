@@ -98,9 +98,15 @@ void main() {
 
   group('text 分支', () {
     testWidgets('渲染文本内容与等宽字体，无截断提示', (t) async {
+      // 用 `.txt` 驱动等宽分支：`.md` 现在走 Markdown 渲染器（见下组）。
       await _pumpPreview(
         t,
-        file: _file(),
+        file: _file(
+          mimeType: 'text/plain',
+          fileName: 'a.txt',
+          relativePath: 'out/a.txt',
+          displayName: 'a.txt',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => utf8.encode('# 标题\n正文'),
         ),
@@ -110,7 +116,7 @@ void main() {
         find.byKey(const ValueKey('agent-file-preview-dialog')),
         findsOneWidget,
       );
-      expect(find.text('report.md'), findsOneWidget);
+      expect(find.text('a.txt'), findsOneWidget);
       expect(find.text('文本'), findsOneWidget);
       final text = t.widget<SelectableText>(
         find.byKey(const ValueKey('agent-file-preview-text')),
@@ -128,7 +134,11 @@ void main() {
       final big = 'x' * (kTextPreviewMaxChars + 500);
       await _pumpPreview(
         t,
-        file: _file(),
+        file: _file(
+          mimeType: 'text/plain',
+          fileName: 'a.txt',
+          relativePath: 'out/a.txt',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => utf8.encode(big),
         ),
@@ -154,7 +164,11 @@ void main() {
       // FormatException，用户看到「加载失败」而不是「文件里有乱码」。
       await _pumpPreview(
         t,
-        file: _file(),
+        file: _file(
+          mimeType: 'text/plain',
+          fileName: 'a.txt',
+          relativePath: 'out/a.txt',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => [0xFF, 0xFE, 0x41],
         ),
@@ -166,6 +180,109 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey('agent-file-preview-text')),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('Markdown 分支（issue #15：渲染器选择）', () {
+    testWidgets('.md 用 GptMarkdown 渲染，不再展示字面标记', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'text/markdown',
+          fileName: 'report.md',
+          relativePath: 'out/report.md',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('# 标题\n\n正文'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-markdown')),
+        findsOneWidget,
+      );
+      // 关键：走了 Markdown 渲染器，就不该再有等宽纯文本分支。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsNothing,
+      );
+      // `# 标题` 被渲染成标题：字面串（含 `# ` 前缀）不应作为整段文本出现。
+      expect(find.text('# 标题'), findsNothing);
+      expect(find.textContaining('标题'), findsWidgets);
+    });
+
+    testWidgets('mime 为 text/plain 但扩展名是 .md → 仍走 Markdown', (t) async {
+      // 服务端常报通用 text/plain，此时只能靠扩展名。漏判会让 README 显示
+      // 成一堆 `#`、`**` 标记。
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'text/plain',
+          fileName: 'README.md',
+          relativePath: 'README.md',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('## 二级标题'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-markdown')),
+        findsOneWidget,
+      );
+      expect(find.text('## 二级标题'), findsNothing);
+    });
+
+    testWidgets('.txt 仍是等宽纯文本（Markdown 渲染会吃掉 # 与 *）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'text/plain',
+          fileName: 'notes.txt',
+          relativePath: 'notes.txt',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('# 这不是标题\n* 也不是列表'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-markdown')),
+        findsNothing,
+      );
+      final text = t.widget<SelectableText>(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+      );
+      expect(text.data, '# 这不是标题\n* 也不是列表');
+    });
+
+    testWidgets('超长 .md：截断提示仍可见（Markdown 渲染不能省掉它）', (t) async {
+      // Markdown 渲染后页面看起来「很完整」，比纯文本更容易让人以为这就是全部。
+      final big = '# 报告\n${'x' * (kTextPreviewMaxChars + 10)}';
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'text/markdown',
+          fileName: 'big.md',
+          relativePath: 'out/big.md',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(big),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-truncated')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-markdown')),
         findsOneWidget,
       );
     });
@@ -319,7 +436,12 @@ void main() {
           '"props":{"content":"正文"}}}}';
       await _pumpPreview(
         t,
-        file: _file(),
+        // 用 `.md` 驱动：spec 优先于 Markdown（issue #15 的关键约束）。
+        file: _file(
+          mimeType: 'text/markdown',
+          fileName: 'spec.md',
+          relativePath: 'out/spec.md',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => utf8.encode(spec),
         ),
@@ -332,9 +454,13 @@ void main() {
       // SpecUiCard 按 type 分派渲染出 title 与正文。
       expect(find.text('报告'), findsOneWidget);
       expect(find.text('正文'), findsOneWidget);
-      // 识别为 spec 时不该同时展示原文。
+      // 识别为 spec 时不该同时展示原文或 Markdown。
       expect(
         find.byKey(const ValueKey('agent-file-preview-text')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-markdown')),
         findsNothing,
       );
     });
@@ -344,7 +470,11 @@ void main() {
       // 用户看到的是空对话框（SpecUiCard 对 null/悬空 root 渲染 shrink）。
       await _pumpPreview(
         t,
-        file: _file(),
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'a.json',
+          relativePath: 'a.json',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => utf8.encode('{"a":1,"b":[2,3]}'),
         ),
@@ -367,7 +497,11 @@ void main() {
     testWidgets('悬空 root 的 schema → 原文（不退化成空对话框）', (t) async {
       await _pumpPreview(
         t,
-        file: _file(),
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'a.json',
+          relativePath: 'a.json',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => utf8.encode(
             '{"root":"missing","elements":{"x":{"type":"card"}}}',
@@ -425,7 +559,11 @@ void main() {
     testWidgets('点关闭按钮收起对话框', (t) async {
       await _pumpPreview(
         t,
-        file: _file(),
+        file: _file(
+          mimeType: 'text/plain',
+          fileName: 'a.txt',
+          relativePath: 'out/a.txt',
+        ),
         onPreview: AgentFilePreviewCallbacks(
           loadBytes: (_) async => utf8.encode('hi'),
         ),
