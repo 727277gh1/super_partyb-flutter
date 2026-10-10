@@ -1,0 +1,555 @@
+# 对话数据本地缓存设计（issue #26）
+
+> 状态：**阶段 1（设计）+ 阶段 2 切片 A（实现）已完成**；切片 B/C 未做
+> （纯客户端范围，Go API 零改动）
+> 背景：`spb_data` 的 drift 库里只有 4 张表（同步游标 / 已同步文件 / 目录绑定 /
+> 偏好），**对话数据零本地缓存**。断网启动时除同步页与设置页外全是白屏。
+> 本文是 issue #26 的**阶段 1 交付物**，回答 issue 列出的 6 个问题；切片 A 的
+> 实现见阶段 2。
+
+---
+
+## 0. 结论速览
+
+| # | 问题 | 决策 |
+|---|---|---|
+| 1 | 缓存什么 | **切片 A** group 列表（存服务端原始 JSON）；**切片 B** 落库 timeline 事件；**切片 C** 离线写队列。**不缓存**文件内容、不缓存 `transient` 事件 |
+| 2 | 失效策略 | **不用 TTL**（到期清空 = 又白屏）。group 列表**整表替换**（表达「服务端删了」）；timeline 以 `globalSeq` **增量追加**。陈旧只做**提示**，不做清空 |
+| 3 | 写路径 | **两个写点，都不在 SSE 热路径上**：`listGroups` 成功后写 group 列表；`_backfill` / `loadOlder` 成功后写 timeline。SSE 事件**不**触发缓存写 |
+| 4 | 冲突 | 缓存里只存落库事件（与服务端 `_backfill` **同构**），故缓存层**不存在冲突**——它是 `_backfill` 的替代数据源，不是新的真源。乐观回显由既有 `EventReducer` 处理 |
+| 5 | 体积 | 每 group 事件数上限 = `maxBufferEvents`（2000）；单 payload 上限 64 KiB；总字节上限 + 按 `last_accessed_at` LRU 淘汰。**`kTextPreviewMaxChars` 不适用**（那是预览上限，见 §5.1） |
+| 6 | 迁移 | 只 `createTable`，**禁止** `createAll()` 兜底；已有 v1→v2 回归防线扩展到新表；缓存是**可丢弃数据**，降级直接清表而非写 down-migration |
+
+**依赖方向**（照抄既有 `SyncStateStore` 模式）：契约在 `spb_domain`，实现在
+`spb_data`，装配在 `apps/*`。`spb_domain` **不能**依赖 `spb_data`（AGENTS.md §3）。
+
+---
+
+## 1. 现状与缺口
+
+### 1.1 现有 4 张表全是「同步」的
+
+```
+SyncCursors    —— 同步游标（每状态键一行）
+SyncedFiles    —— 已同步文件（etag / size / contentHash）
+SyncBindings   —— 本地根目录绑定
+Preferences    —— 键值偏好
+```
+
+`grep -cE 'ChatGroup|ChatTurn|ChatEvent|ConversationItem' packages/spb_data/lib/src/database.dart`
+→ `0`。
+
+### 1.2 具体表现
+
+| 场景 | 现状 |
+|---|---|
+| 断网启动 | 对话列表空 → 点任何对话都是错误页 |
+| 弱网（地铁/电梯） | 每次切对话都重新拉，无缓存兜底 |
+| 冷启动 | 必须等网络往返才有首屏 |
+| 同一对话反复进入 | 每次都重拉 timeline |
+
+### 1.3 为什么不能靠「已有机制」兜底
+
+- **SSE 断线重连的 cursor 回放**（`chat_stream_controller.dart` 的
+  `_oldestLoadedGlobalSeq`）：它解决的是「连接断开期间的事件」，前提是**曾经
+  连上过**。冷启动断网时 `_buffer` 是空的，回放无从谈起。
+- **`ChatStreamController.maxBufferEvents = 2000` 的缓冲区**：纯内存，进程退出即失。
+- **UFS 交付物同步**：只覆盖文件，不覆盖对话。
+
+故必须新增持久化层。
+
+---
+
+## 2. 问题 1：缓存什么
+
+### 2.1 三个切片（按价值/成本排序，**不塞进一个 PR**）
+
+| 切片 | 内容 | 消除的症状 | 成本 |
+|---|---|---|---|
+| **A** | group 列表 | 断网启动白屏 | 低（单表 + 整表替换） |
+| **B** | 落库 timeline 事件 | 断网看不了历史对话 | 中（事件序列 + 游标 + 体积控制） |
+| **C** | 离线写队列 | 断网不能发消息 | 高（幂等 + 顺序 + 冲突） |
+
+**先做 A**：它用最小成本消除「白屏」这个最刺眼的症状。C 的复杂度与 A 差一个
+数量级（见 §7），单独排期。
+
+### 2.2 存「服务端原始 JSON」而不是拆列
+
+**决策：`ChatGroups` 表存 `payload TEXT`（服务端返回的 group JSON 原文）。**
+
+理由：`ChatGroup` 有 10 个实例字段，其中 3 个是嵌套结构
+（`metadata` / `active_session` / `current_goal`，见 `chat_group.dart`）。
+拆列的话**服务端加一个字段就要改客户端 schema + 写迁移**——而服务端加字段是
+常态（`metadata` 下已长到 `follow_up_suggest` / `habit_suggest` / `goal_gate` /
+`tts` 四块）。
+
+存 JSON 则 `ChatGroup.fromJson` 直接复用，**服务端加字段客户端零改动**。
+
+**这不是新发明**：`ChatEvent.toJson()` 已存在，其文档就写着「序列化回 JSON
+（本地缓存用）」（`chat_event.dart:886`）。本设计沿用同一做法，并需要给
+`ChatGroup` 补一个 `toJson()`（目前缺失，见 §3.2）。
+
+### 2.3 明确**不**缓存的东西
+
+| 不缓存 | 理由 |
+|---|---|
+| **文件内容** | 那是 UFS 交付物同步的职责，已有 `SyncedFiles` 表 + 完整链路。两套缓存同一份内容必然漂移 |
+| **`transient` 事件** | 服务端**不落库**（流式增量片段 / 状态变更通知）。缓存了也无法与服务端对账——`_backfill` 拿不回来，缓存永远「多出」这些行 |
+| **本地乐观回显**（`injectLocalUserMessage`） | `eventId = 'local-<micros>'`、`transient: true`，服务端没有对应物。见 §4 |
+| **诊断事件**（`Diagnostic: true`） | 默认不广播、不进时间线（AGENTS.md §5.4），缓存它们只会白占体积 |
+| **`goal_updated`** | 服务端漏设 `transient` 且**不落库**（`chat_stream_controller.dart:863` 的提前 `return`）。它的真源是业务表，缓存它会污染 timeline |
+
+---
+
+## 3. 数据模型
+
+### 3.1 新表（切片 A）
+
+> **表名与 issue 验收的差异**：issue 的验收写的是
+> `grep -c 'ChatGroups' packages/spb_data/lib/src/database.dart` → ≥1，而实现用的
+> 是 **`CachedGroups`**。这是有意的：这张表存的是**缓存**，叫 `ChatGroups` 会
+> 暗示它是 chat group 的**真源**——而本设计的核心原则正是「缓存不是真源」
+> （§4bis）。等价的验收命令：
+>
+> ```bash
+> grep -c 'CachedGroups' packages/spb_data/lib/src/database.dart   # → 3
+> ```
+
+
+```dart
+/// 对话列表缓存：**整表替换**语义（见 §3.3）。
+@DataClassName('CachedGroupRow')
+class CachedGroups extends Table {
+  /// group id（服务端主键）。
+  TextColumn get id => text()();
+
+  /// 归属用户。多账号切换时必须按 user_id 隔离，否则 A 账号能看到 B 的列表。
+  TextColumn get userId => text()();
+
+  /// 服务端返回的 group JSON **原文**（`ChatGroup.fromJson` 的输入）。
+  TextColumn get payload => text()();
+
+  /// 服务端 `updated_at`（原样保留，仅用于诊断/排序提示）。
+  TextColumn get updatedAt => text().nullable()();
+
+  /// 本地写入时刻。用于「离线数据，X 前更新」提示（**不是** TTL 依据，见 §3.4）。
+  IntColumn get fetchedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+```
+
+**为什么 `userId` 必须进表**：`ChatApi.listGroups` 走的是网关注入的 `X-User-ID`，
+切换账号后同一台机器上的缓存会串。加 `user_id` 列 + 查询时过滤，是唯一不依赖
+「切换账号时记得清库」的做法（后者会漏——登出路径不止一条）。
+
+### 3.2 需要补的序列化
+
+`ChatEvent.toJson()` 已有；**`ChatGroup` 没有 `toJson()`**（`grep -c toJson
+chat_group.dart` → 0）。切片 A 需要补一个，且必须满足：
+
+- 字段名与 `fromJson` **逐字对称**（snake_case，含 `active_session` /
+  `current_goal` 嵌套）；
+- round-trip 有测试：`ChatGroup.fromJson(g.toJson())` 与 `g` 的关键字段一致
+  （不能只测 `id`——`metadata` 的嵌套子对象最容易漏）。
+
+### 3.3 失效策略：整表替换（问题 2）
+
+**决策：`saveGroups(userId, List<ChatGroup>)` 是「删该 user 全部行 + 插入新行」
+的单一事务。**
+
+这是从 `SyncStateStore.save` 学到的教训——它的类文档写着：
+
+> `save` 是**整体替换**：先删该键的全部文件记录再插入新记录。若只做 upsert 而不
+> 删，远端已删除的文件会永远留在表里。
+
+同样的陷阱在这里是：**服务端删了一个 group，逐行 upsert 的缓存会永远显示它**。
+用户点进去得到 404，且没有任何机制能让它消失（`group_updated` 的删除通知只在
+线时收到）。
+
+### 3.4 为什么**不用 TTL**（问题 2 的关键论证）
+
+TTL 的直觉是「缓存过期就清掉，保证新鲜」。但本 issue 要消除的症状**就是白屏**：
+
+```
+断网 + TTL 到期 → 缓存被清 → 又是白屏
+```
+
+即 TTL 会在最需要缓存的时候（长时间断网）**主动放弃缓存**。
+
+**决策：缓存永不过期；陈旧只做提示。**
+
+- 缓存行带 `fetched_at`；
+- 读取时若 `now - fetched_at > staleAfter`（默认 15 分钟），UI 标注
+  「离线数据 · X 前更新」并保留内容；
+- **网络成功时无条件覆盖**——新鲜数据的来源是「拉到了」，不是「时间到了」。
+
+这样「陈旧」与「不可用」被分开：陈旧是**可展示的**，不可用才是白屏。
+
+### 3.5 切片 B 的 timeline 表（设计，不在切片 A 实现）
+
+```dart
+@DataClassName('CachedEventRow')
+class CachedEvents extends Table {
+  TextColumn get groupId => text()();
+  /// 落库事件的全局序（**不是** per-turn 的 seq，见 AGENTS.md §5.7）。
+  IntColumn get globalSeq => integer()();
+  /// `ChatEvent.toJson()` 原文。
+  TextColumn get payload => text()();
+  IntColumn get cachedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {groupId, globalSeq};
+}
+```
+
+**主键用 `globalSeq` 而非 `eventId`**：排序与分页必须用 `globalSeq`
+（AGENTS.md §5.7 的硬约束）。用 `eventId` 作主键会逼出「按 eventId 排序」的
+错误写法——而 `eventId` 的字典序与时间序**无关**。
+
+---
+
+## 4. 问题 3：写路径
+
+### 4.1 决策：两个写点，都不在 SSE 热路径上
+
+| 数据 | 写点 | 不在哪写 |
+|---|---|---|
+| group 列表 | `ChatApi.listGroups` 返回成功后 | **不在** `group_updated` 事件上写 |
+| timeline | `_backfill` / `loadOlder` 成功后 | **不在** SSE 事件到达时写 |
+
+### 4.2 为什么 group 列表不在 `group_updated` 上写
+
+`group_updated` 是 **Transient**（`group/group_events.go:63` 显式设了
+`Transient: true`，见 `chat_stream_controller.dart` 的注释）。三个问题：
+
+1. **断线会丢**——Transient 不落库、不回放。断线期间建的 group 在缓存里缺席，
+   而缓存恰恰是为断线服务的；
+2. **写放大**——列表页在全局模式运行，会收到**任何** group 的变更。每来一条
+   就写一次整表，代价与「拉一次列表」相当，却只换来一条增量；
+3. **信息不全**——事件载荷是 `GroupUpdate`（`op` / `groupId` / `title` /
+   `status` / `metadata` / `at`），不是完整 `ChatGroup`。用它写缓存会得到
+   **残缺行**：缺 `user_id`（无法按用户隔离）、`created_at`、`goal`、
+   `active_session`、`current_goal`。下次读缓存时这些字段为空，UI 会显示
+   假的「无 goal / 无活跃会话」——而 `ChatGroup` 的几个关键 getter
+   （`currentGoalText` / `goalGateEnabled` / `ttsEnabled`）正是读这些字段。
+
+这与 `GroupListPage` 既有做法的取向一致：它在收到 `group_updated` 后对**已加载
+的行**做就地更新（`_patchLoaded`），而不是重写整个缓存。
+
+### 4.3 为什么 timeline 不在 SSE 事件到达时写
+
+1. **写放大**：流式增量（`message` / `thought` 的 transient 帧）频率最高，
+   而它们**本来就不该缓存**（§2.3）。真正要写的只有落库事件，而落库事件在
+   服务端**本来就存着**——下次联网 `_backfill` 会重新拿到。
+2. **缓存的作用是「断网时能看历史」**，而「历史」= 已落库事件 = `_backfill`
+   能拿到的集合。SSE 写入只能让缓存**提前**包含它们，不增加最终覆盖面。
+3. **写路径越少，一致性越好**：只有一个写点（`_backfill`/`loadOlder`）时，
+   缓存内容 ≡ 「上次成功拉取的 timeline 页集合」，语义清晰。
+
+**代价（要如实记录）**：会话进行中崩溃，最近几条落库事件不在缓存里。可接受
+——它们是「刚发生的」，用户重连后 SSE 回放会补上。
+
+### 4.4 写失败必须静默
+
+缓存写失败（磁盘满 / 库损坏）**不得**影响主流程。照抄 `PreferencesStore` 的
+取向：「偏好是配置而非数据，一个坏值不该让应用起不来」。缓存比偏好更弱——
+它是**可丢弃的**。故 `saveGroups` 内部 catch 后记日志，**不抛**
+（与 `SyncStateStore.save` 抛 `StorageError` 不同：那个状态丢了会导致文件重复
+下载，是有后果的；这个丢了只是下次白屏）。
+
+---
+
+## 4bis. 问题 4：冲突处理
+
+### 4bis.1 决策：缓存层**不存在冲突**
+
+这不是「回避问题」，而是本设计的一个**结构性结论**：缓存只存落库事件，而落库
+事件与服务端 `_backfill` 返回的集合**同构**——同一份数据、同一个 `globalSeq`
+主键、同一个 `ChatEvent.fromJson`。
+
+于是缓存的角色是「`_backfill` 在断网时的**替代数据源**」，不是**新的真源**。
+没有第二个真源，就没有「谁的版本更新」这个判定，也就没有冲突。
+
+**对照**：如果设计成「SSE 事件到达时写入缓存」（本设计明确否掉，见 §4.3），
+那就**会**出现冲突——本地缓存包含尚未被服务端确认的流式增量，重连后需要判断
+「本地这段是权威的还是服务端的」。本设计用「不写 SSE 热路径」这一步**从结构上
+消除**了这类冲突，而不是事后去调和它。
+
+### 4bis.2 三类「看起来像冲突」的情况，各自的处理
+
+| 情况 | 为什么不是冲突 | 处理 |
+|---|---|---|
+| **本地乐观回显**（`injectLocalUserMessage`） | 它**不进缓存**（`transient: true` + `eventId = 'local-<micros>'`，服务端无对应物）。它只活在 `ChatStreamController._buffer` 里 | 由既有 `EventReducer` 处理：权威帧到达时替换乐观项（AGENTS.md §5.4）。缓存全程不参与 |
+| **服务端删除了一条已缓存事件** | 服务端**不会**删单个事件（`chat_events` 只追加） | 无需处理。若整个 group 被删，走 §3.3 的整表替换/`clear` |
+| **同一 `globalSeq` 被缓存两次** | 主键 `(groupId, globalSeq)` 保证物理上去重 | upsert（`insertOnConflictUpdate`）。这与 `SyncedFiles` 用复合主键保证「重复写入必须是覆盖」是同一手法 |
+
+### 4bis.3 唯一需要「对账」的地方：游标边界
+
+缓存与网络的交界处有一个**必须小心**的点：缓存的 `globalSeq` 上界与
+`_backfill` 拉回的第一页可能重叠。
+
+**处理**：`_backfill` 用**整段替换**（`_buffer..clear()..addAll(events)`，既有
+行为），而不是「把缓存拼在 timeline 前面」。理由：
+
+- 拼接会产生重复事件（重叠区），需要按 `globalSeq` 去重 + 排序；
+- 更糟的是**空洞**：缓存的上界与 timeline 的下界之间若有一段缺口（断网期间
+  服务端新增了事件，而本地缓存没有），拼接会让用户以为历史是连续的。
+
+**故缓存只在「网络完全不可用」时启用**（§8.3 的回落分支），网络可用时它只是
+被写入、不被读取。这样两条路径**永不同时活跃**，重叠问题不存在。
+
+---
+
+## 5. 问题 5：体积控制
+
+### 5.1 `kTextPreviewMaxChars` **不适用**
+
+issue 建议「`kTextPreviewMaxChars` 这类上限要同样施加于缓存」。核实后**不采纳**：
+
+- `kTextPreviewMaxChars = 200 * 1024`（`file_preview.dart:56`），它是
+  **文件预览**的截断阈值——用于「把一个大文件塞进对话框」；
+- 缓存存的是**事件**，不是文件内容。一个 `agent.file.*` 事件的 payload 是
+  **元数据**（路径 / 大小 / etag），几十到几百字节，远达不到 200 KiB；
+- 真正可能巨大的是 `tool_call` 的 `output`（构建日志、`cat` 大文件）——
+  这需要**它自己的**上限（§5.2），而不是借用文件预览的阈值。
+
+**结论**：`kTextPreviewMaxChars` 与缓存无关。若照抄，会得到一个「200 KiB 的
+单事件上限」——既过大（2000 条 × 200 KiB = 400 MiB）又语义错位。
+
+### 5.2 实际的三层上限
+
+| 层级 | 上限 | 依据 |
+|---|---|---|
+| 每 group 事件条数 | **2000** | 对齐 `ChatStreamController.maxBufferEvents`。缓存比内存缓冲区多没有意义——多出来的部分归约器根本不会用 |
+| 单事件 payload | **64 KiB** | 超过则**不缓存该事件**（不是截断）。截断会产生一个「看起来完整但内容缺失」的事件，比缺席更糟——归约器会把它当权威帧 |
+| 全库总字节 | **64 MiB** | 超出时按 `last_accessed_at` 升序淘汰整 group（**按 group 淘汰**，不按事件——半个 group 的历史比没有更让人困惑） |
+
+### 5.3 淘汰必须整 group
+
+按事件淘汰会让某 group 的历史出现「中间空洞」：用户向上翻页时看到
+`globalSeq` 跳跃，且无法判断是「被淘汰了」还是「服务端就没有」。
+整 group 淘汰的语义是清晰的：**这个 group 没有缓存**，走网络或显示空态。
+
+---
+
+## 6. 问题 6：schema 迁移
+
+### 6.1 现有版本与既有防线
+
+`AppDatabase.schemaVersion = 2`，`onUpgrade` 只做 `addColumn`，并有一条明确注释：
+
+> **不要**用 `m.createAll()` 兜底：那会重建全部表、丢用户已有的同步状态。
+
+`database_test.dart` 已有对应的回归测试：用原始 SQL 造一个 `schemaVersion = 1`
+的库、插一行数据、用当前版本打开，断言**旧数据不丢 + 新列已加**。
+
+### 6.2 新表的迁移写法
+
+```dart
+@override
+int get schemaVersion => 3;   // 2 → 3
+
+@override
+MigrationStrategy get migration => MigrationStrategy(
+  onCreate: (m) => m.createAll(),
+  onUpgrade: (m, from, to) async {
+    if (from < 2) {
+      await m.addColumn(syncedFiles, syncedFiles.contentHash);
+    }
+    if (from < 3) {
+      await m.createTable(cachedGroups);
+      // 切片 B 时：await m.createTable(cachedEvents);
+    }
+    // **不要** m.createAll() 兜底（既有注释已警告）。
+  },
+);
+```
+
+### 6.3 三条迁移约束
+
+1. **只加不删**：新表用 `createTable`，新列用 `addColumn`。删表/删列需要
+   `m.alterTable`（重建表），风险高且对缓存无必要。
+2. **`from < N` 而非 `from == N-1`**：跳版本升级（v1 → v3）必须两个分支都跑。
+   这是 drift 迁移的常见错误——写 `if (from == 2)` 会让 v1 用户升到 v3 时
+   **缺少 v2 的列**。
+3. **缓存表与同步表生命周期分离**：`DriftSyncStateStore.resetAll()`（「换同步
+   目录」时调用）**不得**清缓存表。理由：换目录与「对话缓存」无关，清了只是
+   让用户下次断网又白屏。故 `resetAll` 保持只清 `SyncedFiles` + `SyncCursors`。
+
+### 6.4 降级：不写 down-migration
+
+缓存是**可丢弃数据**。若将来真要支持降级（`schemaVersion` 回退），正确做法是
+**清空缓存表**而不是试图把新 schema 的数据塞回旧 schema：
+
+```dart
+// 伪代码，实际 drift 的降级需 onDowngrade 或删除库文件
+if (to < 3) { await m.deleteTable('cached_groups'); }
+```
+
+理由：旧版本代码读不懂新列/新表，与其做有损转换（且必然有 bug），不如让它
+重新拉。这与 `SyncedFiles`（**不可**丢——丢了会全量重下）形成对照。
+
+### 6.5 与同步状态**同库**的理由
+
+新表放进同一个 `AppDatabase`，而不是单开一个 `cache.db`：
+
+- **同一个打开/关闭生命周期**（`openAppDatabaseAt` / `openAppDatabaseLazy` 已
+  处理了桌面端与移动端的路径差异），单开一库要复制这两套逻辑；
+- **多库协调是既有的痛点**——`PreferencesStore` 的文档明确写了「偏好与状态
+  必须一起更新，若两者分属不同存储就会出现中间态」。虽然缓存与同步状态**不**
+  需要事务一致，但把它们放一起避免引入「两库各自迁移」的复杂度。
+
+**代价**：缓存库损坏会连带同步状态（同文件）。但 SQLite 的页级损坏通常表现为
+「某表读失败」而非整库不可用，且同步状态已有 `load` 失败 → 按首次同步处理的
+兜底（`DriftSyncStateStore.load`）。
+
+---
+
+## 7. 切片 C（离线写队列）为什么必须单独排期
+
+issue 已写明「不要把 A/B/C 塞进一个 PR」。补充具体理由：
+
+| 维度 | 切片 A | 切片 C |
+|---|---|---|
+| 一致性模型 | 整表替换（幂等） | 顺序 + 幂等 + 因果 |
+| 失败处理 | 静默丢弃（可重拉） | 必须重试且不能重复投递 |
+| 冲突 | 无 | 本地队列 vs 服务端已产生的 turn |
+| 服务端依赖 | 无 | 需要 `request_id` 幂等键的语义保证 |
+
+**可参考的既有语义**：`/me/quick-capture/enqueue` 已是「异步投递、无 `group_id`
+返回」的模型（AGENTS.md §6.7）。但那条链路是**服务端**做的排队，客户端只需
+「投递成功即完成」。C 要在客户端排队，得自己实现顺序、重试与去重——工作量
+差一个数量级。
+
+**若做 C，第一条要验证的**：`POST /users/:uid/chat/messages` 的 `request_id`
+是否真正幂等（重复投递同一 `request_id` 是否只建一个 turn）。这需要读 Go 侧
+实现确认，**不能假设**。
+
+---
+
+## 8. 切片 A 的实现要点（阶段 2 的规格）
+
+### 8.1 契约（`spb_domain`）
+
+```dart
+/// 对话列表缓存（**可丢弃**数据：读失败一律降级为「无缓存」）。
+abstract interface class GroupCacheStore {
+  /// 读该用户的缓存列表；无缓存返回空列表（**不抛异常**）。
+  Future<List<ChatGroup>> load(String userId);
+
+  /// **整表替换**该用户的缓存（见 §3.3）。
+  Future<void> save(String userId, List<ChatGroup> groups);
+
+  /// 清空该用户缓存（登出时调用；**不**影响同步状态）。
+  Future<void> clear(String userId);
+}
+```
+
+**为什么 `load` 返回 `List<ChatGroup>` 而不是带 `fetchedAt` 的包装**：陈旧提示
+需要 `fetchedAt`，但把它塞进返回值会让**所有**调用点都要处理它，而多数调用点
+（如「点进对话再返回」）不关心。故 `fetchedAt` 由实现层的
+`Future<DateTime?> lastFetchedAt(String userId)` 单独暴露，只有列表页的兜底
+分支去读。
+
+### 8.2 装配（`apps/*`）
+
+- `groupCacheStoreProvider`（桌面/移动各一个，同 `syncStateStoreProvider` 模式）；
+- `GroupListPage` 接**可选** `cache` 参数（同 `groupUpdates` 的可选注入取向：
+  为 null 时不缓存/不回落，页面单测不必造库）。
+
+### 8.2bis userId 必须先本地持久化（实现时发现的**前置条件**）
+
+设计初稿假设「userId 由调用方传入」，但实现时发现这不足以让回落生效：
+
+`currentUserIdProvider` 内部是 `chatApi.me()`——一次 `GET /api/auth/me`
+**网络请求**。而缓存要解决的正是在**断网冷启动**时展示列表，那时这个请求必然
+失败 → userId 拿不到 → 缓存无法定位自己的行 → **回落失效**。
+
+即：**不解决 userId 的离线可得性，整个切片 A 在目标场景下等于没做。**
+
+故新增 `cachedUserIdProvider`（两端各一份），语义是「先本地、后网络」：
+
+| 场景 | 结果 |
+|---|---|
+| 在线 | 本地命中，零额外请求（成功拿到时顺带写回本地） |
+| 断网冷启动 | 本地命中 → 缓存可用 ✅ |
+| 首次启动（本地无值）且断网 | 返回 null → 不回落（无行可查，无更优解） |
+
+用偏好表（`PreferencesStore`）存，键 `auth.cached_user_id`。**不存 token**
+（那是 `SecureTokenStore` 的职责，明文落盘等于交出登录态）——只存 userId 这个
+非敏感标识。
+
+### 8.3 回落逻辑（**关键**）
+
+```
+_loadMore():
+  try:
+    page = await api.listGroups(...)
+    cache?.save(userId, _groups + page)      ← 成功时覆盖
+    ...
+  on SpbError catch (e):
+    if (_groups.isEmpty && cache != null):
+      cached = await cache.load(userId)      ← 只在**首次加载失败**时回落
+      if (cached.isNotEmpty):
+        _groups = cached; _fromCache = true  ← 展示缓存 + 陈旧提示
+        return                               ← 不设 _error（不是错误页）
+    _error = e
+```
+
+**三个必须遵守的点**：
+
+1. **只在 `_groups.isEmpty` 时回落**：已有数据时回落会**覆盖用户刚看到的
+   内容**（例如「加载更多」失败，回落会把整页缓存塞进来、丢掉滚动位置）。
+2. **回落成功时不设 `_error`**：显示错误页会盖掉刚拿到的缓存内容。改为置
+   `_fromCache = true`，由 UI 渲染「离线数据 · X 前更新」提示条。
+3. **`_fromCache` 在下一次网络成功时必须清除**，否则提示条永久残留。
+
+### 8.4 验收（issue 原文）
+
+- `grep -c 'CachedGroups' packages/spb_data/lib/src/database.dart` → ≥1；
+- `cd packages/spb_data && dart test` → 新表 CRUD + **「旧库升级后现有 4 张表
+  数据不丢」**（扩展既有 v1 测试到 v3）；
+- `flutter test packages/spb_features/test/chat/group_list_page_test.dart` →
+  新增「网络失败时回落缓存并展示（不显示错误页）」；
+- 反向验证：禁用回落 → 该用例失败；
+- 门禁：`dart analyze --fatal-infos .` + `bash tools/check_layering.sh`。
+
+---
+
+## 9. 与既有机制的边界
+
+| 机制 | 关系 |
+|---|---|
+| `ChatStreamController._buffer`（内存 2000 条） | 缓存是它的**持久化投影**。条数上限对齐（§5.2），避免「缓存里有用不上的数据」 |
+| SSE cursor 回放（`_oldestLoadedGlobalSeq`） | **互补**：回放管「在线时断线」，缓存管「冷启动断网」 |
+| `EventReducer` | **不感知缓存**。缓存提供的事件经 `_backfill` 同一路径进入 `_buffer`，归约逻辑零改动 |
+| `SyncedFiles`（UFS 交付物） | **无关**：一个存对话事件，一个存文件 |
+| `PreferencesStore` | 同库不同表。偏好是「配置」（读失败给默认值），缓存是「可丢弃数据」（读失败给空） |
+
+---
+
+## 10. 明确**不做**的事
+
+- **不做双向同步**：缓存只从服务端流向本地。客户端不把缓存写回服务端。
+- **不做全文检索**：缓存不建 FTS 索引。需要检索时走服务端已有的搜索端点（`ChatApi.searchMyTurns` →
+  `GET /me/turns/search`，或 `GET /users/:uid/chat/search`）。
+- **不做「缓存即真源」**：任何网络成功的响应都**无条件覆盖**缓存，缓存永不
+  参与「哪个版本更新」的判定。
+- **不缓存权限/身份**：`X-User-ID` 是网关注入的结果（AGENTS.md §5.1），
+  客户端侧的值只用于拼 URL 路径与**隔离缓存行**，不是身份真源。
+- **不改 Go API**：本设计全程纯客户端。
+
+---
+
+## 11. 相关文档
+
+| 文档 | 关系 |
+|---|---|
+| `AGENTS.md` §5.7 | 排序/分页必须用 `globalSeq`（§3.5 的依据） |
+| `AGENTS.md` §5.4 | `transient` 语义（§2.3 的依据） |
+| `AGENTS.md` §6.7 | 无归属入口的异步投递（切片 C 的参考语义） |
+| `docs/deliverable-upload-and-conflict.md` | 交付物同步的完整设计（与本设计**无关**，但同样的「先设计后实现」流程） |
+| `packages/spb_data/lib/src/database.dart` | 现有 schema 与迁移策略 |
+| `packages/spb_domain/lib/src/sync_state.dart` | `SyncStateStore` 契约（本设计的模板） |
