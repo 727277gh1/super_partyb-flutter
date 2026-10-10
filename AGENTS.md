@@ -663,7 +663,7 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | `SkillPanel` | dashboard | ❌ 不接 | §6.9 已覆盖 |
 
 **关于 `DashboardRenderer` 与 #8 的 `spec` / `dashboard` / `map`**（issue #12 决策点 1）：
-这三类**不是一个决策**，不要捆绑——
+这三种渲染器**不是一个决策**，不要捆绑——
 
 | 类型 | 客户端现状 | 结论 |
 |---|---|---|
@@ -672,11 +672,19 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | `map` | 无渲染器（webapp `normalizeMapSchema`，`type:"map"` + 坐标） | ⚠️ **待决策** |
 
 故 issue #12 的决策点 1 应缩小为「**是否引入 dashboard / map 渲染器**」（`spec` 已有
-基础，不需与它们捆绑）。**本轮不引入**，待产品确认后在独立 issue 中处理。
+基础，不需与它捆绑）。三种渲染器与两个实测真缺口的去向：
 
-**有意不做的标记**：上表除 `spec`（小活，见 issue #14）与 `dashboard`/`map`（待决策）外，
-其余均为**有意不做**。`auto-schedules`（issue #13）与 `spec` 文件预览（issue #14）
-是两个实测出的真缺口。
+| 类型 | 去向 |
+|---|---|
+| `spec` | 已拆到 **issue #14**（小活，需补 schema 提取） |
+| `auto-schedules` | 已拆到 **issue #13**（实测出的真缺口） |
+| `dashboard` / `map` | **唯一待决策项**。产品确认前 **issue #12 保持 open** 承载该决策；若确认要做，再另开独立 issue 落地（届时关闭 #12） |
+
+**有意不做的标记**：10 个面板的逐项去向 = **1 已实现**（`WorkbenchBacklogCard`，载体
+不同）+ **8 有意不做**（4 个聊天面 P2 面板 + `WorkbenchGroupCanvas` /
+`PlanImportPanel` / `WorkbenchNotificationCenter` + `SkillPanel`）+ **1 待决策**
+（`DashboardRenderer`，与 #8 的 `map` 同一决策）。`auto-schedules`（issue #13）与
+`spec` 文件预览（issue #14）是两个实测出的真缺口，与上述 10 项**不捆绑**。
 
 ### 6.10 两端 UI 面板族的不对称（**有意保留的差异**）
 
