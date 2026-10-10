@@ -79,6 +79,55 @@ class SyncBindings extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// 对话列表缓存（issue #26 切片 A）。
+///
+/// ## 为什么存 JSON 原文而不是拆列
+///
+/// 拆列的话**服务端加一个字段就要改客户端 schema + 写迁移**，而 `ChatGroup` 的
+/// `metadata` 下已长到 `follow_up_suggest` / `habit_suggest` / `goal_gate` / `tts`
+/// 四块。存 JSON 则 `ChatGroup.fromJson` 直接复用，服务端加字段客户端零改动。
+///
+/// 设计依据见 `docs/offline-cache-design.md` §2.2。
+///
+/// ## 与 [SyncedFiles] 的语义对照
+///
+/// | | SyncedFiles | CachedGroups |
+/// |---|---|---|
+/// | 数据性质 | **不可丢**（丢了会全量重下） | **可丢弃**（丢了只是下次白屏） |
+/// | 写失败 | 抛 `StorageError` | 静默记日志 |
+/// | 清空时机 | 换同步目录时 `resetAll()` | **不**随同步状态清（见 §6.3） |
+@DataClassName('CachedGroupRow')
+class CachedGroups extends Table {
+  /// group id（服务端主键）。
+  TextColumn get id => text()();
+
+  /// 归属用户。
+  ///
+  /// ## 为什么必须有这一列（不能只靠「切换账号时清库」）
+  ///
+  /// `ChatApi.listGroups` 走的是网关注入的 `X-User-ID`，同一台机器换账号后
+  /// 缓存会串——A 账号会看到 B 账号的对话列表。而「登出时清缓存」会漏：登出
+  /// 路径不止一条（token 过期、手动清凭证、进程被杀后重登），任一条没清就串了。
+  /// 把 user_id 放进主键的查询条件里，串号在结构上不可能发生。
+  TextColumn get userId => text()();
+
+  /// 服务端返回的 group JSON **原文**（`ChatGroup.fromJson` 的输入）。
+  TextColumn get payload => text()();
+
+  /// 服务端 `updated_at` 原样保留，仅用于诊断。
+  TextColumn get updatedAt => text().nullable()();
+
+  /// 本地写入时刻（毫秒 epoch）。
+  ///
+  /// 用于「离线数据 · X 前更新」提示（`docs/offline-cache-design.md` §3.4）。
+  /// ⚠️ **不是 TTL 依据**：本设计明确不用 TTL——TTL 会在长时间断网（最需要
+  /// 缓存的时刻）主动清掉缓存，把用户打回白屏。
+  IntColumn get fetchedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 /// 键值偏好（同步开关、上次落点等）。
 ///
 /// 值统一存文本：调用方按需解析（`bool`/`int`/`json`）。用 `TEXT` 而不是
@@ -108,13 +157,15 @@ class Preferences extends Table {
 ///
 /// ⚠️ 但**语义必须保持一致**：状态键的选择（[workspaceStateKey]）、
 /// 「失败项不写状态」、「换目录才重置」这几条都不能因为换了存储而改变。
-@DriftDatabase(tables: [SyncCursors, SyncedFiles, SyncBindings, Preferences])
+@DriftDatabase(
+  tables: [SyncCursors, SyncedFiles, SyncBindings, CachedGroups, Preferences],
+)
 class AppDatabase extends _$AppDatabase {
   /// 用给定的执行器构造（生产传文件、测试传 `NativeDatabase.memory()`）。
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -122,11 +173,21 @@ class AppDatabase extends _$AppDatabase {
     // 版本 1 → 2：SyncedFiles 增加 content_hash 列（下载时算的本地内容
     // SHA256，脏检测的比对基准）。只加列不动数据：旧记录保持 null，语义是
     // 「无法检测」，不是「未变更」。
+    //
+    // 版本 2 → 3：新增 cached_groups（对话列表缓存，issue #26 切片 A）。
     onUpgrade: (m, from, to) async {
       if (from < 2) {
         await m.addColumn(syncedFiles, syncedFiles.contentHash);
       }
+      if (from < 3) {
+        await m.createTable(cachedGroups);
+      }
       // **不要**用 m.createAll() 兜底：那会重建全部表、丢用户已有的同步状态。
+      //
+      // ⚠️ 条件必须写 `from < N` 而**不是** `from == N-1`：跳版本升级
+      // （v1 直接升到 v3）时两个分支都得跑。写 `from == 2` 会让 v1 用户升到
+      // v3 后**缺少 v2 的 content_hash 列**，而 drift 不会报错——直到某个
+      // 查询碰到那一列才炸（且报错信息指不到迁移）。
     },
   );
 }

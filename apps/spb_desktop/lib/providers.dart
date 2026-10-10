@@ -609,6 +609,56 @@ final currentUserIdProvider = FutureProvider<String>((ref) async {
   return me.id;
 });
 
+/// userId 的**本地持久化**副本（离线可用）。
+///
+/// ## 为什么不能只用 [currentUserIdProvider]（issue #26 切片 A）
+///
+/// 它内部是 `chatApi.me()` ——一次 `GET /api/auth/me` **网络请求**。而对话列表
+/// 缓存要解决的正是在**断网冷启动**时展示列表，那时这个请求必然失败 →
+/// userId 拿不到 → 缓存无法定位自己的行 → 回落失效。
+///
+/// 于是把成功拿到的 userId 落进偏好表，读时**先本地后网络**：
+///
+/// | 场景 | 结果 |
+/// |---|---|
+/// | 在线 | 本地命中，零额外请求（仍会后台刷新写入，见下） |
+/// | 断网冷启动 | 本地命中 → 缓存可用 ✅ |
+/// | 首次启动（本地无值）且断网 | 返回 null → 不回落（无行可查，无法更优） |
+///
+/// ⚠️ **不在这里发网络请求**：它会在启动路径上引入一次往返（列表页首帧就要等
+/// 它），而 [currentUserIdProvider] 的调用方本来就会各自去拿。本 Provider 只
+/// 做「读本地 + 把已知值写回」，故是同步可得的 `FutureProvider`。
+///
+/// ## 为什么用 userId 而不是 session id 作缓存行归属
+///
+/// 服务端 `chat_groups.user_id` 就是 userId，且 `GET /api/auth/me` 返回它。
+/// 用 session id 会让「同一用户重新登录」被当成换人，缓存白丢。
+final cachedUserIdProvider = FutureProvider<String?>((ref) async {
+  final prefs = ref.watch(preferencesStoreProvider);
+  final stored = await prefs.getString(cachedUserIdPrefKey);
+  if (stored != null && stored.isNotEmpty) return stored;
+
+  // 本地没有：尝试从网络拿一次并落盘。失败返回 null（不抛——缓存是可选能力）。
+  try {
+    final id = await ref.watch(currentUserIdProvider.future);
+    if (id.isNotEmpty) {
+      await prefs.setString(cachedUserIdPrefKey, id);
+      return id;
+    }
+  } catch (_) {
+    // 断网 / 未登录：返回 null，调用方（列表页）据此不启用缓存。
+  }
+  return null;
+});
+
+/// 缓存 userId 的偏好键。
+const String cachedUserIdPrefKey = 'auth.cached_user_id';
+
+/// 对话列表缓存（issue #26 切片 A）。
+final groupCacheStoreProvider = Provider<GroupCacheStore>((ref) {
+  return DriftGroupCacheStore(ref.watch(appDatabaseProvider));
+});
+
 /// 搜索消息内容（供 [SearchPage] 注入）。
 ///
 /// ## 为什么在这里解析 userId

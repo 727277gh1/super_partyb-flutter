@@ -42,6 +42,8 @@ class GroupListPage extends StatefulWidget {
     this.pendingConfirmationCount = 0,
     this.onOpenConfirmations,
     this.groupUpdates,
+    this.cache,
+    this.userId,
     this.pageSize = 30,
   });
 
@@ -133,6 +135,24 @@ class GroupListPage extends StatefulWidget {
   /// 为 null 时不展示入口（但 [pendingConfirmationCount] 仍可驱动角标）。
   final VoidCallback? onOpenConfirmations;
 
+  /// 对话列表缓存（issue #26 切片 A）。
+  ///
+  /// ## 为什么是可选参数（而不是必需）
+  ///
+  /// 与 [groupUpdates] 等可选参数同一取向：为 null 时页面**既不写缓存也不回落**
+  /// ——保持「纯拉取列表」的用法，也让页面单测不必造一个库。
+  ///
+  /// ## 为什么还需要 [userId]
+  ///
+  /// 缓存按用户隔离（见 `CachedGroups.userId` 的说明：换账号必须不串号）。
+  /// 页面不解析身份（那是 `currentUserIdProvider` 的职责），故由调用方传入。
+  /// 两者**同时**有效才启用缓存——只给 cache 不给 userId 时无法定位行，故同样
+  /// 视为未启用（静默降级，不报错）。
+  final GroupCacheStore? cache;
+
+  /// 当前用户 id（缓存的行归属）。见 [cache]。
+  final String? userId;
+
   final int pageSize;
 
   @override
@@ -149,6 +169,17 @@ class _GroupListPageState extends State<GroupListPage> {
   bool _loading = false;
   bool _hasMore = true;
   SpbError? _error;
+
+  /// 当前展示的内容来自**缓存**（而非网络）。
+  ///
+  /// ## 为什么需要它（而不是用 `_error != null` 判断）
+  ///
+  /// 回落成功时**不能**设 [_error]：那会让 [_buildBody] 渲染整页错误、盖掉刚拿到
+  /// 的缓存内容。故「离线」与「出错」是两个独立状态，本字段只表示前者。
+  bool _fromCache = false;
+
+  /// 缓存写入时刻（陈旧提示用）。仅当 [_fromCache] 为 true 时有意义。
+  DateTime? _cacheFetchedAt;
 
   /// 正在创建对话（避免重复提交）。
   ///
@@ -369,14 +400,78 @@ class _GroupListPageState extends State<GroupListPage> {
         // 但后面还有数据——用「原始返回条数 < pageSize」更准确。
         _hasMore = page.length >= widget.pageSize;
         _loading = false;
+        // 网络成功了，之前的「离线数据」提示必须消失（否则提示条永久残留）。
+        _fromCache = false;
+        _cacheFetchedAt = null;
       });
+      unawaited(_saveCache());
     } on SpbError catch (e) {
       if (!mounted) return;
+
+      // ── 首次加载失败时回落缓存（issue #26 切片 A）──────────────
+      //
+      // ## 为什么只在 `_groups.isEmpty` 时回落
+      //
+      // 已有数据时回落会**覆盖用户刚看到的内容**：典型场景是「加载更多」失败，
+      // 回落会把整页缓存塞进来、丢掉当前滚动位置与已加载的后续页。
+      //
+      // ## 为什么回落成功时不设 _error
+      //
+      // 设了会让 _buildBody 渲染整页错误页，盖掉刚拿到的缓存内容——等于白回落。
+      // 改为置 _fromCache，由 UI 渲染「离线数据」提示条（见 _CacheNotice）。
+      if (_groups.isEmpty) {
+        final cached = await _loadCache();
+        if (!mounted) return;
+        if (cached.isNotEmpty) {
+          setState(() {
+            _groups
+              ..clear()
+              ..addAll(cached);
+            _seenIds
+              ..clear()
+              ..addAll(cached.map((g) => g.id));
+            // 缓存里只有已拉过的部分，不能再自动加载更多（无游标可用，
+            // 而且网络本来就是失败的）。
+            _hasMore = false;
+            _fromCache = true;
+            _loading = false;
+          });
+          return;
+        }
+      }
+
       setState(() {
         _error = e;
         _loading = false;
       });
     }
+  }
+
+  /// 读缓存；未启用或为空时返回空列表（失败静默，见 `GroupCacheStore`）。
+  Future<List<ChatGroup>> _loadCache() async {
+    final cache = widget.cache;
+    final userId = widget.userId;
+    if (cache == null || userId == null || userId.isEmpty) return const [];
+    final groups = await cache.load(userId);
+    final at = await cache.lastFetchedAt(userId);
+    if (mounted) _cacheFetchedAt = at;
+    return groups;
+  }
+
+  /// 把当前列表写入缓存（**整表替换**语义，见 `GroupCacheStore.save`）。
+  ///
+  /// ## 为什么传整个 `_groups` 而不是刚拉到的那一页
+  ///
+  /// `save` 是整表替换（先删后插）。只传新页会把前面几页删掉——用户下次
+  /// 断网就只能看到最后一页。故必须传累积后的完整列表。
+  ///
+  /// 缓存写失败不影响主流程（实现层已静默，见 `DriftGroupCacheStore.save`）。
+  Future<void> _saveCache() async {
+    final cache = widget.cache;
+    final userId = widget.userId;
+    if (cache == null || userId == null || userId.isEmpty) return;
+    if (_groups.isEmpty) return;
+    await cache.save(userId, List.of(_groups));
   }
 
   Future<void> _refresh() async {
@@ -385,6 +480,8 @@ class _GroupListPageState extends State<GroupListPage> {
       _seenIds.clear();
       _hasMore = true;
       _error = null;
+      _fromCache = false;
+      _cacheFetchedAt = null;
     });
     await _loadMore();
   }
@@ -536,7 +633,21 @@ class _GroupListPageState extends State<GroupListPage> {
             ),
         ],
       ),
-      body: RefreshIndicator(onRefresh: _refresh, child: _buildBody()),
+      body: RefreshIndicator(
+        onRefresh: _refresh,
+        child: Column(
+          children: [
+            // 离线缓存提示条（issue #26 切片 A）。
+            //
+            // 放在列表**上方**而不是列表里：它描述的是「整个列表的来源」，
+            // 不是某一条的属性；放在 itemBuilder 里会被滚动带出屏幕（用户
+            // 滚到中间就看不见「这是缓存」了）。
+            if (_fromCache)
+              _CacheNotice(fetchedAt: _cacheFetchedAt, onRetry: _refresh),
+            Expanded(child: _buildBody()),
+          ],
+        ),
+      ),
       // 无归属快速输入入口（悬浮窗）。未注入时不展示——入口存在但点了没反应
       // 比没有入口更糟（同 [onOpenWorks] 的取向）。
       floatingActionButton: widget.onOpenQuickCapture == null
@@ -645,6 +756,86 @@ class _GroupListPageState extends State<GroupListPage> {
       );
     }
     return const SizedBox(height: SpbSpacing.xxl);
+  }
+}
+
+/// 离线缓存提示条（issue #26 切片 A）。
+///
+/// ## 为什么需要它（而不是直接展示缓存当无事发生）
+///
+/// 缓存可能是几小时前的快照：别人新建的对话不在里面、已删除的可能还在。
+/// 用户不知道这一点时会以为「对话消失了」。提示条明确告知「这是离线数据」，
+/// 并提供重试入口。
+///
+/// ## 为什么用 `MaterialBanner` 风格的内联条而不是 `SnackBar`
+///
+/// SnackBar 会**自动消失**（几秒后），而「当前看到的是缓存」是一个**持续成立**
+/// 的事实，不是一次性通知。用内联条才能让它在整个离线期间可见。
+///
+/// ## 为什么不用 `ErrorBanner`
+///
+/// [ErrorBanner] 的语义是「出错了」（错误色）。而这里既不是错误也不是失败——
+/// 数据是**有效**的，只是旧。用 `surfaceContainerHighest` + `onSurfaceVariant`
+/// 传达「提示」而非「警告」，与真正的错误态区分开。
+class _CacheNotice extends StatelessWidget {
+  const _CacheNotice({required this.fetchedAt, this.onRetry});
+
+  /// 缓存写入时刻；null 时退化为不带时间的文案。
+  final DateTime? fetchedAt;
+
+  final VoidCallback? onRetry;
+
+  /// 把「多久之前」格式化成中文。
+  ///
+  /// 只做到「天」粒度：更细的分钟数对「这份缓存多旧」这个判断没有帮助，
+  /// 反而会让文案频繁变化（每次 rebuild 都不一样）。
+  String _ageText() {
+    final at = fetchedAt;
+    if (at == null) return '';
+    final d = DateTime.now().difference(at);
+    if (d.inMinutes < 1) return '刚刚';
+    if (d.inHours < 1) return '${d.inMinutes} 分钟前';
+    if (d.inDays < 1) return '${d.inHours} 小时前';
+    return '${d.inDays} 天前';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final age = _ageText();
+    return Material(
+      key: const ValueKey('group-list-cache-notice'),
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                // 文案不写「已中断」「加载失败」：网络错误不代表中断，只是
+                // 这次没拉到。也不写「正在重试」——页面不会自动重试。
+                age.isEmpty ? '离线数据' : '离线数据 · $age',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            if (onRetry != null)
+              TextButton(onPressed: onRetry, child: const Text('重试')),
+          ],
+        ),
+      ),
+    );
   }
 }
 

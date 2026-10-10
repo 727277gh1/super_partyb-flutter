@@ -570,6 +570,36 @@ final currentUserIdProvider = FutureProvider<String>((ref) async {
   return me.id;
 });
 
+/// userId 的**本地持久化**副本（离线可用）。与桌面端同构，理由见其文档。
+///
+/// 简述：`currentUserIdProvider` 内部是 `chatApi.me()`（网络请求），而对话列表
+/// 缓存要解决的正是**断网冷启动**——那时该请求必然失败，userId 拿不到，缓存就
+/// 无法定位自己的行。故把成功拿到的 userId 落进偏好表，读时先本地后网络。
+final cachedUserIdProvider = FutureProvider<String?>((ref) async {
+  final prefs = ref.watch(preferencesStoreProvider);
+  final stored = await prefs.getString(cachedUserIdPrefKey);
+  if (stored != null && stored.isNotEmpty) return stored;
+
+  try {
+    final id = await ref.watch(currentUserIdProvider.future);
+    if (id.isNotEmpty) {
+      await prefs.setString(cachedUserIdPrefKey, id);
+      return id;
+    }
+  } catch (_) {
+    // 断网 / 未登录：返回 null，调用方据此不启用缓存。
+  }
+  return null;
+});
+
+/// 缓存 userId 的偏好键。
+const String cachedUserIdPrefKey = 'auth.cached_user_id';
+
+/// 对话列表缓存（issue #26 切片 A）。
+final groupCacheStoreProvider = Provider<GroupCacheStore>((ref) {
+  return DriftGroupCacheStore(ref.watch(appDatabaseProvider));
+});
+
 /// 搜索消息内容（供 [SearchPage] 注入）。
 ///
 /// ## 为什么在这里解析 userId

@@ -15,6 +15,8 @@ library;
 //   QuickCaptureAttachment        —— 待发送附件（字节 + 文件名，来源无关）
 //   QuickCaptureEnqueueResult     —— 部分失败语义的提交结果（delivered/uploaded/failedUploads）
 //   SyncStateStore                —— 交付物同步状态契约（key → 游标 + etag 记录）
+//   GroupCacheStore               —— 对话列表缓存契约（issue #26 切片 A；**可丢弃数据**，
+//                                    读失败返回空列表、写失败不抛——与 SyncStateStore 相反）
 //   SyncState / SyncedFile        —— 同步状态值类型（含 contentHash：脏检测的比对基准）
 //   contentHashOf                 —— 内容 SHA256（下载时记录与回传前比对共用同一算法）
 //   workspaceStateKey             —— 「全部/选中若干 group」共用的状态键
@@ -70,6 +72,7 @@ export 'src/execution_status.dart';
 export 'src/file_preview.dart';
 export 'src/gate_decision.dart';
 export 'src/goal_update.dart';
+export 'src/group_cache.dart';
 export 'src/local_deliverable_path.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';

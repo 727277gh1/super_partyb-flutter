@@ -10,6 +10,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 void main() {
   late Dio dio;
@@ -68,6 +69,8 @@ void main() {
     Future<ChatGroup> Function(String)? onCreateGroup,
     Stream<GroupUpdate>? groupUpdates,
     VoidCallback? onOpenHabits,
+    GroupCacheStore? cache,
+    String? userId,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -78,12 +81,22 @@ void main() {
           onCreateGroup: onCreateGroup,
           groupUpdates: groupUpdates,
           onOpenHabits: onOpenHabits,
+          cache: cache,
+          userId: userId,
           pageSize: pageSize,
         ),
       ),
     );
     await settleIo(tester);
   }
+
+  /// 内存版 [GroupCacheStore]（页面单测不造 drift 库）。
+  ///
+  /// 语义与 `DriftGroupCacheStore` 对齐到「页面依赖的部分」：整表替换、
+  /// 按 user 隔离、读失败返回空。**不做**坏行跳过/排序等实现细节——那些由
+  /// `spb_data` 的测试覆盖（见 `database_test.dart`）。
+  late FakeGroupCacheStore fakeCache;
+  setUp(() => fakeCache = FakeGroupCacheStore());
 
   /// 一份服务端 `POST /chat/groups` 的响应体（`groupToDict` 的形状）。
   Map<String, dynamic> createdJson({
@@ -587,4 +600,216 @@ void main() {
       expect(find.text('只读'), findsOneWidget);
     });
   });
+
+  // ── 对话列表缓存回落（issue #26 切片 A）──────────────────────────────
+  //
+  // 本组的核心命题：**断网冷启动时列表不再是白屏**。反向验证（去掉回落分支）
+  // 会让「网络失败时回落缓存」这条失败，而其余用例不受影响。
+  group('缓存回落（issue #26）', () {
+    testWidgets('网络失败时回落缓存并展示（不显示错误页）', (tester) async {
+      // 1) 先在**在线**状态下拉一次，把结果写进缓存。
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '缓存里的对话')],
+      );
+      await pumpPage(tester, cache: fakeCache, userId: 'usr_1');
+      expect(find.text('缓存里的对话'), findsOneWidget);
+      expect(fakeCache.saved, hasLength(1), reason: '网络成功后必须写缓存');
+
+      // 2) 断网：同样的页面重新挂载（新 tester 树）。
+      await tester.pumpWidget(const SizedBox()); // 卸载，让新页面重新 initState
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(500, {'error': 'offline'}),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await pumpPage(tester, cache: fakeCache, userId: 'usr_1');
+
+      // 关键断言：内容来自缓存，**不是**整页错误。
+      expect(find.text('缓存里的对话'), findsOneWidget);
+      expect(
+        find.byType(ErrorState),
+        findsNothing,
+        reason: '回落成功不得渲染错误页（那会盖掉缓存内容）',
+      );
+      expect(
+        find.byKey(const ValueKey('group-list-cache-notice')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('离线数据'), findsOneWidget);
+    });
+
+    testWidgets('回落时不显示重试按钮以外的错误态（无整页错误）', (tester) async {
+      await fakeCache.save('usr_1', [
+        ChatGroup.fromJson(groupJson(id: 'g_cached', title: '仅缓存有')),
+      ]);
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(500, {'error': 'offline'}),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await pumpPage(tester, cache: fakeCache, userId: 'usr_1');
+
+      expect(find.text('仅缓存有'), findsOneWidget);
+      expect(find.byType(ErrorState), findsNothing);
+      // 提示条里有「重试」按钮（下拉刷新也能重试）。
+      expect(find.text('重试'), findsOneWidget);
+    });
+
+    testWidgets('缓存为空时仍然显示错误页（回落无内容可用）', (tester) async {
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(500, {'error': 'offline'}),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await pumpPage(tester, cache: fakeCache, userId: 'usr_1');
+
+      expect(find.byType(ErrorState), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('group-list-cache-notice')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('不注入 cache 时行为完全不变（纯拉取）', (tester) async {
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(500, {'error': 'boom'}),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await pumpPage(tester); // 不传 cache / userId
+
+      expect(find.byType(ErrorState), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('group-list-cache-notice')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('只给 cache 不给 userId 时不启用缓存（静默降级）', (tester) async {
+      // userId 是缓存行的归属键；缺它无法定位行，故不启用（不报错）。
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(500, {'error': 'boom'}),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await pumpPage(tester, cache: fakeCache); // userId 为 null
+
+      expect(find.byType(ErrorState), findsOneWidget);
+      expect(fakeCache.loadedUserIds, isEmpty, reason: '无 userId 不该查缓存');
+    });
+
+    testWidgets('网络成功后清除离线提示（提示条不永久残留）', (tester) async {
+      await fakeCache.save('usr_1', [
+        ChatGroup.fromJson(groupJson(id: 'g_old', title: '旧缓存')),
+      ]);
+      // 先失败 → 回落。
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(500, {'error': 'offline'}),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await pumpPage(tester, cache: fakeCache, userId: 'usr_1');
+      expect(
+        find.byKey(const ValueKey('group-list-cache-notice')),
+        findsOneWidget,
+      );
+
+      // 再点提示条里的「重试」，这次网络成功。
+      //
+      // ⚠️ 不用 `tester.drag` 触发 RefreshIndicator：那需要走完一整套下拉手势
+      // 动画，在 `testWidgets` 的假时钟下不可靠（实测 drag 后列表未刷新）。
+      // 提示条里的「重试」按钮是**同一条** `_refresh` 路径，且点击是确定性的。
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(200, {
+          'items': [groupJson(id: 'g_new', title: '网络新数据')],
+        }),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await tester.tap(find.text('重试'));
+      await settleIo(tester);
+
+      expect(find.text('网络新数据'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('group-list-cache-notice')),
+        findsNothing,
+        reason: '网络成功必须清掉离线提示，否则永久残留',
+      );
+    });
+
+    testWidgets('写入缓存的是累积后的完整列表（整表替换语义）', (tester) async {
+      // 若只把新页写进缓存，第二页会把第一页删掉（save 是先删后插）。
+      mockPage(
+        offset: 0,
+        items: List.generate(30, (i) => groupJson(id: 'g$i', title: '对话 $i')),
+      );
+      await pumpPage(tester, cache: fakeCache, userId: 'usr_1', pageSize: 30);
+
+      mockPage(
+        offset: 30,
+        items: [groupJson(id: 'g100', title: '第二页')],
+      );
+      await tester.drag(find.byType(ListView), const Offset(0, -3000));
+      await settleIo(tester);
+      await tester.drag(find.byType(ListView), const Offset(0, -3000));
+      await settleIo(tester);
+
+      expect(
+        fakeCache.saved.last,
+        hasLength(31),
+        reason: '缓存必须是累积的 31 条，而不是只有第二页的 1 条',
+      );
+    });
+  });
+}
+
+/// 内存版 [GroupCacheStore]。
+///
+/// ## 为什么不用 `DriftGroupCacheStore` + 内存库
+///
+/// `spb_features` 不依赖 `spb_data`（分层规则：features → data 是允许的，但
+/// 本页只依赖 domain 的接口）。用 fake 还能**记录调用**——「不注入 cache 时不
+/// 查缓存」「写的是累积列表」这类断言必须看到调用轨迹，而不只是最终状态。
+///
+/// ## 语义对齐
+///
+/// 与 `DriftGroupCacheStore` 对齐到页面依赖的部分：整表替换（`save` 覆盖）、
+/// 按 user 隔离。**不做**排序/坏行跳过（那是实现细节，由 `spb_data` 的测试覆盖）。
+class FakeGroupCacheStore implements GroupCacheStore {
+  final Map<String, List<ChatGroup>> _byUser = {};
+
+  /// 每次 `save` 的入参快照（供断言「写的是累积列表」）。
+  final List<List<ChatGroup>> saved = [];
+
+  /// 每次 `load` 的 userId（供断言「无 userId 时不查」）。
+  final List<String> loadedUserIds = [];
+
+  /// `lastFetchedAt` 的返回值（默认 null = 不显示时间）。
+  DateTime? fetchedAt;
+
+  /// 置 true 模拟读失败（接口约定：返回空列表而非抛）。
+  bool failLoad = false;
+
+  @override
+  Future<List<ChatGroup>> load(String userId) async {
+    loadedUserIds.add(userId);
+    if (failLoad) return const [];
+    return List.of(_byUser[userId] ?? const []);
+  }
+
+  @override
+  Future<void> save(String userId, List<ChatGroup> groups) async {
+    saved.add(List.of(groups));
+    // 整表替换（与 DriftGroupCacheStore 同语义）。
+    _byUser[userId] = List.of(groups);
+  }
+
+  @override
+  Future<void> clear(String userId) async {
+    _byUser.remove(userId);
+  }
+
+  @override
+  Future<DateTime?> lastFetchedAt(String userId) async => fetchedAt;
 }

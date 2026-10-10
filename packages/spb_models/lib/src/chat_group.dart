@@ -203,6 +203,41 @@ class ChatGroup {
     updatedAt: _date(json['updated_at']),
   );
 
+  /// 序列化回服务端的 JSON 形态（**本地缓存用**）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// 本地缓存（issue #26）存的是服务端返回的**原始 JSON**，而不是把 10 个字段
+  /// 拆成数据库列——拆列的话服务端加一个字段就要改客户端 schema + 写迁移，而
+  /// `metadata` 下已长到 `follow_up_suggest` / `habit_suggest` / `goal_gate` /
+  /// `tts` 四块。存 JSON 则 [fromJson] 直接复用，服务端加字段客户端零改动。
+  ///
+  /// ## 与 [fromJson] 必须逐字对称
+  ///
+  /// 键名一律 **snake_case**（与 Go 侧一致，见类文档），嵌套键 `active_session` /
+  /// `current_goal` 同样对称。**改这里就必须改 [fromJson]**——不对称会表现为
+  /// 「缓存写进去、读出来字段全丢」，而不会报错（`fromJson` 对缺失键给默认值）。
+  /// `chat_group_test.dart` 有 round-trip 用例守着这条。
+  ///
+  /// ## 为什么不写 `DateTime` 的原始字符串
+  ///
+  /// [createdAt] / [updatedAt] 在 [fromJson] 里已被归一成**本地时区**
+  /// （`_date` 用 `toLocal()`），这里用 `toIso8601String()` 写回会丢失原时区
+  /// 偏移。但这对缓存无影响：读回时 `_date` 会再 `toLocal()` 一次，而
+  /// `DateTime` 的**时刻**（instant）不变——缓存不展示服务端的原始字符串。
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'user_id': userId,
+    'title': title,
+    'status': status,
+    if (goal != null) 'goal': goal,
+    if (metadata != null) 'metadata': metadata,
+    if (activeSession != null) 'active_session': activeSession!.toJson(),
+    if (currentGoal != null) 'current_goal': currentGoal,
+    'created_at': createdAt.toIso8601String(),
+    'updated_at': updatedAt.toIso8601String(),
+  };
+
   static Map<String, dynamic>? _asMap(Object? v) {
     if (v is Map<String, dynamic>) return v;
     if (v is Map) return Map<String, dynamic>.from(v);
@@ -252,4 +287,17 @@ class ActiveSession {
       joinedAt: DateTime.tryParse((m['joined_at'] as String?) ?? '')?.toLocal(),
     );
   }
+
+  /// 序列化回服务端形态（[maybeFromJson] 的逆，**本地缓存用**）。
+  ///
+  /// 与 [maybeFromJson] 逐字对称（snake_case）。仅在与缓存 round-trip 时被
+  /// [ChatGroup.toJson] 调用；`joined_at` 缺失时不写该键，让 [maybeFromJson]
+  /// 读回 null（而不是写出一个解析不出的空串）。
+  Map<String, dynamic> toJson() => {
+    'agent_id': agentId,
+    if (sessionId != null) 'session_id': sessionId,
+    if (agentSessionId != null) 'agent_session_id': agentSessionId,
+    if (role != null) 'role': role,
+    if (joinedAt != null) 'joined_at': joinedAt!.toIso8601String(),
+  };
 }

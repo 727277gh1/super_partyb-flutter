@@ -355,6 +355,20 @@ class _HomePage extends ConsumerWidget {
       onOpenWorks: () => context.push(SpbRoutes.works),
       onOpenHabits: () => context.push(SpbRoutes.habits),
       pendingConfirmationCount: pendingCount,
+      // 对话列表缓存（issue #26 切片 A）：断网冷启动时回落展示已缓存的列表，
+      // 而不是白屏。
+      //
+      // ## 为什么 userId 用 `cachedUserIdProvider`（本地优先）而不是
+      // `currentUserIdProvider`
+      //
+      // 后者内部是 `chatApi.me()`——一次**网络请求**。断网时它必然失败，userId
+      // 拿不到，缓存就无法定位自己的行 → 回落失效（而那正是本功能要覆盖的场景）。
+      // `cachedUserIdProvider` 先读本地持久化副本，离线也能命中。
+      //
+      // 首次启动（本地无值）且断网时它返回 null，此时 `cache`/`userId` 不同时
+      // 有效，页面静默不启用缓存——无行可查，也没有更优解。
+      cache: ref.watch(groupCacheStoreProvider),
+      userId: ref.watch(cachedUserIdProvider).value,
       // 不需要 userId：`POST /chat/groups` 的身份来自网关注入的 `X-User-ID`
       // （服务端 `chatHandlers.userID` 优先取该头），`ChatApi.createGroup` 的
       // 请求体里根本没有 user_id 字段。

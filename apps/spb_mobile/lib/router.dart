@@ -348,6 +348,11 @@ class _ConversationsTab extends ConsumerWidget {
       onOpenWorks: () => context.push(SpbRoutes.works),
       // 习惯：两端都接（端点与页面都是共享的，见 `spb_features` 的 `HabitsPage`）。
       onOpenHabits: () => context.push(SpbRoutes.habits),
+      // 对话列表缓存（issue #26 切片 A）。与桌面端同构，理由见桌面端 router 注释：
+      // userId 必须走本地优先的 `cachedUserIdProvider`，否则断网时拿不到 userId、
+      // 回落失效（而断网正是本功能要覆盖的场景）。
+      cache: ref.watch(groupCacheStoreProvider),
+      userId: ref.watch(cachedUserIdProvider).value,
       // 无归属快速输入入口（带附件）。
       //
       // ## 为什么移动端需要它

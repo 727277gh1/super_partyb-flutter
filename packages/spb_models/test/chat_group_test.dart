@@ -275,4 +275,116 @@ void main() {
       expect(g.goalGateMaxAutoTurns, 20);
     });
   });
+
+  group('ChatGroup.toJson（本地缓存 round-trip，issue #26）', () {
+    /// 断言 round-trip 后**关键字段**一致。
+    ///
+    /// 不能只比 `id`：`metadata` / `active_session` / `current_goal` 是嵌套结构，
+    /// 键名不对称时它们会**静默变 null**（`fromJson` 对缺失键给默认值，不抛）。
+    /// 而 `ChatGroup` 的关键 getter（`currentGoalText` / `goalGateEnabled` /
+    /// `ttsEnabled`）正是读这些字段——缓存写坏会让界面显示假的「无 goal / 全部关闭」。
+    void expectSameKeyFields(ChatGroup a, ChatGroup b) {
+      expect(b.id, a.id);
+      expect(b.userId, a.userId);
+      expect(b.title, a.title);
+      expect(b.status, a.status);
+      expect(b.goal, a.goal);
+      expect(b.metadata, a.metadata);
+      expect(b.currentGoal, a.currentGoal);
+      expect(b.createdAt, a.createdAt);
+      expect(b.updatedAt, a.updatedAt);
+      // 嵌套对象：比字段而不是比引用。
+      expect(b.activeSession?.agentId, a.activeSession?.agentId);
+      expect(b.activeSession?.sessionId, a.activeSession?.sessionId);
+      expect(b.activeSession?.agentSessionId, a.activeSession?.agentSessionId);
+      expect(b.activeSession?.role, a.activeSession?.role);
+      expect(b.activeSession?.joinedAt, a.activeSession?.joinedAt);
+    }
+
+    test('全字段 round-trip：fromJson(toJson()) 关键字段全等', () {
+      final original = ChatGroup.fromJson({
+        'id': 'grp_1',
+        'user_id': 'usr_1',
+        'title': '某个对话',
+        'status': 'active',
+        'goal': '旧列目标',
+        'metadata': {
+          'tts': {'enabled': true, 'narration_mode': 'summary'},
+          'goal_gate': {'enabled': true, 'continue_until_done': true},
+        },
+        'active_session': {
+          'agent_id': 'agt_1',
+          'session_id': 'ses_1',
+          'agent_session_id': 'pigo_1',
+          'role': 'primary',
+          'joined_at': '2024-03-05T08:01:00Z',
+        },
+        'current_goal': snapshot('结构化目标'),
+        'created_at': '2024-03-05T08:00:00Z',
+        'updated_at': '2024-03-05T08:09:10Z',
+      });
+
+      final back = ChatGroup.fromJson(original.toJson());
+      expectSameKeyFields(original, back);
+
+      // getter 层也必须一致——这是「缓存写坏」在界面上的真实表现。
+      expect(back.ttsEnabled, original.ttsEnabled);
+      expect(back.ttsNarrationMode, original.ttsNarrationMode);
+      expect(back.goalGateEnabled, original.goalGateEnabled);
+      expect(back.currentGoalText, original.currentGoalText);
+    });
+
+    test('可选字段为 null 时不写键，读回仍是 null（不变成空串）', () {
+      final original = ChatGroup.fromJson({
+        'id': 'grp_2',
+        'user_id': 'usr_1',
+        'title': 't',
+        'status': 'archived',
+        'created_at': '2024-03-05T08:00:00Z',
+        'updated_at': '2024-03-05T08:00:00Z',
+      });
+
+      final json = original.toJson();
+      // 不能写出 `goal: null` 这类键：`fromJson` 里 `json['goal'] as String?`
+      // 对 null 没问题，但多写无意义的键会让缓存行体积无谓变大。
+      expect(json.containsKey('goal'), isFalse);
+      expect(json.containsKey('metadata'), isFalse);
+      expect(json.containsKey('active_session'), isFalse);
+      expect(json.containsKey('current_goal'), isFalse);
+
+      final back = ChatGroup.fromJson(json);
+      expectSameKeyFields(original, back);
+      expect(back.activeSession, isNull);
+    });
+
+    test('active_session 的 agent_id 为空时读回 null（与 maybeFromJson 一致）', () {
+      // maybeFromJson 对空 agent_id 返回 null。toJson 不该把它写成一个
+      // 「有 active_session 键但 agent_id 空」的半残对象——那种行读回是 null，
+      // 但缓存里存着一块废数据。
+      final original = ChatGroup.fromJson({
+        'id': 'grp_3',
+        'user_id': 'usr_1',
+        'title': 't',
+        'status': 'active',
+        'active_session': {'agent_id': ''},
+        'created_at': '2024-03-05T08:00:00Z',
+        'updated_at': '2024-03-05T08:00:00Z',
+      });
+      expect(original.activeSession, isNull);
+      final back = ChatGroup.fromJson(original.toJson());
+      expect(back.activeSession, isNull);
+    });
+
+    test('键名是 snake_case（服务端形态），不是 camelCase', () {
+      // 这条守着「toJson 与 fromJson 逐字对称」：若有人把 toJson 写成
+      // `userId` / `createdAt`，fromJson 读不到（它只认 snake_case），
+      // 缓存 round-trip 会静默丢字段。
+      final json = mkGroup().toJson();
+      expect(json.keys, contains('user_id'));
+      expect(json.keys, contains('created_at'));
+      expect(json.keys, contains('updated_at'));
+      expect(json.keys, isNot(contains('userId')));
+      expect(json.keys, isNot(contains('createdAt')));
+    });
+  });
 }

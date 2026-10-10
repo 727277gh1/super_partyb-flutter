@@ -855,6 +855,387 @@ class SyncBindingsCompanion extends UpdateCompanion<SyncBindingRow> {
   }
 }
 
+class $CachedGroupsTable extends CachedGroups
+    with TableInfo<$CachedGroupsTable, CachedGroupRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CachedGroupsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _userIdMeta = const VerificationMeta('userId');
+  @override
+  late final GeneratedColumn<String> userId = GeneratedColumn<String>(
+    'user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _payloadMeta = const VerificationMeta(
+    'payload',
+  );
+  @override
+  late final GeneratedColumn<String> payload = GeneratedColumn<String>(
+    'payload',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _fetchedAtMeta = const VerificationMeta(
+    'fetchedAt',
+  );
+  @override
+  late final GeneratedColumn<int> fetchedAt = GeneratedColumn<int>(
+    'fetched_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    userId,
+    payload,
+    updatedAt,
+    fetchedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'cached_groups';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CachedGroupRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('user_id')) {
+      context.handle(
+        _userIdMeta,
+        userId.isAcceptableOrUnknown(data['user_id']!, _userIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_userIdMeta);
+    }
+    if (data.containsKey('payload')) {
+      context.handle(
+        _payloadMeta,
+        payload.isAcceptableOrUnknown(data['payload']!, _payloadMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_payloadMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    if (data.containsKey('fetched_at')) {
+      context.handle(
+        _fetchedAtMeta,
+        fetchedAt.isAcceptableOrUnknown(data['fetched_at']!, _fetchedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_fetchedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  CachedGroupRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CachedGroupRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      userId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_id'],
+      )!,
+      payload: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payload'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      ),
+      fetchedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}fetched_at'],
+      )!,
+    );
+  }
+
+  @override
+  $CachedGroupsTable createAlias(String alias) {
+    return $CachedGroupsTable(attachedDatabase, alias);
+  }
+}
+
+class CachedGroupRow extends DataClass implements Insertable<CachedGroupRow> {
+  /// group id（服务端主键）。
+  final String id;
+
+  /// 归属用户。
+  ///
+  /// ## 为什么必须有这一列（不能只靠「切换账号时清库」）
+  ///
+  /// `ChatApi.listGroups` 走的是网关注入的 `X-User-ID`，同一台机器换账号后
+  /// 缓存会串——A 账号会看到 B 账号的对话列表。而「登出时清缓存」会漏：登出
+  /// 路径不止一条（token 过期、手动清凭证、进程被杀后重登），任一条没清就串了。
+  /// 把 user_id 放进主键的查询条件里，串号在结构上不可能发生。
+  final String userId;
+
+  /// 服务端返回的 group JSON **原文**（`ChatGroup.fromJson` 的输入）。
+  final String payload;
+
+  /// 服务端 `updated_at` 原样保留，仅用于诊断。
+  final String? updatedAt;
+
+  /// 本地写入时刻（毫秒 epoch）。
+  ///
+  /// 用于「离线数据 · X 前更新」提示（`docs/offline-cache-design.md` §3.4）。
+  /// ⚠️ **不是 TTL 依据**：本设计明确不用 TTL——TTL 会在长时间断网（最需要
+  /// 缓存的时刻）主动清掉缓存，把用户打回白屏。
+  final int fetchedAt;
+  const CachedGroupRow({
+    required this.id,
+    required this.userId,
+    required this.payload,
+    this.updatedAt,
+    required this.fetchedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['user_id'] = Variable<String>(userId);
+    map['payload'] = Variable<String>(payload);
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<String>(updatedAt);
+    }
+    map['fetched_at'] = Variable<int>(fetchedAt);
+    return map;
+  }
+
+  CachedGroupsCompanion toCompanion(bool nullToAbsent) {
+    return CachedGroupsCompanion(
+      id: Value(id),
+      userId: Value(userId),
+      payload: Value(payload),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
+      fetchedAt: Value(fetchedAt),
+    );
+  }
+
+  factory CachedGroupRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CachedGroupRow(
+      id: serializer.fromJson<String>(json['id']),
+      userId: serializer.fromJson<String>(json['userId']),
+      payload: serializer.fromJson<String>(json['payload']),
+      updatedAt: serializer.fromJson<String?>(json['updatedAt']),
+      fetchedAt: serializer.fromJson<int>(json['fetchedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'userId': serializer.toJson<String>(userId),
+      'payload': serializer.toJson<String>(payload),
+      'updatedAt': serializer.toJson<String?>(updatedAt),
+      'fetchedAt': serializer.toJson<int>(fetchedAt),
+    };
+  }
+
+  CachedGroupRow copyWith({
+    String? id,
+    String? userId,
+    String? payload,
+    Value<String?> updatedAt = const Value.absent(),
+    int? fetchedAt,
+  }) => CachedGroupRow(
+    id: id ?? this.id,
+    userId: userId ?? this.userId,
+    payload: payload ?? this.payload,
+    updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
+    fetchedAt: fetchedAt ?? this.fetchedAt,
+  );
+  CachedGroupRow copyWithCompanion(CachedGroupsCompanion data) {
+    return CachedGroupRow(
+      id: data.id.present ? data.id.value : this.id,
+      userId: data.userId.present ? data.userId.value : this.userId,
+      payload: data.payload.present ? data.payload.value : this.payload,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      fetchedAt: data.fetchedAt.present ? data.fetchedAt.value : this.fetchedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CachedGroupRow(')
+          ..write('id: $id, ')
+          ..write('userId: $userId, ')
+          ..write('payload: $payload, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('fetchedAt: $fetchedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, userId, payload, updatedAt, fetchedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CachedGroupRow &&
+          other.id == this.id &&
+          other.userId == this.userId &&
+          other.payload == this.payload &&
+          other.updatedAt == this.updatedAt &&
+          other.fetchedAt == this.fetchedAt);
+}
+
+class CachedGroupsCompanion extends UpdateCompanion<CachedGroupRow> {
+  final Value<String> id;
+  final Value<String> userId;
+  final Value<String> payload;
+  final Value<String?> updatedAt;
+  final Value<int> fetchedAt;
+  final Value<int> rowid;
+  const CachedGroupsCompanion({
+    this.id = const Value.absent(),
+    this.userId = const Value.absent(),
+    this.payload = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.fetchedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CachedGroupsCompanion.insert({
+    required String id,
+    required String userId,
+    required String payload,
+    this.updatedAt = const Value.absent(),
+    required int fetchedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       userId = Value(userId),
+       payload = Value(payload),
+       fetchedAt = Value(fetchedAt);
+  static Insertable<CachedGroupRow> custom({
+    Expression<String>? id,
+    Expression<String>? userId,
+    Expression<String>? payload,
+    Expression<String>? updatedAt,
+    Expression<int>? fetchedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (userId != null) 'user_id': userId,
+      if (payload != null) 'payload': payload,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (fetchedAt != null) 'fetched_at': fetchedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CachedGroupsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? userId,
+    Value<String>? payload,
+    Value<String?>? updatedAt,
+    Value<int>? fetchedAt,
+    Value<int>? rowid,
+  }) {
+    return CachedGroupsCompanion(
+      id: id ?? this.id,
+      userId: userId ?? this.userId,
+      payload: payload ?? this.payload,
+      updatedAt: updatedAt ?? this.updatedAt,
+      fetchedAt: fetchedAt ?? this.fetchedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (userId.present) {
+      map['user_id'] = Variable<String>(userId.value);
+    }
+    if (payload.present) {
+      map['payload'] = Variable<String>(payload.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (fetchedAt.present) {
+      map['fetched_at'] = Variable<int>(fetchedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CachedGroupsCompanion(')
+          ..write('id: $id, ')
+          ..write('userId: $userId, ')
+          ..write('payload: $payload, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('fetchedAt: $fetchedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $PreferencesTable extends Preferences
     with TableInfo<$PreferencesTable, PreferenceRow> {
   @override
@@ -1069,6 +1450,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $SyncCursorsTable syncCursors = $SyncCursorsTable(this);
   late final $SyncedFilesTable syncedFiles = $SyncedFilesTable(this);
   late final $SyncBindingsTable syncBindings = $SyncBindingsTable(this);
+  late final $CachedGroupsTable cachedGroups = $CachedGroupsTable(this);
   late final $PreferencesTable preferences = $PreferencesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
@@ -1078,6 +1460,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     syncCursors,
     syncedFiles,
     syncBindings,
+    cachedGroups,
     preferences,
   ];
 }
@@ -1569,6 +1952,206 @@ typedef $$SyncBindingsTableProcessedTableManager =
       SyncBindingRow,
       PrefetchHooks Function()
     >;
+typedef $$CachedGroupsTableCreateCompanionBuilder =
+    CachedGroupsCompanion Function({
+      required String id,
+      required String userId,
+      required String payload,
+      Value<String?> updatedAt,
+      required int fetchedAt,
+      Value<int> rowid,
+    });
+typedef $$CachedGroupsTableUpdateCompanionBuilder =
+    CachedGroupsCompanion Function({
+      Value<String> id,
+      Value<String> userId,
+      Value<String> payload,
+      Value<String?> updatedAt,
+      Value<int> fetchedAt,
+      Value<int> rowid,
+    });
+
+class $$CachedGroupsTableFilterComposer
+    extends Composer<_$AppDatabase, $CachedGroupsTable> {
+  $$CachedGroupsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CachedGroupsTableOrderingComposer
+    extends Composer<_$AppDatabase, $CachedGroupsTable> {
+  $$CachedGroupsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CachedGroupsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CachedGroupsTable> {
+  $$CachedGroupsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get userId =>
+      $composableBuilder(column: $table.userId, builder: (column) => column);
+
+  GeneratedColumn<String> get payload =>
+      $composableBuilder(column: $table.payload, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<int> get fetchedAt =>
+      $composableBuilder(column: $table.fetchedAt, builder: (column) => column);
+}
+
+class $$CachedGroupsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CachedGroupsTable,
+          CachedGroupRow,
+          $$CachedGroupsTableFilterComposer,
+          $$CachedGroupsTableOrderingComposer,
+          $$CachedGroupsTableAnnotationComposer,
+          $$CachedGroupsTableCreateCompanionBuilder,
+          $$CachedGroupsTableUpdateCompanionBuilder,
+          (
+            CachedGroupRow,
+            BaseReferences<_$AppDatabase, $CachedGroupsTable, CachedGroupRow>,
+          ),
+          CachedGroupRow,
+          PrefetchHooks Function()
+        > {
+  $$CachedGroupsTableTableManager(_$AppDatabase db, $CachedGroupsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CachedGroupsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CachedGroupsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$CachedGroupsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> userId = const Value.absent(),
+                Value<String> payload = const Value.absent(),
+                Value<String?> updatedAt = const Value.absent(),
+                Value<int> fetchedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CachedGroupsCompanion(
+                id: id,
+                userId: userId,
+                payload: payload,
+                updatedAt: updatedAt,
+                fetchedAt: fetchedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String userId,
+                required String payload,
+                Value<String?> updatedAt = const Value.absent(),
+                required int fetchedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => CachedGroupsCompanion.insert(
+                id: id,
+                userId: userId,
+                payload: payload,
+                updatedAt: updatedAt,
+                fetchedAt: fetchedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CachedGroupsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CachedGroupsTable,
+      CachedGroupRow,
+      $$CachedGroupsTableFilterComposer,
+      $$CachedGroupsTableOrderingComposer,
+      $$CachedGroupsTableAnnotationComposer,
+      $$CachedGroupsTableCreateCompanionBuilder,
+      $$CachedGroupsTableUpdateCompanionBuilder,
+      (
+        CachedGroupRow,
+        BaseReferences<_$AppDatabase, $CachedGroupsTable, CachedGroupRow>,
+      ),
+      CachedGroupRow,
+      PrefetchHooks Function()
+    >;
 typedef $$PreferencesTableCreateCompanionBuilder =
     PreferencesCompanion Function({
       required String key,
@@ -1717,6 +2300,8 @@ class $AppDatabaseManager {
       $$SyncedFilesTableTableManager(_db, _db.syncedFiles);
   $$SyncBindingsTableTableManager get syncBindings =>
       $$SyncBindingsTableTableManager(_db, _db.syncBindings);
+  $$CachedGroupsTableTableManager get cachedGroups =>
+      $$CachedGroupsTableTableManager(_db, _db.cachedGroups);
   $$PreferencesTableTableManager get preferences =>
       $$PreferencesTableTableManager(_db, _db.preferences);
 }

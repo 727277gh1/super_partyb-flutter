@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
 
 /// 建一个内存库（每个用例独立，互不干扰）。
 ///
@@ -165,6 +166,51 @@ void main() {
       );
       final after = await store.load(workspaceStateKey);
       expect(after.files['g1/a.md']?.contentHash, 'abc123');
+
+      // 4) 同一次升级还必须建出 v3 的新表（cached_groups，issue #26）。
+      //
+      // ⚠️ 这条测试现在是**跳版升级**（v1 → v3，中间跨过 v2）。它同时守着
+      // `onUpgrade` 里必须写 `from < N` 而不是 `from == N-1`：若写
+      // `if (from == 2) await m.createTable(cachedGroups)`，v1 用户升到 v3 后
+      // 就没有这张表，而 drift 不会在升级时报错——直到列表页第一次查缓存才炸。
+      //
+      // ## 为什么必须直接查表，不能通过 `DriftGroupCacheStore`
+      //
+      // 缓存是**可丢弃数据**，故 store 的每一处失败都静默降级（读失败返回空
+      // 列表、写失败只记日志）。于是「表不存在」在 store 层表现为**空列表**，
+      // `expect(await cache.load(...), isEmpty)` 会**无条件通过**——这条断言
+      // 对「迁移漏建表」完全无效（实测：把 `from < 3` 改成 `from == 2` 后
+      // 测试仍全绿，日志里只有 `no such table: cached_groups` 的 warn）。
+      //
+      // 故直接走 SQL 查 `sqlite_master`：这是唯一能区分「表不存在」与「表存在
+      // 但没有行」的检查。
+      final tables = await db
+          .customSelect(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='cached_groups'",
+          )
+          .get();
+      expect(
+        tables.map((r) => r.data['name']),
+        contains('cached_groups'),
+        reason: 'v3 新表必须存在（跳版升级 v1→v3 也要建）',
+      );
+
+      // 再确认它**可读写**（建了表但列不对同样是坏的）。
+      final cache = DriftGroupCacheStore(db);
+      await cache.save('usr_1', [
+        ChatGroup.fromJson({
+          'id': 'g1',
+          'user_id': 'usr_1',
+          'title': 't',
+          'status': 'active',
+          'created_at': '2024-03-05T08:00:00Z',
+          'updated_at': '2024-03-05T08:09:10Z',
+        }),
+      ]);
+      expect((await cache.load('usr_1')).map((e) => e.id), [
+        'g1',
+      ], reason: 'v3 新表必须可读写');
     });
 
     test('未写入过的键返回 empty（不是抛异常）', () async {
@@ -462,6 +508,236 @@ void main() {
       expect(a, b);
       expect(a.hashCode, b.hashCode);
       expect(a == c, isFalse);
+    });
+  });
+
+  group('DriftGroupCacheStore（issue #26 切片 A）', () {
+    /// 造一个 `ChatGroup`（走 fromJson，与服务端形态一致）。
+    ChatGroup g(String id, {String title = 't', String? updatedAt}) =>
+        ChatGroup.fromJson({
+          'id': id,
+          'user_id': 'usr_1',
+          'title': title,
+          'status': 'active',
+          'created_at': '2024-03-05T08:00:00Z',
+          'updated_at': updatedAt ?? '2024-03-05T08:09:10Z',
+        });
+
+    test('无缓存返回空列表（不是抛异常）', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      expect(await cache.load('usr_never'), isEmpty);
+      expect(await cache.lastFetchedAt('usr_never'), isNull);
+    });
+
+    test('写入后读回：字段完整（含嵌套 metadata / current_goal）', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      final group = ChatGroup.fromJson({
+        'id': 'g1',
+        'user_id': 'usr_1',
+        'title': '带 metadata 的对话',
+        'status': 'active',
+        'metadata': {
+          'tts': {'enabled': true, 'narration_mode': 'summary'},
+          'goal_gate': {'enabled': true, 'continue_until_done': true},
+        },
+        'active_session': {'agent_id': 'agt_1', 'session_id': 'ses_1'},
+        'created_at': '2024-03-05T08:00:00Z',
+        'updated_at': '2024-03-05T08:09:10Z',
+      });
+
+      await cache.save('usr_1', [group]);
+      final back = await cache.load('usr_1');
+
+      expect(back, hasLength(1));
+      expect(back.first.title, '带 metadata 的对话');
+      // 嵌套字段必须活着——它们是界面状态的来源（tts 开关、goal gate）。
+      expect(back.first.ttsEnabled, isTrue);
+      expect(back.first.ttsNarrationMode, 'summary');
+      expect(back.first.goalGateEnabled, isTrue);
+      expect(back.first.activeSession?.agentId, 'agt_1');
+      expect(back.first.activeSession?.sessionId, 'ses_1');
+    });
+
+    test('整表替换：服务端删掉的 group 不残留（不能只 upsert）', () async {
+      // 这是本实现最容易写错的地方（见 GroupCacheStore.save 文档）：
+      // 若只 upsert，服务端删掉的 group 会永远显示，用户点进去得到 404。
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.save('usr_1', [g('g1'), g('g2'), g('g3')]);
+      expect(await cache.load('usr_1'), hasLength(3));
+
+      // 服务端删掉了 g2。
+      await cache.save('usr_1', [g('g1'), g('g3')]);
+      final back = await cache.load('usr_1');
+      expect(back.map((e) => e.id), ['g1', 'g3']);
+      expect(
+        back.any((e) => e.id == 'g2'),
+        isFalse,
+        reason: '整表替换：g2 必须消失，否则用户点进去 404',
+      );
+    });
+
+    test('save 空列表 = 清空该用户缓存', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.save('usr_1', [g('g1')]);
+      await cache.save('usr_1', const []);
+      expect(await cache.load('usr_1'), isEmpty);
+    });
+
+    test('按 user_id 隔离：换账号不串号', () async {
+      // 这条守着 CachedGroups.userId 列的存在意义：若查询不过滤 user_id，
+      // A 账号会看到 B 账号的对话列表。
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.save('usr_A', [g('gA')]);
+      await cache.save('usr_B', [g('gB1'), g('gB2')]);
+
+      expect((await cache.load('usr_A')).map((e) => e.id), ['gA']);
+      expect((await cache.load('usr_B')).map((e) => e.id), ['gB1', 'gB2']);
+    });
+
+    test('clear 只清该用户，不影响别人', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.save('usr_A', [g('gA')]);
+      await cache.save('usr_B', [g('gB')]);
+
+      await cache.clear('usr_A');
+      expect(await cache.load('usr_A'), isEmpty);
+      expect((await cache.load('usr_B')).map((e) => e.id), ['gB']);
+    });
+
+    test('按 updated_at 降序（与服务端列表排序一致）', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.save('usr_1', [
+        g('old', updatedAt: '2024-03-01T00:00:00Z'),
+        g('newest', updatedAt: '2024-03-09T00:00:00Z'),
+        g('mid', updatedAt: '2024-03-05T00:00:00Z'),
+      ]);
+
+      expect((await cache.load('usr_1')).map((e) => e.id), [
+        'newest',
+        'mid',
+        'old',
+      ]);
+    });
+
+    test('lastFetchedAt：写入后有值，未写过为 null', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      expect(await cache.lastFetchedAt('usr_1'), isNull);
+      final before = DateTime.now().subtract(const Duration(seconds: 1));
+      await cache.save('usr_1', [g('g1')]);
+      final at = await cache.lastFetchedAt('usr_1');
+      // 不用 `isNotNull`：drift 的 query_builder 也导出了同名符号（这里已
+      // `hide isNull`，但 isNotNull 未 hide），会报「imported from both」。
+      expect(at, isA<DateTime>());
+      expect(at!.isAfter(before), isTrue);
+    });
+
+    test('坏行被跳过，其余行照常返回（不因一行坏而整份作废）', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.save('usr_1', [g('good1'), g('good2')]);
+      // 手工把一行 payload 改坏（模拟截断 / 手工改库）。
+      await db.customStatement(
+        "UPDATE cached_groups SET payload = '{not json' WHERE id = 'good1'",
+      );
+
+      final back = await cache.load('usr_1');
+      expect(back.map((e) => e.id), ['good2']);
+    });
+
+    // ── 静默降级：可丢弃数据的核心语义（issue #26）────────────────────
+    //
+    // 这四条覆盖的是「库坏了会怎样」。它们不是凑覆盖率：`GroupCacheStore` 的
+    // 设计前提就是**每一处失败都静默**（与 `SyncStateStore` 相反），若某天有人
+    // 把某个 `catch` 改成 `rethrow`，对话列表会从「能用但无缓存」变成「整页报错」
+    // ——而缓存的存在意义恰恰是在坏环境下让应用可用。
+    //
+    // ## 手法：`DROP TABLE cached_groups`
+    //
+    // 制造一个「查询必然失败」的环境。为什么不用「关掉数据库」：实测
+    // `await db.close()` 之后 drift 的查询**不抛**（静默返回空 / 无操作），
+    // 于是那组用例会**无条件通过**——对「catch 有没有被改成 rethrow」毫无
+    // 鉴别力（踩过一次，覆盖率报告显示 catch 行根本没被命中才发现的）。
+    //
+    // 删表则稳定触发 `SqliteException: no such table: cached_groups`。
+    Future<AppDatabase> dbWithDroppedCacheTable() async {
+      final db = _memoryDb();
+      await db.customStatement('DROP TABLE cached_groups');
+      return db;
+    }
+
+    test('表不可用时 load 返回空列表（不抛异常）', () async {
+      final db = await dbWithDroppedCacheTable();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      expect(await cache.load('usr_1'), isEmpty);
+    });
+
+    test('表不可用时 save 静默（不抛，主流程不受影响）', () async {
+      final db = await dbWithDroppedCacheTable();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      // 不抛 = 通过。若这里抛了，列表页的「网络成功 → 写缓存」会把一次正常的
+      // 列表加载变成错误页。
+      await cache.save('usr_1', [g('g1')]);
+    });
+
+    test('表不可用时 clear 静默（不抛）', () async {
+      final db = await dbWithDroppedCacheTable();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      await cache.clear('usr_1');
+    });
+
+    test('表不可用时 lastFetchedAt 返回 null（不抛）', () async {
+      final db = await dbWithDroppedCacheTable();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+
+      expect(await cache.lastFetchedAt('usr_1'), isNull);
+    });
+
+    test('清同步状态不得动缓存（resetAll 与缓存生命周期分离）', () async {
+      // docs/offline-cache-design.md §6.3：换同步目录与「对话缓存」无关，
+      // 清了只会让用户下次断网又白屏。
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final cache = DriftGroupCacheStore(db);
+      final sync = DriftSyncStateStore(db);
+
+      await cache.save('usr_1', [g('g1')]);
+      await sync.save(workspaceStateKey, SyncState(cursor: 'c1'));
+      await sync.resetAll();
+
+      expect((await cache.load('usr_1')).map((e) => e.id), ['g1']);
     });
   });
 }
