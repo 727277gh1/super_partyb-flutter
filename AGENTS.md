@@ -49,11 +49,21 @@ flutter pub get
 # 静态分析（全量，含分层规则）
 dart analyze .
 bash tools/check_layering.sh          # 分层规则（纯 Dart 包禁止依赖 Flutter）
+bash tools/check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
 cd apps/spb_mobile  && flutter test   # 移动端
 dart test                             # 纯 Dart 包（spb_core/models/api/domain）
+
+# 覆盖率（issue #25）——逐包采集并汇总，产物 coverage/lcov.info
+bash tools/coverage.sh                # 全包（约 +3 min）
+bash tools/coverage.sh spb_domain     # 单包（调试用）
+bash tools/coverage.sh --summary-only # 不跑测试，只汇总已有产物
+
+# golden 基线（issue #25）——更新前先确认 diff 是你有意改的！
+cd packages/spb_ui     && flutter test --update-goldens test/golden_test.dart
+cd packages/spb_features && flutter test --update-goldens test/chat/golden_test.dart
 
 # 构建
 cd apps/spb_desktop && flutter build linux --release

@@ -59,6 +59,12 @@ jobs:
       - name: Layering check
         run: bash tools/check_layering.sh
 
+      # 跨包**逐字节相同**的测试辅助文件必须真的相同（见脚本头部的「为什么会有
+      # 重复文件」）。本机与 CI 装载不同字体会让 golden 基线必然有一边失败，
+      # 而报错只说「像素不匹配」，指不到根因。
+      - name: Test support sync check
+        run: bash tools/check_test_support_sync.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 
@@ -92,6 +98,44 @@ jobs:
             echo "=== $app ==="
             (cd "apps/$app" && flutter test)
           done
+
+      # ── 覆盖率采集（issue #25）───────────────────────────────────────
+      #
+      # 为什么单独一步而不是把 `--coverage` 加到上面的测试循环：
+      #
+      # 1. **纯 Dart 包与 Flutter 包的产物格式不同**。`dart test --coverage`
+      #    产出 `coverage/test/*.json`（需再跑 `coverage:format_coverage`），
+      #    而 `flutter test --coverage` 直接产出 `coverage/lcov.info`。
+      #    `tools/coverage.sh` 封装了这个差异（含逐包汇总表）。
+      # 2. **测试循环要快、要失败即停**；覆盖率是**观测**，不该让它的开销
+      #    （重跑一遍全部测试）影响门禁的反馈速度。
+      #
+      # 注意：这一步会**再跑一遍全部测试**（约 +3 min）。可以接受——
+      # 与 build-* job 并行，不增加关键路径长度。
+      - name: Collect coverage
+        run: bash tools/coverage.sh
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 30
+
+      # 覆盖率**摘要写进 job summary**：不必下载 artifact 就能在 Actions
+      # 页面看到逐包数字（issue #25 的验收项之一）。
+      #
+      # ⚠️ 不用 codecov：它需要仓库 token（私有仓要付费/配置），而本 issue
+      # 只要求「报告可见」，artifact + summary 已满足。将来要趋势图再加。
+      - name: Coverage summary
+        run: |
+          {
+            echo '## 覆盖率（逐包行覆盖率）'
+            echo ''
+            echo '```'
+            bash tools/coverage.sh --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ── Linux 桌面端出包（验证可构建 + 自包含）────────────────────────
   build-linux:
