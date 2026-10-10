@@ -1243,6 +1243,9 @@ docs: 补充 Windows 构建限制
 | 文档 | 位置 |
 |---|---|
 | Windows 下载与出包 | `docs/windows-release.md` |
+| 交付物回传（本地改动 → agent） | `docs/deliverable-upload-and-conflict.md` |
+| 对话数据本地缓存（issue #26 设计） | `docs/offline-cache-design.md` |
+| 手工验证清单（含 §2.7 可访问性） | `docs/m0-manual-verification.md` |
 | Go API 契约与业务逻辑 | `super_partyb/AGENTS.md` |
 | Tauri 桌面端（迁移来源） | `super_partyb/apps/desktop/README.md` |
 | 微信小程序（BFF 可复用） | `super_partyb/apps/miniapp/README.md` |

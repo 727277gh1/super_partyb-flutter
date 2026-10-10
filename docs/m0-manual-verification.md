@@ -5,7 +5,8 @@
 > 交互能力——多窗口、托盘、全局快捷键、OIDC 回跳、剪贴板文件、交付物同步写盘。
 >
 > 相关：`AGENTS.md` §6.5（多窗口结论）、§6.8（剪贴板文件）、§6.11（托盘菜单）、
-> §8（macOS entitlements）、§9（无头验证的边界）、§11（已知问题）；
+> §6.12（i18n 决策）、§8（macOS entitlements）、§9（无头验证的边界）、
+> §11（已知问题）；
 > `docs/rfc8252-loopback-signin.md`（桌面 OIDC）、
 > `docs/mobile-oidc-deeplink.md`（移动 OIDC）。
 
@@ -57,16 +58,31 @@ bash tools/check_format.sh
 # 期望：✅ 格式检查通过
 
 # 4) 逐包测试
-#    ⚠️ spb_domain / spb_features 必须在**各自目录**下跑
-#    （event_types_consistency_test 用相对路径读 lib/src/event_reducer.dart）
-for p in spb_core spb_models spb_api spb_data spb_design spb_ui spb_platform; do
+#
+# ⚠️ **测试命令按包类型分两组**（写错会静默少跑一半用例）：
+#
+#   纯 Dart 包（无 Flutter 依赖）→ `dart test`
+#     spb_core / spb_models / spb_api / spb_domain
+#   含 UI 的包 → `flutter test`
+#     spb_data / spb_design / spb_ui / spb_platform / spb_features
+#
+# 实测（2026-10）：对后 5 个包跑 `dart test` 会**失败**（需要 Flutter 引擎）。
+# 故**不要**把两类混在一个 `for` 循环里——那会让其中一类整体跑不起来，
+# 而 `for` 循环里的失败容易被当成噪音忽略。
+for p in spb_core spb_models spb_api; do
   (cd packages/$p && dart test)
 done
-(cd packages/spb_domain   && dart test)     # +665
-(cd packages/spb_features && flutter test)  # +932
-(cd apps/spb_desktop      && flutter test)  # +133
-(cd apps/spb_mobile       && flutter test)  # +86
+(cd packages/spb_domain   && dart test)     # +724
+for p in spb_data spb_design spb_ui spb_platform spb_features; do
+  (cd packages/$p && flutter test)
+done
+(cd apps/spb_desktop      && flutter test)  # +139
+(cd apps/spb_mobile       && flutter test)  # +91
 # 期望：全部 `All tests passed!`
+#
+# ⚠️ spb_domain / spb_features **必须在各自目录**下跑：
+# event_types_consistency_test 用相对路径读 lib/src/event_reducer.dart，
+# 从仓库根跑会失败（预先存在的约束，非回归）。
 
 # 5) Linux release 构建
 cd apps/spb_desktop && flutter build linux --release
@@ -84,15 +100,33 @@ for f in lib/*.so*; do patchelf --print-rpath "$f"; done # 期望：无 /home/
 patchelf --print-rpath spb_desktop                       # 期望：$ORIGIN/lib
 
 # 8) 进程能启动并存活（唯一能自动化的运行时证据）
+#
+# ⚠️ **必须套 `xvfb-run`**：本机无 `DISPLAY`（`AGENTS.md` §9），
+# 直接跑二进制会以 **退出码 1** 失败（`Gtk-WARNING: cannot open display:`），
+# 看起来像「程序坏了」而不是「环境没屏幕」。`xvfb-run` 造一个虚拟 X
+# 服务器，进程才能走到主循环并存活到超时。
 cd /home/jim/git.atjog.com/dever/super_partyb-flutter/apps/spb_desktop
-timeout 15 ./build/linux/x64/release/bundle/spb_desktop
+xvfb-run -a timeout 15 ./build/linux/x64/release/bundle/spb_desktop
 # 期望：退出码 124（存活到超时 = 正常）
+#
+# 不要因为「退出码不是 124」就去查业务代码——先确认是否忘了 `xvfb-run`。
+# 另外：`xvfb-run` 下**渲染仍不可靠**（同一命令有时窗口创建成功、有时停在
+# 10x10 占位窗），故它只证明「进程能启动并存活」，**不是**渲染正确的证据（见 §0）。
 ```
 
 **基线计数**（2026-10 实测，供对照；数量随开发增长，只需关注「是否全绿」）：
-spb_core 30 / spb_models 234 / spb_api 343 / spb_domain 665 / spb_data 49 /
-spb_design 24 / spb_ui 9 / spb_platform 67 / spb_features 932 /
-spb_desktop 133 / spb_mobile 86。
+
+| 包 | 用例数 | 包 | 用例数 |
+|---|---|---|---|
+| `spb_core` | 30 | `spb_ui` | 27 |
+| `spb_models` | 238 | `spb_platform` | 67 |
+| `spb_api` | 351 | `spb_features` | 1003 |
+| `spb_domain` | 724 | `spb_desktop` | 139 |
+| `spb_data` | 63 | `spb_mobile` | 91 |
+| `spb_design` | 24 | **合计** | **2757** |
+
+> 合计与逐包数字**必须一起更新**——本文件曾出现「正文说 199 个测试」而实际
+> 已 2600+ 的漂移（issue #4 正文）。改任一处时请顺手核一遍总和。
 
 ---
 
@@ -328,6 +362,48 @@ Android `<intent-filter>` 与 iOS `CFBundleURLTypes` **已注册**（
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb#30` |
 | Windows / macOS 出包需原生主机 | 已知限制 | `AGENTS.md` §8 |
 | iOS 出包需 Apple Developer 账号（$99/年） | 待决策 | `super_partyb#31` |
+
+---
+
+## 3.4 阻塞条件的**核实记录**（issue #4，逐条对代码/上游核实）
+
+issue #4 的正文写于 M0 阶段，其中**三处已过时**。下表是逐条核实的结果——避免
+后来者照着过时的描述去排查一个不存在的问题。
+
+### 3.4.1 issue 正文过时之处
+
+| issue #4 正文的说法 | 核实结果 | 证据 |
+|---|---|---|
+| 「199 个测试」 | **已过时**：当前 **2757**（见 §1 的逐包数字与合计） | 逐包 `flutter test` / `dart test` |
+| 「`sessionTokenProvider` 恒返回 `null`，即未接 OIDC」 | **已过时**：它返回 `manager.currentAccessToken`（`SessionManager`），OIDC 已接通 | `apps/spb_desktop/lib/providers.dart` 的 `sessionTokenProvider` |
+| 「确认卡『同意/拒绝』当前实现路径有误，见 #1，修好前此项必然失败」 | **#1 已 closed**：路径现为 `POST /api/chat/groups/:gid/confirmations/:cid/resolve`（含 `group_id`，体键 `action`），有 4 例单测 | `packages/spb_api/lib/src/chat_api.dart:1053`、`test/chat_api_test.dart` 的 `resolveConfirmation` 组 |
+| 「多窗口」作为「M0 头号风险，需验证主窗+设置窗+悬浮窗能否同时存在」 | **已重新决策**：`window_manager` **做不到**多窗口（一个 engine 一个 view），改为「主窗口临时变身」单窗方案。验证项已相应改写（见 §2.1） | `AGENTS.md` §6.5 |
+| 「IdP 是否支持 PKCE / 是否允许自定义 scheme」 | **已定论**：IdP 支持 PKCE；**自定义 scheme 与 loopback 都被拒**（`400 invalid_request`），故走 RFC 8252 §7.3 loopback + 待注册 public client | `docs/rfc8252-loopback-signin.md`、`packages/spb_api/lib/src/oidc_client.dart:28` |
+
+> 结论：issue #4 的**清单仍然有效**（本机确实无 `DISPLAY` / 无 `/dev/kvm`），
+> 但它的「现状描述」不能直接引用。以本文件 §2 的清单为准。
+
+### 3.4.2 阻塞条件的**当前**核实状态
+
+| 阻塞项 | 核实方式 | 结果 |
+|---|---|---|
+| 桌面 public client（loopback） | 上游 issue `dever/id-provider#6` 状态 | **仍 open** → 阻塞成立 |
+| `token_endpoint_auth_methods_supported` 缺 `none` | 读 `id-provider/go/internal/oidc/provider.go:233` | **确认缺**：只有 `client_secret_basic` / `client_secret_post` → 阻塞成立 |
+| 移动端 deeplink client | 同上（`id-provider#6` 待办 2） | **仍 open** → 阻塞成立 |
+| 生产 IdP 是否已注册该 client | `ssh bcc` + 查 `oauth_clients` 表 | ⚠️ **本次无法核实**：容器到 `bcc`（106.13.164.172:22）**连接超时**，`https://idp.atjog.com` 亦不可达（`000`）。故「已注册/未注册」只能依据 `id-provider#6` 的 open 状态推断 |
+
+⚠️ **上表最后一行的不确定性必须如实传递**：本容器网络到生产不可达，故「生产
+是否已注册」是**推断**（依据上游 issue 仍 open），不是**实测**。人工验证时请先
+按 §2.4 直接试一次登录——若成功，说明 `id-provider#6` 已完成（届时关闭它）。
+
+### 3.4.3 本机**无法**核实的原因（环境限制的精确表述）
+
+| 想核实的东西 | 为什么本机做不到 |
+|---|---|
+| 生产 `oauth_clients` 表内容 | 容器到 `bcc` SSH 超时、IdP 域名不可达（本次实测） |
+| 任何渲染/交互 | 无 `DISPLAY`（`AGENTS.md` §9） |
+| Android 真机行为 | 无 `/dev/kvm`（模拟器不可用）、无连接的真机 |
+| Windows / macOS 包 | Flutter 要求原生主机（`AGENTS.md` §8） |
 
 ---
 
