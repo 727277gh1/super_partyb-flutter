@@ -1356,6 +1356,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~`map` spec 文件预览未实现~~ | ✅ 已实现（issue #12）：`MapSpecCard` + `parseMapSchema` / `MapProjection`（零新依赖），接入预览框与两端 router | issue #12、§6.9.5 |
 | ~~`dashboard` 网格格式渲染器未实现~~ | ✅ 已闭环（issue #12）：按「不做」处理——真实 `dashboard.spec.json` 走的是 `spec` 路径（已支持），网格格式**无已知生产者** | issue #12、§6.9.3 |
 | 四项检索面板未接（语义 / 图谱 / 文件演化 / 决策演化） | **有意不做**（issue #12）。语义搜索的**嵌入链路是通的**，但数据面为空（`chat_groups` = 0 行）；两个「演化」面板的数据源在 Go 时代已停写——**前置条件是服务端先恢复数据写入** | issue #12、§6.9.6 |
+| ~~对话列表缓存：本地变更（新建/改名/删除）后不写缓存~~ | ✅ 已修（issue #28）：5 条本地变更路径补 `_saveCache()`，并去掉 `_saveCache` 的空列表跳过（删掉最后一个对话后缓存不更新的成因） | issue #28、`docs/offline-cache-design.md` §4.5 |
+| 离线缓存切片 B（timeline 只读缓存）/ C（离线写队列） | **未做**（设计已就绪）。B 消除「断网点进对话看不了历史」；C 消除「断网不能发消息」，其 `request_id` 幂等前提**已核实成立**（`enqueue.go:265`） | issue #29 / #30、`docs/offline-cache-design.md` §3.5/§7 |
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 

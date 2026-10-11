@@ -1,6 +1,7 @@
 # 对话数据本地缓存设计（issue #26）
 
 > 状态：**阶段 1（设计）+ 阶段 2 切片 A（实现）已完成**；切片 B/C 未做
+> （切片 B → issue #29，切片 C → issue #30；本地变更写缓存的一致性补丁 → #28）
 > （纯客户端范围，Go API 零改动）
 > 背景：`spb_data` 的 drift 库里只有 4 张表（同步游标 / 已同步文件 / 目录绑定 /
 > 偏好），**对话数据零本地缓存**。断网启动时除同步页与设置页外全是白屏。
@@ -15,7 +16,7 @@
 |---|---|---|
 | 1 | 缓存什么 | **切片 A** group 列表（存服务端原始 JSON）；**切片 B** 落库 timeline 事件；**切片 C** 离线写队列。**不缓存**文件内容、不缓存 `transient` 事件 |
 | 2 | 失效策略 | **不用 TTL**（到期清空 = 又白屏）。group 列表**整表替换**（表达「服务端删了」）；timeline 以 `globalSeq` **增量追加**。陈旧只做**提示**，不做清空 |
-| 3 | 写路径 | **两个写点，都不在 SSE 热路径上**：`listGroups` 成功后写 group 列表；`_backfill` / `loadOlder` 成功后写 timeline。SSE 事件**不**触发缓存写 |
+| 3 | 写路径 | **三个写点，都不在 SSE 热路径上**：`listGroups` 成功后写 group 列表；`_backfill` / `loadOlder` 成功后写 timeline；**本地变更后**（新建 / 改名 / 删除，见 §4.5）也写 group 列表。SSE 事件**不**触发缓存写 |
 | 4 | 冲突 | 缓存里只存落库事件（与服务端 `_backfill` **同构**），故缓存层**不存在冲突**——它是 `_backfill` 的替代数据源，不是新的真源。乐观回显由既有 `EventReducer` 处理 |
 | 5 | 体积 | 每 group 事件数上限 = `maxBufferEvents`（2000）；单 payload 上限 64 KiB；总字节上限 + 按 `last_accessed_at` LRU 淘汰。**`kTextPreviewMaxChars` 不适用**（那是预览上限，见 §5.1） |
 | 6 | 迁移 | 只 `createTable`，**禁止** `createAll()` 兜底；已有 v1→v2 回归防线扩展到新表；缓存是**可丢弃数据**，降级直接清表而非写 down-migration |
@@ -212,11 +213,12 @@ class CachedEvents extends Table {
 
 ## 4. 问题 3：写路径
 
-### 4.1 决策：两个写点，都不在 SSE 热路径上
+### 4.1 决策：三个写点，都不在 SSE 热路径上
 
 | 数据 | 写点 | 不在哪写 |
 |---|---|---|
 | group 列表 | `ChatApi.listGroups` 返回成功后 | **不在** `group_updated` 事件上写 |
+| group 列表 | **本地变更后**（新建 / 改名 / 归档 / 删除，含 SSE 的 `group_updated` 镜像）——见 §4.5 | — |
 | timeline | `_backfill` / `loadOlder` 成功后 | **不在** SSE 事件到达时写 |
 
 ### 4.2 为什么 group 列表不在 `group_updated` 上写
@@ -258,6 +260,35 @@ class CachedEvents extends Table {
 它是**可丢弃的**。故 `saveGroups` 内部 catch 后记日志，**不抛**
 （与 `SyncStateStore.save` 抛 `StorageError` 不同：那个状态丢了会导致文件重复
 下载，是有后果的；这个丢了只是下次白屏）。
+
+### 4.5 本地变更后必须写缓存（issue #28 补）
+
+§4.1 原写「两个写点」，漏了**本地列表被就地修改**的那几条路径。它们不经过
+`listGroups` 的成功分支，于是缓存停留在变更**之前**的状态：
+
+| 路径 | 变更 |
+|---|---|
+| `_createGroup` 成功 | 插入新建的 group |
+| `_insertCreated`（SSE `op=created`） | 插入回读到的权威行 |
+| `_handleAction` 的 `GroupActionApplied` | 替换（改名/归档）或移除（删除） |
+| `_onGroupUpdate` 的 `deleted` / `_patchLoaded`（`archived` / `active` / `title`） | 就地改状态或标题 |
+
+**症状**：在线新建 / 改名 / 删除后，**不触发任何网络成功**就断网重启 → 缓存展示
+的是变更前的旧列表（新建的消失、删掉的还在）。这比没有缓存更容易误导——用户会
+以为自己建的对话丢了 / 删的没删掉。
+
+**修法**：上述每一条路径在 `setState` 之后调用 `_saveCache()`（`_saveCache` 已是
+整表替换语义，见 §3.3，故不需要新的失效策略，也不需要改 `GroupCacheStore` 契约）。
+
+**这不与 §4.2 矛盾**：§4.2 否掉的是「**用事件载荷本身**写缓存」（`GroupUpdate`
+缺 `user_id` / `created_at` / `active_session`，会写出残缺行）。本地变更路径写的
+是 **`_groups` 里的完整 `ChatGroup`**（来自 `listGroups` 或 `getGroup` 的权威行），
+与 §4.2 的顾虑无关。
+
+**`_saveCache` 不得跳过空列表**：曾经有一道 `if (_groups.isEmpty) return;`，它让
+「删掉最后一个对话」不更新缓存（下次断网重启那个已删除的对话仍在）。空列表是
+合法状态，与契约一致——`GroupCacheStore.save` 明确写「`groups` 为空时等价于清空
+该用户缓存」。
 
 ---
 
@@ -516,6 +547,20 @@ _loadMore():
 - 反向验证：禁用回落 → 该用例失败；
 - 门禁：`dart analyze --fatal-infos .` + `bash tools/check_layering.sh`。
 
+### 8.5 一致性验收（issue #28 补）
+
+§8.4 只验证了「网络失败 → 回落」。本地变更路径的写入需要**另一组**用例：
+
+| 用例 | 反向验证（去掉对应 `_saveCache()` 即失败） |
+|---|---|
+| 新建对话后缓存含新对话 | ✓ |
+| SSE `op=created` 后缓存含新对话 | ✓ |
+| SSE `op=deleted` 后缓存不含被删项 | ✓ |
+| SSE `op=title` 后缓存是新标题 | ✓ |
+| 管理动作（改名）后缓存是新标题 | ✓ |
+| 管理动作（删除）后缓存为空 | ✓ |
+| 未注入 cache 时本地变更不报错 | （保护用例，不依赖修复） |
+
 ---
 
 ## 9. 与既有机制的边界
@@ -550,6 +595,8 @@ _loadMore():
 | `AGENTS.md` §5.7 | 排序/分页必须用 `globalSeq`（§3.5 的依据） |
 | `AGENTS.md` §5.4 | `transient` 语义（§2.3 的依据） |
 | `AGENTS.md` §6.7 | 无归属入口的异步投递（切片 C 的参考语义） |
+| issue #28 | 本地变更后写缓存（§4.5 的补丁） |
+| issue #29 / #30 | 切片 B（timeline 只读缓存）/ 切片 C（离线写队列） |
 | `docs/deliverable-upload-and-conflict.md` | 交付物同步的完整设计（与本设计**无关**，但同样的「先设计后实现」流程） |
 | `packages/spb_data/lib/src/database.dart` | 现有 schema 与迁移策略 |
 | `packages/spb_domain/lib/src/sync_state.dart` | `SyncStateStore` 契约（本设计的模板） |

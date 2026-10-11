@@ -67,6 +67,7 @@ void main() {
     WidgetTester tester, {
     void Function(ChatGroup)? onOpenGroup,
     Future<ChatGroup> Function(String)? onCreateGroup,
+    GroupActionHandler? onGroupAction,
     Stream<GroupUpdate>? groupUpdates,
     VoidCallback? onOpenHabits,
     GroupCacheStore? cache,
@@ -79,6 +80,7 @@ void main() {
           api: api,
           onOpenGroup: onOpenGroup,
           onCreateGroup: onCreateGroup,
+          onGroupAction: onGroupAction,
           groupUpdates: groupUpdates,
           onOpenHabits: onOpenHabits,
           cache: cache,
@@ -760,6 +762,222 @@ void main() {
         hasLength(31),
         reason: '缓存必须是累积的 31 条，而不是只有第二页的 1 条',
       );
+    });
+  });
+
+  // ── 本地变更后写缓存（issue #28）─────────────────────────────────────
+  //
+  // 切片 A 只在**网络成功**路径写缓存，于是「新建 / 改名 / 删除后立刻断网重启」
+  // 会看到变更前的旧列表——比没有缓存更容易误导（用户以为对话丢了 / 没删掉）。
+  //
+  // 本组的每条用例都能被反向验证抓住：去掉 `_saveCache()` 调用即失败。
+  group('本地变更写缓存（issue #28）', () {
+    /// 取最后一次写入的缓存内容（无写入时为 null）。
+    List<ChatGroup>? lastSaved() =>
+        fakeCache.saved.isEmpty ? null : fakeCache.saved.last;
+
+    testWidgets('新建对话后写缓存（断网重启能看到它）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '已有的')],
+      );
+      await pumpPage(
+        tester,
+        cache: fakeCache,
+        userId: 'usr_1',
+        onCreateGroup: (title) async =>
+            ChatGroup.fromJson(createdJson(id: 'g_new', title: title)),
+      );
+      // 初始加载已写一次（只有 g1）。
+      expect(lastSaved(), hasLength(1));
+
+      await tester.tap(find.byKey(const ValueKey('group-list-create')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('group-create-field')),
+        '刚建的',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(
+        lastSaved()?.map((g) => g.id),
+        containsAll(<String>['g1', 'g_new']),
+        reason: '新建后缓存必须包含新对话，否则断网重启它就不见了',
+      );
+    });
+
+    testWidgets('SSE op=created 后写缓存（别处建的对话也落缓存）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '已有的')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+      adapter.onGet(
+        '/chat/groups/g_new',
+        (server) => server.reply(200, groupJson(id: 'g_new', title: '别处建的')),
+      );
+
+      await pumpPage(
+        tester,
+        groupUpdates: stream.stream,
+        cache: fakeCache,
+        userId: 'usr_1',
+      );
+      expect(lastSaved(), hasLength(1));
+
+      stream.add(
+        GroupUpdate(
+          op: GroupUpdateOp.created,
+          groupId: 'g_new',
+          title: '别处建的',
+          at: DateTime(2024, 3, 5, 8, 30),
+        ),
+      );
+      await settleIo(tester);
+
+      expect(
+        lastSaved()?.map((g) => g.id),
+        containsAll(<String>['g1', 'g_new']),
+        reason: 'SSE 建的对话也要落缓存——它同样不经过网络成功路径',
+      );
+    });
+
+    testWidgets('SSE op=deleted 后写缓存（删掉的不能留在缓存里）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(id: 'g1', title: '要删的'),
+          groupJson(id: 'g2', title: '保留的'),
+        ],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(
+        tester,
+        groupUpdates: stream.stream,
+        cache: fakeCache,
+        userId: 'usr_1',
+      );
+
+      stream.add(
+        GroupUpdate(
+          op: GroupUpdateOp.deleted,
+          groupId: 'g1',
+          at: DateTime(2024, 3, 5, 8, 30),
+        ),
+      );
+      await settleIo(tester);
+
+      expect(lastSaved()?.map((g) => g.id), [
+        'g2',
+      ], reason: '删除后缓存里不能再有它，否则断网重启会看到一个点进去 404 的条目');
+    });
+
+    testWidgets('SSE op=title 后写缓存（改名后断网重启看到新标题）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '旧标题')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      await pumpPage(
+        tester,
+        groupUpdates: stream.stream,
+        cache: fakeCache,
+        userId: 'usr_1',
+      );
+
+      stream.add(
+        GroupUpdate(
+          op: GroupUpdateOp.title,
+          groupId: 'g1',
+          title: '新标题',
+          at: DateTime(2024, 3, 5, 8, 30),
+        ),
+      );
+      await settleIo(tester);
+
+      expect(lastSaved()?.single.title, '新标题');
+    });
+
+    testWidgets('管理动作（改名）后写缓存', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '旧名字')],
+      );
+      await pumpPage(
+        tester,
+        cache: fakeCache,
+        userId: 'usr_1',
+        onGroupAction: (group, action) async => GroupActionApplied(
+          group: ChatGroup.fromJson(groupJson(id: 'g1', title: '改过的名字')),
+        ),
+      );
+
+      await tester.longPress(find.text('旧名字'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('重命名'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('group-rename-field')),
+        '改过的名字',
+      );
+      await tester.tap(find.byKey(const ValueKey('group-rename-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(lastSaved()?.single.title, '改过的名字');
+    });
+
+    testWidgets('管理动作（删除）后写缓存', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '要删的')],
+      );
+      await pumpPage(
+        tester,
+        cache: fakeCache,
+        userId: 'usr_1',
+        // 删除成功 = group 为 null（见 GroupActionApplied 文档）。
+        onGroupAction: (group, action) async => const GroupActionApplied(),
+      );
+      expect(lastSaved(), hasLength(1));
+
+      await tester.longPress(find.text('要删的'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+
+      expect(lastSaved(), isEmpty, reason: '删掉最后一个对话后缓存必须清空，否则断网重启它还在');
+    });
+
+    testWidgets('未注入 cache 时本地变更不报错（纯拉取用法）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '只读')],
+      );
+      final stream = StreamController<GroupUpdate>.broadcast();
+      addTearDown(stream.close);
+
+      // 不传 cache / userId：变更路径上的 _saveCache 应静默 return。
+      await pumpPage(tester, groupUpdates: stream.stream);
+
+      stream.add(
+        GroupUpdate(
+          op: GroupUpdateOp.deleted,
+          groupId: 'g1',
+          at: DateTime(2024, 3, 5, 8, 30),
+        ),
+      );
+      await settleIo(tester);
+
+      expect(tester.takeException(), isNull);
     });
   });
 }

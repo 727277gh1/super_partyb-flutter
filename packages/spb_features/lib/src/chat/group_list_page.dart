@@ -250,14 +250,22 @@ class _GroupListPageState extends State<GroupListPage> {
         // active_session），插进列表会缺字段，故读回权威行。
         unawaited(_insertCreated(update));
       case GroupUpdateOp.deleted:
+        var removed = false;
         setState(() {
           final index = _groups.indexWhere((g) => g.id == update.groupId);
-          if (index >= 0) _groups.removeAt(index);
+          if (index >= 0) {
+            _groups.removeAt(index);
+            removed = true;
+          }
           // 同时放开去重集合：否则该 id 之后若被服务端重新返回（如撤销删除后
           // 重建同名 id），会因「已见过」被静默丢弃，表现为列表少一项。
           // 与 [_handleAction] 的删除分支保持同一套判据。
           _seenIds.remove(update.groupId);
         });
+        // 只在真的移除了一行时写缓存（issue #28）。未加载过的 group 不在
+        // `_groups` 里，也就不在缓存里（缓存是 `_groups` 的整表投影），
+        // 写一次是纯粹的无效写入。
+        if (removed) unawaited(_saveCache());
       case GroupUpdateOp.archived:
         _patchLoaded(update, status: 'archived');
       case GroupUpdateOp.active:
@@ -299,6 +307,8 @@ class _GroupListPageState extends State<GroupListPage> {
         updatedAt: update.at,
       );
     });
+    // 把变更镜像进缓存（issue #28）：否则「改名后断网重启」会看到旧标题。
+    unawaited(_saveCache());
   }
 
   /// 处理 `op=created`：读回权威行后插到列表最前。
@@ -325,6 +335,8 @@ class _GroupListPageState extends State<GroupListPage> {
       // 服务端按 updated_at 倒序，刚建的必然在最前（与 [_createGroup] 一致）。
       if (_seenIds.add(resolved.id)) _groups.insert(0, resolved);
     });
+    // 把变更镜像进缓存（issue #28）：A 端建的对话，B 端断网重启后也要看得见。
+    unawaited(_saveCache());
   }
 
   /// 用事件快照造一条占位 [ChatGroup]；连标题都没有时返回 null。
@@ -466,11 +478,23 @@ class _GroupListPageState extends State<GroupListPage> {
   /// 断网就只能看到最后一页。故必须传累积后的完整列表。
   ///
   /// 缓存写失败不影响主流程（实现层已静默，见 `DriftGroupCacheStore.save`）。
+  ///
+  /// ## 为什么**不**跳过空列表（issue #28）
+  ///
+  /// 曾经这里有一道 `if (_groups.isEmpty) return;`，它是错的：
+  ///
+  /// 1. **删掉最后一个对话后缓存不更新**——用户下次断网重启，那个已删除的
+  ///    对话仍在列表里（点进去 404）；
+  /// 2. 与契约矛盾——`GroupCacheStore.save` 明确写「[groups] 为空时等价于清空
+  ///    该用户缓存（合法：服务端确实一个对话都没有）」。
+  ///
+  /// 空列表是**合法状态**，不是「还没加载完」。真正的「还没加载完」由调用点
+  /// 控制：本方法只在**网络成功**或**本地列表已变更**之后被调用，不会在加载
+  /// 途中被调用（见 [_loadMore] / [_refresh]）。
   Future<void> _saveCache() async {
     final cache = widget.cache;
     final userId = widget.userId;
     if (cache == null || userId == null || userId.isEmpty) return;
-    if (_groups.isEmpty) return;
     await cache.save(userId, List.of(_groups));
   }
 
@@ -526,6 +550,8 @@ class _GroupListPageState extends State<GroupListPage> {
     setState(() {
       if (_seenIds.add(created!.id)) _groups.insert(0, created);
     });
+    // 把变更镜像进缓存（issue #28）：新建后立刻断网重启，新对话必须还在。
+    unawaited(_saveCache());
 
     // 导航交给调用方（页面不碰路由）。
     widget.onOpenGroup?.call(created);
@@ -566,6 +592,8 @@ class _GroupListPageState extends State<GroupListPage> {
             _groups[index] = updated;
           }
         });
+        // 把变更镜像进缓存（issue #28）：改名/删除后断网重启必须看到新状态。
+        unawaited(_saveCache());
       case GroupActionRejected(:final message):
         _showMessage(message, isError: true);
     }
