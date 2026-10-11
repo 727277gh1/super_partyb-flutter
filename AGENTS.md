@@ -637,7 +637,7 @@ feedback）、`/me/preferences`、`/users/:user_id/chat/*` 虽是 CRUD，但直�
 | 移动端打开已下载文件 | 移动端注入 `NoopDesktopCapabilities`，`openFile` / `revealPath` 恒 false。要真正打开需引入 `open_filex` / `share_plus` + Android FileProvider 配置 + 真机验证（模拟器在本机不可用，见 §9）。当前退化为「只读浏览 + 下载」。 |
 | 桌面端「通知订阅」区块 | 该区块（`NotificationSubscriptionsCard`）的语义是**微信小程序订阅消息额度**（`miniapp_subscriptions` 表 + `wx.requestSubscribeMessage` 的配额消耗模型）。桌面端没有小程序运行环境，展示它无法兑现；故只在移动端装配（`settings_page.dart` 按 `loadNotifications` 是否注入决定展示）。是否给桌面端一个只读「额度查看」视图需产品确认。 |
 | P2 端点族：`fork` / `canvas` / `plan-import` / `decisions` / `file-evolution` / `semantic-search` | 本轮范围外。它们是**考古 / 分析 / 分叉**类能力（`chat_ext.go` 的 `POST /turns/:turn_id/fork`、`GET /groups/:group_id/canvas`、`POST /groups/:group_id/plan/import`；`ext_routes.go:530` 的 `/groups/:group_id/decisions`；`misc_extra.go:649` 的 `file-evolution` 与 `:650` 的 `semantic-search`），承载点是 webapp 的分析视图。留待后续轮次。 |
-| 语义 / 图谱搜索四项面板（`SemanticSearchPanel` / `GraphSearchDialog` / `FileEvolutionPanel` / `DecisionEvolutionPanel`） | 同上——它们正是 P2 端点族的 UI 载体。客户端已有**关键词**搜索（`ChatApi.search` → `SearchPage`），语义/图谱是**另一种检索方式**而非「搜索缺失」。详见 §6.9.3 |
+| 语义 / 图谱搜索四项面板（`SemanticSearchPanel` / `GraphSearchDialog` / `FileEvolutionPanel` / `DecisionEvolutionPanel`） | 同上——它们正是 P2 端点族的 UI 载体。客户端已有**关键词**搜索（`ChatApi.search` / `searchMyTurns` → `SearchPage`），语义/图谱是**另一种检索方式**而非「搜索缺失」。且语义搜索的数据面为空（`chat_groups` = 0）、两个「演化」面板的数据源已停写——详见 §6.9.6 |
 | `SkillPanel`（`dashboard/agents/[id]/chat`） | 属管理面，已被 §6.9 的 `/api/skills` 一行覆盖，无需重复实现 |
 
 #### 6.9.2 未接端点族的逐项依据（issue #11 收口）
@@ -666,7 +666,7 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 面板 | 面 | 结论 | 依据 |
 |---|---|---|---|
 | `WorkbenchBacklogCard` | workbench | ✅ **已实现（载体不同）** | 客户端 `PendingMessagesBar` 消费 `/users/:uid/chat/messages/pending`，同样做「pending 收件箱 + 单条撤销 + 批量合并发送」（webapp 的 `use-pending-messages.ts` 是同一个共享 hook 语义）。它在对话页输入区上方，不在侧边栏——与 §6.10 的载体差异同一取向 |
-| `SemanticSearchPanel` / `GraphSearchDialog` / `FileEvolutionPanel` / `DecisionEvolutionPanel` | 聊天 | ❌ 不接（本轮） | 对应 P2 端点族，已登记。**语义搜索是四项里最可行的一项**（端点 `semantic-search` 已在用且被 webapp 命令菜单复用），但仍属新检索面，需单独排期 |
+| `SemanticSearchPanel` / `GraphSearchDialog` / `FileEvolutionPanel` / `DecisionEvolutionPanel` | 聊天 | ❌ 不接（本轮） | 对应 P2 端点族。**决策依据不只「属 P2」**——还有三条生产实测：客户端搜索面已闭环（载体不同）、语义搜索的数据面为空（`chat_groups` = 0 行）、两个「演化」面板的数据源（`chat_decisions` / `file_versions` / `replies`）**在 Go 时代已停写**。⚠️ 嵌入链路本身**是通的**（`bore` 隧道 + 共享凭证），别误记为「未接嵌入服务」。详见 §6.9.6 |
 | `WorkbenchGroupCanvas` | workbench | ❌ 不接 | 是**独立路由** `/workbench/[groupId]/canvas`；客户端没有 workbench 路由概念（`SpbRoutes` 只有 chat / search / settings / confirmations 等） |
 | `PlanImportPanel` | workbench | ❌ 不接 | 计划导入是 goal 系统的**批量录入**入口，属 webapp 分析视图 |
 | `WorkbenchNotificationCenter` | workbench | ❌ 不接 | 「系统通知 / 确认请求 / 新消息提醒」聚合器。客户端已有各自的原生载体（确认页、待处理栏、SSE 实时流），再加一个聚合层需先有产品需求 |
@@ -677,19 +677,19 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 
 | 类型 | 客户端现状 | 结论 |
 |---|---|---|
-| `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`（12 个白名单 type，消费 `spec_ui` 事件） | 文件预览复用它是**可行的**，但需补一层「从任意 JSON 里提取 schema」（webapp `extractSchemaFromUnknown` 会深度下探，客户端 `parseSpecUi` 只认裸 `{root, elements}`）。属**小活**，已另开 issue #14 |
-| `dashboard` | ⚠️ **上游有「两个不同」的渲染器，别混为一谈**（详见下节） | ⚠️ **待决策** |
+| `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`（12 个白名单 type，消费 `spec_ui` 事件） | ✅ 已实现——文件预览复用需补一层「从任意 JSON 里提取 schema」（webapp `extractSchemaFromUnknown` 会深度下探，客户端 `parseSpecUi` 只认裸 `{root, elements}`）。已另开 issue #14 |
+| `dashboard`（网格格式） | ✅ **已闭环——不做**。真实 `dashboard.spec.json` 走的是 `spec` 路径，网格格式**无已知生产者**（详见下节） | ✅ 不做 |
 | `map` | ✅ **已实现**（issue #12）：`MapSpecCard`（`CustomPaint` 归一化轨迹图）+ `parseMapSchema` / `MapProjection`（`spb_domain`）。**零新依赖**——详见下节 | ✅ 已完成 |
 
-故 issue #12 的决策点 1 应缩小为「**是否引入 `DashboardRenderer` 网格格式**」（`spec`
-已有基础，`map` 已落地，均不需与它捆绑）。三种渲染器与两个实测真缺口的去向：
+故 issue #12 的三个决策点**已全部闭环**（`spec` / `map` 已实现，`dashboard` 网格格式
+无生产者，四项检索面板有生产实测依据）。三种渲染器与两个实测真缺口的去向：
 
 | 类型 | 去向 |
 |---|---|
 | `spec` | 已拆到 **issue #14**（小活，需补 schema 提取）——⚠️ 但 #14 **引入了一个回归**，见 issue #27（**已修**） |
 | `auto-schedules` | 已拆到 **issue #13**（实测出的真缺口） |
 | `map` | ✅ **已完成**（issue #12）：`spb_domain` 的 `parseMapSchema` / `MapProjection` + `spb_features` 的 `MapSpecCard`，接入 `agent_file_preview.dart`（`MapTextPreview` 分支）与两端 router（`openMapMarker` → 高德外链）。**零新依赖** |
-| `dashboard`（网格格式） | **唯一剩余待决策项**。产品确认前 **issue #12 保持 open** 承载该决策；若确认要做，再另开独立 issue 落地（届时关闭 #12）。⚠️ 真实 `dashboard.spec.json` 走的是 `spec` 路径，网格格式**无已知生产者**，故此项优先级很低 |
+| `dashboard`（网格格式） | ✅ **不做**（已闭环）。真实 `dashboard.spec.json` 走的是 `spec` 路径（客户端已支持，见 #14 / #27）；网格格式**无已知生产者**——全仓搜该形状只命中一个**测试用例**（`mapspec_test.go:84` 的负例） |
 
 #### 6.9.4 `dashboard` / `map` 的真实成本（**核实后修正早期判断**）
 
@@ -744,7 +744,7 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 2 条失败；大小写敏感 → 1 条；去掉空壳守卫 → 1 条；去掉列表封顶 → 1 条
 （`1000.0 > 180.0`）；`hasAny` 计入 `openMapMarker` → 1 条；失败静默 → 1 条。
 
-**#27 已修**（未容器下钻 + 保留原始 type 字符串），且修的过程中又发现并修掉
+**#27 已修**（未知容器下钻 + 保留原始 type 字符串），且修的过程中又发现并修掉
 两个**既有**缺陷（都不是 #27 引入的，而是递归下钻路径的前置条件）：
 
 - **渲染层用了扁平子树**：`_SpecElementView` 曾用 `childrenOf`（**整棵子树的
@@ -759,10 +759,78 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 
 **有意不做的标记**：10 个面板的逐项去向 = **1 已实现**（`WorkbenchBacklogCard`，载体
 不同）+ **8 有意不做**（4 个聊天面 P2 面板 + `WorkbenchGroupCanvas` /
-`PlanImportPanel` / `WorkbenchNotificationCenter` + `SkillPanel`）+ **1 待决策**
-（`DashboardRenderer` 网格格式，无已知生产者）。`auto-schedules`（issue #13）、
-`spec` 文件预览（issue #14）与 `map` 文件预览（issue #12）是三个实测出的真缺口，
-与上述 10 项**不捆绑**。
+`PlanImportPanel` / `WorkbenchNotificationCenter` + `SkillPanel`）+ **1 已闭环**
+（`DashboardRenderer` 网格格式，无已知生产者，按「不做」处理）。`auto-schedules`
+（issue #13）、`spec` 文件预览（issue #14）与 `map` 文件预览（issue #12）是三个
+实测出的真缺口，与上述 10 项**不捆绑**。
+
+#### 6.9.6 四项检索面板的决策依据（2026-10 生产核实）
+
+§6.9.3 把四项检索面板（`SemanticSearchPanel` / `GraphSearchDialog` /
+`FileEvolutionPanel` / `DecisionEvolutionPanel`）记为「不接（本轮）」。
+决策依据**不只是「属 P2 端点族」**，还有三条 2026-10 实测出来的事实：
+
+**1. 客户端的搜索面已经闭环（载体不同）。** 客户端有 `SearchPage`，两端已接线：
+
+| 端点 | 客户端方法 | 语义 |
+|---|---|---|
+| `GET /me/turns/search?q=` | `ChatApi.searchMyTurns` | 跨 group 按**输入文本**搜轮次 |
+| `GET /users/:uid/chat/search?q=` | `ChatApi.search` | 按 `input_text` / `agent_id` 搜 |
+| `GET /me/turns?days=` | 同页数据源 | 列近期轮次 |
+
+故四项里的「搜索」不是缺口，而是**另一种检索方式**（语义/图谱）。
+
+**2. 语义搜索的数据面是空的——但原因**不是**「未接嵌入服务」。**
+
+⚠️ 先纠正一个容易得出的**错误**结论。静态读码会以为「生产未接嵌入服务」，
+但实测**嵌入链路是活的**：
+
+| 层 | 实测（2026-10-11） |
+|---|---|
+| 启动日志 | `embedding_resolver:true`，且 `chatrouter` **真的调了**嵌入：`POST http://127.0.0.1:43001/v1/embeddings` |
+| `43001` 端口 | `bore` 隧道（`bore server --min-port 40000 --max-port 50000`，systemd `bore.service` active）——上游是**远端**嵌入服务 |
+| 凭证 | `service_name='embedding'` 的 3 个键均为 `owner_type='shared'`，`EMBEDDING_BASE_URL = http://127.0.0.1:43001/v1`，`secret_ref` / `plain_value` 均有值 |
+| 连通性 | 连发 5 次 `POST /v1/embeddings` 均得 **401**（0.15–0.18s）——**服务在，只是无凭据时拒**；说明隧道通、上游在 |
+| `embeddings` 表 | 4807 行（`user_message` 3629 / `turn_input` 562 / `reply` 316 / `topic` 300），最近写入 2026-10-09 |
+
+真正的阻碍是**数据面**，而不是链路：
+
+- `recallEntities` 先调 `resolveVisibleGroupIDs`（`misc_extra.go:901`）→ `ListVisibleGroupIDs`
+  （`graph_search_manual.go:316`）的 SQL 是
+  `SELECT id FROM chat_groups WHERE user_id = ? AND status = 'active'`；
+- 生产 `chat_groups` = **0 行** → `groupIDs` 为空 → `recallEntities` **直接返回空
+  列表**（不报 503，因为它在开头就 `if len(groupIDs) == 0 { return []semanticHit{}, nil }`）。
+
+即：面板接上去会得到**「搜索无结果」**（而非错误），而这不是客户端的问题。
+
+**3. 两个「演化」面板的数据源在 Go 时代已停写。** 生产库（2026-10-11）：
+`chat_decisions` = **0**、`file_paths` = **0**、`file_versions` = **0**、`replies` = **0**。
+`replies` 的注释已自述「在 Go 时代不再写入（`ReplyProjector` 停用）」
+（`misc_extra.go` 的 `chain` 注释）。故 `DecisionEvolutionPanel` /
+`FileEvolutionPanel` 即使接上也是空面板——**无数据可演化**。
+
+**结论**：四项维持「有意不做」。若将来要做，**前置条件是服务端先恢复对应数据
+链路**（`chat_groups` / `chat_decisions` / `file_versions` 的写入），而不是客户端先动。
+语义搜索本身**不需要**再配嵌入凭证——它已经通了。
+
+> ⚠️ **与 #12 无关的一个生产异常（另行跟踪）**：2026-10-11 实测 bcc
+> `/opt/super_partyb/data/dev.db` 的 `chat_turns` / `chat_groups` / `chat_events` /
+> `chat_confirmations` **全为 0**，而 2026-09-27 的备份里 `chat_turns` 有 **3559** 行。
+> 该库 2026-10-10 22:54 被一份**备份覆盖**过（`dev.db.bak-before-del-baixiaosheng-
+> 20261010T225140Z.db`，两者 md5 不同），而「删除百晓生」的迁移 0040 已在库中
+> 记录为已执行。故当前库是一份**缺 chat_* 数据的状态**，而 `topics`（2669）/
+> `user_memories`（2290）/ `embeddings`（4807）仍在。⚠️ **影响面**：`SearchPage`
+> （关键词搜索）与四项语义/演化面板**都**依赖这些表，故目前均无结果——需在
+> `super_partyb` 侧单独排查（本仓库代码不受影响）。
+
+> ⚠️ **与 #12 无关的一个生产异常（另行跟踪）**：2026-10-11 实测 bcc
+> `/opt/super_partyb/data/dev.db` 的 `chat_turns` / `chat_groups` / `chat_events` /
+> `chat_confirmations` **全为 0**，而 2026-09-27 的备份里 `chat_turns` 有 **3559** 行。
+> 该库 2026-10-10 22:54 被一份**备份覆盖**过（`dev.db.bak-before-del-baixiaosheng-
+> 20261010T225140Z.db`，两者 md5 不同），而「删除百晓生」的迁移 0040 已在库中
+> 记录为已执行。故当前库是一份**缺 chat_* 数据的状态**，而 `topics`（2669）/
+> `user_memories`（2290）/ `embeddings`（4807）仍在——需在 `super_partyb` 侧
+> 单独排查（本仓库不受影响，但会影响「关键词搜索有无结果」的观察）。
 
 ### 6.10 两端 UI 面板族的不对称（**有意保留的差异**）
 
@@ -1286,7 +1354,9 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | IdP 生产未注册桌面 public client | **当前登录阻塞项**（粘贴导入可降级） | `docs/rfc8252-loopback-signin.md` §7 |
 | ~~`#14` 回归：未知容器不递归 `children`~~ | ✅ 已修（issue #27）：未知容器下钻 + 占位符打印原始 type；**顺带修掉两个既有缺陷**——渲染层用扁平子树导致重复渲染（叶子 ×2）、渲染路径无环检测导致 `A→B→A` 栈溢出 | issue #27、§6.9.4 |
 | ~~`map` spec 文件预览未实现~~ | ✅ 已实现（issue #12）：`MapSpecCard` + `parseMapSchema` / `MapProjection`（零新依赖），接入预览框与两端 router | issue #12、§6.9.5 |
-| `dashboard` 网格格式渲染器未实现 | **待决策**（#12 剩余项）。⚠️ 真实 `dashboard.spec.json` 走的是 `spec` 路径（已支持），网格格式**无已知生产者** | issue #12、§6.9.3 |
+| ~~`dashboard` 网格格式渲染器未实现~~ | ✅ 已闭环（issue #12）：按「不做」处理——真实 `dashboard.spec.json` 走的是 `spec` 路径（已支持），网格格式**无已知生产者** | issue #12、§6.9.3 |
+| 四项检索面板未接（语义 / 图谱 / 文件演化 / 决策演化） | **有意不做**（issue #12）。语义搜索的**嵌入链路是通的**，但数据面为空（`chat_groups` = 0 行）；两个「演化」面板的数据源在 Go 时代已停写——**前置条件是服务端先恢复数据写入** | issue #12、§6.9.6 |
+| ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 
 ---
