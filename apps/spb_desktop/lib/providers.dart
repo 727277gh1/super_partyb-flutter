@@ -659,6 +659,15 @@ final groupCacheStoreProvider = Provider<GroupCacheStore>((ref) {
   return DriftGroupCacheStore(ref.watch(appDatabaseProvider));
 });
 
+/// 对话 timeline 只读缓存（issue #26 切片 B / issue #29）。
+///
+/// 与 [groupCacheStoreProvider] 同取向：同一个 [AppDatabase]，同一个 Provider
+/// 形态，差异只在契约与表。**不随同步状态清空**（`DriftSyncStateStore.resetAll`
+/// 只碰同步表，见 `docs/offline-cache-design.md` §6.3）。
+final timelineCacheStoreProvider = Provider<TimelineCacheStore>((ref) {
+  return DriftTimelineCacheStore(ref.watch(appDatabaseProvider));
+});
+
 /// 搜索消息内容（供 [SearchPage] 注入）。
 ///
 /// ## 为什么在这里解析 userId
@@ -788,6 +797,7 @@ final chatStreamControllerProvider = Provider.autoDispose
         sse: ref.watch(sseClientProvider),
         api: ref.watch(chatApiProvider),
         userId: userId,
+        timelineCache: ref.watch(timelineCacheStoreProvider),
       );
       ref.onDispose(controller.dispose);
       return controller;

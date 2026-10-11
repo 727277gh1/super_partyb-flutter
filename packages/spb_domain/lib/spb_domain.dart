@@ -17,6 +17,8 @@ library;
 //   SyncStateStore                —— 交付物同步状态契约（key → 游标 + etag 记录）
 //   GroupCacheStore               —— 对话列表缓存契约（issue #26 切片 A；**可丢弃数据**，
 //                                    读失败返回空列表、写失败不抛——与 SyncStateStore 相反）
+//   TimelineCacheStore / isCacheableEvent —— 对话 timeline 只读缓存契约（切片 B / issue #29；
+//                                    增量 upsert，只存落库事件）
 //   SyncState / SyncedFile        —— 同步状态值类型（含 contentHash：脏检测的比对基准）
 //   contentHashOf                 —— 内容 SHA256（下载时记录与回传前比对共用同一算法）
 //   workspaceStateKey             —— 「全部/选中若干 group」共用的状态键
@@ -84,6 +86,7 @@ export 'src/spec_ui.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
+export 'src/timeline_cache.dart';
 export 'src/tts_audio_path.dart';
 export 'src/tts_status.dart';
 export 'src/turn_activity.dart';

@@ -128,6 +128,53 @@ class CachedGroups extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// 对话 timeline 只读缓存（issue #26 切片 B / issue #29）。
+///
+/// ## 为什么存 JSON 原文
+///
+/// 同 [CachedGroups]：事件载荷结构随 `eventType` 变化（`payload` 是
+/// `Map<String, dynamic>`，无强类型 schema），拆列等于把事件契约复制到 schema
+/// 里。存 `ChatEvent.toJson()` 原文则 `ChatEvent.fromJson` 直接复用。
+///
+/// ## 主键为什么是 `(groupId, globalSeq)` 而**不是** `eventId`
+///
+/// 排序与分页**只能**用 `globalSeq`（AGENTS.md §5.7）：它是「全局唯一且单调」
+/// 的排序键，而 `eventId` 的字典序与时间序**无关**。用它作主键会逼出「按
+/// eventId 排序」的错误写法。
+///
+/// ## 与 [CachedGroups] 的写入语义相反
+///
+/// | | CachedGroups | CachedEvents |
+/// |---|---|---|
+/// | 写入 | **整表替换**（服务端删了 group 要能消失） | **增量 upsert**（分页只来一段，替换会丢掉别的页） |
+/// | 键 | `id`（+ `userId` 隔离） | `(groupId, globalSeq)` |
+@DataClassName('CachedEventRow')
+class CachedEvents extends Table {
+  /// 归属 group。
+  TextColumn get groupId => text()();
+
+  /// 落库事件的全局序（**不是** per-turn 的 `seq`）。
+  IntColumn get globalSeq => integer()();
+
+  /// `ChatEvent.toJson()` 原文。
+  TextColumn get payload => text()();
+
+  /// 本地写入时刻（毫秒 epoch）。
+  IntColumn get cachedAt => integer()();
+
+  /// 最近一次被读取的时刻（毫秒 epoch），全库超限时按它**整 group** 淘汰。
+  ///
+  /// ## 为什么在 group 级而不是事件级
+  ///
+  /// 按事件淘汰会让某 group 的历史出现「中间空洞」：用户向上翻页时看到
+  /// `globalSeq` 跳跃，且无法判断是「被淘汰了」还是「服务端就没有」。整 group
+  /// 淘汰的语义是清晰的：**这个 group 没有缓存**（`docs/offline-cache-design.md` §5.3）。
+  IntColumn get lastAccessedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {groupId, globalSeq};
+}
+
 /// 键值偏好（同步开关、上次落点等）。
 ///
 /// 值统一存文本：调用方按需解析（`bool`/`int`/`json`）。用 `TEXT` 而不是
@@ -158,14 +205,21 @@ class Preferences extends Table {
 /// ⚠️ 但**语义必须保持一致**：状态键的选择（[workspaceStateKey]）、
 /// 「失败项不写状态」、「换目录才重置」这几条都不能因为换了存储而改变。
 @DriftDatabase(
-  tables: [SyncCursors, SyncedFiles, SyncBindings, CachedGroups, Preferences],
+  tables: [
+    SyncCursors,
+    SyncedFiles,
+    SyncBindings,
+    CachedGroups,
+    CachedEvents,
+    Preferences,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   /// 用给定的执行器构造（生产传文件、测试传 `NativeDatabase.memory()`）。
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -175,6 +229,8 @@ class AppDatabase extends _$AppDatabase {
     // 「无法检测」，不是「未变更」。
     //
     // 版本 2 → 3：新增 cached_groups（对话列表缓存，issue #26 切片 A）。
+    //
+    // 版本 3 → 4：新增 cached_events（timeline 只读缓存，切片 B / issue #29）。
     onUpgrade: (m, from, to) async {
       if (from < 2) {
         await m.addColumn(syncedFiles, syncedFiles.contentHash);
@@ -182,11 +238,14 @@ class AppDatabase extends _$AppDatabase {
       if (from < 3) {
         await m.createTable(cachedGroups);
       }
+      if (from < 4) {
+        await m.createTable(cachedEvents);
+      }
       // **不要**用 m.createAll() 兜底：那会重建全部表、丢用户已有的同步状态。
       //
       // ⚠️ 条件必须写 `from < N` 而**不是** `from == N-1`：跳版本升级
-      // （v1 直接升到 v3）时两个分支都得跑。写 `from == 2` 会让 v1 用户升到
-      // v3 后**缺少 v2 的 content_hash 列**，而 drift 不会报错——直到某个
+      // （v1 直接升到 v4）时三个分支都得跑。写 `from == 3` 会让 v1 用户升到
+      // v4 后**缺少 v2 的 content_hash 列**，而 drift 不会报错——直到某个
       // 查询碰到那一列才炸（且报错信息指不到迁移）。
     },
   );

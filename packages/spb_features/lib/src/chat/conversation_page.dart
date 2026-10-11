@@ -479,6 +479,14 @@ class _ConversationPageState extends State<ConversationPage> {
   StreamSubscription<List<ConversationItem>>? _itemsSub;
   List<ConversationItem> _items = const [];
 
+  /// 时间线是否来自本地缓存（issue #29 切片 B）。
+  ///
+  /// 与 [_items] 同取向：存在 State 里 + 订阅推送时 setState。初值取控制器
+  /// 快照——页面可能在控制器已回落到缓存**之后**才挂载（如从列表页进入），
+  /// 只看流会错过那一次推送。
+  bool _timelineFromCache = false;
+  StreamSubscription<bool>? _fromCacheSub;
+
   /// `turn_activity` 订阅与最近一次快照（按 turnId 索引）。
   ///
   /// 与 [_items] 同取向：存在 State 里 + 订阅推送时 setState。若在 build 里
@@ -541,6 +549,27 @@ class _ConversationPageState extends State<ConversationPage> {
     _subscribeExecutionStatus();
     _subscribeTtsStatus();
     _subscribeStaleTurnIds();
+    _subscribeTimelineCache();
+  }
+
+  /// 订阅「时间线来自缓存」信号（切片 B / issue #29）。
+  ///
+  /// ## 为什么总是订阅（不像 activities 那样「注入才订阅」）
+  ///
+  /// 缓存是**控制器自带**的能力（构造时注入 `timelineCache`），不像
+  /// `activities` 那样需要调用方额外接线。故这里无需一个「是否注入」的开关：
+  /// 未注入缓存的控制器永远不会推 true，订阅是空转但不产生噪声。
+  ///
+  /// ## 初值必须取快照
+  ///
+  /// 从列表页进入对话时，`switchGroup`/`start` 的回落可能在**页面挂载之前**
+  /// 就完成了。只看流会错过那一次推送，提示条永远不出现。
+  void _subscribeTimelineCache() {
+    _timelineFromCache = widget.controller.timelineFromCacheSnapshot;
+    _fromCacheSub = widget.controller.timelineFromCache.listen((v) {
+      if (!mounted) return;
+      setState(() => _timelineFromCache = v);
+    });
   }
 
   /// 订阅活动流（仅在调用方传了 [ConversationPage.activities] 时）。
@@ -650,6 +679,16 @@ class _ConversationPageState extends State<ConversationPage> {
       _staleTurnIds = const {};
       _subscribeStaleTurnIds();
     }
+    // 换了控制器（或换对话）：重订缓存信号并重取快照。
+    //
+    // 控制器携带 `timelineCache`，换 group 后 `_fromCache` 已在
+    // `switchGroup` 里复位——本页需要跟上那个新值。
+    if (oldWidget.controller != widget.controller) {
+      unawaited(_fromCacheSub?.cancel());
+      _fromCacheSub = null;
+      _timelineFromCache = widget.controller.timelineFromCacheSnapshot;
+      _subscribeTimelineCache();
+    }
     // 换了对话就要重新给翻页一次机会：`_reachedOldest` 是上一个 group 的结论，
     // 沿用会让新对话永远翻不到历史（见 [historyKey] 的说明）。
     if (oldWidget.historyKey != widget.historyKey ||
@@ -666,6 +705,7 @@ class _ConversationPageState extends State<ConversationPage> {
     _executionStatusSub?.cancel();
     _ttsStatusSub?.cancel();
     _staleTurnIdsSub?.cancel();
+    _fromCacheSub?.cancel();
     _scrollController.dispose();
     _draft.dispose();
     super.dispose();
@@ -1035,6 +1075,13 @@ class _ConversationPageState extends State<ConversationPage> {
             ),
       body: Column(
         children: [
+          // 离线数据提示（issue #29 切片 B）：贴最顶。
+          //
+          // 与下面几条状态条的语义不同：那几条说的是「这一轮/这个 turn」的状态，
+          // 而本提示说的是「你看到的整份历史都来自本地缓存」——它修饰的是
+          // **整个时间线**，故贴顶且独立成条（与切片 A 的
+          // `GroupListPage._CacheNotice` 同一取向）。
+          if (_timelineFromCache) const _OfflineTimelineNotice(),
           // 上下文用量：贴在时间线**上方**（顶部诊断区），不进时间线。
           //
           // 与下面两条状态条的位置差异是有意的：用量是「资源占用」的常驻读数，
@@ -1612,6 +1659,68 @@ class _ExecutionStatusBar extends StatelessWidget {
 /// 一动不动，用户唯一的判断依据是「它是不是死了」。本组件把服务端 `turn_activity`
 /// 里的「已运行多久 + 上一步是什么」呈现出来，让等待有可见的进展。
 ///
+/// 离线时间线提示条（issue #26 切片 B / issue #29）。
+///
+/// ## 为什么需要它
+///
+/// 回填失败时用缓存渲染，若不给任何提示，用户看到的是**一份陈旧且不再更新
+/// 的历史**——他会以为「对方没再说话」，而不是「我掉线了」。
+///
+/// ## 为什么没有「重试」按钮（与 `GroupListPage._CacheNotice` 不同）
+///
+/// 列表页那条可以「重试」是因为重试的代价小（一次列表请求）。对话页的重试
+/// 要重拉整段 timeline 并**重建缓冲**，而重连本身已有入口（AppBar 的连接
+/// 指示器 `onReconnect`）——再加一个按钮会让两个入口做同一件事，且用户很难
+/// 分辨它们。故这里只陈述事实。
+///
+/// ## 为什么没有时间戳（同样与列表页那条不同）
+///
+/// 列表缓存的 `fetchedAt` 是**整表写入**的单一时刻，问「多旧」有意义。
+/// timeline 缓存是**增量 upsert**（分页逐段追加），整 group 没有单一写入
+/// 时刻；拿最大/最小 `cachedAt` 都不代表「这份历史有多旧」。与其编一个
+/// 看起来精确实则误导的时间，不如只说「可能不是最新」。
+class _OfflineTimelineNotice extends StatelessWidget {
+  const _OfflineTimelineNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Material(
+      key: const ValueKey('conversation-offline-timeline'),
+      // 与 `GroupListPage._CacheNotice` 同色：提示而非警告（数据是**有效**的，
+      // 只是旧）——与错误色区分开。
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                // 不写「已中断」也不写「正在重试」：与 `_StaleTurnNotice` 同一
+                // 原则——客户端不跟踪重试，没有证据就不编造。
+                '离线数据 · 当前显示的是本地缓存的历史',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// 超时兜底提示条：长时间未收到进展。
 ///
 /// ## 它解决什么问题

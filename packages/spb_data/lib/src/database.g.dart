@@ -1236,6 +1236,394 @@ class CachedGroupsCompanion extends UpdateCompanion<CachedGroupRow> {
   }
 }
 
+class $CachedEventsTable extends CachedEvents
+    with TableInfo<$CachedEventsTable, CachedEventRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CachedEventsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _groupIdMeta = const VerificationMeta(
+    'groupId',
+  );
+  @override
+  late final GeneratedColumn<String> groupId = GeneratedColumn<String>(
+    'group_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _globalSeqMeta = const VerificationMeta(
+    'globalSeq',
+  );
+  @override
+  late final GeneratedColumn<int> globalSeq = GeneratedColumn<int>(
+    'global_seq',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _payloadMeta = const VerificationMeta(
+    'payload',
+  );
+  @override
+  late final GeneratedColumn<String> payload = GeneratedColumn<String>(
+    'payload',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _cachedAtMeta = const VerificationMeta(
+    'cachedAt',
+  );
+  @override
+  late final GeneratedColumn<int> cachedAt = GeneratedColumn<int>(
+    'cached_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastAccessedAtMeta = const VerificationMeta(
+    'lastAccessedAt',
+  );
+  @override
+  late final GeneratedColumn<int> lastAccessedAt = GeneratedColumn<int>(
+    'last_accessed_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    groupId,
+    globalSeq,
+    payload,
+    cachedAt,
+    lastAccessedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'cached_events';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CachedEventRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('group_id')) {
+      context.handle(
+        _groupIdMeta,
+        groupId.isAcceptableOrUnknown(data['group_id']!, _groupIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_groupIdMeta);
+    }
+    if (data.containsKey('global_seq')) {
+      context.handle(
+        _globalSeqMeta,
+        globalSeq.isAcceptableOrUnknown(data['global_seq']!, _globalSeqMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_globalSeqMeta);
+    }
+    if (data.containsKey('payload')) {
+      context.handle(
+        _payloadMeta,
+        payload.isAcceptableOrUnknown(data['payload']!, _payloadMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_payloadMeta);
+    }
+    if (data.containsKey('cached_at')) {
+      context.handle(
+        _cachedAtMeta,
+        cachedAt.isAcceptableOrUnknown(data['cached_at']!, _cachedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_cachedAtMeta);
+    }
+    if (data.containsKey('last_accessed_at')) {
+      context.handle(
+        _lastAccessedAtMeta,
+        lastAccessedAt.isAcceptableOrUnknown(
+          data['last_accessed_at']!,
+          _lastAccessedAtMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_lastAccessedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {groupId, globalSeq};
+  @override
+  CachedEventRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CachedEventRow(
+      groupId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}group_id'],
+      )!,
+      globalSeq: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}global_seq'],
+      )!,
+      payload: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payload'],
+      )!,
+      cachedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}cached_at'],
+      )!,
+      lastAccessedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}last_accessed_at'],
+      )!,
+    );
+  }
+
+  @override
+  $CachedEventsTable createAlias(String alias) {
+    return $CachedEventsTable(attachedDatabase, alias);
+  }
+}
+
+class CachedEventRow extends DataClass implements Insertable<CachedEventRow> {
+  /// 归属 group。
+  final String groupId;
+
+  /// 落库事件的全局序（**不是** per-turn 的 `seq`）。
+  final int globalSeq;
+
+  /// `ChatEvent.toJson()` 原文。
+  final String payload;
+
+  /// 本地写入时刻（毫秒 epoch）。
+  final int cachedAt;
+
+  /// 最近一次被读取的时刻（毫秒 epoch），全库超限时按它**整 group** 淘汰。
+  ///
+  /// ## 为什么在 group 级而不是事件级
+  ///
+  /// 按事件淘汰会让某 group 的历史出现「中间空洞」：用户向上翻页时看到
+  /// `globalSeq` 跳跃，且无法判断是「被淘汰了」还是「服务端就没有」。整 group
+  /// 淘汰的语义是清晰的：**这个 group 没有缓存**（`docs/offline-cache-design.md` §5.3）。
+  final int lastAccessedAt;
+  const CachedEventRow({
+    required this.groupId,
+    required this.globalSeq,
+    required this.payload,
+    required this.cachedAt,
+    required this.lastAccessedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['group_id'] = Variable<String>(groupId);
+    map['global_seq'] = Variable<int>(globalSeq);
+    map['payload'] = Variable<String>(payload);
+    map['cached_at'] = Variable<int>(cachedAt);
+    map['last_accessed_at'] = Variable<int>(lastAccessedAt);
+    return map;
+  }
+
+  CachedEventsCompanion toCompanion(bool nullToAbsent) {
+    return CachedEventsCompanion(
+      groupId: Value(groupId),
+      globalSeq: Value(globalSeq),
+      payload: Value(payload),
+      cachedAt: Value(cachedAt),
+      lastAccessedAt: Value(lastAccessedAt),
+    );
+  }
+
+  factory CachedEventRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CachedEventRow(
+      groupId: serializer.fromJson<String>(json['groupId']),
+      globalSeq: serializer.fromJson<int>(json['globalSeq']),
+      payload: serializer.fromJson<String>(json['payload']),
+      cachedAt: serializer.fromJson<int>(json['cachedAt']),
+      lastAccessedAt: serializer.fromJson<int>(json['lastAccessedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'groupId': serializer.toJson<String>(groupId),
+      'globalSeq': serializer.toJson<int>(globalSeq),
+      'payload': serializer.toJson<String>(payload),
+      'cachedAt': serializer.toJson<int>(cachedAt),
+      'lastAccessedAt': serializer.toJson<int>(lastAccessedAt),
+    };
+  }
+
+  CachedEventRow copyWith({
+    String? groupId,
+    int? globalSeq,
+    String? payload,
+    int? cachedAt,
+    int? lastAccessedAt,
+  }) => CachedEventRow(
+    groupId: groupId ?? this.groupId,
+    globalSeq: globalSeq ?? this.globalSeq,
+    payload: payload ?? this.payload,
+    cachedAt: cachedAt ?? this.cachedAt,
+    lastAccessedAt: lastAccessedAt ?? this.lastAccessedAt,
+  );
+  CachedEventRow copyWithCompanion(CachedEventsCompanion data) {
+    return CachedEventRow(
+      groupId: data.groupId.present ? data.groupId.value : this.groupId,
+      globalSeq: data.globalSeq.present ? data.globalSeq.value : this.globalSeq,
+      payload: data.payload.present ? data.payload.value : this.payload,
+      cachedAt: data.cachedAt.present ? data.cachedAt.value : this.cachedAt,
+      lastAccessedAt: data.lastAccessedAt.present
+          ? data.lastAccessedAt.value
+          : this.lastAccessedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CachedEventRow(')
+          ..write('groupId: $groupId, ')
+          ..write('globalSeq: $globalSeq, ')
+          ..write('payload: $payload, ')
+          ..write('cachedAt: $cachedAt, ')
+          ..write('lastAccessedAt: $lastAccessedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(groupId, globalSeq, payload, cachedAt, lastAccessedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CachedEventRow &&
+          other.groupId == this.groupId &&
+          other.globalSeq == this.globalSeq &&
+          other.payload == this.payload &&
+          other.cachedAt == this.cachedAt &&
+          other.lastAccessedAt == this.lastAccessedAt);
+}
+
+class CachedEventsCompanion extends UpdateCompanion<CachedEventRow> {
+  final Value<String> groupId;
+  final Value<int> globalSeq;
+  final Value<String> payload;
+  final Value<int> cachedAt;
+  final Value<int> lastAccessedAt;
+  final Value<int> rowid;
+  const CachedEventsCompanion({
+    this.groupId = const Value.absent(),
+    this.globalSeq = const Value.absent(),
+    this.payload = const Value.absent(),
+    this.cachedAt = const Value.absent(),
+    this.lastAccessedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CachedEventsCompanion.insert({
+    required String groupId,
+    required int globalSeq,
+    required String payload,
+    required int cachedAt,
+    required int lastAccessedAt,
+    this.rowid = const Value.absent(),
+  }) : groupId = Value(groupId),
+       globalSeq = Value(globalSeq),
+       payload = Value(payload),
+       cachedAt = Value(cachedAt),
+       lastAccessedAt = Value(lastAccessedAt);
+  static Insertable<CachedEventRow> custom({
+    Expression<String>? groupId,
+    Expression<int>? globalSeq,
+    Expression<String>? payload,
+    Expression<int>? cachedAt,
+    Expression<int>? lastAccessedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (groupId != null) 'group_id': groupId,
+      if (globalSeq != null) 'global_seq': globalSeq,
+      if (payload != null) 'payload': payload,
+      if (cachedAt != null) 'cached_at': cachedAt,
+      if (lastAccessedAt != null) 'last_accessed_at': lastAccessedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CachedEventsCompanion copyWith({
+    Value<String>? groupId,
+    Value<int>? globalSeq,
+    Value<String>? payload,
+    Value<int>? cachedAt,
+    Value<int>? lastAccessedAt,
+    Value<int>? rowid,
+  }) {
+    return CachedEventsCompanion(
+      groupId: groupId ?? this.groupId,
+      globalSeq: globalSeq ?? this.globalSeq,
+      payload: payload ?? this.payload,
+      cachedAt: cachedAt ?? this.cachedAt,
+      lastAccessedAt: lastAccessedAt ?? this.lastAccessedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (groupId.present) {
+      map['group_id'] = Variable<String>(groupId.value);
+    }
+    if (globalSeq.present) {
+      map['global_seq'] = Variable<int>(globalSeq.value);
+    }
+    if (payload.present) {
+      map['payload'] = Variable<String>(payload.value);
+    }
+    if (cachedAt.present) {
+      map['cached_at'] = Variable<int>(cachedAt.value);
+    }
+    if (lastAccessedAt.present) {
+      map['last_accessed_at'] = Variable<int>(lastAccessedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CachedEventsCompanion(')
+          ..write('groupId: $groupId, ')
+          ..write('globalSeq: $globalSeq, ')
+          ..write('payload: $payload, ')
+          ..write('cachedAt: $cachedAt, ')
+          ..write('lastAccessedAt: $lastAccessedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $PreferencesTable extends Preferences
     with TableInfo<$PreferencesTable, PreferenceRow> {
   @override
@@ -1451,6 +1839,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $SyncedFilesTable syncedFiles = $SyncedFilesTable(this);
   late final $SyncBindingsTable syncBindings = $SyncBindingsTable(this);
   late final $CachedGroupsTable cachedGroups = $CachedGroupsTable(this);
+  late final $CachedEventsTable cachedEvents = $CachedEventsTable(this);
   late final $PreferencesTable preferences = $PreferencesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
@@ -1461,6 +1850,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     syncedFiles,
     syncBindings,
     cachedGroups,
+    cachedEvents,
     preferences,
   ];
 }
@@ -2152,6 +2542,208 @@ typedef $$CachedGroupsTableProcessedTableManager =
       CachedGroupRow,
       PrefetchHooks Function()
     >;
+typedef $$CachedEventsTableCreateCompanionBuilder =
+    CachedEventsCompanion Function({
+      required String groupId,
+      required int globalSeq,
+      required String payload,
+      required int cachedAt,
+      required int lastAccessedAt,
+      Value<int> rowid,
+    });
+typedef $$CachedEventsTableUpdateCompanionBuilder =
+    CachedEventsCompanion Function({
+      Value<String> groupId,
+      Value<int> globalSeq,
+      Value<String> payload,
+      Value<int> cachedAt,
+      Value<int> lastAccessedAt,
+      Value<int> rowid,
+    });
+
+class $$CachedEventsTableFilterComposer
+    extends Composer<_$AppDatabase, $CachedEventsTable> {
+  $$CachedEventsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get groupId => $composableBuilder(
+    column: $table.groupId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get globalSeq => $composableBuilder(
+    column: $table.globalSeq,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get cachedAt => $composableBuilder(
+    column: $table.cachedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lastAccessedAt => $composableBuilder(
+    column: $table.lastAccessedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CachedEventsTableOrderingComposer
+    extends Composer<_$AppDatabase, $CachedEventsTable> {
+  $$CachedEventsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get groupId => $composableBuilder(
+    column: $table.groupId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get globalSeq => $composableBuilder(
+    column: $table.globalSeq,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get payload => $composableBuilder(
+    column: $table.payload,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get cachedAt => $composableBuilder(
+    column: $table.cachedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lastAccessedAt => $composableBuilder(
+    column: $table.lastAccessedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CachedEventsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CachedEventsTable> {
+  $$CachedEventsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get groupId =>
+      $composableBuilder(column: $table.groupId, builder: (column) => column);
+
+  GeneratedColumn<int> get globalSeq =>
+      $composableBuilder(column: $table.globalSeq, builder: (column) => column);
+
+  GeneratedColumn<String> get payload =>
+      $composableBuilder(column: $table.payload, builder: (column) => column);
+
+  GeneratedColumn<int> get cachedAt =>
+      $composableBuilder(column: $table.cachedAt, builder: (column) => column);
+
+  GeneratedColumn<int> get lastAccessedAt => $composableBuilder(
+    column: $table.lastAccessedAt,
+    builder: (column) => column,
+  );
+}
+
+class $$CachedEventsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CachedEventsTable,
+          CachedEventRow,
+          $$CachedEventsTableFilterComposer,
+          $$CachedEventsTableOrderingComposer,
+          $$CachedEventsTableAnnotationComposer,
+          $$CachedEventsTableCreateCompanionBuilder,
+          $$CachedEventsTableUpdateCompanionBuilder,
+          (
+            CachedEventRow,
+            BaseReferences<_$AppDatabase, $CachedEventsTable, CachedEventRow>,
+          ),
+          CachedEventRow,
+          PrefetchHooks Function()
+        > {
+  $$CachedEventsTableTableManager(_$AppDatabase db, $CachedEventsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CachedEventsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CachedEventsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$CachedEventsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> groupId = const Value.absent(),
+                Value<int> globalSeq = const Value.absent(),
+                Value<String> payload = const Value.absent(),
+                Value<int> cachedAt = const Value.absent(),
+                Value<int> lastAccessedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CachedEventsCompanion(
+                groupId: groupId,
+                globalSeq: globalSeq,
+                payload: payload,
+                cachedAt: cachedAt,
+                lastAccessedAt: lastAccessedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String groupId,
+                required int globalSeq,
+                required String payload,
+                required int cachedAt,
+                required int lastAccessedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => CachedEventsCompanion.insert(
+                groupId: groupId,
+                globalSeq: globalSeq,
+                payload: payload,
+                cachedAt: cachedAt,
+                lastAccessedAt: lastAccessedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CachedEventsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CachedEventsTable,
+      CachedEventRow,
+      $$CachedEventsTableFilterComposer,
+      $$CachedEventsTableOrderingComposer,
+      $$CachedEventsTableAnnotationComposer,
+      $$CachedEventsTableCreateCompanionBuilder,
+      $$CachedEventsTableUpdateCompanionBuilder,
+      (
+        CachedEventRow,
+        BaseReferences<_$AppDatabase, $CachedEventsTable, CachedEventRow>,
+      ),
+      CachedEventRow,
+      PrefetchHooks Function()
+    >;
 typedef $$PreferencesTableCreateCompanionBuilder =
     PreferencesCompanion Function({
       required String key,
@@ -2302,6 +2894,8 @@ class $AppDatabaseManager {
       $$SyncBindingsTableTableManager(_db, _db.syncBindings);
   $$CachedGroupsTableTableManager get cachedGroups =>
       $$CachedGroupsTableTableManager(_db, _db.cachedGroups);
+  $$CachedEventsTableTableManager get cachedEvents =>
+      $$CachedEventsTableTableManager(_db, _db.cachedEvents);
   $$PreferencesTableTableManager get preferences =>
       $$PreferencesTableTableManager(_db, _db.preferences);
 }

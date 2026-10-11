@@ -11,6 +11,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 假的 [SseClient]（与 spb_domain 的测试同构）。
 class _FakeSseClient extends SseClient {
@@ -69,6 +70,37 @@ class JsonEncoderShim {
     }
     return '"$v"';
   }
+}
+
+/// 假的 [TimelineCacheStore]（issue #29）。
+///
+/// `spb_features` 不依赖 `spb_data`（分层：features 只经 apps 装配拿到实现），
+/// 故这里用内存 Map 实现契约——正好也证明契约是纯 Dart 的。
+class _FakeTimelineCache implements TimelineCacheStore {
+  _FakeTimelineCache([List<ChatEvent>? seed]) {
+    if (seed != null) _data['grp_1'] = List.of(seed);
+  }
+
+  final Map<String, List<ChatEvent>> _data = {};
+
+  @override
+  Future<List<ChatEvent>> load(String groupId, {int? limit}) async {
+    final all = _data[groupId] ?? const <ChatEvent>[];
+    return List.of(all);
+  }
+
+  @override
+  Future<void> save(String groupId, List<ChatEvent> events) async {
+    final merged = <int, ChatEvent>{
+      for (final e in _data[groupId] ?? const <ChatEvent>[]) e.globalSeq!: e,
+      for (final e in events.where(isCacheableEvent)) e.globalSeq!: e,
+    };
+    _data[groupId] = merged.values.toList()
+      ..sort((a, b) => a.globalSeq!.compareTo(b.globalSeq!));
+  }
+
+  @override
+  Future<void> clear(String groupId) async => _data.remove(groupId);
 }
 
 void main() {
@@ -2978,6 +3010,146 @@ void main() {
       expect(
         find.byKey(const ValueKey('agent-file-preview')),
         findsNWidgets(5),
+      );
+    });
+  });
+
+  group('离线时间线提示条（issue #29 切片 B）', () {
+    /// 造一条可缓存的历史事件。
+    ChatEvent cachedEvent(String text, {int globalSeq = 1}) => ChatEvent(
+      eventId: 'evt_$globalSeq',
+      userId: 'usr_1',
+      groupId: 'grp_1',
+      turnId: 'turn_$globalSeq',
+      eventType: EventTypes.userMessage,
+      seq: 1,
+      globalSeq: globalSeq,
+      source: 'user',
+      createdAt: DateTime.utc(2024, 3, 5),
+      payload: {'input': text},
+    );
+
+    testWidgets('回填失败但有缓存 → 渲染历史 + 显示离线提示条（不显示空态）', (tester) async {
+      // 反向验证：去掉对话页的 `_OfflineTimelineNotice` 渲染 → 本用例失败。
+      final cache = _FakeTimelineCache([
+        cachedEvent('缓存里的第一条'),
+        cachedEvent('缓存里的第二条', globalSeq: 2),
+      ]);
+      controller = ChatStreamController(
+        sse: sse,
+        api: api,
+        userId: 'usr_1',
+        timelineCache: cache,
+      );
+      // 不挂 timeline mock → 回填失败。
+      adapter.onGet(
+        '/api/chat/turn-runtime',
+        (server) => server.reply(200, {
+          'request_timeout_seconds': 300,
+          'inactivity_timeout_seconds': 0,
+          'client_turn_timeout_seconds': 300,
+        }),
+      );
+
+      await startController(tester);
+      await tester.pumpAndSettle();
+      await pumpPage(tester);
+
+      // 历史被渲染（不是空态）。
+      expect(find.text('缓存里的第一条'), findsOneWidget);
+      expect(find.text('缓存里的第二条'), findsOneWidget);
+      expect(find.byType(EmptyState), findsNothing);
+
+      // 离线提示条存在。
+      expect(
+        find.byKey(const ValueKey('conversation-offline-timeline')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('离线数据'), findsOneWidget);
+    });
+
+    testWidgets('回填失败且无缓存 → 空态，**不显示**离线提示条', (tester) async {
+      // 反向验证：把「有无缓存」判据去掉（一律显示提示条）→ 本用例失败。
+      //
+      // 无缓存时是「确实没有内容」，不是「离线数据」——显示离线提示会让用户
+      // 以为「本来有内容但看不到」。
+      controller = ChatStreamController(
+        sse: sse,
+        api: api,
+        userId: 'usr_1',
+        timelineCache: _FakeTimelineCache(),
+      );
+      adapter.onGet(
+        '/api/chat/turn-runtime',
+        (server) => server.reply(200, {
+          'request_timeout_seconds': 300,
+          'inactivity_timeout_seconds': 0,
+          'client_turn_timeout_seconds': 300,
+        }),
+      );
+
+      await startController(tester);
+      await tester.pumpAndSettle();
+      await pumpPage(tester);
+
+      expect(find.byType(EmptyState), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('conversation-offline-timeline')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('网络成功时**不显示**离线提示条', (tester) async {
+      final cache = _FakeTimelineCache([cachedEvent('缓存内容')]);
+      controller = ChatStreamController(
+        sse: sse,
+        api: api,
+        userId: 'usr_1',
+        timelineCache: cache,
+      );
+      mockTimeline();
+      await startController(tester);
+      await tester.pumpAndSettle();
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-offline-timeline')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('页面在回落**之后**挂载也能看到提示条（初值取快照）', (tester) async {
+      // 反向验证：把 `_timelineFromCache` 初值改成写死的 false → 本用例失败。
+      //
+      // 真实路径：用户从列表页点进对话 → `switchGroup` 先跑（回落完成）→
+      // 对话页才挂载。只看流会错过那一次推送。
+      final cache = _FakeTimelineCache([cachedEvent('缓存内容')]);
+      controller = ChatStreamController(
+        sse: sse,
+        api: api,
+        userId: 'usr_1',
+        timelineCache: cache,
+      );
+      adapter.onGet(
+        '/api/chat/turn-runtime',
+        (server) => server.reply(200, {
+          'request_timeout_seconds': 300,
+          'inactivity_timeout_seconds': 0,
+          'client_turn_timeout_seconds': 300,
+        }),
+      );
+      // 控制器先跑（此时对话页尚未挂载）。
+      await startController(tester);
+      await tester.pumpAndSettle();
+      expect(controller.timelineFromCacheSnapshot, isTrue, reason: '前提：已回落');
+
+      // 现在才挂载页面。
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-offline-timeline')),
+        findsOneWidget,
+        reason: '挂载时必须从快照取初值，否则提示条永不出现',
       );
     });
   });

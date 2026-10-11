@@ -11,6 +11,7 @@ import 'event_reducer.dart';
 import 'execution_status.dart';
 import 'gate_decision.dart';
 import 'goal_update.dart';
+import 'timeline_cache.dart';
 import 'tts_status.dart';
 import 'turn_activity.dart';
 
@@ -32,6 +33,7 @@ class ChatStreamController {
     required ChatApi api,
     required this.userId,
     Duration? turnTimeoutOverride,
+    TimelineCacheStore? timelineCache,
   }) : assert(
          userId != '',
          // WHY 断言而非静默容忍：空 userId 会拼出 `/users//chat/stream` 这种
@@ -43,12 +45,28 @@ class ChatStreamController {
        ),
        _sse = sse,
        _api = api,
+       _timelineCache = timelineCache,
        _turnTimeoutOverride = turnTimeoutOverride,
        _turnTimeout = turnTimeoutOverride;
 
   final SseClient _sse;
   final ChatApi _api;
   final String userId;
+
+  /// timeline 只读缓存（issue #26 切片 B / issue #29）。
+  ///
+  /// ## 为什么可选（与页面侧 `cache` 参数同一取向）
+  ///
+  /// 为 null 时不读也不写缓存——保持「纯网络」的用法，也让领域层单测不必造库。
+  ///
+  /// ## 两条不变式（都不是可选的）
+  ///
+  /// 1. **只在 `_backfill` / `loadOlder` 成功后写**（`docs/offline-cache-design.md`
+  ///    §4.3）：SSE 热路径**绝不**写——写放大，且流式增量本就不该缓存；
+  /// 2. **只在网络完全不可用时读**（§4bis.3）：网络可用时缓存只被写入不被读取。
+  ///    否则缓存的上界与 timeline 的下界之间若有一段缺口（断网期间服务端新增
+  ///    了事件），拼出来的历史会让用户以为是连续的。
+  final TimelineCacheStore? _timelineCache;
 
   /// 当前聚焦的 group。null 表示接收全部 group 的事件。
   String? _groupId;
@@ -108,6 +126,11 @@ class ChatStreamController {
   StreamSubscription<SseFrame>? _frameSub;
   StreamSubscription<SseState>? _stateSub;
   bool _disposed = false;
+
+  /// 时间线是否来自本地缓存（见 [timelineFromCache]）。
+  bool _fromCache = false;
+
+  final _fromCacheController = StreamController<bool>.broadcast();
 
   /// 正在执行 [loadOlder]（防止并发翻页把同一页插两次）。
   bool _loadingOlder = false;
@@ -197,6 +220,23 @@ class ChatStreamController {
   Stream<GoalUpdate> get goalUpdates => _goalUpdatesController.stream;
 
   Stream<SpbError> get errors => _errorController.stream;
+
+  /// 当前时间线是否来自**本地缓存**（而非服务端）。
+  ///
+  /// ## 为什么需要这条信号（切片 B / issue #29）
+  ///
+  /// 回填失败时用缓存渲染，若不给任何提示，用户看到的是**一份陈旧且不再更新
+  /// 的历史**——他会以为「对方没再说话」，而不是「我掉线了」。切片 A 的
+  /// `GroupListPage._CacheNotice` 解决同一问题（那里的注释解释了为何用内联条
+  /// 而非一次性通知），本信号是它在对话页的对应物。
+  ///
+  /// 置 true 的唯一位置是 [_fallbackToCache]；下一次**网络成功**的回填
+  /// （[_backfill] 或 [loadOlder]）无条件置 false——否则提示条永久残留
+  /// （与 `GroupListPage._fromCache` 同一不变式）。
+  Stream<bool> get timelineFromCache => _fromCacheController.stream;
+
+  /// 当前值快照（供 UI 首次渲染）。
+  bool get timelineFromCacheSnapshot => _fromCache;
 
   Stream<SseState> get connectionState => _stateController.stream;
 
@@ -555,6 +595,7 @@ class ChatStreamController {
     _groupId = groupId;
     _buffer.clear();
     _oldestLoadedGlobalSeq = null;
+    _setFromCache(false);
     _resetStaleWatch();
     if (groupId != null) {
       await _backfill(groupId);
@@ -612,8 +653,20 @@ class ChatStreamController {
 
   /// 用 timeline API 拉取历史事件。
   ///
-  /// 服务端 timeline 返回的是 `ChatEvent` 列表（按 global_seq 升序），
-  /// 直接灌入缓冲即可。
+  /// ## 失败时回落缓存（issue #29）
+  ///
+  /// 回填失败（断网 / 5xx）时，用 [TimelineCacheStore] 里的落库事件渲染历史，
+  /// 而不是留一片空白。这是切片 B 的**唯一读点**——网络可用时缓存只被写入
+  /// 不被读取（`docs/offline-cache-design.md` §4bis.3）。
+  ///
+  /// ## 为什么回落时**不能**沿用「失败就不 emit」的既有行为
+  ///
+  /// 原来失败只记 warn + 推 errors 流，`_buffer` 保持空。对话页在「没有 items」
+  /// 时渲染 [EmptyState]，于是断网点进对话看到的是「还没有消息」——用户会以为
+  /// 对话是空的，而不是「离线」。有缓存时填入它，至少能看到上次看到的历史。
+  ///
+  /// 缓存与网络的**互斥性**由调用点保证：只有 catch 分支才读缓存，故不会出现
+  /// 「缓存上界与 timeline 下界重叠/缺口」的拼接问题。
   Future<void> _backfill(String groupId, {int limit = 200}) async {
     try {
       final page = await _api.groupTimeline(groupId, limit: limit);
@@ -628,13 +681,71 @@ class ChatStreamController {
       _oldestLoadedGlobalSeq = _minGlobalSeqOf(events);
       _trimBuffer();
       SpbLog.info('对话历史回填完成', {'groupId': groupId, 'count': events.length});
+      // 写缓存：**只在网络成功路径**（§4.3）。SSE 热路径不写。
+      //
+      // 不 await：写缓存是旁路，不应拖慢首屏渲染（实现层已静默，不会抛）。
+      unawaited(_saveTimelineCache(groupId, events));
+      // 网络成功 → 清除「离线数据」提示（否则提示条永久残留）。
+      _setFromCache(false);
     } catch (e) {
       SpbLog.warn('对话历史回填失败，仅依赖实时流', {'error': e.toString()});
       if (e is SpbError && !_errorController.isClosed) {
         _errorController.add(e);
       }
       // 回填失败不阻断实时流——用户仍能看到新消息。
+      //
+      // 但若本地有缓存，把它填进缓冲，让断网时至少能看到历史（issue #29）。
+      await _fallbackToCache(groupId);
     }
+  }
+
+  /// 回填失败时用缓存填缓冲（issue #29）。
+  ///
+  /// ## 为什么只在缓冲为空时填
+  ///
+  /// 已有内容时填入会**覆盖用户刚看到的内容**——与 `GroupListPage` 的回落
+  /// 判据同一取向（那里的注释解释了「加载更多失败」的场景）。回填失败发生在
+  /// [start] / [switchGroup]（那时缓冲刚被清空），故实际上总会填。
+  Future<void> _fallbackToCache(String groupId) async {
+    final cache = _timelineCache;
+    if (cache == null || _buffer.isNotEmpty) return;
+    final cached = await cache.load(groupId, limit: maxBufferEvents);
+    if (_disposed || cached.isEmpty) return;
+    // 缓存里的就是落库事件，按 globalSeq 升序（实现层保证）。这里再排一次是
+    // 防御性的：归约器假定输入正序，而错序**不会报错**，只会渲染顺序颠倒。
+    cached.sort((a, b) => (a.globalSeq ?? 0).compareTo(b.globalSeq ?? 0));
+    _buffer.addAll(cached);
+    // 历史边界：缓存里最小的事件就是能继续向上翻页的起点。
+    //
+    // ⚠️ 但服务端分页谓词是 `global_seq < cursor`，而缓存**可能**不含连续的
+    // 一段（只缓存了最近 2000 条）。故这里设边界是「乐观」的：翻页拿回的更早
+    // 事件会被 `loadOlder` 的 eventId 去重挡住重叠部分，缺口则表现为「翻到
+    // 一半跳了一下」——比完全不能翻页好，且只在断网时可见。
+    _oldestLoadedGlobalSeq = _minGlobalSeqOf(cached);
+    _trimBuffer();
+    _setFromCache(true);
+    SpbLog.info('对话历史回填失败，已用本地缓存渲染', {
+      'groupId': groupId,
+      'count': cached.length,
+    });
+  }
+
+  /// 更新 [timelineFromCache] 并推送（去重，避免重复帧）。
+  void _setFromCache(bool value) {
+    if (_fromCache == value) return;
+    _fromCache = value;
+    if (!_fromCacheController.isClosed) _fromCacheController.add(value);
+  }
+
+  /// 把落库事件写进缓存（旁路，失败静默）。
+  Future<void> _saveTimelineCache(
+    String groupId,
+    List<ChatEvent> events,
+  ) async {
+    final cache = _timelineCache;
+    if (cache == null || events.isEmpty) return;
+    // 过滤由实现层做（`isCacheableEvent`），这里不重复。
+    await cache.save(groupId, events);
   }
 
   /// 向上翻页：加载比当前缓冲区更早的一页历史。
@@ -723,6 +834,16 @@ class ChatStreamController {
         'cursor': cursor,
         'count': fresh.length,
       });
+      // 写缓存：与 `_backfill` 同一写点（§4.3）。只写**新取到的**那页，
+      // upsert 语义下不会影响已有页。
+      unawaited(_saveTimelineCache(groupId, fresh));
+      // 网络又通了 → 撤下「离线数据」提示。
+      //
+      // 此时缓冲里是「缓存 + 新拉的更早页」的混合体，严格说仍含陈旧数据；
+      // 但提示条的语义是「你现在离线，看到的东西不会再更新」——既然能成功
+      // 拉到更早的历史，后半句已经不成立。整段刷新留给下一次 `_backfill`
+      // （重连 / 切 group 会触发），不在翻页路径上做。
+      _setFromCache(false);
       return events.length >= limit;
     } catch (e) {
       SpbLog.warn('加载更早历史失败', {'error': e.toString()});
@@ -1004,6 +1125,7 @@ class ChatStreamController {
     await _executionStatusController.close();
     await _ttsStatusController.close();
     await _staleTurnIdsController.close();
+    await _fromCacheController.close();
     await _groupUpdatesController.close();
     await _goalUpdatesController.close();
     await _errorController.close();
