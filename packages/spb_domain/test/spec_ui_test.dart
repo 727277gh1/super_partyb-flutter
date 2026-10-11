@@ -406,6 +406,166 @@ void main() {
     });
   });
 
+  // ==========================================================================
+  // issue #27：原始 type 字符串 + 直接子元素
+  // ==========================================================================
+
+  group('原始 type 字符串（issue #27）', () {
+    test('保留未归一化的原始 type（大小写 / 下划线不丢）', () {
+      final doc = parseSpecUi({
+        'root': 'r',
+        'elements': {
+          'r': {
+            'type': 'Stack',
+            'children': ['a', 'b', 'c'],
+          },
+          'a': {'type': 'Grid'},
+          'b': {'type': 'ListItem'},
+          'c': {'type': 'hologram_3d'},
+        },
+      })!;
+
+      // 枚举已塌缩为 unknown / listItem，但原始字符串必须可读——否则占位符
+      // 只能打印 `unknown`，用户与开发者都看不出缺的是哪个类型。
+      expect(doc.root!.type, SpecUiType.unknown);
+      expect(doc.root!.rawType, 'Stack');
+      expect(doc.elements['a']!.rawType, 'Grid');
+      // 大小写不同的白名单项：枚举归一，原文照留。
+      expect(doc.elements['b']!.type, SpecUiType.listItem);
+      expect(doc.elements['b']!.rawType, 'ListItem');
+      // 下划线：原文照留。
+      expect(doc.elements['c']!.type, SpecUiType.unknown);
+      expect(doc.elements['c']!.rawType, 'hologram_3d');
+    });
+
+    test('缺 type 字段时 rawType 为空串（不抛）', () {
+      final doc = parseSpecUi({
+        'root': 'r',
+        'elements': {
+          'r': {
+            'props': {'title': '无 type'},
+          },
+        },
+      })!;
+
+      expect(doc.root!.type, SpecUiType.unknown);
+      expect(doc.root!.rawType, '');
+    });
+
+    test('toString 优先用原始 type（诊断友好）', () {
+      final doc = parseSpecUi({
+        'root': 'r',
+        'elements': {
+          'r': {'type': 'Stack'},
+        },
+      })!;
+
+      expect(doc.root!.toString(), contains('Stack'));
+    });
+  });
+
+  group('directChildrenOf（issue #27：渲染路径必须用直接子元素）', () {
+    /// 3 层链：a → b → c。
+    SpecUiDocument chain() => parseSpecUi({
+      'root': 'a',
+      'elements': {
+        'a': {
+          'type': 'card',
+          'children': ['b'],
+        },
+        'b': {
+          'type': 'list',
+          'children': ['c'],
+        },
+        'c': {
+          'type': 'text',
+          'props': {'content': '叶子'},
+        },
+      },
+    })!;
+
+    test('只返回直接子元素（不像 childrenOf 那样扁平化整棵子树）', () {
+      final doc = chain();
+
+      // childrenOf 返回整棵子树（b, c）——用它做「直接子元素」再逐项递归，
+      // 会让 c 被渲染两次。
+      expect(doc.childrenOf(doc.root!).map((e) => e.id), ['b', 'c']);
+      expect(doc.directChildrenOf(doc.root!).map((e) => e.id), ['b']);
+      expect(doc.directChildrenOf(doc.elements['b']!).map((e) => e.id), ['c']);
+      expect(doc.directChildrenOf(doc.elements['c']!), isEmpty);
+    });
+
+    test('悬空引用被跳过', () {
+      final doc = parseSpecUi({
+        'root': 'r',
+        'elements': {
+          'r': {
+            'type': 'card',
+            'children': ['ghost', 'real'],
+          },
+          'real': {'type': 'text'},
+        },
+      })!;
+
+      expect(doc.directChildrenOf(doc.root!).map((e) => e.id), ['real']);
+    });
+
+    test('自引用被跳过（渲染层不必依赖祖先集合兜底）', () {
+      final doc = parseSpecUi({
+        'root': 'a',
+        'elements': {
+          'a': {
+            'type': 'Stack',
+            'children': ['a', 'b'],
+          },
+          'b': {'type': 'text'},
+        },
+      })!;
+
+      expect(doc.directChildrenOf(doc.root!).map((e) => e.id), ['b']);
+    });
+
+    test('互相引用时各自返回对方（环由渲染层处理）', () {
+      // directChildrenOf 只做一层，**不做**环检测——环检测是渲染层（递归）的
+      // 职责，这里若也过滤会让「渲染层到底有没有环检测」无法单独验证。
+      final doc = parseSpecUi({
+        'root': 'a',
+        'elements': {
+          'a': {
+            'type': 'Stack',
+            'children': ['b'],
+          },
+          'b': {
+            'type': 'Grid',
+            'children': ['a'],
+          },
+        },
+      })!;
+
+      expect(doc.directChildrenOf(doc.root!).map((e) => e.id), ['b']);
+      expect(doc.directChildrenOf(doc.elements['b']!).map((e) => e.id), ['a']);
+    });
+  });
+
+  group('childrenOf 条数上限（issue #27）', () {
+    test('超宽的树被截断（深度上限挡不住「宽」）', () {
+      // 10 万个兄弟节点在**深度**上只算 1 层——深度上限对它无效。
+      // 若不限条数，调用方会构造出同样多的 widget。
+      final doc = parseSpecUi({
+        'root': 'r',
+        'elements': {
+          'r': {
+            'type': 'card',
+            'children': [for (var i = 0; i < 100000; i++) 'n$i'],
+          },
+          for (var i = 0; i < 100000; i++) 'n$i': {'type': 'text'},
+        },
+      })!;
+
+      expect(doc.childrenOf(doc.root!).length, 64);
+    });
+  });
+
   group('SpecUiType.from（大小写不敏感）', () {
     test('三种大小写形态映射到同一白名单项', () {
       expect(SpecUiType.from('Card'), SpecUiType.card);

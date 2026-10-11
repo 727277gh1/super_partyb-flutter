@@ -39,7 +39,7 @@
 ///   `Stack`/`Grid`/`Metric`/`Chart`/`Alert`/`Table` 的 `root`/`elements` 结构）——
 ///   **不是** ①的网格格式。
 ///
-/// ## 由此暴露的真实缺陷（已另开 issue #27）
+/// ## 由此暴露的真实缺陷（issue #27，**已修**）
 ///
 /// 上述真实看板**已被本客户端识别为 `spec`**（`resolveTextPreview` 命中），但
 /// 渲染结果是**一行「（不支持的组件类型：unknown）」**——因为它的容器类型
@@ -50,6 +50,11 @@
 /// 对照 webapp `JsonUiSchemaRenderer.renderFallback`：它在未知类型时**会**渲染
 /// `element.children`（`element.children.length > 0 && renderChildren(...)`）。
 /// 故这不是「webapp 也不支持」，而是**本客户端的降级策略比上游更保守**。
+///
+/// 已按该对照修正：未知类型**有子元素时照常下钻**，仅叶子留占位标记，且占位符
+/// 打印**原始 type 字符串**（`SpecUiElement.rawType`）而不是塌缩后的 `unknown`。
+/// 同一份真实看板的可见文本从 `[（不支持的组件类型：unknown）]` 变为
+/// `[上证指数, 3864.37, …]`。
 ///
 /// 识别不出来时**一律退化为 `text`**（见 [resolveTextPreview]），而不是假装
 /// 识别出来推给 `external`——后者会让用户从「能看原文」退化成「跳出去」。

@@ -44,6 +44,9 @@ enum SpecUiType {
 
   /// 白名单之外的类型。**不抛错**：服务端新增 type 时老客户端降级为占位，
   /// 时间线其余部分照常渲染。
+  ///
+  /// 原始字符串保留在 [SpecUiElement.rawType]——枚举本身丢掉了大小写与
+  /// 具体类型名，占位符要显示「缺哪个类型」只能靠它（issue #27）。
   unknown;
 
   /// 从服务端原始 type 字符串解析（大小写不敏感）。
@@ -123,6 +126,7 @@ final class SpecUiElement {
   const SpecUiElement({
     required this.id,
     required this.type,
+    this.rawType = '',
     this.props = const {},
     this.childIds = const [],
     this.actions = const [],
@@ -133,6 +137,18 @@ final class SpecUiElement {
   final String id;
 
   final SpecUiType type;
+
+  /// 服务端原始 type 字符串（**未归一化**：保留大小写与下划线）。
+  ///
+  /// ## 为什么必须保留（issue #27）
+  ///
+  /// [type] 是枚举，白名单外的类型全部塌缩成 [SpecUiType.unknown]，故
+  /// `type.name` 对 `Stack` / `Grid` / `Chart` 一律打印 `unknown`——占位符的
+  /// **诊断价值为零**：用户与开发者都看不出到底缺哪个类型。
+  ///
+  /// 另注：原始字符串可能为空（服务端未写 `type` 字段），此时 [type] 也是
+  /// [SpecUiType.unknown]。
+  final String rawType;
 
   /// 渲染所需的原始 props（title/content/value/label/hint 等）。
   /// 不做字段级归一：不同 type 读的键不同，归一放渲染层。
@@ -157,7 +173,7 @@ final class SpecUiElement {
 
   @override
   String toString() =>
-      'SpecUiElement($id, ${type.name}, '
+      'SpecUiElement($id, ${rawType.isEmpty ? type.name : rawType}, '
       'children: $childIds, actions: $actions)';
 }
 
@@ -174,9 +190,30 @@ final class SpecUiDocument {
   /// 根元素；悬空 root 时为 null。
   SpecUiElement? get root => elements[rootId];
 
+  /// [element] 的**直接**子元素（按 childIds 顺序），跳过悬空引用与自引用。
+  ///
+  /// ## 与 [childrenOf] 的分工（issue #27）
+  ///
+  /// 渲染器**必须**用这个而不是 [childrenOf]：[childrenOf] 返回的是**整棵子树
+  /// 的扁平列表**，而渲染器对每个子元素都会再递归一次——两者叠加会让深层元素
+  /// **渲染多次**（实测：3 层树里叶子出现 2 次）。这是本方法存在的全部理由。
+  ///
+  /// 自引用（`children` 含自身 id）直接跳过：递归渲染时它必然被祖先集合拦下，
+  /// 但提前过滤能让「A→A」这种数据不必依赖渲染层兜底。
+  List<SpecUiElement> directChildrenOf(SpecUiElement element) {
+    final out = <SpecUiElement>[];
+    for (final id in element.childIds) {
+      if (id == element.id) continue; // 自引用：跳过。
+      final child = elements[id];
+      if (child == null) continue; // 悬空引用：跳过。
+      out.add(child);
+    }
+    return out;
+  }
+
   /// 遍历 [element] 的子树（广度优先、按 childIds 顺序），返回扁平列表。
   ///
-  /// ## 三个安全边界
+  /// ## 四个安全边界
   ///
   /// - **悬空引用**：childIds 里指向不存在的 id → 跳过（不是错误——服务端
   ///   各生产者都不保证 children 与 elements 严格一致）；
@@ -184,11 +221,18 @@ final class SpecUiDocument {
   ///   无限循环）；
   /// - **深度上限**（[maxDepth]，默认 32）：超深嵌套按截断处理。服务端真实
   ///   产出最多 3 层（card → text/button），32 已是数量级余量。
-  List<SpecUiElement> childrenOf(SpecUiElement element, {int maxDepth = 32}) {
+  /// - **条数上限**（[limit]，默认 64）：扁平列表本身也要有界。深度上限挡不住
+  ///   「宽」的树——一个 children 里塞 10 万个 id 的 payload 在深度上只算 1 层，
+  ///   却会让调用方构造出同样多的 widget。
+  List<SpecUiElement> childrenOf(
+    SpecUiElement element, {
+    int maxDepth = 32,
+    int limit = 64,
+  }) {
     final out = <SpecUiElement>[];
     final visited = <String>{element.id};
     void walk(String id, int depth) {
-      if (depth > maxDepth) return;
+      if (depth > maxDepth || out.length >= limit) return;
       final child = elements[id];
       if (child == null) return; // 悬空引用：跳过。
       if (!visited.add(child.id)) return; // 环：停止下钻。
@@ -222,9 +266,11 @@ SpecUiDocument? parseSpecUi(Object? raw) {
   rawElements.forEach((key, value) {
     if (value is! Map) return; // 元素形状不对：跳过该元素，不影响其余。
     final id = key.toString();
+    final rawType = value['type']?.toString() ?? '';
     elements[id] = SpecUiElement(
       id: id,
-      type: SpecUiType.from(value['type']?.toString()),
+      type: SpecUiType.from(rawType),
+      rawType: rawType,
       props: value['props'] is Map
           ? Map<String, Object?>.from(value['props'] as Map)
           : const {},
