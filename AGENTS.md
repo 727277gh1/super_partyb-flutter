@@ -679,16 +679,17 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 |---|---|---|
 | `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`（12 个白名单 type，消费 `spec_ui` 事件） | 文件预览复用它是**可行的**，但需补一层「从任意 JSON 里提取 schema」（webapp `extractSchemaFromUnknown` 会深度下探，客户端 `parseSpecUi` 只认裸 `{root, elements}`）。属**小活**，已另开 issue #14 |
 | `dashboard` | ⚠️ **上游有「两个不同」的渲染器，别混为一谈**（详见下节） | ⚠️ **待决策** |
-| `map` | ⚠️ **不需要 SDK / 底图**（详见下节） | ⚠️ **待决策** |
+| `map` | ✅ **已实现**（issue #12）：`MapSpecCard`（`CustomPaint` 归一化轨迹图）+ `parseMapSchema` / `MapProjection`（`spb_domain`）。**零新依赖**——详见下节 | ✅ 已完成 |
 
-故 issue #12 的决策点 1 应缩小为「**是否引入 dashboard / map 渲染器**」（`spec` 已有
-基础，不需与它捆绑）。三种渲染器与两个实测真缺口的去向：
+故 issue #12 的决策点 1 应缩小为「**是否引入 `DashboardRenderer` 网格格式**」（`spec`
+已有基础，`map` 已落地，均不需与它捆绑）。三种渲染器与两个实测真缺口的去向：
 
 | 类型 | 去向 |
 |---|---|
 | `spec` | 已拆到 **issue #14**（小活，需补 schema 提取）——⚠️ 但 #14 **引入了一个回归**，见 issue #27（**已修**） |
 | `auto-schedules` | 已拆到 **issue #13**（实测出的真缺口） |
-| `dashboard` / `map` | **唯一待决策项**。产品确认前 **issue #12 保持 open** 承载该决策；若确认要做，再另开独立 issue 落地（届时关闭 #12） |
+| `map` | ✅ **已完成**（issue #12）：`spb_domain` 的 `parseMapSchema` / `MapProjection` + `spb_features` 的 `MapSpecCard`，接入 `agent_file_preview.dart`（`MapTextPreview` 分支）与两端 router（`openMapMarker` → 高德外链）。**零新依赖** |
+| `dashboard`（网格格式） | **唯一剩余待决策项**。产品确认前 **issue #12 保持 open** 承载该决策；若确认要做，再另开独立 issue 落地（届时关闭 #12）。⚠️ 真实 `dashboard.spec.json` 走的是 `spec` 路径，网格格式**无已知生产者**，故此项优先级很低 |
 
 #### 6.9.4 `dashboard` / `map` 的真实成本（**核实后修正早期判断**）
 
@@ -713,6 +714,36 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 却因 `unknown` 分支不递归 `children` 而退化成一行占位符——**修 #27 比做网格
 `dashboard` 渲染器更紧要**（前者影响现存真实产物，后者无生产者）。
 
+#### 6.9.5 `map` 已落地（issue #12）：实现要点与三个「不要重做」的坑
+
+`map` 的核实结论（§6.9.4）已兑现为代码：`spb_domain` 的 `parseMapSchema` /
+`parseMapPolyline` / `MapProjection` + `spb_features` 的 `MapSpecCard`。
+
+**分层归属**（按 §4 的判据）：解析 + 投影数学在 `spb_domain`（纯 Dart，可无
+图形环境测）；`CustomPaint` 绘制在 `spb_features`。投影数学是**正确性核心**
+（错一点整张图就偏），必须能在纯 Dart 测试里逐点断言。
+
+| 要点 | 结论 | 为什么 |
+|---|---|---|
+| 底图 / SDK | **不做** | 上游 `MapSchemaRenderer.tsx` 自称「一期轻量实现：SVG 归一化轨迹图（无底图、无高德 JS key 依赖）」。归一化轨迹图回答「这些点在哪、相对关系如何」——正是产物要表达的。要看真地图，点一行走高德外链 |
+| 坐标顺序 | polyline 是 `[经度, 纬度]` | 高德惯例；`parseMapPolyline` 同时接受字符串形态 `"lng,lat;lng,lat"`（服务端两种都写过） |
+| 判定位置 | **只认顶层 `type: "map"`**，不做深度下探 | 与 webapp 一致（`normalizeMapSchema(parsed)`）。若像 `spec` 那样深度扫，「任意 JSON 里嵌了一个 `{type:"map"}` 的配置对象」会被误判成地图 |
+| 空壳处理 | `markers` / `routes` 全空（或无坐标）→ `parseMapSchema` 返回 `null` | 否则预览框会变成**一张空图**——比显示原文差 |
+| 缺字段 | 距离 / 耗时 / 模式标签缺失时**不显示**（不写「0 米」「未知」） | 同 §5.4 的 `schedule_created`：没有证据就不编造 |
+| 外链 | `amapMarkerUrl` = `uri.amap.com/marker?position=lng,lat&name=…`，经 `AgentFilePreviewCallbacks.openMapMarker` 上抛 | URL 拼接留在**装配层**（同 `openExternal` 的既有约定）：页面只收集意图，不掌握第三方 URI 形状 |
+| 无障碍 | 轨迹图是 `CustomPaint`，对屏幕阅读器**完全空白** → 必须给语义标签（「地图轨迹图，公交路线，2 个地点，1 条路线」） | 同 issue #24 对 `SpecUiCard` 进度条的判据：自绘区域必须自己说明「这是什么」 |
+| 列表封顶 | 地点列表 `maxHeight: 180` + 内滚 | 对齐 webapp 的 `max-h-[180px] overflow-y-auto`。不封顶时 200 个地点会把卡片撑到几千像素——作为**内联卡片**会直接溢出（实测 50 行 = 1000px，RenderFlex overflow） |
+
+**投影的一个有意偏离**（`MapProjection.build`）：以**数据包围盒中心**为基准施加
+跨度下限，而不是 webapp 的「从 `min` 角固定」。两者在跨度**未被抬高时完全等价**
+（`center - span/2 == min`），故真实多点产物逐像素一致；差别只在单点 / 极近点时
+——webapp 会把单点画到视口左上角（实测 x=146, y=16 而视口 560×300），看起来像
+「范围很大、点在角落」。以中心为基准后单点落在视口正中。
+
+**反向验证**（每条修复都能被对应用例抓住，否则用例是空转）：去掉 map 分支 →
+2 条失败；大小写敏感 → 1 条；去掉空壳守卫 → 1 条；去掉列表封顶 → 1 条
+（`1000.0 > 180.0`）；`hasAny` 计入 `openMapMarker` → 1 条；失败静默 → 1 条。
+
 **#27 已修**（未容器下钻 + 保留原始 type 字符串），且修的过程中又发现并修掉
 两个**既有**缺陷（都不是 #27 引入的，而是递归下钻路径的前置条件）：
 
@@ -729,8 +760,9 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 **有意不做的标记**：10 个面板的逐项去向 = **1 已实现**（`WorkbenchBacklogCard`，载体
 不同）+ **8 有意不做**（4 个聊天面 P2 面板 + `WorkbenchGroupCanvas` /
 `PlanImportPanel` / `WorkbenchNotificationCenter` + `SkillPanel`）+ **1 待决策**
-（`DashboardRenderer`，与 #8 的 `map` 同一决策）。`auto-schedules`（issue #13）与
-`spec` 文件预览（issue #14）是两个实测出的真缺口，与上述 10 项**不捆绑**。
+（`DashboardRenderer` 网格格式，无已知生产者）。`auto-schedules`（issue #13）、
+`spec` 文件预览（issue #14）与 `map` 文件预览（issue #12）是三个实测出的真缺口，
+与上述 10 项**不捆绑**。
 
 ### 6.10 两端 UI 面板族的不对称（**有意保留的差异**）
 
@@ -1253,6 +1285,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | IdP 生产未注册桌面 public client | **当前登录阻塞项**（粘贴导入可降级） | `docs/rfc8252-loopback-signin.md` §7 |
 | ~~`#14` 回归：未知容器不递归 `children`~~ | ✅ 已修（issue #27）：未知容器下钻 + 占位符打印原始 type；**顺带修掉两个既有缺陷**——渲染层用扁平子树导致重复渲染（叶子 ×2）、渲染路径无环检测导致 `A→B→A` 栈溢出 | issue #27、§6.9.4 |
+| ~~`map` spec 文件预览未实现~~ | ✅ 已实现（issue #12）：`MapSpecCard` + `parseMapSchema` / `MapProjection`（零新依赖），接入预览框与两端 router | issue #12、§6.9.5 |
+| `dashboard` 网格格式渲染器未实现 | **待决策**（#12 剩余项）。⚠️ 真实 `dashboard.spec.json` 走的是 `spec` 路径（已支持），网格格式**无已知生产者** | issue #12、§6.9.3 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 
 ---
