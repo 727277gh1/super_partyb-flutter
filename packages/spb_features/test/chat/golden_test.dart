@@ -169,4 +169,59 @@ void main() {
       );
     });
   });
+
+  group('MapSpecCard golden（issue #12）', () {
+    /// 真实产物：`super_partyb` 生产 workspace 的
+    /// `reports/route-changban-dashadong.map.spec.json`。
+    Map<String, dynamic> realMapSpec() => {
+      'type': 'map',
+      'version': '1',
+      'title': '公交路线',
+      'description': '公交路线，共 5 个方案',
+      'markers': [
+        {
+          'id': 'marker-1',
+          'longitude': 113.349324,
+          'latitude': 23.178369,
+          'title': '起点',
+        },
+        {
+          'id': 'marker-2',
+          'longitude': 113.458515,
+          'latitude': 23.106216,
+          'title': '终点',
+        },
+      ],
+      'routes': [
+        {
+          'id': 'route-1',
+          'mode': 'transfer',
+          'title': '公交路线',
+          'distanceMeters': 12400,
+          'durationSeconds': 3300,
+          'polyline': [
+            [113.349324, 23.178369],
+            [113.458515, 23.106216],
+          ],
+        },
+      ],
+    };
+
+    testWidgets('真实产物：轨迹图 + 路线 + 地点', (tester) async {
+      // 尺寸要装得下 560×300 的轨迹图加下方列表；用宽屏，跟真实预览
+      // 对话框的宽度同量级。
+      await tester.pumpWidget(
+        host(
+          MapSpecCard(schema: parseMapSchema(realMapSpec())!),
+          size: const Size(600, 620),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await expectLater(
+        find.byType(MapSpecCard),
+        matchesGoldenFile('goldens/map_spec_card.png'),
+      );
+    });
+  });
 }

@@ -520,6 +520,187 @@ void main() {
     });
   });
 
+  group('map 分支（issue #12：map spec）', () {
+    /// 真实产物：`super_partyb` 生产 workspace 的
+    /// `reports/route-changban-dashadong.map.spec.json`。
+    const mapSpec =
+        '{"type":"map","version":"1","title":"公交路线",'
+        '"markers":[{"id":"marker-1","longitude":113.349324,'
+        '"latitude":23.178369,"title":"起点"},'
+        '{"id":"marker-2","longitude":113.458515,'
+        '"latitude":23.106216,"title":"终点"}],'
+        '"routes":[{"id":"route-1","mode":"transfer",'
+        '"title":"公交路线","polyline":[[113.349324,23.178369],'
+        '[113.458515,23.106216]]}]}';
+
+    testWidgets('文本内容是 map spec → 渲染 MapSpecCard（不渲染原文）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'route.json',
+          relativePath: 'out/route.json',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(mapSpec),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-map')),
+        findsOneWidget,
+      );
+      expect(find.text('起点'), findsOneWidget);
+      expect(find.text('终点'), findsOneWidget);
+      // 识别为 map 时不该同时展示原文或 spec 分支。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-spec')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('未注入 openMapMarker → 地点行不可点（不渲染无反应的入口）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'route.json',
+          relativePath: 'out/route.json',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(mapSpec),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-map')),
+        findsOneWidget,
+      );
+      // 用 marker key 而不是 `find.byType(InkWell)`：对话框自身也有 InkWell
+      // （关闭按钮等），按类型断言会把它们算进来。
+      expect(find.byKey(const ValueKey('map-marker-marker-1')), findsNothing);
+      expect(find.text('地点'), findsOneWidget);
+    });
+
+    testWidgets('注入 openMapMarker → 点击地点行上抛该 marker', (t) async {
+      final opened = <String>[];
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'route.json',
+          relativePath: 'out/route.json',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(mapSpec),
+          openMapMarker: (m) async {
+            opened.add(m.title);
+            return true;
+          },
+        ),
+      );
+
+      // 对话框内容可滚动，地点行可能不在首屏——先滚到可见再点。
+      final row = find.byKey(const ValueKey('map-marker-marker-1'));
+      await t.ensureVisible(row);
+      await t.pumpAndSettle();
+      await t.tap(row);
+      await t.pumpAndSettle();
+
+      expect(opened, ['起点']);
+    });
+
+    testWidgets('openMapMarker 返回 false → 提示「无法打开地图」（不静默）', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'route.json',
+          relativePath: 'out/route.json',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(mapSpec),
+          openMapMarker: (_) async => false,
+        ),
+      );
+
+      final row = find.byKey(const ValueKey('map-marker-marker-1'));
+      await t.ensureVisible(row);
+      await t.pumpAndSettle();
+      await t.tap(row);
+      await t.pumpAndSettle();
+
+      // 点了没反应是最差的降级——必须有可读反馈。
+      expect(find.text('无法打开地图'), findsOneWidget);
+    });
+
+    testWidgets('openMapMarker 抛异常 → 提示，不把异常弹出对话框', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'route.json',
+          relativePath: 'out/route.json',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode(mapSpec),
+          openMapMarker: (_) async => throw StateError('boom'),
+        ),
+      );
+
+      final row = find.byKey(const ValueKey('map-marker-marker-1'));
+      await t.ensureVisible(row);
+      await t.pumpAndSettle();
+      await t.tap(row);
+      await t.pumpAndSettle();
+
+      expect(t.takeException(), isNull);
+      expect(find.textContaining('打开地图失败'), findsOneWidget);
+    });
+
+    testWidgets('空壳 map（type=map 无坐标）→ 退回原文，不变成空图', (t) async {
+      await _pumpPreview(
+        t,
+        file: _file(
+          mimeType: 'application/json',
+          fileName: 'a.json',
+          relativePath: 'a.json',
+        ),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) async => utf8.encode('{"type":"map"}'),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-text')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-map')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('只配 openMapMarker 时预览入口仍不渲染（hasAny 不含它）', (t) async {
+      // 关键：它只在**已打开**的预览框里用得上，不能单独让入口出现，
+      // 否则会弹出一个取不到内容的空框。
+      await _pumpPreview(
+        t,
+        file: _file(),
+        onPreview: AgentFilePreviewCallbacks(openMapMarker: (_) async => true),
+      );
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        findsNothing,
+      );
+    });
+  });
+
   group('取数失败', () {
     testWidgets('loadBytes 返回 null → 错误提示（不是无限转圈）', (t) async {
       await _pumpPreview(

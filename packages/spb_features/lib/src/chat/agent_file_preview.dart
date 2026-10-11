@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:convert' show utf8;
 import 'dart:typed_data' show Uint8List;
 
@@ -8,6 +9,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 
+import 'map_spec_card.dart';
 import 'spec_ui_card.dart';
 
 /// 取文件**原始字节**（预览用）。null 表示取不到（无 id / 已删除 / 下载失败）。
@@ -29,6 +31,13 @@ typedef LoadAgentFileBytes = Future<List<int>?> Function(AgentFileItem file);
 /// 返回 false = 未能发起（浏览器打不开、无 id），调用方据此给反馈。
 typedef OpenAgentFileExternal = Future<bool> Function(AgentFileItem file);
 
+/// 在高德地图打开一个地点（map spec 的地点行点击）。
+///
+/// 与 [OpenAgentFileExternal] 分开：后者拼的是**本服务**的 UFS 预览页 URL，
+/// 前者拼的是**第三方** `uri.amap.com` 链接（见 `amapMarkerUrl`）。两者目标
+/// 域名、失败语义都不同，合一个会让装配层必须再判一次类型。
+typedef OpenMapMarker = Future<bool> Function(MapMarker marker);
+
 /// 文件预览所需的两个 IO 能力。**打包成一个对象**，避免 `AgentFileCard` /
 /// `AgentFileBatchCard` / `ConversationPage` 各加两个可选参数（4 处 × 2 参数
 /// 的透传链）。
@@ -48,7 +57,11 @@ typedef OpenAgentFileExternal = Future<bool> Function(AgentFileItem file);
 /// `onPreview` 为 null 时卡片**不渲染**预览按钮（与 #6 的打开/定位菜单项
 /// 同一约定：不渲染一个点了没反应的入口）。
 class AgentFilePreviewCallbacks {
-  const AgentFilePreviewCallbacks({this.loadBytes, this.openExternal});
+  const AgentFilePreviewCallbacks({
+    this.loadBytes,
+    this.openExternal,
+    this.openMapMarker,
+  });
 
   /// 取原始字节（text 解码 / image 渲染共用）。
   final LoadAgentFileBytes? loadBytes;
@@ -56,7 +69,24 @@ class AgentFilePreviewCallbacks {
   /// 打开 UFS 预览页（external 类）。
   final OpenAgentFileExternal? openExternal;
 
+  /// 在高德地图打开一个地点（map spec 的地点行）。
+  ///
+  /// ## 为什么单独一个回调而不是复用 [openExternal]
+  ///
+  /// [openExternal] 的签名收的是 `AgentFileItem`（它要拼 UFS 预览页 URL），
+  /// 而这里要打开的是一个 `MapMarker` 的第三方链接——调用方拿不到、也不该
+  /// 拿到「当前预览的是哪个文件」这个信息。
+  ///
+  /// ## 未注入时的降级
+  ///
+  /// 地点行**不可点**（不渲染成一个点了没反应的入口）。地图与地点列表
+  /// 照常显示——「看到」不依赖「能跳出去」。
+  final OpenMapMarker? openMapMarker;
+
   /// 是否至少有一个可用能力（决定预览入口是否渲染）。
+  ///
+  /// 注意 [openMapMarker] **不计入**：它只在已经打开的预览对话框里用得上，
+  /// 不能单独让「预览」按钮出现（否则只配了它时点预览会得到空对话框）。
   bool get hasAny => loadBytes != null || openExternal != null;
 }
 
@@ -155,6 +185,7 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
           return switch (resolveTextPreview(
             utf8.decode(bytes, allowMalformed: true),
           )) {
+            MapTextPreview(:final schema) => _MapPayload(schema),
             SpecTextPreview(:final doc) => _SpecPayload(doc),
             PlainTextPreview(:final text) => _TextPayload(
               text,
@@ -303,6 +334,7 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
             isMarkdown: isMarkdown,
           ),
           _SpecPayload(:final doc) => _specBody(doc),
+          _MapPayload(:final schema) => _mapBody(schema),
           _ImagePayload(:final bytes) => _imageBody(bytes),
           null => _errorBody('加载失败'),
         };
@@ -320,6 +352,38 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
     padding: const EdgeInsets.all(SpbSpacing.lg),
     child: SpecUiCard(doc: doc),
   );
+
+  /// map spec：轨迹图 + 路线/地点列表（issue #12 的 `map` 项）。
+  ///
+  /// 与 [_specBody] 同样包滚动容器：地点列表可能比对话框高。
+  ///
+  /// 地点行只在注入了 [AgentFilePreviewCallbacks.openMapMarker] 时可点——
+  /// 未注入时 `MapSpecCard` 渲染成纯展示（不画一个点了没反应的入口）。
+  Widget _mapBody(MapSchema schema) => SingleChildScrollView(
+    key: const ValueKey('agent-file-preview-map'),
+    padding: const EdgeInsets.all(SpbSpacing.lg),
+    child: MapSpecCard(
+      schema: schema,
+      onOpenMarker: widget.onPreview.openMapMarker == null
+          ? null
+          : (marker) => unawaited(_openMapMarker(marker)),
+    ),
+  );
+
+  /// 在高德地图打开地点。失败只提示（不弹异常）。
+  Future<void> _openMapMarker(MapMarker marker) async {
+    final cb = widget.onPreview.openMapMarker;
+    if (cb == null) return;
+    try {
+      final ok = await cb(marker);
+      if (!mounted || ok) return;
+      _showMessage('无法打开地图');
+    } on Object catch (e) {
+      if (!mounted) return;
+      SpbLog.debug('打开高德地图失败', {'marker': marker.displayTitle, 'error': '$e'});
+      _showMessage('打开地图失败：$e');
+    }
+  }
 
   /// 文本：Markdown 用 [GptMarkdown]，其余等宽、可选中、可滚动。
   ///
@@ -547,6 +611,11 @@ class _TextPayload extends _PreviewPayload {
 class _SpecPayload extends _PreviewPayload {
   const _SpecPayload(this.doc);
   final SpecUiDocument doc;
+}
+
+class _MapPayload extends _PreviewPayload {
+  const _MapPayload(this.schema);
+  final MapSchema schema;
 }
 
 class _ImagePayload extends _PreviewPayload {
