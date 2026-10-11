@@ -21,6 +21,7 @@ import 'follow_up_chips.dart';
 import 'habit_auto_run_card.dart';
 import 'habit_suggestion_card.dart';
 import 'message_composer.dart';
+import 'outbox_bar.dart';
 import 'spec_ui_card.dart';
 import 'pending_messages_bar.dart';
 import 'thought_tile.dart';
@@ -81,6 +82,11 @@ class ConversationPage extends StatefulWidget {
     this.ttsStatusSnapshot,
     this.staleTurnIds,
     this.staleTurnIdsSnapshot,
+    this.outboxEntries,
+    this.outboxSnapshot,
+    this.onCancelOutbox,
+    this.onRetryOutbox,
+    this.onRemoveOutbox,
     this.actions,
     this.emptyHint = '还没有对话，输入消息开始吧',
   });
@@ -410,6 +416,34 @@ class ConversationPage extends StatefulWidget {
   /// 超时集合的同步初值（同 [contextUsageSnapshot]）。
   final Set<String>? staleTurnIdsSnapshot;
 
+  /// 离线队列的「待发送」条（issue #26 切片 C / issue #30）。
+  ///
+  /// null = 不展示（未接线时；页面单测不必造队列）。
+  ///
+  /// ## 为什么是「一个流 + 一个快照 + 三个回调」，而不是直接注入 `OutboxQueue`
+  ///
+  /// 与 `loadPending` / `undoPending` 同一取向：本包只做渲染与交互，网络/存储
+  /// 实现由 app 注入。且本包只依赖契约类型 `OutboxEntry`，不需要知道队列的
+  /// 重试/持久化实现。
+  ///
+  /// ## 为什么快照与流都要（同 `activities` 的取向）
+  ///
+  /// 页面可能在队列已有条目**之后**才挂载（从列表页点进来）。只看流会错过
+  /// 那一次推送，首帧显示为空。
+  final Stream<List<OutboxEntry>>? outboxEntries;
+
+  /// 队列快照（供首帧渲染）。
+  final List<OutboxEntry>? outboxSnapshot;
+
+  /// 取消一条待发送消息（返回 false = 被拒绝，条目正在投递中）。
+  final Future<bool> Function(String id)? onCancelOutbox;
+
+  /// 手动重试一条（针对彻底失败的条目）。
+  final Future<bool> Function(String id)? onRetryOutbox;
+
+  /// 丢弃一条（删除，不再投递）。
+  final Future<void> Function(String id)? onRemoveOutbox;
+
   final String emptyHint;
 
   @override
@@ -487,6 +521,10 @@ class _ConversationPageState extends State<ConversationPage> {
   bool _timelineFromCache = false;
   StreamSubscription<bool>? _fromCacheSub;
 
+  /// 离线队列快照（issue #30）。
+  List<OutboxEntry> _outbox = const [];
+  StreamSubscription<List<OutboxEntry>>? _outboxSub;
+
   /// `turn_activity` 订阅与最近一次快照（按 turnId 索引）。
   ///
   /// 与 [_items] 同取向：存在 State 里 + 订阅推送时 setState。若在 build 里
@@ -550,6 +588,20 @@ class _ConversationPageState extends State<ConversationPage> {
     _subscribeTtsStatus();
     _subscribeStaleTurnIds();
     _subscribeTimelineCache();
+    _subscribeOutbox();
+  }
+
+  /// 订阅离线队列（仅在调用方注入 [ConversationPage.outboxEntries] 时）。
+  ///
+  /// 与 `activities` 同取向的「注入才订阅」：未接线时页面是纯只读时间线。
+  void _subscribeOutbox() {
+    final stream = widget.outboxEntries;
+    if (stream == null) return;
+    _outbox = widget.outboxSnapshot ?? const [];
+    _outboxSub = stream.listen((rows) {
+      if (!mounted) return;
+      setState(() => _outbox = rows);
+    });
   }
 
   /// 订阅「时间线来自缓存」信号（切片 B / issue #29）。
@@ -679,6 +731,22 @@ class _ConversationPageState extends State<ConversationPage> {
       _staleTurnIds = const {};
       _subscribeStaleTurnIds();
     }
+    // 队列接线换了：重订 + 重取快照。
+    //
+    // ⚠️ 快照要**每次**重取（不能只在流变化时）：`outboxSnapshot` 来自
+    // Provider 的 `ref.watch(...).snapshot`，而 Provider 只在依赖变化时重建
+    // ——单靠它拿不到最新队列，必须配合流；反过来，流的值在两次推送之间也可能
+    // 落后于快照（页面刚重建）。两者都刷新才能保证不显示过期状态。
+    if (oldWidget.outboxEntries != widget.outboxEntries) {
+      unawaited(_outboxSub?.cancel());
+      _outboxSub = null;
+      _subscribeOutbox();
+    } else if (widget.outboxEntries != null) {
+      final snap = widget.outboxSnapshot;
+      if (snap != null && !identical(snap, _outbox)) {
+        _outbox = snap;
+      }
+    }
     // 换了控制器（或换对话）：重订缓存信号并重取快照。
     //
     // 控制器携带 `timelineCache`，换 group 后 `_fromCache` 已在
@@ -706,6 +774,7 @@ class _ConversationPageState extends State<ConversationPage> {
     _ttsStatusSub?.cancel();
     _staleTurnIdsSub?.cancel();
     _fromCacheSub?.cancel();
+    _outboxSub?.cancel();
     _scrollController.dispose();
     _draft.dispose();
     super.dispose();
@@ -822,13 +891,31 @@ class _ConversationPageState extends State<ConversationPage> {
   }
 
   Future<void> _handleSubmit(String text) async {
-    final custom = widget.onSend;
-    if (custom != null) {
-      await custom(text);
-      return;
-    }
+    // ## 为什么两个分支共用同一个错误处置
+    //
+    // `onSend` 是**生产路径**（两个 app 都注入了它，为了带上 agentId，见
+    // desktop/mobile router 的说明），而默认的 `controller.send` 才是
+    // 「未接线」时的兑底。两者都可能抛 [MessageQueuedError]（离线入队）
+    // ——若只包住其中一个，生产路径上的入队异常会变成**未捕获异常**：
+    // 用户看不到任何提示，消息虽然排上了队却无从得知。
     try {
-      await widget.controller.send(input: text);
+      final custom = widget.onSend;
+      if (custom != null) {
+        await custom(text);
+      } else {
+        await widget.controller.send(input: text);
+      }
+    } on MessageQueuedError catch (e) {
+      // 已入离线队列（issue #30）：**不是**失败——用户打好的字没丢。
+      //
+      // ## 为什么不与下面的分支合并
+      //
+      // 两者都继承 SpbError，但用户的正确反应完全相反：这条要「等着，别重打」
+      // （重打会发两条），下面那条要「改一下再试」。合并成一句「发送失败」会让
+      // 用户以为消息丢了、然后重打一遍。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('网络不可用，已加入待发送：${e.message}')));
     } on SpbError catch (e) {
       // 发送失败：提示但不回滚输入（用户可能想重试同一段文字，
       // 清空反而让他重打一遍）。
@@ -836,6 +923,18 @@ class _ConversationPageState extends State<ConversationPage> {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('发送失败：${e.message}')));
     }
+  }
+
+  /// 把「被拒绝」翻译成用户可读的提示。
+  ///
+  /// 返回原结果，便于调用方继续用（当前无人用，但保持可组合）。
+  Future<bool> _withRejectionNotice(Future<bool> action, String notice) async {
+    final ok = await action;
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(notice)));
+    }
+    return ok;
   }
 
   /// 当前仍在生成的项；null 表示没有进行中的生成。
@@ -1118,6 +1217,38 @@ class _ConversationPageState extends State<ConversationPage> {
             _ExecutionStatusBar(status: _executionStatus!)
           else if (_visibleActivity != null)
             _TurnActivityIndicator(activity: _visibleActivity!),
+          // 离线队列（issue #30）：紧贴待处理栏**上方**。
+          //
+          // ## 为什么两条并存而不是合并
+          //
+          // 它们回答两个不同的问题：本栏是「我这边还没发出去」（客户端队列），
+          // 待处理栏是「服务端还在攒批」（`chat_inbox_messages`）。断网时先入
+          // 客户端队列；联网投递成功后服务端才开始攒批——两者**可以同时非空**。
+          // 合并会让「消息到底在哪一端」变得不可知。
+          //
+          // ## 为什么在待处理栏之上
+          //
+          // 本栏的条目**更早**（还没到服务端），故离输入框更远——视觉上
+          // 「越靠外 = 越早期」与时间顺序一致。
+          if (widget.outboxEntries != null)
+            OutboxBar(
+              entries: _outbox,
+              // 取消 / 重试被拒绝时给出反馈（见 `_rejectNotice`）。
+              //
+              // ## 为什么要在页面包装一层，而不是把回调直接透传
+              //
+              // 回调返回 false 表示**拒绝**（条目正在投递中 / 存储删除失败）。
+              // 组件层不做乐观移除，但若什么都不说，用户点了「取消」看到列表
+              // 没变，会以为按钮坏了——于是再点几次。必须说明原因。
+              onCancel: widget.onCancelOutbox == null
+                  ? null
+                  : (id) => _withRejectionNotice(
+                      widget.onCancelOutbox!(id),
+                      '这条消息正在发送中，稍候再取消',
+                    ),
+              onRetry: widget.onRetryOutbox,
+              onRemove: widget.onRemoveOutbox,
+            ),
           if (widget.loadPending != null && widget.undoPending != null)
             PendingMessagesBar(
               load: widget.loadPending!,

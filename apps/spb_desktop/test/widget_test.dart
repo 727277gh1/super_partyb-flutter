@@ -2471,6 +2471,66 @@ void main() {
       return root;
     }
 
+    group('离线写队列装配（issue #30）', () {
+      testWidgets('outboxQueueProvider 用注入的 AppDatabase（同一内存库）', (
+        tester,
+      ) async {
+        // ## 这条为什么值得单独测
+        //
+        // 装配层的错误（provider 忘了 override、或指向了另一个 db）在单测里
+        // 全都看不见：`spb_domain` 的队列测试用内存 store，`spb_data` 的
+        // store 测试用内存 db，只有这里才验证「两者真的接在一起」。
+        //
+        // 反向验证：把 `outboxStoreProvider` 的 `appDatabaseProvider` 换成
+        // 新开的 `AppDatabase(NativeDatabase.memory())`，本用例会失败。
+        final harness = await pumpApp(tester);
+        final queue = harness.container.read(outboxQueueProvider);
+        expect(queue, isNotNull);
+
+        // store 确实用的是注入的那个 db：直接写一行，再让队列 load 出来。
+        await tester.runAsync(() async {
+          await DriftOutboxStore(harness.container.read(appDatabaseProvider))
+              .upsert(
+                OutboxEntry(
+                  id: 'req-装配',
+                  userId: 'usr_REAL',
+                  input: '装配层验证',
+                  createdAt: DateTime.utc(2026),
+                  nextAttemptAt: DateTime.utc(2026),
+                ),
+              );
+          await queue.load('usr_REAL');
+        });
+        expect(queue.snapshot.map((e) => e.input), ['装配层验证']);
+
+        await queue.dispose();
+      });
+
+      test('outboxQueueProvider **不**是 autoDispose（重试计时器要活过对话页）', () {
+        // ## 为什么判据是 `isAutoDispose` 而不是别的
+        //
+        // Riverpod 3 里 `Provider.autoDispose(...)` 返回的**也是** `Provider`
+        // （只是 `isAutoDispose: true`），故静态类型断言没有区分力。运行期判据
+        // 也踩过两个坑：
+        //  - `identical(read(), read())`：`read` 不留监听者，而 autoDispose 的
+        //    释放条件是「没有监听者」——autoDispose 在 read 路径上根本不会被
+        //    回收，两种实现都恒等（空转）；
+        //  - 「释放监听后看 `entries` 是否 done」：会把测试拖进 Riverpod 的
+        //    调度细节，实测直接挂死。
+        //
+        // `isAutoDispose` 是 Riverpod 自己的字段，正是我们要表达的那个语义。
+        //
+        // 语义：队列持有重试计时器，而 `chatStreamControllerProvider` 是
+        // `autoDispose.family`（离开对话页即释放）。队列若随页面释放，用户
+        // 「断网发一条 → 退出对话 → 网络恢复」后消息永远不会被重试。
+        expect(
+          outboxQueueProvider.isAutoDispose,
+          isFalse,
+          reason: '改成 Provider.autoDispose 会让重试计时器随页面一起消失',
+        );
+      });
+    });
+
     /// 进入某个 group 的对话页所需的 mock（含侧边栏依赖的两个端点）。
     void mockChat(DioAdapter adapter, String gid) {
       adapter.onGet(

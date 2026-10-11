@@ -60,6 +60,12 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   @override
   void initState() {
     super.initState();
+    // 离线写队列（issue #30）：与桌面端同构的预热（见 `apps/spb_desktop/lib/app.dart`
+    // 同一行的说明）。
+    //
+    // 移动端尤其需要：用户在地铁里断网发一条 → 杀掉 App → 出站后重新打开，
+    // 若队列未预热则这条消息永远不会被重试。
+    ref.read(outboxQueueProvider);
     _installNotifications();
   }
 

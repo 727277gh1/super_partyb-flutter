@@ -60,6 +60,7 @@ export 'habit_auto_run_card.dart';
 export 'habit_suggestion_card.dart';
 export 'habit_suggestion_editor.dart';
 export 'my_turns_page.dart';
+export 'outbox_bar.dart';
 export 'message_composer.dart';
 export 'pending_messages_bar.dart';
 export 'pending_confirmations_page.dart';

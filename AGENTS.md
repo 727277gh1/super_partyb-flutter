@@ -991,19 +991,26 @@ bash tools/coverage.sh --summary-only # 不跑测试，只汇总已有产物（C
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_features` | **93.7%** | `spb_api` | 71.7% |
-| `spb_domain` | 86.5% | `spb_desktop` | 58.2% |
-| `spb_core` | 84.5% | `spb_mobile` | 53.4% |
+| `spb_features` | **93.9%** | `spb_api` | 71.7% |
+| `spb_domain` | 88.1% | `spb_desktop` | 58.8% |
+| `spb_core` | 85.0% | `spb_mobile` | 54.1% |
 | `spb_design` | 80.0% | `spb_platform` | 52.5% |
 | `spb_ui` | 73.6% | `spb_models` | 50.6% |
-| | | `spb_data` | **42.2%** |
-| | | **总计** | **76.3%**（13482/17677） |
+| | | `spb_data` | **42.9%** |
+| | | **总计** | **75.7%**（14683/19400） |
 
 ⚠️ issue #25 曾猜「90% 集中在 `spb_domain`，`spb_features` 可能大量是挂载即通过的
-烟雾测试」——**实测相反**：`spb_features` 是最高的 93.7%。要补测试的是 **`spb_data`
-（42.2%）与 `spb_models`（50.6%）**。数据会随代码变动，用上面的命令重跑而不是
+烟雾测试」——**实测相反**：`spb_features` 是最高的 93.9%。要补测试的是 **`spb_data`
+（42.9%）与 `spb_models`（50.6%）**。数据会随代码变动，用上面的命令重跑而不是
 引用本表。
 
+> **总计从 76.3% 降到 75.7% 不是回归**：`#29`/`#30` 两个切片新增约 1700 行实现
+> （`outbox.dart` / `timeline_cache_store.dart` / `outbox_store.dart` / 生成的
+> drift 代码），分母从 17677 涨到 19400。各包中位数实际**上升**（`spb_domain`
+> 86.5% → 88.1%、`spb_features` 93.7% → 93.9%、`spb_data` 42.2% → 42.9%）。
+> `spb_data` 仍最低是因为 drift 的生成代码（`database.g.dart`）算在分母里而
+> 基本不可测。
+>
 > 本表曾标「当前基线」却已漂移（总计 76.6% → 76.3%，`spb_models` 49.6% → 50.6%）
 > ——漂移与 `#26` 切片 A 的新增代码/测试同批出现（`spb_models` 上升的合理解释是
 > `ChatGroup.toJson` 的 round-trip 用例，未逐行归因）。**改完代码顺手重跑一次**，
@@ -1358,7 +1365,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 四项检索面板未接（语义 / 图谱 / 文件演化 / 决策演化） | **有意不做**（issue #12）。语义搜索的**嵌入链路是通的**，但数据面为空（`chat_groups` = 0 行）；两个「演化」面板的数据源在 Go 时代已停写——**前置条件是服务端先恢复数据写入** | issue #12、§6.9.6 |
 | ~~对话列表缓存：本地变更（新建/改名/删除）后不写缓存~~ | ✅ 已修（issue #28）：5 条本地变更路径补 `_saveCache()`，并去掉 `_saveCache` 的空列表跳过（删掉最后一个对话后缓存不更新的成因） | issue #28、`docs/offline-cache-design.md` §4.5 |
 | ~~离线缓存切片 B（timeline 只读缓存）~~ | ✅ 已实现（issue #29）：`CachedEvents` 表（`(groupId, globalSeq)` 主键）+ `TimelineCacheStore` 契约 + `DriftTimelineCacheStore`（三层上限）+ 控制器两个写点（`_backfill`/`loadOlder`）与一个读点（回落，带「缓冲非空则不填」守卫）+ 对话页 `_OfflineTimelineNotice`。共 50 条用例，24 项反向验证逐条实测 | issue #29、`docs/offline-cache-design.md` §3.5/§8.6 |
-| 离线缓存切片 C（离线写队列） | **未做**（设计已就绪）。消除「断网不能发消息」，其 `request_id` 幂等前提**已核实成立**（`enqueue.go:265`） | issue #30、`docs/offline-cache-design.md` §7 |
+| ~~离线缓存切片 C（离线写队列）~~ | ✅ 已实现（issue #30）：`OutboxEntries` 表（schemaVersion 4→5，`request_id` 即主键）+ `OutboxQueue`（严格 FIFO / 队首阻塞 / 退避 2s×2ⁿ 封顶 5 min / 上限 10 次 / `request_id` 幂等）+ 控制器 `send` 入队与 `delivered` 回显注入 + 「待发送」条（取消/重试/丢弃）+ 两端 `outboxQueueProvider`（**非** autoDispose，App 启动预热）。共 93 条用例。⚠️ 与 A/B 相反：**存储失败抛 `StorageError` 不静默降级**（装的是用户输入） | issue #30、`docs/offline-cache-design.md` §7bis |
+| 离线缓存切片 C 的「反向验证为 0」 | ⚠️ **唯一一条**（诚实记录）：`drain` 进度哨兵——正确代码上不可达，属 **fail-safe**（拦「将来有人改坏 `_nextSendable`」，把挂死变成记 error + 中断）。另两条初版缺口（store `delete`/`clear` 静默降级、`onConnectivityRestored` 不碰 `failed`）**已补测** | `docs/offline-cache-design.md` §7bis.11 |
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 

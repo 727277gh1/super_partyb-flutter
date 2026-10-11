@@ -80,6 +80,18 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
   @override
   void initState() {
     super.initState();
+    // 离线写队列（issue #30）：**必须在这里预热**。
+    //
+    // ## 为什么不能等对话页来读
+    //
+    // `outboxQueueProvider` 的构造里挂了 `ref.listen(currentUserIdProvider...)`
+    // ——那是队列「恢复上次未发完的条目」的唯一入口。而 Riverpod 的 provider
+    // 是**惰性**的：没人读就永不构造。若只在 `ConversationPage` 里读，则
+    // 「断网发一条 → 关掉对话页 → 重启 App」后队列不会恢复，消息要等用户
+    // 再次打开某个对话才被重试（甚至永远不重试）。
+    //
+    // 预热后，重试计时器与 `drain` 从 App 启动起就在跑。
+    ref.read(outboxQueueProvider);
     _installNotifications();
     // 移动端的能力是 NoopDesktopCapabilities，attach 会自行跳过。
     // 但移动端连 spb_desktop 都不该走，故这里只在桌面端接线。

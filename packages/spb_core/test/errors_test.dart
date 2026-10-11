@@ -190,6 +190,8 @@ void main() {
         StorageError() => 'storage',
         PlatformError() => 'platform',
         ValidationError() => 'validation',
+        MessageQueuedError() => 'queued',
+        MessageDeliveryFailedError() => 'delivery-failed',
       };
 
       expect(label(const NetworkError('x')), 'network');
@@ -199,6 +201,21 @@ void main() {
       expect(label(const StorageError('x')), 'storage');
       expect(label(const PlatformError('x')), 'platform');
       expect(label(const ValidationError('x')), 'validation');
+      // 这两个是「消息进了待发送状态 / 投递最终失败」的**状态信号**，不是
+      // 网络失败——UI 靠它们区分「已排队」与「发送失败」（issue #30）。
+      expect(label(const MessageQueuedError('x')), 'queued');
+      expect(label(const MessageDeliveryFailedError('x')), 'delivery-failed');
+    });
+
+    test('MessageQueuedError 不是 NetworkError（UI 靠类型区分「排队」与「失败」）', () {
+      // 若图省事复用了 NetworkError，UI 只能笼统说「发送失败：网络错误」——
+      // 用户会以为消息丢了、重打一遍（结果发两条）。
+      expect(const MessageQueuedError('x'), isNot(isA<NetworkError>()));
+      expect(
+        const MessageDeliveryFailedError('x'),
+        isNot(isA<MessageQueuedError>()),
+        reason: '「已排队」与「投递失败」必须是两个可区分的终态',
+      );
     });
   });
 }

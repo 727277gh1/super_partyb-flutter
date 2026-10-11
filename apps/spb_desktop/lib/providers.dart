@@ -668,6 +668,75 @@ final timelineCacheStoreProvider = Provider<TimelineCacheStore>((ref) {
   return DriftTimelineCacheStore(ref.watch(appDatabaseProvider));
 });
 
+/// 离线写队列的持久化（issue #26 切片 C / issue #30）。
+///
+/// 与上面两个 store 的关键差异：**它不是可丢弃数据**。队列装的是用户敲进去、
+/// 还没发出去的文本——`DriftOutboxStore` 的读写失败一律抛 `StorageError`
+/// 而非静默降级（设计文档 §7bis.9）。故它不参与 `resetAll`（见
+/// `DriftSyncStateStore`）：**退出登录不该删掉未发送的消息**。
+final outboxStoreProvider = Provider<OutboxStore>((ref) {
+  return DriftOutboxStore(ref.watch(appDatabaseProvider));
+});
+
+/// 离线写队列（issue #30）。
+///
+/// ## ⚠️ 不能是 autoDispose
+///
+/// 队列持有重试计时器，而 `chatStreamControllerProvider` 是
+/// `autoDispose.family`（离开对话页即释放）。若队列随页面一起释放，用户
+/// 「断网发一条 → 退出对话 → 网络恢复」后消息永远不会被重试。
+///
+/// ## 加载时机
+///
+/// 首次读取时 `load` 一次（从库里恢复上次会话未发完的条目）。若用户切换账号，
+/// [OutboxQueue.userId] 与当前 userId 不一致，会重新 load 并丢弃旧队列的内存
+/// 视图（存储层按 userId 过滤，互不干扰）。
+final outboxQueueProvider = Provider<OutboxQueue>((ref) {
+  final queue = OutboxQueue(
+    store: ref.watch(outboxStoreProvider),
+    // 投递实现：`request_id` = `entry.id`，故重试天然幂等（服务端按
+    // `(user_id, request_id)` 去重，见 `chat/enqueue.go`）。
+    //
+    // ⚠️ 这里**不能**复用 `chatStreamControllerProvider` 的 `send`——那条路径
+    // 会在失败时再次入队，形成环。队列只调 `ChatApi`，不做任何排队决策。
+    send: (entry) => ref
+        .read(chatApiProvider)
+        .sendMessage(
+          entry.userId,
+          input: entry.input,
+          groupId: entry.groupId,
+          agentId: entry.agentId,
+          routingMode: entry.routingMode,
+          requestId: entry.id,
+        ),
+  );
+  ref.onDispose(queue.dispose);
+  // 启动时恢复上次未发完的条目。
+  //
+  // ## 为什么必须 `.future` 而不是 `.valueOrNull`
+  //
+  // `currentUserIdProvider` 是 `FutureProvider`，首次读取**必然 pending**
+  // （没有 `valueOrNull` 那种「同步就能拿到」的情况）——用它会在冷启动时
+  // 永远拿不到 id，队列永不恢复。故这里 await 真实 id。
+  //
+  // `ref.listen(..., fireImmediately: true)` 覆盖「进程启动时已登录」与
+  // 「运行中登录/切换账号」两种情况：后者若换了 id，队列会重新 load（存储层
+  // 按 userId 过滤，旧账号的条目留在库里不丢）。
+  ref.listen(currentUserIdProvider.future, (_, next) {
+    unawaited(
+      next
+          .then((id) async {
+            if (id.isEmpty || queue.userId == id) return;
+            await queue.load(id);
+          })
+          .catchError((Object _) {
+            // 用户尚未登录（读 id 失败）：没什么可加载的，等下次登录再试。
+          }),
+    );
+  }, fireImmediately: true);
+  return queue;
+});
+
 /// 搜索消息内容（供 [SearchPage] 注入）。
 ///
 /// ## 为什么在这里解析 userId
@@ -798,6 +867,7 @@ final chatStreamControllerProvider = Provider.autoDispose
         api: ref.watch(chatApiProvider),
         userId: userId,
         timelineCache: ref.watch(timelineCacheStoreProvider),
+        outbox: ref.watch(outboxQueueProvider),
       );
       ref.onDispose(controller.dispose);
       return controller;

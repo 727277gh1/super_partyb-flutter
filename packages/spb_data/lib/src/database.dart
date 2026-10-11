@@ -180,6 +180,64 @@ class CachedEvents extends Table {
 /// 值统一存文本：调用方按需解析（`bool`/`int`/`json`）。用 `TEXT` 而不是
 /// 多态列，是因为 SQLite 的动态类型会让「同一个键先后存了 bool 与 int」
 /// 这种 bug 静默通过。
+/// 离线写队列（issue #26 切片 C / issue #30）。
+///
+/// ## 与另外两张缓存表的本质区别
+///
+/// `CachedGroups` / `CachedEvents` 装的是**可重拉的缓存**（丢了只是断网看不到
+/// 历史）；本表装的是**用户输入的文本**——丢了就真丢了。故 store 层读写失败
+/// **抛 `StorageError`**（同 `SyncedFiles`），不静默降级。
+///
+/// ## `id` 就是 `request_id`
+///
+/// 幂等键与主键合并（设计文档 §7bis.1）：分开存会引入「哪个才是真键」的问题，
+/// 合并后「重试复用同一 `request_id`」在结构上不可能写错。
+///
+/// ## 为什么没有 `status` 列
+///
+/// 状态由 `attempts` / `lastError` **派生**（`OutboxEntry.status`）。多一个
+/// 可写字段就多一处「派生值与存储值不一致」的机会。
+@DataClassName('OutboxRow')
+class OutboxEntries extends Table {
+  TextColumn get id => text()();
+
+  TextColumn get userId => text()();
+
+  /// null = 无归属入口（服务端分类链判定，见 AGENTS.md §5.5）。
+  ///
+  /// ⚠️ 必须保留 null 与「空串」的区别：**空串是无效值**，null 才是「让服务端
+  /// 判定」。
+  TextColumn get groupId => text().nullable()();
+
+  TextColumn get agentId => text().nullable()();
+
+  TextColumn get input => text()();
+
+  TextColumn get routingMode => text()();
+
+  /// 入队时刻（毫秒 epoch），**FIFO 排序依据**。
+  IntColumn get createdAt => integer()();
+
+  /// 已尝试投递次数（含首次）。
+  IntColumn get attempts => integer()();
+
+  /// 下次可尝试的时刻（毫秒 epoch）。退避算出。
+  IntColumn get nextAttemptAt => integer()();
+
+  /// 最近一次失败原因（诊断用，UI 可展示）。
+  TextColumn get lastError => text().nullable()();
+
+  /// 本条目适用**当时的**重试上限（入队时从策略快照）。
+  ///
+  /// ⚠️ 必须有默认值（`withDefault`）而不是 `nullable`：这是**派生状态**的
+  /// 输入，不是「可能没有的数据」——读回 null 会让 `status` 判不出 failed。
+  /// 默认值与 `OutboxRetryPolicy.defaultMaxAttempts` 一致。
+  IntColumn get maxAttempts => integer().withDefault(const Constant(10))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 @DataClassName('PreferenceRow')
 class Preferences extends Table {
   TextColumn get key => text()();
@@ -211,6 +269,7 @@ class Preferences extends Table {
     SyncBindings,
     CachedGroups,
     CachedEvents,
+    OutboxEntries,
     Preferences,
   ],
 )
@@ -219,7 +278,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -231,6 +290,8 @@ class AppDatabase extends _$AppDatabase {
     // 版本 2 → 3：新增 cached_groups（对话列表缓存，issue #26 切片 A）。
     //
     // 版本 3 → 4：新增 cached_events（timeline 只读缓存，切片 B / issue #29）。
+    //
+    // 版本 4 → 5：新增 outbox_entries（离线写队列，切片 C / issue #30）。
     onUpgrade: (m, from, to) async {
       if (from < 2) {
         await m.addColumn(syncedFiles, syncedFiles.contentHash);
@@ -241,11 +302,14 @@ class AppDatabase extends _$AppDatabase {
       if (from < 4) {
         await m.createTable(cachedEvents);
       }
+      if (from < 5) {
+        await m.createTable(outboxEntries);
+      }
       // **不要**用 m.createAll() 兜底：那会重建全部表、丢用户已有的同步状态。
       //
       // ⚠️ 条件必须写 `from < N` 而**不是** `from == N-1`：跳版本升级
-      // （v1 直接升到 v4）时三个分支都得跑。写 `from == 3` 会让 v1 用户升到
-      // v4 后**缺少 v2 的 content_hash 列**，而 drift 不会报错——直到某个
+      // （v1 直接升到 v5）时四个分支都得跑。写 `from == 4` 会让 v1 用户升到
+      // v5 后**缺少 v2 的 content_hash 列**，而 drift 不会报错——直到某个
       // 查询碰到那一列才炸（且报错信息指不到迁移）。
     },
   );

@@ -1958,6 +1958,46 @@ void main() {
     expect(find.byKey(const ValueKey('sync-pick-directory')), findsOneWidget);
   });
 
+  group('离线写队列装配（issue #30）', () {
+    testWidgets('outboxQueueProvider 用注入的 AppDatabase（同一内存库）', (tester) async {
+      // 与桌面端同一条断言（`apps/spb_desktop/test/widget_test.dart` 同组）。
+      // 两端各有一份装配，各测一份——否则「一端接错 db」在另一端测试里看不见。
+      final harness = await pumpApp(tester);
+      final queue = harness.container.read(outboxQueueProvider);
+      expect(queue, isNotNull);
+
+      await tester.runAsync(() async {
+        await DriftOutboxStore(harness.container.read(appDatabaseProvider))
+            .upsert(
+              OutboxEntry(
+                id: 'req-装配-移动',
+                userId: 'usr_1',
+                input: '装配层验证',
+                createdAt: DateTime.utc(2026),
+                nextAttemptAt: DateTime.utc(2026),
+              ),
+            );
+        await queue.load('usr_1');
+      });
+      expect(queue.snapshot.map((e) => e.input), ['装配层验证']);
+
+      await queue.dispose();
+    });
+
+    test('outboxQueueProvider **不**是 autoDispose（重试计时器要活过对话页）', () {
+      // 语义与桌面端同（见那边同组用例的详细说明）：队列持有重试计时器，
+      // 而对话页是 autoDispose——队列若随页面释放，用户「断网发一条 →
+      // 退出对话 → 网络恢复」后消息永远不会被重试。
+      //
+      // 移动端尤其致命：用户切走 App 是常态（不是例外）。
+      expect(
+        outboxQueueProvider.isAutoDispose,
+        isFalse,
+        reason: '改成 Provider.autoDispose 会让重试计时器随页面一起消失',
+      );
+    });
+  });
+
   group('习惯（移动端接线）', () {
     /// `/api/habits` 列表项（sqlc camelCase 形态）。
     Map<String, dynamic> habitJson({

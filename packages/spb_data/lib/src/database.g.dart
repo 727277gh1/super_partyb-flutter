@@ -1624,6 +1624,693 @@ class CachedEventsCompanion extends UpdateCompanion<CachedEventRow> {
   }
 }
 
+class $OutboxEntriesTable extends OutboxEntries
+    with TableInfo<$OutboxEntriesTable, OutboxRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $OutboxEntriesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _userIdMeta = const VerificationMeta('userId');
+  @override
+  late final GeneratedColumn<String> userId = GeneratedColumn<String>(
+    'user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _groupIdMeta = const VerificationMeta(
+    'groupId',
+  );
+  @override
+  late final GeneratedColumn<String> groupId = GeneratedColumn<String>(
+    'group_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _agentIdMeta = const VerificationMeta(
+    'agentId',
+  );
+  @override
+  late final GeneratedColumn<String> agentId = GeneratedColumn<String>(
+    'agent_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _inputMeta = const VerificationMeta('input');
+  @override
+  late final GeneratedColumn<String> input = GeneratedColumn<String>(
+    'input',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _routingModeMeta = const VerificationMeta(
+    'routingMode',
+  );
+  @override
+  late final GeneratedColumn<String> routingMode = GeneratedColumn<String>(
+    'routing_mode',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<int> createdAt = GeneratedColumn<int>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _attemptsMeta = const VerificationMeta(
+    'attempts',
+  );
+  @override
+  late final GeneratedColumn<int> attempts = GeneratedColumn<int>(
+    'attempts',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nextAttemptAtMeta = const VerificationMeta(
+    'nextAttemptAt',
+  );
+  @override
+  late final GeneratedColumn<int> nextAttemptAt = GeneratedColumn<int>(
+    'next_attempt_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastErrorMeta = const VerificationMeta(
+    'lastError',
+  );
+  @override
+  late final GeneratedColumn<String> lastError = GeneratedColumn<String>(
+    'last_error',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _maxAttemptsMeta = const VerificationMeta(
+    'maxAttempts',
+  );
+  @override
+  late final GeneratedColumn<int> maxAttempts = GeneratedColumn<int>(
+    'max_attempts',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(10),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    userId,
+    groupId,
+    agentId,
+    input,
+    routingMode,
+    createdAt,
+    attempts,
+    nextAttemptAt,
+    lastError,
+    maxAttempts,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'outbox_entries';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<OutboxRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('user_id')) {
+      context.handle(
+        _userIdMeta,
+        userId.isAcceptableOrUnknown(data['user_id']!, _userIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_userIdMeta);
+    }
+    if (data.containsKey('group_id')) {
+      context.handle(
+        _groupIdMeta,
+        groupId.isAcceptableOrUnknown(data['group_id']!, _groupIdMeta),
+      );
+    }
+    if (data.containsKey('agent_id')) {
+      context.handle(
+        _agentIdMeta,
+        agentId.isAcceptableOrUnknown(data['agent_id']!, _agentIdMeta),
+      );
+    }
+    if (data.containsKey('input')) {
+      context.handle(
+        _inputMeta,
+        input.isAcceptableOrUnknown(data['input']!, _inputMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_inputMeta);
+    }
+    if (data.containsKey('routing_mode')) {
+      context.handle(
+        _routingModeMeta,
+        routingMode.isAcceptableOrUnknown(
+          data['routing_mode']!,
+          _routingModeMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_routingModeMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('attempts')) {
+      context.handle(
+        _attemptsMeta,
+        attempts.isAcceptableOrUnknown(data['attempts']!, _attemptsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_attemptsMeta);
+    }
+    if (data.containsKey('next_attempt_at')) {
+      context.handle(
+        _nextAttemptAtMeta,
+        nextAttemptAt.isAcceptableOrUnknown(
+          data['next_attempt_at']!,
+          _nextAttemptAtMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_nextAttemptAtMeta);
+    }
+    if (data.containsKey('last_error')) {
+      context.handle(
+        _lastErrorMeta,
+        lastError.isAcceptableOrUnknown(data['last_error']!, _lastErrorMeta),
+      );
+    }
+    if (data.containsKey('max_attempts')) {
+      context.handle(
+        _maxAttemptsMeta,
+        maxAttempts.isAcceptableOrUnknown(
+          data['max_attempts']!,
+          _maxAttemptsMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  OutboxRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return OutboxRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      userId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_id'],
+      )!,
+      groupId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}group_id'],
+      ),
+      agentId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}agent_id'],
+      ),
+      input: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}input'],
+      )!,
+      routingMode: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}routing_mode'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}created_at'],
+      )!,
+      attempts: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}attempts'],
+      )!,
+      nextAttemptAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}next_attempt_at'],
+      )!,
+      lastError: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_error'],
+      ),
+      maxAttempts: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}max_attempts'],
+      )!,
+    );
+  }
+
+  @override
+  $OutboxEntriesTable createAlias(String alias) {
+    return $OutboxEntriesTable(attachedDatabase, alias);
+  }
+}
+
+class OutboxRow extends DataClass implements Insertable<OutboxRow> {
+  final String id;
+  final String userId;
+
+  /// null = 无归属入口（服务端分类链判定，见 AGENTS.md §5.5）。
+  ///
+  /// ⚠️ 必须保留 null 与「空串」的区别：**空串是无效值**，null 才是「让服务端
+  /// 判定」。
+  final String? groupId;
+  final String? agentId;
+  final String input;
+  final String routingMode;
+
+  /// 入队时刻（毫秒 epoch），**FIFO 排序依据**。
+  final int createdAt;
+
+  /// 已尝试投递次数（含首次）。
+  final int attempts;
+
+  /// 下次可尝试的时刻（毫秒 epoch）。退避算出。
+  final int nextAttemptAt;
+
+  /// 最近一次失败原因（诊断用，UI 可展示）。
+  final String? lastError;
+
+  /// 本条目适用**当时的**重试上限（入队时从策略快照）。
+  ///
+  /// ⚠️ 必须有默认值（`withDefault`）而不是 `nullable`：这是**派生状态**的
+  /// 输入，不是「可能没有的数据」——读回 null 会让 `status` 判不出 failed。
+  /// 默认值与 `OutboxRetryPolicy.defaultMaxAttempts` 一致。
+  final int maxAttempts;
+  const OutboxRow({
+    required this.id,
+    required this.userId,
+    this.groupId,
+    this.agentId,
+    required this.input,
+    required this.routingMode,
+    required this.createdAt,
+    required this.attempts,
+    required this.nextAttemptAt,
+    this.lastError,
+    required this.maxAttempts,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['user_id'] = Variable<String>(userId);
+    if (!nullToAbsent || groupId != null) {
+      map['group_id'] = Variable<String>(groupId);
+    }
+    if (!nullToAbsent || agentId != null) {
+      map['agent_id'] = Variable<String>(agentId);
+    }
+    map['input'] = Variable<String>(input);
+    map['routing_mode'] = Variable<String>(routingMode);
+    map['created_at'] = Variable<int>(createdAt);
+    map['attempts'] = Variable<int>(attempts);
+    map['next_attempt_at'] = Variable<int>(nextAttemptAt);
+    if (!nullToAbsent || lastError != null) {
+      map['last_error'] = Variable<String>(lastError);
+    }
+    map['max_attempts'] = Variable<int>(maxAttempts);
+    return map;
+  }
+
+  OutboxEntriesCompanion toCompanion(bool nullToAbsent) {
+    return OutboxEntriesCompanion(
+      id: Value(id),
+      userId: Value(userId),
+      groupId: groupId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(groupId),
+      agentId: agentId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(agentId),
+      input: Value(input),
+      routingMode: Value(routingMode),
+      createdAt: Value(createdAt),
+      attempts: Value(attempts),
+      nextAttemptAt: Value(nextAttemptAt),
+      lastError: lastError == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastError),
+      maxAttempts: Value(maxAttempts),
+    );
+  }
+
+  factory OutboxRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return OutboxRow(
+      id: serializer.fromJson<String>(json['id']),
+      userId: serializer.fromJson<String>(json['userId']),
+      groupId: serializer.fromJson<String?>(json['groupId']),
+      agentId: serializer.fromJson<String?>(json['agentId']),
+      input: serializer.fromJson<String>(json['input']),
+      routingMode: serializer.fromJson<String>(json['routingMode']),
+      createdAt: serializer.fromJson<int>(json['createdAt']),
+      attempts: serializer.fromJson<int>(json['attempts']),
+      nextAttemptAt: serializer.fromJson<int>(json['nextAttemptAt']),
+      lastError: serializer.fromJson<String?>(json['lastError']),
+      maxAttempts: serializer.fromJson<int>(json['maxAttempts']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'userId': serializer.toJson<String>(userId),
+      'groupId': serializer.toJson<String?>(groupId),
+      'agentId': serializer.toJson<String?>(agentId),
+      'input': serializer.toJson<String>(input),
+      'routingMode': serializer.toJson<String>(routingMode),
+      'createdAt': serializer.toJson<int>(createdAt),
+      'attempts': serializer.toJson<int>(attempts),
+      'nextAttemptAt': serializer.toJson<int>(nextAttemptAt),
+      'lastError': serializer.toJson<String?>(lastError),
+      'maxAttempts': serializer.toJson<int>(maxAttempts),
+    };
+  }
+
+  OutboxRow copyWith({
+    String? id,
+    String? userId,
+    Value<String?> groupId = const Value.absent(),
+    Value<String?> agentId = const Value.absent(),
+    String? input,
+    String? routingMode,
+    int? createdAt,
+    int? attempts,
+    int? nextAttemptAt,
+    Value<String?> lastError = const Value.absent(),
+    int? maxAttempts,
+  }) => OutboxRow(
+    id: id ?? this.id,
+    userId: userId ?? this.userId,
+    groupId: groupId.present ? groupId.value : this.groupId,
+    agentId: agentId.present ? agentId.value : this.agentId,
+    input: input ?? this.input,
+    routingMode: routingMode ?? this.routingMode,
+    createdAt: createdAt ?? this.createdAt,
+    attempts: attempts ?? this.attempts,
+    nextAttemptAt: nextAttemptAt ?? this.nextAttemptAt,
+    lastError: lastError.present ? lastError.value : this.lastError,
+    maxAttempts: maxAttempts ?? this.maxAttempts,
+  );
+  OutboxRow copyWithCompanion(OutboxEntriesCompanion data) {
+    return OutboxRow(
+      id: data.id.present ? data.id.value : this.id,
+      userId: data.userId.present ? data.userId.value : this.userId,
+      groupId: data.groupId.present ? data.groupId.value : this.groupId,
+      agentId: data.agentId.present ? data.agentId.value : this.agentId,
+      input: data.input.present ? data.input.value : this.input,
+      routingMode: data.routingMode.present
+          ? data.routingMode.value
+          : this.routingMode,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      attempts: data.attempts.present ? data.attempts.value : this.attempts,
+      nextAttemptAt: data.nextAttemptAt.present
+          ? data.nextAttemptAt.value
+          : this.nextAttemptAt,
+      lastError: data.lastError.present ? data.lastError.value : this.lastError,
+      maxAttempts: data.maxAttempts.present
+          ? data.maxAttempts.value
+          : this.maxAttempts,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OutboxRow(')
+          ..write('id: $id, ')
+          ..write('userId: $userId, ')
+          ..write('groupId: $groupId, ')
+          ..write('agentId: $agentId, ')
+          ..write('input: $input, ')
+          ..write('routingMode: $routingMode, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('attempts: $attempts, ')
+          ..write('nextAttemptAt: $nextAttemptAt, ')
+          ..write('lastError: $lastError, ')
+          ..write('maxAttempts: $maxAttempts')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    userId,
+    groupId,
+    agentId,
+    input,
+    routingMode,
+    createdAt,
+    attempts,
+    nextAttemptAt,
+    lastError,
+    maxAttempts,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is OutboxRow &&
+          other.id == this.id &&
+          other.userId == this.userId &&
+          other.groupId == this.groupId &&
+          other.agentId == this.agentId &&
+          other.input == this.input &&
+          other.routingMode == this.routingMode &&
+          other.createdAt == this.createdAt &&
+          other.attempts == this.attempts &&
+          other.nextAttemptAt == this.nextAttemptAt &&
+          other.lastError == this.lastError &&
+          other.maxAttempts == this.maxAttempts);
+}
+
+class OutboxEntriesCompanion extends UpdateCompanion<OutboxRow> {
+  final Value<String> id;
+  final Value<String> userId;
+  final Value<String?> groupId;
+  final Value<String?> agentId;
+  final Value<String> input;
+  final Value<String> routingMode;
+  final Value<int> createdAt;
+  final Value<int> attempts;
+  final Value<int> nextAttemptAt;
+  final Value<String?> lastError;
+  final Value<int> maxAttempts;
+  final Value<int> rowid;
+  const OutboxEntriesCompanion({
+    this.id = const Value.absent(),
+    this.userId = const Value.absent(),
+    this.groupId = const Value.absent(),
+    this.agentId = const Value.absent(),
+    this.input = const Value.absent(),
+    this.routingMode = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.attempts = const Value.absent(),
+    this.nextAttemptAt = const Value.absent(),
+    this.lastError = const Value.absent(),
+    this.maxAttempts = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  OutboxEntriesCompanion.insert({
+    required String id,
+    required String userId,
+    this.groupId = const Value.absent(),
+    this.agentId = const Value.absent(),
+    required String input,
+    required String routingMode,
+    required int createdAt,
+    required int attempts,
+    required int nextAttemptAt,
+    this.lastError = const Value.absent(),
+    this.maxAttempts = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       userId = Value(userId),
+       input = Value(input),
+       routingMode = Value(routingMode),
+       createdAt = Value(createdAt),
+       attempts = Value(attempts),
+       nextAttemptAt = Value(nextAttemptAt);
+  static Insertable<OutboxRow> custom({
+    Expression<String>? id,
+    Expression<String>? userId,
+    Expression<String>? groupId,
+    Expression<String>? agentId,
+    Expression<String>? input,
+    Expression<String>? routingMode,
+    Expression<int>? createdAt,
+    Expression<int>? attempts,
+    Expression<int>? nextAttemptAt,
+    Expression<String>? lastError,
+    Expression<int>? maxAttempts,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (userId != null) 'user_id': userId,
+      if (groupId != null) 'group_id': groupId,
+      if (agentId != null) 'agent_id': agentId,
+      if (input != null) 'input': input,
+      if (routingMode != null) 'routing_mode': routingMode,
+      if (createdAt != null) 'created_at': createdAt,
+      if (attempts != null) 'attempts': attempts,
+      if (nextAttemptAt != null) 'next_attempt_at': nextAttemptAt,
+      if (lastError != null) 'last_error': lastError,
+      if (maxAttempts != null) 'max_attempts': maxAttempts,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  OutboxEntriesCompanion copyWith({
+    Value<String>? id,
+    Value<String>? userId,
+    Value<String?>? groupId,
+    Value<String?>? agentId,
+    Value<String>? input,
+    Value<String>? routingMode,
+    Value<int>? createdAt,
+    Value<int>? attempts,
+    Value<int>? nextAttemptAt,
+    Value<String?>? lastError,
+    Value<int>? maxAttempts,
+    Value<int>? rowid,
+  }) {
+    return OutboxEntriesCompanion(
+      id: id ?? this.id,
+      userId: userId ?? this.userId,
+      groupId: groupId ?? this.groupId,
+      agentId: agentId ?? this.agentId,
+      input: input ?? this.input,
+      routingMode: routingMode ?? this.routingMode,
+      createdAt: createdAt ?? this.createdAt,
+      attempts: attempts ?? this.attempts,
+      nextAttemptAt: nextAttemptAt ?? this.nextAttemptAt,
+      lastError: lastError ?? this.lastError,
+      maxAttempts: maxAttempts ?? this.maxAttempts,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (userId.present) {
+      map['user_id'] = Variable<String>(userId.value);
+    }
+    if (groupId.present) {
+      map['group_id'] = Variable<String>(groupId.value);
+    }
+    if (agentId.present) {
+      map['agent_id'] = Variable<String>(agentId.value);
+    }
+    if (input.present) {
+      map['input'] = Variable<String>(input.value);
+    }
+    if (routingMode.present) {
+      map['routing_mode'] = Variable<String>(routingMode.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<int>(createdAt.value);
+    }
+    if (attempts.present) {
+      map['attempts'] = Variable<int>(attempts.value);
+    }
+    if (nextAttemptAt.present) {
+      map['next_attempt_at'] = Variable<int>(nextAttemptAt.value);
+    }
+    if (lastError.present) {
+      map['last_error'] = Variable<String>(lastError.value);
+    }
+    if (maxAttempts.present) {
+      map['max_attempts'] = Variable<int>(maxAttempts.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OutboxEntriesCompanion(')
+          ..write('id: $id, ')
+          ..write('userId: $userId, ')
+          ..write('groupId: $groupId, ')
+          ..write('agentId: $agentId, ')
+          ..write('input: $input, ')
+          ..write('routingMode: $routingMode, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('attempts: $attempts, ')
+          ..write('nextAttemptAt: $nextAttemptAt, ')
+          ..write('lastError: $lastError, ')
+          ..write('maxAttempts: $maxAttempts, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $PreferencesTable extends Preferences
     with TableInfo<$PreferencesTable, PreferenceRow> {
   @override
@@ -1840,6 +2527,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $SyncBindingsTable syncBindings = $SyncBindingsTable(this);
   late final $CachedGroupsTable cachedGroups = $CachedGroupsTable(this);
   late final $CachedEventsTable cachedEvents = $CachedEventsTable(this);
+  late final $OutboxEntriesTable outboxEntries = $OutboxEntriesTable(this);
   late final $PreferencesTable preferences = $PreferencesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
@@ -1851,6 +2539,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     syncBindings,
     cachedGroups,
     cachedEvents,
+    outboxEntries,
     preferences,
   ];
 }
@@ -2744,6 +3433,326 @@ typedef $$CachedEventsTableProcessedTableManager =
       CachedEventRow,
       PrefetchHooks Function()
     >;
+typedef $$OutboxEntriesTableCreateCompanionBuilder =
+    OutboxEntriesCompanion Function({
+      required String id,
+      required String userId,
+      Value<String?> groupId,
+      Value<String?> agentId,
+      required String input,
+      required String routingMode,
+      required int createdAt,
+      required int attempts,
+      required int nextAttemptAt,
+      Value<String?> lastError,
+      Value<int> maxAttempts,
+      Value<int> rowid,
+    });
+typedef $$OutboxEntriesTableUpdateCompanionBuilder =
+    OutboxEntriesCompanion Function({
+      Value<String> id,
+      Value<String> userId,
+      Value<String?> groupId,
+      Value<String?> agentId,
+      Value<String> input,
+      Value<String> routingMode,
+      Value<int> createdAt,
+      Value<int> attempts,
+      Value<int> nextAttemptAt,
+      Value<String?> lastError,
+      Value<int> maxAttempts,
+      Value<int> rowid,
+    });
+
+class $$OutboxEntriesTableFilterComposer
+    extends Composer<_$AppDatabase, $OutboxEntriesTable> {
+  $$OutboxEntriesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get groupId => $composableBuilder(
+    column: $table.groupId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get agentId => $composableBuilder(
+    column: $table.agentId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get input => $composableBuilder(
+    column: $table.input,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get routingMode => $composableBuilder(
+    column: $table.routingMode,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get attempts => $composableBuilder(
+    column: $table.attempts,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get nextAttemptAt => $composableBuilder(
+    column: $table.nextAttemptAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastError => $composableBuilder(
+    column: $table.lastError,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get maxAttempts => $composableBuilder(
+    column: $table.maxAttempts,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$OutboxEntriesTableOrderingComposer
+    extends Composer<_$AppDatabase, $OutboxEntriesTable> {
+  $$OutboxEntriesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get groupId => $composableBuilder(
+    column: $table.groupId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get agentId => $composableBuilder(
+    column: $table.agentId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get input => $composableBuilder(
+    column: $table.input,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get routingMode => $composableBuilder(
+    column: $table.routingMode,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get attempts => $composableBuilder(
+    column: $table.attempts,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get nextAttemptAt => $composableBuilder(
+    column: $table.nextAttemptAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastError => $composableBuilder(
+    column: $table.lastError,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get maxAttempts => $composableBuilder(
+    column: $table.maxAttempts,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$OutboxEntriesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $OutboxEntriesTable> {
+  $$OutboxEntriesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get userId =>
+      $composableBuilder(column: $table.userId, builder: (column) => column);
+
+  GeneratedColumn<String> get groupId =>
+      $composableBuilder(column: $table.groupId, builder: (column) => column);
+
+  GeneratedColumn<String> get agentId =>
+      $composableBuilder(column: $table.agentId, builder: (column) => column);
+
+  GeneratedColumn<String> get input =>
+      $composableBuilder(column: $table.input, builder: (column) => column);
+
+  GeneratedColumn<String> get routingMode => $composableBuilder(
+    column: $table.routingMode,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<int> get attempts =>
+      $composableBuilder(column: $table.attempts, builder: (column) => column);
+
+  GeneratedColumn<int> get nextAttemptAt => $composableBuilder(
+    column: $table.nextAttemptAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get lastError =>
+      $composableBuilder(column: $table.lastError, builder: (column) => column);
+
+  GeneratedColumn<int> get maxAttempts => $composableBuilder(
+    column: $table.maxAttempts,
+    builder: (column) => column,
+  );
+}
+
+class $$OutboxEntriesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $OutboxEntriesTable,
+          OutboxRow,
+          $$OutboxEntriesTableFilterComposer,
+          $$OutboxEntriesTableOrderingComposer,
+          $$OutboxEntriesTableAnnotationComposer,
+          $$OutboxEntriesTableCreateCompanionBuilder,
+          $$OutboxEntriesTableUpdateCompanionBuilder,
+          (
+            OutboxRow,
+            BaseReferences<_$AppDatabase, $OutboxEntriesTable, OutboxRow>,
+          ),
+          OutboxRow,
+          PrefetchHooks Function()
+        > {
+  $$OutboxEntriesTableTableManager(_$AppDatabase db, $OutboxEntriesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$OutboxEntriesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$OutboxEntriesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$OutboxEntriesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> userId = const Value.absent(),
+                Value<String?> groupId = const Value.absent(),
+                Value<String?> agentId = const Value.absent(),
+                Value<String> input = const Value.absent(),
+                Value<String> routingMode = const Value.absent(),
+                Value<int> createdAt = const Value.absent(),
+                Value<int> attempts = const Value.absent(),
+                Value<int> nextAttemptAt = const Value.absent(),
+                Value<String?> lastError = const Value.absent(),
+                Value<int> maxAttempts = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => OutboxEntriesCompanion(
+                id: id,
+                userId: userId,
+                groupId: groupId,
+                agentId: agentId,
+                input: input,
+                routingMode: routingMode,
+                createdAt: createdAt,
+                attempts: attempts,
+                nextAttemptAt: nextAttemptAt,
+                lastError: lastError,
+                maxAttempts: maxAttempts,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String userId,
+                Value<String?> groupId = const Value.absent(),
+                Value<String?> agentId = const Value.absent(),
+                required String input,
+                required String routingMode,
+                required int createdAt,
+                required int attempts,
+                required int nextAttemptAt,
+                Value<String?> lastError = const Value.absent(),
+                Value<int> maxAttempts = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => OutboxEntriesCompanion.insert(
+                id: id,
+                userId: userId,
+                groupId: groupId,
+                agentId: agentId,
+                input: input,
+                routingMode: routingMode,
+                createdAt: createdAt,
+                attempts: attempts,
+                nextAttemptAt: nextAttemptAt,
+                lastError: lastError,
+                maxAttempts: maxAttempts,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$OutboxEntriesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $OutboxEntriesTable,
+      OutboxRow,
+      $$OutboxEntriesTableFilterComposer,
+      $$OutboxEntriesTableOrderingComposer,
+      $$OutboxEntriesTableAnnotationComposer,
+      $$OutboxEntriesTableCreateCompanionBuilder,
+      $$OutboxEntriesTableUpdateCompanionBuilder,
+      (
+        OutboxRow,
+        BaseReferences<_$AppDatabase, $OutboxEntriesTable, OutboxRow>,
+      ),
+      OutboxRow,
+      PrefetchHooks Function()
+    >;
 typedef $$PreferencesTableCreateCompanionBuilder =
     PreferencesCompanion Function({
       required String key,
@@ -2896,6 +3905,8 @@ class $AppDatabaseManager {
       $$CachedGroupsTableTableManager(_db, _db.cachedGroups);
   $$CachedEventsTableTableManager get cachedEvents =>
       $$CachedEventsTableTableManager(_db, _db.cachedEvents);
+  $$OutboxEntriesTableTableManager get outboxEntries =>
+      $$OutboxEntriesTableTableManager(_db, _db.outboxEntries);
   $$PreferencesTableTableManager get preferences =>
       $$PreferencesTableTableManager(_db, _db.preferences);
 }

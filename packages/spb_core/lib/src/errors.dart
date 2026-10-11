@@ -117,3 +117,40 @@ final class PlatformError extends SpbError {
 final class ValidationError extends SpbError {
   const ValidationError(super.message, {super.cause, super.stackTrace});
 }
+
+/// 消息已**排队待发送**，尚未投递（issue #26 切片 C / issue #30）。
+///
+/// ## 为什么它是一个「错误」（而不是一个成功结果）
+///
+/// 它从 `ChatStreamController.send` 抛出，而调用方的默认处置是「提示发送
+/// 失败」。但**语义上它不是失败**——用户打好的字没丢，联网后会自动发出去。
+///
+/// 若不给它一个独立类型，UI 只能说「发送失败：网络错误」，用户会以为消息
+/// 丢了、然后重打一遍（结果发两条）。有了独立类型，UI 可以准确地说「已排队，
+/// 联网后自动发送」。
+///
+/// ## 为什么必须是 [SpbError] 的子类（以及为什么放在本文件）
+///
+/// 控制器的 `send` 只能抛 `SpbError`（catch 分支绑在这个类型上）；而
+/// `SpbError` 是 **sealed** 的，子类必须与它同库。
+///
+/// ## 为什么名字不提「队列」（queued 就够了）
+///
+/// `spb_core` 是分层最底的基础设施，**不应该知道「离线队列」这个上层机制**。
+/// 它只知道「这条消息进入了待发送状态」这个事实。将来若换掉队列实现
+/// （例如改由服务端排队），本类型仍然成立。
+final class MessageQueuedError extends SpbError {
+  const MessageQueuedError(super.message, {super.cause, super.stackTrace});
+}
+
+/// 消息投递**最终失败**（重试用尽，或遇终态错误），确实没送出去。
+///
+/// 与 [MessageQueuedError] 相反：这次不会自动重试（重试用尽时用户可手动重试）。
+/// UI 应明确提示失败并保留用户输入。
+final class MessageDeliveryFailedError extends SpbError {
+  const MessageDeliveryFailedError(
+    super.message, {
+    super.cause,
+    super.stackTrace,
+  });
+}

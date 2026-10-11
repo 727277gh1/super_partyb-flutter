@@ -1897,6 +1897,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       staleTurnIds: controller.staleTurnIds,
       staleTurnIdsSnapshot: _staleTurnIds,
+      // 离线写队列（issue #30）：断网时用户发的消息进「待发送」条而不是
+      // 时间线——入队时还没有 turnId，而归约器按 turnId 去重，无 turnId 的
+      // 本地项会在服务端 `user_message` 到达后渲染成两个气泡。
+      //
+      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      outboxEntries: ref.watch(outboxQueueProvider).entries,
+      outboxSnapshot: ref.watch(outboxQueueProvider).snapshot,
+      onCancelOutbox: (id) => ref.read(outboxQueueProvider).cancel(id),
+      onRetryOutbox: (id) => ref.read(outboxQueueProvider).retryNow(id),
+      onRemoveOutbox: (id) => ref.read(outboxQueueProvider).remove(id),
       // 向上翻页：加载更早历史。
       //
       // 直接委托给控制器：游标（缓冲区最小 globalSeq）与去重都是**领域状态**，

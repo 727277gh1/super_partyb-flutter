@@ -11,6 +11,7 @@ import 'event_reducer.dart';
 import 'execution_status.dart';
 import 'gate_decision.dart';
 import 'goal_update.dart';
+import 'outbox.dart';
 import 'timeline_cache.dart';
 import 'tts_status.dart';
 import 'turn_activity.dart';
@@ -34,6 +35,7 @@ class ChatStreamController {
     required this.userId,
     Duration? turnTimeoutOverride,
     TimelineCacheStore? timelineCache,
+    OutboxQueue? outbox,
   }) : assert(
          userId != '',
          // WHY 断言而非静默容忍：空 userId 会拼出 `/users//chat/stream` 这种
@@ -46,6 +48,7 @@ class ChatStreamController {
        _sse = sse,
        _api = api,
        _timelineCache = timelineCache,
+       _outbox = outbox,
        _turnTimeoutOverride = turnTimeoutOverride,
        _turnTimeout = turnTimeoutOverride;
 
@@ -67,6 +70,19 @@ class ChatStreamController {
   ///    否则缓存的上界与 timeline 的下界之间若有一段缺口（断网期间服务端新增
   ///    了事件），拼出来的历史会让用户以为是连续的。
   final TimelineCacheStore? _timelineCache;
+
+  /// 离线写队列（issue #26 切片 C / issue #30）。
+  ///
+  /// ## 方向是单向的
+  ///
+  /// 控制器**依赖**队列（[send] 遇可重试错误时入队）；队列**不**依赖控制器
+  /// ——投递成功只推自己的 `delivered` 流，本控制器订阅它。故无循环依赖。
+  ///
+  /// 为 null 时不排队：可重试错误照旧上抛（修复前的行为），页面单测不必造库。
+  final OutboxQueue? _outbox;
+
+  StreamSubscription<OutboxDelivered>? _outboxDeliveredSub;
+  StreamSubscription<OutboxFailure>? _outboxFailureSub;
 
   /// 当前聚焦的 group。null 表示接收全部 group 的事件。
   String? _groupId;
@@ -550,7 +566,17 @@ class ChatStreamController {
     _frameSub ??= _sse.frames.listen(_onFrame, onError: _onStreamError);
     _stateSub ??= _sse.states.listen((s) {
       if (!_stateController.isClosed) _stateController.add(s);
+      // 网络恢复的**最强信号**：SSE 真的连上了。让离线队列立刻重试
+      // （设计文档 §7bis.7）。比轮询准确，也比「有默认路由」更接近
+      // 「服务端可达」这个真正关心的条件。
+      if (s == SseState.connected) {
+        unawaited(_outbox?.onConnectivityRestored() ?? Future<void>.value());
+      }
     });
+
+    // 离线队列只在首次 start 时接上（`??=` 的同一取向：重复 start 不应
+    // 产生重复订阅）。
+    if (_outboxDeliveredSub == null) _bindOutbox();
 
     await _sse.connect(path: '/users/$userId/chat/stream');
   }
@@ -1059,6 +1085,18 @@ class ChatStreamController {
   ///
   /// [groupId] 省略即「无归属入口」——服务端跑分类链判定归属，
   /// 响应里的 groupId 是判定结果。
+  ///
+  /// ## 离线时自动入队（issue #26 切片 C / issue #30）
+  ///
+  /// 若注入了 [OutboxQueue] 且失败是**可重试**的（断网 / 5xx / 429），
+  /// 则消息进队列而不是上抛异常——用户打好的字不会丢。终态错误（400 等）
+  /// 照旧上抛：重试无用，入队只会让用户在「待发送」里看到一条永远发不出去的
+  /// 消息。
+  ///
+  /// ⚠️ **入队时不注入乐观回显**（设计文档 §7bis.6）：入队的条目还没有
+  /// `turnId`，而归约器**按 turnId 去重**——无 turnId 的本地项在服务端
+  /// `user_message` 到达后会渲染成两个气泡。故离线消息进「待发送」条，不进
+  /// 时间线；投递成功后才用**服务端返回的 turnId** 注入回显。
   Future<SendMessageResult> send({
     required String input,
     String? groupId,
@@ -1066,26 +1104,89 @@ class ChatStreamController {
     String routingMode = 'auto',
     String? requestId,
   }) async {
-    final result = await _api.sendMessage(
-      userId,
-      input: input,
-      groupId: groupId ?? _groupId,
-      agentId: agentId,
-      routingMode: routingMode,
-      requestId: requestId,
-    );
+    final resolvedGroupId = groupId ?? _groupId;
+    try {
+      final result = await _api.sendMessage(
+        userId,
+        input: input,
+        groupId: resolvedGroupId,
+        agentId: agentId,
+        routingMode: routingMode,
+        requestId: requestId,
+      );
+      _injectEcho(result, input);
+      return result;
+    } on SpbError catch (e) {
+      final outbox = _outbox;
+      if (outbox == null || !OutboxRetryPolicy.isRetryable(e)) rethrow;
 
-    // 乐观回显：立刻把用户消息放进列表，不等服务端事件回来。
-    //
-    // 构造细节集中在 injectLocalUserMessage（与 quick capture 路径共用），
-    // 那里解释了「为什么事件类型必须是 user_message」「为什么 transient 必须为 true」。
+      final outcome = await outbox.submit(
+        userId: userId,
+        input: input,
+        groupId: resolvedGroupId,
+        agentId: agentId,
+        routingMode: routingMode,
+      );
+      switch (outcome) {
+        case OutboxSubmittedNow(:final result):
+          // 队列自己重试成功了（例如第一次失败只是偶发）。
+          _injectEcho(result, input);
+          return result;
+        case OutboxQueuedOffline():
+          // 已入队。调用方需要知道「没发出去」——用一条携带原始错误的信息
+          // 让页面提示「已排队，联网后自动发送」而不是「发送失败」。
+          throw MessageQueuedError(e.message, cause: e);
+        case OutboxEnqueueFailed(:final error):
+          // 存储也挂了 → 降级为旧行为（发送失败）。
+          throw error;
+      }
+    }
+  }
+
+  /// 注入乐观回显（构造细节集中在 [injectLocalUserMessage]，那里解释了
+  /// 「为什么事件类型必须是 user_message」「为什么 transient 必须为 true」）。
+  void _injectEcho(SendMessageResult result, String input) {
     injectLocalUserMessage(
       input: input,
       groupId: result.groupId,
       turnId: result.turnId,
     );
+  }
 
-    return result;
+  /// 把离线队列接上：订阅投递成功 / 终态失败。
+  ///
+  /// ## 为什么由控制器订阅而不是队列反向回调控制器
+  ///
+  /// 方向保持单向（控制器 → 队列）。否则队列要持有控制器引用，而控制器的
+  /// 生命周期是 `autoDispose.family`（离开对话页即释放）——队列会被迫感知
+  /// 「当前哪个页面在看」，两者耦合。
+  void _bindOutbox() {
+    final outbox = _outbox;
+    if (outbox == null) return;
+    _outboxDeliveredSub = outbox.delivered.listen((d) {
+      if (_disposed) return;
+      // 投递成功：用**服务端返回的 turnId** 注入回显。此时 turnId 是真的，
+      // 服务端随后的 `user_message` 会原位合并，不会出现两个气泡。
+      //
+      // ⚠️ 只在「这条消息属于当前打开的对话」时注入：队列是全局的，用户可能
+      // 在 A 对话里发了一条，投递成功时已经切到 B 对话。
+      final target = d.result.groupId;
+      if (_groupId != null && target != _groupId) return;
+      _injectEcho(d.result, d.entry.input);
+    });
+    _outboxFailureSub = outbox.failures.listen((f) {
+      if (_disposed) return;
+      if (!_errorController.isClosed) {
+        _errorController.add(
+          MessageDeliveryFailedError(
+            f.exhausted
+                ? '离线消息重试多次仍失败：${f.error.message}'
+                : '离线消息发送失败：${f.error.message}',
+            cause: f.error,
+          ),
+        );
+      }
+    });
   }
 
   /// 重连（用户手动点「重试」时调用）。
@@ -1118,6 +1219,8 @@ class ChatStreamController {
     _staleTimers.clear();
     await _frameSub?.cancel();
     await _stateSub?.cancel();
+    await _outboxDeliveredSub?.cancel();
+    await _outboxFailureSub?.cancel();
     await _itemsController.close();
     await _gateDecisionsController.close();
     await _activitiesController.close();
