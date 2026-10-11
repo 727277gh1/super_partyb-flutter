@@ -1943,6 +1943,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onPreviewAgentFile: AgentFilePreviewCallbacks(
         loadBytes: _loadAgentFileBytes,
         openExternal: _openAgentFileExternal,
+        // map spec 的地点行：跳高德。移动端本就是「跳出去打开」的语义，
+        // 故这里与 `openExternal` 用同一个 `url_launcher` 入口。
+        openMapMarker: _openMapMarker,
       ),
       // ⚠️ **有意不装配**打开/定位回调（issue #6）：
       //
@@ -2098,6 +2101,20 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final res = await ref.read(ufsApiProvider).download(fileId);
     if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return null;
     return res.bytes;
+  }
+
+  /// 在高德地图打开一个地点（map spec 的地点行，issue #12）。
+  ///
+  /// URL 拼接留在装配层（页面不掌握高德 URI 形状）；与
+  /// `_openAgentFileExternal` 共用 `url_launcher`，只是目标域名不同。
+  Future<bool> _openMapMarker(MapMarker marker) async {
+    final url = Uri.parse(amapMarkerUrl(marker));
+    try {
+      return await launchUrl(url, mode: LaunchMode.externalApplication);
+    } on Object catch (e) {
+      SpbLog.warn('打开高德地图失败', {'error': '$e'});
+      return false;
+    }
   }
 
   /// 在系统浏览器中打开 UFS 预览页（external 类）。

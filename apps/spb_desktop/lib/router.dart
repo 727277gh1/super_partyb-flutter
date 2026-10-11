@@ -1331,6 +1331,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onPreviewAgentFile: AgentFilePreviewCallbacks(
         loadBytes: _loadAgentFileBytes,
         openExternal: _openAgentFileExternal,
+        // map spec 的地点行：跳高德（`uri.amap.com`，第三方链接）。
+        // 与 `openExternal` 分开：后者拼的是**本服务**的 UFS 预览页，
+        // 前者是外部地图服务（见 `OpenMapMarker` 的文档）。
+        openMapMarker: _openMapMarker,
       ),
       // 打开 Markdown 回复里的链接。
       //
@@ -2124,6 +2128,28 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       return true;
     } on Object catch (e) {
       SpbLog.warn('打开 UFS 预览页失败', {'error': '$e'});
+      return false;
+    }
+  }
+
+  /// 在系统浏览器中打开高德地图的 marker 链接（map spec 地点行）。
+  ///
+  /// ## 为什么走 `openInBrowser` 而不引入 `url_launcher`
+  ///
+  /// 桌面端的 `openInBrowser` 已经三平台分派（`spb_platform` 的
+  /// `spawnSystemOpen`），与 OIDC 登录、Markdown 链接、UFS 预览页共用同一条
+  /// 路径。为这一个场景再引一个插件会多一份平台实现与一份依赖。
+  ///
+  /// ## URL 拼接为什么在这里
+  ///
+  /// 同 `_openAgentFileExternal`：页面只收集「用户点了这个地点」这个意图，
+  /// 它不该知道高德的 URI 形状（`uri.amap.com/marker?position=…`）。
+  Future<bool> _openMapMarker(MapMarker marker) async {
+    try {
+      await openInBrowser(amapMarkerUrl(marker));
+      return true;
+    } on Object catch (e) {
+      SpbLog.warn('打开高德地图失败', {'error': '$e'});
       return false;
     }
   }
