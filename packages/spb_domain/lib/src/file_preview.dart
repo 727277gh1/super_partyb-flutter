@@ -13,11 +13,14 @@
 /// | `image` | ✅ 已实现 |
 /// | `external`（跳 UFS 预览页） | ✅ 已实现 |
 /// | `spec`（`{root, elements}` 结构化表单） | ✅ 已实现（内容层判定，见 [resolveTextPreview]） |
-/// | `dashboard` / `map` | ❌ 未实现（issue #12 决策点，见下） |
+/// | `map`（`{type:"map", markers, routes}`） | ✅ 已实现（见 [MapTextPreview] / `MapSpecCard`） |
+/// | `dashboard`（网格格式） | ❌ 未实现（issue #12 剩余项，见下） |
 ///
-/// `spec` 与另两类**不是一个决策**：客户端已有 `SpecUiCard` + [parseSpecUi]，
-/// 缺的只是「从任意 JSON 里把 schema 提取出来」，故由
-/// [extractSpecSchemaFromUnknown] 补上，**不需要**引入新的渲染器。
+/// `spec` / `map` 与 `dashboard`（网格格式）**不是一个决策**：客户端已有
+/// `SpecUiCard` + [parseSpecUi]，缺的只是「从任意 JSON 里把 schema 提取出来」，
+/// 故由 [extractSpecSchemaFromUnknown] 补上；`map` 的渲染器由
+/// [parseMapSchema] / `MapProjection`（纯 Dart）与 `MapSpecCard`（绘制）承载。
+/// 两者**都不需要**引入新渲染器/新依赖。
 ///
 /// ## ⚠️ `dashboard` / `map` 的真实成本（2026-10 核实，修正早期判断）
 ///
@@ -27,8 +30,9 @@
 /// - **`map`**：webapp `MapSchemaRenderer.tsx` 自称「一期轻量实现：SVG 归一化
 ///   轨迹图（**无底图、无高德 JS key 依赖**）」，实现只有 ~25 行投影数学
 ///   （经纬度 → SVG 坐标，等比缩放 + 居中）＋ marker 列表 ＋「在高德地图打开」
-///   外链。**没有地图 SDK，没有瓦片，没有密钥。** Flutter 侧用 `CustomPaint`
-///   或 `Transform` + `Positioned` 即可，**不需要任何新依赖**。
+///   外链。**没有地图 SDK，没有瓦片，没有密钥。** ✅ 已按此落地：见
+///   [parseMapSchema] / [MapProjection]（纯 Dart，可无图形环境测）与
+///   `spb_features` 的 `MapSpecCard`（`CustomPaint`）。
 /// - **`dashboard`**：webapp 有**两个不同**的渲染器，别混为一谈——
 ///   ① `DashboardRenderer.tsx`（`{type:"dashboard", components:[{type,layout}]}`
 ///   网格布局）只认 **3 个**组件类型（`stat-cards` / `table` / `chart`，共 364 行）；
@@ -37,7 +41,7 @@
 ///   `apps/miniapp/src/lib/spec-demo-fixtures.ts` 的 `realDashboardDoc`，注释自称
 ///   「bcc 工作区实际产出的 dashboard.spec.json 回归基准」，里面是
 ///   `Stack`/`Grid`/`Metric`/`Chart`/`Alert`/`Table` 的 `root`/`elements` 结构）——
-///   **不是** ①的网格格式。
+///   **不是** ①的网格格式。网格格式**无已知生产者**，故不做。
 ///
 /// ## 由此暴露的真实缺陷（issue #27，**已修**）
 ///
@@ -62,7 +66,24 @@ library;
 
 import 'dart:convert';
 
+import 'map_schema.dart';
 import 'spec_ui.dart';
+
+/// 尝试把整段文本解析成 JSON（失败返回 null）。
+///
+/// **只解析顶层**，不做「从字符串里抠 JSON」的猜测（那是
+/// [extractSpecSchemaFromUnknown] 的职责，用于**嵌套** schema）。
+/// map spec 是顶层格式，故这里只认「整段就是一份 JSON」。
+Object? _tryDecodeJson(String content) {
+  final trimmed = content.trim();
+  // 快速排除：非 `{`/`[` 开头的不可能是 JSON 对象/数组（省一次异常）。
+  if (trimmed.isEmpty || (trimmed[0] != '{' && trimmed[0] != '[')) return null;
+  try {
+    return jsonDecode(trimmed);
+  } on Object {
+    return null;
+  }
+}
 
 /// 预览形态。三态即本轮全部能力（见库文档的六类对照表）。
 enum FilePreviewKind {
@@ -342,23 +363,50 @@ final class SpecTextPreview extends TextPreviewPayload {
   final SpecUiDocument doc;
 }
 
-/// 内容层判定：把解码后的文本分成「spec 文档」或「原文」。
+/// map spec 呈现（交给 `MapSpecCard`，issue #12 的 `map` 项）。
 ///
-/// 对齐 webapp `file-preview.ts` 的 `resolveTextPreview`（**去掉** dashboard / map
-/// 两类——它们归 issue #12 的待决策点，见库文档）。
+/// 与 [SpecTextPreview] 并列而非「塞进 spec」：map 是**顶层 `type: "map"` +
+/// `markers`/`routes`** 的独立格式（见 [MapSchema]），与 `{root, elements}`
+/// 树形 UI 不兼容。webapp 也是两个并列分支（`MapSchemaRenderer` /
+/// `JsonUiSchemaRenderer`）。
+final class MapTextPreview extends TextPreviewPayload {
+  const MapTextPreview(this.schema);
+
+  /// 已解析的文档。构造时保证 [MapSchema.isRenderable]（见 [resolveTextPreview]）。
+  final MapSchema schema;
+}
+
+/// 内容层判定：把解码后的文本分成「map 文档」「spec 文档」或「原文」。
+///
+/// 对齐 webapp `file-preview.ts` 的 `resolveTextPreview`（含 map 分支；
+/// dashboard 仍不做——网格格式无已知生产者，见库文档）。
+///
+/// ## 判定顺序（与 webapp 一致：map → spec）
+///
+/// map 先判：它的特征最明确（顶层 `type: "map"` + 坐标），且
+/// [parseMapSchema] **只认顶层**、不做深度下探（见其文档）。反过来的话，
+/// 一份含 `{type:'map'}` 字段的 spec 会被 [extractSpecSchemaFromUnknown]
+/// 的深度扫描先抢走。
 ///
 /// ## 识别失败必须退回原文
 ///
-/// ⚠️ 这是本函数的**硬约束**：spec 解析失败绝不能变成空白对话框。
+/// ⚠️ 这是本函数的**硬约束**：解析失败绝不能变成空白对话框。
 /// `SpecUiCard` 在 `doc` 为 null 或 `root` 悬空时渲染 `SizedBox.shrink()`，
 /// 用户看到的是空对话框——比原文差得多。故这里只在 `root` 确实存在时返回
-/// [SpecTextPreview]（[extractSpecSchemaFromUnknown] 已校验），否则一律
-/// [PlainTextPreview]。
+/// [SpecTextPreview]（[extractSpecSchemaFromUnknown] 已校验），map 只在
+/// [MapSchema.isRenderable] 时返回 [MapTextPreview]。
 ///
 /// ## 为什么识别失败不退 `external`
 ///
 /// 那会让 JSON 文件从「能看原文」退化成「跳 UFS 预览页」——比识别不出来更差。
 TextPreviewPayload resolveTextPreview(String content) {
+  // 顶层 JSON 解析失败 → 原文（map 是顶层格式，必须先有可解析的 JSON）。
+  final decoded = _tryDecodeJson(content);
+  if (decoded != null) {
+    final map = parseMapSchema(decoded);
+    if (map != null && map.isRenderable) return MapTextPreview(map);
+  }
+
   final schema = extractSpecSchemaFromUnknown(content);
   if (schema != null) {
     final doc = parseSpecUi(schema);

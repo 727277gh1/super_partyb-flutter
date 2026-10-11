@@ -51,8 +51,11 @@ library;
 //   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
 //   resolvePreviewKind / FilePreviewKind —— 文件预览类型判定（text/image/external，纯逻辑）
-//   resolveTextPreview / TextPreviewPayload —— 内容层判定（spec 文档 or 原文，纯逻辑）
+//   resolveTextPreview / TextPreviewPayload —— 内容层判定（map / spec 文档 or 原文，纯逻辑）
 //   extractSpecSchemaFromUnknown          —— 从任意 JSON 深度下探提取 spec schema
+//   MapSchema / parseMapSchema            —— map spec（*.map.spec.json）解析（顶层 type=map + markers/routes）
+//   MapProjection                         —— 经纬度 → 视口像素的等比投影（纯数学，可无头单测）
+//   MapMarker / MapRoute / amapMarkerUrl  —— map spec 的元素类型与高德跳转 URI
 //   buildTextPreview / TextPreview     —— 文本预览裁剪（大文件截断 + 明确提示）
 //   groupFileEventsForDisplay / FILE_BATCH_MIN_COUNT —— 时间线 → 展示行（同 turn 同秒批量聚合，纯逻辑）
 //   TimelineDisplayRow / SingleItemRow / AgentFileBatchRow —— 展示行 sealed 家族（不改归约结果）
@@ -74,6 +77,7 @@ export 'src/gate_decision.dart';
 export 'src/goal_update.dart';
 export 'src/group_cache.dart';
 export 'src/local_deliverable_path.dart';
+export 'src/map_schema.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
 export 'src/spec_ui.dart';
