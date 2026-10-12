@@ -58,6 +58,7 @@ bash tools/check_workflow_steps.sh    # workflow 的 step 没被注释吞掉（�
 bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_options（见 issue #34）
 bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39）
 bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
+bash tools/check_agents_refs.sh       # AGENTS.md 引用的 Dart 标识符真实存在（见 issue #37）
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
@@ -126,6 +127,7 @@ super_partyb-flutter/
     ├── check_analysis_options.sh # 静态分析配置接线检查
     ├── check_wiring_parity.sh  # 两端装配层接线一致性检查
     ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
+    ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
     └── bundle_linux_deps.sh  # Linux 分发包依赖打包
 ```
 
@@ -857,15 +859,6 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 > （关键词搜索）与四项语义/演化面板**都**依赖这些表，故目前均无结果——需在
 > `super_partyb` 侧单独排查（本仓库代码不受影响）。
 
-> ⚠️ **与 #12 无关的一个生产异常（另行跟踪）**：2026-10-11 实测 bcc
-> `/opt/super_partyb/data/dev.db` 的 `chat_turns` / `chat_groups` / `chat_events` /
-> `chat_confirmations` **全为 0**，而 2026-09-27 的备份里 `chat_turns` 有 **3559** 行。
-> 该库 2026-10-10 22:54 被一份**备份覆盖**过（`dev.db.bak-before-del-baixiaosheng-
-> 20261010T225140Z.db`，两者 md5 不同），而「删除百晓生」的迁移 0040 已在库中
-> 记录为已执行。故当前库是一份**缺 chat_* 数据的状态**，而 `topics`（2669）/
-> `user_memories`（2290）/ `embeddings`（4807）仍在——需在 `super_partyb` 侧
-> 单独排查（本仓库不受影响，但会影响「关键词搜索有无结果」的观察）。
-
 ### 6.10 两端 UI 面板族的不对称（**有意保留的差异**）
 
 同一个「查看这次对话的产出」诉求，两端的载体不同：
@@ -1168,8 +1161,10 @@ webapp 在 `errorType === 'session_expired'` 时先逐个 `restoreChatSession` �
 | 对话内搜索 | **本地已加载的时间线** | 「这段对话里 agent 说的那句在哪」 |
 
 ⚠️ **本地搜索有边界，必须告知用户**：只搜**已加载**的（分页加载的历史不在内）。
-故面板顶部在 `hasMore` 为真时显示「仅搜索已加载部分，上方还有更早历史」——
-不告知会让用户把「没搜到」误读成「不存在」。
+故面板顶部在 `upperHistoryUnloaded` 为真时显示「仅搜索已加载部分，上方还有更早历史」
+——不告知会让用户把「没搜到」误读成「不存在」。
+（⚠️ 参数名是 `upperHistoryUnloaded`，**不是** `hasMore`：后者是 controller 里
+「是否还有更早历史」的字段，语义不同——见 `ConversationSearchResult` 文档。）
 
 #### 分层归属
 
@@ -1190,7 +1185,8 @@ webapp 在 `errorType === 'session_expired'` 时先逐个 `restoreChatSession` �
    命中项要 `Navigator.pop` 关闭它**再**滚动——在弹层还开着时滚动，用户看不到
    效果，会以为「点了没反应」。
 4. **摘要要截断且居中命中处**。一条几千字的回复若从头截，命中词可能落在第 3000
-   字（摘要里看不到）。`_summarize` 以命中位置为中心取窗口，两端都加省略号。
+   字（摘要里看不到）。`searchConversationItems` 内部以命中位置为中心取窗口
+   （产出 `ConversationSearchHit.snippet`），两端都加省略号。
 
 #### 有意不做
 
@@ -1345,7 +1341,55 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 `RowLocateRegistry` 与 `locateIdsOf` 都是纯函数/纯逻辑，故可在无 widget 环境逐条
 断言（`row_locate_registry_test.dart` 12 条、`agent_file_batch_test.dart` 新增 5 条）。
 
----
+### 6.19 AGENTS.md 标识符引用守卫（issue #37）
+
+`tools/check_agents_refs.sh`。本文档是本仓库**主要协作接口**（AI agent 与人的
+共同参考），它引用的函数/字段若不存在，读者会去找一个不存在的东西。
+
+#### 真实漂移先例（不是假想）
+
+| 位置 | 曾引用 | 实际是 |
+|---|---|---|
+| §6.15 | `_summarize` | `searchConversationItems` 内联截取（产出 `snippet`） |
+| §6.15 | `hasMore` | 参数名 `upperHistoryUnloaded` |
+| 移动端 router 注释 | `_narrowActions` | 已改名为 `_appBarActions` |
+
+改代码时重命名一个函数，不会有人记得回头改 AGENTS.md——除非有机器检查。
+
+#### 只查三类（**零误报是硬指标**）
+
+全文 backtick 标识符有 300+ 个，其中大量**合法地**不存在于 `lib/`：服务端 Go
+符号（`ReplyProjector`）、webapp 组件名（`SkillPanel`）、环境变量
+（`ANDROID_HOME`）、SQL 列名（`chat_decisions`）、C++ 符号（`fl_view_new`）……
+无差别地查会淹没在误报里，没人会看。
+
+故只查下面三类，实测在本仓库当前基线**逐类零误报**（规则以正则写在
+`tools/check_agents_refs.sh` 里）：
+
+| 规则 | 理由 | 实测 |
+|---|---|---|
+| 下划线开头的标识符 | 只可能来自本仓库 Dart（Go 导出符号首字母大写、React 组件 PascalCase） | 20 候选 / 0 误报 |
+| snake_case 函数调用 | 同上 | 4 候选 / 0 误报 |
+| `.dart` 文件名 | 只可能来自本仓库文件 | 22 候选 / 0 误报 |
+
+扫描范围含 `lib/` 与 `test/`（文档会引用测试辅助/用例里的符号）。
+
+#### 有意不查什么
+
+- **CamelCase 标识符**：203 个候选里 34 个是**合法**的外部符号（服务端 Go
+  方法、webapp 组件、宿主 API）——误报率 17%，不可用。
+- **全大写常量**：15 个候选里 12 个是环境变量（`ANDROID_HOME` / `PATH`）。
+- **本仓库确实没有的、需要引用的符号**：写进脚本的 `EXEMPT` 并注明来源。
+  当前为空。
+
+#### 与其他守卫的关系
+
+七个守卫各管一件事，**不要合并**：`check_layering`（分层）、
+`check_test_support_sync`（重复测试辅助逐字节相同）、`check_workflow_steps`
+（CI step 结构）、`check_analysis_options`（分析配置接线）、
+`check_wiring_parity`（两端接线）、`check_unused_deps`（零引用依赖）、
+`check_agents_refs`（本文档引用）。
+
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
@@ -1670,6 +1714,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
 | 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
 | 契约同步靠人工 | 可接受 | §6.2 |
+| ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
 
 ---
 

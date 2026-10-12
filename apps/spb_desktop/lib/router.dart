@@ -1258,19 +1258,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       activities: controller.activities,
       activitiesSnapshot: _activities,
       // 上下文用量（context_update）：贴时间线顶部的诊断读数。
-      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      // 与移动端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       contextUsage: controller.contextUsage,
       contextUsageSnapshot: _contextUsage,
       // 等待/重试提示（queue_state / retry_scheduled）：与活动指示共用槽位。
-      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      // 与移动端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       executionStatus: controller.executionStatus,
       executionStatusSnapshot: _executionStatus,
       // 语音播报状态（tts_*）：只做状态展示，不引入播放（AGENTS.md §11）。
-      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      // 与移动端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       ttsStatus: controller.ttsStatus,
       ttsStatusSnapshot: _ttsStatus,
       // 超时兜底（长时间无进展）：停掉流式光标 + 提示条，但**不禁用**取消。
-      // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      // 与移动端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       staleTurnIds: controller.staleTurnIds,
       staleTurnIdsSnapshot: _staleTurnIds,
       // 离线写队列（issue #30）：断网时用户发的消息进「待发送」条而不是

@@ -93,6 +93,11 @@ jobs:
       - name: Unused dependencies check
         run: bash tools/check_unused_deps.sh
 
+      # AGENTS.md 是本仓库主要协作接口；它引用的函数/字段若不存在（重命名后
+      # 忘了回头改文档），会让读者去找一个不存在的东西（issue #37）。
+      - name: AGENTS.md identifier references
+        run: bash tools/check_agents_refs.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 
