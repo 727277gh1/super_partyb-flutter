@@ -59,6 +59,7 @@ bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_option
 bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39）
 bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
 bash tools/check_agents_refs.sh       # AGENTS.md 引用的 Dart 标识符真实存在（见 issue #37）
+bash tools/check_format.sh            # dart format 门禁
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
@@ -130,6 +131,7 @@ super_partyb-flutter/
     ├── check_wiring_parity.sh  # 两端装配层接线一致性检查
     ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
     ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
+    ├── check_format.sh         # dart format 门禁
     └── bundle_linux_deps.sh  # Linux 分发包依赖打包
 ```
 
