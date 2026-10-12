@@ -118,12 +118,12 @@ xvfb-run -a timeout 15 ./build/linux/x64/release/bundle/spb_desktop
 
 | 包 | 用例数 | 包 | 用例数 |
 |---|---|---|---|
-| `spb_core` | 30 | `spb_ui` | 27 |
-| `spb_models` | 238 | `spb_platform` | 67 |
-| `spb_api` | 351 | `spb_features` | 1003 |
-| `spb_domain` | 724 | `spb_desktop` | 139 |
-| `spb_data` | 63 | `spb_mobile` | 91 |
-| `spb_design` | 24 | **合计** | **2757** |
+| `spb_core` | 31 | `spb_ui` | 40 |
+| `spb_models` | 433 | `spb_platform` | 67 |
+| `spb_api` | 355 | `spb_features` | 1081 |
+| `spb_domain` | 881 | `spb_desktop` | 142 |
+| `spb_data` | 130 | `spb_mobile` | 102 |
+| `spb_design` | 24 | **合计** | **3286** |
 
 > 合计与逐包数字**必须一起更新**——本文件曾出现「正文说 199 个测试」而实际
 > 已 2600+ 的漂移（issue #4 正文）。改任一处时请顺手核一遍总和。

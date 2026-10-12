@@ -133,9 +133,13 @@ run_dart_pkg() {
     # `--report-on` 用**绝对路径**：format_coverage 把 SF: 写成相对于该路径的
     # 形式，用相对路径会因工作目录不同而产生 `packages/spb_domain/lib/...`
     # 与 `lib/...` 两种前缀，合并时同一文件会被算两次。
+    #
+    # `--check-ignore` 让 `// coverage:ignore-line` / `ignore-start/end` 生效。
+    # ⚠️ 纯 Dart 路径**必须显式加**（`flutter test --coverage` 默认就认，见
+    # `database.dart` 的表类标记），否则标记被静默忽略、数字偏高（issue #38）。
     dart run coverage:format_coverage \
       --lcov --in=coverage --out=coverage/lcov.info \
-      --report-on="$PWD/lib" >/dev/null
+      --report-on="$PWD/lib" --check-ignore >/dev/null
   )
   SEGMENTS+=("packages/$pkg/coverage/lcov.info")
 }

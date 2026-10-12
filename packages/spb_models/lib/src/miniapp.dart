@@ -843,7 +843,9 @@ class MiniappNotificationSubscription {
 /// 这是服务端的现状，不是客户端的 bug——UI 如实展示即可，但文案不该
 /// 暗示「打开它就能收到某类通知」。
 class MiniappNotificationTemplates {
-  const MiniappNotificationTemplates._();
+  // 私有构造：纯常量命名空间（全部成员是 `static const String`），任何地方
+  // 都不会调用——结构上不可达，非「漏测」。
+  const MiniappNotificationTemplates._(); // coverage:ignore-line
 
   /// 三类事件共用的主 key（唯一有生产者）。
   static const notify = 'notify';

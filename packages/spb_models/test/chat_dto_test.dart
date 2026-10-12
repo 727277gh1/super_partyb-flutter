@@ -523,4 +523,168 @@ void main() {
       expect(h.raw['extra_field'], 1);
     });
   });
+
+  /// `toString()` 覆盖（issue #38 补）。
+  ///
+  /// ## 为什么值得单测
+  ///
+  /// 这些不是「为了凑覆盖率」的填充：`toString` 是**日志与调试输出**的唯一来源，
+  /// 而它们插值的是可空字段与集合长度——`$groupTitle`（可空）、
+  /// `input.length`（input 为 null 时会抛）、`${items.length}/$total` 等。
+  /// 一条 `toString` 抛异常会把「本来只想打一行日志」变成二次故障，且发生位置
+  /// 往往是错误处理路径（最不该再抛的地方）。
+  group('toString 诊断输出（不得抛）', () {
+    test('ChatSearchHit', () {
+      final hit = ChatSearchHit.fromJson(const {
+        'turn_id': 't1',
+        'group_id': 'g1',
+        'group_title': '标题',
+      });
+      expect(hit.toString(), contains('turn=t1'));
+      expect(hit.toString(), contains('group=g1'));
+
+      // group_title 缺失（null）时也不能抛。
+      final noTitle = ChatSearchHit.fromJson(const {
+        'turn_id': 't1',
+        'group_id': 'g1',
+      });
+      expect(() => noTitle.toString(), returnsNormally);
+    });
+
+    test('ChatInboxMessage', () {
+      final m = ChatInboxMessage.fromJson(const {
+        'id': 'm1',
+        'status': 'pending',
+        'group_id': 'g1',
+        'input': 'hello',
+      });
+      expect(m.toString(), contains('m1'));
+      expect(m.toString(), contains('5 chars'));
+
+      // input 缺失 → 空串，length 为 0（不抛）。
+      final empty = ChatInboxMessage.fromJson(const {'id': 'm2'});
+      expect(() => empty.toString(), returnsNormally);
+    });
+
+    test('UfsFileEntry / UfsFilePage', () {
+      final e = UfsFileEntry.fromJson(const {
+        'id': 'f1',
+        'path': 'a/b.md',
+        'size': 12,
+        'etag': 'e1',
+      });
+      expect(e.toString(), contains('f1'));
+      expect(e.toString(), contains('a/b.md'));
+
+      // isDeleted 为真时额外带 DELETED 标记（诊断用）。
+      final deleted = UfsFileEntry.fromJson(const {
+        'id': 'f1',
+        'path': 'a/b.md',
+        'size': 12,
+        'deleted_at': '2026-03-01T00:00:00Z',
+      });
+      expect(deleted.toString(), contains('DELETED'));
+
+      expect(
+        const UfsFilePage(items: [], total: 7).toString(),
+        contains('0/7'),
+      );
+    });
+
+    test('Agent / GroupSession / GroupAgentSwitchResult', () {
+      expect(
+        Agent.fromJson(const {'id': 'a1', 'name': '小助手'}).toString(),
+        contains('a1'),
+      );
+      expect(
+        GroupSession.fromJson(const {'id': 's1', 'agent_id': 'a1'}).toString(),
+        contains('s1'),
+      );
+      expect(
+        GroupAgentSwitchResult.fromJson(const {
+          'group_id': 'g1',
+          'new_agent_id': 'a2',
+        }).toString(),
+        contains('g1'),
+      );
+    });
+
+    test('Miniapp* 一族', () {
+      final progress = MiniappProgress.fromJson(const {
+        'completed': 3,
+        'total': 5,
+      });
+      expect(progress.toString(), contains('3/5'));
+
+      final work = MiniappWork.fromJson(const {
+        'id': 'w1',
+        'title': 'x',
+        'status': 'running',
+        'progress': {'completed': 1, 'total': 2},
+      });
+      expect(work.toString(), contains('w1'));
+
+      final step = MiniappStep.fromJson(const {'id': 'st1', 'status': 'done'});
+      expect(step.toString(), contains('st1'));
+
+      final artifact = MiniappArtifact.fromJson(const {
+        'id': 'ar1',
+        'name': 'report.md',
+        'type': 'file',
+      });
+      expect(artifact.toString(), contains('ar1'));
+
+      final confirmation = MiniappConfirmation.fromJson(const {
+        'id': 'c1',
+        'type': 'confirm',
+        'status': 'pending',
+      });
+      expect(confirmation.toString(), contains('c1'));
+
+      final detail = MiniappWorkDetail.fromJson(const {
+        'id': 'w1',
+        'status': 'running',
+      });
+      expect(detail.toString(), contains('w1'));
+
+      final eventItem = MiniappEventItem.fromJson(const {
+        'id': 'ev1',
+        'type': 'message',
+      });
+      expect(eventItem.toString(), contains('ev1'));
+
+      final workEvent = MiniappWorkEvent.fromJson(const {
+        'id': 'we1',
+        'event_type': 'message',
+      });
+      expect(workEvent.toString(), contains('we1'));
+
+      final dispatch = MiniappDispatchResult.fromJson(const {
+        'turn_id': 't1',
+        'status': 'queued',
+      });
+      expect(dispatch.toString(), contains('t1'));
+
+      final sub = MiniappNotificationSubscription.fromJson(const {
+        'template_key': 'k1',
+        'remaining_quota': 3,
+      });
+      expect(sub.toString(), contains('k1'));
+    });
+
+    test('PreferenceChannelOption / UserPreferences', () {
+      expect(
+        const PreferenceChannelOption(
+          value: 'dingtalk',
+          label: '钉钉',
+        ).toString(),
+        contains('dingtalk'),
+      );
+      final prefs = UserPreferences.fromJson(const {
+        'reply_language': 'zh',
+        'customized': true,
+      });
+      expect(() => prefs.toString(), returnsNormally);
+    });
+  });
 }

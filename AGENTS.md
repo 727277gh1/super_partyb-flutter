@@ -1047,31 +1047,45 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 `coverage:ignore-start/end` 由 `flutter test --coverage` 直接支持（实测：标记 240 行
 表定义后 `database.dart` 的 `LF` 从 90 → 43，未覆盖行从 48 → 2）。
 
+⚠️ **纯 Dart 包要显式传 `--check-ignore`**：`dart test --coverage` 的产物经
+`coverage:format_coverage` 转 lcov 时，`coverage:ignore-line` /
+`ignore-start/end` **默认被静默忽略**（`flutter test` 路径则默认认）。
+`tools/coverage.sh` 的 `run_dart_pkg` 已加上这个 flag——去掉它会让
+`spb_models` 的标记失效（`event_types.dart` 从 0/0 回到 0/1），而**不会报错**。
+
+同类的「纯常量命名空间」私有构造（`EventTypes._()` /
+`MiniappNotificationTemplates._()`）也是**结构上不可达**（库外不可见、库内无调用，
+只用于防止实例化），同样用 `// coverage:ignore-line` 标记。
+
 #### 当前基线（2026-10，本机实测，**已剔除生成代码**）
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_data` | **98.3%** | `spb_platform` | 52.5% |
+| `spb_data` | **98.3%** | `spb_platform` | 52.8% |
 | `spb_features` | **93.5%** | `spb_mobile` | 54.4% |
 | `spb_domain` | 88.3% | `spb_desktop` | 58.8% |
-| `spb_models` | 85.2% | `spb_api` | 72.3% |
+| `spb_models` | 88.0% | `spb_api` | 72.3% |
 | `spb_core` | 85.0% | `spb_ui` | 78.9% |
-| `spb_design` | 78.6% | **总计** | **83.4%**（≈15026/18015） |
+| `spb_design` | 78.6% | **总计** | **83.7%**（≈15072/18013） |
 
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
 行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
 不是回归。
 
-> **总计从 75.7% 涨到 83.4% 不全是新增测试的功劳**：
+> **总计从 75.7% 涨到 83.7% 不全是新增测试的功劳**：
 >
 > - 剔除生成代码（1591 行）抬升约 4.5 个百分点；
-> - `spb_models` 50.6% → 85.2%（issue #38 补了 `Agent` / `ChatTurn` /
+> - `spb_models` 50.6% → 88.0%（issue #38 补了 `Agent` / `ChatTurn` /
 >   `ChatTurnSummary` / `ChatConfirmation` / `ChatInboxMessage` / `ChatSearchHit` /
 >   `UfsFileEntry` / `Miniapp*` / `UserPreferences` 语义 getter / `Habit*` 的
->   round-trip 与容错用例）；
+>   round-trip 与容错用例，以及 `toString()` 诊断输出）；
 > - `spb_data` 43.8% → 98.3%（补了 v1–v4 **跳版升级**、`openAppDatabaseAt` /
 >   `openAppDatabaseLazy`、以及五条 `StorageError` 写失败路径）。
+>
+> issue #38 点名的 7 个「0% 文件」（`chat_search_hit` / `chat_confirmation` /
+> `chat_inbox_message` / `chat_turn` / `chat_turn_summary` / `ufs_file_entry` /
+> `agent`）现在**全部 100%**，`miniapp.dart` 7.3% → 99.6%。
 
 **剩余的低值**（`spb_platform` 52.5% / `spb_desktop` 58.8% / `spb_mobile` 54.4%）
 有明确的环境原因：它们大量是**平台通道与原生代码的 Dart 侧包装**（`MethodChannel`

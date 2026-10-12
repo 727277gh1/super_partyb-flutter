@@ -8,7 +8,10 @@
 /// 则天然容忍未知类型（走 [ChatEvent.isKnown] 判定后按通用方式渲染）。
 /// 这是**向前兼容**的刻意选择——移动端发布后无法强制用户升级。
 class EventTypes {
-  const EventTypes._();
+  // 私有构造：本类是**纯常量命名空间**（全部成员是 `static const String`），
+  // 只用于防止实例化，任何地方都不会调用。`// coverage:ignore-line` 是因为
+  // 它**结构上不可达**（库外不可见、库内无调用），不是「漏测」。
+  const EventTypes._(); // coverage:ignore-line
 
   // ---- 基础执行流 ----
   static const start = 'start';
