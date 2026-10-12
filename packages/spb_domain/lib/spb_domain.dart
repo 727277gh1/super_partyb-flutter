@@ -69,6 +69,7 @@ export 'src/chat_stream_controller.dart';
 export 'src/confirmation_notifier.dart';
 export 'src/notifications.dart';
 export 'src/conversation_item.dart';
+export 'src/conversation_search.dart';
 export 'src/deliverable_sync.dart';
 export 'src/deliverable_sync_usecase.dart';
 export 'src/deliverable_upload.dart';
