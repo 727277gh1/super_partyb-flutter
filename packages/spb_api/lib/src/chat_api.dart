@@ -292,21 +292,50 @@ class ChatApi {
   /// 常规对话请用 [sendMessage]（`/users/:uid/chat/messages`），它会跑完整
   /// 前置链（分类 → 路由 → 归属判定）。本方法用于「已知 group 且要绕过前置链」
   /// 的场景（如重试、脚本化操作）。
-  Future<ChatTurn> createTurn(
+  ///
+  /// ## ⚠️ 请求体字段与响应形状都与 [sendMessage] 不同
+  ///
+  /// 本端点绑定的是 Go 的 `CreateTurnRequest`（`internal/server/chat.go:476`）：
+  ///
+  /// ```go
+  /// type CreateTurnRequest struct {
+  ///     RequestID string `json:"requestId"`   // 注意是 camelCase，不是 request_id
+  ///     UserID    string `json:"userId"`      // 已弃用，不参与鉴权
+  ///     InputText string `json:"inputText"`   // ← 必填；发 `input` 会 400
+  ///     Source    string `json:"source"`
+  ///     Channel   string `json:"channel"`
+  ///     Metadata  string `json:"metadata"`
+  /// }
+  /// ```
+  ///
+  /// 响应是 `CreateTurnResponse{status, groupId, turnId}`（camelCase，**平铺**），
+  /// 不是 `ChatTurn`。历史上这里发的是 `{input, agent_id, request_id}` 并解析成
+  /// `ChatTurn` —— 字段名与形状**双双不符**，实际调用必然 400
+  /// （`InputText` 的 `binding:"required"` 失败）。本方法此前无生产调用者，
+  /// 故这个缺陷没有暴露出来（见 #11 的「未接端点族」收口）。
+  ///
+  /// `agent_id` **不是**本端点的参数：`CreateTurnRequest` 没有该字段，
+  /// 服务端按 group 的 active session 决定 agent。要指定 agent 请用
+  /// [switchGroupAgent] 或 [sendMessage] 的 `agentId`。
+  Future<CreateTurnResult> createTurn(
     String groupId, {
     required String input,
-    String? agentId,
     String? requestId,
+    String source = 'direct',
+    String? channel,
+    String? metadata,
   }) async {
     final res = await _post(
       '/chat/groups/$groupId/turns',
       body: {
-        'input': input,
-        if (agentId != null) 'agent_id': agentId,
-        if (requestId != null) 'request_id': requestId,
+        'inputText': input,
+        if (requestId != null) 'requestId': requestId,
+        'source': source,
+        if (channel != null) 'channel': channel,
+        if (metadata != null) 'metadata': metadata,
       },
     );
-    return ChatTurn.fromJson(_asMap(res));
+    return CreateTurnResult.fromJson(_asMap(res));
   }
 
   /// `GET /chat/groups/:group_id/turns`
@@ -1367,7 +1396,39 @@ String? _nonEmptyStr(Object? v) {
   return s.isEmpty ? null : s;
 }
 
-/// `POST /users/:user_id/chat/messages` 的响应。
+/// `POST /chat/groups/:group_id/turns` 的响应（Go 侧 `CreateTurnResponse`）。
+///
+/// ## 为什么不用 `ChatTurn`
+///
+/// 该端点返回的是 `{status, groupId, turnId}`（camelCase，**平铺**），
+/// 而 `ChatTurn` 需要 `id`/`group_id`/`user_id`/`input_text`/`created_at` 等
+/// snake_case 字段。用 `ChatTurn.fromJson` 解析它只会得到一堆空串（不报错），
+/// 调用方拿到的是个「看似存在实则全空」的对象——比直接 400 更难排查。
+///
+/// 需要完整 turn 时再调 [ChatApi.getTurn]。
+class CreateTurnResult {
+  const CreateTurnResult({
+    required this.turnId,
+    required this.groupId,
+    required this.status,
+  });
+
+  final String turnId;
+  final String groupId;
+
+  /// 固定为 `queued`（服务端 `c.JSON(201, ...{Status: "queued"})`）。
+  final String status;
+
+  factory CreateTurnResult.fromJson(Map<String, dynamic> json) =>
+      CreateTurnResult(
+        // 兼容 snake_case：服务端用 camelCase，但历史/网关改写可能出现下划线。
+        turnId: (json['turnId'] ?? json['turn_id'] ?? '').toString(),
+        groupId: (json['groupId'] ?? json['group_id'] ?? '').toString(),
+        status: (json['status'] ?? 'queued').toString(),
+      );
+}
+
+/// `POST /users/:user_id/chat/messages` 的响应（Go 侧 `SendMessageResponse`）。
 ///
 /// 服务端可能返回**新建 turn** 或**命中已有 turn**（同 request_id 幂等命中），
 /// 后者通过 [deduped] 标识。

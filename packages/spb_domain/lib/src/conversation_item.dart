@@ -37,9 +37,14 @@ final class UserMessageItem extends ConversationItem {
     required super.createdAt,
     required this.text,
     super.turnId,
+    this.agentId,
   });
 
   final String text;
+
+  /// 发出时选中的 agent（本地乐观回显才有；服务端 `user_message` 事件不带该
+  /// 字段，故权威帧合并后会丢失）。用途是「重发」时带上同一个 agent。
+  final String? agentId;
 }
 
 /// Agent 的回复段落。
@@ -124,6 +129,16 @@ final class ToolCallItem extends ConversationItem {
 }
 
 /// 错误项。
+///
+/// ## [isRecoverable] 决定是否展示「重发」按钮
+///
+/// `error` 事件是**回合终态**（`event_reducer.dart` 把它登记进
+/// `terminalTurnIds`）：服务端执行失败后本轮不会再产出任何内容。用户唯一的
+/// 出路是把这段输入再投一次。
+///
+/// 但并非所有错误都值得重发——参数非法 / 权限不足 / 额度耗尽重发也是同样结果。
+/// 归约层无法区分（`error` 的 payload 只有 `message`/`error`），故默认 true，
+/// 由**调用方**按需置 false。
 final class ErrorItem extends ConversationItem {
   const ErrorItem({
     required super.id,

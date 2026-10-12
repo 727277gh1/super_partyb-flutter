@@ -57,6 +57,7 @@ class ConversationPage extends StatefulWidget {
     this.onSpecAction,
     this.onSelectAgent,
     this.onSend,
+    this.onRetryTurn,
     this.onFlush,
     this.onFlushWithStrategy,
     this.onCancelTurn,
@@ -177,6 +178,29 @@ class ConversationPage extends StatefulWidget {
   /// 之所以可覆盖：悬浮窗等入口走 `QuickCaptureUseCase`（无归属），
   /// 而本页是「已知 group」的常规发送。
   final Future<void> Function(String text)? onSend;
+
+  /// 重发一个**已失败**的 turn（用原输入重新投递一轮）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `error` 事件是回合终态（服务端不会再产出任何内容），用户唯一的出路是
+  /// 把那段输入再发一次。没有这个入口，用户只能手动重打一遍——而重打的输入
+  /// 会变成一个**新 turn**，与失败那轮并列显示，历史里留下两条几乎一样的用户
+  /// 消息（webapp 的 `handleRetryTurn` 正是为此存在）。
+  ///
+  /// ## 为什么不复用 `onSend`
+  ///
+  /// `onSend` 的语义是「发一条**新**消息」：它走 `/users/:uid/chat/messages`
+  /// 的完整前置链（分类 → 路由 → 归属判定），并生成新的 `request_id`。
+  /// 重发要的是「锁定原 group + 原 agent，不再跑路由」，并**换一个新
+  /// `request_id`**（否则命中幂等去重，返回那个已失败的 turn，等于什么都没做）。
+  /// 这两点在装配层用 [ChatStreamController.send] 的 `groupId`/`agentId`/
+  /// `routingMode` 参数表达，页面不该知道。
+  ///
+  /// 参数是失败 turn 的输入文本与当时选中的 agent。
+  ///
+  /// 为 null 时错误条不展示「重发」按钮。
+  final Future<void> Function(String text, String? agentId)? onRetryTurn;
 
   /// 「立即发送」：把服务端缓冲区里已 pending 的消息立即合并提交。
   ///
@@ -489,6 +513,12 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 不需要「请求失败就恢复」的特殊逻辑：finally 里无条件复位，若 `done` 已先
   /// 到达，复位后按钮依然禁用（因为流式项已被 `_sealStreaming` 闭合）。
   bool _cancelling = false;
+
+  /// 正在重发的 turn id（null = 没有）。
+  ///
+  /// 与 [_cancelling] 同一取向：重发是写操作，按钮在请求往返期间必须禁用，
+  /// 否则连点两次会产生两个新 turn。
+  String? _retryingTurnId;
 
   /// 是否已到最早一条历史（[ConversationPage.onLoadOlder] 返回过 false）。
   ///
@@ -922,6 +952,54 @@ class _ConversationPageState extends State<ConversationPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('发送失败：${e.message}')));
+    }
+  }
+
+  /// 重发一个失败的 turn（用原输入重新投递一轮）。
+  ///
+  /// ## 为什么直接发送而不是回填输入框
+  ///
+  /// 对齐 webapp 的 `handleRetryTurn`（`ChatMessageList.tsx:290`）：它同样
+  /// 直接重新投递。按钮文案是「重发」而不是「重新编辑」，语义就是「再跑一遍」。
+  /// 用户想改文案时可以直接在输入框里重打（那是发**新**消息，语义也不同）。
+  ///
+  /// 与 [FollowUpChips] 的 `onAppend` 不同：建议卡是「追问的起点」（服务端动作
+  /// 就是 `copy_text`），而这里是「把刚失败的那次重做」。
+  ///
+  /// 防重复点击靠 [_retryingTurnId]：重发是写操作，连点两次会产生两个 turn。
+  Future<void> _handleRetryTurn(ErrorItem error) async {
+    final handler = widget.onRetryTurn;
+    final turnId = error.turnId;
+    if (handler == null || turnId.isEmpty || _retryingTurnId != null) return;
+
+    // 找该 turn 的原用户输入与当时选中的 agent。
+    //
+    // 不能用「全局最后一条 UserMessageItem」：用户在失败后又发了几条时，那个
+    // 找到的是别人的输入。`turnId` 是可靠的关联键（error 与 user_message 同 turn）。
+    UserMessageItem? source;
+    for (var i = _items.length - 1; i >= 0; i--) {
+      final item = _items[i];
+      if (item is UserMessageItem && item.turnId == turnId) {
+        source = item;
+        break;
+      }
+    }
+    final text = source?.text ?? '';
+    // 找不到原输入（历史只回填到 error 之后）时不发请求：拿别的文本去发会把
+    // 「重发」变成「乱发一条」。按钮会因此在那种情况下无反应——比发错好。
+    if (text.isEmpty) return;
+
+    setState(() => _retryingTurnId = turnId);
+    try {
+      await handler(text, source?.agentId);
+    } on SpbError catch (e) {
+      // 重发本身又失败了（例如仍是同一个终态错误）：提示但**不**改归约结果
+      // ——新一轮的 error 事件会由服务端发出，页面会多出一条错误条。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('重发失败：${e.message}')));
+    } finally {
+      if (mounted) setState(() => _retryingTurnId = null);
     }
   }
 
@@ -1401,7 +1479,18 @@ class _ConversationPageState extends State<ConversationPage> {
     GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
     ScheduleCreatedItem() => _ScheduleCreatedNotice(item: item),
     DiagnosticNoticeItem() => _DiagnosticNotice(item: item),
-    ErrorItem(:final message) => ErrorBanner(message: message),
+    ErrorItem(:final message, :final isRecoverable) => ErrorBanner(
+      // 重发是「用原输入再跑一轮」，按钮文案用「重发」而不是「重试」——
+      // 后者容易被读成「重试这个请求」（不产生新 turn），而实际会产生新 turn。
+      message: message,
+      onRetry:
+          (widget.onRetryTurn != null &&
+              isRecoverable &&
+              item.turnId.isNotEmpty)
+          ? () => _handleRetryTurn(item)
+          : null,
+      retryLabel: _retryingTurnId == item.turnId ? '重发中…' : '重发',
+    ),
     FeedbackRequestItem() => FeedbackRequestCard(
       question: item.question,
       options: item.options,

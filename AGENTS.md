@@ -1056,6 +1056,65 @@ Dart 的 import 只能引用包内的 `lib/`，测试辅助代码**无法**跨�
 > 用户的组 ID 数组）。赋值会被静默忽略，循环里拿到组 ID 而不是路径。踩过一次，
 > 故这里用 `SYNC_GROUPS`。
 
+### 6.14 失败 turn 的重发（`ErrorItem` → 重新投递）
+
+`error` 事件是**回合终态**（`event_reducer.dart` 把它登记进 `terminalTurnIds`）：
+服务端执行失败后本轮不会再产出任何内容。此前客户端只在时间线渲染一条错误条
+——用户唯一的出路是手动重打一遍，而那会变成一个**新 turn**，与失败那轮并列。
+
+webapp 早有这个入口（`ChatMessageList.tsx` 的 `handleRetryTurn`），客户端此前没有。
+
+#### 链路
+
+| 层 | 改动 |
+|---|---|
+| `spb_ui` | `ErrorBanner` 新增可选 `onRetry` / `retryLabel`（为 null 时不渲染按钮，同 `ErrorState`） |
+| `spb_domain` | `UserMessageItem.agentId`（本地回显独有） |
+| `spb_features` | `ConversationPage.onRetryTurn` + `_handleRetryTurn`（防重复点击） |
+| `apps/*` | 注入 `onRetryTurn`，走 `controller.send(groupId:, agentId:, routingMode: 'manual')` |
+
+#### 四个易写错的点
+
+1. **必须换一个新的 `request_id`。** 沿用失败那轮的 id 会命中服务端
+   `(user_id, request_id)` 幂等去重，直接返回**那个已失败的 turn**，等于什么都没做
+   （webapp 的注释专门记了这一点）。故装配层**不传** `requestId`，由服务端生成。
+2. **`routingMode: 'manual'`**：锁定原 group，不再跑归属判定——否则可能再触发一次
+   归属歧义确认（而那正是用户刚失败的那一轮的前置步骤）。
+3. **按 `turnId` 找原输入，不能取「最后一条用户消息」**：用户在失败后又发了几条时，
+   后者找到的是别人的输入。找不到原输入时**不发请求**（按钮静默无反应）——拿别的
+   文本去发会把「重发」变成「乱发一条」。
+4. **`agentId` 在权威帧到达后仍要保留**：服务端 `user_message` 事件不带 `agent_id`
+   （那是客户端回显独有的键），归约器原位替换时从旧项继承。否则用户看到的输入框还
+   选着某 agent，重发却换了人。
+
+#### 有意不做：`session_expired` 的串行 restore
+
+webapp 在 `errorType === 'session_expired'` 时先逐个 `restoreChatSession` 再重发。
+客户端不做，因为**服务端不产出 `errorType`**：客户端拿到的 `error` 事件 payload
+只有 `message`/`error`，没有类型字段。没有这个信号就无法区分「会话失效」与普通
+执行失败——按 webapp 那样无条件 restore 会引入一个无用的往返。
+
+同理，**`ErrorItem.isRecoverable` 归约层恒为 true**（`error` payload 没有可判定的
+分类字段），由调用方按需置 false。
+
+#### 相关：`createTurn` 的请求体契约（同批修复）
+
+`ChatApi.createTurn`（`POST /chat/groups/:group_id/turns`）此前发的是
+`{input, agent_id, request_id}` 并解析成 `ChatTurn`——**字段名与响应形状双双不符**：
+
+| 项 | Go 期望 | 此前发的 |
+|---|---|---|
+| 文本键 | `inputText`（`binding:"required"`） | `input` → 400 |
+| 幂等键 | `requestId`（camelCase） | `request_id` |
+| 响应 | `{status, groupId, turnId}` 平铺 | 解析成 `ChatTurn`（得到全空对象） |
+
+该方法此前**无生产调用者**，故缺陷未暴露。现已修正为 `CreateTurnResult` 并补
+真 server 断言（`chat_api_test.dart` 的 `createTurn 请求体字段名`）。
+
+⚠️ **重发走的是消息流而不是本端点**：`CreateTurnRequest` 没有 `agent_id` 字段
+（服务端按 group 的 active session 决定），且 webapp 也因同样理由弃用了它。
+本端点保留给「已知 group 且要绕过前置链」的脚本化场景。
+
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
@@ -1303,6 +1362,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
 - [x] 消息发送 + 无归属入口（悬浮窗）
+- [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 §6.14）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入

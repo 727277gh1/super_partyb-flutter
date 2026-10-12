@@ -1871,4 +1871,87 @@ void main() {
       expect(received, ['POST /chat/groups/grp_1/auto-schedule/stop']);
     });
   });
+
+  /// `POST /chat/groups/:group_id/turns` 的**请求体字段名**契约。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 该端点绑定 Go 的 `CreateTurnRequest`（`internal/server/chat.go:476`），
+  /// 字段是 **camelCase** 且文本键叫 `inputText`：
+  ///
+  /// ```go
+  /// RequestID string `json:"requestId"`
+  /// InputText string `json:"inputText" binding:"required"`
+  /// ```
+  ///
+  /// 而消息流端点 `/users/:uid/chat/messages` 用的是 `input` / `request_id`。
+  /// 两个端点长得像、参数名却不同，写成后者会被 `binding:"required"` 打回 400
+  /// ——历史上这里正是发 `{input, request_id}` 并解析成 `ChatTurn`，**双重**不符。
+  ///
+  /// 故这里断言的是「打到线上的字面量」，而不是「调用没抛异常」。
+  group('createTurn 请求体字段名（对齐 CreateTurnRequest）', () {
+    late HttpServer server;
+    late ChatApi realApi;
+    late List<String> received;
+    late List<Map<String, dynamic>> bodies;
+
+    setUp(() async {
+      received = [];
+      bodies = [];
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      realApi = ChatApi(createDio(baseUrl: 'http://127.0.0.1:${server.port}'));
+      server.listen((req) async {
+        received.add('${req.method} ${req.uri.path}');
+        final raw = await utf8.decoder.bind(req).join();
+        bodies.add(jsonDecode(raw) as Map<String, dynamic>);
+        req.response
+          ..statusCode = 201
+          ..headers.contentType = ContentType.json
+          ..write(
+            jsonEncode({
+              'status': 'queued',
+              'groupId': 'grp_1',
+              'turnId': 'turn_9',
+            }),
+          );
+        await req.response.close();
+      });
+    });
+
+    tearDown(() async => server.close(force: true));
+
+    test('发 inputText（不是 input），并带上 source', () async {
+      final result = await realApi.createTurn('grp_1', input: '再跑一遍');
+
+      expect(received, ['POST /chat/groups/grp_1/turns']);
+      expect(bodies.single['inputText'], '再跑一遍');
+      expect(bodies.single.containsKey('input'), isFalse);
+      expect(bodies.single['source'], 'direct');
+      // 响应是 camelCase 平铺，不是 ChatTurn。
+      expect(result.turnId, 'turn_9');
+      expect(result.groupId, 'grp_1');
+      expect(result.status, 'queued');
+    });
+
+    test('requestId 用 camelCase（不是 request_id）', () async {
+      await realApi.createTurn('grp_1', input: 'x', requestId: 'req_1');
+
+      expect(bodies.single['requestId'], 'req_1');
+      expect(bodies.single.containsKey('request_id'), isFalse);
+    });
+
+    test('不带 requestId 时不出该键（服务端每次新建）', () async {
+      await realApi.createTurn('grp_1', input: 'x');
+
+      expect(bodies.single.containsKey('requestId'), isFalse);
+    });
+
+    test('CreateTurnResult 缺字段时不抛异常（安全默认值）', () {
+      final r = CreateTurnResult.fromJson(const {});
+
+      expect(r.turnId, '');
+      expect(r.groupId, '');
+      expect(r.status, 'queued');
+    });
+  });
 }

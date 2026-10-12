@@ -53,6 +53,47 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text(long), findsOneWidget);
     });
+
+    testWidgets('onRetry 为 null 时不渲染按钮', (tester) async {
+      await tester.pumpWidget(_host(const ErrorBanner(message: 'x')));
+
+      expect(
+        find.byType(TextButton),
+        findsNothing,
+        reason: '不可重试的错误渲染一个按了没用的按钮比不渲染更糟',
+      );
+    });
+
+    testWidgets('注入 onRetry 时渲染按钮且点击回调生效', (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(
+        _host(ErrorBanner(message: '本轮执行失败', onRetry: () => taps++)),
+      );
+
+      expect(find.text('重试'), findsOneWidget);
+      await tester.tap(find.byType(TextButton));
+      await tester.pump();
+
+      expect(taps, 1);
+    });
+
+    testWidgets('retryLabel 可自定义（对话页用「重发」）', (tester) async {
+      await tester.pumpWidget(
+        _host(ErrorBanner(message: 'x', onRetry: () {}, retryLabel: '重发')),
+      );
+
+      expect(find.text('重发'), findsOneWidget);
+      expect(find.text('重试'), findsNothing);
+    });
+
+    testWidgets('带按钮时长文案不溢出', (tester) async {
+      final long = '失败原因：' * 40;
+      await tester.pumpWidget(
+        _host(ErrorBanner(message: long, onRetry: () {})),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
   });
 
   group('HintLine', () {

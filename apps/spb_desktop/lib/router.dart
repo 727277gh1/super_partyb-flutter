@@ -1369,6 +1369,24 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       onSend: (text) => ref
           .read(chatStreamControllerProvider(userId))
           .send(input: text, agentId: _selectedAgentId),
+      // 失败 turn 的重发：锁定**原 group + 原 agent**，`routingMode: manual`
+      // 避免再次触发归属歧义确认。
+      //
+      // ## 为什么换一个新的 `request_id`
+      //
+      // `send` 不传 `requestId` 时服务端每次新建 turn。若沿用失败那轮的 id，
+      // 服务端按 `(user_id, request_id)` 幂等命中会直接返回**那个已失败的
+      // turn**，等于什么都没做（webapp `ChatMessageList.tsx:313` 的注释专门
+      // 记了这一点）。故这里不传 requestId，由服务端生成。
+      onRetryTurn: (text, agentId) => ref
+          .read(chatStreamControllerProvider(userId))
+          .send(
+            input: text,
+            groupId: widget.groupId,
+            agentId: agentId ?? _selectedAgentId,
+            routingMode: 'manual',
+          )
+          .then((_) => null),
       // spec 卡动作：copy_text 已由页面内部回填输入框（_draft 通道），
       // 这里只需处理 send_next_input（直接发送）。goal_gate 的 spec 无动作，
       // 此分支当前不会命中，保留是为了服务端新增动作类型时老客户端仍能工作。

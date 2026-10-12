@@ -217,6 +217,7 @@ void main() {
     void Function(HabitSuggestionItem suggestion, HabitSnoozeOption option)?
     onSnoozeHabit,
     Future<void> Function(String)? onSend,
+    Future<void> Function(String text, String? agentId)? onRetryTurn,
     Future<void> Function(String)? onCancelTurn,
     Future<List<int>?> Function(AgentFileItem file)? onLoadThumbnailAgentFile,
     Future<void> Function(AgentFileItem file)? onDownloadAgentFile,
@@ -256,6 +257,7 @@ void main() {
           onSpecAction: onSpecAction,
           onSelectAgent: onSelectAgent,
           onSend: onSend,
+          onRetryTurn: onRetryTurn,
           onCancelTurn: onCancelTurn,
           onLoadThumbnailAgentFile: onLoadThumbnailAgentFile,
           onDownloadAgentFile: onDownloadAgentFile,
@@ -3357,6 +3359,136 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('发送失败'), findsOneWidget);
+    });
+  });
+
+  group('ConversationPage 失败 turn 重发', () {
+    /// 推一条 user_message + 一条 error（同一 turn）。
+    Future<void> pushFailedTurn(
+      WidgetTester tester, {
+      required String turnId,
+      String input = '帮我看看这个报错',
+      Map<String, dynamic> extra = const {},
+    }) async {
+      await pushEvent(
+        tester,
+        EventTypes.userMessage,
+        sseEvent(
+          EventTypes.userMessage,
+          id: 'e_user',
+          turnId: turnId,
+          payload: {'input': input, ...extra},
+        ),
+      );
+      await pushEvent(
+        tester,
+        EventTypes.error,
+        sseEvent(
+          EventTypes.error,
+          id: 'e_err',
+          turnId: turnId,
+          seq: 2,
+          payload: {'message': '执行器崩溃'},
+        ),
+      );
+    }
+
+    testWidgets('错误条带「重发」按钮，点击回调带上原输入与 agent', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      final calls = <({String text, String? agentId})>[];
+      await pumpPage(
+        tester,
+        onRetryTurn: (text, agentId) async {
+          calls.add((text: text, agentId: agentId));
+        },
+      );
+
+      await pushFailedTurn(
+        tester,
+        turnId: 'turn_err',
+        extra: {'agent_id': 'agt_x'},
+      );
+
+      expect(find.text('重发'), findsOneWidget);
+      await tester.tap(find.text('重发'));
+      await tester.pumpAndSettle();
+
+      expect(calls, hasLength(1));
+      expect(calls.single.text, '帮我看看这个报错');
+      // agent_id 来自本地回显的 payload，重发时原样带上。
+      expect(calls.single.agentId, 'agt_x');
+    });
+
+    testWidgets('未注入 onRetryTurn → 不渲染重发按钮', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await pushFailedTurn(tester, turnId: 'turn_err');
+
+      expect(find.text('重发'), findsNothing);
+    });
+
+    testWidgets('找不到同 turn 的原输入时不发请求（不拿别的文本乱发）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      final calls = <String>[];
+      await pumpPage(tester, onRetryTurn: (text, _) async => calls.add(text));
+
+      // 只有 error，没有对应的 user_message。
+      await pushEvent(
+        tester,
+        EventTypes.error,
+        sseEvent(
+          EventTypes.error,
+          id: 'e_orphan',
+          turnId: 'turn_orphan',
+          payload: {'message': 'boom'},
+        ),
+      );
+
+      // 按钮仍在（有 turnId + 已注入），但点击后不发请求。
+      await tester.tap(find.text('重发'));
+      await tester.pumpAndSettle();
+
+      expect(calls, isEmpty);
+    });
+
+    testWidgets('重发失败 → 提示「重发失败」，不崩', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onRetryTurn: (_, _) async => throw const HttpError(500, '服务端挂了'),
+      );
+
+      await pushFailedTurn(tester, turnId: 'turn_err');
+
+      await tester.tap(find.text('重发'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('重发失败'), findsOneWidget);
+    });
+
+    testWidgets('turnId 为空的 error 不渲染按钮（无法定位原输入）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onRetryTurn: (_, _) async {});
+
+      await pushEvent(
+        tester,
+        EventTypes.error,
+        sseEvent(
+          EventTypes.error,
+          id: 'e_no_turn',
+          turnId: '',
+          payload: {'message': 'boom'},
+        ),
+      );
+
+      expect(find.text('重发'), findsNothing);
     });
   });
 }

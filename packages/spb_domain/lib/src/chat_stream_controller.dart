@@ -653,6 +653,7 @@ class ChatStreamController {
     required String input,
     required String groupId,
     String? turnId,
+    String? agentId,
     DateTime? createdAt,
   }) {
     final now = createdAt ?? DateTime.now().toUtc();
@@ -666,7 +667,11 @@ class ChatStreamController {
         seq: 0,
         source: 'client',
         createdAt: now,
-        payload: {'input': input},
+        // `agent_id` 是本地回显**额外**带的键（服务端 `user_message` 事件没有它）。
+        // 归约器读它填进 [UserMessageItem.agentId]，供「重发」带上同一个 agent。
+        // 权威帧到达后原位替换，该字段随之丢失——重发仍能工作，因为页面在
+        // agentId 为空时退化为「不指定 agent」（由服务端按 active session 决定）。
+        payload: {'input': input, if (agentId != null) 'agent_id': agentId},
         // 见方法文档：绝不能推进游标。
         transient: true,
       ),
@@ -1114,7 +1119,7 @@ class ChatStreamController {
         routingMode: routingMode,
         requestId: requestId,
       );
-      _injectEcho(result, input);
+      _injectEcho(result, input, agentId: agentId);
       return result;
     } on SpbError catch (e) {
       final outbox = _outbox;
@@ -1130,7 +1135,7 @@ class ChatStreamController {
       switch (outcome) {
         case OutboxSubmittedNow(:final result):
           // 队列自己重试成功了（例如第一次失败只是偶发）。
-          _injectEcho(result, input);
+          _injectEcho(result, input, agentId: agentId);
           return result;
         case OutboxQueuedOffline():
           // 已入队。调用方需要知道「没发出去」——用一条携带原始错误的信息
@@ -1145,11 +1150,12 @@ class ChatStreamController {
 
   /// 注入乐观回显（构造细节集中在 [injectLocalUserMessage]，那里解释了
   /// 「为什么事件类型必须是 user_message」「为什么 transient 必须为 true」）。
-  void _injectEcho(SendMessageResult result, String input) {
+  void _injectEcho(SendMessageResult result, String input, {String? agentId}) {
     injectLocalUserMessage(
       input: input,
       groupId: result.groupId,
       turnId: result.turnId,
+      agentId: agentId,
     );
   }
 
@@ -1172,7 +1178,7 @@ class ChatStreamController {
       // 在 A 对话里发了一条，投递成功时已经切到 B 对话。
       final target = d.result.groupId;
       if (_groupId != null && target != _groupId) return;
-      _injectEcho(d.result, d.entry.input);
+      _injectEcho(d.result, d.entry.input, agentId: d.entry.agentId);
     });
     _outboxFailureSub = outbox.failures.listen((f) {
       if (_disposed) return;

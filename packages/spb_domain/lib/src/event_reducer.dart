@@ -244,6 +244,14 @@ class EventReducer {
             createdAt: ev.createdAt,
             text: text,
             turnId: ev.turnId,
+            // 服务端 `user_message` 事件不带 agent_id（那是客户端回显独有的键）。
+            // 原位替换时**保留**本地已知的那个，否则「重发」会在权威帧到达后
+            // 丢掉 agent 选择——用户看到的输入框还选着某 agent，重发却换了人。
+            agentId:
+                _nonEmptyString(ev.payload?['agent_id']) ??
+                (existing != null && items[existing] is UserMessageItem
+                    ? (items[existing] as UserMessageItem).agentId
+                    : null),
           );
           if (existing != null) {
             // 原位替换：保持它排在 assistant 流式段落之前。

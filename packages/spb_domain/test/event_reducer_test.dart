@@ -107,6 +107,48 @@ void main() {
       expect(r.lastEventId, 'evt_real');
     });
 
+    test('agent_id 在权威帧到达后仍保留（供「重发」带上同一个 agent）', () {
+      // 本地回显带 agent_id（客户端自己加的键），服务端事件不带。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.userMessage,
+          id: 'local-1',
+          turnId: 'turn_7',
+          payload: {'input': '你好', 'agent_id': 'agt_x'},
+          transient: true,
+        ),
+        ev(
+          EventTypes.userMessage,
+          id: 'evt_real',
+          turnId: 'turn_7',
+          payload: {'input': '你好'},
+          globalSeq: 42,
+        ),
+      ]);
+
+      expect((r.items.single as UserMessageItem).agentId, 'agt_x');
+    });
+
+    test('服务端事件自带 agent_id 时以它为准', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.userMessage,
+          turnId: 'turn_7',
+          payload: {'input': '你好', 'agent_id': 'agt_server'},
+        ),
+      ]);
+
+      expect((r.items.single as UserMessageItem).agentId, 'agt_server');
+    });
+
+    test('两边都没有 agent_id 时为 null（不编造）', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.userMessage, turnId: 'turn_7', payload: {'input': '你好'}),
+      ]);
+
+      expect((r.items.single as UserMessageItem).agentId, isNull);
+    });
+
     test('不同 turnId 的用户消息各自成项（不误合并）', () {
       final r = EventReducer.reduce([
         ev(EventTypes.userMessage, turnId: 'turn_a', payload: {'input': 'A'}),

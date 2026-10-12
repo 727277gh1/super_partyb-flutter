@@ -2058,6 +2058,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
       // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
       onSend: (text) => controller.send(input: text, agentId: _selectedAgentId),
+      // 失败 turn 的重发：锁定原 group + 原 agent，`manual` 路由跳过归属判定。
+      // 不传 requestId → 服务端新建 turn（沿用旧 id 会幂等命中那个已失败的 turn）。
+      onRetryTurn: (text, agentId) => controller
+          .send(
+            input: text,
+            groupId: widget.groupId,
+            agentId: agentId ?? _selectedAgentId,
+            routingMode: 'manual',
+          )
+          .then((_) => null),
       // spec 卡动作：copy_text 已由页面内部回填输入框（_draft 通道），
       // 这里只处理 send_next_input（直接发送）。
       onSpecAction: (action) {
