@@ -27,10 +27,10 @@ scripts:
     description: 分层规则检查（core/api/domain 禁止依赖 Flutter）
     run: bash tools/check_layering.sh
   gen:
-    description: 代码生成（freezed / json_serializable / riverpod）
+    description: 代码生成（drift；spb_models 为手写 fromJson，见 AGENTS.md §6.2）
     run: dart run build_runner build --delete-conflicting-outputs
   gen:watch:
-    description: 代码生成（监听模式）
+    description: 代码生成（监听模式；同上）
     run: dart run build_runner watch --delete-conflicting-outputs
   build:linux:
     description: 构建 Linux 桌面端

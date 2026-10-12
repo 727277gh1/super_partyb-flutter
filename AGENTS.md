@@ -57,6 +57,7 @@ bash tools/check_test_support_sync.sh # 跨包重复的测试辅助文件必须�
 bash tools/check_workflow_steps.sh    # workflow 的 step 没被注释吞掉（见 issue #32）
 bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_options（见 issue #34）
 bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39）
+bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
@@ -79,7 +80,10 @@ cd apps/spb_mobile  && flutter build apk --release
 # Linux 分发包（必须：把非系统依赖库打进 bundle，见 §7）
 bash tools/bundle_linux_deps.sh
 
-# 代码生成（freezed / json_serializable / riverpod）
+# 代码生成（drift：spb_data 的 database.g.dart）
+#
+# ⚠️ 当前**只有 spb_data** 用代码生成（drift_dev）。spb_models 是手写
+# fromJson，已不再声明 freezed / json_serializable（issue #36，见 §6.2）。
 dart run build_runner build --delete-conflicting-outputs
 
 # 格式化
@@ -120,6 +124,8 @@ super_partyb-flutter/
     ├── check_layering.sh     # 分层规则检查
     ├── check_workflow_steps.sh # workflow step 结构检查
     ├── check_analysis_options.sh # 静态分析配置接线检查
+    ├── check_wiring_parity.sh  # 两端装配层接线一致性检查
+    ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
     └── bundle_linux_deps.sh  # Linux 分发包依赖打包
 ```
 
@@ -477,15 +483,34 @@ turn 与一个回填出来仍在跑的 turn，归约结果**完全一致**
 
 **何时该上**：当事件类型 > 50 个，或出现「服务端改了 payload 结构但客户端静默不兼容」的实际事故时。
 
+⚠️ **决策的落实（issue #36）**：既然决定手写，`spb_models` 就**不得**再挂着
+freezed / json_serializable / build_runner / json_annotation / freezed_annotation
+这五个依赖——它们从未产出文件（0 个 `@freezed` / `@JsonSerializable`，0 个
+`.g.dart`），`melos run gen` 对本包为空。曾出现「既没享受到生成器的一致性保证，
+又承担了解析成本」的状态。现已删除，并由 `tools/check_unused_deps.sh` 守住。
+
 ### 6.3 状态管理：Riverpod
 
 `flutter_riverpod` 3.x。理由：编译期安全、可测试、无需 `BuildContext`。
+
+⚠️ 它只被**装配层**（`apps/*`）依赖，不在 `packages/spb_features` 里——
+后者只拿注入进来的回调与数据（见 §6.17 的接线守卫）。同理 `go_router` 也是
+装配层的。若将来要让 `spb_features` 内部直接用 Provider，需重新论证分层（它
+会打破「功能模块不依赖 DI 容器」这一取向）。
 
 ### 6.4 桌面能力隔离
 
 `spb_platform` 定义 `DesktopCapabilities` 接口，移动端注入 `NoopDesktopCapabilities`。
 
 **所有方法静默降级**（记日志 + 返回 false/null），不抛异常。UI 用 `isSupported` 决定是否展示「托盘/全局快捷键」等设置项。
+
+⚠️ **接口在本包，实现（与插件依赖）在 `apps/spb_desktop`（issue #36）**：
+`window_manager` / `tray_manager` / `hotkey_manager` / `screen_retriever` /
+`launch_at_startup` 只被 `apps/spb_desktop/lib/bootstrap.dart` 的
+`PlatformDesktopCapabilities` 使用，故它们声明在**桌面端 app** 的 pubspec 里。
+此前声明在 `spb_platform` 会让这些桌面插件**传递进移动端构建**（移动端注入
+`NoopDesktopCapabilities`，用不到却要编译）——实测移出后移动端
+`.flutter-plugins-dependencies` 不再列出它们，而桌面端仍正常注册。
 
 ### 6.5 多窗口：`window_manager` 不行，但可另选插件（M0 结论）
 
@@ -1640,6 +1665,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
 | ~~两端装配层接线无守卫（漏接一端而测试仍绿）~~ | ✅ 已修（issue #39）：`tools/check_wiring_parity.sh` 比对两端 `ConversationPage(` 具名参数，差异必须命中显式豁免（`onOpenAgentFile`/`onRevealAgentFile` 仅桌面、`overflowItems` 仅移动）；接入 CI | issue #39、§6.17 |
 | ~~对话页 `_rowKeys` 只注册不回收（跨 group 累积）~~ | ✅ 已修（issue #39）：抽 `RowLocateRegistry`（注册 + 按「当前行 id 集合」回收，**不** `clear()` 重建）+ 领域层唯一口径 `locateIdsOf` / `locateIdsOfAll`；17 条用例，3 项反向验证逐条实测 | issue #39、§6.18 |
+| ~~多个包声明了「全仓零 import」的依赖~~ | ✅ 已修（issue #36）：删 20 个零引用依赖（spb_core 的 meta/collection；spb_models 的 freezed/json_serializable 全家桶；spb_api 的 http_parser/meta；spb_domain 的 collection；spb_data 的 path_provider/path/shared_preferences；spb_features 的 flutter_riverpod/go_router/spb_data），桌面插件从 spb_platform **下移到 apps/spb_desktop**；新增 `tools/check_unused_deps.sh` 守防复发 | issue #36、§6.2/§6.4 |
+| `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：它是原生插件（把 `libsqlite3.so` 打进 Android/iOS 包），drift 移动端运行时需要；已写进 `check_unused_deps.sh` 的显式豁免。实测 apk 含 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so` | issue #36、§6.4 |
 | 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
 | 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
 | 契约同步靠人工 | 可接受 | §6.2 |

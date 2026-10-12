@@ -87,6 +87,12 @@ jobs:
       - name: Wiring parity check
         run: bash tools/check_wiring_parity.sh
 
+      # 声明了却从未 import 的依赖会**误导**读者（以为模型用 freezed 生成、
+      # 以为 spb_platform 封装了窗口/托盘），且桌面插件会经它传递进移动端
+      # 构建（issue #36）。
+      - name: Unused dependencies check
+        run: bash tools/check_unused_deps.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 

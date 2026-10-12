@@ -9,8 +9,8 @@ environment:
 resolution: workspace
 
 dependencies:
-  meta: ^1.16.0
-  collection: ^1.19.0
+  # 本包**零第三方依赖**（纯 Dart 基础设施，只用 dart:core / dart:io）。
+  # 曾声明 meta / collection，但源码从未 import——已删（issue #36）。
 
 dev_dependencies:
   lints: ^6.0.0

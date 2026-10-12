@@ -12,7 +12,7 @@ dependencies:
   spb_core:
   spb_models:
   spb_api:
-  collection: ^1.19.0
+  # 曾声明 collection，但源码从未 import——已删（issue #36）。
   meta: ^1.16.0
   uuid: ^4.5.1
   # 脏检测基准：下载时对实际落盘字节算 SHA256（UFS etag 与内容无关，

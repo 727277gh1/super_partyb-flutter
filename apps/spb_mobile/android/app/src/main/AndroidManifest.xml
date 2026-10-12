@@ -9,8 +9,8 @@
 
       也不能指望插件贡献：已逐个核对全部依赖的 `android/src/main/
       AndroidManifest.xml`，贡献 INTERNET 的插件数为 **0**（flutter_secure_
-      storage / share_plus / app_links / file_selector_android / sqlite3_
-      flutter_libs / shared_preferences_android 等都没有）。
+      storage / app_links / file_selector_android / sqlite3_flutter_libs 等
+      都没有）。
 
       缺失时的表现是「debug 能跑、release 包一联网就失败」——而且不是崩
       溃，是 API 调用抛 SocketException / 登录无响应，排查成本高。
