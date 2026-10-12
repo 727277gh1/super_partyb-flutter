@@ -1386,11 +1386,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   ///
   /// ## 分档依据：频率与是否需要一眼可见
   ///
-  /// | 入口 | 窄屏 | 理由 |
-  /// |---|---|---|
-  /// | AgentSwitcher | 常驻 | 「这段对话由谁回答」是全局属性，随时要切 |
-  /// | 交付物 / 待办 | 常驻 | **带徽标**，回答「现在有什么在等我」，必须一眼可见 |
-  /// | 对话设置 / 任务清单 / 目标历史 / 对话内搜索 | 收进菜单 | 低频弹层，多一步不痛 |
+  /// | 入口 | 窄屏 | 宽屏 | 理由 |
+  /// |---|---|---|---|
+  /// | AgentSwitcher | 常驻 | 常驻 | 「这段对话由谁回答」是全局属性，随时要切 |
+  /// | 交付物 / 待办 | 常驻 | 常驻 | **带徽标**，回答「现在有什么在等我」，必须一眼可见 |
+  /// | 对话设置 / 任务清单 / 目标历史 | 收进菜单 | 独立图标 | 低频弹层，多一步不痛 |
+  /// | 对话内搜索 | 收进菜单 | 独立图标 | 同上（宽屏由页面的 `enableSearch` 摆出） |
   ///
   /// ## 阈值为什么是 `SpbBreakpoints.compact`（720dp）
   ///
@@ -1506,7 +1507,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     ];
   }
 
-  /// 窄屏溢出菜单的条目（宽屏返回 null，由页面渲染独立图标）。
+  /// 窄屏溢出菜单的条目（宽屏返回 null）。
+  ///
+  /// 宽屏的「对话设置 / 任务清单 / 目标历史」由 [_appBarActions] 摆成独立
+  /// 图标，故这里不重复给条目；「对话内搜索」则由页面的独立图标提供
+  /// （`enableSearch`，见 build）。
   List<ConversationOverflowItem>? _overflowItems() {
     final narrow = SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width);
     if (!narrow) return null;
@@ -1910,9 +1915,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       title: '对话',
       // 对话内搜索（搜已加载的时间线，含 agent 回复）。
       //
-      // 移动端放在溢出菜单里（见下方 [_narrowActions]）：AppBar 在窄屏本就
-      // 溢出（issue #31），直接加图标会让溢出量从 66px 涨到 114px。
-      enableSearch: false,
+      // ## 为什么按宽度给（issue #33）
+      //
+      // 窄屏：不摆图标，改由溢出菜单收纳（见下方 [_overflowItems]）。AppBar
+      // 在窄屏本就溢出（issue #31），直接加图标会让溢出量从 66px 涨到 114px。
+      //
+      // 宽屏：摆独立图标。此前恒为 `false`，而 [_overflowItems] 在宽屏又返回
+      // `null` —— 两个入口同时消失，搜索在 ≥720dp（平板/折叠屏展开/横屏手机）
+      // **彻底不可达**。宽屏 AppBar 有 720dp 余量，多一个 48dp 图标不会溢出。
+      enableSearch: !SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width),
       // 对话设置入口（目标 + 三个 CAS 开关）。
       //
       // 移动端没有侧边栏，故走 AppBar 按钮 → 底部弹层；桌面端同一份

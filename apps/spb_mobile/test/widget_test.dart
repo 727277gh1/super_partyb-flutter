@@ -3198,9 +3198,8 @@ void main() {
       expect(find.byKey(const ValueKey('open-group-settings')), findsOneWidget);
       expect(find.byKey(const ValueKey('open-goal-tasks')), findsOneWidget);
       expect(find.byKey(const ValueKey('open-goal-history')), findsOneWidget);
-      // 宽屏下 `_ChatPage` 的 enableSearch 仍为 false（搜索走菜单是窄屏的
-      // 收纳手段，宽屏由桌面端那样的独立图标提供——移动端保持菜单入口，
-      // 避免在 720~1000dp 之间又要多一个 48dp 图标）。
+      // 宽屏下 `_ChatPage` 的 enableSearch 为 true（搜索改由独立图标提供，
+      // 见 `宽屏（≥720dp）对话内搜索入口以独立图标可达` 用例），菜单消失。
       expect(h.router.state.matchedLocation, SpbRoutes.chat('grp_menu'));
     });
 
@@ -3226,6 +3225,100 @@ void main() {
         find.byKey(const ValueKey('conversation-search-field')),
         findsOneWidget,
         reason: '菜单项必须真的打开搜索面板（而不是只关掉菜单）',
+      );
+    });
+
+    /// ## 这个用例防的是什么
+    ///
+    /// 此前移动端在**宽屏（≥720dp）**下两个搜索入口**同时消失**
+    /// （issue #33）：`enableSearch` 恒为 `false`，而 `_overflowItems()`
+    /// 在非 compact 宽度返回 `null` —— 溢出菜单也不渲染。平板、折叠屏
+    /// 展开态、横屏手机上「对话内搜索」彻底不可达，而既有用例只断言了
+    /// `_group` 系列入口（`open-*` / `menu-*`），没碰搜索。
+    ///
+    /// 故这里从 **router** 层断言：宽屏下搜索图标存在且能打开面板，
+    /// 同时溢出菜单**不**渲染（避免两个入口重复）。与桌面端
+    /// `apps/spb_desktop/test/widget_test.dart` 的
+    /// `对话页 AppBar 提供对话内搜索入口` 同型：页面测试自己传参，
+    /// 「接不接线」它不管，只有 router 层能钉住。
+    testWidgets('宽屏（≥720dp）对话内搜索入口以独立图标可达（issue #33）', (tester) async {
+      // 取**边界值** 720dp（最紧的宽屏）而不是 1000dp：新增的 48dp 图标若
+      // 会在宽屏撑破 AppBar，最可能先在这一档暴露（issue #31 的溢出是
+      // 宽度敏感的）。`isCompact(720) == false`，故它属于宽屏。
+      tester.view.physicalSize = const Size(720, 1600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await pumpApp(tester, initialLocation: SpbRoutes.chat('grp_search_wide'));
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(
+        find.byKey(const ValueKey('conversation-overflow-menu')),
+        findsNothing,
+        reason: '宽屏低频入口摆独立图标，不需要溢出菜单',
+      );
+
+      final icon = find.byKey(const ValueKey('conversation-search-open'));
+      expect(
+        icon,
+        findsOneWidget,
+        reason:
+            '宽屏必须直接摆出搜索图标——此前它与溢出菜单同时消失，'
+            '搜索在 ≥720dp 彻底不可达（issue #33）',
+      );
+
+      // 新增的 48dp 图标不能在宽屏把 AppBar 又撑破（issue #31 的反向守卫）。
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: '宽屏加搜索图标后仍不应有 RenderFlex 溢出',
+      );
+
+      // 点开确认它真的打开面板（而不是只渲染了一个图标）。
+      await tester.tap(icon);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('conversation-search-field')),
+        findsOneWidget,
+      );
+    });
+
+    /// 与上一条互补：窄屏没有余量，搜索必须留在溢出菜单里。
+    ///
+    /// 两条分开写而不是合成一个循环：循环里 `pumpApp` 两次会让第一个 app
+    /// 的 SSE 重连计时器跨轮次残留（`A Timer is still pending`）。
+    testWidgets('窄屏（<720dp）对话内搜索入口收进溢出菜单（issue #31/#33）', (tester) async {
+      tester.view.physicalSize = const Size(360, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_search_narrow'),
+      );
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(
+        find.byKey(const ValueKey('conversation-search-open')),
+        findsNothing,
+        reason: '窄屏没有 48dp 余量摆图标（issue #31）',
+      );
+      final menu = find.byKey(const ValueKey('conversation-overflow-menu'));
+      expect(menu, findsOneWidget, reason: '窄屏搜索走溢出菜单');
+
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('menu-conversation-search')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('conversation-search-field')),
+        findsOneWidget,
       );
     });
 

@@ -1202,7 +1202,7 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 | `AgentSwitcher` | 常驻（**<360dp 时只留图标**） | 「这段对话由谁回答」是全局属性，随时要切 |
 | 交付物 / 待办 | 常驻（**带徽标**） | 回答「现在有什么在等我」，必须一眼可见 |
 | 对话设置 / 任务清单 / 目标历史 | **收进溢出菜单** | 低频弹层，多一步不痛 |
-| 对话内搜索 | **收进溢出菜单**（页面追加） | 同上（见 §6.15） |
+| 对话内搜索 | **收进溢出菜单**（页面追加） | 同上（见 §6.15）；**宽屏则摆独立图标**（issue #33，见下） |
 
 **阈值用 `SpbBreakpoints.compact`（720dp）而不是「刚好放得下」的实测值（440dp 左右）**：
 后者是**内容相关的**——`AgentSwitcher` 宽度随 agent 名字变化（实测 94.3dp，上限
@@ -1231,14 +1231,23 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 
 #### 移动端搜索入口的取向（与桌面端不同）
 
-| | 桌面端 | 移动端 |
-|---|---|---|
-| 搜索入口 | 独立图标（`enableSearch: true`） | **溢出菜单**（`enableSearch: false`） |
+| | 桌面端 | 移动端窄屏（<720dp） | 移动端宽屏（≥720dp） |
+|---|---|---|---|
+| 搜索入口 | 独立图标（`enableSearch: true`） | **溢出菜单**（`enableSearch: false`） | **独立图标**（`enableSearch: true`） |
 
-移动端在 720~1000dp 之间若给搜索一个 48dp 图标，会挤压常驻项；而菜单入口在
-所有窄屏档位都可用。`apps/spb_desktop/test/widget_test.dart` 有一条从 **router
-层**断言的用例（`对话页 AppBar 提供对话内搜索入口`）钉住桌面端——**页面测试自己
-传参，接不接线它不管**，故必须有 router 层的断言。
+移动端窄屏在 720dp 以下若给搜索一个 48dp 图标，会挤压常驻项；而菜单入口在
+所有窄屏档位都可用。宽屏（平板 / 折叠屏展开 / 横屏手机）则有 720dp 余量，摆
+独立图标不会溢出——**两个入口必须互补覆盖**：窄屏「菜单有、图标无」，宽屏
+「图标有、菜单无」。
+
+⚠️ **曾经两档都缺**（issue #33）：`enableSearch` 恒为 `false`，而
+`_overflowItems()` 在宽屏返回 `null` —— ≥720dp 下搜索**彻底不可达**。既有用例
+只断言了 `_group` 系列入口，没碰搜索；本机无 `DISPLAY` 也看不出。故两端各有一条
+从 **router 层**断言的用例钉住搜索入口——**页面测试自己传参，接不接线它不管**：
+`apps/spb_desktop/test/widget_test.dart` 的 `对话页 AppBar 提供对话内搜索入口`、
+`apps/spb_mobile/test/widget_test.dart` 的 `宽屏（≥720dp）…` 与
+`窄屏（<720dp）…`（两条分别钉住宽屏图标与窄屏菜单，避免「一边补上、另一边
+漏掉」）。
 
 ---
 ---
@@ -1542,7 +1551,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | iOS 出包需 Apple Developer 账号 | 待决策 | §8、`super_partyb` issue #31 |
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
 | ~~窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp）~~ | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
-| ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `hasMore` 时告知边界 | §6.15 |
+| ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `upperHistoryUnloaded` 时告知边界 | §6.15 |
+| ~~移动端宽屏（≥720dp）对话内搜索入口不可达~~ | ✅ 已修（issue #33）：宽屏 `enableSearch: true` 摆独立图标，窄屏仍走溢出菜单；两端 router 层各有用例钉住 | issue #33、§6.16 |
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
