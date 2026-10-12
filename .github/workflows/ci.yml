@@ -65,6 +65,11 @@ jobs:
       - name: Test support sync check
         run: bash tools/check_test_support_sync.sh
 
+      # workflow 的 step 不能被注释吞掉：中文注释行尾误接 step 标记（issue #32
+      # 就是这样漏掉 release 的 download-artifact，YAML 仍合法，打 tag 时才炸）。
+      - name: Workflow step structure check
+        run: bash tools/check_workflow_steps.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 

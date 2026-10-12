@@ -493,12 +493,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 四端产物合并到同一目录；merge-multiple 让它们平铺而不是各自一层子目录。      - uses: actions/download-artifact@v4
+      # 四端产物合并到同一目录；merge-multiple 让它们平铺而不是各自一层子目录。
+      - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: List assets
-        run: ls -lh
+      # 断言四个产物都在，再交给 gh release create。
+      #
+      # WHY 不能只 `ls -lh`：download-artifact 缺失/改名时它只打印空目录，
+      # 直到最后一步 gh release create 才报「文件不存在」，错误指向的是**结果**
+      # 而不是原因。这里提前失败并点名缺哪个（与 Windows job 的
+      # `if (-not (Test-Path ...)) { throw }` 同一取向）。
+      - name: Verify assets
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in spb_desktop-windows-x64.zip spb_desktop-linux-x64.tar.gz \
+                   spb_desktop-macos-universal.zip spb_mobile-android.apk; do
+            if [ -f "$f" ]; then
+              echo "✅ $f"
+            else
+              echo "❌ 缺产物 $f"; missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "产物不全，出包中止"; exit 1; }
+          ls -lh
 
       # 写成文件再用 --notes-file：内联 here-string 要同时过 YAML 缩进、
       # shell 的 $ 插值、gh 的转义三关，很容易静默产生错的 Release 正文。
