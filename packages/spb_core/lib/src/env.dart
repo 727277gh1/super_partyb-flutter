@@ -96,6 +96,18 @@ class SpbEnv {
   static bool get isAndroid => Platform.isAndroid;
   static bool get isIOS => Platform.isIOS;
 
+  /// 平台短名（`linux` / `macos` / `windows` / `android` / `ios` / `unknown`）。
+  ///
+  /// ## 为什么用 `dart:io` 的 `operatingSystem` 而不是拼 [isLinux] 等
+  ///
+  /// 拼出来的版本漏了「都不匹配」的分支（web、将来的新平台），而那正是
+  /// **最需要写进日志**的情形——静默返回空串会让诊断报告里少一行，看起来
+  /// 像「没生成出来」。`Platform.operatingSystem` 自带回落值。
+  ///
+  /// 这也是 `dart:io` 的返回值（`linux`/`macos`/`windows`/`android`/`ios`），
+  /// 与 [HostPlatform] 的命名一致，便于与 `spb_platform` 的日志对齐。
+  static String get platformName => Platform.operatingSystem;
+
   /// 是否具备桌面端专有能力（多窗口 / 托盘 / 全局快捷键）。
   ///
   /// 移动端应据此隐藏对应设置项，而不是等到调用时抛 [PlatformError]。

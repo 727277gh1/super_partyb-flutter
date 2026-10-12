@@ -685,6 +685,63 @@ void main() {
     expect(find.text('系统托盘'), findsOneWidget);
   });
 
+  testWidgets('桌面端设置页有「导出诊断日志」入口，点击交给能力实现（issue #40）', (tester) async {
+    // ## 这个用例防的是什么
+    //
+    // `SettingsPage.onExportDiagnostics` 默认是 null（未注入即隐藏）。页面自身
+    // 的测试自己传参，**抓不到「router 忘了传」**——而本仓库最常见的失败模式
+    // 就是「功能齐全但无人调用」（见 AGENTS.md §6.17）。故从 router 层断言。
+    //
+    // 同时验证**真的走到了能力层**：导出文本与文件名经
+    // `exportDiagnosticsReport` → `capabilities.saveDiagnostics`，而不是在
+    // 页面里拼一份不经脱敏的字符串。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final caps = _FakeDesktopCapabilities();
+    final h = await pumpApp(tester, capabilities: caps);
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    final entry = find.byKey(const ValueKey('settings-export-diagnostics'));
+    expect(entry, findsOneWidget, reason: '桌面端必须有入口');
+
+    await tester.tap(entry);
+    await tester.pumpAndSettle();
+
+    expect(caps.exportedDiagnostics, hasLength(1));
+    final report = caps.exportedDiagnostics.single;
+    expect(report, contains('Super PartyB 诊断报告'));
+    expect(report, contains('## 运行环境'));
+    expect(report, contains('## 最近日志'));
+  });
+
+  testWidgets('导出诊断日志：失败时给用户反馈（不静默）', (tester) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final caps = _FakeDesktopCapabilities()
+      ..diagnosticsOutcome = DiagnosticsExportOutcome.failed;
+    final h = await pumpApp(tester, capabilities: caps);
+
+    h.router.go(SpbRoutes.settings);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-export-diagnostics')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('导出诊断报告失败，请重试'), findsOneWidget);
+  });
+
   testWidgets('设置页「默认 Agent」下拉拿到真实 agent 列表（调用点传参）', (tester) async {
     // ## 这个用例防的是什么
     //
@@ -3640,6 +3697,21 @@ class _FakeDesktopCapabilities implements DesktopCapabilities {
   Future<bool> openFile(String path) async {
     openedPaths.add(path);
     return true;
+  }
+
+  /// 收到的诊断报告导出请求（按顺序）。
+  final exportedDiagnostics = <String>[];
+
+  /// `saveDiagnostics` 的返回值（用例可改以验证失败提示）。
+  DiagnosticsExportOutcome diagnosticsOutcome = DiagnosticsExportOutcome.saved;
+
+  @override
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  }) async {
+    exportedDiagnostics.add(text);
+    return diagnosticsOutcome;
   }
 
   @override

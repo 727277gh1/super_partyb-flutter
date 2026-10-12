@@ -617,6 +617,16 @@ class PlatformDesktopCapabilities
     return _spawnSystemOpen(path, what: '文件');
   }
 
+  // ---------------------------------------------------------------------------
+  // 诊断报告导出（issue #40）
+  // ---------------------------------------------------------------------------
+
+  @override
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  }) => const DiagnosticsExporter().save(text, suggestedName: suggestedName);
+
   /// 按平台 spawn 系统「打开」命令。
   ///
   /// ## 为什么 [revealPath] 与 [openFile] 能共用这一条 spawn 路径

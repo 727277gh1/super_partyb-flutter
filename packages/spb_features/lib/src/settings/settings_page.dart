@@ -7,6 +7,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_platform/spb_platform.dart';
 import 'package:spb_ui/spb_ui.dart';
 
 import 'notification_subscriptions_card.dart';
@@ -14,6 +15,15 @@ import 'user_preferences_card.dart';
 
 /// 弹出目录选择器。返回 null = 用户取消。
 typedef PickSettingsDirectory = Future<String?> Function();
+
+/// 导出诊断报告（issue #40）。
+///
+/// ## 为什么返回三态枚举而不是 `bool`
+///
+/// 见 `spb_platform` 的 `DiagnosticsExportOutcome`：页面需要对「已导出」与
+/// 「用户取消」给**不同**的反馈（后者不弹任何提示），而「失败」要弹错误。
+/// 用 `bool` 会把取消当失败，用户点一下取消就看到「导出失败」。
+typedef ExportDiagnostics = Future<DiagnosticsExportOutcome> Function();
 
 /// 读取主题模式偏好。
 typedef LoadThemeMode = Future<ThemeMode> Function();
@@ -133,6 +143,7 @@ class SettingsPage extends StatefulWidget {
     this.savePreferences,
     this.preferenceAgentOptions = const [],
     this.preferenceFallbackDisplayName = '',
+    this.onExportDiagnostics,
     this.title = '设置',
   });
 
@@ -239,6 +250,19 @@ class SettingsPage extends StatefulWidget {
   /// 昵称未设置时的回落值（`users.name` → `email`），仅作输入框占位提示。
   final String preferenceFallbackDisplayName;
 
+  /// 导出诊断报告（issue #40）。为 null 时**不展示**该入口。
+  ///
+  /// ## 为什么用「未注入即隐藏」而不是「按平台判定」
+  ///
+  /// 与 [onOpenDirectory] / [loadLaunchAtStartup] 同一约定：判定留在装配层
+  /// （那里才真的持有平台能力），页面只渲染。移动端注入
+  /// `NoopDesktopCapabilities`（`saveDiagnostics` 恒返回
+  /// `unsupported`），所以两端 router 都可以传同一个装配函数——真到运行时
+  /// 发现不支持时，装配函数返回 `unsupported`，页面据此不弹成功提示。
+  ///
+  /// 见 [ExportDiagnostics] 的说明。
+  final ExportDiagnostics? onExportDiagnostics;
+
   final String title;
 
   @override
@@ -283,6 +307,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 自启开关是否在途（防重复切换 + 禁用控件）。
   bool _togglingLaunch = false;
+
+  /// 诊断报告导出是否在途（防重复点击 + 禁用入口）。
+  ///
+  /// 保存对话框是**模态**的，用户点了之后界面不会立即回来；不置 busy 会让
+  /// 用户以为没反应而再点一下，弹出第二个对话框。
+  bool _exportingDiagnostics = false;
+
   String? _error;
 
   /// 「已保存」提示是否可见。
@@ -423,6 +454,49 @@ class _SettingsPageState extends State<SettingsPage> {
     await _loadLaunchAtStartup();
     if (!mounted) return;
     setState(() => _togglingLaunch = false);
+  }
+
+  /// 导出诊断报告（issue #40）。
+  ///
+  /// ## 三态反馈（不是「成功/失败」二元）
+  ///
+  /// - `saved`：弹「已导出」；
+  /// - `cancelled`：**什么都不说**。用户自己点了取消，再弹一条提示是噪音；
+  /// - `failed`：弹「导出失败」，让用户知道该重试或换目录；
+  /// - `unsupported`：弹「本平台不支持」。
+  ///
+  /// ## 为什么不把「取消」也当成功
+  ///
+  /// 「已导出」是一条**事实断言**。用户取消后看到它，会以为文件已经写好了
+  /// 而去磁盘里找——找不到才是真正的困惑。
+  Future<void> _exportDiagnostics() async {
+    final export = widget.onExportDiagnostics;
+    if (export == null || _exportingDiagnostics) return;
+
+    setState(() => _exportingDiagnostics = true);
+    DiagnosticsExportOutcome outcome;
+    try {
+      outcome = await export();
+    } on Object catch (e) {
+      // 装配函数原则上不抛（能力层已静默降级），但日志/环境采集路径可能抛
+      // （如平台常量读取失败）。页面在这里兜底，不让一个诊断功能把设置页
+      // 搞崩。
+      SpbLog.warn('导出诊断报告失败', {'error': '$e'});
+      outcome = DiagnosticsExportOutcome.failed;
+    }
+    if (!mounted) return;
+    setState(() => _exportingDiagnostics = false);
+
+    final message = switch (outcome) {
+      DiagnosticsExportOutcome.saved => '诊断报告已导出',
+      DiagnosticsExportOutcome.cancelled => null,
+      DiagnosticsExportOutcome.failed => '导出诊断报告失败，请重试',
+      DiagnosticsExportOutcome.unsupported => '当前平台不支持导出诊断报告',
+    };
+    if (message != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   Future<void> _loadGroups() async {
@@ -1100,6 +1174,38 @@ class _SettingsPageState extends State<SettingsPage> {
               subtitle: const Text('跨对话回顾最近让 agent 做了什么'),
               trailing: const Icon(Icons.chevron_right),
               onTap: widget.onOpenMyTurns,
+            ),
+          ),
+        ],
+
+        // 诊断：报障时把环境信息 + 最近日志导成一个文本文件（issue #40）。
+        //
+        // ## 为什么放在最后一节而不是「桌面集成」区块里
+        //
+        // 那个区块只在桌面端展示（`desktopInfo.visible`），而诊断入口在两端
+        // 都可接（移动端会得到 `unsupported`）。混进去会让移动端因为
+        // 「visible == false」而整个区块不渲染，入口跟着消失——而它本不属于
+        // 「桌面集成」的语义（与托盘/快捷键无关）。
+        if (widget.onExportDiagnostics != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          Card(
+            margin: EdgeInsets.zero,
+            child: ListTile(
+              key: const ValueKey('settings-export-diagnostics'),
+              leading: const Icon(Icons.bug_report_outlined),
+              title: const Text('导出诊断日志'),
+              subtitle: const Text('包含版本、平台与最近日志；已对疑似凭据掩码'),
+              // 在途时用转圈替掉右侧箭头：保存对话框是模态的，用户看不到
+              // 「已在处理」就会再点一下。
+              trailing: _exportingDiagnostics
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.save_alt_outlined),
+              enabled: !_exportingDiagnostics,
+              onTap: _exportingDiagnostics ? null : _exportDiagnostics,
             ),
           ),
         ],

@@ -44,6 +44,11 @@ class _RecordingCapabilities implements DesktopCapabilities {
   @override
   Future<bool> openFile(String path) async => false;
   @override
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  }) async => DiagnosticsExportOutcome.unsupported;
+  @override
   Future<void> dispose() async {}
 }
 

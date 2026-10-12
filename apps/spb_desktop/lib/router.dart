@@ -2312,6 +2312,23 @@ class _SettingsPage extends ConsumerWidget {
       preferenceFallbackDisplayName:
           ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
+      // 诊断报告导出（issue #40）。
+      //
+      // ## 为什么不经过 provider
+      //
+      // 与 `pickDirectoryProvider` 不同，本入口不需要被测试 override——
+      // 装配函数 `exportDiagnosticsReport` 已经是一行纯函数，而它的依赖
+      // （能力实现）正是 `desktopCapabilitiesProvider`，测试直接 override
+      // 那个即可，更接近真实接线。
+      //
+      // ## 移动端有意不接
+      //
+      // `file_selector` 的 `getSaveLocation` 在 Android/iOS 上**未实现**
+      // （基类抛 `UnimplementedError`），接上只会得到「导出失败」。与
+      // AGENTS.md §6.10「移动端不接 `onOpen`/`onReveal`」同一取舍：
+      // 未注入 → 不展示入口（而非展示一个点了必失败的按钮）。
+      onExportDiagnostics: () =>
+          exportDiagnosticsReport(ref.read(desktopCapabilitiesProvider)),
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
       // 退出登录：清凭证 → 回登录页。

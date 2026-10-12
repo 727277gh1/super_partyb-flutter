@@ -6,6 +6,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 /// 设置页测试。
 ///
@@ -46,6 +47,7 @@ void main() {
     Future<void> Function(bool)? setLaunchAtStartup,
     Future<ThemeMode> Function()? loadThemeMode,
     Future<void> Function(ThemeMode)? saveThemeMode,
+    Future<DiagnosticsExportOutcome> Function()? onExportDiagnostics,
   }) async {
     // ## 为什么要把测试窗口调高
     //
@@ -80,6 +82,7 @@ void main() {
           setLaunchAtStartup: setLaunchAtStartup,
           loadThemeMode: loadThemeMode,
           saveThemeMode: saveThemeMode,
+          onExportDiagnostics: onExportDiagnostics,
         ),
       ),
     );
@@ -398,6 +401,145 @@ void main() {
         findsOneWidget,
         reason: '快捷键文案由装配层传入（本测试用非默认值），页面不硬编码 Alt+Space',
       );
+    });
+  });
+
+  group('设置页：导出诊断日志（issue #40）', () {
+    testWidgets('未注入 onExportDiagnostics 时不渲染该按钮', (tester) async {
+      // 与 onOpenDirectory / loadLaunchAtStartup 同一约定：未注入即隐藏。
+      // 移动端不接（`file_selector` 的 `getSaveLocation` 在 Android/iOS 上
+      // 未实现），展示一个点了必失败的按钮比不展示更糟。
+      await pumpSettings(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('注入后展示入口，点击调一次回调', (tester) async {
+      var calls = 0;
+      await pumpSettings(
+        tester,
+        onExportDiagnostics: () async {
+          calls++;
+          return DiagnosticsExportOutcome.saved;
+        },
+      );
+
+      final entry = find.byKey(const ValueKey('settings-export-diagnostics'));
+      expect(entry, findsOneWidget);
+
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('saved 时弹「已导出」提示', (tester) async {
+      await pumpSettings(
+        tester,
+        onExportDiagnostics: () async => DiagnosticsExportOutcome.saved,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('诊断报告已导出'), findsOneWidget);
+    });
+
+    testWidgets('cancelled 时**不弹任何提示**（用户自己点的取消）', (tester) async {
+      // 若把取消也提示一下，用户会看到「已取消」或「导出失败」——前者是
+      // 噪音，后者是假报错。两者都比沉默差。
+      await pumpSettings(
+        tester,
+        onExportDiagnostics: () async => DiagnosticsExportOutcome.cancelled,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SnackBar), findsNothing);
+    });
+
+    testWidgets('failed 时弹失败提示（不能沉默）', (tester) async {
+      // 静默失败会让用户以为导出成功了，去磁盘里白找一场。
+      await pumpSettings(
+        tester,
+        onExportDiagnostics: () async => DiagnosticsExportOutcome.failed,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('导出诊断报告失败，请重试'), findsOneWidget);
+    });
+
+    testWidgets('unsupported 时如实说「不支持」（不是「失败」）', (tester) async {
+      // 两者对用户意味着不同的事：一个是可以换平台，一个是该重试。
+      await pumpSettings(
+        tester,
+        onExportDiagnostics: () async => DiagnosticsExportOutcome.unsupported,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('当前平台不支持导出诊断报告'), findsOneWidget);
+    });
+
+    testWidgets('回调抛异常时页面不崩，而是弹失败提示', (tester) async {
+      // 环境信息采集路径可能抛（如平台常量读取失败）。一个诊断功能
+      // 不该把设置页搞崩。
+      await pumpSettings(
+        tester,
+        onExportDiagnostics: () async => throw StateError('boom'),
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('导出诊断报告失败，请重试'), findsOneWidget);
+    });
+
+    testWidgets('在途时禁用入口（防重复弹保存对话框）', (tester) async {
+      // 保存对话框是**模态**的：用户点一下后界面不会立即回来。不置 busy
+      // 会让用户再点一下，弹出第二个对话框。
+      final gate = Completer<DiagnosticsExportOutcome>();
+      await pumpSettings(tester, onExportDiagnostics: () => gate.future);
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      // 只推一帧：回调未完成。
+      await tester.pump();
+
+      final tile = tester.widget<ListTile>(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      expect(tile.enabled, isFalse);
+      expect(tile.onTap, isNull);
+
+      gate.complete(DiagnosticsExportOutcome.saved);
+      await tester.pumpAndSettle();
+
+      // 完成后恢复可点。
+      final after = tester.widget<ListTile>(
+        find.byKey(const ValueKey('settings-export-diagnostics')),
+      );
+      expect(after.enabled, isTrue);
+      expect(after.onTap, isNotNull);
     });
   });
 

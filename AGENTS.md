@@ -1063,19 +1063,19 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_data` | **98.3%** | `spb_platform` | 52.8% |
+| `spb_data` | **98.3%** | `spb_platform` | 55.3% |
 | `spb_features` | **93.5%** | `spb_mobile` | 54.4% |
 | `spb_domain` | 88.3% | `spb_desktop` | 58.8% |
 | `spb_models` | 88.0% | `spb_api` | 72.3% |
-| `spb_core` | 85.0% | `spb_ui` | 78.9% |
-| `spb_design` | 78.6% | **总计** | **83.7%**（≈15072/18013） |
+| `spb_core` | **92.4%** | `spb_ui` | 79.8% |
+| `spb_design` | 78.6% | **总计** | **83.8%**（≈15191/18138） |
 
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
 行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
 不是回归。
 
-> **总计从 75.7% 涨到 83.7% 不全是新增测试的功劳**：
+> **总计从 75.7% 涨到 83.8% 不全是新增测试的功劳**：
 >
 > - 剔除生成代码（1591 行）抬升约 4.5 个百分点；
 > - `spb_models` 50.6% → 88.0%（issue #38 补了 `Agent` / `ChatTurn` /
@@ -1083,13 +1083,16 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 >   `UfsFileEntry` / `Miniapp*` / `UserPreferences` 语义 getter / `Habit*` 的
 >   round-trip 与容错用例，以及 `toString()` 诊断输出）；
 > - `spb_data` 43.8% → 98.3%（补了 v1–v4 **跳版升级**、`openAppDatabaseAt` /
->   `openAppDatabaseLazy`、以及五条 `StorageError` 写失败路径）。
+>   `openAppDatabaseLazy`、以及五条 `StorageError` 写失败路径）；
+> - `spb_core` 85.0% → **92.4%**、`spb_platform` 52.5% → **55.3%**（issue #40
+>   的诊断导出：`redactSecrets` / `buildDiagnosticsReport` / 环形缓冲 / 文件名
+>   安全字符均有用例）。
 >
 > issue #38 点名的 7 个「0% 文件」（`chat_search_hit` / `chat_confirmation` /
 > `chat_inbox_message` / `chat_turn` / `chat_turn_summary` / `ufs_file_entry` /
 > `agent`）现在**全部 100%**，`miniapp.dart` 7.3% → 99.6%。
 
-**剩余的低值**（`spb_platform` 52.5% / `spb_desktop` 58.8% / `spb_mobile` 54.4%）
+**剩余的低值**（`spb_platform` 55.3% / `spb_desktop` 58.8% / `spb_mobile` 54.4%）
 有明确的环境原因：它们大量是**平台通道与原生代码的 Dart 侧包装**（`MethodChannel`
 调用、窗口/托盘/快捷键），本机无 `DISPLAY`、无真机（见 §9），widget test 只能覆盖
 「未注册 channel 时的降级路径」。要抬升需要 mock 平台通道或集成测试——不是「补
@@ -1440,11 +1443,128 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 
 #### 与其他守卫的关系
 
-七个守卫各管一件事，**不要合并**：`check_layering`（分层）、
-`check_test_support_sync`（重复测试辅助逐字节相同）、`check_workflow_steps`
-（CI step 结构）、`check_analysis_options`（分析配置接线）、
+八个守卫各管一件事，**不要合并**：`check_format`（格式）、`check_layering`
+（分层）、`check_test_support_sync`（重复测试辅助逐字节相同）、
+`check_workflow_steps`（CI step 结构）、`check_analysis_options`（分析配置接线）、
 `check_wiring_parity`（两端接线）、`check_unused_deps`（零引用依赖）、
 `check_agents_refs`（本文档引用）。
+
+---
+
+### 6.20 诊断日志导出（issue #40，**第一层已实现**）
+
+客户端此前**没有任何远程日志通道**：`LogSink` 只有 `ConsoleLogSink`（打印到
+stdout）与 `NullLogSink`（测试用）。用户报障时除了「它不工作」没有别的信息
+——没有堆栈、没有版本、没有设备信息。而 §9 已列出「需真机/有桌面环境手测」
+的范围（多窗口、托盘、`Alt+Space`、OIDC 回跳、交付物同步）恰好是最容易出
+平台特异性问题、而本机无法验证的部分。
+
+issue #40 给了三层。**本轮只做第一层**，后两层有意不做：
+
+| 层 | 内容 | 状态 |
+|---|---|---|
+| 1 | 「导出诊断日志」入口（手动附给报障） | ✅ 已实现 |
+| 2 | 崩溃上报（Sentry 自托管 / 复用 `logs-collector`） | ❌ 有意不做 |
+| 3 | `integration_test/` 覆盖无头可跑的链路 | ❌ 有意不做 |
+
+#### 链路
+
+```
+设置页「导出诊断日志」
+  └─ onExportDiagnostics 回调（装配层）
+       └─ exportDiagnosticsReport(capabilities)      [spb_platform]
+            ├─ diagnosticsEnvironment()   ← 版本/平台/Flutter/服务地址（**非机密**）
+            ├─ buildDiagnosticsReport(...) ← spb_core：环境信息 + 最近日志
+            │    └─ redactSecrets(...)     ← 导出前**最后一道**脱敏
+            └─ capabilities.saveDiagnostics(text, suggestedName:)
+                 └─ DiagnosticsExporter.save() → 系统「另存为」→ 写文件
+```
+
+#### 分层归属（按 §4 的判据）
+
+| 层 | 内容 | 为什么在这一层 |
+|---|---|---|
+| `spb_core` | 环形缓冲（`SpbLog.recentLogs`）、`LogRecord.format()`、`redactSecrets`、`buildDiagnosticsReport` | 「保留哪些、怎么渲染、怎么脱敏」是**正确性核心**，必须能在无 Flutter 引擎的环境下逐条断言 |
+| `spb_platform` | `DesktopCapabilities.saveDiagnostics` + `DiagnosticsExporter` + `diagnosticsEnvironment` / `exportDiagnosticsReport` | 环境信息要 `FlutterVersion` / `appBuildName`（Flutter 侧常量，纯 Dart 包拿不到）；保存要走 `file_selector` |
+| `spb_features` | `SettingsPage.onExportDiagnostics` + 入口 + 四态反馈 | 渲染与交互 |
+| `apps/*` | 一行 `onExportDiagnostics: () => exportDiagnosticsReport(caps)` | 装配 |
+
+#### 四态而非「成功/失败」二元（**最易写错**）
+
+`DiagnosticsExportOutcome` 有四个值，因为**用户看到的反馈不同**：
+
+| 值 | 页面反馈 | 为什么不能合并 |
+|---|---|---|
+| `saved` | 弹「诊断报告已导出」 | — |
+| `cancelled` | **什么都不说** | 用 `bool` 会把取消当失败，用户点一下取消就看到「导出失败」，以为功能坏了 |
+| `failed` | 弹「导出失败，请重试」 | 静默失败会让用户以为导出成功、去磁盘里白找一场 |
+| `unsupported` | 弹「当前平台不支持」 | 与「失败」不同：一个是可以换平台，一个是该重试 |
+
+`NoopDesktopCapabilities.saveDiagnostics` 恒返回 `unsupported`，所以**移动端
+不接**（两端 router 都传同一个装配函数也不会出事）——真到了移动端，页面会
+如实说「不支持」而不是「失败」。
+
+#### 安全红线：导出文本必须已脱敏
+
+报告会被用户贴进**公开** issue / 聊天窗口，而泄漏的凭证收不回来。两道防线：
+
+1. **来源侧克制**：`spb_api` 的 `session_credential.dart` 明写「本函数**绝不
+   记录 token 值**」；`diagnosticsEnvironment()` 只含版本/平台/地址（逐条依据
+   写在函数文档里，每个值都是公开的——`client_id` 本就是公开值，`env.dart`
+   已说明；发布地址来自 CI Variables，而 Variables 在公开仓库里本来就可见）。
+2. **导出侧按形态掩码**：`redactSecrets` 是**最后一道**，不依赖「谁记了什么」。
+   将来有人不小心把 header 打进日志，这里仍然拦住。
+
+`redactSecrets` 掩的是：`Bearer <token>`、JWT（`eyJ…`）、已知前缀令牌
+（`sk-` / `ghp_` / `xox[bpoa]-` / `AKIA`）、PEM 私钥头、URL 里的 `user:pass@`、
+以及**凭据类键名**后的值（`authorization` / `access_token` / `refresh_token` /
+`id_token` / `api_key` / `apikey` / `client_secret` / `password` / `passwd` /
+`token` / `secret`）。
+
+⚠️ **不能过度掩码**。把「收到 401，会话凭证可能已失效」这种无辜文本抹掉，等于
+把诊断信息删了。故键名是**白名单式列举**（不是关键词黑名单），且有专门一组
+用例钉住「不误伤」（真实日志文案、路径/域名/端口、无凭据 JSON、英文句里的
+`bearer` 一词）。
+
+两个实现细节（都踩过）：
+
+- 凭据键名里的 `\b` 让 `access_token` **不会**被 `token` 分支命中（`_` 是词字符，
+  其与 `t` 之间没有词边界），故 `access_token` / `refresh_token` 必须逐个列出。
+- PEM 头的正则**不能**在模式前加 `\b`（模式开头是 `-`，`\b` 要求前面是词字符
+  → 永远匹配不到行首的 PEM 头）。
+
+#### 三处「看起来能省、其实不能」的取舍
+
+| 取舍 | 结论 | 为什么 |
+|---|---|---|
+| 写固定目录（应用数据目录） | ❌ | macOS 沙箱与 Linux 下都是隐藏路径，用户找不着——「导出成功但用户拿不到文件」比导出失败更糟 |
+| 走剪贴板 | ❌ | 报告最多 500 条日志（上千行），粘进聊天窗口会被截断；且剪贴板是**静默**的（用户不知道复制成功没有） |
+| 文件名用 `toIso8601String()` | ❌ | 它含 `:`，而 `:` 在 NTFS 上是数据流分隔符，`File.writeAsString` 会失败——**Linux 开发机一切正常、Windows 用户报导出失败**，而 CI 只跑 Linux。改用 `20261012-203045` 形态 |
+
+#### 环形缓冲的两个不变式
+
+- **上限 500 条，丢最旧的**。桌面端是常驻进程（关窗只隐藏到托盘），跑一周能
+  产生几十万条日志；全留会让内存随运行时长线性增长——而这是用户**看不见**的
+  泄漏。方向写反（丢最新）会让报告只剩启动时的日志。
+- **阈值过滤在记录之前**。故报告只包含运行时**实际可见**的日志——想让报告
+  带上 debug 细节，得用 `--dart-define=SPB_VERBOSE_LOG=true` 构建，而不是
+  期待导出时能补回来。否则「日志里没有」会被误读成「没发生」。
+
+`SpbLog.clearRecentLogs()` 是**测试专用**（全局单例的缓冲会跨用例累积，断言
+「缓冲里有什么」之前必须先清）。
+
+#### 有意不做：移动端导出
+
+`file_selector` 的 `getSaveLocation` 在 **Android/iOS 上未实现**（基类抛
+`UnimplementedError`）。移动端要做需引入 `share_plus` + 真机验证，属独立一轮
+（同 §6.9.1「移动端打开已下载文件」的取舍）。当前移动端**不注入**
+`onExportDiagnostics`，故入口不渲染。
+
+#### 反向验证（逐条实测）
+
+去掉 `redactSecrets` 调用 → 1 条失败；键名去掉 `access_token` → 1 条；PEM
+正则加回 `\b` → 1 条；文件名改回 ISO8601 → 1 条（`:` 检测）；环形缓冲改丢
+最新 → 1 条；阈值过滤移到缓冲之后 → 1 条；取消态也弹提示 → 1 条。
 
 ---
 
@@ -1697,6 +1817,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 对话内搜索（搜已加载时间线，见 §6.15）+ 窄屏 AppBar 溢出修复（issue #31，见 §6.16）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
+- [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
 - [ ] 移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`，见 `docs/mobile-oidc-deeplink.md`）
 - [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
@@ -1709,7 +1830,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 
 | 文件 | 职责 | 触发 | 产物保留 |
 |---|---|---|---|
-| `.github/workflows/ci.yml` | **验证**：analyze / format / layering / test / 能否构建 | push main + PR | Actions 7 天 |
+| `.github/workflows/ci.yml` | **验证**：analyze / format / 8 个守卫 / test / 能否构建 | push main + PR | Actions 7 天 |
 | `.github/workflows/release.yml` | **交付**：三端出包 + 建 Release | `v*` tag + 手动 | Release 长期 / Actions 30 天 |
 
 发布构建的地址参数（API/UFS/webapp/OIDC）由仓库 **Variables** 提供
@@ -1770,6 +1891,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
 | 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
 | 契约同步靠人工 | 可接受 | §6.2 |
+| ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（剔除后口径），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%** | issue #38、§6.13 |
 | ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
 

@@ -108,6 +108,11 @@ class _WiringCapabilities
   @override
   Future<bool> openFile(String path) async => false;
   @override
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  }) async => DiagnosticsExportOutcome.unsupported;
+  @override
   Future<void> dispose() async {}
 }
 
@@ -140,6 +145,11 @@ class _PlainCapabilities implements DesktopCapabilities {
   Future<bool> revealPath(String path) async => false;
   @override
   Future<bool> openFile(String path) async => false;
+  @override
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  }) async => DiagnosticsExportOutcome.unsupported;
   @override
   Future<void> dispose() async {}
 }

@@ -204,6 +204,53 @@ abstract interface class DesktopCapabilities {
 
   /// 释放资源。
   Future<void> dispose();
+
+  /// 把诊断报告写入用户选定的文件（issue #40）。
+  ///
+  /// ## 为什么返回三态枚举而不是 `bool` / `String?`
+  ///
+  /// 调用方（设置页）需要给**不同**的反馈：
+  /// - [DiagnosticsExportOutcome.saved] → 「已导出」；
+  /// - [DiagnosticsExportOutcome.cancelled] → **什么都不说**（用户自己点了
+  ///   取消，再弹一条「已取消」是噪音）；
+  /// - [DiagnosticsExportOutcome.failed] → 「导出失败」。
+  ///
+  /// 用 `bool` 会把「取消」与「失败」合并，于是取消时弹一个失败提示（用户
+  /// 以为功能坏了）；用 `String?`（非空即成功）会丢掉「失败」这一态。
+  ///
+  /// ## 为什么日志写入失败也算「失败」而不是抛
+  ///
+  /// 与 [revealPath] / [openFile] 同一约定：调用方不该为此写 try/catch。
+  /// 磁盘满、路径只读、用户选了不可写目录都是**预期内**的降级路径，
+  /// 记日志 + 返回 [DiagnosticsExportOutcome.failed] 即可。
+  ///
+  /// [suggestedName] 是保存对话框的默认文件名，由调用方给（它才知道「现在
+  /// 几点、哪个平台」）——本层不自己编时间戳。
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  });
+}
+
+/// 诊断报告的导出结果。
+///
+/// 见 [DesktopCapabilities.saveDiagnostics] 的说明：三态而非布尔，因为
+/// 「用户取消」与「写入失败」对用户意味着完全不同的两件事。
+enum DiagnosticsExportOutcome {
+  /// 已写入用户选定的文件。
+  saved,
+
+  /// 用户取消了保存对话框（或平台返回了空路径）。**不是错误**。
+  cancelled,
+
+  /// 打开对话框或写入文件时出错。
+  failed,
+
+  /// 当前平台没有这个能力（[NoopDesktopCapabilities]）。
+  ///
+  /// 与 [failed] 分开：装配层可以据此**不展示**入口（而不是展示一个点了
+  /// 必失败的按钮）。
+  unsupported,
 }
 
 /// 「窗口显示/隐藏」的可接线能力。
@@ -484,6 +531,15 @@ class NoopDesktopCapabilities implements DesktopCapabilities {
   Future<bool> openFile(String path) async {
     SpbLog.debug('openFile 在当前平台不可用', {'path': path});
     return false;
+  }
+
+  @override
+  Future<DiagnosticsExportOutcome> saveDiagnostics(
+    String text, {
+    required String suggestedName,
+  }) async {
+    SpbLog.debug('saveDiagnostics 在当前平台不可用', {'name': suggestedName});
+    return DiagnosticsExportOutcome.unsupported;
   }
 
   @override

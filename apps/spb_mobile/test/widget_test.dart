@@ -1697,6 +1697,14 @@ void main() {
       findsNothing,
       reason: '移动端不展示托盘/快捷键区块',
     );
+    expect(
+      find.byKey(const ValueKey('settings-export-diagnostics')),
+      findsNothing,
+      reason:
+          '移动端不接导出诊断日志（file_selector 的 getSaveLocation '
+          '在 Android/iOS 上未实现），未注入即隐藏，'
+          '而非展示一个点了必失败的按钮（AGENTS.md §6.10 同一取舍）',
+    );
   });
 
   testWidgets('设置页「默认 Agent」下拉拿到真实 agent 列表（调用点传参）', (tester) async {

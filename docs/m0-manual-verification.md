@@ -118,12 +118,12 @@ xvfb-run -a timeout 15 ./build/linux/x64/release/bundle/spb_desktop
 
 | 包 | 用例数 | 包 | 用例数 |
 |---|---|---|---|
-| `spb_core` | 31 | `spb_ui` | 40 |
-| `spb_models` | 433 | `spb_platform` | 67 |
-| `spb_api` | 355 | `spb_features` | 1081 |
-| `spb_domain` | 881 | `spb_desktop` | 142 |
+| `spb_core` | 67 | `spb_ui` | 40 |
+| `spb_models` | 433 | `spb_platform` | 79 |
+| `spb_api` | 355 | `spb_features` | 1089 |
+| `spb_domain` | 881 | `spb_desktop` | 144 |
 | `spb_data` | 130 | `spb_mobile` | 102 |
-| `spb_design` | 24 | **合计** | **3286** |
+| `spb_design` | 24 | **合计** | **3344** |
 
 > 合计与逐包数字**必须一起更新**——本文件曾出现「正文说 199 个测试」而实际
 > 已 2600+ 的漂移（issue #4 正文）。改任一处时请顺手核一遍总和。
@@ -323,6 +323,29 @@ flutter test test/chat/accessibility_test.dart   # 期望：+6 All tests passed!
 - 「语义测试找不到标签」 → 确认测试里调了 `tester.ensureSemantics()`。
   `flutter_test` 默认**关闭**语义树，不开的话断言永远落空。
 
+### 2.8 导出诊断日志（issue #40）
+
+- **前置**：桌面端（Linux / Windows / macOS）。移动端**有意不接**（`file_selector`
+  的 `getSaveLocation` 在 Android/iOS 上未实现，见 `AGENTS.md` §6.20）。
+- **操作**：设置页 → 「导出诊断日志」→ 在「另存为」里选一个可写目录 → 打开
+  导出的 `spb-diagnostics-<时间戳>.txt`。
+- **期望**：
+  - [ ] 弹出系统「另存为」对话框，默认文件名形如
+        `spb-diagnostics-20261012-203045.txt`（**含 `:` 则 Windows 会失败**）。
+  - [ ] 取消对话框时**不弹任何提示**（取消不是失败）。
+  - [ ] 导出成功时弹「诊断报告已导出」。
+  - [ ] 报告含「运行环境」（版本 / 平台 / Flutter / 服务地址）与「最近日志」。
+  - [ ] 报告**不含**任何 `Bearer …` / JWT（`eyJ…`）/ `sk-…` / `ghp_…` /
+        `api_key=…` / `password=…`——这是硬红线（会被贴进公开 issue）。
+  - [ ] 日志条目**每条一行**（堆栈里的换行被转义为字面量 `\n`）。
+- **失败时排查点**：
+  - 「另存为对话框弹不出来」 → 无 `DISPLAY` / 缺 GTK 端口。属**预期内**降级
+    （弹「导出失败」而非崩），不要当缺陷。
+  - 「Windows 上报导出失败」 → 先查文件名是否含 `:`。
+  - 「报告里日志很少」 → 阈值过滤在**记录之前**：默认 `minLevel=info` 且
+    上限 500 条。要 debug 细节需 `--dart-define=SPB_VERBOSE_LOG=true` 重建，
+    而不是期待导出时能补回来（见 `AGENTS.md` §6.20）。
+
 ---
 
 ## 3. 阻塞条件（跨仓生产配置，本仓无法完成）
@@ -374,7 +397,7 @@ issue #4 的正文写于 M0 阶段，其中**三处已过时**。下表是逐条
 
 | issue #4 正文的说法 | 核实结果 | 证据 |
 |---|---|---|
-| 「199 个测试」 | **已过时**：当前 **2757**（见 §1 的逐包数字与合计） | 逐包 `flutter test` / `dart test` |
+| 「199 个测试」 | **已过时**：当前 **3344**（见 §1 的逐包数字与合计） | 逐包 `flutter test` / `dart test` |
 | 「`sessionTokenProvider` 恒返回 `null`，即未接 OIDC」 | **已过时**：它返回 `manager.currentAccessToken`（`SessionManager`），OIDC 已接通 | `apps/spb_desktop/lib/providers.dart` 的 `sessionTokenProvider` |
 | 「确认卡『同意/拒绝』当前实现路径有误，见 #1，修好前此项必然失败」 | **#1 已 closed**：路径现为 `POST /api/chat/groups/:gid/confirmations/:cid/resolve`（含 `group_id`，体键 `action`），有 4 例单测 | `packages/spb_api/lib/src/chat_api.dart:1053`、`test/chat_api_test.dart` 的 `resolveConfirmation` 组 |
 | 「多窗口」作为「M0 头号风险，需验证主窗+设置窗+悬浮窗能否同时存在」 | **已重新决策**：`window_manager` **做不到**多窗口（一个 engine 一个 view），改为「主窗口临时变身」单窗方案。验证项已相应改写（见 §2.1） | `AGENTS.md` §6.5 |
