@@ -46,6 +46,10 @@ Flutter 是**「加一个端」**，不是「换一套栈」。现有三端全�
 # 依赖（workspace 根目录执行，所有包共享一份 lockfile）
 flutter pub get
 
+# CI 用 `flutter pub get --enforce-lockfile`：lockfile 与 pubspec.yaml 不一致时
+# 显式失败。改完依赖请把根 `pubspec.lock` 一起提交（它是唯一那份，**不要**加进
+# `.gitignore`）——只提交 lockfile 不够，还得保证 CI 用的是它，见 issue #35。
+
 # 静态分析（全量，含分层规则）
 dart analyze .
 bash tools/check_layering.sh          # 分层规则（纯 Dart 包禁止依赖 Flutter）

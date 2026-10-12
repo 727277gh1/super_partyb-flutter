@@ -50,8 +50,12 @@ jobs:
           cache: true
 
       # Pub Workspaces：根目录一次 pub get 即解析全部成员（单一 lockfile）。
+      #
+      # `--enforce-lockfile`：lockfile 与 pubspec.yaml 不一致时显式失败，而不是
+      # 默默重解析。提交 `pubspec.lock` 只保证「有一份」，不保证「CI 用的是它」
+      # ——少了这个标志，新增依赖却忘了更新 lockfile 时 CI 仍会绿（见 issue #35）。
       - name: Resolve dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Format check
         run: bash tools/check_format.sh

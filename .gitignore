@@ -40,7 +40,10 @@ coverage/
 !**/lib/**/*.g.dart
 
 # 依赖
-pubspec.lock
+#
+# ⚠️ 工作区根的 lockfile **必须提交**，不要加回忽略列表。
+# 它是 Pub Workspaces 的唯一解析结果，保证 CI 与本地解析出同一组版本。
+# 理由与配套的 `--enforce-lockfile` 见 AGENTS.md §2 与 issue #35。
 
 # ---- IDE ----
 .idea/
