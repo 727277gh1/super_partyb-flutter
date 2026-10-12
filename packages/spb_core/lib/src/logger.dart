@@ -230,8 +230,8 @@ class SpbLog {
 // 第一层（本次实现）不做任何上报：把环境信息与最近日志拼成一份**文本**，
 // 让用户手动附给报障。无第三方服务、无网络、无隐私评审负担。
 //
-// 崩溃上报（Sentry / 复用 logs-collector）与 `integration_test/` 是 issue
-// #40 的第二、三层，**有意未做**。
+// 崩溃上报（第三方 crash reporter / 复用 logs-collector）与 `integration_test/`
+// 是 issue #40 的第二、三层，**有意未做**。
 
 /// 掩码疑似凭据。
 ///
