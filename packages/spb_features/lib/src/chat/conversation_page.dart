@@ -25,6 +25,7 @@ import 'message_composer.dart';
 import 'outbox_bar.dart';
 import 'spec_ui_card.dart';
 import 'pending_messages_bar.dart';
+import 'row_locate_registry.dart';
 import 'thought_tile.dart';
 import 'tool_call_tile.dart';
 import 'user_message_bubble.dart';
@@ -542,18 +543,9 @@ class _ConversationPageState extends State<ConversationPage> {
 
   /// 时间线上每个展示行的 `GlobalKey`，供搜索命中后滚动定位。
   ///
-  /// ## 为什么用 `GlobalKey` 而不是自己算偏移量
-  ///
-  /// 时间线是**变高**列表（消息长度、文件卡、批量卡各不相同），自己累加高度
-  /// 去推算目标偏移几乎必然不准——`ListView.builder` 对未构建项的高度只能
-  /// 估算，且估算值会在后续帧里修正（见 [_onScroll] 的注释）。
-  ///
-  /// `GlobalKey` + `Scrollable.ensureVisible` 交给框架处理：它对已构建项直接
-  /// 用真实几何，对未构建项会先滚到附近再重试，是唯一可靠的做法。
-  ///
-  /// 用 item.id 而非下标作键：搜索期间新消息可能到达，下标会整体平移，
-  /// 而下标错位会让「跳到命中项」跳到别人身上。
-  final _rowKeys = <String, GlobalKey>{};
+  /// 注册 + 回收的规则见 [RowLocateRegistry]（issue #39：此前只 `putIfAbsent`
+  /// 从不回收，跨 group 切换持续累积）。
+  final _rowKeys = RowLocateRegistry();
 
   /// 已提交 resolve 的卡行 id（本地去重，避免重复点击发出两次请求）。
   ///
@@ -1533,8 +1525,17 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 多一处可忘的地方。
   List<TimelineDisplayRow> _displayRows() => groupFileEventsForDisplay(_items);
 
+  /// 丢弃已不在时间线上的行所对应的 `GlobalKey`（issue #39）。
+  ///
+  /// 规则与理由见 [RowLocateRegistry.recycle]。在 [_buildTimeline] 里调用
+  /// （而不是 `_onItems`）：`rows` 已经算好了，零额外开销，且「当前行集合」
+  /// 就是渲染的事实来源。
+  void _recycleRowKeys(List<TimelineDisplayRow> rows) =>
+      _rowKeys.recycle(locateIdsOfAll(rows));
+
   Widget _buildTimeline() {
     final rows = _displayRows();
+    _recycleRowKeys(rows);
 
     return ScrollConfiguration(
       // 桌面端：Flutter 默认的 dragDevices **不含鼠标**，不加这个
@@ -1573,17 +1574,8 @@ class _ConversationPageState extends State<ConversationPage> {
           // 其他文件时 `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——
           // 而那条明明就在屏幕上。同一批共用一个定位点是对的：它们本来就渲染
           // 在同一张卡里。
-          final locateKeys = switch (row) {
-            SingleItemRow(:final item) => [item.id],
-            AgentFileBatchRow(:final files) => [for (final f in files) f.id],
-          };
-          final locateKey = _rowKeys.putIfAbsent(
-            locateKeys.first,
-            GlobalKey.new,
-          );
-          for (final id in locateKeys.skip(1)) {
-            _rowKeys[id] = locateKey;
-          }
+          final locateKeys = locateIdsOf(row);
+          final locateKey = _rowKeys.keyFor(locateKeys);
 
           return KeyedSubtree(
             key: locateKey,

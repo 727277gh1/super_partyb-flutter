@@ -64,6 +64,7 @@ export 'my_turns_page.dart';
 export 'outbox_bar.dart';
 export 'message_composer.dart';
 export 'pending_messages_bar.dart';
+export 'row_locate_registry.dart';
 export 'pending_confirmations_page.dart';
 export 'search_page.dart';
 export 'spec_ui_card.dart';

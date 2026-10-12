@@ -56,6 +56,7 @@ bash tools/check_layering.sh          # 分层规则（纯 Dart 包禁止依赖 
 bash tools/check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
 bash tools/check_workflow_steps.sh    # workflow 的 step 没被注释吞掉（见 issue #32）
 bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_options（见 issue #34）
+bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39）
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
@@ -1249,6 +1250,76 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 `窄屏（<720dp）…`（两条分别钉住宽屏图标与窄屏菜单，避免「一边补上、另一边
 漏掉」）。
 
+### 6.17 两端接线一致性守卫（issue #33/#39）
+
+**脚本**：`tools/check_wiring_parity.sh`（CI quality job，在 Analyze 之前）。
+
+#### 它防的是什么
+
+`ConversationPage` 有 46 个具名参数，两端 router 各传 40+ 个。**漏接一端不会让
+任何测试失败**：页面测试自己传参（接不接线它不管），两端 router 测试各管一端。
+后果是用户界面上某个入口**静默消失**——移动端宽屏搜索入口就是这么丢的
+（issue #33）。
+
+源码里有 11 处注释写「两端构造点必须一致，否则一端功能缺失而测试仍绿」，
+但**约定靠注释不靠工具**。故本脚本对两端 `ConversationPage(` 的具名参数做集合
+比对。
+
+#### 豁免是**显式**的，不是「取交集」
+
+| 端 | 豁免参数 | 理由 |
+|---|---|---|
+| desktop | `onOpenAgentFile` / `onRevealAgentFile` | 移动端注入 `NoopDesktopCapabilities`，`openFile`/`revealPath` 恒 false，接上会得到「无法打开文件」（§6.10） |
+| mobile | `overflowItems` | 窄屏溢出菜单是移动端独有载体，桌面端宽屏直接摆独立图标（§6.16） |
+
+⚠️ **不要把它改成「两端取交集」**——那会把这类**有意的**产品差异也一起藏掉，
+才是真的失去守卫。豁免写死在脚本里，过期（两端都传了）时脚本会报错提醒删。
+
+#### 不检查什么
+
+- **值**：两端传的表达式不同是正常的（`enableSearch` 就按宽度给），脚本只比对
+  参数**名**是否存在，不解析值语义；
+- **provider 层**：两端 `providers.dart` 有 88 个同名 provider，上提到共享包是
+  独立重构（issue #39 已登记），不在本守卫范围。
+
+#### 三个易写错的点（写这类脚本时）
+
+1. **必须先把注释与字符串抹掉再解析**：`reason: 'a, b'` 里的逗号会被当成参数
+   分隔符，注释里的 `ConversationPage(` 会抢到错误位置。脚本用「保持长度与
+   换行」的替换（而非删除），行号才对得上。
+2. **豁免过期要报错**：否则清单会随重构腐化，最终列出早已统一的参数。
+3. **拼错参数名要单独报**：Dart 编译器会报，但脚本早一步给出「传了 X 没有的
+   参数」，定位更快。
+
+### 6.18 `_rowKeys` 的注册与回收（issue #39）
+
+时间线搜索定位用 `GlobalKey`（变高列表无法自己算偏移量），其注册 + 回收抽在
+`spb_features` 的 `RowLocateRegistry`（`packages/spb_features/lib/src/chat/row_locate_registry.dart`）。
+
+**此前只有注册（`putIfAbsent`）、从不回收**：时间线只保留最近 2000 条事件，
+旧项被裁掉后键仍在 Map 里；跨 group 切换（State 复用）持续累积，且旧
+`GlobalKey` 会让对应 Element 无法回收。
+
+#### 三条互相拉扯的约束
+
+| 做错的方向 | 后果 |
+|---|---|
+| 注册少了 | 搜索命中后找不到键 → 退化成「请向上滚动」，而目标在屏幕上 |
+| 回收少了（修复前的状态） | 跨 group 累积，Element 无法回收 |
+| **回收多了** | 仍在渲染的行的键被删 → 下一帧生成新键，`KeyedSubtree` 卸载重挂，**滚动位置丢失** |
+
+故 `recycle(liveIds)` **只删不在时间线上的 id**，绝不 `clear()` 重建。
+
+#### 「一行占哪些 id」是领域层口径
+
+`locateIdsOf(row)` / `locateIdsOfAll(rows)`（`spb_domain` 的 `agent_file_batch.dart`）
+是唯一口径，页面用它**同时**做注册与回收——两处若各写一份，回收会漏算
+**批量卡的非首成员**（批内 5 个文件共用同一张卡、同一个定位点），把仍在渲染的
+行的键删掉。
+
+`RowLocateRegistry` 与 `locateIdsOf` 都是纯函数/纯逻辑，故可在无 widget 环境逐条
+断言（`row_locate_registry_test.dart` 12 条、`agent_file_batch_test.dart` 新增 5 条）。
+
 ---
 ---
 
@@ -1567,6 +1638,10 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~离线缓存切片 C（离线写队列）~~ | ✅ 已实现（issue #30）：`OutboxEntries` 表（schemaVersion 4→5，`request_id` 即主键）+ `OutboxQueue`（严格 FIFO / 队首阻塞 / 退避 2s×2ⁿ 封顶 5 min / 上限 10 次 / `request_id` 幂等）+ 控制器 `send` 入队与 `delivered` 回显注入 + 「待发送」条（取消/重试/丢弃）+ 两端 `outboxQueueProvider`（**非** autoDispose，App 启动预热）。共 93 条用例。⚠️ 与 A/B 相反：**存储失败抛 `StorageError` 不静默降级**（装的是用户输入） | issue #30、`docs/offline-cache-design.md` §7bis |
 | 离线缓存切片 C 的「反向验证为 0」 | ⚠️ **唯一一条**（诚实记录）：`drain` 进度哨兵——正确代码上不可达，属 **fail-safe**（拦「将来有人改坏 `_nextSendable`」，把挂死变成记 error + 中断）。另两条初版缺口（store `delete`/`clear` 静默降级、`onConnectivityRestored` 不碰 `failed`）**已补测** | `docs/offline-cache-design.md` §7bis.11 |
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
+| ~~两端装配层接线无守卫（漏接一端而测试仍绿）~~ | ✅ 已修（issue #39）：`tools/check_wiring_parity.sh` 比对两端 `ConversationPage(` 具名参数，差异必须命中显式豁免（`onOpenAgentFile`/`onRevealAgentFile` 仅桌面、`overflowItems` 仅移动）；接入 CI | issue #39、§6.17 |
+| ~~对话页 `_rowKeys` 只注册不回收（跨 group 累积）~~ | ✅ 已修（issue #39）：抽 `RowLocateRegistry`（注册 + 按「当前行 id 集合」回收，**不** `clear()` 重建）+ 领域层唯一口径 `locateIdsOf` / `locateIdsOfAll`；17 条用例，3 项反向验证逐条实测 | issue #39、§6.18 |
+| 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
+| 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 
 ---

@@ -345,4 +345,56 @@ void main() {
       );
     });
   });
+
+  group('定位 id（locateIdsOf / locateIdsOfAll）', () {
+    /// ## 这个 group 防的是什么
+    ///
+    /// `ConversationPage` 用它做两件事：注册定位键、**回收**已不在时间线上的
+    /// 键（issue #39）。两处必须是同一份口径——若回收用的集合比注册用的
+    /// 少算了一个 id，那个仍在渲染的行的 `GlobalKey` 会被删掉，`KeyedSubtree`
+    /// 随之卸载重挂（丢失滚动位置，且搜索定位失效）。
+    ///
+    /// 最容易漏的是**批量卡的非首成员**：批内 5 个文件共用同一个定位点
+    /// （它们渲染在同一张卡里），故 5 个 id 都必须算进「活着的行」。
+    test('单条行 → 只含该条 id', () {
+      final item = _text('m1');
+      expect(locateIdsOf(SingleItemRow(item)), ['m1']);
+    });
+
+    test('批量卡 → 含批内全部成员 id（不只首成员）', () {
+      final files = [for (var i = 0; i < 5; i++) _file('f$i.md', second: 0)];
+      final row = groupFileEventsForDisplay(files).single;
+      expect(row, isA<AgentFileBatchRow>());
+      expect(locateIdsOf(row), ['f0.md', 'f1.md', 'f2.md', 'f3.md', 'f4.md']);
+    });
+
+    test('locateIdsOfAll 展平多行，含批内全部成员', () {
+      final rows = groupFileEventsForDisplay([
+        _text('m1'),
+        for (var i = 0; i < 5; i++) _file('f$i.md', second: 0),
+        _text('m2', second: 1),
+      ]);
+      expect(locateIdsOfAll(rows), {
+        'm1',
+        'f0.md',
+        'f1.md',
+        'f2.md',
+        'f3.md',
+        'f4.md',
+        'm2',
+      });
+    });
+
+    test('空时间线 → 空集合（页面据此回收全部旧键）', () {
+      expect(locateIdsOfAll([]), isEmpty);
+    });
+
+    test('返回的集合不含重复 id', () {
+      final rows = groupFileEventsForDisplay([
+        for (var i = 0; i < 5; i++) _file('f$i.md', second: 0),
+      ]);
+      final ids = locateIdsOfAll(rows);
+      expect(ids, hasLength(5));
+    });
+  });
 }

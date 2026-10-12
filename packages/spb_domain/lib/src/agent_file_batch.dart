@@ -53,6 +53,29 @@ final class AgentFileBatchRow extends TimelineDisplayRow {
   int get count => files.length;
 }
 
+/// 一行在时间线搜索定位中占用的全部 `item.id`。
+///
+/// ## 为什么放在领域层
+///
+/// 「哪条 id 对应哪个定位点」是**口径**而非渲染细节：批量卡的每个成员都必须
+/// 能被定位到同一张卡（见 `conversation_page.dart` 的 `_rowKeys` 注释），而
+/// 页面用它做两件事——注册定位键、**回收**已不在时间线上的键（issue #39）。
+/// 两处必须用同一份口径，否则回收会把仍在渲染的行的键删掉。
+///
+/// 纯函数、无 Flutter 依赖，故可在无头环境逐行断言。
+List<String> locateIdsOf(TimelineDisplayRow row) => switch (row) {
+  SingleItemRow(:final item) => [item.id],
+  AgentFileBatchRow(:final files) => [for (final f in files) f.id],
+};
+
+/// 当前时间线上**全部**可用于定位的 `item.id`。
+///
+/// 页面用它与 `_rowKeys` 求差，回收已裁剪项的键：`_rowKeys` 只 `putIfAbsent`
+/// 的话会随裁剪/切 group 持续累积（且旧 `GlobalKey` 会阻止 Element 回收）。
+Set<String> locateIdsOfAll(List<TimelineDisplayRow> rows) => {
+  for (final row in rows) ...locateIdsOf(row),
+};
+
 /// 事件的「秒」分组键：截断到秒，**不**用 `Date.parse`。
 ///
 /// 对齐 webapp `secondOf` 的 `createdAt.slice(0, 19)`：那里刻意不解析日期，

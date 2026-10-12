@@ -80,6 +80,13 @@ jobs:
       - name: Analysis options wiring check
         run: bash tools/check_analysis_options.sh
 
+      # 两端装配层对同一共享组件的接线必须一致：`ConversationPage` 有 40+ 个
+      # 具名参数，漏接一端**不会让任何测试失败**（页面测试自己传参，两端
+      # router 测试各管一端），只会让用户界面上某个入口静默消失——移动端
+      # 宽屏搜索入口就是这么丢的（issue #33/#39）。
+      - name: Wiring parity check
+        run: bash tools/check_wiring_parity.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 
