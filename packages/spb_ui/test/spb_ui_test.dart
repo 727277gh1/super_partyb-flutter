@@ -304,4 +304,133 @@ void main() {
       );
     });
   });
+
+  group('HighlightedText', () {
+    /// 取渲染后的富文本 spans。
+    List<TextSpan> spansOf(WidgetTester tester) {
+      final rich = tester.widget<Text>(find.byType(Text));
+      return (rich.textSpan! as TextSpan).children!.cast<TextSpan>();
+    }
+
+    /// 高亮样式（测试用它区分「命中」与「普通」span）。
+    ///
+    /// 必须显式传：`highlightStyle` 为 null 时组件退化为 `style`，此时
+    /// 「高亮」在渲染上不可见——组件的行为是对的，但断言无从区分。
+    const highlight = TextStyle(backgroundColor: Color(0xFF00FF00));
+
+    testWidgets('高亮全部命中处（不止第一处）', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const HighlightedText(
+            text: 'todo 与 TODO',
+            query: 'todo',
+            highlightStyle: highlight,
+          ),
+        ),
+      );
+
+      final spans = spansOf(tester);
+      final highlighted = spans.where((s) => s.style?.backgroundColor != null);
+      expect(highlighted, hasLength(2));
+      expect(highlighted.map((s) => s.text), ['todo', 'TODO']);
+    });
+
+    testWidgets('保留原文大小写（不高亮成小写）', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const HighlightedText(
+            text: 'ERROR',
+            query: 'error',
+            highlightStyle: highlight,
+          ),
+        ),
+      );
+
+      final highlighted = spansOf(tester)
+          .where((s) => s.style?.backgroundColor != null);
+      expect(highlighted.single.text, 'ERROR');
+    });
+
+    testWidgets('查询词为空 → 退化为普通 Text（不高亮、无 RichText）', (tester) async {
+      await tester.pumpWidget(
+        _host(const HighlightedText(text: '普通文本', query: '')),
+      );
+
+      final rich = tester.widget<Text>(find.byType(Text));
+      expect(rich.textSpan, isNull, reason: '空查询不该构造 spans');
+      expect(find.text('普通文本'), findsOneWidget);
+    });
+
+    testWidgets('文本为空 → 退化为普通 Text', (tester) async {
+      await tester.pumpWidget(
+        _host(const HighlightedText(text: '', query: 'x')),
+      );
+
+      expect(tester.widget<Text>(find.byType(Text)).textSpan, isNull);
+    });
+
+    testWidgets('无命中 → 单个未高亮 span，文本完整', (tester) async {
+      await tester.pumpWidget(
+        _host(const HighlightedText(text: 'hello', query: 'zzz')),
+      );
+
+      final spans = spansOf(tester);
+      expect(spans, hasLength(1));
+      expect(spans.single.text, 'hello');
+      expect(spans.single.style?.backgroundColor, isNull);
+    });
+
+    testWidgets('含正则元字符的查询不抛异常（字面量匹配）', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const HighlightedText(
+            text: 'a ( b',
+            query: '(',
+            highlightStyle: highlight,
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      final highlighted = spansOf(tester)
+          .where((s) => s.style?.backgroundColor != null);
+      expect(highlighted.single.text, '(');
+    });
+
+    testWidgets('toLowerCase 长度不变（切片下标可直接互用的前提）', (tester) async {
+      // `HighlightedText` 用小写匹配的结果去切**原文**片段（保留原大小写），
+      // 这依赖 Dart 的 `toLowerCase` 用简单大小写映射、长度不变。
+      // 若某次 Dart 升级改成完整映射（如 `İ` → `i̇`），这里会失败并指向该假设。
+      for (final s in ['İstanbul', 'ẞ', '中文ABC']) {
+        expect(s.toLowerCase().length, s.length, reason: '前提：长度不变');
+      }
+    });
+
+    testWidgets('非 ASCII 大小写字符也保留原文', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const HighlightedText(
+            text: 'İstanbul 之行',
+            query: 'stanbul',
+            highlightStyle: highlight,
+          ),
+        ),
+      );
+
+      final joined = spansOf(tester).map((s) => s.text).join();
+      expect(joined, 'İstanbul 之行', reason: '切片不能错位或丢字');
+      final highlighted = spansOf(tester)
+          .where((s) => s.style?.backgroundColor != null);
+      expect(highlighted.single.text, 'stanbul');
+    });
+
+    testWidgets('命中在开头与结尾时文本完整无丢字', (tester) async {
+      await tester.pumpWidget(
+        _host(const HighlightedText(text: 'ab cd ab', query: 'ab')),
+      );
+
+      final joined = spansOf(tester).map((s) => s.text).join();
+      expect(joined, 'ab cd ab');
+    });
+  });
 }

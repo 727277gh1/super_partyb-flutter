@@ -16,6 +16,7 @@
 ///   copyIconButton  —— 复制到剪贴板（用户气泡 / 助手气泡各一份）
 ///   emptyState      —— 空状态（对话页 / 对话列表页 / 搜索页各一份，样式互不相同）
 ///   errorState      —— 整页错误 + 重试（对话列表页 / 搜索页各一份，逐字段相同）
+///   highlightedText —— 搜索命中高亮（搜索页 / 对话内搜索各一份，逐字段相同）
 ///
 /// ## 与 `spb_design` 的分工
 ///
@@ -28,4 +29,5 @@ export 'src/empty_state.dart';
 export 'src/error_banner.dart';
 export 'src/error_state.dart';
 export 'src/hint_line.dart';
+export 'src/highlighted_text.dart';
 export 'src/section_title.dart';

@@ -262,10 +262,11 @@ class _HitTile extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // 命中片段：服务端在 200 字符处截断，故可能不完整。
-            _HighlightedText(
+            HighlightedText(
               text: hit.inputText,
               query: query,
               style: textTheme.bodyMedium,
+              maxLines: 3,
               highlightStyle: textTheme.bodyMedium?.copyWith(
                 backgroundColor: scheme.primaryContainer,
                 fontWeight: FontWeight.w600,
@@ -297,65 +298,5 @@ class _HitTile extends StatelessWidget {
     if (diff.inDays < 30) return '${diff.inDays} 天前';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}'
         '-${t.day.toString().padLeft(2, '0')}';
-  }
-}
-
-/// 把 [query] 在 [text] 中的出现处高亮。
-///
-/// ## 为什么大小写不敏感地匹配
-///
-/// 服务端的 `SearchChatTurnsByText` 用的是 SQLite 的 LIKE，而 SQLite 的 LIKE
-/// 对 ASCII **默认大小写不敏感**。若客户端用大小写敏感的方式高亮，会出现
-/// 「搜 `Todo` 命中了 `todo`，但界面上没有任何高亮」的困惑。
-///
-/// 不用正则：查询词是用户输入，含 `.` `*` `(` 等字符时会被当成元字符，
-/// 既可能抛异常也可能匹配到意料之外的位置。直接做子串扫描更可预测。
-class _HighlightedText extends StatelessWidget {
-  const _HighlightedText({
-    required this.text,
-    required this.query,
-    this.style,
-    this.highlightStyle,
-  });
-
-  final String text;
-  final String query;
-  final TextStyle? style;
-  final TextStyle? highlightStyle;
-
-  @override
-  Widget build(BuildContext context) {
-    if (query.isEmpty || text.isEmpty) {
-      return Text(text, style: style);
-    }
-
-    final lowerText = text.toLowerCase();
-    final lowerQuery = query.toLowerCase();
-    final spans = <TextSpan>[];
-    var start = 0;
-
-    while (true) {
-      final index = lowerText.indexOf(lowerQuery, start);
-      if (index < 0) {
-        spans.add(TextSpan(text: text.substring(start), style: style));
-        break;
-      }
-      if (index > start) {
-        spans.add(TextSpan(text: text.substring(start, index), style: style));
-      }
-      spans.add(
-        TextSpan(
-          text: text.substring(index, index + query.length),
-          style: highlightStyle ?? style,
-        ),
-      );
-      start = index + query.length;
-    }
-
-    return Text.rich(
-      TextSpan(children: spans),
-      maxLines: 3,
-      overflow: TextOverflow.ellipsis,
-    );
   }
 }
