@@ -4,6 +4,7 @@ import 'package:drift/drift.dart' hide isNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
@@ -483,6 +484,93 @@ void main() {
       await prefs.setString('k', 'v');
       await prefs.remove('k');
       expect(await prefs.getString('k'), isNull);
+    });
+  });
+
+  group('写失败不静默（StorageError 路径）', () {
+    /// 造一个「能读、不能写」的库。
+    ///
+    /// ## 为什么不用 `db.close()`
+    ///
+    /// 内存执行器的写是**缓冲**的：`close()` 之后 `save()` 可能仍然「成功」
+    /// 返回（只是没落盘），会让用例以错误的原因变绿。`PRAGMA query_only = 1`
+    /// 是 SQLite 层面的只读开关，任何写语句都会报 `SQLITE_READONLY`（code 8）。
+    ///
+    /// ⚠️ 必须先真正打开过库（跑一次查询），否则 PRAGMA 作用在未打开的连接上。
+    Future<AppDatabase> readOnlyDb() async {
+      final db = _memoryDb();
+      await db.customSelect('SELECT 1').get();
+      await db.customStatement('PRAGMA query_only = 1');
+      return db;
+    }
+
+    test('sync save 失败抛 StorageError（不假装游标已推进）', () async {
+      // 若静默吞掉，下一轮同步会以为「游标已到 X」而**跳过** X 之前的全部
+      // 变更——用户看到「同步成功」但文件永远不来。
+      final db = await readOnlyDb();
+      addTearDown(db.close);
+
+      await expectLater(
+        DriftSyncStateStore(db).save(
+          workspaceStateKey,
+          const SyncState(cursor: '2026-03-01T00:00:00Z'),
+        ),
+        throwsA(isA<StorageError>()),
+      );
+    });
+
+    test('sync reset 失败抛 StorageError（不假装已清空）', () async {
+      final db = await readOnlyDb();
+      addTearDown(db.close);
+
+      await expectLater(
+        DriftSyncStateStore(db).reset(workspaceStateKey),
+        throwsA(isA<StorageError>()),
+      );
+    });
+
+    test('sync resetAll 失败抛 StorageError（换目录时的全量清理）', () async {
+      final db = await readOnlyDb();
+      addTearDown(db.close);
+
+      await expectLater(
+        DriftSyncStateStore(db).resetAll(),
+        throwsA(isA<StorageError>()),
+      );
+    });
+
+    test('bindLocalRoot 失败抛 StorageError（绑定失败不能让目录「看起来已换」）', () async {
+      // 若静默吞掉，调用方会以为目录已切换，而实际绑定仍是旧目录——
+      // 下轮同步会往**旧目录**写文件。
+      final db = await readOnlyDb();
+      addTearDown(db.close);
+
+      await expectLater(
+        DriftSyncStateStore(db).bindLocalRoot('/home/u/deliverables'),
+        throwsA(isA<StorageError>()),
+      );
+    });
+
+    test('prefs setString 失败抛 StorageError（不假装设置已保存）', () async {
+      final db = await readOnlyDb();
+      addTearDown(db.close);
+
+      await expectLater(
+        PreferencesStore(db).setString('local_root', '/home/u/deliverables'),
+        throwsA(isA<StorageError>()),
+      );
+    });
+
+    test('StorageError 的 message 指得出是哪一层（便于日志定位）', () async {
+      final db = await readOnlyDb();
+      addTearDown(db.close);
+      try {
+        await DriftSyncStateStore(db)
+            .save(workspaceStateKey, const SyncState());
+        fail('应当抛出');
+      } on StorageError catch (e) {
+        expect(e.message, contains('同步状态'));
+      }
     });
   });
 

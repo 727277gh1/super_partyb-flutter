@@ -7,6 +7,24 @@ import 'package:spb_domain/spb_domain.dart';
 
 part 'database.g.dart';
 
+// coverage:ignore-start
+//
+// ⚠️ 下面 7 个 drift 表类（直到 `coverage:ignore-end`）的**列 getter 在运行时
+// 不可达**：它们只在 `build_runner` 生成 `database.g.dart` 时被读取，运行时
+// 每个表用的是生成的 `$XTable` 子类（`GeneratedColumn` 覆盖了这些 getter）。
+// 直接调用 `SyncCursors().stateKey` 会抛：
+//
+//   Unsupported operation: This method should not be called at runtime.
+//   Are you sure you re-ran the builder after changing your tables or databases?
+//
+// 它们没有「测试写得好不好」这个维度——为它补测试只能靠反射/绕过 drift 的
+// 运行时保护，是纯粹的 coverage-gaming。故整体标记忽略，让 `spb_data` 的
+// 覆盖率反映**真正可测**的代码（issue #38）。
+//
+// ⚠️ 若将来 drift 改了生成方式、这些 getter 真的能在运行时被调用，**必须删掉
+// 这对标记**——否则会静默漏测。判据：`dart run build_runner build` 后
+// `database.g.dart` 里不再有 `$XTable` 覆盖对应 getter。
+
 /// 同步游标：每个状态键一行。
 ///
 /// 单独一张表（而不是把游标塞进文件记录表）是因为它们的**基数不同**：
@@ -247,6 +265,7 @@ class Preferences extends Table {
   @override
   Set<Column> get primaryKey => {key};
 }
+// coverage:ignore-end
 
 /// 本地持久化数据库（同步状态 + 偏好）。
 ///

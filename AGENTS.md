@@ -66,9 +66,11 @@ cd apps/spb_mobile  && flutter test   # 移动端
 dart test                             # 纯 Dart 包（spb_core/models/api/domain）
 
 # 覆盖率（issue #25）——逐包采集并汇总，产物 coverage/lcov.info
+# 默认剔除生成代码（*.g.dart / *.freezed.dart / *.gr.dart，见 §6.13）
 bash tools/coverage.sh                # 全包（约 +3 min）
 bash tools/coverage.sh spb_domain     # 单包（调试用）
 bash tools/coverage.sh --summary-only # 不跑测试，只汇总已有产物
+COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only  # 含生成代码的原始数字
 
 # golden 基线（issue #25）——更新前先确认 diff 是你有意改的！
 cd packages/spb_ui     && flutter test --update-goldens test/golden_test.dart
@@ -1015,34 +1017,72 @@ bash tools/coverage.sh --summary-only # 不跑测试，只汇总已有产物（C
 `format_coverage` 的 `--report-on` 必须传**绝对路径**（`$PWD/lib`）：传相对路径会让
 `SF:` 前缀随工作目录变化，同一文件在合并时被算两次。
 
-**当前基线（2026-10，本机实测）**：
+#### 生成代码被剔除（issue #38）
+
+汇总与合并时**剔除** `*.g.dart` / `*.freezed.dart` / `*.gr.dart`——它们是构建产物
+（`dart run build_runner build` 生成），没有「测试写得好不好」这个维度。
+
+| 文件 | 对分母的影响 |
+|---|---|
+| `spb_data/lib/src/database.g.dart` | **1591 行 = 该包分母的 79%**（全仓唯一一个生成文件） |
+
+剔除是**可见的**：汇总表下方打印被剔除的行数，并给出查看原始数字的命令。
+
+```bash
+# 含生成代码的原始数字（对比用）
+COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
+```
+
+> 剔除后 `spb_data` 从 43.8% → **98.3%**——原先的低值几乎全是生成代码拉低的，
+> 而不是「持久层缺测试」。**但 `spb_data` 的手写代码确实有真缺口**（见下），
+> 故不能只靠剔除收工。
+
+#### 两处**结构性不可达**的代码（不是测试缺口）
+
+| 位置 | 为什么不可达 | 处理 |
+|---|---|---|
+| `database.dart` 的 7 个 drift 表类（列 getter / `primaryKey`） | 它们只在 `build_runner` 生成 `database.g.dart` 时被读取；运行时每个表用生成的 `$XTable` 子类（`GeneratedColumn` 覆盖了 getter）。直接调用 `SyncCursors().stateKey` 会抛 `Unsupported operation: This method should not be called at runtime` | 源码里用 `// coverage:ignore-start` / `// coverage:ignore-end` 标记（带「drift 改生成方式时必须删掉」的注释） |
+| 同上，`database.g.dart` 本身 | 构建产物 | `tools/coverage.sh` 的 `*.g.dart` 过滤 |
+
+`coverage:ignore-start/end` 由 `flutter test --coverage` 直接支持（实测：标记 240 行
+表定义后 `database.dart` 的 `LF` 从 90 → 43，未覆盖行从 48 → 2）。
+
+#### 当前基线（2026-10，本机实测，**已剔除生成代码**）
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_features` | **93.9%** | `spb_api` | 71.7% |
-| `spb_domain` | 88.1% | `spb_desktop` | 58.8% |
-| `spb_core` | 85.0% | `spb_mobile` | 54.1% |
-| `spb_design` | 80.0% | `spb_platform` | 52.5% |
-| `spb_ui` | 73.6% | `spb_models` | 50.6% |
-| | | `spb_data` | **42.9%** |
-| | | **总计** | **75.7%**（14683/19400） |
+| `spb_data` | **98.3%** | `spb_platform` | 52.5% |
+| `spb_features` | **93.5%** | `spb_mobile` | 54.4% |
+| `spb_domain` | 88.3% | `spb_desktop` | 58.8% |
+| `spb_models` | 85.2% | `spb_api` | 72.3% |
+| `spb_core` | 85.0% | `spb_ui` | 78.9% |
+| `spb_design` | 78.6% | **总计** | **83.4%**（≈15026/18015） |
 
-⚠️ issue #25 曾猜「90% 集中在 `spb_domain`，`spb_features` 可能大量是挂载即通过的
-烟雾测试」——**实测相反**：`spb_features` 是最高的 93.9%。要补测试的是 **`spb_data`
-（42.9%）与 `spb_models`（50.6%）**。数据会随代码变动，用上面的命令重跑而不是
-引用本表。
+⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
+⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
+行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
+不是回归。
 
-> **总计从 76.3% 降到 75.7% 不是回归**：`#29`/`#30` 两个切片新增约 1700 行实现
-> （`outbox.dart` / `timeline_cache_store.dart` / `outbox_store.dart` / 生成的
-> drift 代码），分母从 17677 涨到 19400。各包中位数实际**上升**（`spb_domain`
-> 86.5% → 88.1%、`spb_features` 93.7% → 93.9%、`spb_data` 42.2% → 42.9%）。
-> `spb_data` 仍最低是因为 drift 的生成代码（`database.g.dart`）算在分母里而
-> 基本不可测。
+> **总计从 75.7% 涨到 83.4% 不全是新增测试的功劳**：
 >
-> 本表曾标「当前基线」却已漂移（总计 76.6% → 76.3%，`spb_models` 49.6% → 50.6%）
-> ——漂移与 `#26` 切片 A 的新增代码/测试同批出现（`spb_models` 上升的合理解释是
-> `ChatGroup.toJson` 的 round-trip 用例，未逐行归因）。**改完代码顺手重跑一次**，
-> 别让「当前」二字失真。
+> - 剔除生成代码（1591 行）抬升约 4.5 个百分点；
+> - `spb_models` 50.6% → 85.2%（issue #38 补了 `Agent` / `ChatTurn` /
+>   `ChatTurnSummary` / `ChatConfirmation` / `ChatInboxMessage` / `ChatSearchHit` /
+>   `UfsFileEntry` / `Miniapp*` / `UserPreferences` 语义 getter / `Habit*` 的
+>   round-trip 与容错用例）；
+> - `spb_data` 43.8% → 98.3%（补了 v1–v4 **跳版升级**、`openAppDatabaseAt` /
+>   `openAppDatabaseLazy`、以及五条 `StorageError` 写失败路径）。
+
+**剩余的低值**（`spb_platform` 52.5% / `spb_desktop` 58.8% / `spb_mobile` 54.4%）
+有明确的环境原因：它们大量是**平台通道与原生代码的 Dart 侧包装**（`MethodChannel`
+调用、窗口/托盘/快捷键），本机无 `DISPLAY`、无真机（见 §9），widget test 只能覆盖
+「未注册 channel 时的降级路径」。要抬升需要 mock 平台通道或集成测试——不是「补
+单测」能解决的。
+
+> **历史漂移记录（保留，避免重复踩）**：本表曾标「当前基线」却漂移多次（总计
+> 76.6% → 76.3% → 75.7%）。曾把 `spb_data` 的低值归因为「drift 生成代码算在分母
+> 里」——该判断**方向正确但不完整**：生成代码是主因（79% 分母），但剔除后仍暴露出
+> 真缺口（跳版升级 / 两个 open 工厂 / 写失败路径）。**剔除 ≠ 收工**。
 
 #### golden：只给「稳定 + 纯展示 + 改错代价高」的组件加
 
@@ -1714,6 +1754,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
 | 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
 | 契约同步靠人工 | 可接受 | §6.2 |
+| ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（剔除后口径），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%** | issue #38、§6.13 |
 | ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
 
 ---

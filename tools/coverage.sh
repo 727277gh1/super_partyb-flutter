@@ -25,6 +25,19 @@
 # `--summary-only` 供 CI 写 job summary 用：避免为了打一张表**再跑一遍全部
 # 测试**（CI 里上一步刚跑完，产物就在磁盘上）。
 #
+# ## 剔除生成代码（issue #38）
+#
+# `database.g.dart` 一个文件就占 `spb_data` 分母的 78%（1591/2049 行），而它
+# **是构建产物**：`dart run build_runner build` 生成，随表/列定义自动变。
+# 它没有「测试写得好不好」这个维度——覆盖多少完全由「用到了哪些表/列」决定，
+# 为它补测试就是 coverage-gaming。
+#
+# 故汇总与合并时**剔除**下列模式，让数字反映**手写可测代码**的真实覆盖：
+# `*.g.dart`（drift / json_serializable）、`*.freezed.dart`、`*.gr.dart`。
+#
+# 剔除是**可见的**：汇总表下方会打印被剔除了多少行，不是悄悄消失。
+# 要看含生成代码的原始数字，用 `COVERAGE_INCLUDE_GENERATED=1`。
+#
 # 产物：`coverage/lcov.info`（仓库根，合并全部包）+ 终端汇总表。
 set -euo pipefail
 
@@ -71,6 +84,29 @@ fi
 OUT_DIR="coverage"
 # 收集所有分段 lcov，最后合并。
 SEGMENTS=()
+
+# 生成代码的模式（`SF:` 行）。用 `\\.` 转义点号，避免 `gXdart` 之类误匹配。
+GENERATED_RE='\.(g|freezed|gr)\.dart$'
+
+# 把一份 lcov 过滤后写到 stdout（剔除生成代码）。
+#
+# lcov 是「一条记录 = SF: 行 + 若干 DA:/LF:/LH: 行 + end_of_record」的文本格式，
+# 故按记录过滤：命中模式的 SF: 起直到下一条 SF: 全部丢弃。
+#
+# `COVERAGE_INCLUDE_GENERATED=1` 时原样输出（用于对比原始数字）。
+filter_lcov() {
+  if [ "${COVERAGE_INCLUDE_GENERATED:-0}" = "1" ]; then
+    cat "$1"
+    return
+  fi
+  awk -v re="$GENERATED_RE" '
+    /^SF:/ {
+      skip = ($0 ~ re) ? 1 : 0
+      if (skip) next
+    }
+    !skip { print }
+  ' "$1"
+}
 
 if [ "$SUMMARY_ONLY" = true ]; then
   # 不跑测试：直接指向各包已存在的 lcov。
@@ -121,9 +157,10 @@ if [ "$SUMMARY_ONLY" = false ]; then
 
   # 合并：lcov 是「每个 SF: 一段」的文本格式，直接拼接即可（lcov 工具链的
   # `lcov -a` 做的是同样的事，但那是外部依赖，这里只拼文本，无额外依赖）。
+  # 拼接前逐份过滤，剔除生成代码（见文件头说明）。
   for f in "${SEGMENTS[@]}"; do
     [ -f "$f" ] || continue
-    cat "$f" >> "$OUT_DIR/lcov.info"
+    filter_lcov "$f" >> "$OUT_DIR/lcov.info"
   done
 fi
 
@@ -134,16 +171,20 @@ printf '%-16s %8s %8s %7s\n' -- ------ ----- ------
 
 total_lf=0
 total_lh=0
+total_excluded_lf=0
 for f in "${SEGMENTS[@]}"; do
   [ -f "$f" ] || continue
   # 包名：packages/spb_x/coverage/... 或 apps/spb_y/coverage/...
   pkg="$(echo "$f" | cut -d/ -f2)"
-  read -r lh lf < <(awk -F: '
+  read -r lh lf < <(filter_lcov "$f" | awk -F: '
     /^LH:/ { lh += $2 }
     /^LF:/ { lf += $2 }
     END    { printf "%d %d\n", lh, lf }
-  ' "$f")
+  ')
   [ "${lf:-0}" -eq 0 ] && continue
+  # 被剔除的生成代码行数（仅统计，用于提示可见性）。
+  raw_lf=$(awk -F: '/^LF:/ { lf += $2 } END { printf "%d", lf }' "$f")
+  total_excluded_lf=$((total_excluded_lf + raw_lf - lf))
   total_lh=$((total_lh + lh))
   total_lf=$((total_lf + lf))
   printf '%-16s %8d %8d %6.1f%%\n' "$pkg" "$lh" "$lf" \
@@ -154,6 +195,10 @@ echo ""
 if [ "$total_lf" -gt 0 ]; then
   printf '总计 %d/%d = %.1f%%\n' "$total_lh" "$total_lf" \
     "$(awk -v a="$total_lh" -v b="$total_lf" 'BEGIN { printf "%.1f", 100*a/b }')"
+fi
+if [ "${COVERAGE_INCLUDE_GENERATED:-0}" != "1" ] && [ "$total_excluded_lf" -gt 0 ]; then
+  echo "（已剔除生成代码 $total_excluded_lf 行：*.g.dart / *.freezed.dart / *.gr.dart）"
+  echo "  含生成代码的原始数字：COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only"
 fi
 if [ "$SUMMARY_ONLY" = false ]; then
   echo "lcov: $OUT_DIR/lcov.info"
