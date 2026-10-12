@@ -328,12 +328,31 @@ class _MessageComposerState extends State<MessageComposer> {
             icon: const Icon(Icons.send, size: SpbSpacing.lg),
           ),
           const SizedBox(width: SpbSpacing.xs),
-          Text(
-            'Enter 发送 · Shift+Enter 换行',
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
+          // 快捷键说明：窄屏**隐藏**，宽屏保留。
+          //
+          // ## 为什么必须处理（它是一个真实的窄屏溢出源）
+          //
+          // 这句文本实测宽 **287.5dp**，且它在 `Row` 里不是 `Expanded`/
+          // `Flexible`——于是它把整行撑破：320dp 溢出 104px、360dp 64px、
+          // 390dp 34px（接线「立即发送」时；未接线时小 52px）。
+          //
+          // ## 为什么按宽度隐藏而不是 `Flexible` + 省略号
+          //
+          // 截断后剩下的会是「Enter 发送 · Shift+En…」——一个比不显示更让人
+          // 困惑的半句。而这句话的价值本就只在**桌面端**（有物理键盘、需要知道
+          // Enter 与 Shift+Enter 的区别）；手机是软键盘，回车键行为由
+          // `textInputAction` 决定，这行说明对移动端用户无意义。
+          //
+          // 阈值用 `SpbBreakpoints.compact`（720dp）而不是「刚好够放下」的
+          // 实测值：说明文本的出现与否不该随「几个像素」抖动，且 720 以下
+          // 一律是单栏窄屏，正是它的适用场景分界。
+          if (!SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width))
+            Text(
+              'Enter 发送 · Shift+Enter 换行',
+              style: textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
             ),
-          ),
         ],
       ),
     );

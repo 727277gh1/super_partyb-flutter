@@ -1408,6 +1408,17 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 建议卡标注了 agent_id：记住它，下一条消息（含回填后用户改过再发的）
       // 由这个 agent 回答。对齐 webapp FollowUpSuggestCard 的「先切人再追加」。
       onSelectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
+      // 对话内搜索（搜的是**已加载的时间线**，含 agent 回复）。
+      //
+      // ## 为什么显式打开
+      //
+      // `ConversationPage.enableSearch` 默认 `false`：移动端 AppBar 在窄屏
+      // 没有余量（issue #31），故不能默认开。桌面端有宽屏余量，显式打开。
+      //
+      // 忘了这一行**不会让任何页面测试失败**（页面测试自己传参），只会让
+      // 用户界面上入口静默消失——`apps/spb_desktop/test/widget_test.dart`
+      // 有一条从 router 层断言的用例专门钉住它。
+      enableSearch: true,
     );
 
     if (!_showSidebar) return conversation;

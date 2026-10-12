@@ -3538,6 +3538,39 @@ void main() {
       );
     });
   });
+
+  /// 对话页 AppBar 必须提供「在本对话中搜索」入口（对话内搜索 / issue #31）。
+  ///
+  /// ## 这个用例防的是什么
+  ///
+  /// `ConversationPage.enableSearch` 默认为 `false`（移动端 AppBar 无余量，
+  /// 见 issue #31）。若某一端的 router 忘了显式打开，**页面测试不会失败**
+  /// （它们自己传参），而用户界面上那个入口会静默消失——「功能实现了但没接线」
+  /// 是这类开关型参数最容易出的错。
+  ///
+  /// 故这里从 **router** 层断言：真实装配出来的对话页上有那个图标。
+  testWidgets('对话页 AppBar 提供对话内搜索入口（router 显式打开 enableSearch）', (tester) async {
+    final h = await pumpApp(tester);
+    h.router.go(SpbRoutes.chat('grp_search_wire'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      find.byKey(const ValueKey('conversation-search-open')),
+      findsOneWidget,
+      reason:
+          '桌面端 AppBar 有宽屏余量，必须直接摆出搜索图标'
+          '（移动端才收进溢出菜单）',
+    );
+
+    // 点开确认它真的打开面板（而不是只渲染了一个图标）。
+    await tester.tap(find.byKey(const ValueKey('conversation-search-open')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('conversation-search-field')),
+      findsOneWidget,
+    );
+  });
 }
 
 /// 桌面能力桩（`isSupported == true`，用于验证桌面专属设置项会展示）。

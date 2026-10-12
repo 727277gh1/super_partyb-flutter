@@ -43,6 +43,7 @@ class AgentSwitcher extends StatefulWidget {
     required this.switchAgent,
     this.currentAgentId,
     this.busy = false,
+    this.compact = false,
   });
 
   final LoadAgents loadAgents;
@@ -57,6 +58,24 @@ class AgentSwitcher extends StatefulWidget {
 
   /// 切换是否在途（装配层传入）。为真时禁用入口，防并发切换把绑定打乱。
   final bool busy;
+
+  /// 紧凑模式：只显示图标，不显示 agent 名字。
+  ///
+  /// ## 为什么需要它（issue #31）
+  ///
+  /// 标签最多占 140dp（名字长时），加图标与箭头后整个控件可达 190dp。窄屏
+  /// AppBar 本就吃紧（issue #31 实测 320dp 下即使收起了三个低频入口，配上
+  /// 长 agent 名仍溢出 10px）。
+  ///
+  /// ## 为什么省的是「名字」而不是整个入口
+  ///
+  /// 名字是**冗余信息**：`_currentLabel` 的内容在菜单里每一项旁边都有勾选
+  /// 标记（`CheckedPopupMenuItem`），点开就能看到当前是哪个。而图标本身是
+  /// 入口，省掉它用户就完全找不到切换处。
+  ///
+  /// 代价：用户要多点一下才知道当前 agent。这是窄屏下的合理取舍——320dp
+  /// 的设备（如 iPhone SE 一代）本就无法同时容纳全部信息。
+  final bool compact;
 
   @override
   State<AgentSwitcher> createState() => _AgentSwitcherState();
@@ -175,15 +194,16 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
           children: [
             Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
             const SizedBox(width: SpbSpacing.xs),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 140),
-              child: Text(
-                _currentLabel,
-                key: const ValueKey('agent-switcher-label'),
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelLarge,
+            if (!widget.compact)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
+                child: Text(
+                  _currentLabel,
+                  key: const ValueKey('agent-switcher-label'),
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge,
+                ),
               ),
-            ),
             // 当前 agent 已不在可选列表里（归档/删除）：给出标记，否则用户会
             // 疑惑「为什么这个 agent 在菜单里找不到」。
             if (_currentMissing)

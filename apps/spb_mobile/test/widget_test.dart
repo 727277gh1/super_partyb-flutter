@@ -3103,6 +3103,158 @@ void main() {
       expect(restored.pkce.verifier, 'v_restart');
     });
   });
+
+  group('对话页窄屏 AppBar（issue #31）', () {
+    /// ## 这个 group 防的是什么
+    ///
+    /// 此前对话页在常见手机宽度下**两处** RenderFlex 溢出（composer 360dp
+    /// 达 64px、AppBar 达 66px），而测试没发现——因为全部 widget test 用
+    /// **默认 800dp 窗口**，比真机宽。本机无 `DISPLAY`（AGENTS.md §9），
+    /// 也没有真机可看。
+    ///
+    /// 故这里显式把窗口压到真机宽度。用例只断言「不溢出」，不锁定具体
+    /// 布局——布局会随设计调整，而「任何宽度都不该出黄黑条」是不变式。
+    for (final width in [320.0, 360.0, 390.0, 412.0]) {
+      testWidgets('宽 $width dp 下对话页无 RenderFlex 溢出', (tester) async {
+        tester.view.physicalSize = Size(width, 844);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        // 用长 agent 名（140dp 上限）：短名字会掩盖 AgentSwitcher 的宽度问题。
+        await pumpApp(
+          tester,
+          initialLocation: SpbRoutes.chat('grp_narrow'),
+          loadAgents: () async => const [
+            Agent(id: 'agent_a', name: '一个名字很长的写作助手'),
+          ],
+        );
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: '窄屏溢出会把右侧入口裁掉/盖住，用户点不到（issue #31）',
+        );
+      });
+    }
+
+    testWidgets('窄屏低频入口收进溢出菜单，宽屏摆出独立图标', (tester) async {
+      // 窄屏：三个低频入口在菜单里，独立图标不存在。
+      tester.view.physicalSize = const Size(360, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_menu'),
+      );
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(
+        find.byKey(const ValueKey('conversation-overflow-menu')),
+        findsOneWidget,
+        reason: '窄屏必须收起低频入口，否则 AppBar 溢出（issue #31）',
+      );
+      // 常驻项（带徽标，需一眼可见）仍在。
+      expect(
+        find.byKey(const ValueKey('open-group-deliverables')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('open-group-todos')), findsOneWidget);
+
+      // 展开菜单：三个低频入口 + 对话内搜索。
+      await tester.tap(
+        find.byKey(const ValueKey('conversation-overflow-menu')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('menu-group-settings')), findsOneWidget);
+      expect(find.byKey(const ValueKey('menu-goal-tasks')), findsOneWidget);
+      expect(find.byKey(const ValueKey('menu-goal-history')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('menu-conversation-search')),
+        findsOneWidget,
+        reason: '窄屏不摆搜索图标（没地方），但功能不能因此消失',
+      );
+
+      // 关掉菜单，避免留下未结算的动画。
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      // 宽屏：独立图标回来，菜单消失。
+      tester.view.physicalSize = const Size(1000, 2400);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('conversation-overflow-menu')),
+        findsNothing,
+      );
+      expect(find.byKey(const ValueKey('open-group-settings')), findsOneWidget);
+      expect(find.byKey(const ValueKey('open-goal-tasks')), findsOneWidget);
+      expect(find.byKey(const ValueKey('open-goal-history')), findsOneWidget);
+      // 宽屏下 `_ChatPage` 的 enableSearch 仍为 false（搜索走菜单是窄屏的
+      // 收纳手段，宽屏由桌面端那样的独立图标提供——移动端保持菜单入口，
+      // 避免在 720~1000dp 之间又要多一个 48dp 图标）。
+      expect(h.router.state.matchedLocation, SpbRoutes.chat('grp_menu'));
+    });
+
+    testWidgets('窄屏从溢出菜单能打开对话内搜索', (tester) async {
+      tester.view.physicalSize = const Size(360, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await pumpApp(tester, initialLocation: SpbRoutes.chat('grp_search'));
+      await tester.pump(const Duration(seconds: 1));
+
+      await tester.tap(
+        find.byKey(const ValueKey('conversation-overflow-menu')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('menu-conversation-search')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('conversation-search-field')),
+        findsOneWidget,
+        reason: '菜单项必须真的打开搜索面板（而不是只关掉菜单）',
+      );
+    });
+
+    testWidgets('极窄屏（<360dp）AgentSwitcher 隐藏名字，避免溢出', (tester) async {
+      tester.view.physicalSize = const Size(320, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_tiny'),
+        loadAgents: () async => const [
+          Agent(id: 'agent_a', name: '一个名字很长的写作助手'),
+        ],
+      );
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(
+        find.byKey(const ValueKey('agent-switcher-label')),
+        findsNothing,
+        reason: '320dp 下名字（最多 140dp）放不下，只留图标（issue #31）',
+      );
+      expect(find.byKey(const ValueKey('agent-switcher')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
 }
 
 /// 固定值的前后台状态（测试用：不随生命周期事件变化）。

@@ -15,6 +15,7 @@ import 'agent_file_card.dart';
 import 'agent_file_preview.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
+import 'conversation_search_sheet.dart';
 import 'feedback_request_card.dart';
 import 'flush_strategy_dialog.dart';
 import 'follow_up_chips.dart';
@@ -27,6 +28,36 @@ import 'pending_messages_bar.dart';
 import 'thought_tile.dart';
 import 'tool_call_tile.dart';
 import 'user_message_bubble.dart';
+
+/// 溢出菜单的一项（窄屏时收纳 AppBar 的低频入口）。
+///
+/// 见 [ConversationPage.overflowItems] 与 issue #31。
+class ConversationOverflowItem {
+  const ConversationOverflowItem({
+    required this.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  /// 菜单项的测试键。
+  ///
+  /// **不要**复用宽屏那个 `IconButton` 的 key：同一个 key 指向两种交互会让
+  /// 断言的含义随窗口宽度漂移（宽屏找到按钮、窄屏找到菜单项）。
+  final Key key;
+
+  final IconData icon;
+
+  final String label;
+
+  /// 点击动作。null = 该项禁用（如 `_group` 未就绪）。
+  ///
+  /// ## 为什么是禁用而不是不传这一项
+  ///
+  /// 与 AppBar 图标同一取舍（见 [ConversationPage.actions] 的注释）：入口
+  /// 消失会让用户以为「本端不支持这个功能」，而置灰只说明「现在还用不了」。
+  final VoidCallback? onTap;
+}
 
 /// 对话页：时间线 + 输入框。
 ///
@@ -58,6 +89,8 @@ class ConversationPage extends StatefulWidget {
     this.onSelectAgent,
     this.onSend,
     this.onRetryTurn,
+    this.enableSearch = false,
+    this.overflowItems,
     this.onFlush,
     this.onFlushWithStrategy,
     this.onCancelTurn,
@@ -468,6 +501,36 @@ class ConversationPage extends StatefulWidget {
   /// 丢弃一条（删除，不再投递）。
   final Future<void> Function(String id)? onRemoveOutbox;
 
+  /// 是否在 AppBar 展示「在本对话中搜索」入口。
+  ///
+  /// ## 为什么由本页自己实现（而不是交给 app 层）
+  ///
+  /// 搜索命中后要**滚回时间线的某一条**，那需要本页的 `ScrollController` 与
+  /// 归约后的 `_items`。两者都是页面私有 State，app 层拿不到。故本参数是
+  /// **开关**，不是实现注入。
+  ///
+  /// ## 为什么默认 false
+  ///
+  /// 移动端 AppBar 此前已无余量（见 issue #31：≤412dp 溢出），若默认开启会
+  /// 把「未接线的调用方」也一起撑破。故默认关闭，由各端在确认空间足够后
+  /// 显式打开（桌面端有宽屏空间；移动端先修 AppBar 再开）。
+  final bool enableSearch;
+
+  /// 窄屏溢出菜单的条目。null = 不渲染溢出菜单（宽屏或未接线）。
+  ///
+  /// ## 为什么由调用方提供条目、页面负责渲染
+  ///
+  /// 三个低频入口（对话设置 / 任务清单 / 目标历史）的**动作**属于各端
+  /// （它们各自持有弹层与 State），而「在本对话中搜索」的**动作**属于本页
+  /// （需要页面的 `ScrollController` 与 `_items`）。
+  ///
+  /// 故页面把两者合成一个菜单：调用方给条目，页面把自己的搜索项**追加在
+  /// 末尾**并渲染整个菜单。若让调用方渲染菜单，搜索项就得由调用方触发——
+  /// 而它拿不到页面私有 State。
+  ///
+  /// 见 issue #31（窄屏 AppBar 溢出）。
+  final List<ConversationOverflowItem>? overflowItems;
+
   final String emptyHint;
 
   @override
@@ -476,6 +539,21 @@ class ConversationPage extends StatefulWidget {
 
 class _ConversationPageState extends State<ConversationPage> {
   final _scrollController = ScrollController();
+
+  /// 时间线上每个展示行的 `GlobalKey`，供搜索命中后滚动定位。
+  ///
+  /// ## 为什么用 `GlobalKey` 而不是自己算偏移量
+  ///
+  /// 时间线是**变高**列表（消息长度、文件卡、批量卡各不相同），自己累加高度
+  /// 去推算目标偏移几乎必然不准——`ListView.builder` 对未构建项的高度只能
+  /// 估算，且估算值会在后续帧里修正（见 [_onScroll] 的注释）。
+  ///
+  /// `GlobalKey` + `Scrollable.ensureVisible` 交给框架处理：它对已构建项直接
+  /// 用真实几何，对未构建项会先滚到附近再重试，是唯一可靠的做法。
+  ///
+  /// 用 item.id 而非下标作键：搜索期间新消息可能到达，下标会整体平移，
+  /// 而下标错位会让「跳到命中项」跳到别人身上。
+  final _rowKeys = <String, GlobalKey>{};
 
   /// 已提交 resolve 的卡行 id（本地去重，避免重复点击发出两次请求）。
   ///
@@ -1003,6 +1081,76 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
+  /// 打开「在本对话中搜索」底部弹层。
+  ///
+  /// ## 为什么用弹层而不是新路由
+  ///
+  /// 与 AGENTS.md §6.10 的两端载体约定一致，但这里还有一个更硬的理由：
+  /// 搜索命中后要**滚回本页时间线的某一条**，而那需要本页的
+  /// `ScrollController` 与 `_rowKeys`。新路由会得到另一个页面实例
+  /// （State 不共享），滚不动原页面。
+  ///
+  /// ## 为什么把「是否还有更早历史」传下去
+  ///
+  /// 搜索只覆盖**已加载**的 items。若 `_reachedOldest` 为 false，面板必须
+  /// 告知用户「没搜到」不等于「不存在」（见 `ConversationSearchSheet`）。
+  ///
+  /// ## 为什么在 `await` 之后才滚动（而不是在 `onOpenHit` 里直接滚）
+  ///
+  /// 弹层占据下半屏，未关闭时 `ensureVisible` 会把目标滚到**被弹层遮住的
+  /// 位置**（它只保证「在滚动视口内」，不知道上层还有弹层）。而
+  /// `showModalBottomSheet` 返回的 Future 正是在弹层**完全退场后**完成，
+  /// 故这里 await 它、再滚动，不需要任何「等动画的固定延时」。
+  Future<void> _openSearch() async {
+    ConversationSearchHit? picked;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      // 高度按屏幕比例给：键盘弹出时 `viewInsets` 会把内容顶上去，
+      // 固定高度会让结果区被挤没。
+      builder: (sheetContext) => SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.7,
+        child: ConversationSearchSheet(
+          // 每次查询时现读，故弹层打开期间到达的新消息也能被搜到。
+          readItems: () => _items,
+          upperHistoryUnloaded: !_reachedOldest,
+          onOpenHit: (hit) {
+            picked = hit;
+            Navigator.of(sheetContext).maybePop();
+          },
+        ),
+      ),
+    );
+    if (!mounted || picked == null) return;
+    await _scrollToItem(picked!.itemId);
+  }
+
+  /// 把时间线滚到指定 `item.id` 的那一行。
+  Future<void> _scrollToItem(String itemId) async {
+    final targetContext = _rowKeys[itemId]?.currentContext;
+    if (targetContext == null) {
+      // 目标行未被构建（在视口外且 `ListView.builder` 尚未创建它）。
+      //
+      // 不静默失败：用户点了命中项却什么都没发生，会以为搜索坏了。给出
+      // 可执行的下一步（继续往上翻）比沉默好。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('该条在更早的位置，请向上滚动后重试')));
+      return;
+    }
+
+    await Scrollable.ensureVisible(
+      targetContext,
+      // 用 `center` 而不是 `alignment: 0`：命中项周围的内容（同一轮的
+      // 上下文）比「目标贴顶」更有用，且贴顶时若上方有未加载历史会立即触发
+      // 翻页，把用户从目标处推走。
+      alignment: 0.5,
+      duration: SpbDuration.normal,
+      curve: Curves.easeOut,
+    );
+  }
+
   /// 把「被拒绝」翻译成用户可读的提示。
   ///
   /// 返回原结果，便于调用方继续用（当前无人用，但保持可组合）。
@@ -1239,6 +1387,30 @@ class _ConversationPageState extends State<ConversationPage> {
                 // 调用方追加的操作（如桌面端的交付物侧边栏开关），
                 // 放在连接指示**之前**：连接状态是全局性的，固定在最右侧。
                 ...?widget.actions,
+                // 对话内搜索：搜的是**已加载的时间线**（含 agent 回复），
+                // 与全局搜索页（只搜用户输入、跨对话）互补。
+                //
+                // 放在 widget.actions **之后**：它是页面固有能力，而 actions
+                // 是各端追加的。
+                if (widget.enableSearch)
+                  IconButton(
+                    key: const ValueKey('conversation-search-open'),
+                    icon: const Icon(Icons.search),
+                    tooltip: '在本对话中搜索',
+                    onPressed: _openSearch,
+                  ),
+                // 窄屏溢出菜单（issue #31）：收纳调用方交来的低频入口，并把
+                // 「在本对话中搜索」追加在末尾。
+                //
+                // 搜索项**总是**追加：窄屏不摆 `conversation-search-open`
+                // 图标（没地方），但功能不能因此消失。两项的 `key` 不同
+                // （`conversation-search-open` vs `menu-conversation-search`），
+                // 故测试能分别断言两种布局下的路径。
+                if (widget.overflowItems != null)
+                  _OverflowMenu(
+                    items: widget.overflowItems!,
+                    onSearch: _openSearch,
+                  ),
                 StreamBuilder<SseState>(
                   stream: widget.controller.connectionState,
                   initialData: widget.controller.currentState,
@@ -1386,26 +1558,56 @@ class _ConversationPageState extends State<ConversationPage> {
             return const SizedBox(height: SpbSpacing.xxl);
           }
           final row = rows[index];
-          return Padding(
-            // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
-            // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
-            // 避免流式更新时整列重建。
-            key: ValueKey(switch (row) {
-              SingleItemRow(:final item) => item.id,
-              AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
-            }),
-            padding: const EdgeInsets.only(bottom: SpbSpacing.md),
-            child: switch (row) {
-              SingleItemRow(:final item) => _buildItem(item),
-              AgentFileBatchRow() => AgentFileBatchCard(
-                batch: row,
-                onDownload: widget.onDownloadAgentFile,
-                onLoadThumbnail: widget.onLoadThumbnailAgentFile,
-                onOpen: widget.onOpenAgentFile,
-                onReveal: widget.onRevealAgentFile,
-                onPreview: widget.onPreviewAgentFile,
-              ),
-            },
+          // 搜索定位用的 GlobalKey。
+          //
+          // ## 为什么用 `KeyedSubtree` 包一层，而不是把 GlobalKey 当行 key
+          //
+          // 下面那个 `ValueKey` 的作用是「同一逻辑项跨重建复用 Element」；
+          // 换成 `GlobalKey` 会让框架按「全局唯一」语义搬移 Element，
+          // 流式更新时的复用行为会变。两者目的不同，故各占一层。
+          //
+          // ## 批量卡为什么给每个成员都注册同一个 key
+          //
+          // 搜索命中拿到的 `itemId` 是**具体某条**的 id（可能是批里的第 3 个
+          // 文件），而行 key 是 `batch:<首成员 id>`。若只注册首成员，搜到批内
+          // 其他文件时 `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——
+          // 而那条明明就在屏幕上。同一批共用一个定位点是对的：它们本来就渲染
+          // 在同一张卡里。
+          final locateKeys = switch (row) {
+            SingleItemRow(:final item) => [item.id],
+            AgentFileBatchRow(:final files) => [for (final f in files) f.id],
+          };
+          final locateKey = _rowKeys.putIfAbsent(
+            locateKeys.first,
+            GlobalKey.new,
+          );
+          for (final id in locateKeys.skip(1)) {
+            _rowKeys[id] = locateKey;
+          }
+
+          return KeyedSubtree(
+            key: locateKey,
+            child: Padding(
+              // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
+              // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
+              // 避免流式更新时整列重建。
+              key: ValueKey(switch (row) {
+                SingleItemRow(:final item) => item.id,
+                AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
+              }),
+              padding: const EdgeInsets.only(bottom: SpbSpacing.md),
+              child: switch (row) {
+                SingleItemRow(:final item) => _buildItem(item),
+                AgentFileBatchRow() => AgentFileBatchCard(
+                  batch: row,
+                  onDownload: widget.onDownloadAgentFile,
+                  onLoadThumbnail: widget.onLoadThumbnailAgentFile,
+                  onOpen: widget.onOpenAgentFile,
+                  onReveal: widget.onRevealAgentFile,
+                  onPreview: widget.onPreviewAgentFile,
+                ),
+              },
+            ),
           );
         },
       ),
@@ -2098,6 +2300,73 @@ String formatTurnElapsed(int elapsedMs) {
 /// 连接状态指示（AppBar 右侧）。
 ///
 /// 非已连接态时变为可点的「重连」入口；已连接态是纯展示。
+/// AppBar 上的溢出菜单（窄屏收纳低频入口）。
+///
+/// ## 为什么用 `PopupMenuButton` 而不是 `MenuAnchor`
+///
+/// `PopupMenuButton` 自带定位、键盘导航与关闭语义，且 `itemBuilder` 在每次
+/// 打开时重建——后者正好让「`_group` 刚加载完」这类状态在下次打开菜单时生效。
+/// `MenuAnchor` 需要自己管 `MenuController` 与关闭时机，收益为零。
+///
+/// ## 菜单项的禁用而不是隐藏
+///
+/// [ConversationOverflowItem.onTap] 为 null 的项渲染成**禁用**（`enabled: false`），
+/// 与 AppBar 图标同一取舍：入口消失会让用户以为「本端不支持」，置灰只说明
+/// 「现在还用不了」。
+class _OverflowMenu extends StatelessWidget {
+  const _OverflowMenu({required this.items, required this.onSearch});
+
+  final List<ConversationOverflowItem> items;
+
+  /// 「在本对话中搜索」的动作（由页面提供，见 [ConversationPage.overflowItems]）。
+  final VoidCallback onSearch;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<VoidCallback>(
+      key: const ValueKey('conversation-overflow-menu'),
+      tooltip: '更多',
+      // 回调用 `value` 而不是 `onSelected` + 枚举：条目本身就是「做什么」，
+      // 再引入一个枚举只会多一层需要同步维护的映射。禁用项不进入
+      // `onSelected`（`PopupMenuItem.enabled: false` 不可点）。
+      onSelected: (action) => action(),
+      itemBuilder: (context) => [
+        for (final item in items)
+          PopupMenuItem<VoidCallback>(
+            key: item.key,
+            value: item.onTap,
+            enabled: item.onTap != null,
+            child: _OverflowMenuRow(icon: item.icon, label: item.label),
+          ),
+        // 搜索始终可用（它不依赖 `_group`）：搜的是已加载的时间线。
+        const PopupMenuDivider(),
+        PopupMenuItem<VoidCallback>(
+          key: const ValueKey('menu-conversation-search'),
+          value: onSearch,
+          child: const _OverflowMenuRow(icon: Icons.search, label: '在本对话中搜索'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 溢出菜单的一行（图标 + 文案）。
+class _OverflowMenuRow extends StatelessWidget {
+  const _OverflowMenuRow({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(icon, size: SpbSpacing.lg),
+      const SizedBox(width: SpbSpacing.md),
+      Text(label),
+    ],
+  );
+}
+
 class _ConnectionIndicator extends StatelessWidget {
   const _ConnectionIndicator({required this.state, this.onReconnect});
 

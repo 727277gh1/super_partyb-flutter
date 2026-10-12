@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -1372,6 +1373,166 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     );
   }
 
+  /// AppBar 的操作按钮。
+  ///
+  /// ## 为什么按宽度分两套（issue #31）
+  ///
+  /// 移动端 AppBar 曾经塞了 7 个常驻元素（AgentSwitcher + 5 个 IconButton +
+  /// 连接指示器），合计约 366dp，在常见手机宽度下**溢出**：360dp 达 66px、
+  /// 390dp 36px、412dp 14px（实测，见 issue #31）。
+  ///
+  /// 溢出后右侧图标被黄黑条覆盖/裁切，用户点不到。且本机无 `DISPLAY`
+  /// （AGENTS.md §9），此前的 widget test 用默认 800dp 窗口，掩盖了它。
+  ///
+  /// ## 分档依据：频率与是否需要一眼可见
+  ///
+  /// | 入口 | 窄屏 | 理由 |
+  /// |---|---|---|
+  /// | AgentSwitcher | 常驻 | 「这段对话由谁回答」是全局属性，随时要切 |
+  /// | 交付物 / 待办 | 常驻 | **带徽标**，回答「现在有什么在等我」，必须一眼可见 |
+  /// | 对话设置 / 任务清单 / 目标历史 / 对话内搜索 | 收进菜单 | 低频弹层，多一步不痛 |
+  ///
+  /// ## 阈值为什么是 `SpbBreakpoints.compact`（720dp）
+  ///
+  /// 而不是「刚好放得下」的实测值（440dp 左右）：后者是**内容相关的**
+  /// ——AgentSwitcher 的宽度随 agent 名字变化（实测 94.3dp，上限 140dp+），
+  /// 按「刚好」设阈值会在换个长名字的 agent 后又溢出。720dp 以下一律是
+  /// 单栏窄屏，是这类取舍的天然分界。
+  ///
+  /// 副作用（**有意**）：既有 widget test 用默认 800dp 窗口，落在「宽屏」档，
+  /// 故它们的交互路径完全不变（仍可直接 `find` 那些 `ValueKey`）。
+  ///
+  /// ## 溢出菜单为什么交给 `ConversationPage` 渲染
+  ///
+  /// 因为「在本对话中搜索」需要页面的 `ScrollController` 与 `_items`
+  /// （命中后要滚回时间线），那是页面私有 State。故页面提供一个
+  /// `overflowItems` 插槽，本端把三个低频入口与搜索开关一起交给它。
+  List<Widget> _appBarActions() {
+    final narrow = SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width);
+    return [
+      // Agent 切换：
+      //
+      // 放在 AppBar 而非底部弹层里：它是「这段对话由谁回答」的全局属性，
+      // 用户在对话过程中随时可能要换，不该先开设置弹层再切。
+      //
+      // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「未绑定」——
+      // 这与真实状态（尚未拉取）不符，但切换本身仍可用（服务端以 agentId
+      // 为准），且比隐藏入口让用户以为「本端不支持切 agent」要好。
+      AgentSwitcher(
+        loadAgents: ref.watch(loadAgentsProvider),
+        switchAgent: (agentId, {forceNewSession = false}) =>
+            _switchAgent(agentId, forceNewSession: forceNewSession),
+        currentAgentId: _group?.activeSession?.agentId,
+        busy: _switchingAgent,
+        // 极窄屏（< 360dp）只显示图标：名字最多占 140dp，配上三个常驻图标
+        // 在 320dp 下仍会溢出 10px（issue #31）。名字在菜单的勾选项里可见，
+        // 故省它不丢信息。
+        compact: MediaQuery.sizeOf(context).width < 360,
+      ),
+      // 交付物入口（按对话浏览本次产出的文件）。
+      //
+      // ## 为什么与设置/任务分开
+      //
+      // 它是**只读浏览 + 下载**，而设置弹层是表单、任务弹层是可编辑列表。
+      // 混在一起会让弹层变成多套交互的堆叠，且交付物的刷新（`agent.file.*`
+      // 事件）会与表单草稿编辑互相干扰。
+      //
+      // ## 为什么徽标是「本对话已出现的 agent 文件数」而不是权威文件数
+      //
+      // 权威值要跑一轮 UFS 分页（生产实测单 group 可达数千条），而 AppBar
+      // 在首帧就要渲染。徽标只回答「这个对话有没有产出」这个粗粒度问题，
+      // 精确计数在弹层里（面板工具条）。取不到时（未就绪 / 事件未到）
+      // 不显示徽标，不谎报 0。
+      //
+      // 与「任务清单」不同，本入口**不要求** `_group` 就绪：交付物取数只用
+      // `widget.groupId`（URL 里已有），group 拉取失败不该连带屏蔽它。
+      IconButton(
+        key: const ValueKey('open-group-deliverables'),
+        icon: Badge.count(
+          count: _agentFileCount,
+          isLabelVisible: _agentFileCount > 0,
+          child: const Icon(Icons.folder_outlined),
+        ),
+        tooltip: '交付物',
+        onPressed: _openDeliverables,
+      ),
+      // 待办入口（跨轮次聚合未解决确认卡）。
+      //
+      // ## 为什么与交付物分开
+      //
+      // 交付物回答「这个对话产出了什么」（只读浏览），待办回答「现在有什么
+      // 在等我」（可作答）。两者数据源不同（UFS 远端 vs 时间线归约），且
+      // 待办需要 busy 态与写端点，合成一个弹层会让两套交互堆叠。
+      //
+      // ## 徽标是「未解决确认卡数」
+      //
+      // 它就是弹层里列表的长度，可直接从归约结果算，无需额外请求。为 0 时
+      // 不显示徽标（`isLabelVisible`）——显示一个恒为 0 的徽标会让用户以为
+      // 功能坏了。
+      //
+      // 与交付物同理，**不要求** `_group` 就绪：确认卡来自时间线归约，
+      // 与 group 快照无关。
+      IconButton(
+        key: const ValueKey('open-group-todos'),
+        icon: Badge.count(
+          count: _pendingConfirmationCount,
+          isLabelVisible: _pendingConfirmationCount > 0,
+          child: const Icon(Icons.pending_actions_outlined),
+        ),
+        tooltip: '待办',
+        onPressed: _openTodos,
+      ),
+      // 宽屏：低频入口直接摆出来（与既有行为一致，测试路径不变）。
+      if (!narrow) ...[
+        IconButton(
+          key: const ValueKey('open-group-settings'),
+          icon: const Icon(Icons.tune),
+          tooltip: '对话设置',
+          onPressed: _group == null ? null : _openSettings,
+        ),
+        IconButton(
+          key: const ValueKey('open-goal-tasks'),
+          icon: const Icon(Icons.checklist_outlined),
+          tooltip: '任务清单',
+          onPressed: _group == null ? null : _openGoalTasks,
+        ),
+        IconButton(
+          key: const ValueKey('open-goal-history'),
+          icon: const Icon(Icons.history),
+          tooltip: '目标历史',
+          onPressed: _group == null ? null : _openGoalHistory,
+        ),
+      ],
+    ];
+  }
+
+  /// 窄屏溢出菜单的条目（宽屏返回 null，由页面渲染独立图标）。
+  List<ConversationOverflowItem>? _overflowItems() {
+    final narrow = SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width);
+    if (!narrow) return null;
+    final groupReady = _group != null;
+    return [
+      ConversationOverflowItem(
+        key: const ValueKey('menu-group-settings'),
+        icon: Icons.tune,
+        label: '对话设置',
+        onTap: groupReady ? _openSettings : null,
+      ),
+      ConversationOverflowItem(
+        key: const ValueKey('menu-goal-tasks'),
+        icon: Icons.checklist_outlined,
+        label: '任务清单',
+        onTap: groupReady ? _openGoalTasks : null,
+      ),
+      ConversationOverflowItem(
+        key: const ValueKey('menu-goal-history'),
+        icon: Icons.history,
+        label: '目标历史',
+        onTap: groupReady ? _openGoalHistory : null,
+      ),
+    ];
+  }
+
   /// 打开目标版本历史底部弹层。
   ///
   /// 同 [_openGoalTasks]：用弹层而非新路由，共享同一份 State（`_group` /
@@ -1747,6 +1908,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     return ConversationPage(
       controller: controller,
       title: '对话',
+      // 对话内搜索（搜已加载的时间线，含 agent 回复）。
+      //
+      // 移动端放在溢出菜单里（见下方 [_narrowActions]）：AppBar 在窄屏本就
+      // 溢出（issue #31），直接加图标会让溢出量从 66px 涨到 114px。
+      enableSearch: false,
       // 对话设置入口（目标 + 三个 CAS 开关）。
       //
       // 移动端没有侧边栏，故走 AppBar 按钮 → 底部弹层；桌面端同一份
@@ -1754,113 +1920,23 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       //
       // 权威 group 未就绪时**禁用而非隐藏**：AppBar 宽度恒定，不会因加载完成
       // 而拖动其余图标（与停止按钮同一取舍）。
-      actions: [
-        // Agent 切换：
-        //
-        // 放在 AppBar 而非底部弹层里：它是「这段对话由谁回答」的全局属性，
-        // 用户在对话过程中随时可能要换，不该先开设置弹层再切。
-        //
-        // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「未绑定」——
-        // 这与真实状态（尚未拉取）不符，但切换本身仍可用（服务端以 agentId
-        // 为准），且比隐藏入口让用户以为「本端不支持切 agent」要好。
-        AgentSwitcher(
-          loadAgents: ref.watch(loadAgentsProvider),
-          switchAgent: (agentId, {forceNewSession = false}) =>
-              _switchAgent(agentId, forceNewSession: forceNewSession),
-          currentAgentId: _group?.activeSession?.agentId,
-          busy: _switchingAgent,
-        ),
-        IconButton(
-          key: const ValueKey('open-group-settings'),
-          icon: const Icon(Icons.tune),
-          tooltip: '对话设置',
-          onPressed: _group == null ? null : _openSettings,
-        ),
-        // 交付物入口（按对话浏览本次产出的文件）。
-        //
-        // ## 为什么与设置/任务分开
-        //
-        // 它是**只读浏览 + 下载**，而设置弹层是表单、任务弹层是可编辑列表。
-        // 混在一起会让弹层变成多套交互的堆叠，且交付物的刷新（`agent.file.*`
-        // 事件）会与表单草稿编辑互相干扰。
-        //
-        // ## 为什么徽标是「本对话已出现的 agent 文件数」而不是权威文件数
-        //
-        // 权威值要跑一轮 UFS 分页（生产实测单 group 可达数千条），而 AppBar
-        // 在首帧就要渲染。徽标只回答「这个对话有没有产出」这个粗粒度问题，
-        // 精确计数在弹层里（面板工具条）。取不到时（未就绪 / 事件未到）
-        // 不显示徽标，不谎报 0。
-        //
-        // 与「任务清单」不同，本入口**不要求** `_group` 就绪：交付物取数只用
-        // `widget.groupId`（URL 里已有），group 拉取失败不该连带屏蔽它。
-        IconButton(
-          key: const ValueKey('open-group-deliverables'),
-          icon: Badge.count(
-            count: _agentFileCount,
-            isLabelVisible: _agentFileCount > 0,
-            child: const Icon(Icons.folder_outlined),
-          ),
-          tooltip: '交付物',
-          onPressed: _openDeliverables,
-        ),
-        // 待办入口（跨轮次聚合未解决确认卡）。
-        //
-        // ## 为什么与交付物分开
-        //
-        // 交付物回答「这个对话产出了什么」（只读浏览），待办回答「现在有什么
-        // 在等我」（可作答）。两者数据源不同（UFS 远端 vs 时间线归约），且
-        // 待办需要 busy 态与写端点，合成一个弹层会让两套交互堆叠。
-        //
-        // ## 徽标是「未解决确认卡数」
-        //
-        // 它就是弹层里列表的长度，可直接从归约结果算，无需额外请求。为 0 时
-        // 不显示徽标（`isLabelVisible`）——显示一个恒为 0 的徽标会让用户以为
-        // 功能坏了。
-        //
-        // 与交付物同理，**不要求** `_group` 就绪：确认卡来自时间线归约，
-        // 与 group 快照无关。
-        IconButton(
-          key: const ValueKey('open-group-todos'),
-          icon: Badge.count(
-            count: _pendingConfirmationCount,
-            isLabelVisible: _pendingConfirmationCount > 0,
-            child: const Icon(Icons.pending_actions_outlined),
-          ),
-          tooltip: '待办',
-          onPressed: _openTodos,
-        ),
-        // 任务清单入口。
-        //
-        // ## 为什么与设置分开而不是塞进设置弹层
-        //
-        // 任务清单是一个**可操作列表**（勾选/新增/重排/删除），而设置弹层是
-        // 表单。混在一起会让设置弹层变成两套交互的堆叠，且任务的实时刷新
-        // （`goal_updated` SSE）会与表单草稿编辑互相干扰。
-        //
-        // 未就绪时**禁用而非隐藏**：AppBar 宽度恒定，不会因加载完成而拖动
-        // 其余图标（与设置按钮同一取舍）。
-        IconButton(
-          key: const ValueKey('open-goal-tasks'),
-          icon: const Icon(Icons.checklist_outlined),
-          tooltip: '任务清单',
-          onPressed: _group == null ? null : _openGoalTasks,
-        ),
-        // 目标版本历史入口。
-        //
-        // ## 为什么要与任务清单分开
-        //
-        // 两者维度不同：任务面板操作的是**当前目标的任务**，历史面板操作的
-        // 是**目标本身的版本与状态**（切回 / 完成 / 归档）。合成一个弹层会让
-        // 「当前目标」这个上下文在两层列表间变得含糊。
-        //
-        // 未就绪时**禁用而非隐藏**（与设置/任务按钮同一取舍）。
-        IconButton(
-          key: const ValueKey('open-goal-history'),
-          icon: const Icon(Icons.history),
-          tooltip: '目标历史',
-          onPressed: _group == null ? null : _openGoalHistory,
-        ),
-      ],
+      //
+      // ## 窄屏（issue #31）：低频率入口收进溢出菜单
+      //
+      // 7 个常驻元素合计约 366dp，在 ≤412dp 宽度下溢出（360dp 达 66px）。
+      // 故窄屏把「对话设置 / 任务清单 / 目标历史」收进一个 PopupMenuButton
+      // （净省 2 个图标的宽度 = 96dp），保留带徽标的交付物/待办与 AgentSwitcher
+      // ——它们回答「现在有什么在等我」，需要一眼可见。
+      //
+      // 用 `SpbBreakpoints.isCompact`（< 720dp）作阈值而不是「刚好放得下」的
+      // 实测值：720 以上是桌面端宽屏，也是既有测试窗口（默认 800dp）所在区间
+      // ——后者让全部既有用例的交互路径**不变**（它们直接 find 那些 ValueKey）。
+      actions: _appBarActions(),
+      // 窄屏（issue #31）：三个低频入口收进溢出菜单。
+      //
+      // 宽屏返回 null，此时页面不渲染溢出菜单（入口以独立图标摆出，与既有
+      // 行为一致，既有测试路径不变）。
+      overflowItems: _overflowItems(),
       // 待处理收件箱消息（可撤销）。
       //
       // 撤销需要 userId，而页面不该知道 userId 从哪来——故在这里闭包捕获

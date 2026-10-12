@@ -841,7 +841,8 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 交付物（`GroupDeliverablesPanel`） | 侧边栏 tab | AppBar 按钮 → `showModalBottomSheet` |
 | 待办（`GroupTodosPanel`） | 侧边栏 tab | AppBar 按钮 → `showModalBottomSheet` |
 | 设置（`GroupSettingsPanel`） | 侧边栏 tab | 底部弹层 |
-| 任务清单 / 目标历史 | 侧边栏 tab | 底部弹层 |
+| 任务清单 / 目标历史 | 侧边栏 tab | 底部弹层（窄屏从**溢出菜单**进，见 §6.16） |
+| 对话内搜索 | AppBar 图标（`enableSearch: true`） | **溢出菜单**（窄屏无余量，见 §6.15 / §6.16） |
 | **诊断（`GroupDebugPanel`：工具调用 + gate 决策）** | 侧边栏 tab | **无** |
 
 桌面端有侧边栏这个载体（宽屏常驻），移动端没有——小屏放不下常驻侧栏，故移动端
@@ -1115,6 +1116,123 @@ webapp 在 `errorType === 'session_expired'` 时先逐个 `restoreChatSession` �
 （服务端按 group 的 active session 决定），且 webapp 也因同样理由弃用了它。
 本端点保留给「已知 group 且要绕过前置链」的脚本化场景。
 
+### 6.15 对话内搜索（搜已加载的时间线，**非**服务端检索）
+
+客户端此前只有**全局搜索页**（`SearchPage`：`GET /me/turns/search`，只搜用户输入、
+跨对话）。issue #31 的排查过程中补上了**对话内搜索**：搜当前已加载的时间线，
+**含 agent 回复**。
+
+#### 为什么是本地的、而不是新加一个服务端端点
+
+时间线本就全在内存里（`_items`，归约结果）。补一个服务端端点要做：
+新 SQL（`chat_events` 全文）、新分页契约、新事件类型同步——而**已加载的部分**
+用户本来就能用 `Ctrl+F` 式的本地查找回答。两端的分工是明确的：
+
+| 面板 | 数据面 | 语义 |
+|---|---|---|
+| 全局搜索页 | 服务端（跨 group、仅用户输入） | 「我在哪儿说过这件事」 |
+| 对话内搜索 | **本地已加载的时间线** | 「这段对话里 agent 说的那句在哪」 |
+
+⚠️ **本地搜索有边界，必须告知用户**：只搜**已加载**的（分页加载的历史不在内）。
+故面板顶部在 `hasMore` 为真时显示「仅搜索已加载部分，上方还有更早历史」——
+不告知会让用户把「没搜到」误读成「不存在」。
+
+#### 分层归属
+
+| 层 | 内容 | 为什么在这一层 |
+|---|---|---|
+| `spb_domain` | `conversation_search.dart`：`searchConversationItems(items, query)` → `ConversationSearchResult`（命中项 + 摘要 + 是否截断） | 匹配/摘要/排序是**正确性核心**，须能无头单测 |
+| `spb_ui` | `HighlightedText`（命中片段高亮） | 无业务语义的展示组件 |
+| `spb_features` | `conversation_search_sheet.dart`（面板）+ `ConversationPage` 的 `_openSearch` / `_scrollToItem` | 需要页面的 `ScrollController` 与 `_items` |
+
+#### 四个易写错的点
+
+1. **查询词按字面量匹配，不做正则**。用户输入 `(`、`*`、`[` 等元字符时，
+   `RegExp` 会抛 `FormatException`。`search_page.dart` 曾有同样的高亮需求，
+   也踩过这个坑——`HighlightedText` 用 `indexOf` 循环而非 `split`/`replaceAll`。
+2. **高亮保留原文大小写**。查询 `todo` 命中 `TODO` 时，高亮的 span 文本必须是
+   `TODO`（原文），不是 `todo`。服务端 `LIKE` 也是大小写不敏感的——两端语义一致。
+3. **命中后要滚回时间线**。搜索面板是**弹层**（`showModalBottomSheet`），点击
+   命中项要 `Navigator.pop` 关闭它**再**滚动——在弹层还开着时滚动，用户看不到
+   效果，会以为「点了没反应」。
+4. **摘要要截断且居中命中处**。一条几千字的回复若从头截，命中词可能落在第 3000
+   字（摘要里看不到）。`_summarize` 以命中位置为中心取窗口，两端都加省略号。
+
+#### 有意不做
+
+- **不搜交付物文件名 / 工具调用参数**：前者是 UFS 数据面（另一条路径，面板已
+  有），后者是诊断面（AGENTS.md §6.9 有意不做 `GroupDebugPanel` 于移动端）。
+- **不做「高亮全部 + 上/下跳转」**（浏览器 `Ctrl+F` 那种）：需要维护「当前第几个
+  命中」的游标与循环跳转，属独立交互；当前只做「列出命中 + 点一条滚过去」。
+- **不做正则 / 模糊 / 拼音**：与全局搜索页的 `LIKE` 语义保持一致（AGENTS.md §6.2
+  的契约同步取向）。
+
+### 6.16 窄屏 AppBar 溢出（issue #31）
+
+**症状**：移动端对话页在常见手机宽度下**两处** RenderFlex 溢出——AppBar 与输入区。
+溢出后右侧入口被黄黑条覆盖/裁切，**用户点不到**。
+
+**为什么此前没发现**：全部 widget test 用**默认 800dp 窗口**（比真机宽），而本机无
+`DISPLAY`（AGENTS.md §9）也没有真机可看。这是一个**测试环境掩盖真实布局**的典型。
+
+#### 实测数据（`tester.view.physicalSize`，修复前）
+
+| 宽度 | AppBar 溢出 | 输入区溢出 |
+|---|---|---|
+| 320dp | 66px | — |
+| 360dp | 66px | 64px |
+| 390dp | 36px | — |
+| 412dp | 14px | — |
+
+AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接指示器），
+合计约 366dp。
+
+#### 修法：按「频率 + 是否需一眼可见」分档
+
+| 入口 | 窄屏 | 理由 |
+|---|---|---|
+| `AgentSwitcher` | 常驻（**<360dp 时只留图标**） | 「这段对话由谁回答」是全局属性，随时要切 |
+| 交付物 / 待办 | 常驻（**带徽标**） | 回答「现在有什么在等我」，必须一眼可见 |
+| 对话设置 / 任务清单 / 目标历史 | **收进溢出菜单** | 低频弹层，多一步不痛 |
+| 对话内搜索 | **收进溢出菜单**（页面追加） | 同上（见 §6.15） |
+
+**阈值用 `SpbBreakpoints.compact`（720dp）而不是「刚好放得下」的实测值（440dp 左右）**：
+后者是**内容相关的**——`AgentSwitcher` 宽度随 agent 名字变化（实测 94.3dp，上限
+140dp+），按「刚好」设阈值会在换个长名字的 agent 后又溢出。720dp 以下一律单栏窄屏，
+是这类取舍的天然分界。
+
+#### 溢出菜单为什么由 `ConversationPage` 渲染、条目由调用方给
+
+三个低频入口的**动作**属于各端（各自持有弹层与 State），而「在本对话中搜索」的
+**动作**属于页面（需要页面私有 `ScrollController` 与 `_items`）。故页面提供
+`overflowItems` 插槽：调用方给条目，页面把自己的搜索项**追加在末尾**并渲染整个菜单。
+
+⚠️ **菜单项与宽屏图标用不同的 `key`**（`menu-group-settings` vs
+`open-group-settings`）：同一个 key 指向两种交互会让断言的含义随窗口宽度漂移。
+
+#### 三条不变式
+
+1. **窄屏不能「藏掉」功能，只能「多一步」**。菜单项禁用（`onTap == null`）而不是
+   不渲染——入口消失会让用户以为「本端不支持」，置灰只说明「现在还用不了」。
+2. **测试必须显式设窗口尺寸**。新增的 `对话页窄屏 AppBar（issue #31）` group 用
+   `tester.view.physicalSize` 压到 320/360/390/412dp，并断言
+   `tester.takeException()` 为 null（溢出会走 `FlutterError.onError`）。
+   **默认 800dp 的用例不能替代它**——那正是缺陷被掩盖的原因。
+3. **`compact` 只省「名字」，不省入口**。`AgentSwitcher.compact` 在 <360dp 时隐藏
+   标签（名字在菜单勾选项里可见），图标本身保留——它是入口。
+
+#### 移动端搜索入口的取向（与桌面端不同）
+
+| | 桌面端 | 移动端 |
+|---|---|---|
+| 搜索入口 | 独立图标（`enableSearch: true`） | **溢出菜单**（`enableSearch: false`） |
+
+移动端在 720~1000dp 之间若给搜索一个 48dp 图标，会挤压常驻项；而菜单入口在
+所有窄屏档位都可用。`apps/spb_desktop/test/widget_test.dart` 有一条从 **router
+层**断言的用例（`对话页 AppBar 提供对话内搜索入口`）钉住桌面端——**页面测试自己
+传参，接不接线它不管**，故必须有 router 层的断言。
+
+---
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
@@ -1363,6 +1481,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 §6.14）
+- [x] 对话内搜索（搜已加载时间线，见 §6.15）+ 窄屏 AppBar 溢出修复（issue #31，见 §6.16）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
@@ -1414,6 +1533,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | macOS 包未签名/未公证，首次打开需绕过 Gatekeeper | 已知限制（免签名分发） | §8 |
 | iOS 出包需 Apple Developer 账号 | 待决策 | §8、`super_partyb` issue #31 |
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
+| ~~窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp）~~ | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
+| ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `hasMore` 时告知边界 | §6.15 |
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |

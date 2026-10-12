@@ -40,6 +40,7 @@ export 'auto_schedules.dart';
 export 'auto_schedules_panel.dart';
 export 'confirmation_card.dart';
 export 'conversation_page.dart';
+export 'conversation_search_sheet.dart';
 export 'feedback_request_card.dart';
 export 'flush_strategy_dialog.dart';
 export 'follow_up_chips.dart';
