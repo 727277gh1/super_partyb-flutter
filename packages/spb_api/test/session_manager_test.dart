@@ -198,7 +198,7 @@ void main() {
       final store = InMemoryTokenStore(expired());
       final m = SessionManager(
         store: store,
-        refresher: (_) async => throw NetworkError('断网'),
+        refresher: (_) async => throw const NetworkError('断网'),
       );
 
       expect(await m.refresh(), isNull);

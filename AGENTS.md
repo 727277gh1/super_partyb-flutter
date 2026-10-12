@@ -51,6 +51,7 @@ dart analyze .
 bash tools/check_layering.sh          # 分层规则（纯 Dart 包禁止依赖 Flutter）
 bash tools/check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
 bash tools/check_workflow_steps.sh    # workflow 的 step 没被注释吞掉（见 issue #32）
+bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_options（见 issue #34）
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
@@ -113,6 +114,7 @@ super_partyb-flutter/
 └── tools/
     ├── check_layering.sh     # 分层规则检查
     ├── check_workflow_steps.sh # workflow step 结构检查
+    ├── check_analysis_options.sh # 静态分析配置接线检查
     └── bundle_linux_deps.sh  # Linux 分发包依赖打包
 ```
 

@@ -192,7 +192,7 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
+            const Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
             const SizedBox(width: SpbSpacing.xs),
             if (!widget.compact)
               ConstrainedBox(

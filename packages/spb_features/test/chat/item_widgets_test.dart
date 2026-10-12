@@ -398,7 +398,7 @@ void main() {
     });
 
     testWidgets('未接线时不显示「立即发送」入口', (tester) async {
-      await tester.pumpWidget(_host(MessageComposer(onSubmit: null)));
+      await tester.pumpWidget(_host(const MessageComposer(onSubmit: null)));
 
       expect(find.byKey(const ValueKey('composer-flush')), findsNothing);
       // 「发送」按钮不受影响。
@@ -717,9 +717,9 @@ void main() {
     testWidgets('busy 时禁用按钮并显示「提交中」', (tester) async {
       await tester.pumpWidget(
         _host(
-          ConfirmationCard(
+          const ConfirmationCard(
             question: '提交中',
-            options: const ['继续'],
+            options: ['继续'],
             busy: true,
             onResolve: _noop,
           ),

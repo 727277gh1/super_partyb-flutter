@@ -154,10 +154,10 @@ void main() {
       await pumpSidebar(
         tester,
         tabs: [
-          ChatSidebarTab(
+          const ChatSidebarTab(
             label: '文件',
             icon: Icons.folder,
-            content: const _StatefulProbe(),
+            content: _StatefulProbe(),
           ),
           tab('待办', body: 'TODO_BODY'),
         ],
@@ -271,10 +271,10 @@ void main() {
       await pumpSidebar(
         tester,
         tabs: [
-          ChatSidebarTab(
+          const ChatSidebarTab(
             label: '文件',
             icon: Icons.folder,
-            content: const _StatefulProbe(),
+            content: _StatefulProbe(),
           ),
           tab('待办', body: 'TODO_BODY'),
         ],

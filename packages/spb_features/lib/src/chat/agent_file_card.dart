@@ -267,10 +267,10 @@ class _AgentFileCardState extends State<AgentFileCard> {
 
   Widget _leading(ColorScheme scheme) {
     if (_loadingThumb) {
-      return SizedBox(
+      return const SizedBox(
         width: SpbSpacing.xxxl,
         height: SpbSpacing.xxxl,
-        child: const CircularProgressIndicator(strokeWidth: 2),
+        child: CircularProgressIndicator(strokeWidth: 2),
       );
     }
     if (_thumbnail != null && _thumbnail!.isNotEmpty) {

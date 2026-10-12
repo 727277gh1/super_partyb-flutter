@@ -108,7 +108,7 @@ class _PendingConfirmationsPageState extends State<PendingConfirmationsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final title = const Text('待确认');
+    const title = Text('待确认');
     final refreshBtn = IconButton(
       key: const ValueKey('pending-confirmations-refresh'),
       icon: const Icon(Icons.refresh),

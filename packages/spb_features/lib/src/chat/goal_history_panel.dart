@@ -280,9 +280,9 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
 
     // 首帧加载中：转圈而非空占位（空占位会被误读为「确实没有历史」）。
     if (_loading && _goals.isEmpty) {
-      return Center(
-        key: const ValueKey('goal-history-loading'),
-        child: const Padding(
+      return const Center(
+        key: ValueKey('goal-history-loading'),
+        child: Padding(
           padding: SpbSpacing.pagePadding,
           child: SizedBox(
             width: SpbSpacing.xl,

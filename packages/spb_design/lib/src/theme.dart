@@ -40,15 +40,15 @@ class SpbTheme {
         backgroundColor: scheme.surface,
         foregroundColor: scheme.onSurface,
       ),
-      cardTheme: CardThemeData(
+      cardTheme: const CardThemeData(
         elevation: 0,
-        shape: const RoundedRectangleBorder(borderRadius: SpbRadius.cardAll),
+        shape: RoundedRectangleBorder(borderRadius: SpbRadius.cardAll),
         margin: EdgeInsets.zero,
       ),
-      inputDecorationTheme: InputDecorationTheme(
+      inputDecorationTheme: const InputDecorationTheme(
         isDense: true,
-        border: const OutlineInputBorder(borderRadius: SpbRadius.inputAll),
-        contentPadding: const EdgeInsets.symmetric(
+        border: OutlineInputBorder(borderRadius: SpbRadius.inputAll),
+        contentPadding: EdgeInsets.symmetric(
           horizontal: SpbSpacing.md,
           vertical: SpbSpacing.sm,
         ),

@@ -1,7 +1,9 @@
 analyzer:
   exclude:
     - build/**
-include: package:flutter_lints/flutter.yaml
+include:
+  - package:flutter_lints/flutter.yaml
+  - ../../analysis_options.yaml
 
 linter:
   rules:

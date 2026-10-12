@@ -34,15 +34,15 @@ void main() {
       addTearDown(db.close);
       final store = DriftSyncStateStore(db);
 
-      final state = SyncState(
+      const state = SyncState(
         cursor: '2026-03-01T00:00:00Z',
         files: {
-          'grp_1/reports/a.md': const SyncedFile(
+          'grp_1/reports/a.md': SyncedFile(
             etag: 'W/"1"',
             size: 100,
             updatedAt: '2026-03-01T00:00:00Z',
           ),
-          'grp_1/reports/b.md': const SyncedFile(etag: null, size: 42),
+          'grp_1/reports/b.md': SyncedFile(etag: null, size: 42),
         },
       );
 
@@ -734,7 +734,7 @@ void main() {
       final sync = DriftSyncStateStore(db);
 
       await cache.save('usr_1', [g('g1')]);
-      await sync.save(workspaceStateKey, SyncState(cursor: 'c1'));
+      await sync.save(workspaceStateKey, const SyncState(cursor: 'c1'));
       await sync.resetAll();
 
       expect((await cache.load('usr_1')).map((e) => e.id), ['g1']);

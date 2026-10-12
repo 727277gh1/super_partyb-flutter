@@ -339,7 +339,7 @@ void main() {
 
   group('展示辅助（不编造缺失信息）', () {
     test('marker 无标题时退化为坐标（不写「未命名」）', () {
-      final m = MapMarker(longitude: 113.34932, latitude: 23.17837);
+      const m = MapMarker(longitude: 113.34932, latitude: 23.17837);
       expect(m.displayTitle, '113.34932,23.17837');
     });
 

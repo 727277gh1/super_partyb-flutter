@@ -36,7 +36,7 @@ class _StubDownloader implements FileDownloader {
     if (should304) {
       return const SyncDownloadResult.notModified();
     }
-    return SyncDownloadResult.downloaded([1, 2, 3, 4, 5]);
+    return const SyncDownloadResult.downloaded([1, 2, 3, 4, 5]);
   }
 }
 
@@ -155,7 +155,7 @@ class _ConcurrencyProbeDownloader implements FileDownloader {
       final err = errors[fileId];
       if (err != null) throw Exception(err);
       finished.add(fileId);
-      return SyncDownloadResult.downloaded([1, 2, 3, 4, 5]);
+      return const SyncDownloadResult.downloaded([1, 2, 3, 4, 5]);
     } finally {
       inFlight--;
     }
@@ -287,7 +287,7 @@ void main() {
     });
 
     test('游标只前进不回退（单调性）', () {
-      final s = SyncState(cursor: '2026-03-01T00:00:00Z');
+      const s = SyncState(cursor: '2026-03-01T00:00:00Z');
       expect(
         s.advanceCursor('2026-04-01T00:00:00Z').cursor,
         '2026-04-01T00:00:00Z',
@@ -638,7 +638,7 @@ void main() {
     });
 
     test('选中若干 group：保留前缀但过滤未选中的', () {
-      final scope = const SyncGroupsScope(['ga', 'gc']);
+      const scope = SyncGroupsScope(['ga', 'gc']);
       expect(scope.relativePath('/workspace/groups/ga/a.md/'), 'ga/a.md');
       expect(scope.relativePath('/workspace/groups/gb/a.md/'), isNull);
 
@@ -762,7 +762,7 @@ void main() {
       final store = _MemoryStateStore();
       await store.save(
         workspaceStateKey,
-        SyncState(cursor: '2026-03-01T00:00:00Z')
+        const SyncState(cursor: '2026-03-01T00:00:00Z')
             .markSynced('g1/a.md', etag: 'W/"1"', size: 10),
       );
 
@@ -783,7 +783,7 @@ void main() {
       final store = _MemoryStateStore();
       await store.save(
         workspaceStateKey,
-        SyncState(cursor: '2026-03-01T00:00:00Z'),
+        const SyncState(cursor: '2026-03-01T00:00:00Z'),
       );
       final reset = await applyLocalRootChange(
         store: store,
@@ -1118,7 +1118,7 @@ void main() {
   // =========================================================================
   group('同步状态值类型', () {
     test('markSynced / forget 是不可变的（不改自身）', () {
-      final base = SyncState.empty;
+      const base = SyncState.empty;
       final next = base.markSynced('a.md', etag: 'W/"1"', size: 10);
       expect(base.files, isEmpty, reason: '计划阶段必须基于执行前的事实');
       expect(next.files, hasLength(1));
@@ -1425,8 +1425,8 @@ void main() {
           _remote('b.md', id: 'id-b.md', etag: 'W/"9"'),
         ],
         state: _stateWith({
-          'a.md': SyncedFile(etag: 'W/"1"', size: 5),
-          'b.md': SyncedFile(etag: 'W/"8"', size: 5),
+          'a.md': const SyncedFile(etag: 'W/"1"', size: 5),
+          'b.md': const SyncedFile(etag: 'W/"8"', size: 5),
         }),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
@@ -1472,7 +1472,7 @@ void main() {
           // 重建后的条目（新版本）。
           _remote('a.md', id: 'id-new.md', etag: 'W/"new"'),
         ],
-        state: _stateWith({'a.md': SyncedFile(etag: 'W/"old"', size: 5)}),
+        state: _stateWith({'a.md': const SyncedFile(etag: 'W/"old"', size: 5)}),
         scope: const SyncGroupScope(_gid),
         filter: _permissive,
       );

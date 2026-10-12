@@ -57,9 +57,9 @@ void main() {
 
     testWidgets('可自定义空提示', (tester) async {
       await tester.pumpWidget(
-        MaterialApp(
+        const MaterialApp(
           home: Scaffold(
-            body: GroupGatePanel(decisions: const [], emptyHint: '暂无诊断数据'),
+            body: GroupGatePanel(decisions: [], emptyHint: '暂无诊断数据'),
           ),
         ),
       );

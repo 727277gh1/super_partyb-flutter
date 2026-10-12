@@ -460,12 +460,12 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   _header(detail),
                   if (detail.steps.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    SectionTitle('步骤'),
+                    const SectionTitle('步骤'),
                     for (final s in detail.steps) _StepTile(step: s),
                   ],
                   if (detail.pendingConfirmations.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    SectionTitle('待确认'),
+                    const SectionTitle('待确认'),
                     for (final c in detail.pendingConfirmations)
                       _ConfirmationCard(
                         key: ValueKey('miniapp-confirmation-${c.id}'),
@@ -477,7 +477,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   ],
                   if (_artifacts.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    SectionTitle('产物'),
+                    const SectionTitle('产物'),
                     for (final a in _artifacts)
                       _ArtifactTile(
                         key: ValueKey('miniapp-artifact-${a.id}'),
@@ -488,7 +488,7 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
                   ],
                   if (_events.isNotEmpty) ...[
                     const SizedBox(height: SpbSpacing.lg),
-                    SectionTitle('事件'),
+                    const SectionTitle('事件'),
                     for (final e in _events)
                       _EventTile(
                         key: ValueKey('miniapp-event-${e.id}'),

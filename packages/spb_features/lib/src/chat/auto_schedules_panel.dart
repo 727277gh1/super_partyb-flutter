@@ -227,9 +227,9 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
 
     // 首帧加载中：转圈而非空占位（空占位会被误读为「确实没有排程」）。
     if (_loading && _items.isEmpty) {
-      return Center(
-        key: const ValueKey('auto-schedules-loading'),
-        child: const Padding(
+      return const Center(
+        key: ValueKey('auto-schedules-loading'),
+        child: Padding(
           padding: SpbSpacing.pagePadding,
           child: SizedBox(
             width: SpbSpacing.xl,

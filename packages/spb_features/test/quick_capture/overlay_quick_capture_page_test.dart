@@ -270,9 +270,9 @@ void main() {
 
     testWidgets('部分附件失败但已投递 → 不关窗，提示哪些失败', (tester) async {
       var closed = false;
-      submit.result = QuickCaptureEnqueueResult(
+      submit.result = const QuickCaptureEnqueueResult(
         delivered: true,
-        failedUploads: const [
+        failedUploads: [
           QuickCaptureFailedUpload(filename: 'big.zip', reason: '太大'),
         ],
       );

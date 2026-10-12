@@ -90,7 +90,7 @@ final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
 /// 用「双保险」而非只靠「发布脚本记得别传」——后者是流程约定，会被遗忘。
 final devUserHeaderOverrideProvider = Provider<String?>((ref) {
   if (SpbEnv.isRelease) return null;
-  final v = const String.fromEnvironment('SPB_DEV_USER_ID');
+  const v = String.fromEnvironment('SPB_DEV_USER_ID');
   return v.isEmpty ? null : v;
 });
 
@@ -458,7 +458,7 @@ class AuthStateNotifier extends Notifier<AuthState> {
       state = AuthState.failed(error);
       return error;
     }
-    state = AuthState(status: AuthStatus.unknown, message: null);
+    state = const AuthState(status: AuthStatus.unknown, message: null);
     return null;
   }
 

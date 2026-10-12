@@ -436,9 +436,9 @@ class _FakeUfsApi extends UfsApi {
   @override
   Future<UfsDownload> download(String fileId, {String? ifNoneMatch}) async {
     downloadCalls.add(fileId);
-    return UfsDownload(
+    return const UfsDownload(
       notModified: false,
-      bytes: const [1, 2, 3],
+      bytes: [1, 2, 3],
       etag: 'W/"test"',
     );
   }

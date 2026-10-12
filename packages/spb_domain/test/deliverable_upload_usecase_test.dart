@@ -415,9 +415,9 @@ void main() {
 
     test('记录缺 contentHash → 不进脏列表（降级不误报）', () async {
       final (reader, store, remote, uploader, notifier, quick) = _defaults(
-        state: SyncState(
+        state: const SyncState(
           files: {
-            _rel: const SyncedFile(etag: 'W/"1"', size: 3), // 无 hash
+            _rel: SyncedFile(etag: 'W/"1"', size: 3), // 无 hash
           },
         ),
         remoteEntries: [_remoteEntry(etag: 'W/"1"')],
@@ -724,7 +724,7 @@ void main() {
     });
 
     test('only 限定子集：没勾的文件不动', () async {
-      final rel2 = '$_gid/reports/y.md';
+      const rel2 = '$_gid/reports/y.md';
       final store = _Store();
       store.data[workspaceStateKey] = SyncState(
         files: {

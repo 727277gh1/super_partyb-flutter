@@ -94,6 +94,6 @@ String generateOidcState({Random? random}) {
 Future<void> openInBrowser(String url) async {
   final ok = await spawnSystemOpenHere(url);
   if (!ok) {
-    throw PlatformError('无法在当前平台打开链接（已尝试系统默认程序）');
+    throw const PlatformError('无法在当前平台打开链接（已尝试系统默认程序）');
   }
 }

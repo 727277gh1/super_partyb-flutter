@@ -66,7 +66,7 @@ class _Downloader implements FileDownloader {
     String? ifNoneMatch,
   }) async {
     calls.add((fileId, ifNoneMatch));
-    return SyncDownloadResult.downloaded([1, 2, 3]);
+    return const SyncDownloadResult.downloaded([1, 2, 3]);
   }
 }
 
@@ -215,7 +215,7 @@ void main() {
     test('有游标时带 updated_since（增量）', () async {
       await store.save(
         syncStateKeyFor(scope),
-        SyncState(cursor: '2026-04-01T00:00:00Z'),
+        const SyncState(cursor: '2026-04-01T00:00:00Z'),
       );
 
       adapter.onGet(
@@ -340,9 +340,9 @@ void main() {
       );
 
       // 预置状态：etag 与远端一致（看起来「已同步」），但磁盘上没有文件。
-      store.data[workspaceStateKey] = SyncState(
+      store.data[workspaceStateKey] = const SyncState(
         cursor: '2026-04-01T00:00:00Z',
-        files: const {'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3)},
+        files: {'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3)},
       );
       expect(sink.preExisting, isEmpty, reason: '磁盘上确实没有这个文件');
 
@@ -378,9 +378,9 @@ void main() {
       );
 
       // 状态里 etag 较旧 → 会下载；磁盘上真有文件 → 应带条件头。
-      store.data[workspaceStateKey] = SyncState(
+      store.data[workspaceStateKey] = const SyncState(
         cursor: '2026-04-01T00:00:00Z',
-        files: const {'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3)},
+        files: {'g1/a.md': SyncedFile(etag: 'W/"1"', size: 3)},
       );
       sink.preExisting.add('g1/a.md');
 

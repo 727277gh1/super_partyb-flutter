@@ -70,6 +70,12 @@ jobs:
       - name: Workflow step structure check
         run: bash tools/check_workflow_steps.sh
 
+      # 门禁本身有没有接上：Dart analyzer 不向上继承父目录配置，成员包漏引根
+      # `analysis_options.yaml` 时 CI 仍「全绿」而严格规则一条没跑（issue #34）。
+      # 这条检查必须在 Analyze 之前——它决定 Analyze 的结果是否可信。
+      - name: Analysis options wiring check
+        run: bash tools/check_analysis_options.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 

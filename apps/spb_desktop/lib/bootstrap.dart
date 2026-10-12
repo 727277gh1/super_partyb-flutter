@@ -575,7 +575,7 @@ class PlatformDesktopCapabilities
 
   @override
   Future<String?> pickDirectory({String? title}) =>
-      FileSelectorDirectoryPicker().pick(title: title);
+      const FileSelectorDirectoryPicker().pick(title: title);
 
   // ---------------------------------------------------------------------------
   // 在文件管理器中打开目录（对齐 Tauri 的 reveal_sync_dir）

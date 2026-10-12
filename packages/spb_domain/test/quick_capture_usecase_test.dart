@@ -287,7 +287,9 @@ void main() {
         status: 'feedback_recorded',
       );
       expect(
-        describe(QuickCaptureFeedbackRecorded(groupId: 'g', result: result)),
+        describe(
+          const QuickCaptureFeedbackRecorded(groupId: 'g', result: result),
+        ),
         'toast',
       );
     });

@@ -1802,7 +1802,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           .catchError((Object e) {
             debugPrint('接受习惯建议失败: $e');
             _showHabitError('接受失败，请重试');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
     );
   }
@@ -1829,7 +1829,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           .catchError((Object e) {
             debugPrint('编辑并接受习惯建议失败: $e');
             _showHabitError('保存失败，请重试');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
     );
   }
@@ -1846,7 +1846,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           .catchError((Object e) {
             debugPrint('忽略习惯建议失败: $e');
             _showHabitError('操作失败，请重试');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
     );
   }
@@ -1868,7 +1868,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           .catchError((Object e) {
             debugPrint('延后习惯建议失败: $e');
             _showHabitError('操作失败，请重试');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
     );
   }
@@ -2425,7 +2425,9 @@ class _WorksPage extends ConsumerWidget {
       // 而非完整的 `MiniappWork`，页面内部造不出来。
       onCreateWork: () async {
         final workId = await ref.read(createMiniappWorkProvider)();
-        if (context.mounted) context.push(SpbRoutes.work(workId));
+        // `push` 的 Future 在**目标路由 pop 时**才完成，不是导航完成时——
+        // 等它会把本回调挂到用户返回为止。故显式 unawaited。
+        if (context.mounted) unawaited(context.push(SpbRoutes.work(workId)));
         return workId;
       },
     );

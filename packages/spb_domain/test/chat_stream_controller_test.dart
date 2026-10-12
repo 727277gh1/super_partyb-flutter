@@ -417,7 +417,7 @@ void main() {
         userId: 'usr_1',
         outbox: queue,
       );
-      c.start();
+      unawaited(c.start());
 
       // 先塞一条在退避窗口里的条目（否则 onConnectivityRestored 无事可做）。
       final future = DateTime.now().add(const Duration(hours: 1));
@@ -458,7 +458,7 @@ void main() {
         userId: 'usr_1',
         outbox: queue,
       );
-      c.start();
+      unawaited(c.start());
 
       final errors = <SpbError>[];
       c.errors.listen(errors.add);
@@ -488,7 +488,7 @@ void main() {
         userId: 'usr_1',
         outbox: queue,
       );
-      c.start();
+      unawaited(c.start());
       await c.dispose();
 
       // 释放后再投递：控制器不该崩（订阅已取消）。
@@ -747,7 +747,11 @@ void main() {
       await c.start(groupId: 'grp_1');
 
       sse.framesController.add(
-        SseFrame(event: 'message', data: '{"eventType":"message"}', id: null),
+        const SseFrame(
+          event: 'message',
+          data: '{"eventType":"message"}',
+          id: null,
+        ),
       );
       await Future<void>.delayed(Duration.zero);
       expect(c.snapshot, isEmpty);
@@ -2819,7 +2823,7 @@ void main() {
       await c.start(groupId: 'grp_1');
 
       const overflow = 100;
-      final total = ChatStreamController.maxBufferEvents + overflow;
+      const total = ChatStreamController.maxBufferEvents + overflow;
       pushMany(1, total);
       // 广播流按 microtask 派发，一次事件循环轮次即可排空全部待投递帧。
       await pumpEventQueue();

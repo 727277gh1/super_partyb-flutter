@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -324,10 +326,13 @@ class _SettingsPageState extends State<SettingsPage> {
         _syncMaxSizeField(settings);
       });
       // 统计与对话列表是次要信息：不阻塞首屏（分别单独加载）。
-      _loadStats();
-      _loadLaunchAtStartup();
-      _loadThemeMode();
-      if (!settings.scope.allGroups) _loadGroups();
+      //
+      // 显式 `unawaited`：这几条都是**有意**不等待的（等待会让首屏白等）。
+      // 不写的话 `unawaited_futures` 会把它们与「忘了 await」混为一谈。
+      unawaited(_loadStats());
+      unawaited(_loadLaunchAtStartup());
+      unawaited(_loadThemeMode());
+      if (!settings.scope.allGroups) unawaited(_loadGroups());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -577,7 +582,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _savedHint = true;
       });
       // 保存后重算统计：目录可能变了（旧统计已失效）。
-      _loadStats();
+      unawaited(_loadStats());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -638,7 +643,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _savedHint = true;
         }
       });
-      _loadStats();
+      unawaited(_loadStats());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -853,7 +858,7 @@ class _SettingsPageState extends State<SettingsPage> {
         // 外观：与其余设置项不同，**选中即保存**（不走 draft）。见
         // [SaveThemeMode] 的说明——主题需要即时反馈。
         if (widget.loadThemeMode != null && widget.saveThemeMode != null) ...[
-          SectionTitle('外观', highlight: true),
+          const SectionTitle('外观', highlight: true),
           Card(
             key: const ValueKey('settings-appearance'),
             margin: EdgeInsets.zero,
@@ -880,7 +885,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: SpbSpacing.lg),
         ],
 
-        SectionTitle('同步目录', highlight: true),
+        const SectionTitle('同步目录', highlight: true),
         _DirectoryCard(
           localRoot: draft.localRoot,
           onPick: _pickDirectory,
@@ -901,7 +906,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: SpbSpacing.lg),
 
-        SectionTitle('同步范围', highlight: true),
+        const SectionTitle('同步范围', highlight: true),
         Card(
           margin: EdgeInsets.zero,
           child: Column(
@@ -919,7 +924,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: SpbSpacing.lg),
 
-        SectionTitle('过滤与范围', highlight: true),
+        const SectionTitle('过滤与范围', highlight: true),
         Card(
           margin: EdgeInsets.zero,
           child: Column(
@@ -972,7 +977,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: SpbSpacing.lg),
 
-        SectionTitle('本地数据', highlight: true),
+        const SectionTitle('本地数据', highlight: true),
         _StatsCard(
           stats: _stats,
           loading: _loadingStats,
@@ -1007,7 +1012,7 @@ class _SettingsPageState extends State<SettingsPage> {
         // 桌面能力项：移动端（visible == false）整段不展示。
         if (widget.desktopInfo.visible) ...[
           const SizedBox(height: SpbSpacing.lg),
-          SectionTitle('桌面集成', highlight: true),
+          const SectionTitle('桌面集成', highlight: true),
           Card(
             key: const ValueKey('settings-capabilities'),
             margin: EdgeInsets.zero,
@@ -1058,8 +1063,8 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
         if (_savedHint && !_dirty) ...[
           const SizedBox(height: SpbSpacing.lg),
-          _Banner(
-            key: const ValueKey('settings-saved'),
+          const _Banner(
+            key: ValueKey('settings-saved'),
             message: '设置已保存',
             danger: false,
           ),
@@ -1068,7 +1073,7 @@ class _SettingsPageState extends State<SettingsPage> {
         // 危险操作区放最后：与上面的普通设置项拉开距离，避免误触。
         if (widget.onSignOut != null) ...[
           const SizedBox(height: SpbSpacing.lg),
-          SectionTitle('账号', highlight: true),
+          const SectionTitle('账号', highlight: true),
           Card(
             margin: EdgeInsets.zero,
             child: ListTile(

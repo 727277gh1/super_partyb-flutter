@@ -609,34 +609,34 @@ void main() {
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/d.md', 40),
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/e.md', 50),
         ]),
-        uploadChanges: (_) async => UploadReport(
+        uploadChanges: (_) async => const UploadReport(
           items: [
-            const UploadItemResult(
+            UploadItemResult(
               relPath: 'a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md',
               groupId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
               outcome: UploadOutcome.uploaded,
               notified: true,
             ),
-            const UploadItemResult(
+            UploadItemResult(
               relPath: 'a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/b.md',
               groupId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
               outcome: UploadOutcome.conflictMaterialized,
               conflictPath: '_conflict/2026-09-30T12-00-00Z-b.md.conflict',
               notified: true,
             ),
-            const UploadItemResult(
+            UploadItemResult(
               relPath: 'a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/c.pdf',
               groupId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
               outcome: UploadOutcome.fallbackQuickCapture,
               notified: true,
             ),
-            const UploadItemResult(
+            UploadItemResult(
               relPath: 'a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/d.md',
               groupId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
               outcome: UploadOutcome.skippedRemoteDeleted,
               reason: '远端已没有这个文件',
             ),
-            const UploadItemResult(
+            UploadItemResult(
               relPath: 'a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/e.md',
               groupId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
               outcome: UploadOutcome.failed,

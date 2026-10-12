@@ -2093,7 +2093,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           )
           .catchError((Object e) {
             debugPrint('接受习惯建议失败: $e');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
       onEditAndAcceptHabit: (s, patch) => ref
           .read(habitApiProvider)
@@ -2106,7 +2106,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           )
           .catchError((Object e) {
             debugPrint('编辑并接受习惯建议失败: $e');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
       onDismissHabit: (s) => ref
           .read(habitApiProvider)
@@ -2116,7 +2116,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           )
           .catchError((Object e) {
             debugPrint('忽略习惯建议失败: $e');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
       onSnoozeHabit: (s, option) => ref
           .read(habitApiProvider)
@@ -2129,7 +2129,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           )
           .catchError((Object e) {
             debugPrint('延后习惯建议失败: $e');
-            return HabitSuggestionResolveResult(resolved: false);
+            return const HabitSuggestionResolveResult(resolved: false);
           }),
       // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
       // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
@@ -2263,7 +2263,9 @@ class _WorksPage extends ConsumerWidget {
       // `workId` 而非完整的 `MiniappWork`，页面内部造不出来。
       onCreateWork: () async {
         final workId = await ref.read(createMiniappWorkProvider)();
-        if (context.mounted) context.push(SpbRoutes.work(workId));
+        // `push` 的 Future 在**目标路由 pop 时**才完成，不是导航完成时——
+        // 等它会把本回调挂到用户返回为止。故显式 unawaited。
+        if (context.mounted) unawaited(context.push(SpbRoutes.work(workId)));
         return workId;
       },
     );

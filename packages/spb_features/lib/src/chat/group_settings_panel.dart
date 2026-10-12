@@ -299,9 +299,9 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
                   keyboardType: TextInputType.number,
                   inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                   onSubmitted: (_) => _submitMaxTurns(),
-                  decoration: InputDecoration(
+                  decoration: const InputDecoration(
                     labelText: '最大自动轮次（$kMinMaxAutoTurns-$kMaxMaxAutoTurns）',
-                    border: const OutlineInputBorder(
+                    border: OutlineInputBorder(
                       borderRadius: SpbRadius.inputAll,
                     ),
                     isDense: true,

@@ -373,7 +373,7 @@ class _WatchReadOnly extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.visibility_outlined, size: SpbSpacing.lg),
+              const Icon(Icons.visibility_outlined, size: SpbSpacing.lg),
               const SizedBox(width: SpbSpacing.xs),
               Text('盯梢型：按节奏反复检查', style: textTheme.labelLarge),
             ],

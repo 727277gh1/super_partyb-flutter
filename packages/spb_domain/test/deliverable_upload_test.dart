@@ -122,7 +122,7 @@ void main() {
   // =========================================================================
   group('脏检测', () {
     test('改一字节 → 进脏列表（size 可能相同，必须靠内容判）', () async {
-      final rel = '$_gid/a.md';
+      const rel = '$_gid/a.md';
       final reader = _Reader({
         rel: [1, 2, 3, 4],
       });
@@ -147,7 +147,7 @@ void main() {
     });
 
     test('内容一致 → 不进脏列表', () async {
-      final rel = '$_gid/a.md';
+      const rel = '$_gid/a.md';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1, 2, 3],
@@ -168,7 +168,7 @@ void main() {
     test('仅 mtime 变（内容相同）→ 不进脏列表', () async {
       // 判据只有内容 hash，没有任何时间戳输入。用户 touch 一下、或同步器刚
       // 写过一遍，都不该被报成「改动」。
-      final rel = '$_gid/a.md';
+      const rel = '$_gid/a.md';
       final bytes = [7, 8, 9];
       final result = await scanLocalDirtyFiles(
         reader: _Reader({rel: bytes}),
@@ -184,7 +184,7 @@ void main() {
       // 单 group 布局：relPath 就是组内路径，前缀锚定在开头 → 命中。
       // （workspace 布局下 relPath 是 `{gid}/reports/tts/...`，同步侧
       //  `shouldSync` 同样命中不了——两边行为一致，镜像关系成立。）
-      final rel = 'reports/tts/a.mp3';
+      const rel = 'reports/tts/a.mp3';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1],
@@ -206,7 +206,7 @@ void main() {
     });
 
     test('tts 前缀只锚定在组内路径开头（x/reports/tts/ 不误伤）', () async {
-      final rel = 'x/reports/tts/a.md';
+      const rel = 'x/reports/tts/a.md';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1],
@@ -223,7 +223,7 @@ void main() {
     });
 
     test('媒体扩展名在未开启媒体时跳过（按扩展名推断）', () async {
-      final rel = '$_gid/reports/pic.png';
+      const rel = '$_gid/reports/pic.png';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1],
@@ -241,7 +241,7 @@ void main() {
     });
 
     test('超过体积上限的不进脏列表（按本地实际大小判）', () async {
-      final rel = '$_gid/big.md';
+      const rel = '$_gid/big.md';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1, 2, 3, 4, 5],
@@ -263,14 +263,14 @@ void main() {
     });
 
     test('记录缺 contentHash → 无法检测，不算脏（降级不误报）', () async {
-      final rel = '$_gid/a.md';
+      const rel = '$_gid/a.md';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1, 2, 3],
         }),
-        state: SyncState(
+        state: const SyncState(
           // 升级前写入的记录：有 etag/size，没有 contentHash。
-          files: {rel: const SyncedFile(etag: 'W/"1"', size: 3)},
+          files: {rel: SyncedFile(etag: 'W/"1"', size: 3)},
         ),
         filter: _permissive,
         stateKey: workspaceStateKey,
@@ -282,7 +282,7 @@ void main() {
     });
 
     test('本地文件已不在 → 记失败，不算脏（没有内容可上传）', () async {
-      final rel = '$_gid/gone.md';
+      const rel = '$_gid/gone.md';
       final result = await scanLocalDirtyFiles(
         reader: _Reader(const {}), // 读不到
         state: SyncState(
@@ -314,7 +314,7 @@ void main() {
     });
 
     test('单 group 布局：groupId 取状态键', () async {
-      final rel = 'reports/a.md';
+      const rel = 'reports/a.md';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
           rel: [1, 2, 3],
@@ -333,11 +333,11 @@ void main() {
 
     test('scanned 覆盖各分支之和（供「状态里有 N 条」展示）', () async {
       // 用 workspace 布局，路径带真实 group 前缀，覆盖完整链路。
-      final dirtyRel = '$_gid/dirty.md';
-      final sameRel = '$_gid/same.md';
-      final noHashRel = '$_gid/nohash.md';
-      final ttsRel = '$_gid/reports/tts/x.mp3';
-      final goneRel = '$_gid/gone.md';
+      const dirtyRel = '$_gid/dirty.md';
+      const sameRel = '$_gid/same.md';
+      const noHashRel = '$_gid/nohash.md';
+      const ttsRel = '$_gid/reports/tts/x.mp3';
+      const goneRel = '$_gid/gone.md';
 
       final result = await scanLocalDirtyFiles(
         reader: _Reader({

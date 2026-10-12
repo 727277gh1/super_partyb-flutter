@@ -170,9 +170,9 @@ class QuickCaptureEnqueueUseCase {
   }) async {
     final text = input.trim();
     if (text.isEmpty && attachments.isEmpty) {
-      return QuickCaptureEnqueueResult(
+      return const QuickCaptureEnqueueResult(
         delivered: false,
-        error: const ValidationError('输入与附件不能同时为空'),
+        error: ValidationError('输入与附件不能同时为空'),
       );
     }
 
