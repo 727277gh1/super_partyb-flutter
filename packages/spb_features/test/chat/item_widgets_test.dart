@@ -428,6 +428,95 @@ void main() {
     });
   });
 
+  /// ## 这个 group 防的是什么（issue #31）
+  ///
+  /// 输入区在窄屏溢出过：那句快捷键说明实测宽 **287.5dp**，且它在 `Row` 里
+  /// 不是 `Expanded`/`Flexible`——于是把整行撑破（320dp 溢出 104px、360dp
+  /// 64px、390dp 34px）。修复是按 `SpbBreakpoints.compact`（720dp）在窄屏
+  /// **隐藏**它。
+  ///
+  /// ⚠️ 既有用例都在**默认 800dp 窗口**（宽屏档）下跑，故「窄屏不溢出」这条
+  /// 不变式在它们里**永远不会被触发**——这正是缺陷被掩盖的原因。故这里显式
+  /// 把窗口压到真机宽度。
+  ///
+  /// 用例只断言「不溢出」与「该显示时才显示」，不锁定具体布局——布局会随
+  /// 设计调整，而这两条是不变式。
+  group('MessageComposer 窄屏（issue #31）', () {
+    for (final width in [320.0, 360.0, 390.0, 412.0]) {
+      testWidgets('宽 $width dp 下输入区无 RenderFlex 溢出', (tester) async {
+        tester.view.physicalSize = Size(width, 200);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          _host(
+            MessageComposer(
+              onSubmit: _noop,
+              // 「立即发送」**必须接线**：未接线时溢出量小 52px，
+              // 缺陷会被掩盖（issue #31 实测）。
+              onFlush: () async => _okFlush(),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: '窄屏输入区溢出会盖住发送按钮，用户点不到（issue #31）',
+        );
+        // 两个按钮都还在（溢出时右侧那个会被裁掉）。
+        expect(find.byKey(const ValueKey('composer-flush')), findsOneWidget);
+        expect(find.byKey(const ValueKey('composer-send')), findsOneWidget);
+      });
+    }
+
+    testWidgets('窄屏隐藏快捷键说明，宽屏保留', (tester) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      Future<void> pumpAt(double width) async {
+        tester.view.physicalSize = Size(width, 200);
+        tester.view.devicePixelRatio = 1.0;
+        await tester.pumpWidget(
+          _host(
+            MessageComposer(onSubmit: _noop, onFlush: () async => _okFlush()),
+          ),
+        );
+        await tester.pump();
+      }
+
+      const hint = 'Enter 发送 · Shift+Enter 换行';
+
+      await pumpAt(390);
+      expect(
+        find.text(hint),
+        findsNothing,
+        reason: '窄屏没有余量摆它；截断成「Shift+En…」比不显示更困惑（issue #31）',
+      );
+
+      // 阈值取 `SpbBreakpoints.compact`（720dp）的边界值：719 隐藏、720 显示。
+      await pumpAt(719);
+      expect(find.text(hint), findsNothing);
+
+      await pumpAt(720);
+      expect(
+        find.text(hint),
+        findsOneWidget,
+        reason: '桌面端有物理键盘，这行说明只在宽屏有意义（issue #31）',
+      );
+
+      await pumpAt(1000);
+      expect(find.text(hint), findsOneWidget);
+      expect(tester.takeException(), isNull, reason: '宽屏摆出提示文本后仍不应溢出（反向守卫）');
+    });
+  });
+
   group('UserMessageBubble', () {
     testWidgets('渲染文本且右对齐', (tester) async {
       await tester.pumpWidget(_host(const UserMessageBubble(text: '用户说的话')));
