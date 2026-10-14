@@ -120,6 +120,17 @@ jobs:
       - name: AGENTS.md identifier references
         run: bash tools/check_agents_refs.sh
 
+      # 同上的**数字**版本：§6.12 的「重新评估条件 2」是「spb_features 硬编码
+      # 字符串 > 1500」——文档里的当前值若不准，会基于错误基线做决策
+      # （issue #46）。容差 5%（小漂移放行、大漂移拦住）。
+      - name: AGENTS.md number references
+        run: bash tools/check_agents_numbers.sh
+
+      # 上面那条守卫的假绿/假红风险（无标记空转、大漂移漏检、小漂移误报、
+      # 文档展示的命令与脚本不一致）各有断言。
+      - name: AGENTS.md number guard self-test
+        run: bash tools/check_agents_numbers_selftest.sh
+
       # `catch (_) {}` 让异常完全消失。issue #40 建好了「导出诊断日志」通道，
       # 但它的输入只有显式走 SpbLog 的日志——静默 catch 里的异常永远不会出现
       # 在用户导出的报告里（issue #45）。

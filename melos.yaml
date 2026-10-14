@@ -29,6 +29,9 @@ scripts:
   silent-catches:
     description: 静默吞异常的 catch 必须有说明或日志（issue #45）
     run: bash tools/check_silent_catches.sh
+  agents-numbers:
+    description: AGENTS.md 里标注了复现命令的数字不得漂移（issue #46）
+    run: bash tools/check_agents_numbers.sh
   gen:
     description: 代码生成（drift；spb_models 为手写 fromJson，见 AGENTS.md §6.2）
     # ⚠️ **必须 cd 进包目录**。在仓库根跑 `dart run build_runner build` 是

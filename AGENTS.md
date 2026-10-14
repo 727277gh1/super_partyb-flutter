@@ -61,6 +61,7 @@ bash tools/check_wiring_parity_selftest.sh # 上面那个守卫的解析器自�
 bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
 bash tools/check_agents_refs.sh       # AGENTS.md 引用的 Dart 标识符真实存在（见 issue #37）
 bash tools/check_silent_catches.sh    # 静默吞异常的 catch 必须有说明或日志（见 issue #45）
+bash tools/check_agents_numbers.sh    # AGENTS.md 标注了复现命令的数字不得漂移（见 issue #46）
 bash tools/check_format.sh            # dart format 门禁
 
 # 测试
@@ -144,12 +145,18 @@ super_partyb-flutter/
     ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
     ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
     ├── check_silent_catches.sh # 静默吞异常检查（+ _selftest）
+    ├── check_agents_numbers.sh # AGENTS.md 数字漂移检查（+ _selftest）
     ├── check_format.sh         # dart format 门禁
     ├── check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
     ├── coverage.sh             # 逐包覆盖率采集 + 汇总表
     ├── scrub-history.sh        # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
     └── bundle_linux_deps.sh  # Linux 分发包依赖打包
 ```
+
+⚠️ **`scrub-history.sh` 的使用顺序**（`--dry-run` → 执行 → `--verify`）见脚本头。
+关键约束：它**只重写 git 历史**，工作区里的真实标识需**先清干净**（见 §6.25）
+——否则新提交又会把真实值带回来，等于白做。它还需要仓库外的映射文件
+（`SPB_OS_MAP`，含真实值，绝不入库）。
 
 ### 依赖方向（**单向，不可逆**）
 
@@ -958,21 +965,32 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 #### 当前硬编码量（可复核）
 
 ```bash
+# ⚠️ 下面的数字**会漂移**（随实现自然增长）。以命令实测为准，别把这里当权威
+# 数字——与 §6.13 的覆盖率基线同一约定。`tools/check_agents_numbers.sh` 会
+# 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
+
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：808 —— 随 #15–#22 的实现自然增长
+# 当前（HEAD）量：878
 cd packages/spb_features && grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart lib | wc -l
+# <!-- number-check: name=spb_features_hardcoded_zh value=878 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1569
 grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
+# <!-- number-check: name=repo_hardcoded_zh value=1569 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 808、`spb_desktop` 144、
-`spb_domain` 143、`spb_models` 97、`spb_mobile` 81、`spb_api` 60、`spb_platform` 49、
-`spb_data` 23、`spb_ui` 4、`spb_design` 3、`spb_core` 0。
+量级分布（HEAD，字符串字面量数）：`spb_features` 878、`spb_domain` 172、
+`spb_desktop` 149、`spb_models` 97、`spb_mobile` 89、`spb_platform` 67、
+`spb_api` 62、`spb_data` 39、`spb_core` 8、`spb_ui` 5、`spb_design` 3。
+
+⚠️ **`spb_core` 从 0 涨到 8 是 issue #40/#45 引入的**（诊断报告文案、错误分类
+文案）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
+基础设施层的文案随功能增加而增长，而它们**不在 Widget 里**。
 
 #### 为什么不做
 
@@ -1004,7 +1022,7 @@ grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 | # | 条件 | 为什么是它 |
 |---|---|---|
 | 1 | 产品**进入非中文市场**，且有明确目标语言与验收人 | 无目标语言时引入 i18n 只会产出无人验证的翻译 |
-| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 808） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
+| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 878，见上方命令） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
 | 3 | 出现「**同一文案在 ≥3 处需按语境改写**」的实际需求 | 说明缺的是 message key 机制而非翻译；此时直译方案已不够用 |
 
 #### 若将来要做（供重开时参考，**不要现在就动手**）
@@ -1508,7 +1526,8 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 `check_wiring_parity`（两端接线，含 `check_wiring_parity_selftest` 自测）、
 `check_codegen`（生成物漂移，含 `check_codegen_selftest` 自测）、
 `check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用）、
-`check_silent_catches`（静默吞异常，§6.24）。
+`check_silent_catches`（静默吞异常，§6.24）、`check_agents_numbers`（本文档数字，
+§6.25）。
 
 ⚠️ **两个 `*_selftest` 是「守卫的守卫」**：`check_wiring_parity` 曾因裸子串
 匹配而假绿（issue #42），`check_codegen` 的四个坑任一写错都会假绿或假红
@@ -2038,6 +2057,78 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（§6.20）——本
 
 ---
 
+### 6.25 文档数字守卫与真实标识清理（issue #46）
+
+#### 一、数字漂移（守卫查不到的那一类）
+
+`tools/check_agents_refs.sh`（§6.19）只查**标识符存在性**——查不到数字一致性。
+实测漂移：§6.12 写 `spb_features` 硬编码中文 **808**（实际 878）、全仓 **782**
+（实际 1569）；§11 写总计 **83.4%** 而 §6.13 写 83.8%（**同一文档两处不一致**）。
+
+**为什么值得修**：§6.12 的「重新评估条件 2」是「`spb_features` 硬编码字符串
+> 1500」——文档里的「当前值」若长期不准，将来判断「是否触发重评估」时会基于
+**错误基线**。
+
+#### `tools/check_agents_numbers.sh`：容差而非精确相等
+
+| 方案 | 问题 |
+|---|---|
+| 软失败（只提示） | CI 上**永远不会被看到**（没人翻绿构建的日志）——等于没查 |
+| 精确相等 | 这些数字**随实现自然增长**（782→808→878）。每加一句中文文案就红一次，很快会有人删掉标记 |
+| **容差（选用）** | 小漂移放行（不打扰正常开发），大漂移拦住（防文档烂到误导决策） |
+
+默认容差 **5%**（标记可 `tolerance=` 覆盖）。依据：§6.12 的阈值是 `> 1500` 而
+当前 878——5% 的漂移（约 44 条）远不足以改变「离阈值还有多远」的判断。
+
+**命令定义在脚本里，不在文档的标记里**：两条复现命令**自身含单引号**
+（`grep -rhoE "'[^']*[一-龥][^']*'"`），塞进标记属性就得转义、属性解析会先崩。
+故标记只写 `name=` 与 `value=`，命令单一定义在脚本的 `CHECKS` 表。
+
+这带来一个额外好处：守卫**断言文档展示的命令与脚本里的逐字相同**（去空白后
+比较）——于是「文档教用户跑的」与「守卫实际跑的」不可能漂移。否则用户复现出的
+数字与守卫的判定会不一致，而那种不一致**极难排查**。
+
+**为什么覆盖率总计不在检查范围内**：`coverage.sh --summary-only` 读的是已有
+产物，而本守卫在 CI 的 quality job 跑（覆盖率步骤在测试之后）——要在这里查就得
+重跑全部测试（约 +3 min），而那正是 `coverage.sh` 单独一步、注释里写明「不该让
+它影响门禁反馈速度」的原因。§6.13 的表已有显式免责，且覆盖率是**观测**而非
+决策基线。
+
+配套 `check_agents_numbers_selftest.sh`（6 条断言）：无标记必报错（防**静默
+空转**）、大漂移必报错、容差内放行、文档命令与脚本不一致必报错、未知 `name`
+必报错、`tolerance=` 覆盖生效（含「同值不加 tolerance 必须被拒」的对照）。
+均已接入 CI。
+
+#### 二、真实生产标识残留
+
+仓库有 `tools/scrub-history.sh`（开源前重写 git 历史），但**全仓文档零引用**它，
+且它**假定了工作区已被清理干净**（脚本头写明「把工作区里的域名/IP 换成占位符
+只影响新提交」）——而实测工作区**还没清**。顺序反了。
+
+已清理：
+
+| 文件:行 | 内容 | 替换为 |
+|---|---|---|
+| `docs/m0-manual-verification.md:416` | 生产服务器 IP | 「生产 SSH 别名，见 §部署约定」 |
+| 同上 | 内部域名 `idp.atjog.com` | 「IdP 生产地址」 |
+| `:92`、`:108` | 本地绝对路径 | `/path/to/super_partyb-flutter` |
+
+并在 §3 的 `tools/` 清单下写明 `scrub-history.sh` 的**使用顺序**（`--dry-run` →
+执行 → `--verify`）与关键约束：它**只重写历史**，工作区里的真实标识需**先清
+干净**（即本节），否则新提交又把真实值带回来，等于白做。
+
+⚠️ **`scrub-history.sh` 本身完全值无关**（真实值与占位符都从仓库外的映射文件
+读，脚本里只出现变量名）——这是刻意的：脚本会入库、会被公开，把映射写进它就
+等于**把待清理的目标集中在一处并公开**。
+
+#### 反向验证（逐条实测）
+
+守卫本身改坏：标记删光（空转）→ 自测 1 条失败；大漂移放行 → 1 条；容差内误报
+→ 1 条；文档命令改成不同文本 → 1 条；未知 `name` 放行 → 1 条；`tolerance=`
+不生效 → 1 条。数字本身：把 §6.12 的 `value` 改回 808 → 守卫报「偏差 8.0%」。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -2367,10 +2458,11 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 契约同步靠人工 | 可接受 | §6.2 |
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~无全局错误处理（异常进不了诊断报告）+ outbox 三处静默吞异常~~ | ✅ 已修（issue #45）：`spb_platform` 新增 `installGlobalErrorHandlers`（`FlutterError.onError` + `PlatformDispatcher.onError` + `runZonedGuarded` **三道防线**，两端 `main()` 第一步装配），异常第一次能进「导出诊断日志」；`outbox.dart` 三处 `catch (_) {}` 补日志（`upsert(failed)` 用 warn），另补 `sync_scope_config` / SSE 载荷丢弃 / 角标 / 标题预取 / habits / confirmations 六处；新增 `tools/check_silent_catches.sh`（269 处 catch 零误报）+ 6 条自测断言 | issue #45、§6.24 |
-| ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（剔除后口径），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%** | issue #38、§6.13 |
+| ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（**这是 #38 当时的数字**；当前总计见 §6.13 的表，别把它当现值），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%**（当时；#41/#45 后为 88.0%） | issue #38、§6.13 |
 | ~~SseClient 传输层 0.7% 无测试（上层全用 Fake）~~ | ✅ 已修（issue #41）：新增 `packages/spb_api/test/sse_client_test.dart`（31 条），`sse_client.dart` **0.7% → 98.1%**、`spb_api` 72.3% → **82.6%**。**顺带测出一个真实缺陷**：分片边界落在汉字 UTF-8 序列中间时，逐分片 `utf8.decode(allowMalformed: true)` 会把「中文」损坏成「���文」且不可恢复（`allowMalformed` 是「解不出替换成 U+FFFD」，不是「缓冲到下一分片」）；已改用 `Utf8Decoder.startChunkedConversion` 增量解码。7 项反向验证逐条实测 | issue #41、§6.22 |
 | ~~每条 SSE 事件触发全量归约（长回复流式期间卡顿）~~ | ✅ 已修（issue #44）：`_emit` 把归约合并到一个**事件循环任务**，同一批 N 条增量只归约一次。实测 300 条增量（缓冲区 2000）**640 ms → 19 ms**。⚠️ **issue 建议的 `scheduleMicrotask` 方案实测不成立**——broadcast stream 把 N 次同步 `add` 投递成 N 个独立 microtask，microtask 排的 flush 会夹在每个事件之间（实测 5 条 → 5 次归约）；只有 `Timer` 能跨过整批。`touchedTurnId` 相应改为 `Set`（一批可含多个 turn）；新增 `_reductionDirty` 脏标记保证同步读不拿旧缓存。12 条用例 + 5 项反向验证 | issue #44、§6.23 |
 | ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
+| ~~AGENTS.md 数字漂移 + 真实生产标识残留~~ | ✅ 已修（issue #46）：§6.12 的 808→**878**、782→**1569**、量级分布全部重测；§11 的 83.4% 标注为「#38 当时的数字」（与 §6.13 不再自相矛盾）；新增 `tools/check_agents_numbers.sh`（**容差 5%**：小漂移放行、大漂移拦住；命令单一定义在脚本里并**断言文档展示的命令与之逐字相同**）+ 6 条自测断言。清理 `docs/m0-manual-verification.md` 的生产 IP / 内部域名 / 本地绝对路径，并在 §3 写明 `scrub-history.sh` 的使用顺序（它只重写历史，工作区需**先清干净**） | issue #46、§6.25 |
 
 ---
 
