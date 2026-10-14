@@ -115,10 +115,27 @@ void main() {
     if (transient) 'transient': true,
   };
 
+  /// 让假时区里的「待办」全部跑完：microtask **加上**零延迟的归约计时器。
+  ///
+  /// ## 为什么不能只用 `flushMicrotasks`
+  ///
+  /// issue #44 起归约被合并到一个**零延迟 Timer**（`_emit` → `flushEmit`）。
+  /// `flushMicrotasks` 只跑 microtask 队列，不跑 timer——故 `push` 之后若不
+  /// 额外 `elapse(Duration.zero)`，归约会一直挂着，看门狗也就不会武装/撤销，
+  /// 断言 `pendingTimers` 时还会把那个归约计时器误算进去。
+  ///
+  /// 先 `flushMicrotasks` 让 SSE 帧投递到 `_onFrame`（并排上归约计时器），
+  /// 再 `elapse(zero)` 让它真正执行。
+  void drain(FakeAsync async) {
+    async.flushMicrotasks();
+    async.elapse(Duration.zero);
+    async.flushMicrotasks();
+  }
+
   /// 在假时区里建控制器、起全局模式（**不回填 timeline**，故无 HTTP）。
   ///
   /// `start` 在 `groupId == null` 时没有 await 点，故同步就完成了 `_emit` 与帧
-  /// 订阅——`push` 之后 `flushMicrotasks` 即可让 `_onFrame` 跑起来。
+  /// 订阅——`push` 之后 `drain` 即可让 `_onFrame` 与归约跑起来。
   ChatStreamController boot(FakeAsync async, _FakeSseClient sse) {
     final controller = ChatStreamController(
       sse: sse,
@@ -127,11 +144,11 @@ void main() {
       turnTimeoutOverride: timeout,
     );
     unawaited(controller.start());
-    async.flushMicrotasks();
+    drain(async);
     return controller;
   }
 
-  /// 推一帧并让它被归约（假时区里必须显式冲 microtask）。
+  /// 推一帧并让它被归约（假时区里必须显式冲 microtask + 跑归约计时器）。
   void push(
     FakeAsync async,
     _FakeSseClient sse,
@@ -139,7 +156,7 @@ void main() {
     Map<String, dynamic> data,
   ) {
     sse.push(type, data);
-    async.flushMicrotasks();
+    drain(async);
   }
 
   /// 推一条**流式增量**（`transient: true` → `isStreaming: true`）。

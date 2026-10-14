@@ -302,10 +302,75 @@ class ChatStreamController {
   // 不再各自调 `EventReducer.reduce`（归约几百条事件不是零成本）。
   ReductionResult? _cachedReduction;
 
+  /// 缓冲已变、[_cachedReduction] 失效（issue #44）。
+  ///
+  /// [_emit] 现在把归约**推迟到 microtask**（合并一个 chunk 里的多条增量）。
+  /// 在那之前若有同步读（如 `_syncStaleWatch` 在 `await` 后恢复、或调用方
+  /// 直接读 [snapshot]），不能拿到旧结果——故置脏，让 [_reduction] 现场重算。
+  bool _reductionDirty = false;
+
   ReductionResult get _reduction {
-    // 若 emit 还没跑过（构造后未 start），现场算一次。
-    return _cachedReduction ??= EventReducer.reduce(_buffer);
+    if (_reductionDirty || _cachedReduction == null) {
+      _cachedReduction = EventReducer.reduce(_buffer);
+      _reductionDirty = false;
+    }
+    return _cachedReduction!;
   }
+
+  // ==================== 归约合并（issue #44） ====================
+  //
+  // ## 它解决什么问题
+  //
+  // 流式回复是**逐 token 增量**（`message` 事件的 `transient: true`，见
+  // AGENTS.md §5.4）。一个长回复产生几百条事件，而 [_emit] 原来**每条**都
+  // `EventReducer.reduce(_buffer)` 全量重算（缓冲区上限 2000 条）并重建整个
+  // `List<ConversationItem>`。
+  //
+  // 实测（缓冲区已满 2000、一个回复 300 条增量）：
+  //
+  // ```
+  // 300 条增量 × 全量归约(2000 条): 640 ms   ← 单次归约约 1.8 ms
+  // ```
+  //
+  // 这 640 ms 全部在 UI 线程上，表现为流式期间的滚动卡顿与输入框延迟。
+  //
+  // ## 为什么合并是有效的
+  //
+  // `_sse.frames` 是 broadcast stream，投递是**异步**的。但投递粒度很关键：
+  // 实测一个同步块里的 N 次 `add` 会变成 **N 个独立的 microtask**（每次只投
+  // 一个事件），而不是一个 microtask 投全部。
+  //
+  // 这直接决定了「用什么调度合并」：
+  //
+  // | 调度方式 | 5 条同步增量的归约次数（实测） |
+  // |---|---|
+  // | `scheduleMicrotask` | **5**（没合并） |
+  // | `Timer(Duration.zero, ...)` | **1** |
+  //
+  // 因为 microtask 队列是 FIFO：listener(0) 在 microtask M0 里跑，它排的
+  // flush 排在已经入队的 M1 **后面**，于是每投递一个事件就夹一次 flush。
+  // `Timer` 是事件循环**任务**（不是 microtask），M0..M4 会先全部排空，
+  // 然后计时器只触发一次。
+  //
+  // ⚠️ 故这里用**事件循环任务**（`Timer(Duration.zero, ...)`）而**不是**
+  // `scheduleMicrotask`。本 issue 最初建议的 microtask 方案在本项目的数据流上
+  // **不成立**（实测证据见上表）。
+  //
+  // 延迟代价：只多一个事件循环轮次（实测相对顺序为
+  // `microtask → timer → delayed(zero)`），不是 VSync 对齐——VSync 对齐需要
+  // `SchedulerBinding`，纯 Dart 层不用。一个轮次远小于一帧。
+  //
+  // ## 为什么是 `Set<String>` 而不是单个 id
+  //
+  // 一个 chunk 内可能含**多个 turn** 的事件（如 turn A 的尾部与 turn B 的
+  // 开头）。[_syncStaleWatch] 的语义是「只重排**触发者**的到期时刻」
+  // （AGENTS.md §5.8 的 per-turn 计时器不变式），故必须保留**全部**触发者；
+  // 只留最后一个会让另一个 turn 的计时器被漏掉。
+  //
+  // null 表示「不是由具体事件触发的同步」（回填 / 乐观回显 / 切换 group），
+  // 与空集合区分开。
+  Timer? _emitTimer;
+  Set<String>? _pendingTouchedTurnIds;
 
   // ==================== 超时兜底（长时间无进展） ====================
   //
@@ -395,6 +460,9 @@ class ChatStreamController {
       t.cancel();
     }
     _staleTimers.clear();
+    // 挂起的「本轮触及的 turn」随之失效：切 group / 重启后它们是旧时间线的
+    // turn，若让随后的 flush 拿它们去重排计时器，会武装出无对应项的计时器。
+    _pendingTouchedTurnIds = null;
     _turnTimeout = _turnTimeoutOverride;
     if (_staleTurnIds.isNotEmpty) {
       _staleTurnIds.clear();
@@ -442,11 +510,13 @@ class ChatStreamController {
 
   /// 同步看门狗（每次缓冲变更后调用）。
   ///
-  /// ## 续期只针对「本次事件所属的那个 turn」
+  /// ## 续期只针对「本次事件所属的那些 turn」
   ///
-  /// [touchedTurnId] 是刚被接受的那条事件的 turnId。只有它的计时器重排：
-  /// 若任意事件都重排全部 turn，一个已卡死的 turn 会被旁边还在跑的 turn
-  /// （或全局模式下**别的 group** 的事件）无限续期，兜底等于失效。
+  /// [touchedTurnIds] 是本轮被接受的**全部**事件的 turnId 集合（issue #44 起
+  /// 归约被合并到一个 microtask，一个 chunk 内可能含多个 turn）。只有它们
+  /// 的计时器重排：若任意事件都重排全部 turn，一个已卡死的 turn 会被旁边
+  /// 还在跑的 turn（或全局模式下**别的 group** 的事件）无限续期，兜底等于
+  /// 失效。
   ///
   /// 为 null 表示「不是由具体事件触发的同步」（如回填、乐观回显）：此时只
   /// 为新出现的进行中 turn 武装，不重置已有的。
@@ -469,7 +539,7 @@ class ChatStreamController {
   /// - [EventReducer.lastTurnMayBeRunning] 的结构推断（回填路径，本轮新增）。
   ///
   /// 两者都**只**产出「可能需要兜底」的 turn id 集合，不改归约结果。
-  void _syncStaleWatch({String? touchedTurnId}) {
+  void _syncStaleWatch({Set<String>? touchedTurnIds}) {
     if (_disposed || _staleTurnIdsController.isClosed) return;
 
     final reduction = _reduction;
@@ -498,7 +568,11 @@ class ChatStreamController {
     if (timeout == null) return;
     for (final id in inFlight) {
       final isNew = !_staleTimers.containsKey(id);
-      if (touchedTurnId != null && id != touchedTurnId && !isNew) continue;
+      // 只重排「本轮被触及」的 turn；touchedTurnIds 为 null 时（回填 /
+      // 乐观回显）只武装新出现的，不重置已有的。
+      if (touchedTurnIds != null && !touchedTurnIds.contains(id) && !isNew) {
+        continue;
+      }
       _staleTimers.remove(id)?.cancel();
       _staleTimers[id] = Timer(timeout, () => _markTurnStale(id));
     }
@@ -1062,28 +1136,63 @@ class ChatStreamController {
     if (!_errorController.isClosed) _errorController.add(mapped);
   }
 
+  /// 是否有挂起的归约（测试用，issue #44）。
+  ///
+  /// 合并把归约推迟到事件循环任务，故「挂起」是一个真实状态：
+  /// [dispose] 必须把它取消，否则会留下一个指向已释放对象的计时器。
+  @visibleForTesting
+  bool get hasPendingEmit => _emitTimer != null;
+
+  /// 请求一次归约 + 推送。
+  ///
+  /// 真正的计算在 [flushEmit] 里，由事件循环任务触发。同一轮次内多次调用只会
+  /// 产生一次归约（issue #44，理由见 [_emitTimer] 上方的长注释）。
   void _emit({String? touchedTurnId}) {
     if (_itemsController.isClosed) return;
-    _cachedReduction = EventReducer.reduce(_buffer);
-    _itemsController.add(_cachedReduction!.items);
+    // 缓冲已变 → 缓存的归约结果失效（即使本次不立即重算）。
+    _reductionDirty = true;
+    if (touchedTurnId != null && touchedTurnId.isNotEmpty) {
+      (_pendingTouchedTurnIds ??= <String>{}).add(touchedTurnId);
+    }
+    // 用 `Timer(Duration.zero, ...)` 而非 `Timer.run`：后者返回 void，无法存入
+    // 字段以便取消（切 group / dispose 时要丢掉挂起的合并）。两者都是事件循环
+    // **任务**（非 microtask），合并效果实测一致。
+    _emitTimer ??= Timer(Duration.zero, flushEmit);
+  }
+
+  /// 执行挂起的归约并推送全部派生流。
+  ///
+  /// 对测试可见：需要「立刻看到结果」而不想等一个事件循环轮次的用例可以显式
+  /// 调它（见测试里的 `flushEmit()`）。生产路径只由 [_emit] 的计时器触发。
+  @visibleForTesting
+  void flushEmit() {
+    _emitTimer?.cancel();
+    _emitTimer = null;
+    final touched = _pendingTouchedTurnIds;
+    _pendingTouchedTurnIds = null;
+    if (_itemsController.isClosed) return;
+    // 用 `_reduction` 而非直接 reduce：若期间已有同步读把它算过，这里直接复用。
+    _cachedReduction = _reduction;
+    final reduction = _cachedReduction!;
+    _itemsController.add(reduction.items);
     if (!_gateDecisionsController.isClosed) {
-      _gateDecisionsController.add(_cachedReduction!.gateDecisions);
+      _gateDecisionsController.add(reduction.gateDecisions);
     }
     if (!_activitiesController.isClosed) {
-      _activitiesController.add(_cachedReduction!.activities);
+      _activitiesController.add(reduction.activities);
     }
     if (!_contextUsageController.isClosed) {
-      _contextUsageController.add(_cachedReduction!.contextUsage);
+      _contextUsageController.add(reduction.contextUsage);
     }
     if (!_executionStatusController.isClosed) {
-      _executionStatusController.add(_cachedReduction!.executionStatus);
+      _executionStatusController.add(reduction.executionStatus);
     }
     if (!_ttsStatusController.isClosed) {
-      _ttsStatusController.add(_cachedReduction!.ttsStatus);
+      _ttsStatusController.add(reduction.ttsStatus);
     }
     // 每次缓冲变更都同步看门狗：判据是「距最后一次活动」，故只有
-    // [touchedTurnId] 的到期时刻被推后（见 [_syncStaleWatch]）。
-    _syncStaleWatch(touchedTurnId: touchedTurnId);
+    // [touched] 里那些 turn 的到期时刻被推后（见 [_syncStaleWatch]）。
+    _syncStaleWatch(touchedTurnIds: touched);
   }
 
   /// 发送消息（经完整前置链）。
@@ -1219,6 +1328,10 @@ class ChatStreamController {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // 丢弃挂起的合并（其计时器回调会因控制器已关而提前返回）。
+    _emitTimer?.cancel();
+    _emitTimer = null;
+    _pendingTouchedTurnIds = null;
     for (final t in _staleTimers.values) {
       t.cancel();
     }

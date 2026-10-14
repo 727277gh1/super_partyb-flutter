@@ -192,6 +192,17 @@ void main() {
   /// `startController` 的 runAsync 时区里注册的，在 FakeAsync 时区里 `add`
   /// 的事件会被投递到另一个时区，`tester.pump()` 永远看不到它
   /// （表现为「事件推了但列表是空的」）。
+  ///
+  /// ## 为什么要在**真实时区**里多等（issue #44）
+  ///
+  /// 归约现在被合并到一个零延迟 `Timer`（`_emit` → `flushEmit`）。而控制器的
+  /// 帧订阅是在 [startController] 的 `runAsync` 里注册的，故它触发的 `_emit`
+  /// 也落在**真实时区**——那里创建的 `Timer` 是真实计时器，`tester.pump()`
+  /// **永远跑不到它**（实测：`pump(5ms)` 也不触发，只有真实等待才行）。
+  ///
+  /// 故必须在 `runAsync` 内等两个真实轮次：第一个让 SSE 帧投递到 `_onFrame`
+  /// 并排上归约计时器，第二个让该计时器真正执行并推送新 items。之后
+  /// `tester.pump()` 只是把已推送的状态渲染出来。
   Future<void> pushEvent(
     WidgetTester tester,
     String type,
@@ -199,7 +210,9 @@ void main() {
   ) async {
     await tester.runAsync(() async {
       sse.push(type, data);
-      // 给流一点时间把事件交给控制器。
+      // 第 1 个轮次：帧 → `_onFrame` → `_emit`（排上归约计时器）。
+      await Future<void>.delayed(Duration.zero);
+      // 第 2 个轮次：归约计时器执行 → `items` 推送新列表。
       await Future<void>.delayed(Duration.zero);
     });
     await tester.pump();
@@ -1108,6 +1121,12 @@ void main() {
       await tester.enterText(find.byType(TextField), '走控制器');
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('composer-send')));
+      // ⚠️ 归约被合并到一个零延迟 Timer（issue #44），而它在**真实时区**里
+      // （`controller.send` 由 `runAsync` 启动的链路触发）——`pumpAndSettle`
+      // 跑不到真实计时器。故在 `runAsync` 内等一个真实轮次让它落地，再 pump。
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
       await tester.pumpAndSettle();
 
       // 乐观回显：用户气泡立刻出现（不等 SSE）。

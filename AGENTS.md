@@ -438,7 +438,8 @@ timeline，只派生 lifecycle）。
 
 - **per-turn 计时器，不是一个共享的**：共享的话，别的 turn 的活动会把本 turn
   的到期时刻也推后——已卡死的 turn 会因「旁边那个还在跑」而永不被判 stale。
-  故 `_syncStaleWatch` 收 `touchedTurnId`，只重排触发者的到期时刻。
+  故 `_syncStaleWatch` 收 `touchedTurnIds`（**集合**，issue #44 起归约被合并，
+  一批里可能有多个触发者），只重排触发者的到期时刻。
 - **`inFlightTurnIds` 必须包含未完成的 `ToolCallItem`**：长工具（构建/下载/
   检索）期间既无正文也无思考，只有一条 `tool_call`。
 
@@ -1829,6 +1830,107 @@ URL 匹配返回整体响应，无法表达「同一响应被切成多个分片�
 
 ---
 
+### 6.23 流式归约合并（issue #44）——**并纠正 issue 里的一个错误方案**
+
+#### 问题（实测）
+
+流式回复是逐 token 增量（`message` 的 `transient: true`）。一个长回复产生几百条
+事件，而 `_emit` 原来**每条**都 `EventReducer.reduce(_buffer)` 全量重算（缓冲区
+上限 2000 条）并重建整个 items 列表。
+
+```
+单次归约（2000 条）: 1767 µs
+300 条增量 × 全量归约: 640 ms   ← 全在 UI 线程
+```
+
+#### ⚠️ issue 建议的 `scheduleMicrotask` **不成立**（实测）
+
+issue 原文建议用 `scheduleMicrotask` 合并，并给出理由「microtask 在同一事件循环
+轮次结束前执行」。但**投递粒度**决定了这行不通：
+
+| 调度方式 | 5 条同步增量的归约次数（实测） |
+|---|---|
+| `scheduleMicrotask` | **5**（完全没合并） |
+| `Timer(Duration.zero, ...)` | **1** |
+
+原因：broadcast stream 把 N 次同步 `add` 投递成 **N 个独立 microtask**（每次只投
+一个事件，实测 `listener(0)` → 一个 microtask → `listener(1)` → …）。从 listener
+里排的 microtask 排在「下一个事件」之前，于是每条都夹一次归约。
+
+只有事件循环**任务**（Timer）能跨过整批。故实现用 `Timer(Duration.zero, ...)`。
+延迟代价只是一个事件循环轮次（实测顺序 `microtask → timer → delayed(zero)`），
+远小于一帧。
+
+#### 三个设计要点
+
+1. **`touchedTurnIds` 必须是 `Set`**，不能只留最后一个。一批里可能含**多个
+   turn** 的事件（turn A 的尾部 + turn B 的开头）。只留最后一个会让另一个 turn
+   的看门狗计时器不被重排 → 它会按**原**到期时刻被判 stale（误报）。
+2. **`_reductionDirty` 脏标记 + 同步兜底**。归约被推迟后，`snapshot` /
+   `gateDecisionsSnapshot` 等同步读不能拿到旧缓存。置脏后 `_reduction` getter
+   现场重算（有专门用例钉住「push 后不 await 直接读就是新内容」）。
+3. **dispose / switchGroup 丢弃挂起的合并**。`dispose` 取消计时器（
+   `hasPendingEmit` 断言）；`switchGroup` 清 `_pendingTouchedTurnIds`——后者是
+   fail-safe 路径（清与不清在现有断言下不可观测），已在代码里注明。
+
+#### 效果
+
+```
+300 条增量 × 全量归约(2000): 640 ms   →   19 ms（合并后只归约 1 次）
+```
+
+#### 测试（`chat_stream_controller_emit_test.dart`，12 条）
+
+- 一批 5/10/300 条增量 → **只推送 1 次** items（修复前是 5/10/300 次）；
+- 分两批推 → 各自归约一次（不跨批错误合并）；
+- 合并**不得丢内容**：5 段增量仍拼成完整文本；
+- 同步读不得拿到过期结果（缓存置脏后现场重算）；
+- 一批里两个 turn 都有增量时，**两个**计时器都被重排；只触及一个时不误续期旁边那个；
+- 调度方式的**证据测试**：钉住「broadcast 同步 add 是每事件一个 microtask」这一
+  事实，避免将来有人「优化」回 microtask 又退回每条一归约；
+- dispose 取消挂起计时器；switchGroup 丢弃挂起的 touched。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 失败用例数 |
+|---|---|
+| 去掉合并（每次立刻归约） | 3 |
+| 去掉脏标记兜底 | 6 |
+| `touchedTurnIds` 改成只留最后一个 | 1 |
+| dispose 不取消挂起的计时器 | 1 |
+| switchGroup 不丢弃挂起的 touched | **0（fail-safe，诚实记录）** |
+
+#### 对既有测试的影响（两处适配，非放宽断言）
+
+归约延迟到事件循环任务后，测试需要显式跑该任务：
+
+| 文件 | 适配 |
+|---|---|
+| `chat_stream_controller_stale_test.dart` | 新增 `drain(async)`：`flushMicrotasks` + `elapse(Duration.zero)` + `flushMicrotasks`。`fake_async` 里零延迟 Timer 必须 `elapse` 才跑 |
+| `conversation_page_test.dart` | `pushEvent` 在 `runAsync` 内多等一个真实轮次 |
+
+⚠️ **`conversation_page_test.dart` 的坑**：控制器的帧订阅是在
+`startController` 的 `runAsync` 里注册的，故 `_emit` 的 Timer 落在**真实时区**
+——`tester.pumpAndSettle()` **永远跑不到它**（实测 `pump(5ms)` 也不触发，只有
+`runAsync` 内真实等待才行）。这是「测试环境与生产时区不一致」的又一实例。
+
+#### 关于 `_displayRows()`（issue 的「备选」方案）：**本轮不改**
+
+实测 `groupFileEventsForDisplay` 的成本：
+
+| items | 成本 |
+|---|---|
+| 200 | 245 µs |
+| 1000 | 511 µs |
+| 2000 | 1007 µs |
+
+即满缓冲区下一次 build 约 1 ms。合并把一次突发的 build 次数从 300 降到 1，
+总成本已从「640 ms」降到「19 ms + 1 ms」——**备选方案要解决的那个「每次 build
+重算」已被主修大幅摊薄**，单独缓存它收益不足（且需在 `_onItems` 里同步维护，
+多一处可忘的地方，与 `_displayRows` 现有注释里的取舍一致）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -2158,6 +2260,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（剔除后口径），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%** | issue #38、§6.13 |
 | ~~SseClient 传输层 0.7% 无测试（上层全用 Fake）~~ | ✅ 已修（issue #41）：新增 `packages/spb_api/test/sse_client_test.dart`（31 条），`sse_client.dart` **0.7% → 98.1%**、`spb_api` 72.3% → **82.6%**。**顺带测出一个真实缺陷**：分片边界落在汉字 UTF-8 序列中间时，逐分片 `utf8.decode(allowMalformed: true)` 会把「中文」损坏成「���文」且不可恢复（`allowMalformed` 是「解不出替换成 U+FFFD」，不是「缓冲到下一分片」）；已改用 `Utf8Decoder.startChunkedConversion` 增量解码。7 项反向验证逐条实测 | issue #41、§6.22 |
+| ~~每条 SSE 事件触发全量归约（长回复流式期间卡顿）~~ | ✅ 已修（issue #44）：`_emit` 把归约合并到一个**事件循环任务**，同一批 N 条增量只归约一次。实测 300 条增量（缓冲区 2000）**640 ms → 19 ms**。⚠️ **issue 建议的 `scheduleMicrotask` 方案实测不成立**——broadcast stream 把 N 次同步 `add` 投递成 N 个独立 microtask，microtask 排的 flush 会夹在每个事件之间（实测 5 条 → 5 次归约）；只有 `Timer` 能跨过整批。`touchedTurnId` 相应改为 `Set`（一批可含多个 turn）；新增 `_reductionDirty` 脏标记保证同步读不拿旧缓存。12 条用例 + 5 项反向验证 | issue #44、§6.23 |
 | ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
 
 ---
