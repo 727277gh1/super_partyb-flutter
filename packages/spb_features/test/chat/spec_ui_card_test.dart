@@ -36,22 +36,22 @@ Map<String, dynamic> followUpSpec() => {
       'type': 'Card',
       'props': {'title': '后续提问建议', 'description': '基于本次对话，你可以继续追问'},
       'children': ['follow-up-title', 'follow-up-opt-0', 'follow-up-opt-1'],
-      'on': {},
-      'actions': [],
+      'on': <String, dynamic>{},
+      'actions': <dynamic>[],
     },
     'follow-up-title': {
       'id': 'follow-up-title',
       'type': 'Text',
       'props': {'content': '点击复制问题，可修改后再发送'},
-      'children': [],
-      'on': {},
-      'actions': [],
+      'children': <dynamic>[],
+      'on': <String, dynamic>{},
+      'actions': <dynamic>[],
     },
     'follow-up-opt-0': {
       'id': 'follow-up-opt-0',
       'type': 'Button',
       'props': {'label': '总结要点'},
-      'children': [],
+      'children': <dynamic>[],
       'on': {
         'click': [
           {
@@ -60,13 +60,13 @@ Map<String, dynamic> followUpSpec() => {
           },
         ],
       },
-      'actions': [],
+      'actions': <dynamic>[],
     },
     'follow-up-opt-1': {
       'id': 'follow-up-opt-1',
       'type': 'Button',
       'props': {'label': '查漏补缺'},
-      'children': [],
+      'children': <dynamic>[],
       'on': {
         'click': [
           {
@@ -79,7 +79,7 @@ Map<String, dynamic> followUpSpec() => {
           },
         ],
       },
-      'actions': [],
+      'actions': <dynamic>[],
     },
   },
 };

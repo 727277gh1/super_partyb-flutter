@@ -103,7 +103,7 @@ void main() {
         ),
       );
       expect(a.providerConfig?['api_key_ref'], 'secret_1');
-      expect(a.env?['NESTED'], isA<Map>());
+      expect(a.env?['NESTED'], isA<Map<dynamic, dynamic>>());
     });
 
     test('provider_config 非对象时归一成 null（不抛）', () {

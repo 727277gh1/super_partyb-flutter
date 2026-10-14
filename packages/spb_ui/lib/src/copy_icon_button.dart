@@ -73,7 +73,7 @@ class _CopyIconButtonState extends State<CopyIconButton> {
       _copying = false;
       _copied = true;
     });
-    await Future.delayed(SpbDuration.copyFeedback);
+    await Future<void>.delayed(SpbDuration.copyFeedback);
     if (!mounted) return;
     setState(() => _copied = false);
   }

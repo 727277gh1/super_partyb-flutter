@@ -153,7 +153,7 @@ void main() {
     test('saveTts 全量字段映射到 snake_case', () async {
       adapter.onPut(
         '/chat/groups/grp_1/tts',
-        (server) => server.reply(200, {'tts': {}}),
+        (server) => server.reply(200, {'tts': <String, dynamic>{}}),
         data: Matchers.any,
       );
       mockGroupGet();

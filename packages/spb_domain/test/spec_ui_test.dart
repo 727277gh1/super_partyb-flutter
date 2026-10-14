@@ -53,24 +53,24 @@ void main() {
           'variant': 'default',
         },
         'children': ['follow-up-title', 'follow-up-opt-0', 'follow-up-opt-1'],
-        'on': {},
-        'watch': {},
-        'actions': [],
+        'on': <String, dynamic>{},
+        'watch': <String, dynamic>{},
+        'actions': <dynamic>[],
       },
       'follow-up-title': {
         'id': 'follow-up-title',
         'type': 'Text',
         'props': {'content': '点击复制问题，可修改后再发送'},
-        'children': [],
-        'on': {},
-        'watch': {},
-        'actions': [],
+        'children': <dynamic>[],
+        'on': <String, dynamic>{},
+        'watch': <String, dynamic>{},
+        'actions': <dynamic>[],
       },
       'follow-up-opt-0': {
         'id': 'follow-up-opt-0',
         'type': 'Button',
         'props': {'label': '总结要点', 'variant': 'outline', 'fullWidth': true},
-        'children': [],
+        'children': <dynamic>[],
         'on': {
           'click': [
             {
@@ -79,14 +79,14 @@ void main() {
             },
           ],
         },
-        'watch': {},
-        'actions': [],
+        'watch': <String, dynamic>{},
+        'actions': <dynamic>[],
       },
       'follow-up-opt-1': {
         'id': 'follow-up-opt-1',
         'type': 'Button',
         'props': {'label': '查漏补缺', 'variant': 'outline', 'fullWidth': true},
-        'children': [],
+        'children': <dynamic>[],
         'on': {
           'click': [
             {
@@ -99,11 +99,11 @@ void main() {
             },
           ],
         },
-        'watch': {},
-        'actions': [],
+        'watch': <String, dynamic>{},
+        'actions': <dynamic>[],
       },
     },
-    'state': {},
+    'state': <String, dynamic>{},
   };
 
   /// routing_feedback_request 的 spec_schema（BuildClassifyFeedbackSpecJSON）。
@@ -119,26 +119,26 @@ void main() {
           'classify-feedback-ok',
           'classify-feedback-bad',
         ],
-        'on': {},
-        'watch': {},
-        'actions': [],
+        'on': <String, dynamic>{},
+        'watch': <String, dynamic>{},
+        'actions': <dynamic>[],
       },
       'classify-feedback-title': {
         'id': 'classify-feedback-title',
         'type': 'Text',
         'props': {'content': '这条消息我归到了《团队周报》，准确吗？'},
-        'children': [],
-        'on': {},
-        'watch': {},
-        'actions': [],
+        'children': <dynamic>[],
+        'on': <String, dynamic>{},
+        'watch': <String, dynamic>{},
+        'actions': <dynamic>[],
       },
       'classify-feedback-ok': {
         'id': 'classify-feedback-ok',
         'type': 'Button',
         'props': {'label': '准确', 'variant': 'default'},
-        'children': [],
-        'on': {},
-        'watch': {},
+        'children': <dynamic>[],
+        'on': <String, dynamic>{},
+        'watch': <String, dynamic>{},
         'actions': [
           {'type': 'send_next_input', 'label': '准确', 'nextInput': '反馈#正确'},
         ],
@@ -147,9 +147,9 @@ void main() {
         'id': 'classify-feedback-bad',
         'type': 'Button',
         'props': {'label': '不准确', 'variant': 'outline'},
-        'children': [],
-        'on': {},
-        'watch': {},
+        'children': <dynamic>[],
+        'on': <String, dynamic>{},
+        'watch': <String, dynamic>{},
         'actions': [
           {'type': 'send_next_input', 'label': '不准确', 'nextInput': '反馈#tok#错误'},
         ],
@@ -357,7 +357,11 @@ void main() {
       expect(parseSpecUi(null), isNull);
       expect(parseSpecUi('not a spec'), isNull);
       expect(parseSpecUi({'root': 'r'}), isNull, reason: '缺 elements');
-      expect(parseSpecUi({'elements': {}}), isNull, reason: '缺 root');
+      expect(
+        parseSpecUi({'elements': <String, dynamic>{}}),
+        isNull,
+        reason: '缺 root',
+      );
       expect(parseSpecUi({'root': 'r', 'elements': 'not-a-map'}), isNull);
     });
 

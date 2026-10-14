@@ -197,7 +197,7 @@ void main() {
     test('首次全量：不带 updated_since', () async {
       adapter.onGet(
         '/api/files',
-        (server) => server.reply(200, {'items': [], 'total': 0}),
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
         queryParameters: {
           'owner_type': 'user',
           'path_prefix': root,
@@ -220,7 +220,7 @@ void main() {
 
       adapter.onGet(
         '/api/files',
-        (server) => server.reply(200, {'items': [], 'total': 0}),
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
         queryParameters: {
           'owner_type': 'user',
           'path_prefix': root,
@@ -240,7 +240,7 @@ void main() {
       // 本地副本永远不会被清理。
       adapter.onGet(
         '/api/files',
-        (server) => server.reply(200, {'items': [], 'total': 0}),
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
         queryParameters: {
           'owner_type': 'user',
           'path_prefix': root,

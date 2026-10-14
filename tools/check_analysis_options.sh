@@ -58,6 +58,20 @@ else
       failed=1
     fi
   done
+
+  # 严格模式（issue #47 第四项）。
+  #
+  # 同样是「门禁本身有没有接上」：把 strict-casts 删掉后 `dart analyze`
+  # 依然报「No issues found!」，没人会注意到。三项已实测全仓零告警
+  # （strict-casts / strict-raw-types 零成本；strict-inference 的 103 条
+  # 已在 issue #47 中全部修掉），故这里断言它们**必须在**。
+  for mode in strict-casts strict-raw-types strict-inference; do
+    if ! grep -qE "^[[:space:]]*${mode}:[[:space:]]*true" analysis_options.yaml; then
+      echo "❌ 根 analysis_options.yaml 未开启严格模式 $mode"
+      echo "     删除它不会让 dart analyze 报错——正是这道守卫要拦的静默回退。"
+      failed=1
+    fi
+  done
 fi
 
 if [ "$failed" -eq 0 ]; then

@@ -26,9 +26,15 @@ scripts:
   layering:
     description: 分层规则检查（core/api/domain 禁止依赖 Flutter）
     run: bash tools/check_layering.sh
+  workflow-steps:
+    description: workflow 的 step 不能被注释吞掉（issue #32/#47）
+    run: bash tools/check_workflow_steps.sh
   silent-catches:
     description: 静默吞异常的 catch 必须有说明或日志（issue #45）
     run: bash tools/check_silent_catches.sh
+  agents-refs:
+    description: AGENTS.md 引用的标识符存在，且 tools/ 脚本都被列出（issue #37/#47）
+    run: bash tools/check_agents_refs.sh
   agents-numbers:
     description: AGENTS.md 里标注了复现命令的数字不得漂移（issue #46）
     run: bash tools/check_agents_numbers.sh

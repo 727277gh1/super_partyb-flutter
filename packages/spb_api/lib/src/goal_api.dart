@@ -391,7 +391,7 @@ class GoalApi {
 
   Future<Object?> _get(String path, {Map<String, dynamic>? query}) async {
     try {
-      final res = await _dio.get(path, queryParameters: query);
+      final res = await _dio.get<dynamic>(path, queryParameters: query);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -400,7 +400,7 @@ class GoalApi {
 
   Future<Object?> _post(String path, {Map<String, dynamic>? body}) async {
     try {
-      final res = await _dio.post(path, data: body);
+      final res = await _dio.post<dynamic>(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -409,7 +409,7 @@ class GoalApi {
 
   Future<Object?> _patch(String path, {Map<String, dynamic>? body}) async {
     try {
-      final res = await _dio.patch(path, data: body);
+      final res = await _dio.patch<dynamic>(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -422,7 +422,7 @@ class GoalApi {
   /// 用 PATCH 会 404。
   Future<Object?> _put(String path, {Map<String, dynamic>? body}) async {
     try {
-      final res = await _dio.put(path, data: body);
+      final res = await _dio.put<dynamic>(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -431,7 +431,7 @@ class GoalApi {
 
   Future<void> _delete(String path) async {
     try {
-      final res = await _dio.delete(path);
+      final res = await _dio.delete<dynamic>(path);
       // 返回值用不上，但状态码必须检查：4xx 不会抛 DioException
       // （见 http_client.dart 的 validateStatus），不检查会让删除失败静默成功。
       _unwrap(res);

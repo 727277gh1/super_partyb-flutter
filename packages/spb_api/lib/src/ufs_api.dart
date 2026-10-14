@@ -237,7 +237,7 @@ class UfsApi {
 
   Future<Object?> _get(String path, {Map<String, dynamic>? query}) async {
     try {
-      final res = await _dio.get(path, queryParameters: query);
+      final res = await _dio.get<dynamic>(path, queryParameters: query);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);

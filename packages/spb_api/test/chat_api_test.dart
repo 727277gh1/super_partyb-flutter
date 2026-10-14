@@ -1327,7 +1327,7 @@ void main() {
     test('setGroupTts：全量字段映射到 snake_case', () async {
       adapter.onPut(
         '/chat/groups/grp_1/tts',
-        (server) => server.reply(200, {'tts': {}}),
+        (server) => server.reply(200, {'tts': <String, dynamic>{}}),
         data: Matchers.any,
       );
 
@@ -1412,8 +1412,11 @@ void main() {
       () async {
         adapter.onGet(
           '/chat/groups/grp_1/goals/current',
-          (server) =>
-              server.reply(200, {'goal': null, 'tasks': [], 'progress': null}),
+          (server) => server.reply(200, {
+            'goal': null,
+            'tasks': <dynamic>[],
+            'progress': null,
+          }),
         );
         adapter.onPost(
           '/chat/groups/grp_1/goals',
@@ -1471,8 +1474,11 @@ void main() {
     test('无 current goal 且文本为空 → 什么都不写（不留下空目标）', () async {
       adapter.onGet(
         '/chat/groups/grp_1/goals/current',
-        (server) =>
-            server.reply(200, {'goal': null, 'tasks': [], 'progress': null}),
+        (server) => server.reply(200, {
+          'goal': null,
+          'tasks': <dynamic>[],
+          'progress': null,
+        }),
       );
 
       await api.setGroupGoal('grp_1', '');
@@ -1486,8 +1492,11 @@ void main() {
       // 旧端点仅作存量兼容。若这里退化成旧端点，goal 变更就不会同步到任务/进度。
       adapter.onGet(
         '/chat/groups/grp_1/goals/current',
-        (server) =>
-            server.reply(200, {'goal': null, 'tasks': [], 'progress': null}),
+        (server) => server.reply(200, {
+          'goal': null,
+          'tasks': <dynamic>[],
+          'progress': null,
+        }),
       );
       adapter.onPost(
         '/chat/groups/grp_1/goals',
@@ -1794,7 +1803,7 @@ void main() {
     test('空列表不报错', () async {
       adapter.onGet(
         '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
       );
 
       expect(await api.listAutoSchedules('grp_1'), isEmpty);

@@ -57,12 +57,20 @@ bash tools/check_test_support_sync.sh # 跨包重复的测试辅助文件必须�
 bash tools/check_workflow_steps.sh    # workflow 的 step 没被注释吞掉（见 issue #32）
 bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_options（见 issue #34）
 bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39/#42）
-bash tools/check_wiring_parity_selftest.sh # 上面那个守卫的解析器自测
 bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
-bash tools/check_agents_refs.sh       # AGENTS.md 引用的 Dart 标识符真实存在（见 issue #37）
+bash tools/check_agents_refs.sh       # AGENTS.md 引用的标识符真实存在、tools/ 脚本都被列出（见 issue #37/#47）
 bash tools/check_silent_catches.sh    # 静默吞异常的 catch 必须有说明或日志（见 issue #45）
 bash tools/check_agents_numbers.sh    # AGENTS.md 标注了复现命令的数字不得漂移（见 issue #46）
+bash tools/check_codegen.sh           # 提交进 git 的 .g.dart 与源文件一致（见 issue #43）
 bash tools/check_format.sh            # dart format 门禁
+
+# 守卫自测（每个都钉住对应守卫的假绿/假红风险；改守卫时必跑）
+bash tools/check_wiring_parity_selftest.sh
+bash tools/check_workflow_steps_selftest.sh
+bash tools/check_codegen_selftest.sh
+bash tools/check_agents_refs_selftest.sh
+bash tools/check_agents_numbers_selftest.sh
+bash tools/check_silent_catches_selftest.sh
 
 # 测试
 cd apps/spb_desktop && flutter test   # 桌面端
@@ -136,21 +144,23 @@ super_partyb-flutter/
 │   ├── spb_platform/         # 平台能力抽象
 │   └── spb_features/         # 功能模块
 └── tools/
-    ├── check_layering.sh     # 分层规则检查
-    ├── check_workflow_steps.sh # workflow step 结构检查
-    ├── check_analysis_options.sh # 静态分析配置接线检查
-    ├── check_wiring_parity.sh  # 两端装配层接线一致性检查
-    ├── check_wiring_parity_selftest.sh # 上面那个检查的解析器自测
-    ├── check_codegen.sh        # 生成物漂移检查（提交进 git 的 .g.dart 必须与源同步）
-    ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
-    ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
-    ├── check_silent_catches.sh # 静默吞异常检查（+ _selftest）
-    ├── check_agents_numbers.sh # AGENTS.md 数字漂移检查（+ _selftest）
-    ├── check_format.sh         # dart format 门禁
-    ├── check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
-    ├── coverage.sh             # 逐包覆盖率采集 + 汇总表
-    ├── scrub-history.sh        # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
-    └── bundle_linux_deps.sh  # Linux 分发包依赖打包
+    # 守卫（每个 check_*.sh 都配一个 check_*_selftest.sh；自测脚本本身
+    # 不在下方重复列出，避免树过长——用 `ls tools/` 看全量）
+    ├── check_layering.sh           # 分层规则检查（纯 Dart 包禁依赖 Flutter）
+    ├── check_workflow_steps.sh     # workflow step 结构检查（未被注释吞掉）
+    ├── check_analysis_options.sh   # 静态分析配置接线检查（成员包都引用根配置）
+    ├── check_wiring_parity.sh      # 两端装配层接线一致性检查
+    ├── check_codegen.sh            # 生成物漂移检查（提交进 git 的 .g.dart 必须与源同步）
+    ├── check_unused_deps.sh        # 「声明但零 import」依赖检查
+    ├── check_agents_refs.sh        # AGENTS.md 标识符引用检查
+    ├── check_agents_numbers.sh     # AGENTS.md 数字漂移检查（容差 5%）
+    ├── check_silent_catches.sh     # 静默吞异常检查（空 catch 必须留痕）
+    ├── check_format.sh             # dart format 门禁
+    ├── check_test_support_sync.sh  # 跨包重复的测试辅助文件必须逐字节相同
+    # 工具
+    ├── coverage.sh                 # 逐包覆盖率采集 + 汇总表（剔除生成代码）
+    ├── bundle_linux_deps.sh        # Linux 分发包依赖打包（非系统库 + RUNPATH）
+    └── scrub-history.sh            # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
 ```
 
 ⚠️ **`scrub-history.sh` 的使用顺序**（`--dry-run` → 执行 → `--verify`）见脚本头。
@@ -1520,18 +1530,24 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 
 #### 与其他守卫的关系
 
-十个守卫各管一件事，**不要合并**：`check_format`（格式）、`check_layering`
+十一个守卫各管一件事，**不要合并**：`check_format`（格式）、`check_layering`
 （分层）、`check_test_support_sync`（重复测试辅助逐字节相同）、
-`check_workflow_steps`（CI step 结构）、`check_analysis_options`（分析配置接线）、
-`check_wiring_parity`（两端接线，含 `check_wiring_parity_selftest` 自测）、
-`check_codegen`（生成物漂移，含 `check_codegen_selftest` 自测）、
-`check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用）、
-`check_silent_catches`（静默吞异常，§6.24）、`check_agents_numbers`（本文档数字，
-§6.25）。
+`check_workflow_steps`（CI step 结构，含自测）、`check_analysis_options`（分析配置接线）、
+`check_wiring_parity`（两端接线，含自测）、
+`check_codegen`（生成物漂移，含自测）、
+`check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用 + tools/ 清单，含自测）、
+`check_silent_catches`（静默吞异常，含自测，§6.24）、`check_agents_numbers`（本文档数字，
+含自测，§6.25）。
 
-⚠️ **两个 `*_selftest` 是「守卫的守卫」**：`check_wiring_parity` 曾因裸子串
-匹配而假绿（issue #42），`check_codegen` 的四个坑任一写错都会假绿或假红
-（issue #43）。会假绿的守卫比没有守卫更危险——它给出「已覆盖」的错觉。
+> 自测脚本钉住的是**守卫自身**的假绿/假红风险（每个守卫的头部都列了它那几处
+> 易写反的判定）。改守卫逻辑时必须同步改自测，并在 CI 里跑（均已接入）。
+
+⚠️ **六个 `*_selftest` 是「守卫的守卫」**（截至 issue #47）：`check_wiring_parity`
+曾因裸子串匹配而假绿（issue #42），`check_codegen` 的四个坑任一写错都会假绿或
+假红（issue #43），`check_agents_numbers` 无标记时会静默空转（issue #46），
+`check_silent_catches` 的规则写宽会淹在误报里、写窄会漏掉空体（issue #45），
+`check_workflow_steps` / `check_agents_refs` 各有两处相反方向的判定（issue #47）。
+会假绿的守卫比没有守卫更危险——它给出「已覆盖」的错觉。
 
 ---
 
@@ -2129,6 +2145,135 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（§6.20）——本
 
 ---
 
+### 6.26 工程卫生批量（issue #47）
+
+#### 一、`.gitattributes`：`eol=lf` 而不是只写 `text=auto`
+
+仓库同时面向 Linux / Windows / macOS（`windows/`、`macos/` 都在），CI 也在
+`windows-2022` 出包。Windows 上 `core.autocrlf=true`（Git for Windows 默认）
+会把 `.dart` 检出成 CRLF，而 `tools/check_format.sh` 跑 `dart format
+--set-exit-if-changed`——`dart format` **会**把 CRLF 规范化成 LF，于是 Windows
+开发者本地**永远**格式检查失败（或提交时被改回 LF，产生整文件 diff）。
+
+⚠️ **只写 `* text=auto` 不够**：那只是「入库时统一成 LF」，Windows 检出时
+**仍会**是 CRLF——正是 `dart format` 报错的情形。必须显式 `eol=lf`。
+
+实测（两个受控仓库，同一份源码）：
+
+| 配置 | `autocrlf=true` 检出后的 `.dart` |
+|---|---|
+| 无 `.gitattributes` | `ASCII text, with CRLF line terminators` ❌ |
+| 有 `* text=auto eol=lf` | 保持 LF ✅ |
+
+**`*.png binary` 是最不能删的一条**：12 个 golden 基线 PNG 是**逐字节比对**的，
+任何行尾/编码转换都会让它们全部失败，而报错只说「像素不匹配」，指不到根因。
+
+`database.g.dart` 用 `linguist-generated=true` 而**不是** `-diff`：后者会让
+`git diff` 完全不显示它，而 `tools/check_codegen.sh` 正是靠比对生成物发现漂移的。
+
+#### 二、依赖自动更新与 action pin
+
+`.github/dependabot.yml`：`pub`（weekly，limit 5，`increase-if-necessary`——
+不主动放宽 `pubspec.yaml` 约束）+ `github-actions`（monthly）。
+
+⚠️ **文件头写明前提**：本仓库权威远端是 **Gitea**，若 CI 实际跑 Gitea Actions，
+Dependabot 不生效（Gitea 用 Renovate）。保留仍值得：零成本、若镜像 GitHub 即刻
+生效、且它本身就是升级策略的书面记录。
+
+**第三方 action pin 到 SHA**（`git ls-remote` 实测取得）：
+
+| action | pin |
+|---|---|
+| `subosito/flutter-action` | `1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0` |
+| `android-actions/setup-android` | `9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2` |
+
+官方 `actions/*` 保留 `@v4`：由 GitHub 维护，且 pin SHA 后 Dependabot 仍能升。
+Dependabot **认** `uses: x@<sha> # v2.23.0` 的写法，会把 SHA 与注释一并升级
+——故 pin 不会让 action 变成永久不升级的死区。
+
+#### 三、严格分析模式：三项全开（实测 107 → 0）
+
+| 项 | 开前告警 | 分布 |
+|---|---|---|
+| `strict-casts` | **0** | —— |
+| `strict-raw-types` | 4 | `spb_api` 1、`spb_models` 3 |
+| `strict-inference` | 103 | 测试 79（16 个文件）、`lib/` 24 |
+
+`lib/` 的 24 条里 21 条是 `_dio.get/post/patch/put/delete` 未写类型参数（dio 的
+`Response<T>` 中 T 无约束，无法推断）——显式写 `_dio.get<dynamic>(...)` 即修好
+（`_unwrap` 本就接受 `Response` 并取 `data`，`<dynamic>` 正是它期望的）。
+
+79 条测试告警是 JSON 固定数据里的裸集合字面量（`'items': []` →
+`'items': <dynamic>[]`，语义不变）。
+
+⚠️ **issue 建议「先只在 `spb_core`/`spb_models` 试开」实测不必要**：三项在
+`spb_core` 都是 0，在 `spb_models` 也只有 5+3。修掉 `lib/` 的 25 处 + 测试的
+79 处后，三项可**全仓开**——而按包开需拆两份配置，会重新引入「根配置只对
+include 了它的包生效」这个静默失效（§6.19 的 `check_analysis_options.sh`
+正是为它而设）。
+
+⚠️ **analyzer 的 `language:` 按文件生效，没有「只对 lib」这种写法**。故不要
+因为「测试里 79 条太吵」就把它只开在部分目录。
+
+`tools/check_analysis_options.sh` 新增断言：三项严格模式**必须**在根配置里
+——删掉任一项，`dart analyze` 依然报「No issues found!」，没有任何 lint 会
+提醒门禁少了一层。
+
+#### 四、release notes 由 `git log` 生成（不做 CHANGELOG.md）
+
+`.github/workflows/release.yml` 原来是一份**固定模板**，每版正文相同。现追加
+`git log --oneline --no-merges <上一个 tag>..HEAD`（仓库强制 Conventional
+Commits，故 `--oneline` 直接可读）。
+
+| 方案 | 取舍 |
+|---|---|
+| `CHANGELOG.md` | 每版都要人工同步，忘了就腐化 |
+| **`git log`（选用）** | 提交历史本就是权威记录，零维护 |
+
+**`actions/checkout` 必须 `fetch-depth: 0` + `fetch-tags: true`**：默认 depth=1
+且不带 tag，`git describe --tags` 找不到上一个 tag、`git log` 也列不出提交
+——而那是**静默的**（release notes 少一段，没人会注意）。
+
+无上一个 tag（首个发布）时退化为「列最近 50 条」而非让 release 失败——产物
+已经构建完成，不该因一段正文而中止。
+
+⚠️ **这个改动触发了一次守卫更新（好事）**：`check_workflow_steps.sh` 原本断言
+「`actions/checkout` 不得有 `with`」（那是为了抓「后一个 step 的 with 错挂到
+checkout 上」这一历史缺陷）。现在 checkout 确实需要 `with`，故改成**白名单**：
+只允许 `fetch-depth` / `fetch-tags`。历史缺陷形态（`merge-multiple` 挂到
+checkout）仍被拦住——因为它不在白名单里。
+
+#### 五、`tools/` 清单守卫（`check_agents_refs.sh` 扩展）
+
+§3 的 `tools/` 树是**读者找脚本的唯一入口**。新增守卫后若忘了补文档，读者根本
+不知道它存在（`ls tools/` 不会被想起来）。故 `check_agents_refs.sh` 新增**反向
+检查**：每个非自测（`*_selftest.sh`）的 `tools/*.sh` 都必须在 AGENTS.md 里被引用。
+
+⚠️ **豁免的是 `*_selftest.sh`（规则，不是白名单）**：每个守卫都配一个，逐个
+列进树会让树长一倍；树里已用一行注释说明它们的存在。写反豁免（要求列 selftest）
+会让守卫一上线就假红、很快被删；不豁免普通脚本则守卫静默空转。
+
+`tools/` 树本身也已补齐（原列 8 个，实际 14 个非 selftest 脚本）。
+
+#### 新增/修改的守卫自测
+
+| 脚本 | 断言数 | 钉住的风险 |
+|---|---|---|
+| `check_workflow_steps_selftest.sh` | 5 | 注释形态漏检、合法 checkout `with` 误报、别的 step 的 `with` 错挂、缺 download-artifact、残缺 step |
+| `check_agents_refs_selftest.sh` | 4 | 漏列脚本、自测豁免写反、引用不存在的标识符、两个方向同时满足 |
+
+均已接入 CI 与 melos。
+
+#### 反向验证（逐条实测）
+
+删 `strict-inference` → `check_analysis_options.sh` 报「未开启严格模式」（且
+`dart analyze` 仍全绿，证明这正是它要拦的静默回退）；workflow 里把
+`- uses: actions/download-artifact@v4` 折进注释行 → 自测 1 条失败 + 守卫报
+「step 标记落在注释里」/「checkout 的 with 含意外键」；`.gitattributes` 缺失时
+`autocrlf=true` 确实产出 CRLF（对照实验）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -2381,6 +2526,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 §6.24）
+- [x] 工程卫生批量（issue #47：`.gitattributes` / Dependabot / action pin / 三项严格模式 / release notes 由 `git log` 生成 / `tools/` 清单守卫，见 §6.26）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
 - [ ] 移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`，见 `docs/mobile-oidc-deeplink.md`）
 - [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
@@ -2463,6 +2609,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~每条 SSE 事件触发全量归约（长回复流式期间卡顿）~~ | ✅ 已修（issue #44）：`_emit` 把归约合并到一个**事件循环任务**，同一批 N 条增量只归约一次。实测 300 条增量（缓冲区 2000）**640 ms → 19 ms**。⚠️ **issue 建议的 `scheduleMicrotask` 方案实测不成立**——broadcast stream 把 N 次同步 `add` 投递成 N 个独立 microtask，microtask 排的 flush 会夹在每个事件之间（实测 5 条 → 5 次归约）；只有 `Timer` 能跨过整批。`touchedTurnId` 相应改为 `Set`（一批可含多个 turn）；新增 `_reductionDirty` 脏标记保证同步读不拿旧缓存。12 条用例 + 5 项反向验证 | issue #44、§6.23 |
 | ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
 | ~~AGENTS.md 数字漂移 + 真实生产标识残留~~ | ✅ 已修（issue #46）：§6.12 的 808→**878**、782→**1569**、量级分布全部重测；§11 的 83.4% 标注为「#38 当时的数字」（与 §6.13 不再自相矛盾）；新增 `tools/check_agents_numbers.sh`（**容差 5%**：小漂移放行、大漂移拦住；命令单一定义在脚本里并**断言文档展示的命令与之逐字相同**）+ 6 条自测断言。清理 `docs/m0-manual-verification.md` 的生产 IP / 内部域名 / 本地绝对路径，并在 §3 写明 `scrub-history.sh` 的使用顺序（它只重写历史，工作区需**先清干净**） | issue #46、§6.25 |
+| ~~无 `.gitattributes`（Windows `autocrlf` 下 `dart format` 必红）/ 无依赖自动更新 / 第三方 action 浮动 tag / 严格模式未开 / 无变更记录 / `tools/` 清单不完整~~ | ✅ 已修（issue #47）：`.gitattributes` 用 `* text=auto eol=lf`（只写 `text=auto` 在 Windows 上仍检出 CRLF，实测对照）+ 二进制规则（**12 个 golden PNG 逐字节比对**，不能做任何转换）；`.github/dependabot.yml`（pub weekly + actions monthly，文件头注明权威远端是 Gitea）；第三方 action pin SHA（`subosito/flutter-action@1a44944` / `android-actions/setup-android@9fc6c4e`），官方 `actions/*` 保留 `@v4`；**三项严格模式全开**（实测 107 → 0，`strict-inference` 的 103 条含 79 条测试 JSON 固定数据）；release notes 改为 `git log <上一个 tag>..HEAD` 生成（需 checkout `fetch-depth: 0`）；`tools/` 树补齐至 14 个非自测脚本并由 `check_agents_refs.sh` **反向守卫**（新增 `check_agents_refs_selftest.sh` 4 条、`check_workflow_steps_selftest.sh` 5 条） | issue #47、§6.26 |
 
 ---
 

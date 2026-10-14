@@ -571,7 +571,10 @@ class ChatApi {
               contentType: mediaType,
             );
       final form = FormData.fromMap({'file': part});
-      final res = await _dio.post('/me/quick-capture/attachments', data: form);
+      final res = await _dio.post<dynamic>(
+        '/me/quick-capture/attachments',
+        data: form,
+      );
       return QuickCaptureUpload.fromJson(_asMap(_unwrap(res)));
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -679,7 +682,7 @@ class ChatApi {
         'file': part,
         'relative_path': relativePath,
       });
-      final res = await _dio.post(
+      final res = await _dio.post<dynamic>(
         '/chat/groups/$groupId/workspace-sync/ufs-upload',
         data: form,
       );
@@ -1127,7 +1130,7 @@ class ChatApi {
 
   Future<Object?> _get(String path, {Map<String, dynamic>? query}) async {
     try {
-      final res = await _dio.get(path, queryParameters: query);
+      final res = await _dio.get<dynamic>(path, queryParameters: query);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -1140,7 +1143,11 @@ class ChatApi {
     Map<String, dynamic>? query,
   }) async {
     try {
-      final res = await _dio.post(path, data: body, queryParameters: query);
+      final res = await _dio.post<dynamic>(
+        path,
+        data: body,
+        queryParameters: query,
+      );
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -1149,7 +1156,7 @@ class ChatApi {
 
   Future<Object?> _patch(String path, {Map<String, dynamic>? body}) async {
     try {
-      final res = await _dio.patch(path, data: body);
+      final res = await _dio.patch<dynamic>(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -1172,7 +1179,7 @@ class ChatApi {
   /// `DioException`。不补判会把 `400 goal_required` 当成成功。
   Future<Object?> _put(String path, {Map<String, dynamic>? body}) async {
     try {
-      final res = await _dio.put(path, data: body);
+      final res = await _dio.put<dynamic>(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -1181,7 +1188,7 @@ class ChatApi {
 
   Future<void> _delete(String path) async {
     try {
-      final res = await _dio.delete(path);
+      final res = await _dio.delete<dynamic>(path);
       // 返回值用不上，但状态码必须检查：4xx 不会抛 DioException（见上文说明），
       // 不检查会让「删除失败」静默成功。
       _unwrap(res);
@@ -1260,16 +1267,16 @@ class RoutingPreview {
     routeSource: _nonEmptyStr(json['route_source']),
     focusTopic: _nonEmptyStr(json['focus_topic']),
     candidates: (json['candidates'] is List)
-        ? (json['candidates'] as List)
-              .whereType<Map>()
+        ? (json['candidates'] as List<dynamic>)
+              .whereType<Map<dynamic, dynamic>>()
               .map(
                 (m) => RoutingCandidate.fromJson(Map<String, dynamic>.from(m)),
               )
               .toList(growable: false)
-        : const [],
+        : const <RoutingCandidate>[],
     trace: json['trace'] is Map
-        ? Map<String, dynamic>.from(json['trace'] as Map)
-        : const {},
+        ? Map<String, dynamic>.from(json['trace'] as Map<dynamic, dynamic>)
+        : const <String, dynamic>{},
     raw: json,
   );
 

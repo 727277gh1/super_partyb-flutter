@@ -135,9 +135,9 @@ void main() {
         'snoozed': snoozed,
         'pending': pending,
       },
-      'by_topic': const [],
-      'by_hour': const [],
-      'by_weekday': const [],
+      'by_topic': const <dynamic>[],
+      'by_hour': const <dynamic>[],
+      'by_weekday': const <dynamic>[],
     },
     'due_rules': {
       'trigger_count': triggerCount,
@@ -151,8 +151,8 @@ void main() {
         'total_count': recalibrationTotal,
         'reason_counts': {'acceptance_feedback': 0, 'blocking_feedback': 0},
       },
-      'by_user_day': const [],
-      'by_group_day': const [],
+      'by_user_day': const <dynamic>[],
+      'by_group_day': const <dynamic>[],
     },
     'signal_coverage': {
       'user_message_count': 10,

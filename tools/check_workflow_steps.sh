@@ -20,8 +20,15 @@
 # 1. **注释里出现 step 标记**（`- uses:` / `- name:`）——零依赖的正则检查，
 #    直接命中本次缺陷的形态，且不需要 yaml 模块。
 # 2. **结构断言**（需 PyYAML，缺失则跳过并提示）——release job 必须含
-#    `download-artifact`，且 `actions/checkout` 不得带 `with`（`with` 错挂到
-#    checkout 上正是同一缺陷的另一面）。
+#    `download-artifact`，且 `actions/checkout` 的 `with` 只能挂「拉全历史」
+#    那一组键（`with` 错挂到 checkout 上正是同一缺陷的另一面）。
+#
+# ⚠️ 关于 checkout 的 `with`（issue #47 调整）：原来断言「checkout 不得有
+# `with`」。但 release notes 现在用 `git log <上一个 tag>..HEAD` 生成，
+# **必须** `fetch-depth: 0` + `fetch-tags: true`——否则 tag 与历史都拿不到，
+# 变更列表静默变空。故改成「只允许这一组键」：缺陷的形态（download-artifact
+# 的 `with: merge-multiple` 因 step 边界写坏而挂到 checkout 上）仍会被拦住，
+# 因为那组键不在允许集里。
 #
 # 与 check_layering.sh 同样只用仓库根作为工作目录，保证本地与 CI 跑的是同一
 # 条命令（见 AGENTS.md「常用命令」）。
@@ -86,10 +93,19 @@ else:
             failed = True
 
         # `with` 错挂到 checkout 上：说明某个 step 的边界被写坏了。
+        #
+        # 只允许「拉全历史」这一组键（release notes 需要 `git log` 拿 tag）；
+        # 若出现 `merge-multiple` 这类**属于 download-artifact** 的键，
+        # 说明它后面那个 step 被注释吞掉了（本守卫要抓的历史缺陷）。
+        ALLOWED_CHECKOUT_WITH = {'fetch-depth', 'fetch-tags'}
         for step in steps:
-            if step.get('uses', '').startswith('actions/checkout') and 'with' in step:
-                print(f'❌ {path}: actions/checkout 上挂着 with={step["with"]}'
-                      f'——某处 step 边界被写坏了')
+            if not step.get('uses', '').startswith('actions/checkout'):
+                continue
+            with_keys = set(step.get('with', {}))
+            extra = with_keys - ALLOWED_CHECKOUT_WITH
+            if extra:
+                print(f'❌ {path}: actions/checkout 的 with 含意外键 {sorted(extra)}'
+                      f'——很可能是后一个 step 的 with 错挂上来（step 边界被写坏）')
                 failed = True
 
         # 每个 step 必须有 name 或 uses，否则是残缺条目。

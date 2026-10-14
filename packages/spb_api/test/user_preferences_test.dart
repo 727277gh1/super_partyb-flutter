@@ -187,7 +187,10 @@ void main() {
 
     test('字段缺失时不抛异常，reply_language 回落 auto', () async {
       // 服务端声称 reply_language 恒有值，但客户端仍不该因字段缺失而崩。
-      adapter.onGet('/me/preferences', (server) => server.reply(200, {}));
+      adapter.onGet(
+        '/me/preferences',
+        (server) => server.reply(200, <String, dynamic>{}),
+      );
 
       final p = await api.getPreferences();
 

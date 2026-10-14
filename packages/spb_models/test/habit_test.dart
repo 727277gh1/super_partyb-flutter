@@ -287,7 +287,7 @@ void main() {
     });
 
     test('daily_budget 缺失 → null（不造 0/0）', () {
-      final r = HabitRunsResult.fromJson({'items': []});
+      final r = HabitRunsResult.fromJson({'items': <dynamic>[]});
       expect(r.dailyBudget, isNull);
     });
 
@@ -295,7 +295,8 @@ void main() {
       expect(HabitDailyBudget.fromJson('nope'), isNull);
       expect(HabitDailyBudget.fromJson(null), isNull);
       expect(
-        HabitRunsResult.fromJson({'items': [], 'daily_budget': 3}).dailyBudget,
+        HabitRunsResult.fromJson({'items': <dynamic>[], 'daily_budget': 3})
+            .dailyBudget,
         isNull,
       );
     });

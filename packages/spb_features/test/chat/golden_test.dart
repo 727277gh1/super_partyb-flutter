@@ -106,8 +106,8 @@ void main() {
                   'type': 'Card',
                   'props': {'title': '后续提问建议', 'description': '基于本次对话，你可以继续追问'},
                   'children': ['follow-up-opt-0', 'follow-up-opt-1'],
-                  'on': {},
-                  'actions': [],
+                  'on': <String, dynamic>{},
+                  'actions': <dynamic>[],
                 },
                 'follow-up-opt-0': {
                   'type': 'button',

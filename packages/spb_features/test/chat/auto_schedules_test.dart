@@ -168,7 +168,7 @@ void main() {
       mockGroupGet(groupJson(agentId: null));
       adapter.onGet(
         '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'limit': 50},
       );
 
@@ -220,7 +220,7 @@ void main() {
       mockGroupGet();
       adapter.onGet(
         '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'agent_id': 'agt_1', 'limit': 50},
       );
 

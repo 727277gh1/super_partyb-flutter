@@ -352,7 +352,11 @@ void main() {
           sseEvent(
             'tool_call',
             id: 'tc_1',
-            payload: {'tool_call_id': 'call_1', 'name': 'bash', 'args': {}},
+            payload: {
+              'tool_call_id': 'call_1',
+              'name': 'bash',
+              'args': <String, dynamic>{},
+            },
           ),
         );
 

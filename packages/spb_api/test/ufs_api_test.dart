@@ -78,7 +78,7 @@ void main() {
       // 忽略未知参数，于是「过滤没生效」而列表照常返回，极难发现。
       adapter.onGet(
         '/api/files',
-        (server) => server.reply(200, {'items': [], 'total': 0}),
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
       );
 
       await api.listFiles(
@@ -111,7 +111,7 @@ void main() {
     test('默认参数：不传 include_deleted（避免看起来像已开启）', () async {
       adapter.onGet(
         '/api/files',
-        (server) => server.reply(200, {'items': [], 'total': 0}),
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
       );
 
       await api.listFiles();

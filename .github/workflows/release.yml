@@ -135,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -233,7 +233,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -306,9 +306,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -418,7 +418,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -491,7 +491,14 @@ jobs:
     needs: [windows, linux, android, macos]
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 + fetch-tags 是**必须**的：下面的「本次变更」用
+      # `git log <上一个 tag>..HEAD` 生成。默认 depth=1 且不带 tag，
+      # 命令会退化成「列不出任何提交」或「找不到上一个 tag」——而那是
+      # 静默的（release notes 少一段，没人会注意）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       # 四端产物合并到同一目录；merge-multiple 让它们平铺而不是各自一层子目录。
       - uses: actions/download-artifact@v4
@@ -559,12 +566,44 @@ jobs:
           - Android 包若未配置签名 secrets，则为 **debug 签名**，仅供测试安装，
             不可上架、不可覆盖安装正式包
 
+          ## 本次变更
+
+          EOF
+
+          # 变更列表由 git 生成而非手写：CHANGELOG.md 每版都要人工同步，
+          # 忘了就腐化；提交历史本就是权威记录（仓库强制 Conventional
+          # Commits，故 `--oneline` 直接可读）。
+          #
+          # `|| true`：首个 tag 没有「上一个 tag」；或历史被浅克隆截断。
+          # 此时退化成「列最近 50 条提交」而不是让整个 release 失败——
+          # 发布产物已经构建完成，不该因一段正文而中止。
+          PREV=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..$GITHUB_REF_NAME"
+            echo "变更范围：$RANGE"
+          else
+            RANGE=""
+            echo "未找到上一个 tag，退化为列最近 50 条提交"
+          fi
+          {
+            echo "以下为提交历史（Conventional Commits）："
+            echo
+            if [ -n "$RANGE" ]; then
+              git log --oneline --no-merges "$RANGE" || true
+            else
+              git log --oneline --no-merges -n 50 || true
+            fi
+          } >> RELEASE_NOTES.md
+
+          cat >> RELEASE_NOTES.md <<EOF
+
           ## 构建信息
 
           - Flutter `${{ env.FLUTTER_VERSION }}`
           - 提交：`${{ github.sha }}`
           - 触发：`${{ github.ref_name }}`
           EOF
+
           cat RELEASE_NOTES.md
 
       - name: Create GitHub Release

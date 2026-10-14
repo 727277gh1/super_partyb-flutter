@@ -401,7 +401,7 @@ void main() {
         'future_ext': 'keep-me',
       }, triggerTypeRaw: 'watch');
       final out = c.toJson();
-      expect(out['cadence'], isA<Map>());
+      expect(out['cadence'], isA<Map<dynamic, dynamic>>());
       expect(out['future_ext'], 'keep-me');
     });
 

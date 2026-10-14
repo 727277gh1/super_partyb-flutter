@@ -30,6 +30,15 @@
 # 私有成员/小写调用**不可能**是 Go 导出符号（Go 导出首字母大写）、也不可能是
 # webapp 的 React 组件（PascalCase），故这两类天然无歧义。
 #
+# ## 另加一条：`tools/` 脚本清单不得漏列（issue #47 第六项）
+#
+# §3 的 tools/ 树是**读者找脚本的唯一入口**。新增守卫脚本后若忘了补文档，
+# 读者根本不知道它存在（`ls tools/` 不会被想起来）。故反向检查：
+# 每个非 `_selftest` 的 `tools/*.sh` 都必须在 AGENTS.md 里被 backtick 引用。
+#
+# ⚠️ 豁免的是 `*_selftest.sh`（每个守卫都配一个，逐个列进树会让树长一倍；
+# 树里已用一行注释说明它们的存在）。这是一个**规则**而非白名单，故不会腐化。
+#
 # ## 查不到怎么办
 #
 # - 若标识符**确实**不该存在（文档漂移）→ 改文档；
@@ -112,5 +121,30 @@ for pat, label, mode in checks:
 if failed:
     sys.exit(1)
 
-print(f'✅ AGENTS.md 标识符引用检查通过（{total} 个高置信度引用均存在）')
+# ── 反向检查：tools/ 脚本清单 ────────────────────────────────────────
+#
+# 与上面的「文档引用必须存在」方向相反：**脚本必须被文档提到**。
+# 见脚本头「另加一条」的说明。
+#
+# 只查非 selftest 的 .sh（豁免规则而非白名单，见头注）。
+script_refs = set(re.findall(r'`(tools/[a-z0-9_]+\.sh)`', doc))
+script_names = {os.path.basename(p) for p in script_refs}
+
+missing = []
+for path in sorted(glob.glob('tools/*.sh')):
+    name = os.path.basename(path)
+    if name.endswith('_selftest.sh'):
+        continue
+    if name not in script_names and name not in doc:
+        missing.append(name)
+
+if missing:
+    print('❌ 下列 tools/ 脚本没有被 AGENTS.md §3 提到：')
+    for name in missing:
+        print(f'   - tools/{name}')
+    print('   请在 §3 的 tools/ 树里补上（它是读者找脚本的唯一入口）。')
+    sys.exit(1)
+
+print(f'✅ AGENTS.md 标识符引用检查通过（{total} 个高置信度引用均存在；'
+      f'{len(glob.glob("tools/*.sh"))} 个脚本中非 selftest 者均已列出）')
 PY

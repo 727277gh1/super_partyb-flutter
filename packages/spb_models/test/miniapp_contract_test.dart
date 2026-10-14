@@ -526,7 +526,7 @@ void main() {
             'title': 't',
             'status': 'running',
             'status_label': '',
-            'progress': {},
+            'progress': <String, dynamic>{},
           },
         ],
         'next_cursor': '20',
@@ -538,10 +538,15 @@ void main() {
     });
 
     test('next_cursor 缺失/空串 → hasMore 为 false', () {
-      expect(MiniappWorkPage.fromJson(const {'items': []}).hasMore, isFalse);
       expect(
-        MiniappWorkPage.fromJson(const {'items': [], 'next_cursor': ''})
-            .hasMore,
+        MiniappWorkPage.fromJson(const {'items': <dynamic>[]}).hasMore,
+        isFalse,
+      );
+      expect(
+        MiniappWorkPage.fromJson(const {
+          'items': <dynamic>[],
+          'next_cursor': '',
+        }).hasMore,
         isFalse,
       );
     });

@@ -81,7 +81,10 @@ void main() {
       expect(parseMapSchema(null), isNull);
       expect(parseMapSchema('not a map'), isNull);
       expect(parseMapSchema(<Object>[]), isNull);
-      expect(parseMapSchema({'type': 'dashboard', 'markers': []}), isNull);
+      expect(
+        parseMapSchema({'type': 'dashboard', 'markers': <dynamic>[]}),
+        isNull,
+      );
       expect(
         parseMapSchema({'markers': realMapSpec()['markers']}),
         isNull,
@@ -93,7 +96,11 @@ void main() {
       // 若不拦，预览对话框会变成一张空图——比原文差。
       expect(parseMapSchema({'type': 'map'}), isNull);
       expect(
-        parseMapSchema({'type': 'map', 'markers': [], 'routes': []}),
+        parseMapSchema({
+          'type': 'map',
+          'markers': <dynamic>[],
+          'routes': <dynamic>[],
+        }),
         isNull,
       );
       expect(

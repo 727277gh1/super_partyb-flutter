@@ -298,8 +298,8 @@ MapSchema? parseMapSchema(Object? value) {
 
   final rawMarkers = value['markers'];
   final rawRoutes = value['routes'];
-  final markerList = rawMarkers is List ? rawMarkers : const [];
-  final routeList = rawRoutes is List ? rawRoutes : const [];
+  final markerList = rawMarkers is List ? rawMarkers : const <dynamic>[];
+  final routeList = rawRoutes is List ? rawRoutes : const <dynamic>[];
 
   final markers = <MapMarker>[];
   for (final raw in markerList) {

@@ -252,7 +252,7 @@ void main() {
         ),
       );
 
-      adapter.onGet('/x', (s) => s.reply(200, {}));
+      adapter.onGet('/x', (s) => s.reply(200, <String, dynamic>{}));
       await dio.get<dynamic>('/x');
 
       expect(auth, 'Bearer at_123');
@@ -270,7 +270,7 @@ void main() {
         ),
       );
 
-      adapter.onGet('/x', (s) => s.reply(200, {}));
+      adapter.onGet('/x', (s) => s.reply(200, <String, dynamic>{}));
       await dio.get<dynamic>('/x');
 
       expect(had, isFalse);
@@ -282,7 +282,7 @@ void main() {
         AuthInterceptor(tokenProvider: () async => throw StateError('boom')),
       );
 
-      adapter.onGet('/x', (s) => s.reply(200, {}));
+      adapter.onGet('/x', (s) => s.reply(200, <String, dynamic>{}));
       await dio.get<dynamic>('/x');
       called = true;
 
@@ -306,7 +306,7 @@ void main() {
         ),
       );
 
-      adapter.onGet('/x', (s) => s.reply(200, {}));
+      adapter.onGet('/x', (s) => s.reply(200, <String, dynamic>{}));
       await dio.get<dynamic>('/x');
       expect(uid, 'usr_dev');
     });

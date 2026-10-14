@@ -166,7 +166,7 @@ void main() {
           },
         ),
       );
-      expect(t.metadata?['targets'], isA<List>());
+      expect(t.metadata?['targets'], isA<List<dynamic>>());
 
       final bad = ChatTurn.fromJson(turnJson(metadata: 'not-a-map'));
       expect(bad.metadata, isNull);

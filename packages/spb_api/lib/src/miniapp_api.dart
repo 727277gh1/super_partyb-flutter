@@ -263,7 +263,7 @@ class MiniappApi {
         if (relativePath != null && relativePath.isNotEmpty)
           'relative_path': relativePath,
       });
-      final res = await _dio.post(
+      final res = await _dio.post<dynamic>(
         '/chat/miniapp/works/$workId/files',
         data: form,
       );
@@ -410,7 +410,7 @@ class MiniappApi {
 
   Future<Object?> _get(String path, {Map<String, dynamic>? query}) async {
     try {
-      final res = await _dio.get(path, queryParameters: query);
+      final res = await _dio.get<dynamic>(path, queryParameters: query);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);
@@ -419,7 +419,7 @@ class MiniappApi {
 
   Future<Object?> _post(String path, {Map<String, dynamic>? body}) async {
     try {
-      final res = await _dio.post(path, data: body);
+      final res = await _dio.post<dynamic>(path, data: body);
       return _unwrap(res);
     } on DioException catch (e) {
       throw _toSpbError(e);

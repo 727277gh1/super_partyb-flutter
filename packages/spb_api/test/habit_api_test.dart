@@ -33,7 +33,7 @@ void main() {
     test('listHabits 打 /api/habits（不是 /me/habits）', () async {
       adapter.onGet(
         '/api/habits',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'limit': 50, 'offset': 0},
       );
 
@@ -45,7 +45,7 @@ void main() {
       () async {
         adapter.onGet(
           '/api/habits/runs',
-          (server) => server.reply(200, {'items': []}),
+          (server) => server.reply(200, {'items': <dynamic>[]}),
           queryParameters: {'limit': 50},
         );
 
@@ -56,7 +56,7 @@ void main() {
     test('suggestions 打 /api/chat/habit-suggestions（带 status）', () async {
       adapter.onGet(
         '/api/chat/habit-suggestions',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'status': 'pending'},
       );
 
@@ -66,7 +66,7 @@ void main() {
     test('dismissed 过滤器传 status=dismissed', () async {
       adapter.onGet(
         '/api/chat/habit-suggestions',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'status': 'dismissed'},
       );
 
@@ -541,7 +541,7 @@ void main() {
       // 漏发（或发错名）不会报错——只是「筛选没生效」，用户以为没有记录。
       adapter.onGet(
         '/api/habits/runs',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'days': 7, 'limit': 50, 'trigger_reason': 'due_rule'},
       );
 
@@ -556,7 +556,7 @@ void main() {
       // （且 mock 的 query 断言能揭出这类差异）。
       adapter.onGet(
         '/api/habits/runs',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'limit': 50},
       );
 
@@ -591,7 +591,7 @@ void main() {
       // 旧版服务端 / 端点变更时不造一个假的 0/0（那会渲染成「0 / 0 已用尽」）。
       adapter.onGet(
         '/api/habits/runs',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'limit': 50},
       );
 
@@ -605,7 +605,7 @@ void main() {
       // 无时间窗）。多传会被静默忽略，故这里断言只发这两个参数。
       adapter.onGet(
         '/api/habits/hp-1/runs',
-        (server) => server.reply(200, {'items': []}),
+        (server) => server.reply(200, {'items': <dynamic>[]}),
         queryParameters: {'limit': 20, 'offset': 40},
       );
 
