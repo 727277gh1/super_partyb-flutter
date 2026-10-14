@@ -342,7 +342,15 @@ class _HabitsPageState extends State<HabitsPage> {
           .showSnackBar(SnackBar(content: Text(_suggestionErrorText(e))));
       // 失败后刷新：多半是另一端已处理过（409），刷新让用户看到真实状态。
       await _loadSuggestions();
-    } on Object catch (_) {
+    } on Object catch (e, st) {
+      // 非 SpbError（契约外的意外）。SnackBar 只说「操作失败，请重试」——
+      // 底层原因**完全不可见**，故必须留痕（issue #45）。
+      SpbLog.error(
+        '处理习惯建议失败',
+        error: e,
+        stackTrace: st,
+        fields: {'suggestion_id': suggestion.id},
+      );
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('操作失败，请重试')));
@@ -388,7 +396,14 @@ class _HabitsPageState extends State<HabitsPage> {
           .showSnackBar(SnackBar(content: Text(_actionErrorText(e))));
       // 失败后刷新：多半是状态已变（另一端操作过），刷新能让用户看到真实状态。
       await _load();
-    } on Object catch (_) {
+    } on Object catch (e, st) {
+      // 同 `_handleSuggestion`：非 SpbError 的意外，SnackBar 之外无迹可寻。
+      SpbLog.error(
+        '习惯操作失败',
+        error: e,
+        stackTrace: st,
+        fields: {'habit_id': habit.id},
+      );
       if (!mounted) return;
       setState(() => _busy.remove(habit.id));
       ScaffoldMessenger.of(context)
@@ -432,7 +447,9 @@ class _HabitsPageState extends State<HabitsPage> {
       setState(() => _loading = false);
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(_actionErrorText(e))));
-    } on Object catch (_) {
+    } on Object catch (e, st) {
+      // 同 `_handleSuggestion`：非 SpbError 的意外。
+      SpbLog.error('创建习惯失败', error: e, stackTrace: st);
       if (!mounted) return;
       setState(() => _loading = false);
       ScaffoldMessenger.of(context)

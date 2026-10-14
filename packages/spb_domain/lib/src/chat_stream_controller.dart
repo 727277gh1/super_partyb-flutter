@@ -1010,7 +1010,19 @@ class ChatStreamController {
     Map<String, dynamic> json;
     try {
       final decoded = _decode(frame.data);
-      if (decoded == null) return;
+      if (decoded == null) {
+        // `_decode` 对空串与非法 JSON 都返回 null。两种情况都意味着这个事件
+        // 被**整个丢弃**——用户会在时间线上看到一个缺口，而日志里毫无痕迹。
+        //
+        // ⚠️ 不记 `frame.data` 全文：载荷可能含用户输入，而诊断报告会被贴进
+        // 公开 issue（AGENTS.md §6.20 的安全红线）。只记长度与类型。
+        SpbLog.warn('SSE 事件载荷无法解析（该事件被丢弃）', {
+          'event': eventType,
+          'payload_bytes': frame.data.length,
+          'empty': frame.data.isEmpty,
+        });
+        return;
+      }
       json = decoded;
     } catch (e) {
       SpbLog.warn('SSE 帧解析失败', {'event': eventType, 'error': e.toString()});
@@ -1360,6 +1372,8 @@ class ChatStreamController {
     try {
       decoded = jsonDecode(data);
     } catch (_) {
+      // 静默返回 null，由调用方（`_onFrame`）决定怎么记——那里才有
+      // `frame.event`（事件类型），而事件类型是这条日志最有用的字段。
       return null;
     }
     if (decoded is Map<String, dynamic>) return decoded;

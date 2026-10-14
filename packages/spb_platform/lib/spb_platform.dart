@@ -22,11 +22,14 @@ library;
 ///   executePrunePlan            —— 按计划清理本地目录（删除前重新校验）
 ///   HostPlatform / ProcessRunner / spawnSystemOpen
 ///                               —— 系统「打开」命令的三平台分派（可注入以便测试）
+///   installGlobalErrorHandlers   —— 全局错误兜底（FlutterError / PlatformDispatcher
+///                                  / Zone 三道防线 → SpbLog 环形缓冲，issue #45）
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
 export 'src/drag_drop.dart';
 export 'src/file_sink.dart';
+export 'src/global_error_handler.dart';
 export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
 export 'src/overlay_files.dart';

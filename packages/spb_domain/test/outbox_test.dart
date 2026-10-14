@@ -19,6 +19,17 @@ class _FakeStore implements OutboxStore {
   /// 让下一次调用抛错（测「存储故障不静默降级」）。
   SpbError? failWith;
 
+  /// 只让 `upsert` 抛错（issue #45：测「状态未落盘」的日志）。
+  ///
+  /// ## 为什么需要它而不是复用 [failWith]
+  ///
+  /// [failWith] 会让 `load` 也失败——而「退避时间未落盘」的场景里 `load`
+  /// 必须是好的（队列已经装好了），只有后续的 `upsert` 坏掉。
+  SpbError? failUpsertWith;
+
+  /// 只让 `delete` 抛错（同上，测终态条目删除失败）。
+  SpbError? failDeleteWith;
+
   int loadCalls = 0;
   int upsertCalls = 0;
   int deleteCalls = 0;
@@ -36,6 +47,7 @@ class _FakeStore implements OutboxStore {
   Future<void> upsert(OutboxEntry entry) async {
     upsertCalls++;
     if (failWith != null) throw failWith!;
+    if (failUpsertWith != null) throw failUpsertWith!;
     rows[entry.id] = entry;
   }
 
@@ -43,6 +55,7 @@ class _FakeStore implements OutboxStore {
   Future<void> delete(String id) async {
     deleteCalls++;
     if (failWith != null) throw failWith!;
+    if (failDeleteWith != null) throw failDeleteWith!;
     rows.remove(id);
   }
 
@@ -972,6 +985,113 @@ void main() {
       );
       await queue.dispose();
       await queue.dispose();
+    });
+
+    group('存储故障时留痕（issue #45）', () {
+      // 这三处原先都是 `catch (_) {}`——**完全静默**。后果不是数据丢失（内存里
+      // 是对的），而是「重启后的行为」与「用户看到的」不一致，且开发者无从知晓。
+      // 这组用例钉住「每条静默路径都留下了日志」。
+
+      /// 从环形缓冲里找 message 等于给定串的记录。
+      Iterable<LogRecord> recordsWith(String message) =>
+          SpbLog.recentLogs.where((r) => r.message == message);
+
+      setUp(() {
+        SpbLog.clearRecentLogs();
+        SpbLog.configure(sink: const NullLogSink(), minLevel: LogLevel.debug);
+      });
+
+      test('退避时间未落盘 → 记 debug（重启后首次投递可能偏早）', () async {
+        final store = _FakeStore();
+        final queue = OutboxQueue(
+          store: store,
+          send: (e) async => throw const NetworkError('断网'),
+          policy: const OutboxRetryPolicy(maxAttempts: 5, jitterRatio: 0),
+        );
+        addTearDown(queue.dispose);
+
+        await store.upsert(_queued(id: 'a'));
+        await queue.load('u1');
+        await _settle();
+
+        // 之后所有 upsert 都失败。
+        store.failUpsertWith = const StorageError('磁盘满', cause: 'no space');
+        await queue.onConnectivityRestored();
+        await _settle();
+
+        final rec = recordsWith('离线队列退避时间未落盘（重启后首次投递时刻可能偏早）');
+        expect(rec, hasLength(1));
+        expect(rec.single.fields['request_id'], 'a');
+        expect(rec.single.fields['error'], contains('磁盘满'));
+      });
+
+      test('条目状态未落盘（重试耗尽）→ 记 warn（重启后可能仍按 pending 重试）', () async {
+        final store = _FakeStore();
+        final queue = OutboxQueue(
+          store: store,
+          send: (e) async => throw const NetworkError('断网'),
+          policy: const OutboxRetryPolicy(maxAttempts: 1, jitterRatio: 0),
+        );
+        addTearDown(queue.dispose);
+
+        await store.upsert(_queued(id: 'a', maxAttempts: 1));
+        // ⚠️ 必须在 load 之前置故障：`load` 内部会 unawaited(drain())，那轮就把
+        // 条目打到 failed 了。若晚于它，`failed` 已落盘，且
+        // `onConnectivityRestored` 会**跳过** failed 条目（重试权在用户手里）
+        // → 什么都不发生，用例测不到目标分支。
+        store.failUpsertWith = const StorageError('磁盘满');
+        await queue.load('u1');
+        await _settle();
+
+        expect(queue.snapshot.single.status, OutboxStatus.failed);
+        final rec = recordsWith('离线队列条目状态未落盘（重启后可能仍按 pending 重试）');
+        expect(rec, hasLength(1), reason: '这是「重启后与用户所见不一致」的真实来源');
+        expect(rec.single.level, LogLevel.warn);
+        expect(rec.single.fields['status'], 'failed');
+        expect(rec.single.fields['request_id'], 'a');
+      });
+
+      test('终态条目删除失败 → 记 debug（幂等键兜底，故不是 warn）', () async {
+        final store = _FakeStore();
+        final queue = OutboxQueue(
+          store: store,
+          // 终态错误（不可重试）→ 走 delete 分支。
+          send: (e) async => throw const AuthError('会话失效'),
+        );
+        addTearDown(queue.dispose);
+
+        await store.upsert(_queued(id: 'a'));
+        // 同上：终态判定发生在 load 那轮 drain 里，故障要提前置。
+        store.failDeleteWith = const StorageError('库损坏');
+        await queue.load('u1');
+        await _settle();
+
+        final rec = recordsWith('离线队列终态条目删除失败（重启后可能重复投递，幂等键兜底）');
+        expect(rec, hasLength(1));
+        expect(rec.single.level, LogLevel.debug);
+        expect(rec.single.fields['request_id'], 'a');
+      });
+
+      test('onConnectivityRestored 的落盘循环失败 → 每条都有日志', () async {
+        final store = _FakeStore();
+        final queue = OutboxQueue(
+          store: store,
+          send: (e) async => throw const NetworkError('断网'),
+        );
+        addTearDown(queue.dispose);
+
+        await store.upsert(_queued(id: 'a'));
+        await store.upsert(_queued(id: 'b'));
+        await queue.load('u1');
+        await _settle();
+
+        store.failUpsertWith = const StorageError('磁盘满');
+        await queue.onConnectivityRestored();
+        await _settle();
+
+        final rec = recordsWith('离线队列提前重试时间未落盘（重启后首次投递时刻可能偏后）');
+        expect(rec.map((r) => r.fields['request_id']), containsAll(['a', 'b']));
+      });
     });
 
     test('entries 流推全量快照（同 items 的取向）', () async {

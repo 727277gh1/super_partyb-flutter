@@ -141,6 +141,9 @@ class DriftGroupCacheStore implements GroupCacheStore {
       if (decoded is! Map) return null;
       return ChatGroup.fromJson(Map<String, dynamic>.from(decoded));
     } catch (_) {
+      // 静默返回 null：**调用方**（`load`）负责记日志（它能带上 group_id）。
+      // 这里静默是因为本方法只有这一种失败形态（JSON 语法错），而调用方
+      // 的日志已经能把「哪一行坏了」说清楚，在这里再记一次会重复。
       return null;
     }
   }

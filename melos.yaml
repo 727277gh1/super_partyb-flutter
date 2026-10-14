@@ -26,6 +26,9 @@ scripts:
   layering:
     description: 分层规则检查（core/api/domain 禁止依赖 Flutter）
     run: bash tools/check_layering.sh
+  silent-catches:
+    description: 静默吞异常的 catch 必须有说明或日志（issue #45）
+    run: bash tools/check_silent_catches.sh
   gen:
     description: 代码生成（drift；spb_models 为手写 fromJson，见 AGENTS.md §6.2）
     # ⚠️ **必须 cd 进包目录**。在仓库根跑 `dart run build_runner build` 是

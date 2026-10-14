@@ -586,8 +586,12 @@ final cachedUserIdProvider = FutureProvider<String?>((ref) async {
       await prefs.setString(cachedUserIdPrefKey, id);
       return id;
     }
-  } catch (_) {
+  } catch (e) {
     // 断网 / 未登录：返回 null，调用方据此不启用缓存。
+    //
+    // 记 debug（issue #45）：离线启动时这是**正常**路径（不是故障），
+    // 但它是「为什么这次没有缓存」的唯一线索。
+    SpbLog.debug('取不到 userId，本地缓存本次不启用', {'error': e.toString()});
   }
   return null;
 });
@@ -747,7 +751,13 @@ final pendingConfirmationCountProvider = FutureProvider<int>((ref) async {
   try {
     final items = await ref.watch(pendingConfirmationsProvider.future);
     return items.length;
-  } on Object catch (_) {
+  } on Object catch (e) {
+    // 拉取失败不阻断对话列表渲染：角标静默为 0。
+    //
+    // 记 debug（issue #45）：角标为 0 与「确实没有待确认」**视觉上无法区分**
+    // ——用户会以为没什么要处理的，而实际上是拉取失败了。这条日志是唯一的
+    // 区分依据。（与桌面端同型，两端都有此 provider。）
+    SpbLog.debug('待确认角标拉取失败，本次按 0 显示', {'error': e.toString()});
     return 0;
   }
 });

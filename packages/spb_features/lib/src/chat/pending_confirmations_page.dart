@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:spb_core/spb_core.dart';
 
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
@@ -96,7 +97,15 @@ class _PendingConfirmationsPageState extends State<PendingConfirmationsPage> {
         _items?.removeWhere((e) => e.id == c.id);
         _resolving.remove(c.id);
       });
-    } on Object catch (_) {
+    } on Object catch (e, st) {
+      // 非 SpbError（契约外的意外）。SnackBar 只说「操作失败，请重试」——
+      // 底层原因完全不可见，故必须留痕（issue #45）。
+      SpbLog.error(
+        '解决确认请求失败',
+        error: e,
+        stackTrace: st,
+        fields: {'confirmation_id': c.id, 'action': action},
+      );
       if (!mounted) return;
       setState(() => _resolving.remove(c.id));
       if (mounted) {

@@ -115,7 +115,16 @@ class SyncScopeConfig {
             ? ids.map((e) => e.toString()).toList()
             : const [],
       );
-    } catch (_) {
+    } catch (e) {
+      // 回退成「全部同步」——**用户看不见**的语义变化：他可能特意选了
+      // 「只同步这几个对话」，但存的值坏了，于是所有对话都被拉下来。
+      //
+      // 记 warn（issue #45）：不回退成「什么都不同步」是因为「多同步一些」
+      // 比「突然什么都不同步」好排查；但既然用户意图被丢弃了，就必须留痕。
+      SpbLog.warn('同步范围偏好无法解析，回退成「全部同步」', {
+        'raw_bytes': raw.length,
+        'error': e.toString(),
+      });
       return const SyncScopeConfig();
     }
   }

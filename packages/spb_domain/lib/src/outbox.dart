@@ -630,8 +630,15 @@ class OutboxQueue {
     for (final e in _entries) {
       try {
         await _store.upsert(e);
-      } catch (_) {
+      } catch (err) {
         // 时间戳没落盘只影响重启后的首次投递时刻，不影响本次。
+        //
+        // 但仍要记一笔（issue #45）：否则「重启后行为与预期不符」这一现象
+        // 在诊断报告里**完全没有痕迹**，排查时只能靠猜。
+        SpbLog.debug('离线队列提前重试时间未落盘（重启后首次投递时刻可能偏后）', {
+          'request_id': e.id,
+          'error': err.toString(),
+        });
       }
     }
     _timer?.cancel();
@@ -694,7 +701,15 @@ class OutboxQueue {
         _emit();
         try {
           await _store.delete(entry.id);
-        } catch (_) {}
+        } catch (err) {
+          // 删除失败是**幂等兜底**：条目已从内存移出，重启后它会再次被投递，
+          // 而服务端的 `(user_id, request_id)` 幂等键会去重。故不必 warn。
+          // 记 debug 是为了在诊断报告里留下「为什么重启后出现重复投递」的线索。
+          SpbLog.debug('离线队列终态条目删除失败（重启后可能重复投递，幂等键兜底）', {
+            'request_id': entry.id,
+            'error': err.toString(),
+          });
+        }
         if (!_failureController.isClosed) {
           _failureController.add(
             OutboxFailure(entry: entry, error: e, exhausted: false),
@@ -722,7 +737,16 @@ class OutboxQueue {
         _emit();
         try {
           await _store.upsert(failed);
-        } catch (_) {}
+        } catch (err) {
+          // 内存态已正确（条目是 failed），但**没落盘**：重启后它会回到
+          // 上次落盘的 `pending`，用户会看到「已耗尽重试」的条目又开始重试。
+          // 这是「重启后行为与用户所见不一致」的真实来源，必须留痕。
+          SpbLog.warn('离线队列条目状态未落盘（重启后可能仍按 pending 重试）', {
+            'request_id': entry.id,
+            'status': failed.status.name,
+            'error': err.toString(),
+          });
+        }
         if (!_failureController.isClosed) {
           _failureController.add(
             OutboxFailure(entry: failed, error: e, exhausted: true),
@@ -746,7 +770,15 @@ class OutboxQueue {
       _emit();
       try {
         await _store.upsert(updated);
-      } catch (_) {}
+      } catch (err) {
+        // 同上面的 failed 分支：内存里退避时间是对的，但没落盘 → 重启后
+        // 首次投递时刻会比预期早（回到上次落盘的时间）。
+        SpbLog.debug('离线队列退避时间未落盘（重启后首次投递时刻可能偏早）', {
+          'request_id': entry.id,
+          'attempts': attempts,
+          'error': err.toString(),
+        });
+      }
       SpbLog.debug('离线队列投递失败，将退避重试', {
         'request_id': entry.id,
         'attempts': attempts,

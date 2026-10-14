@@ -399,7 +399,13 @@ class _PendingConfirmationsPageState
             try {
               final g = await api.getGroup(c.groupId);
               _titles[c.groupId] = g.title;
-            } on Object catch (_) {}
+            } on Object catch (e) {
+              // 拉取失败不阻断列表渲染（卡片展示「未知对话」）。
+              SpbLog.debug('待确认卡片预取对话标题失败', {
+                'group_id': c.groupId,
+                'error': e.toString(),
+              });
+            }
           }),
         );
         // 刷新计数角标。
@@ -544,8 +550,12 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
             try {
               final g = await ref.read(chatApiProvider).getGroup(gid);
               _titles[gid] = g.title;
-            } on Object catch (_) {
-              // 静默：标题查不到不该让整个列表失败。
+            } on Object catch (e) {
+              // 标题查不到不该让整个列表失败（展示「未知对话」）。
+              SpbLog.debug('运行记录预取对话标题失败', {
+                'group_id': gid,
+                'error': e.toString(),
+              });
             }
           }),
         );

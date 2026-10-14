@@ -264,6 +264,8 @@ class DriftTimelineCacheStore implements TimelineCacheStore {
       if (decoded is! Map) return null;
       return ChatEvent.fromJson(Map<String, dynamic>.from(decoded));
     } catch (_) {
+      // 静默返回 null：**调用方**负责记日志（它能带上 group_id / global_seq）。
+      // 同 `group_cache_store._decode`，在这里再记会重复。
       return null;
     }
   }

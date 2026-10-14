@@ -35,6 +35,43 @@ void main() {
     });
   });
 
+  group('decode 的坏值回退留痕（issue #45）', () {
+    // 坏值回退成「全部同步」是**用户看不见**的语义变化：他可能特意选了
+    // 「只同步这几个对话」，但存的值坏了，于是所有对话都被拉下来。
+    // 回退方向是对的（「多同步一些」比「突然什么都不同步」好排查），
+    // 但既然用户意图被丢弃了，就必须在诊断报告里留下线索。
+    setUp(() {
+      SpbLog.clearRecentLogs();
+      SpbLog.configure(sink: const NullLogSink(), minLevel: LogLevel.debug);
+    });
+
+    test('非法 JSON → 回退成「全部」且记 warn', () {
+      final c = SyncScopeConfig.decode('{不是 JSON');
+      expect(c.allGroups, isTrue);
+
+      final rec = SpbLog.recentLogs
+          .where((r) => r.message == '同步范围偏好无法解析，回退成「全部同步」')
+          .single;
+      expect(rec.level, LogLevel.warn);
+      expect(rec.fields['raw_bytes'], greaterThan(0));
+    });
+
+    test('合法 JSON 不回退也不记日志', () {
+      final c = SyncScopeConfig.decode(
+        '{"all_groups": false, "group_ids": ["g1"]}',
+      );
+      expect(c.allGroups, isFalse);
+      expect(c.groupIds, ['g1']);
+      expect(SpbLog.recentLogs, isEmpty);
+    });
+
+    test('null / 空串 → 默认值，不记日志（不是坏值，是「还没设过」）', () {
+      expect(SyncScopeConfig.decode(null).allGroups, isTrue);
+      expect(SyncScopeConfig.decode('   ').allGroups, isTrue);
+      expect(SpbLog.recentLogs, isEmpty);
+    });
+  });
+
   group('SyncScopeConfig.toScope', () {
     test('全部 → WorkspaceScope（忽略 groupId）', () {
       final scope = const SyncScopeConfig().toScope(groupId: 'g1');

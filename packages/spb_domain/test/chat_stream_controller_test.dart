@@ -741,6 +741,55 @@ void main() {
       await c.dispose();
     });
 
+    test('无法解析的载荷留下 warn 日志（issue #45）', () async {
+      // 事件被**整个丢弃** → 用户会在时间线上看到一个缺口。修复前这条路径
+      // 完全静默（`if (decoded == null) return;`），日志里毫无痕迹。
+      SpbLog.clearRecentLogs();
+      SpbLog.configure(sink: const NullLogSink(), minLevel: LogLevel.debug);
+
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.framesController.add(
+        const SseFrame(event: 'message', data: '{not json', id: null),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final rec = SpbLog.recentLogs
+          .where((r) => r.message == 'SSE 事件载荷无法解析（该事件被丢弃）')
+          .single;
+      expect(rec.level, LogLevel.warn);
+      expect(rec.fields['event'], 'message');
+      expect(rec.fields['payload_bytes'], 9);
+      // ⚠️ 不得记录载荷全文（可能含用户输入，而诊断报告会被贴进公开 issue）。
+      expect(rec.fields.containsKey('data'), isFalse);
+
+      await c.dispose();
+    });
+
+    test('空载荷也留下 warn 日志（与非法 JSON 区分）', () async {
+      SpbLog.clearRecentLogs();
+      SpbLog.configure(sink: const NullLogSink(), minLevel: LogLevel.debug);
+
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      sse.framesController.add(
+        const SseFrame(event: 'message', data: '', id: null),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final rec = SpbLog.recentLogs
+          .where((r) => r.message == 'SSE 事件载荷无法解析（该事件被丢弃）')
+          .single;
+      expect(rec.fields['empty'], isTrue);
+      expect(rec.fields['payload_bytes'], 0);
+
+      await c.dispose();
+    });
+
     test('契约破坏的事件（缺 eventId）被吞掉且不影响后续', () async {
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
       mockTimeline();

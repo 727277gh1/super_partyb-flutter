@@ -60,6 +60,7 @@ bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（�
 bash tools/check_wiring_parity_selftest.sh # 上面那个守卫的解析器自测
 bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
 bash tools/check_agents_refs.sh       # AGENTS.md 引用的 Dart 标识符真实存在（见 issue #37）
+bash tools/check_silent_catches.sh    # 静默吞异常的 catch 必须有说明或日志（见 issue #45）
 bash tools/check_format.sh            # dart format 门禁
 
 # 测试
@@ -142,6 +143,7 @@ super_partyb-flutter/
     ├── check_codegen.sh        # 生成物漂移检查（提交进 git 的 .g.dart 必须与源同步）
     ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
     ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
+    ├── check_silent_catches.sh # 静默吞异常检查（+ _selftest）
     ├── check_format.sh         # dart format 门禁
     ├── check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
     ├── coverage.sh             # 逐包覆盖率采集 + 汇总表
@@ -1084,12 +1086,12 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_data` | **98.3%** | `spb_platform` | 55.3% |
-| `spb_features` | **93.5%** | `spb_mobile` | 54.4% |
-| `spb_core` | **92.4%** | `spb_desktop` | 58.8% |
-| `spb_domain` | 88.3% | `spb_api` | **82.6%** |
+| `spb_data` | **98.3%** | `spb_platform` | 57.4% |
+| `spb_features` | **93.4%** | `spb_mobile` | 54.1% |
+| `spb_core` | **92.4%** | `spb_desktop` | 58.7% |
+| `spb_domain` | 88.8% | `spb_api` | **82.6%** |
 | `spb_models` | 88.0% | `spb_ui` | 79.8% |
-| `spb_design` | 78.6% | **总计** | **84.6%**（≈15349/18145） |
+| `spb_design` | 78.6% | **总计** | **84.6%**（≈15420/18226） |
 
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
@@ -1505,7 +1507,8 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 `check_workflow_steps`（CI step 结构）、`check_analysis_options`（分析配置接线）、
 `check_wiring_parity`（两端接线，含 `check_wiring_parity_selftest` 自测）、
 `check_codegen`（生成物漂移，含 `check_codegen_selftest` 自测）、
-`check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用）。
+`check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用）、
+`check_silent_catches`（静默吞异常，§6.24）。
 
 ⚠️ **两个 `*_selftest` 是「守卫的守卫」**：`check_wiring_parity` 曾因裸子串
 匹配而假绿（issue #42），`check_codegen` 的四个坑任一写错都会假绿或假红
@@ -1931,6 +1934,110 @@ issue 原文建议用 `scheduleMicrotask` 合并，并给出理由「microtask �
 
 ---
 
+### 6.24 全局错误兜底与静默吞异常（issue #45）
+
+#### 问题：诊断通道建好了，却没接上「异常」这个主来源
+
+issue #40 实现了「导出诊断日志」（环形缓冲 + 环境信息 + 脱敏，§6.20），但它
+的**输入只有显式走 `SpbLog` 的日志**。异常若没被 `try/catch` 包住，就进不了
+环形缓冲——用户导出的报告里**不会有它**。而 release 构建下未捕获的异步异常
+是**静默丢弃**的（Flutter 默认只在 debug 打印），于是「应用莫名其妙没反应」
+这种最需要诊断的场景恰好没有任何记录。
+
+#### 三道防线（**不重叠**，缺一漏一类）
+
+| 来源 | 钩子 |
+|---|---|
+| Flutter 框架（build/layout/paint 抛出的） | `FlutterError.onError` |
+| 平台/引擎层的异步异常（未 await 的 `Future` 拒绝等） | `PlatformDispatcher.onError` |
+| 当前 Zone 里的同步/异步异常（含 `main` 自身抛出的） | `runZonedGuarded` |
+
+只装 `FlutterError.onError` 就抓不到 `Future.delayed(...).then((_) => throw ...)`
+——那走的是引擎投递路径。
+
+实现：`packages/spb_platform/lib/src/global_error_handler.dart` 的
+`installGlobalErrorHandlers`，两端 `main()` 的**第一步**（早于 `SpbLog.configure`；
+`SpbLog` 默认 sink 就是 `ConsoleLogSink` + info 级，故早期异常不会被丢）。
+
+#### 三个易写错的点
+
+1. **必须保留 `FlutterError.presentError`**（且链式调用上一个 handler）。
+   debug 下的红色错误屏幕是开发体验的核心——替换掉它是「为了线上诊断牺牲
+   开发效率」的坏交易。有用例钉住「上一个 handler 仍被调用」。
+2. **`PlatformDispatcher.onError` 必须返回 `true`**（或沿用上一个 handler 的
+   判定）。不返回 true 时某些平台会**直接终止进程**。
+3. **`main` 不 `await` 它**。`runZonedGuarded` 的签名就是 `void`；写成
+   `await` 会引入「body 异常已被 Zone 捕获、外层 Future 也已失败」的双重报告。
+
+#### 为什么放 `spb_platform` 而不是 `spb_core`
+
+`FlutterError` / `PlatformDispatcher` 来自 `package:flutter/foundation.dart`，
+而 `spb_core` 是**纯 Dart 包**（§4，`check_layering.sh` 强制）。
+
+#### 静默 catch：三处必修 + 一条守卫
+
+`outbox.dart` 的三处 `catch (_) {}` 是**完全静默**的：
+
+| 位置 | 失败后用户看到什么不一致 | 级别 |
+|---|---|---|
+| `upsert(failed)` | 重启后「已耗尽重试」的条目又回到 `pending` 继续重试 | `warn` |
+| `upsert(updated)` | 退避时间没落盘 → 重启后首次投递时刻偏早 | `debug` |
+| `store.delete`（终态） | 重启后条目「复活」→ 重复投递（幂等键兜底） | `debug` |
+| `onConnectivityRestored` 的落盘循环 | 重启后首次投递时刻偏后 | `debug` |
+
+都不导致数据丢失（内存态是对的），但会让「重启后的行为」与「用户看到的」
+不一致，且**开发者无从知晓**。
+
+同批补日志的还有：`sync_scope_config.decode`（坏值回退成「全部同步」是
+**用户看不见**的语义变化，`warn`）、`ChatStreamController._onFrame` 的载荷
+无法解析（事件被整个丢弃 → 时间线上一个缺口，`warn`）、`pendingConfirmationCount`
+（角标为 0 与「确实没有待确认」视觉上无法区分，`debug`）、两端 group 标题
+预取（「未知对话」占位与真名无法区分，`debug`）、`cachedUserId`（`debug`）、
+`habits_page` / `pending_confirmations_page` 的非 `SpbError` 分支（SnackBar
+之外无迹可寻，`error`）。
+
+⚠️ **不得记录载荷全文**：SSE 载荷可能含用户输入，而诊断报告会被贴进公开
+issue（§6.20 的安全红线）。只记长度与类型。
+
+#### 守卫：`tools/check_silent_catches.sh`
+
+判定规则（两类，**269 处 catch 全部通过**）：
+
+| 形态 | 要求 |
+|---|---|
+| `catch (_)` | 体内第一条语句是注释，**或**体内有 `SpbLog.` |
+| `catch (e)` 但 `e` **从未被引用** | 同上（`e` 只是占位符） |
+
+⚠️ **不要**把规则扩到「`catch (e)` 且 `e` 被引用但没记日志」——那会命中
+100+ 处「捕获 → 映射成 `SpbError` → rethrow」的正常写法（如
+`on DioException catch (e) { throw mapDioError(e); }`），淹没在误报里，没人会看。
+这是本守卫**零误报**的关键。
+
+用注释而非白名单：白名单会随重构腐化（文件改名后条目失效而没人清理），且
+新增的静默 catch 需要「记得去加白名单」——正是本守卫想避免的「靠人记得」。
+
+`tools/check_silent_catches_selftest.sh` 钉住 6 条：空体必报错（含**嵌套花括号
+后**的空体，防止配对写错导致漏检）、带注释放行、`throw mapXxx(e)` 放行（假红
+会让守卫被加进忽略列表）、`catch (e)` 未使用必报错、带 `SpbLog` 放行。
+
+#### 反向验证（逐条实测）
+
+去掉 `installFlutterErrorHandler` → 2 条失败；去掉 `installPlatformErrorHandler`
+→ 3 条；`PlatformDispatcher` 不返回 true → 1 条；把 `FlutterError.onError`
+改成**替换**而非链式 → 1 条；outbox 三处日志各去掉 → 各 1 条；
+`sync_scope_config` 的 warn 去掉 → 1 条；SSE 载荷日志去掉 → 2 条；
+守卫本身改坏（空体放行）→ 自测 1 条。
+
+#### 有意不做
+
+issue #40 的第 2 层（崩溃上报）仍**有意不做**（§6.20）——本轮是它「不做上报」
+前提下的最低成本补偿：异常至少进了用户能导出的报告。
+
+⚠️ 全局错误处理的**可见行为**（红色屏幕、进程是否存活）需真机验证——本机
+无 `DISPLAY`（§9）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -2182,6 +2289,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
+- [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 §6.24）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
 - [ ] 移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`，见 `docs/mobile-oidc-deeplink.md`）
 - [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
@@ -2258,6 +2366,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
+| ~~无全局错误处理（异常进不了诊断报告）+ outbox 三处静默吞异常~~ | ✅ 已修（issue #45）：`spb_platform` 新增 `installGlobalErrorHandlers`（`FlutterError.onError` + `PlatformDispatcher.onError` + `runZonedGuarded` **三道防线**，两端 `main()` 第一步装配），异常第一次能进「导出诊断日志」；`outbox.dart` 三处 `catch (_) {}` 补日志（`upsert(failed)` 用 warn），另补 `sync_scope_config` / SSE 载荷丢弃 / 角标 / 标题预取 / habits / confirmations 六处；新增 `tools/check_silent_catches.sh`（269 处 catch 零误报）+ 6 条自测断言 | issue #45、§6.24 |
 | ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（剔除后口径），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%** | issue #38、§6.13 |
 | ~~SseClient 传输层 0.7% 无测试（上层全用 Fake）~~ | ✅ 已修（issue #41）：新增 `packages/spb_api/test/sse_client_test.dart`（31 条），`sse_client.dart` **0.7% → 98.1%**、`spb_api` 72.3% → **82.6%**。**顺带测出一个真实缺陷**：分片边界落在汉字 UTF-8 序列中间时，逐分片 `utf8.decode(allowMalformed: true)` 会把「中文」损坏成「���文」且不可恢复（`allowMalformed` 是「解不出替换成 U+FFFD」，不是「缓冲到下一分片」）；已改用 `Utf8Decoder.startChunkedConversion` 增量解码。7 项反向验证逐条实测 | issue #41、§6.22 |
 | ~~每条 SSE 事件触发全量归约（长回复流式期间卡顿）~~ | ✅ 已修（issue #44）：`_emit` 把归约合并到一个**事件循环任务**，同一批 N 条增量只归约一次。实测 300 条增量（缓冲区 2000）**640 ms → 19 ms**。⚠️ **issue 建议的 `scheduleMicrotask` 方案实测不成立**——broadcast stream 把 N 次同步 `add` 投递成 N 个独立 microtask，microtask 排的 flush 会夹在每个事件之间（实测 5 条 → 5 次归约）；只有 `Timer` 能跨过整批。`touchedTurnId` 相应改为 `Set`（一批可含多个 turn）；新增 `_reductionDirty` 脏标记保证同步读不拿旧缓存。12 条用例 + 5 项反向验证 | issue #44、§6.23 |
