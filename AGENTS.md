@@ -1121,6 +1121,9 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 | `spb_models` | 88.0% | `spb_ui` | 79.8% |
 | `spb_design` | 78.6% | **总计** | **84.6%**（≈15420/18226） |
 
+全仓用例 **3421 条**（issue #48 拆分后；拆分本身 0 变化，+13 是新增的 SSE
+端到端，见 §6.27）。
+
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
 行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
@@ -1249,7 +1252,7 @@ webapp 在 `errorType === 'session_expired'` 时先逐个 `restoreChatSession` �
 | 响应 | `{status, groupId, turnId}` 平铺 | 解析成 `ChatTurn`（得到全空对象） |
 
 该方法此前**无生产调用者**，故缺陷未暴露。现已修正为 `CreateTurnResult` 并补
-真 server 断言（`chat_api_test.dart` 的 `createTurn 请求体字段名`）。
+真 server 断言（`chat_api_schedule_test.dart` 的 `createTurn 请求体字段名`）。
 
 ⚠️ **重发走的是消息流而不是本端点**：`CreateTurnRequest` 没有 `agent_id` 字段
 （服务端按 group 的 active session 决定），且 webapp 也因同样理由弃用了它。
@@ -1378,8 +1381,8 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 `_overflowItems()` 在宽屏返回 `null` —— ≥720dp 下搜索**彻底不可达**。既有用例
 只断言了 `_group` 系列入口，没碰搜索；本机无 `DISPLAY` 也看不出。故两端各有一条
 从 **router 层**断言的用例钉住搜索入口——**页面测试自己传参，接不接线它不管**：
-`apps/spb_desktop/test/widget_test.dart` 的 `对话页 AppBar 提供对话内搜索入口`、
-`apps/spb_mobile/test/widget_test.dart` 的 `宽屏（≥720dp）…` 与
+`apps/spb_desktop/test/router_list_test.dart` 的 `对话页 AppBar 提供对话内搜索入口`、
+`apps/spb_mobile/test/router_notify_test.dart` 的 `宽屏（≥720dp）…` 与
 `窄屏（<720dp）…`（两条分别钉住宽屏图标与窄屏菜单，避免「一边补上、另一边
 漏掉」）。
 
@@ -1945,9 +1948,9 @@ issue 原文建议用 `scheduleMicrotask` 合并，并给出理由「microtask �
 | 文件 | 适配 |
 |---|---|
 | `chat_stream_controller_stale_test.dart` | 新增 `drain(async)`：`flushMicrotasks` + `elapse(Duration.zero)` + `flushMicrotasks`。`fake_async` 里零延迟 Timer 必须 `elapse` 才跑 |
-| `conversation_page_test.dart` | `pushEvent` 在 `runAsync` 内多等一个真实轮次 |
+| `conversation_page_*_test.dart`（6 个，共享 `test/support/conversation_page_harness.dart`） | `pushEvent` 在 `runAsync` 内多等一个真实轮次 |
 
-⚠️ **`conversation_page_test.dart` 的坑**：控制器的帧订阅是在
+⚠️ **`conversation_page_harness.dart` 的坑**：控制器的帧订阅是在
 `startController` 的 `runAsync` 里注册的，故 `_emit` 的 Timer 落在**真实时区**
 ——`tester.pumpAndSettle()` **永远跑不到它**（实测 `pump(5ms)` 也不触发，只有
 `runAsync` 内真实等待才行）。这是「测试环境与生产时区不一致」的又一实例。
@@ -2274,6 +2277,162 @@ checkout）仍被拦住——因为它不在白名单里。
 
 ---
 
+### 6.27 测试文件拆分与「真实等待」的实测纠正（issue #48）
+
+issue #48 有三部分。**第一部分（拆文件）成立且已完成；第二部分（「80 处真实
+等待」）经实测是错的；第三部分（端到端）已完成。**
+
+#### 一、拆分：11 个文件 → 34 个，全部 < 1500 行
+
+**原状**（实测 `find packages/*/test apps/*/test -name '*.dart'` + `wc -l`）：
+
+| 原文件 | 行数 | 拆成 |
+|---|---|---|
+| `spb_features/test/chat/conversation_page_test.dart` | 3864 | 6 + `support/conversation_page_harness.dart`(407) |
+| `apps/spb_desktop/test/widget_test.dart` | 3750 | 4 + `support/desktop_harness.dart`(706) |
+| `spb_domain/test/chat_stream_controller_test.dart` | 3703 | 5 + `support/chat_stream_controller_harness.dart`(313) |
+| `apps/spb_mobile/test/widget_test.dart` | 3390 | 4 + `support/mobile_harness.dart`(523) |
+| `spb_domain/test/event_reducer_test.dart` | 2765 | 4 |
+| `spb_api/test/chat_api_test.dart` | 1966 | 4 + `support/chat_api_harness.dart` |
+| `spb_features/test/habit/habits_page_test.dart` | 1536 | 3 + `support/habits_harness.dart`(257) |
+| `spb_domain/test/deliverable_sync_test.dart` | 1533 | 3 + `support/deliverable_sync_harness.dart`(228) |
+| `spb_domain/test/outbox_policy_test.dart` 等 3 个（原为单个 1116 行文件） | 1116 | 3 + `support/outbox_harness.dart`(121) |
+| `spb_features/test/chat/group_list_page_test.dart` | 1033 | （未拆，见下） |
+| `spb_features/test/settings/settings_page_test.dart` | 1363 | （未拆，见下） |
+
+⚠️ **issue 原文只列 10 个，漏了 outbox 那个（1116 行）**——它是实测补上的。
+（该文件已拆成 `outbox_policy_test.dart` / `outbox_queue_test.dart` /
+`outbox_lifecycle_test.dart`，故本文档不再引用旧名。）
+
+**两个「未拆」是有意的**：`group_list_page_test.dart`(1033) 与
+`settings_page_test.dart`(1363) 都**低于 1500 行门禁**，且 `settings_page_test.dart`
+的用例分在 `_themeModeTests()` / `_userPreferencesTests()` 两个**函数里**（函数内部
+再 `group()`），机械按行切会把一个 group 切两半。验收标准是「< 1500 行」，两者已满足。
+
+#### 拆分的两个 harness 模式（**纯移动，不改任何断言**）
+
+| 模式 | 适用 | 做法 |
+|---|---|---|
+| ① 顶层 `late` 变量 + `setUpHarness()` | helper 在 `main()` 内、被所有用例共享 | 局部闭包提到顶层，**调用点逐字节不变** |
+| ② `test/support/<name>_harness.dart` | 文件级 helper（形如下划线开头的私有 fake / mock 声明） | 私有名去下划线 → 公开（跨库不可见，必须去下划线） |
+
+⚠️ **模式 ② 有撞名风险**：`_remote` → `remote` 会与拆分后文件里的局部变量撞名。
+脚本用「去下划线后是否已在原文里作为独立标识符出现」判定，冲突则加 `Fixture` 后缀
+（实测 3 例：`remoteFixture` / `permissiveFixture` / `gidFixture`）。
+
+⚠️ **`part` / `part of` 不能用来拆测试**：`dart test` 每个文件独立加载，`part`
+会让被 part 的文件不被当测试入口。故一律用 `import`。
+
+#### 反向验证：用例名逐条比对
+
+拆分的正确性判据不是「跑绿」（漏搬一个 group 也会绿），而是**拆分前后用例名集合
+逐条一致**。脚本用 `flutter test --reporter=json` 抽 `testStart` 事件的 `name`，
+排序后 `diff`：
+
+| 包/文件 | 前 | 后 |
+|---|---|---|
+| `event_reducer` | 150 | 150 ✅ |
+| `chat_api` | 94 | 94 ✅ |
+| `chat_stream_controller` | 110 | 110 ✅ |
+| `conversation_page` | 140 | 140 ✅ |
+| `outbox` | 54 | 54 ✅ |
+| `deliverable_sync` | 67 | 67 ✅ |
+| `habits_page` | 68 | 68 ✅ |
+| `spb_desktop` | 81 | 81 ✅ |
+| `spb_mobile` | 68 | 68 ✅ |
+
+全仓用例总数 **3408 → 3421**（+13 是新增的端到端用例，拆分本身 0 变化），
+覆盖率 **84.6% 不变**（纯搬家）。
+
+#### 二、「80 处真实等待」——**实测不成立**
+
+issue #48 的判据是：
+
+```bash
+grep -rnE "await Future\.delayed\(|await tester\.pump\(const Duration\(seconds" ... | wc -l
+# → 80
+```
+
+⚠️ **这条命令把两件不同的事混在一起了**：
+
+| 形态 | 真实等待？ | 说明 |
+|---|---|---|
+| `await tester.pump(const Duration(seconds: 2))` | ❌ **不消耗 wall time** | Flutter 测试的**假时钟**，只是把 `FakeAsync` 的时钟往前拨 |
+| `await Future.delayed(const Duration(seconds: 2))` | ✅ 真实等待 | 真的睡 2 秒 |
+
+78 个命中**全部是前者**（`tester.pump`），即**零 wall time**。
+
+**对照实验**（受控工程，`50 × tester.pump(const Duration(seconds: 2))`）：
+
+```
+>>> 50 × pump(2s) 真实耗时 = 8 ms
+```
+
+若是真实等待应为 100000ms。故 issue 的「80 处真实等待」是**统计口径错误**。
+
+**真实的 wall time 只有 2.6 秒**（`Future.delayed` 且位于 `runAsync` 内或纯
+`dart test` 里，逐文件累加）：
+
+| 文件 | 真实等待 |
+|---|---|
+| `spb_domain/test/chat_stream_controller_emit_test.dart` | 890 ms |
+| `spb_api/test/sse_client_test.dart` | 750 ms |
+| `apps/spb_mobile/test/router_chat_test.dart` | 450 ms |
+| 其余 8 个文件 | 534 ms |
+| **合计** | **2624 ms** |
+
+这 2.6 秒里**大部分是不可消除的**：`spb_api` 的 750ms 是「真实 `ResponseBody.stream`
+需要真实事件循环推进」（该文件注释已写明，本包无 `fake_async` 依赖）；
+`spb_domain` 的 890ms 是钉「`scheduleMicrotask` 合并失败 / `Timer(zero)` 成功」
+这一调度差异的证据测试（见 §6.23）——改成 `fakeAsync` 就测不到真实 microtask 时序。
+
+**故 `fakeAsync` 改造的收益接近零**（最多省几秒，且会削弱 §6.23 的证据力）。
+`spb_features` 单包 50 秒的耗时**不是等待造成的**：是 ~1100 个 widget 测试各自的
+`pumpWidget` + 布局 + golden 渲染。
+
+> **教训**：写分析类 issue 时，「grep 计数」必须**先验证命中的是什么**。
+> 把 `tester.pump(Duration)` 当成真实等待，会让一个「不做也行」的优化看起来
+> 像「最该做的优化」。
+
+#### 三、端到端（`sse_end_to_end_test.dart`，13 条）
+
+issue #48 第三部分成立且已做。**此前没有任何测试跨过「真实 socket → 真实分片 →
+真实 UTF-8 增量解码 → 真实 SSE 行解析」**——`SseClient` 自己的测试用
+`DioAdapter` 造 `ResponseBody.stream`，而上层用 `FakeSseClient`。
+
+**为什么 `DioAdapter` 掩盖了 issue #41 的缺陷**：它一次投递**完整字节数组**，
+永远不会把多字节 UTF-8 字符切成两半。issue #41 修的正是「分片切开 UTF-8」
+——故那条缺陷**必须**用真实 socket（`dart:io HttpServer`）才能复现。
+
+| 用例 | 覆盖 |
+|---|---|
+| 基本事件流 / 多行 `data:` 拼接 / `: heartbeat` 注释 | 帧解析 |
+| **UTF-8 跨分片**（切在 `E4` 后）/ **逐字节分片**（含 4 字节 emoji） | issue #41 的真实缺陷 |
+| `\r\n` 分片 / 同帧逐字节分片 | 行缓冲边界 |
+| `Accept: text/event-stream` 头 | CDN 缓冲语义 |
+| 首次无 cursor / `resume` 带 cursor / **未 `recordEventId` 不带 cursor** | 游标契约 |
+| 401 → `failed` 不重试 / 500 → 退避重连 | 错误分类 |
+
+⚠️ **`recordEventId` 是显式调用，不是自动接管**：`_onText` 收到 `id:` 只写
+`_pendingId`，只有上层调 `recordEventId` 才更新 `_lastEventId`。原因是
+**Transient 事件（流式增量）的 ID 不能作 cursor**，否则重连会跳过其后的权威帧
+（§5.4）。测试里有一条专门钉住「收到过 `id:` 但不调 `recordEventId` 时
+`resume` 不带 cursor」，防止将来有人「顺手」把它自动化。
+
+**为什么是纯 Dart 而不是 `integration_test/`**：本文件无 `flutter_test`、无
+Flutter 引擎，`dart test` 直接跑，不需要 `DISPLAY`（本机无，§9）。这**不推翻**
+§6.20「`integration_test/` 第 3 层有意不做」——那个决策针对真机 + UI 集成，
+与本文件的成本/收益不同。
+
+**反向验证**：把 `_onBytes` 的增量解码换回「每片独立 `utf8.decode`」（issue #41
+修复前的行为）→ **2 条失败**（两个 UTF-8 跨分片用例），其余 11 条仍绿。
+
+**覆盖率**：`spb_api` 82.6% 不变（`sse_client.dart` 的 98.1% 已在 #41 达成），
+新增 13 条用例不改变行覆盖（走的是同一条路径，只是入口从 `DioAdapter`
+换成真实 socket）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -2533,13 +2692,15 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 发布流水线（`.github/workflows/release.yml`：tag 触发四端出包 → GitHub Release）
 - [x] Windows 出包（GitHub Actions `windows-2022`，见 `docs/windows-release.md`）
 - [x] macOS 出包（GitHub Actions `macos-14`，ad-hoc 签名 + 通用二进制，**仅 tag 触发**）
+- [x] 测试文件拆分（issue #48）：11 个 >1000 行 → 34 个，全部 < 1500 行（见 §6.27）
+- [x] SSE 端到端（issue #48）：纯 Dart `dart:io HttpServer`，13 条（见 §6.27）
 - [ ] iOS 出包（需 Apple Developer 账号 $99/年 + 签名证书，无法 ad-hoc 凑合）
 
 ### CI / 发布流水线速查
 
 | 文件 | 职责 | 触发 | 产物保留 |
 |---|---|---|---|
-| `.github/workflows/ci.yml` | **验证**：analyze / format / 8 个守卫 / test / 能否构建 | push main + PR | Actions 7 天 |
+| `.github/workflows/ci.yml` | **验证**：analyze / format / 11 个守卫 + 6 个自测 / test / 能否构建 | push main + PR | Actions 7 天 |
 | `.github/workflows/release.yml` | **交付**：三端出包 + 建 Release | `v*` tag + 手动 | Release 长期 / Actions 30 天 |
 
 发布构建的地址参数（API/UFS/webapp/OIDC）由仓库 **Variables** 提供
@@ -2600,7 +2761,9 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~多个包声明了「全仓零 import」的依赖~~ | ✅ 已修（issue #36）：删 20 个零引用依赖（spb_core 的 meta/collection；spb_models 的 freezed/json_serializable 全家桶；spb_api 的 http_parser/meta；spb_domain 的 collection；spb_data 的 path_provider/path/shared_preferences；spb_features 的 flutter_riverpod/go_router/spb_data），桌面插件从 spb_platform **下移到 apps/spb_desktop**；新增 `tools/check_unused_deps.sh` 守防复发 | issue #36、§6.2/§6.4 |
 | `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：它是原生插件（把 `libsqlite3.so` 打进 Android/iOS 包），drift 移动端运行时需要；已写进 `check_unused_deps.sh` 的显式豁免。实测 apk 含 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so` | issue #36、§6.4 |
 | 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
-| 超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等） | **有意不做（本轮）**：拆分是独立重构，与缺陷修复捆在一起会让 diff 不可审 | issue #39 |
+| ~~超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等）~~ | ✅ **测试文件已拆**（issue #48）：11 个 >1000 行的测试文件 → 34 个（全部 < 1500 行），按 group 边界拆 + `test/support/*_harness.dart` 共享夹具；**纯移动、0 断言变化**（用例名逐条 diff 一致：150/94/110/140/54/67/68/81/68）。**`conversation_page.dart` 本身（2587 行）仍未拆**——那是产品代码重构，与测试拆分不同批 | issue #48、§6.27 |
+| ~~issue #48「80 处真实等待，只有 1 个文件用 `fakeAsync`」~~ | ⚠️ **实测不成立**（已纠正）：78 个命中全是 `tester.pump(Duration)`——Flutter 的**假时钟**，零 wall time（对照实验：`50 × pump(2s)` = **8ms**）。真实等待全仓只有 **2.6 秒**，且大部分不可消除（真实 `ResponseBody.stream` 需真实事件循环；§6.23 的调度证据测试需真实 microtask 时序）。故 `fakeAsync` 改造**收益接近零**，未做 | issue #48、§6.27 |
+| ~~无任何测试跨过真实 HTTP + 真实 SSE 字节流~~ | ✅ 已补（issue #48 第三部分）：`packages/spb_api/test/sse_end_to_end_test.dart`（13 条，纯 Dart `dart:io HttpServer`）。覆盖 UTF-8 跨分片（issue #41 的真实缺陷，`DioAdapter` 因一次投递完整字节而**永远复现不到**）、`\r\n` 分片、逐字节分片、cursor 契约、401/500 分类。**反向验证**：改回「每片独立 `utf8.decode`」→ 2 条失败 | issue #48、§6.27 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~无全局错误处理（异常进不了诊断报告）+ outbox 三处静默吞异常~~ | ✅ 已修（issue #45）：`spb_platform` 新增 `installGlobalErrorHandlers`（`FlutterError.onError` + `PlatformDispatcher.onError` + `runZonedGuarded` **三道防线**，两端 `main()` 第一步装配），异常第一次能进「导出诊断日志」；`outbox.dart` 三处 `catch (_) {}` 补日志（`upsert(failed)` 用 warn），另补 `sync_scope_config` / SSE 载荷丢弃 / 角标 / 标题预取 / habits / confirmations 六处；新增 `tools/check_silent_catches.sh`（269 处 catch 零误报）+ 6 条自测断言 | issue #45、§6.24 |
