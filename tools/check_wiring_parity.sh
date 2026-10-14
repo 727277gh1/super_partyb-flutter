@@ -14,8 +14,23 @@
 # - 页面测试自己传参，接不接线它不管（`conversation_page_test.dart` 全绿）；
 # - 两端 router 测试各自只覆盖自己那端。
 #
-# 故这里对两端 `ConversationPage(` 的具名参数做**集合比对**：差异必须命中
-# 下面的显式豁免清单，否则报错并列出差异。
+# 故这里对两端共享组件构造点的具名参数做**集合比对**：差异必须命中下面的
+# 显式豁免清单，否则报错并列出差异。
+#
+# ## 覆盖面（issue #42）
+#
+# 最初只登记了 `ConversationPage`。其余共享页面同样有单端差异（桌面端有托盘/
+# 快捷键/诊断导出，移动端有小程序订阅额度），且**同样没有守卫**。现已扩到
+# 4 个组件：`ConversationPage` / `GroupListPage` / `SettingsPage` / `SyncPage`。
+#
+# ⚠️ **`SyncPage` 的差异曾被本脚本误判为「两端一致」**——因为匹配用了
+# `component + '('` 的裸子串搜索，而两端 router 里各有一个同名的私有包装
+# （`class _SyncPage extends ConsumerWidget`，转成 `ConsumerStatefulWidget`）。
+# `_SyncPage(` 里含 `SyncPage(` 子串，`index()` 命中的是**包装**而不是真正的
+# 构造点（参数为零），于是「零参数 == 零参数」被判为一致——**假绿**。
+#
+# 故 `call_args_all` 现在用 `(?<![A-Za-z0-9_])` 词边界，且返回**全部**调用点
+# （调用方取并集）而不是只取第一个：漏掉的调用点会静默降低覆盖。
 #
 # ## 豁免为什么要写死在脚本里
 #
@@ -46,11 +61,8 @@ import sys
 
 # 被检查的共享组件调用点。
 #
-# `exempt` 是**有意**的单端参数（不是「还没接」）：
-#   - onOpenAgentFile / onRevealAgentFile：桌面端能力，移动端 Noop 降级，
-#     接上会得到「无法打开文件」（AGENTS.md §6.10）；
-#   - overflowItems：窄屏溢出菜单是移动端独有的载体，桌面端有宽屏余量、
-#     直接摆独立图标（AGENTS.md §6.16）。
+# `exempt` 是**有意**的单端参数（不是「还没接」）。每条都必须在下方注明理由
+# ——豁免清单是给人审的，没有理由的条目下次重构时没人敢删。
 TARGETS = [
     {
         'component': 'ConversationPage',
@@ -60,8 +72,62 @@ TARGETS = [
             'mobile': 'apps/spb_mobile/lib/router.dart',
         },
         'exempt': {
+            # 桌面端能力，移动端 Noop 降级，接上会得到「无法打开文件」
+            # （AGENTS.md §6.10）。
             'desktop': {'onOpenAgentFile', 'onRevealAgentFile'},
+            # 窄屏溢出菜单是移动端独有的载体，桌面端有宽屏余量、直接摆独立
+            # 图标（AGENTS.md §6.16）。
             'mobile': {'overflowItems'},
+        },
+    },
+    {
+        'component': 'GroupListPage',
+        'decl': 'packages/spb_features/lib/src/chat/group_list_page.dart',
+        'sites': {
+            'desktop': 'apps/spb_desktop/lib/router.dart',
+            'mobile': 'apps/spb_mobile/lib/router.dart',
+        },
+        'exempt': {
+            'desktop': set(),
+            # 无归属快速输入（带附件）在移动端是 AppBar 入口（AGENTS.md §6.7）；
+            # 桌面端走 Alt+Space 悬浮窗（§6.5），列表页不需要这个入口。
+            'mobile': {'onOpenQuickCapture'},
+        },
+    },
+    {
+        'component': 'SettingsPage',
+        'decl': 'packages/spb_features/lib/src/settings/settings_page.dart',
+        'sites': {
+            'desktop': 'apps/spb_desktop/lib/router.dart',
+            'mobile': 'apps/spb_mobile/lib/router.dart',
+        },
+        'exempt': {
+            'desktop': {
+                # 托盘 / 全局快捷键是桌面专属（AGENTS.md §6.11）。
+                'loadLaunchAtStartup',
+                'setLaunchAtStartup',
+                # `revealPath` 在移动端恒 false（AGENTS.md §6.10）。
+                'onOpenDirectory',
+                # `file_selector.getSaveLocation` 在 Android/iOS 未实现
+                # （AGENTS.md §6.20）。
+                'onExportDiagnostics',
+            },
+            # 微信小程序订阅消息额度（AGENTS.md §6.9.1）：桌面端没有小程序
+            # 运行环境，展示它无法兑现。
+            'mobile': {'loadNotifications', 'saveNotifications'},
+        },
+    },
+    {
+        'component': 'SyncPage',
+        'decl': 'packages/spb_features/lib/src/sync/sync_page.dart',
+        'sites': {
+            'desktop': 'apps/spb_desktop/lib/router.dart',
+            'mobile': 'apps/spb_mobile/lib/router.dart',
+        },
+        'exempt': {
+            # 移动端无「同步目录」概念（NoopDesktopCapabilities，§6.10）。
+            'desktop': {'onOpenDirectory'},
+            'mobile': set(),
         },
     },
 ]
@@ -128,59 +194,83 @@ def blank_strings_and_comments(src):
     return ''.join(out)
 
 
-def call_args(src, component):
-    """取 `component(` 那一对括号里的具名参数名（按出现顺序）。"""
+def call_args_all(src, component):
+    """取**全部** `component(` 调用点的具名参数名（每个调用点一个列表）。
+
+    ## 为什么必须用词边界而不是 `component + '('` 子串
+
+    两端 router 里各有一个同名的私有包装：
+
+        class _SettingsPage extends ConsumerWidget { ... SettingsPage(...) }
+        class _SyncPage      extends ConsumerWidget { ... SyncPage(...) }
+
+    `_SyncPage(` 里含 `SyncPage(` 子串，裸 `index()` 会命中**包装**那个零参数的
+    调用点，于是「零参数 == 零参数」被判为一致——**假绿**。实测：修前
+    `SyncPage` 报告「一致」，实际桌面端多传 `onOpenDirectory`。
+
+    ## 为什么返回全部而不是第一个
+
+    同一组件在两端可能各构造多次（不同路由 / 不同 wrapper）。只取第一个会
+    静默丢掉后面的调用点，覆盖范围随重构缩小而无人察觉。调用方取并集。
+    """
     code = blank_strings_and_comments(src)
-    marker = component + '('
-    if marker not in code:
-        return None
-    start = code.index(marker) + len(component)
-    depth = 0
-    end = None
-    for p in range(start, len(code)):
-        if code[p] == '(':
-            depth += 1
-        elif code[p] == ')':
-            depth -= 1
-            if depth == 0:
-                end = p
-                break
-    if end is None:
-        raise SystemExit(f'❌ {component}( 的括号没有闭合')
+    pattern = re.compile(r'(?<![A-Za-z0-9_])' + re.escape(component) + r'\(')
+    found = []
+    for m in pattern.finditer(code):
+        start = m.end() - 1  # 指向 '('
+        depth = 0
+        end = None
+        for p in range(start, len(code)):
+            if code[p] == '(':
+                depth += 1
+            elif code[p] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = p
+                    break
+        if end is None:
+            raise SystemExit(f'❌ {component}( 的括号没有闭合')
 
-    body = code[start + 1:end]
-    args = []
-    depth = 0
-    cur = ''
-    for ch in body:
-        if ch in '([{':
-            depth += 1
-        elif ch in ')]}':
-            depth -= 1
-        if ch == ',' and depth == 0:
+        body = code[start + 1:end]
+        args = []
+        depth = 0
+        cur = ''
+        for ch in body:
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                depth -= 1
+            if ch == ',' and depth == 0:
+                args.append(cur.strip())
+                cur = ''
+            else:
+                cur += ch
+        if cur.strip():
             args.append(cur.strip())
-            cur = ''
-        else:
-            cur += ch
-    if cur.strip():
-        args.append(cur.strip())
 
-    names = []
-    for a in args:
-        if a.startswith('...'):  # 展开（目前没有，将来有则跳过）
-            continue
-        if ':' in a:
-            names.append(a.split(':', 1)[0].strip())
-    return names
+        names = []
+        for a in args:
+            if a.startswith('...'):  # 展开（目前没有，将来有则跳过）
+                continue
+            if ':' in a:
+                names.append(a.split(':', 1)[0].strip())
+        found.append(names)
+    return found
 
 
 def declared_params(src, component):
     """从 `component` 的构造函数里取 `this.xxx` 形式的具名参数名。"""
     code = blank_strings_and_comments(src)
-    i = code.index(f'class {component} extends StatefulWidget')
-    j = code.index(';', i)
-    # 构造函数体到第一个字段声明之间。
-    k = code.index('const ' + component + '(', i)
+    m = re.search(r'(?<![A-Za-z0-9_])class\s+' + re.escape(component) +
+                  r'\s+extends\s+StatefulWidget\b', code)
+    if m is None:
+        raise SystemExit(f'❌ 找不到 `class {component} extends StatefulWidget`')
+    i = m.start()
+    ctor = re.search(r'(?<![A-Za-z0-9_])const\s+' + re.escape(component) + r'\(',
+                     code[i:])
+    if ctor is None:
+        raise SystemExit(f'❌ 找不到 `const {component}(`')
+    k = i + ctor.start()
     depth = 0
     end = None
     for p in range(k, len(code)):
@@ -202,13 +292,18 @@ for t in TARGETS:
     declared = declared_params(decl_src, comp)
 
     per_end = {}
+    site_counts = {}
     for end, path in t['sites'].items():
-        args = call_args(open(path, encoding='utf-8').read(), comp)
-        if args is None:
+        sites = call_args_all(open(path, encoding='utf-8').read(), comp)
+        if not sites:
             print(f'❌ {path}: 找不到 {comp}( 构造点')
             failed = True
             continue
+        # 并集：同一组件可能在该端构造多次（不同路由 / wrapper），只取第一个
+        # 会静默丢掉后面的调用点。
+        args = [a for site in sites for a in site]
         per_end[end] = args
+        site_counts[end] = len(sites)
 
         # 传了的名字必须在构造函数里声明过（拼错/改名会在这里暴露）。
         unknown = [a for a in args if a not in declared]
@@ -246,9 +341,11 @@ for t in TARGETS:
             failed = True
 
     if not failed:
-        print(f'✅ {comp} 接线一致（{len(per_end[a])} / {len(per_end[b])} 个参数；'
-              f'{a} 单端豁免 {sorted(t["exempt"][a])}，'
-              f'{b} 单端豁免 {sorted(t["exempt"][b])}）')
+        print(f'✅ {comp} 接线一致（{a} {len(per_end[a])} 参数 / '
+              f'{site_counts[a]} 处，{b} {len(per_end[b])} 参数 / '
+              f'{site_counts[b]} 处；{a} 单端豁免 '
+              f'{sorted(t["exempt"][a]) or "无"}，{b} 单端豁免 '
+              f'{sorted(t["exempt"][b]) or "无"}）')
 
 if failed:
     sys.exit(1)

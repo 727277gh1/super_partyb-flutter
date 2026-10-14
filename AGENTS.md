@@ -56,7 +56,8 @@ bash tools/check_layering.sh          # 分层规则（纯 Dart 包禁止依赖 
 bash tools/check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
 bash tools/check_workflow_steps.sh    # workflow 的 step 没被注释吞掉（见 issue #32）
 bash tools/check_analysis_options.sh  # 成员包都引用了根 analysis_options（见 issue #34）
-bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39）
+bash tools/check_wiring_parity.sh     # 两端对共享组件的接线一致（见 issue #33/#39/#42）
+bash tools/check_wiring_parity_selftest.sh # 上面那个守卫的解析器自测
 bash tools/check_unused_deps.sh       # 没有「声明但零 import」的依赖（见 issue #36）
 bash tools/check_agents_refs.sh       # AGENTS.md 引用的 Dart 标识符真实存在（见 issue #37）
 bash tools/check_format.sh            # dart format 门禁
@@ -129,9 +130,13 @@ super_partyb-flutter/
     ├── check_workflow_steps.sh # workflow step 结构检查
     ├── check_analysis_options.sh # 静态分析配置接线检查
     ├── check_wiring_parity.sh  # 两端装配层接线一致性检查
+    ├── check_wiring_parity_selftest.sh # 上面那个检查的解析器自测
     ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
     ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
     ├── check_format.sh         # dart format 门禁
+    ├── check_test_support_sync.sh # 跨包重复的测试辅助文件必须逐字节相同
+    ├── coverage.sh             # 逐包覆盖率采集 + 汇总表
+    ├── scrub-history.sh        # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
     └── bundle_linux_deps.sh  # Linux 分发包依赖打包
 ```
 
@@ -1330,9 +1335,10 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 `窄屏（<720dp）…`（两条分别钉住宽屏图标与窄屏菜单，避免「一边补上、另一边
 漏掉」）。
 
-### 6.17 两端接线一致性守卫（issue #33/#39）
+### 6.17 两端接线一致性守卫（issue #33/#39/#42）
 
-**脚本**：`tools/check_wiring_parity.sh`（CI quality job，在 Analyze 之前）。
+**脚本**：`tools/check_wiring_parity.sh` + `tools/check_wiring_parity_selftest.sh`
+（CI quality job，在 Analyze 之前）。
 
 #### 它防的是什么
 
@@ -1342,15 +1348,46 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 （issue #33）。
 
 源码里有 11 处注释写「两端构造点必须一致，否则一端功能缺失而测试仍绿」，
-但**约定靠注释不靠工具**。故本脚本对两端 `ConversationPage(` 的具名参数做集合
-比对。
+但**约定靠注释不靠工具**。故本脚本对两端共享组件构造点的具名参数做集合比对。
+
+#### 覆盖面：4 个组件，不是 1 个（issue #42）
+
+最初只登记了 `ConversationPage`。其余共享页面同样有单端差异且**同样没有
+守卫**。现已扩到：
+
+| 组件 | desktop 单端 | mobile 单端 |
+|---|---|---|
+| `ConversationPage` | `onOpenAgentFile` / `onRevealAgentFile` | `overflowItems` |
+| `GroupListPage` | — | `onOpenQuickCapture` |
+| `SettingsPage` | `loadLaunchAtStartup` / `setLaunchAtStartup` / `onOpenDirectory` / `onExportDiagnostics` | `loadNotifications` / `saveNotifications` |
+| `SyncPage` | `onOpenDirectory` | — |
+
+#### ⚠️ 守卫自己曾经假绿（issue #42 修掉的真实缺陷）
+
+原实现用 `component + '('` 的**裸子串**搜索，而两端 router 里各有一个同名私有
+包装：
+
+```dart
+class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
+```
+
+`_SyncPage(` 里含 `SyncPage(` 子串，取子串位置时命中的是**包装**那个**零参数**
+的调用点，于是「零参数 == 零参数」被判为一致——脚本报「✅ SyncPage 接线
+一致」，而桌面端实际多传了 `onOpenDirectory`。
+
+**一个会假绿的守卫比没有守卫更危险**：它给出「已覆盖」的错觉。现修法：
+
+1. 用 `(?<![A-Za-z0-9_])` 词边界匹配；
+2. 返回**全部**调用点（调用方取并集）而不是只取第一个——只取第一个会静默
+   丢掉后面的调用点，覆盖范围随重构缩小而无人察觉；
+3. 新增 `check_wiring_parity_selftest.sh` 用**合成输入**钉住解析器行为
+   （同名包装 / 多调用点 / 嵌套构造 / 注释与字符串噪声 / 值内逗号），
+   它从守卫脚本里 **`awk` 抽出真身**再测，不是副本——守卫改了实现自测跟着变。
 
 #### 豁免是**显式**的，不是「取交集」
 
-| 端 | 豁免参数 | 理由 |
-|---|---|---|
-| desktop | `onOpenAgentFile` / `onRevealAgentFile` | 移动端注入 `NoopDesktopCapabilities`，`openFile`/`revealPath` 恒 false，接上会得到「无法打开文件」（§6.10） |
-| mobile | `overflowItems` | 窄屏溢出菜单是移动端独有载体，桌面端宽屏直接摆独立图标（§6.16） |
+每条豁免都在脚本里注明理由（`onOpenAgentFile` 类桌面能力、`overflowItems`
+类窄屏载体、`loadNotifications` 类小程序额度）。
 
 ⚠️ **不要把它改成「两端取交集」**——那会把这类**有意的**产品差异也一起藏掉，
 才是真的失去守卫。豁免写死在脚本里，过期（两端都传了）时脚本会报错提醒删。
@@ -1362,13 +1399,15 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 - **provider 层**：两端 `providers.dart` 有 88 个同名 provider，上提到共享包是
   独立重构（issue #39 已登记），不在本守卫范围。
 
-#### 三个易写错的点（写这类脚本时）
+#### 四个易写错的点（写这类脚本时）
 
 1. **必须先把注释与字符串抹掉再解析**：`reason: 'a, b'` 里的逗号会被当成参数
    分隔符，注释里的 `ConversationPage(` 会抢到错误位置。脚本用「保持长度与
    换行」的替换（而非删除），行号才对得上。
-2. **豁免过期要报错**：否则清单会随重构腐化，最终列出早已统一的参数。
-3. **拼错参数名要单独报**：Dart 编译器会报，但脚本早一步给出「传了 X 没有的
+2. **匹配要用词边界**，否则同名的私有包装（带下划线前缀的薄壳组件）会被当成
+   目标——这正是 issue #42 的假绿。
+3. **豁免过期要报错**：否则清单会随重构腐化，最终列出早已统一的参数。
+4. **拼错参数名要单独报**：Dart 编译器会报，但脚本早一步给出「传了 X 没有的
    参数」，定位更快。
 
 ### 6.18 `_rowKeys` 的注册与回收（issue #39）
@@ -1446,8 +1485,8 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 八个守卫各管一件事，**不要合并**：`check_format`（格式）、`check_layering`
 （分层）、`check_test_support_sync`（重复测试辅助逐字节相同）、
 `check_workflow_steps`（CI step 结构）、`check_analysis_options`（分析配置接线）、
-`check_wiring_parity`（两端接线）、`check_unused_deps`（零引用依赖）、
-`check_agents_refs`（本文档引用）。
+`check_wiring_parity`（两端接线，含 `check_wiring_parity_selftest` 自测）、
+`check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用）。
 
 ---
 
@@ -1885,6 +1924,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 离线缓存切片 C 的「反向验证为 0」 | ⚠️ **唯一一条**（诚实记录）：`drain` 进度哨兵——正确代码上不可达，属 **fail-safe**（拦「将来有人改坏 `_nextSendable`」，把挂死变成记 error + 中断）。另两条初版缺口（store `delete`/`clear` 静默降级、`onConnectivityRestored` 不碰 `failed`）**已补测** | `docs/offline-cache-design.md` §7bis.11 |
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
 | ~~两端装配层接线无守卫（漏接一端而测试仍绿）~~ | ✅ 已修（issue #39）：`tools/check_wiring_parity.sh` 比对两端 `ConversationPage(` 具名参数，差异必须命中显式豁免（`onOpenAgentFile`/`onRevealAgentFile` 仅桌面、`overflowItems` 仅移动）；接入 CI | issue #39、§6.17 |
+| ~~接线守卫只覆盖 1 个组件 + 守卫自身假绿~~ | ✅ 已修（issue #42）：覆盖面扩到 `ConversationPage` / `GroupListPage` / `SettingsPage` / `SyncPage`（差异逐条写进豁免并注明理由）；**修掉守卫自身的假绿**——裸子串匹配命中了 `_SyncPage(` 私有包装（零参数被当成「两端一致」），改用词边界 + 返回全部调用点取并集；新增 `tools/check_wiring_parity_selftest.sh`（7 组合成输入，`awk` 抽真身而非副本）钉住解析器行为 | issue #42、§6.17 |
 | ~~对话页 `_rowKeys` 只注册不回收（跨 group 累积）~~ | ✅ 已修（issue #39）：抽 `RowLocateRegistry`（注册 + 按「当前行 id 集合」回收，**不** `clear()` 重建）+ 领域层唯一口径 `locateIdsOf` / `locateIdsOfAll`；17 条用例，3 项反向验证逐条实测 | issue #39、§6.18 |
 | ~~多个包声明了「全仓零 import」的依赖~~ | ✅ 已修（issue #36）：删 20 个零引用依赖（spb_core 的 meta/collection；spb_models 的 freezed/json_serializable 全家桶；spb_api 的 http_parser/meta；spb_domain 的 collection；spb_data 的 path_provider/path/shared_preferences；spb_features 的 flutter_riverpod/go_router/spb_data），桌面插件从 spb_platform **下移到 apps/spb_desktop**；新增 `tools/check_unused_deps.sh` 守防复发 | issue #36、§6.2/§6.4 |
 | `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：它是原生插件（把 `libsqlite3.so` 打进 Android/iOS 包），drift 移动端运行时需要；已写进 `check_unused_deps.sh` 的显式豁免。实测 apk 含 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so` | issue #36、§6.4 |

@@ -87,6 +87,13 @@ jobs:
       - name: Wiring parity check
         run: bash tools/check_wiring_parity.sh
 
+      # 守卫自己的测试：上面那条检查的**解析器**曾假绿（裸子串匹配命中了
+      # `_SyncPage(` 私有包装，零参数被当成「两端一致」），于是它报「✅」
+      # 而实际有差异（issue #42）。会假绿的守卫比没有守卫更危险——它给出
+      # 「已覆盖」的错觉。故用合成输入钉住解析器的行为。
+      - name: Wiring parity self-test
+        run: bash tools/check_wiring_parity_selftest.sh
+
       # 声明了却从未 import 的依赖会**误导**读者（以为模型用 freezed 生成、
       # 以为 spb_platform 封装了窗口/托盘），且桌面插件会经它传递进移动端
       # 构建（issue #36）。
