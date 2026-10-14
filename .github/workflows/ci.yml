@@ -94,6 +94,21 @@ jobs:
       - name: Wiring parity self-test
         run: bash tools/check_wiring_parity_selftest.sh
 
+      # 提交进 git 的生成物（`packages/spb_data/lib/src/database.g.dart`，
+      # 3900+ 行）必须与源文件同步。改了 drift 表却忘了重跑 build_runner 时，
+      # analyze / test / 其余守卫**全部绿**——因为 `.g.dart` 是 `part of`，
+      # 编译器只看得到旧版本里已有的成员（issue #43，同类：issue #34）。
+      #
+      # ⚠️ 必须在 CI 里跑：本机可以先 `melos run gen` 再提交，而 CI 从干净
+      # checkout 开始，没有增量资产图可依赖。
+      - name: Generated code up to date
+        run: bash tools/check_codegen.sh
+
+      # 上面那条守卫的四个坑（根目录空转 / 生成物未格式化 / 增量资产图非幂等 /
+      # `diff | head` 在 pipefail 下 SIGPIPE）各有一条断言，见脚本头。
+      - name: Codegen guard self-test
+        run: bash tools/check_codegen_selftest.sh
+
       # 声明了却从未 import 的依赖会**误导**读者（以为模型用 freezed 生成、
       # 以为 spb_platform 封装了窗口/托盘），且桌面插件会经它传递进移动端
       # 构建（issue #36）。

@@ -89,7 +89,15 @@ bash tools/bundle_linux_deps.sh
 #
 # ⚠️ 当前**只有 spb_data** 用代码生成（drift_dev）。spb_models 是手写
 # fromJson，已不再声明 freezed / json_serializable（issue #36，见 §6.2）。
-dart run build_runner build --delete-conflicting-outputs
+#
+# ⚠️ **必须 cd 进包目录**。在仓库根跑 `dart run build_runner build` 是**静默
+# 空转**（根包没有 build_runner 依赖、没有 build.yaml，实测 `wrote 0 outputs`）
+# ——这正是 issue #43 里 CI 守卫差点写成空转的那条命令。
+#
+# ⚠️ 生成物**不是** `dart format` 的形态，跑完必须格式化，否则与仓库里
+# 提交的那份对不上（详见 tools/check_codegen.sh 文件头）。
+cd packages/spb_data && dart run build_runner build && dart format lib && cd ../..
+# 或者：melos run gen（已指向包目录）
 
 # 格式化
 dart format .
@@ -101,7 +109,7 @@ dart format .
 dart pub global activate melos
 melos run analyze      # 等价 dart analyze .
 melos run layering     # 等价 bash tools/check_layering.sh
-melos run gen          # build_runner
+melos run gen          # build_runner（仅 spb_data；已指向包目录）
 ```
 
 ---
@@ -131,6 +139,7 @@ super_partyb-flutter/
     ├── check_analysis_options.sh # 静态分析配置接线检查
     ├── check_wiring_parity.sh  # 两端装配层接线一致性检查
     ├── check_wiring_parity_selftest.sh # 上面那个检查的解析器自测
+    ├── check_codegen.sh        # 生成物漂移检查（提交进 git 的 .g.dart 必须与源同步）
     ├── check_unused_deps.sh    # 「声明但零 import」依赖检查
     ├── check_agents_refs.sh    # AGENTS.md 标识符引用检查
     ├── check_format.sh         # dart format 门禁
@@ -497,8 +506,14 @@ turn 与一个回填出来仍在跑的 turn，归约结果**完全一致**
 ⚠️ **决策的落实（issue #36）**：既然决定手写，`spb_models` 就**不得**再挂着
 freezed / json_serializable / build_runner / json_annotation / freezed_annotation
 这五个依赖——它们从未产出文件（0 个 `@freezed` / `@JsonSerializable`，0 个
-`.g.dart`），`melos run gen` 对本包为空。曾出现「既没享受到生成器的一致性保证，
-又承担了解析成本」的状态。现已删除，并由 `tools/check_unused_deps.sh` 守住。
+`.g.dart`），`melos run gen` 只跑 `spb_data`、对本包为空。曾出现「既没享受到
+生成器的一致性保证，又承担了解析成本」的状态。现已删除，并由
+`tools/check_unused_deps.sh` 守住。
+
+⚠️ **手写的代价由 `tools/check_codegen.sh` 部分抵消**（issue #43）：它守的是
+「提交进 git 的生成物与源文件同步」。当前唯一被跟踪的生成物是 `spb_data` 的
+`database.g.dart`——`spb_models` 手写意味着它**没有**这层保护，契约漂移仍靠
+人工比对 Go 常量（见 §5.4）。
 
 ### 6.3 状态管理：Riverpod
 
@@ -1482,11 +1497,16 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 
 #### 与其他守卫的关系
 
-八个守卫各管一件事，**不要合并**：`check_format`（格式）、`check_layering`
+十个守卫各管一件事，**不要合并**：`check_format`（格式）、`check_layering`
 （分层）、`check_test_support_sync`（重复测试辅助逐字节相同）、
 `check_workflow_steps`（CI step 结构）、`check_analysis_options`（分析配置接线）、
 `check_wiring_parity`（两端接线，含 `check_wiring_parity_selftest` 自测）、
+`check_codegen`（生成物漂移，含 `check_codegen_selftest` 自测）、
 `check_unused_deps`（零引用依赖）、`check_agents_refs`（本文档引用）。
+
+⚠️ **两个 `*_selftest` 是「守卫的守卫」**：`check_wiring_parity` 曾因裸子串
+匹配而假绿（issue #42），`check_codegen` 的四个坑任一写错都会假绿或假红
+（issue #43）。会假绿的守卫比没有守卫更危险——它给出「已覆盖」的错觉。
 
 ---
 
@@ -1604,6 +1624,120 @@ issue #40 给了三层。**本轮只做第一层**，后两层有意不做：
 去掉 `redactSecrets` 调用 → 1 条失败；键名去掉 `access_token` → 1 条；PEM
 正则加回 `\b` → 1 条；文件名改回 ISO8601 → 1 条（`:` 检测）；环形缓冲改丢
 最新 → 1 条；阈值过滤移到缓冲之后 → 1 条；取消态也弹提示 → 1 条。
+
+---
+
+### 6.21 生成物漂移守卫（issue #43）
+
+**脚本**：`tools/check_codegen.sh` + `tools/check_codegen_selftest.sh`（CI
+quality job，在 Analyze 之前）。
+
+#### 它防的是什么
+
+`packages/spb_data/lib/src/database.g.dart`（**3912 行**）是仓库里**唯一提交进
+git 的生成文件**，由 `database.dart` 的 7 个 drift 表定义生成。
+
+改了表/列定义却忘了重跑 build_runner 时：
+
+| 门禁 | 结果 |
+|---|---|
+| `dart analyze --fatal-infos .` | ✅ 全绿 |
+| `flutter test` | ✅ 全绿 |
+| 其余 10 个守卫 | ✅ 全绿 |
+
+因为 `.g.dart` 是 `part of`，编译器只看得到旧版本里已有的成员——**新增的列在
+生成代码里不存在，但也没有任何编译错误**。直到运行时第一次查询碰到那一列才炸
+（`no such column`），而报错指向 drift 内部，指不到「忘了重跑」。
+
+与 issue #34（根 `analysis_options.yaml` 从未生效）是**同一类缺陷**：门禁覆盖
+不到的地方，绿不代表对。
+
+#### ⚠️ 四个反直觉的坑（都实测复现过；写错任一个就得到一个假绿或假红守卫）
+
+**坑 1：不能在仓库根跑 build_runner。** 直觉上根目录跑一次就覆盖所有包，
+**实测不是**：
+
+```
+$ dart run build_runner build          # 根目录
+Built with build_runner/aot in 13s; wrote 0 outputs.
+```
+
+根 `pubspec.yaml` 没有 build_runner 依赖、没有 `build.yaml`、没有任何 builder
+声明；`dart run` 能解析到 workspace 里的可执行文件，但「当前包」是根包，它没有
+任何输入/输出 → **静默 0 输出**。于是守卫会永远报「✅ 无漂移」——正是本 issue
+要消灭的那种假绿。故脚本按包执行（从生成物路径反推包目录）。
+
+**坑 2：build_runner 的产出不是 `dart format` 的形态。** 实测：
+
+```
+$ cd packages/spb_data && dart run build_runner build
+$ dart format --output=none --set-exit-if-changed lib/src/database.g.dart
+Changed lib/src/database.g.dart        ← 生成物未格式化
+```
+
+差异全部是空白（`({` 后是否换行），而**提交进仓库的那份是格式化过的**。不调
+format 会得到一个**永远存在的假漂移**（正确状态也红）。故比对前对生成物跑一次
+`dart format`。
+
+**坑 3：增量资产图导致守卫非幂等。** build_runner 把「已构建状态」存在
+`.dart_tool/build/`，它**不看输出文件的当前内容**，只看自己的资产图。于是：
+
+1. 守卫跑 build_runner → 生成物被就地改写（含新列）；
+2. 守卫为「不改工作区」把生成物 `cp` 回提交版；
+3. **下一轮**守卫再跑 → 资产图认为「已是最新」→ `wrote 0 outputs` → 生成物仍
+   是旧版 → 与提交版一致 → **报 ✅**。
+
+即同一个坏状态，第一轮报漂移、第二轮报「一致」。修法：比对前**先删掉输出**
+（实测：删输出后 `wrote 28 outputs`，不删则 `wrote 0`）。这是本守卫第一版
+实测踩到的坑。
+
+**坑 4：`diff | head` + `pipefail` 会在还原文件之前中止。** `set -o pipefail`
+下，`diff | head -20` 在 diff 输出**既超过 20 行、又超过管道缓冲（64KB）**时让
+diff 收到 SIGPIPE，整个脚本以 141 退出——**在把生成物还原回去之前**。实测后果：
+门禁报失败，却把重新生成的文件留在工作区。
+
+⚠️ 两个条件缺一不可：只有「超过 64KB」而**只有 5 行**（单个超长行）时，head
+会把它们全读完正常退出，SIGPIPE 根本不发生。故修法是落到临时文件再 head。
+
+#### 守卫自己的测试（`check_codegen_selftest.sh`）
+
+四个坑各自钉一条可重跑的断言，共 8 组用例（干净通过 / 检出漂移 / 幂等 /
+还原 / 大 diff / 构建失败 / 调 format / 在包目录执行）。
+
+**为什么造临时仓库而不是改真仓库**：直接改 `database.dart` 再 revert 只能在
+本地手动跑，且容易忘 revert（本轮开发中真的踩到过，留下过一个
+`packages/spb_data/lib/src/thing.g.dart`）。故在 `mktemp -d` 里造一个最小仓库，
+用**桩 `dart`** 替换真命令。
+
+⚠️ **桩必须模拟增量资产图**（输出已存在 → `wrote 0 outputs` 且不碰文件），
+否则用例 3（非幂等）是空转——实测：桩写成「每次都写出」时，把守卫的
+`rm -f "$f"` 去掉，自测仍然通过。
+
+⚠️ **每轮用例前要 `git checkout` 回干净态**：有坑的守卫会留下脏文件，使后续
+用例全部失真（实测：把守卫改回 `diff | head` 后，是「非幂等」和「未还原」两条
+先炸，而用例 5 自己的断言因状态被污染不再触发，报错指向错误的原因）。
+
+#### 反向验证（逐条实测）
+
+| 去掉/改坏 | 自测结果 |
+|---|---|
+| 去掉「比对前删输出」（坑 3） | ✅ 检出（生成物不同步却报通过） |
+| 去掉 `dart format`（坑 2） | ✅ 检出（未调用 format） |
+| 不在包目录里跑（坑 1） | ✅ 检出（干净状态即失败） |
+| 改回 `diff \| head`（坑 4） | ✅ 检出（SIGPIPE 提前退出） |
+| 去掉还原 | ✅ 检出（工作区变脏 + 非幂等） |
+
+#### 顺带清理
+
+- `melos.yaml` 的 `gen` / `gen:watch` 原本在**仓库根**跑（坑 1 的空转），
+  且带已被 build_runner 2.5+ **静默忽略**的 `--delete-conflicting-outputs`
+  （`W These options have been removed and were ignored`）。现已 `cd` 进包目录
+  并去掉该 flag。
+- `tools/coverage.sh` 文件头原写「`database.g.dart` 占 `spb_data` 分母的 78%
+  （1591/2049）」——分母已随表定义漂移为 2002（79%）。已修正并注明 1591 是
+  lcov 的**可执行行数**（`LF`）而非文件行数（3912）。
+- AGENTS.md §6.2 原称「`melos run gen` 对本包为空」——该说法在只有 `spb_data`
+  有生成物后已不准确（应是「只跑 spb_data」），已修正。
 
 ---
 
@@ -1925,6 +2059,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
 | ~~两端装配层接线无守卫（漏接一端而测试仍绿）~~ | ✅ 已修（issue #39）：`tools/check_wiring_parity.sh` 比对两端 `ConversationPage(` 具名参数，差异必须命中显式豁免（`onOpenAgentFile`/`onRevealAgentFile` 仅桌面、`overflowItems` 仅移动）；接入 CI | issue #39、§6.17 |
 | ~~接线守卫只覆盖 1 个组件 + 守卫自身假绿~~ | ✅ 已修（issue #42）：覆盖面扩到 `ConversationPage` / `GroupListPage` / `SettingsPage` / `SyncPage`（差异逐条写进豁免并注明理由）；**修掉守卫自身的假绿**——裸子串匹配命中了 `_SyncPage(` 私有包装（零参数被当成「两端一致」），改用词边界 + 返回全部调用点取并集；新增 `tools/check_wiring_parity_selftest.sh`（7 组合成输入，`awk` 抽真身而非副本）钉住解析器行为 | issue #42、§6.17 |
+| ~~`database.g.dart` 无生成物漂移守卫~~ | ✅ 已修（issue #43）：新增 `tools/check_codegen.sh`（CI quality job）+ `tools/check_codegen_selftest.sh`（8 组用例）。守卫涉及**四个反直觉的坑**：① 根目录跑 build_runner 是静默空转（`wrote 0 outputs`）→ 必须按包执行；② 生成物不是 `dart format` 形态 → 比对前必须 format；③ build_runner 增量资产图使守卫**非幂等**（第一轮报漂移、第二轮报一致）→ 比对前先删输出；④ `diff \| head` + `pipefail` 会 SIGPIPE 中止在还原之前 → 落临时文件再 head。顺带清理 `melos.yaml` 的空转 + 已失效 flag、`coverage.sh` 的漂移分母、AGENTS.md §6.2 的过时说法 | issue #43、§6.21 |
 | ~~对话页 `_rowKeys` 只注册不回收（跨 group 累积）~~ | ✅ 已修（issue #39）：抽 `RowLocateRegistry`（注册 + 按「当前行 id 集合」回收，**不** `clear()` 重建）+ 领域层唯一口径 `locateIdsOf` / `locateIdsOfAll`；17 条用例，3 项反向验证逐条实测 | issue #39、§6.18 |
 | ~~多个包声明了「全仓零 import」的依赖~~ | ✅ 已修（issue #36）：删 20 个零引用依赖（spb_core 的 meta/collection；spb_models 的 freezed/json_serializable 全家桶；spb_api 的 http_parser/meta；spb_domain 的 collection；spb_data 的 path_provider/path/shared_preferences；spb_features 的 flutter_riverpod/go_router/spb_data），桌面插件从 spb_platform **下移到 apps/spb_desktop**；新增 `tools/check_unused_deps.sh` 守防复发 | issue #36、§6.2/§6.4 |
 | `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：它是原生插件（把 `libsqlite3.so` 打进 Android/iOS 包），drift 移动端运行时需要；已写进 `check_unused_deps.sh` 的显式豁免。实测 apk 含 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so` | issue #36、§6.4 |

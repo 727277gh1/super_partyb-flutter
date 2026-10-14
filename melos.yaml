@@ -28,10 +28,17 @@ scripts:
     run: bash tools/check_layering.sh
   gen:
     description: 代码生成（drift；spb_models 为手写 fromJson，见 AGENTS.md §6.2）
-    run: dart run build_runner build --delete-conflicting-outputs
+    # ⚠️ **必须 cd 进包目录**。在仓库根跑 `dart run build_runner build` 是
+    # **静默空转**：根 pubspec.yaml 没有 build_runner 依赖、没有 build.yaml、
+    # 没有任何 builder 声明，实测输出 `wrote 0 outputs`。
+    #
+    # 也不加 `--delete-conflicting-outputs`：该 flag 在 build_runner 2.5+ 已被
+    # **静默忽略**（`W These options have been removed and were ignored`）。
+    # 详见 tools/check_codegen.sh 的文件头与 issue #43。
+    run: cd packages/spb_data && dart run build_runner build && cd ../.. && dart format packages/spb_data/lib
   gen:watch:
     description: 代码生成（监听模式；同上）
-    run: dart run build_runner watch --delete-conflicting-outputs
+    run: cd packages/spb_data && dart run build_runner watch
   build:linux:
     description: 构建 Linux 桌面端
     run: cd apps/spb_desktop && flutter build linux --release
