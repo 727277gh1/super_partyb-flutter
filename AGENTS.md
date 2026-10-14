@@ -1117,19 +1117,19 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 | `spb_data` | **98.3%** | `spb_platform` | 57.4% |
 | `spb_features` | **93.4%** | `spb_mobile` | 54.1% |
 | `spb_core` | **92.4%** | `spb_desktop` | 58.7% |
-| `spb_domain` | 88.8% | `spb_api` | **82.6%** |
+| `spb_domain` | 88.8% | `spb_api` | **87.8%** |
 | `spb_models` | 88.0% | `spb_ui` | 79.8% |
-| `spb_design` | 78.6% | **总计** | **84.6%**（≈15420/18226） |
+| `spb_design` | 78.6% | **总计** | **85.0%**（≈15497/18226） |
 
-全仓用例 **3421 条**（issue #48 拆分后；拆分本身 0 变化，+13 是新增的 SSE
-端到端，见 §6.27）。
+全仓用例 **3452 条**（issue #48 拆分后；拆分本身 0 变化，+13 是新增的 SSE
+端到端（§6.27），+31 是零调用者端点契约（§6.28））。
 
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
 行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
 不是回归。
 
-> **总计从 75.7% 涨到 84.6% 不全是新增测试的功劳**：
+> **总计从 75.7% 涨到 85.0% 不全是新增测试的功劳**：
 >
 > - 剔除生成代码（1591 行）抬升约 4.5 个百分点；
 > - `spb_models` 50.6% → 88.0%（issue #38 补了 `Agent` / `ChatTurn` /
@@ -2433,6 +2433,102 @@ Flutter 引擎，`dart test` 直接跑，不需要 `DISPLAY`（本机无，§9�
 
 ---
 
+### 6.28 零调用者端点的契约测试——**并查出第二个同类缺陷**（issue #49）
+
+issue #49 的出发点是 §6.14 记录的先例：`createTurn` 因为**零生产调用者**，
+字段名与响应形状双双写错却长期潜伏。本轮给同类的零调用者端点补契约测试，
+**过程中查出了 `groupConfirmations` 的路径缺陷**。
+
+#### 一、查出的真实缺陷：`groupConfirmations` 缺 `/api` 前缀
+
+| | 客户端拼的 | 服务端注册的 |
+|---|---|---|
+| `groupConfirmations` | `/chat/groups/:id/confirmations` ❌ | `/api/chat/groups/:group_id/confirmations` |
+| `listConfirmations` | `/chat/confirmations` ✅ | `/chat/confirmations`（无 `/api`）|
+
+两者**前缀不同**，容易看错：
+
+- `/chat/confirmations`（**无** `/api`）：`router.go:138` 的
+  `confirmRG := chatRG.Group("/confirmations")`，挂在 `chatRG := r.Group("/chat")` 下；
+- `/api/chat/groups/:group_id/confirmations`（**有** `/api`）：
+  `ext_routes.go:40` 的 `registerConfirmRoutes(api.Group("/chat/groups/:group_id/confirmations"), db)`，
+  而 `registerExtRoutes` 的唯一调用点是 `router.go:170` 的
+  `registerExtRoutes(apiv1, ...)`，`apiv1 := r.Group("/api")`。
+
+故客户端的 `groupConfirmations` **必然 404**。它此前无生产调用者，缺陷潜伏。
+
+⚠️ **webapp 的 `listGroupConfirmations` 也拼同一个错路径**
+（`group-chat.ts:1569`）——那是上游的既有缺陷，不在本仓库修复范围。客户端按
+**服务端真实路由表**拼，不照抄 webapp 的 bug（否则两边一起错、更难发现）。
+
+#### 二、为什么用真实 `HttpServer` 而不是 `DioAdapter`
+
+**这是本轮最关键的方法论**：`DioAdapter` **测不出路径缺陷**——它按测试注册的
+路由匹配，测试注册什么就匹配什么。只有真实 server 的 `req.uri.path` 才能断言
+「客户端到底请求了哪个路径」。
+
+故新文件 `chat_api_contract_test.dart` 用 `dart:io HttpServer` + 一个记录
+`req.uri.path` 的小 `Recorder`（与 §6.27 的端到端测试同一取向）。
+
+#### 三、覆盖的端点（31 条）
+
+| group | 端点 | 断言要点 |
+|---|---|---|
+| group CRUD | `listGroups` / `getGroup` / `createGroup` / `patchGroup` / `deleteGroup` / `archiveGroup` / `unarchiveGroup` | 路径；`groupToDict` 的 snake_case；**`patchGroup` 只发显式传入的键**（服务端用指针字段三态区分「未提交」与「清空」，多发键会强制覆盖）；空串=清空必须真的发键 |
+| timeline | `groupTimeline` | 路径；`eventToDict` 的 snake_case；**游标优先 `next_before_global_seq` 而非 `next_cursor`**；空页 |
+| turns | `listTurns` / `getTurn` / `cancelTurn` | 路径；`turnToDict`；`cancelTurn` 是 POST 不是 DELETE |
+| confirmations | `listConfirmations` / `listConfirmationsTyped` / `groupConfirmations` | **两套前缀不同**（见上表）；`{items: [...]}` 解析 |
+| sendMessage | `POST /users/:uid/chat/messages` | 平铺响应（**不是** `{turn: {...}}`）；**无归属入口不得发 `group_id`**（否则绕过服务端分类链，§5.5）；`feedback_recorded` 回执；`deduped` |
+
+#### 四、决策表（issue #49 的验收标准）
+
+issue 要求逐项给出结论。实际核实后：**除了新查出的 `groupConfirmations`，其余
+零调用者方法都已有契约测试**（在 `agents_api_test` / `habit_api_test` /
+`ufs_api_test` / `miniapp_api_test` 里），故本轮只需补缺的那几个。
+
+| 方法 | 结论 | 依据 |
+|---|---|---|
+| `createTurn` | ✅ 补测试（已 3 条，本轮 +2） | §6.14 已明确「保留给脚本化场景」 |
+| `listTurns` | ✅ **本轮补测试**（此前 0 条） | 路径正确（`/chat/groups/:id/turns`，`chat.go:39`），但响应形状未验 |
+| `groupConfirmations` | ✅ **本轮补测试 + 修缺陷** | 见上（缺 `/api`） |
+| `listConfirmations` | ✅ **本轮补测试**（此前 0 条） | 路径正确，但 `{items}` 解析与 typed 版未验 |
+| `getAgent` / `listGroupSessions` | ✅ 已有测试，**保留** | `agents_api_test.dart:225/262`；路径核实正确 |
+| `getHabit` | ✅ 已有测试，**保留** | `habit_api_test.dart:146`；`/api/habits/:id` 核实正确 |
+| `getFile` | ✅ 已有测试，**保留** | `ufs_api_test.dart:354/365` |
+| `getArtifact` | ✅ 已有测试，**保留** | `miniapp_api_test.dart:546/565` |
+
+**为什么不全删**：issue 的路线 B（删掉）适用于「确认客户端永远不做」的方法。
+但上述几个的路径经核实**全部正确**且已有测试——删掉反而是损失能力（单对象读取
+在将来「已知 id 要刷新一条」的场景有用）。真正的「有意不做」是 §6.9 的**端点族**
+（管理面），不是这些单个读方法。
+
+#### 五、覆盖率
+
+| | 前 | 后 |
+|---|---|---|
+| `chat_api.dart` | 66.9% | **85.8%**（350/408）|
+| `spb_api` 整包 | 82.6% | **87.8%**（1303/1484）|
+| `spb_api` 用例数 | 386 | **430** |
+
+#### 六、反向验证（逐条实测）
+
+| 改动 | 结果 |
+|---|---|
+| `groupConfirmations` 去掉 `/api`（原缺陷） | **2 条失败** |
+| `listTurns` 路径 `turn` 少个 `s` | **1 条失败** |
+| `createTurn` 发 `input` 而非 `inputText`（§6.14 原缺陷） | **1 条失败** |
+| `listGroups` 路径加 `/api` + `cancelTurn` 改 `_delete` | **2 条失败** |
+| `patchGroup` 无条件发全部键（破坏 PATCH 语义） | **1 条失败** |
+| `sendMessage` 无条件发 `group_id`（绕过分类链） | **1 条失败** |
+
+#### 七、一个易踩的断言细节
+
+`ChatTurn.fromJson` 把 `created_at` 做了 **`.toLocal()`**（与 `spb_models`
+其余模型一致）。故断言时间不能写 `expect(t.createdAt, DateTime.utc(...))`
+——本机是 UTC+8，实际得到 `16:09:10`。要写 `expect(t.createdAt.toUtc(), DateTime.utc(...))`。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -2694,6 +2790,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] macOS 出包（GitHub Actions `macos-14`，ad-hoc 签名 + 通用二进制，**仅 tag 触发**）
 - [x] 测试文件拆分（issue #48）：11 个 >1000 行 → 34 个，全部 < 1500 行（见 §6.27）
 - [x] SSE 端到端（issue #48）：纯 Dart `dart:io HttpServer`，13 条（见 §6.27）
+- [x] 零调用者端点契约测试（issue #49）：31 条真实 `HttpServer`，并修掉 `groupConfirmations` 缺 `/api` 的真实缺陷（见 §6.28）
 - [ ] iOS 出包（需 Apple Developer 账号 $99/年 + 签名证书，无法 ad-hoc 凑合）
 
 ### CI / 发布流水线速查
@@ -2764,6 +2861,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~超长文件（`conversation_page.dart` 2587 行 / 测试文件 3845 行等）~~ | ✅ **测试文件已拆**（issue #48）：11 个 >1000 行的测试文件 → 34 个（全部 < 1500 行），按 group 边界拆 + `test/support/*_harness.dart` 共享夹具；**纯移动、0 断言变化**（用例名逐条 diff 一致：150/94/110/140/54/67/68/81/68）。**`conversation_page.dart` 本身（2587 行）仍未拆**——那是产品代码重构，与测试拆分不同批 | issue #48、§6.27 |
 | ~~issue #48「80 处真实等待，只有 1 个文件用 `fakeAsync`」~~ | ⚠️ **实测不成立**（已纠正）：78 个命中全是 `tester.pump(Duration)`——Flutter 的**假时钟**，零 wall time（对照实验：`50 × pump(2s)` = **8ms**）。真实等待全仓只有 **2.6 秒**，且大部分不可消除（真实 `ResponseBody.stream` 需真实事件循环；§6.23 的调度证据测试需真实 microtask 时序）。故 `fakeAsync` 改造**收益接近零**，未做 | issue #48、§6.27 |
 | ~~无任何测试跨过真实 HTTP + 真实 SSE 字节流~~ | ✅ 已补（issue #48 第三部分）：`packages/spb_api/test/sse_end_to_end_test.dart`（13 条，纯 Dart `dart:io HttpServer`）。覆盖 UTF-8 跨分片（issue #41 的真实缺陷，`DioAdapter` 因一次投递完整字节而**永远复现不到**）、`\r\n` 分片、逐字节分片、cursor 契约、401/500 分类。**反向验证**：改回「每片独立 `utf8.decode`」→ 2 条失败 | issue #48、§6.27 |
+| ~~`groupConfirmations` 拼错路径（缺 `/api` 前缀，必然 404）~~ | ✅ **已修**（issue #49，本轮查出的真实缺陷）：客户端拼 `/chat/groups/:id/confirmations`，而服务端注册的是 `/api/chat/groups/:group_id/confirmations`（`ext_routes.go:40` + `router.go:168` 的 `apiv1 := r.Group("/api")`）。该方法此前零生产调用者，缺陷潜伏（与 §6.14 的 `createTurn` 同一模式）。⚠️ webapp 也拼错路径，属上游缺陷 | issue #49、§6.28 |
+| ~~`chat_api.dart` 覆盖率 66.9%，多个零调用者端点无契约测试~~ | ✅ 已补（issue #49）：`chat_api_contract_test.dart`（31 条，**真实 `HttpServer`**——`DioAdapter` 测不出路径缺陷）。覆盖 group CRUD / timeline / turns / confirmations / sendMessage。`chat_api.dart` 66.9% → **85.8%**，`spb_api` 82.6% → **87.8%**（用例 386 → 430）。**反向验证** 6 项逐条实测（含 `groupConfirmations` 缺 `/api`、`patchGroup` 发全量键、`sendMessage` 无条件发 `group_id`） | issue #49、§6.28 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~无全局错误处理（异常进不了诊断报告）+ outbox 三处静默吞异常~~ | ✅ 已修（issue #45）：`spb_platform` 新增 `installGlobalErrorHandlers`（`FlutterError.onError` + `PlatformDispatcher.onError` + `runZonedGuarded` **三道防线**，两端 `main()` 第一步装配），异常第一次能进「导出诊断日志」；`outbox.dart` 三处 `catch (_) {}` 补日志（`upsert(failed)` 用 warn），另补 `sync_scope_config` / SSE 载荷丢弃 / 角标 / 标题预取 / habits / confirmations 六处；新增 `tools/check_silent_catches.sh`（269 处 catch 零误报）+ 6 条自测断言 | issue #45、§6.24 |

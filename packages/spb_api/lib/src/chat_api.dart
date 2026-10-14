@@ -1044,9 +1044,23 @@ class ChatApi {
     return raw.map(ChatConfirmation.fromJson).toList(growable: false);
   }
 
-  /// `GET /chat/groups/:group_id/confirmations`
+  /// `GET /api/chat/groups/:group_id/confirmations` —— **按 group 过滤**的确认卡列表。
+  ///
+  /// ⚠️ **路径必须带 `/api` 前缀**（与 [resolveConfirmation] 同一族）。
+  /// 该端点在 Go 侧挂在 `registerExtRoutes(apiv1, ...)` 里（`ext_routes.go:40`），
+  /// 而 `apiv1 := r.Group("/api")`（`router.go:168`）——故完整路径是
+  /// `/api/chat/groups/:group_id/confirmations`。
+  ///
+  /// 此前拼的是 `/chat/groups/:group_id/confirmations`（缺 `/api`）——该路径在
+  /// 路由表里**不存在**（`/chat` 组下只有 `/chat/confirmations` 这个扁平列表，
+  /// 见 [listConfirmations]），故调用必然 404。本方法此前无生产调用者，
+  /// 缺陷因此长期潜伏（与 §6.14 的 `createTurn` 同一模式）。
+  ///
+  /// 注意 webapp 的 `listGroupConfirmations` 也拼这个路径且**同样缺 `/api`**
+  /// （`group-chat.ts:1569`）——那是上游的既有缺陷，不在本仓库修复范围；
+  /// 客户端按**服务端真实路由表**拼，不照抄 webapp 的 bug。
   Future<List<Map<String, dynamic>>> groupConfirmations(String groupId) async {
-    final res = await _get('/chat/groups/$groupId/confirmations');
+    final res = await _get('/api/chat/groups/$groupId/confirmations');
     return unwrapItems(res, (m) => m);
   }
 
