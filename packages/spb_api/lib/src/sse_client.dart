@@ -51,6 +51,22 @@ class SseFrame {
   String toString() => 'SseFrame(event=$event, id=$id, dataLen=${data.length})';
 }
 
+/// 把增量 UTF-8 解码器接出来的字符串转交给 [onText]。
+///
+/// `startChunkedConversion` 要求一个 `Sink<String>`；这里用一个具名类而不是
+/// 内联 lambda，因为测试要能单独构造它。
+class _Utf8LineSink implements Sink<String> {
+  _Utf8LineSink(this.onText);
+
+  final void Function(String) onText;
+
+  @override
+  void add(String data) => onText(data);
+
+  @override
+  void close() {}
+}
+
 /// SSE 流式客户端。
 ///
 /// ## 为什么手写解析而不是用现成包
@@ -192,8 +208,13 @@ class SseClient {
       _retryCount = 0; // 连接成功即重置退避，避免历史失败累积影响下次断线
       SpbLog.info('SSE 已连接', {'path': path, 'cursor': cursor ?? '(none)'});
 
+      // 每次连接重建增量解码器：新连接不得携带上一个连接的不完整字节。
+      final sink = _Utf8LineSink(_onText);
+      _utf8Sink = const Utf8Decoder(allowMalformed: true)
+          .startChunkedConversion(sink);
+
       _byteSub = body.stream.listen(
-        _onBytes,
+        (bytes) => _utf8Sink?.add(bytes),
         onError: (Object e, StackTrace st) {
           SpbLog.warn('SSE 流错误', {'error': e.toString()});
           _scheduleReconnect();
@@ -226,18 +247,42 @@ class SseClient {
 
   /// SSE 按行分隔，但网络分片不保证与行边界对齐——必须缓冲到完整行。
   ///
+  /// ## 为什么用**增量** UTF-8 解码器，而不是对每个分片单独 `utf8.decode`
+  ///
+  /// 曾经的写法是对每个分片独立 `utf8.decode(bytes, allowMalformed: true)`，
+  /// 注释写「容忍分片切开的 UTF-8 多字节序列」——但 `allowMalformed` 的语义是
+  /// 「解不出就替换成 U+FFFD」，**不是**「缓冲到下一个分片」。当分片边界落在
+  /// 汉字 3 字节序列的中间时，两个分片各自解出替换字符，且**不可恢复**：
+  /// 「中文」会变成「���文」。
+  ///
+  /// 实测（issue #41 补测试时发现）：
+  ///
+  /// ```
+  /// final bytes = utf8.encode('data: {"t":"中文"}\n\n');
+  /// // 在「中」的首字节后切分
+  /// utf8.decode(bytes.sublist(0, cut), allowMalformed: true) // → 'data: {"t":"�'
+  /// utf8.decode(bytes.sublist(cut), allowMalformed: true)    // → '��文"}\n\n'
+  /// ```
+  ///
+  /// 后果是中文回复在网络分片恰好落在汉字中间时显示成乱码，且**只在分片边界**
+  /// 出现——本机跑（通常一个分片装下整个响应）永远复现不了。
+  ///
+  /// `Utf8Decoder.startChunkedConversion` 会跨分片保留不完整序列（实测切分后
+  /// 拼接结果与整段解码逐字节相同），故改用它。
+  ///
   /// 这也是不用 `transform(utf8.decoder).transform(LineSplitter())` 的原因：
-  /// 那样虽然能切行，但会丢掉「跨帧边界的事件」所需的空行语义与注释行识别，
-  /// 且难以处理不完整 UTF-8 序列（中文被切在两个分片之间）。
+  /// 那样虽然能切行，但会丢掉「跨帧边界的事件」所需的空行语义与注释行识别。
   final _lineBuffer = StringBuffer();
   final _pendingData = StringBuffer();
   String? _pendingEvent;
   String? _pendingId;
 
-  void _onBytes(List<int> bytes) {
-    // 用 allowMalformed 容忍分片切开的 UTF-8 多字节序列：
-    // 中文回复被网络分片切断时，严格解码会抛 FormatException 直接断流。
-    final text = utf8.decode(bytes, allowMalformed: true);
+  /// 当前连接的增量解码 sink；每次 `_openStream` 重建（新连接不得携带旧连接
+  /// 的不完整字节）。
+  ByteConversionSink? _utf8Sink;
+
+  /// 接收解码后的文本，按行切分。
+  void _onText(String text) {
     _lineBuffer.write(text);
 
     var content = _lineBuffer.toString();
@@ -370,6 +415,7 @@ class SseClient {
   Future<void> _teardown() async {
     await _byteSub?.cancel();
     _byteSub = null;
+    _utf8Sink = null;
     if (_cancelToken != null && !_cancelToken!.isCancelled) {
       _cancelToken!.cancel('SSE 连接重建');
     }

@@ -1085,17 +1085,17 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 |---|---|---|---|
 | `spb_data` | **98.3%** | `spb_platform` | 55.3% |
 | `spb_features` | **93.5%** | `spb_mobile` | 54.4% |
-| `spb_domain` | 88.3% | `spb_desktop` | 58.8% |
-| `spb_models` | 88.0% | `spb_api` | 72.3% |
-| `spb_core` | **92.4%** | `spb_ui` | 79.8% |
-| `spb_design` | 78.6% | **总计** | **83.8%**（≈15191/18138） |
+| `spb_core` | **92.4%** | `spb_desktop` | 58.8% |
+| `spb_domain` | 88.3% | `spb_api` | **82.6%** |
+| `spb_models` | 88.0% | `spb_ui` | 79.8% |
+| `spb_design` | 78.6% | **总计** | **84.6%**（≈15349/18145） |
 
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
 行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
 不是回归。
 
-> **总计从 75.7% 涨到 83.8% 不全是新增测试的功劳**：
+> **总计从 75.7% 涨到 84.6% 不全是新增测试的功劳**：
 >
 > - 剔除生成代码（1591 行）抬升约 4.5 个百分点；
 > - `spb_models` 50.6% → 88.0%（issue #38 补了 `Agent` / `ChatTurn` /
@@ -1106,7 +1106,9 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 >   `openAppDatabaseLazy`、以及五条 `StorageError` 写失败路径）；
 > - `spb_core` 85.0% → **92.4%**、`spb_platform` 52.5% → **55.3%**（issue #40
 >   的诊断导出：`redactSecrets` / `buildDiagnosticsReport` / 环形缓冲 / 文件名
->   安全字符均有用例）。
+>   安全字符均有用例）；
+> - `spb_api` 72.3% → **82.6%**（issue #41 补了 `sse_client_test.dart`，
+>   `sse_client.dart` 从 **0.7% → 98.1%**；见 §6.22）。
 >
 > issue #38 点名的 7 个「0% 文件」（`chat_search_hit` / `chat_confirmation` /
 > `chat_inbox_message` / `chat_turn` / `chat_turn_summary` / `ufs_file_entry` /
@@ -1741,6 +1743,92 @@ diff 收到 SIGPIPE，整个脚本以 141 退出——**在把生成物还原回
 
 ---
 
+### 6.22 SSE 传输层测试 + 一个真实的数据损坏缺陷（issue #41）
+
+**测试**：`packages/spb_api/test/sse_client_test.dart`（31 条）。
+
+#### 为什么之前没测
+
+`sse_client.dart` 的 149 行里只有 **1 行**被执行（0.7%）。它是**唯一**「上层用
+Fake 测 + 自己不被测」的层：四个测试文件各自 `class _FakeSseClient extends
+SseClient` 并 override 掉 `connect` / `frames` / `states` / `recordEventId`，
+**没有一处构造真实实例**。归约层有 881 条用例，传输层 0 条。
+
+#### 怎么测（不碰真实网络）
+
+用自定义 `HttpClientAdapter` 喂**受控字节流**。不用 `http_mock_adapter`：它按
+URL 匹配返回整体响应，无法表达「同一响应被切成多个分片」——而那正是传输层最
+容易错的地方。
+
+两个辅助适配器：
+
+| 适配器 | 用途 |
+|---|---|
+| `_ChunkAdapter` | 把响应体切成指定分片（可逐字节切） |
+| `_ControllableAdapter` | 流**不自行结束**，测试手动 `push` / `addError` / `endStream` |
+
+⚠️ `_ControllableAdapter` 每次 `fetch` 都新建一个 `StreamController`：单订阅流
+只能 listen 一次，而 `resume()` / 退避重连会发起第二次连接。
+
+#### ⚠️ 测出来的真实缺陷：分片切开的 UTF-8 被静默损坏
+
+原实现对**每个分片**独立调 `utf8.decode(bytes, allowMalformed: true)`，注释写
+「容忍分片切开的 UTF-8 多字节序列」——但 `allowMalformed` 的语义是「解不出就
+替换成 U+FFFD」，**不是**「缓冲到下一个分片」。当分片边界落在汉字 3 字节序列的
+中间时，两个分片各自解出 `�`，且**不可恢复**：
+
+```
+分片1: 'data: {"t":"�'      // 「中」只到了第 1 个字节
+分片2: '��文"}'              // 后两个字节各自解成 U+FFFD
+拼接:  'data: {"t":"���文"}' // 期望 'data: {"t":"中文"}'
+```
+
+后果：**中文回复在网络分片恰好落在汉字中间时显示成乱码**，且只在分片边界出现
+——本机跑（通常一个分片装下整个响应）永远复现不了。
+
+修法：改用 `Utf8Decoder.startChunkedConversion`（增量解码，跨分片保留不完整
+序列）。每次 `_openStream` 重建 sink，新连接不得携带上一个连接的不完整字节。
+
+#### 测试覆盖的契约
+
+| 组 | 钉住的契约 |
+|---|---|
+| 分片与行缓冲 | 逐字节切分不变（含中文）、UTF-8 跨分片不损坏、CRLF、不完整行留到下次 |
+| 字段解析 | 多行 data 用 `\n` 拼接、冒号后单个空格、无冒号行忽略、`id`/`retry`、`_pendingId ?? _lastEventId` 兜底 |
+| 心跳注释帧 | `: heartbeat` 产生注释帧、**不得清空已累积的 data** |
+| 游标续接 | 首次 connect **不带** cursor、connect 重置 lastEventId、`recordEventId` 忽略空串、resume 带上游标 |
+| 状态机 | connect → connected → close → idle、流结束 → reconnecting |
+| 退避与重连上限 | 指数退避 `1s,2s,4s…` 封顶、**401/403 不重连**、5xx 可重试、close 后不重连 |
+| 响应体异常 | 非 DioException 被兜底、流中途 onError、响应体为 null |
+| dispose | 两个流控制器都被关闭 |
+
+#### 两个易写错的测试点
+
+1. **`ResponseBody.fromString` 的流发完即 done** → 立刻触发 `onDone` →
+   `reconnecting`。要观察稳定的 `connected` 态（或要在帧之间做动作）必须用
+   `_ControllableAdapter`。
+2. **`_pendingId` 不随帧清空**（符合 SSE 规范）→ 同一连接内「带 id 帧 → 不带
+   id 帧」时后者从 `_pendingId` 就能拿到值，`?? _lastEventId` **走不到**。兜底
+   真正生效的是「`_teardown` 清空 `_pendingId` 之后、重连的第一帧不带 id」。
+
+#### 反向验证（逐条实测，7 项全部被检出）
+
+| 改坏 | 失败用例数 |
+|---|---|
+| 去掉 `_pendingId ?? _lastEventId` 兜底 | 1 |
+| 多行 data 拼接改成覆盖写 | 2 |
+| 去掉 401/403 停止重连 | 1 |
+| 退避改成常数 | 3 |
+| 去掉心跳识别 | 3 |
+| 增量解码改回逐分片 `utf8.decode` | 2 |
+| 去掉 `recordEventId` 的空串守卫 | 1 |
+
+覆盖率：`sse_client.dart` **0.7% → 98.1%**（153/156），`spb_api` 整包
+72.3% → 82.6%。剩余 3 行是 `_openStream` 的 `catch (e, st)` 防御分支
+（dio 会把适配器抛出的异常包成 `DioException`，该分支实际不可达）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -1985,6 +2073,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 
 - [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
+- [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 §6.22）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 §6.14）
 - [x] 对话内搜索（搜已加载时间线，见 §6.15）+ 窄屏 AppBar 溢出修复（issue #31，见 §6.16）
@@ -2068,6 +2157,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 契约同步靠人工 | 可接受 | §6.2 |
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~覆盖率低且 `spb_data` 数字失真~~ | ✅ 已修（issue #38）：`tools/coverage.sh` 剔除生成代码（`*.g.dart` 等，可见、可用 `COVERAGE_INCLUDE_GENERATED=1` 看原始值）；`database.dart` 的 7 个 drift 表类标 `coverage:ignore-start/end`（运行时不可达）；补 `spb_models` 契约/容错用例与 `spb_data` 的跳版升级、两个 open 工厂、五条 `StorageError` 写失败路径。总计 75.7% → **83.4%**（剔除后口径），`spb_data` 43.8% → **98.3%**，`spb_models` 50.6% → **85.2%** | issue #38、§6.13 |
+| ~~SseClient 传输层 0.7% 无测试（上层全用 Fake）~~ | ✅ 已修（issue #41）：新增 `packages/spb_api/test/sse_client_test.dart`（31 条），`sse_client.dart` **0.7% → 98.1%**、`spb_api` 72.3% → **82.6%**。**顺带测出一个真实缺陷**：分片边界落在汉字 UTF-8 序列中间时，逐分片 `utf8.decode(allowMalformed: true)` 会把「中文」损坏成「���文」且不可恢复（`allowMalformed` 是「解不出替换成 U+FFFD」，不是「缓冲到下一分片」）；已改用 `Utf8Decoder.startChunkedConversion` 增量解码。7 项反向验证逐条实测 | issue #41、§6.22 |
 | ~~AGENTS.md 与代码漂移~~ | ✅ 已修（issue #37）：删 §6.9.6 末尾**逐字重复**的生产异常段、删 §7 前的多余 `---`、§6.15 的 `_summarize`→`searchConversationItems` 与 `hasMore`→`upperHistoryUnloaded`、移动端 router 的 `_narrowActions`→`_appBarActions`、桌面端 router 4 处「与桌面端」→「与移动端」；新增 `tools/check_agents_refs.sh`（只查下划线成员/snake_case 调用/`.dart` 文件名三类，零误报）守防复发 | issue #37、§6.19 |
 
 ---
