@@ -894,7 +894,7 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 语义搜索本身**不需要**再配嵌入凭证——它已经通了。
 
 > ⚠️ **与 #12 无关的一个生产异常（另行跟踪）**：2026-10-11 实测 bcc
-> `/opt/super_partyb/data/dev.db` 的 `chat_turns` / `chat_groups` / `chat_events` /
+> `/opt/<app>/data/dev.db` 的 `chat_turns` / `chat_groups` / `chat_events` /
 > `chat_confirmations` **全为 0**，而 2026-09-27 的备份里 `chat_turns` 有 **3559** 行。
 > 该库 2026-10-10 22:54 被一份**备份覆盖**过（`dev.db.bak-before-del-baixiaosheng-
 > 20261010T225140Z.db`，两者 md5 不同），而「删除百晓生」的迁移 0040 已在库中

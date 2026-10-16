@@ -413,7 +413,7 @@ issue #4 的正文写于 M0 阶段，其中**三处已过时**。下表是逐条
 | 桌面 public client（loopback） | 上游 issue `dever/id-provider#6` 状态 | **仍 open** → 阻塞成立 |
 | `token_endpoint_auth_methods_supported` 缺 `none` | 读 `id-provider/go/internal/oidc/provider.go:233` | **确认缺**：只有 `client_secret_basic` / `client_secret_post` → 阻塞成立 |
 | 移动端 deeplink client | 同上（`id-provider#6` 待办 2） | **仍 open** → 阻塞成立 |
-| 生产 IdP 是否已注册该 client | `ssh bcc` + 查 `oauth_clients` 表 | ⚠️ **本次无法核实**：容器到 `bcc`（生产 SSH 别名，见 AGENTS.md §部署约定）**连接超时**，IdP 生产地址亦不可达（`000`）。故「已注册/未注册」只能依据 `id-provider#6` 的 open 状态推断 |
+| 生产 IdP 是否已注册该 client | `ssh <deploy-host>` + 查 `oauth_clients` 表 | ⚠️ **本次无法核实**：容器到 `bcc`（生产 SSH 别名，见 AGENTS.md §部署约定）**连接超时**，IdP 生产地址亦不可达（`000`）。故「已注册/未注册」只能依据 `id-provider#6` 的 open 状态推断 |
 
 ⚠️ **上表最后一行的不确定性必须如实传递**：本容器网络到生产不可达，故「生产
 是否已注册」是**推断**（依据上游 issue 仍 open），不是**实测**。人工验证时请先
