@@ -150,7 +150,7 @@ class FakeSseClient extends SseClient {
 /// ## 为什么必须 override 这几个 provider
 ///
 /// `chatApiProvider` / `currentUserProvider` 若用默认实现，会向
-/// `SpbEnv.apiBaseUrl`（默认 `127.0.0.1:8000`）发真实请求——测试环境里
+/// `SpbEndpoints.current.apiBaseUrl`（默认 `127.0.0.1:8000`）发真实请求——测试环境里
 /// 那是一次必然失败的真实网络调用，既慢又依赖环境。故：
 ///
 /// - `dioProvider` → 换成挂了 `DioAdapter` 的 dio（响应可控）；

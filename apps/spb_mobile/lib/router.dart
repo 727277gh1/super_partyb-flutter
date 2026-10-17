@@ -2245,7 +2245,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return false;
     final url = Uri.parse(
-      '${SpbEnv.ufsBaseUrl}/preview.html'
+      '${SpbEndpoints.current.ufsBaseUrl}/preview.html'
       '?file_id=${Uri.encodeQueryComponent(fileId)}',
     );
     try {

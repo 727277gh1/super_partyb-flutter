@@ -2165,15 +2165,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   // 预览页的路由形状（`/preview.html?file_id=…`）。把拼接留在装配层，
   // 将来换部署/换路由只改这一处。
   //
-  // ## 为什么用 `SpbEnv.ufsBaseUrl` 而不是某个 provider
+  // ## 为什么用 `SpbEndpoints.current.ufsBaseUrl` 而不是某个 provider
   //
-  // 基地址是**编译期常量**（`--dart-define=SPB_UFS_BASE_URL`），没有运行时
-  // 变更路径，故直接读常量即可，不必为它建一个 provider。
+  // 基地址由启动探测决定（`--dart-define=SPB_UFS_BASE_URL` 是编译期默认值，
+  // 探测可达时会被升级到 IPv6 源站域名，见 `spb_core` 的 `endpoints.dart`），
+  // 但它在整个会话内**不变**，故直接读静态持有者即可，不必为它建一个 provider。
   Future<bool> _openAgentFileExternal(AgentFileItem file) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return false;
     final url =
-        '${SpbEnv.ufsBaseUrl}/preview.html'
+        '${SpbEndpoints.current.ufsBaseUrl}/preview.html'
         '?file_id=${Uri.encodeQueryComponent(fileId)}';
     try {
       await openInBrowser(url);

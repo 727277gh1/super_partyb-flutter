@@ -13,7 +13,7 @@ import 'providers.dart';
 /// 2. `WidgetsFlutterBinding` —— 插件调用前必须先初始化绑定；
 /// 3. 日志 sink；
 /// 4. 依赖注入容器（`ProviderScope`）；
-/// 5. 深链监听（认证回调）；
+/// 5. 深链监听（认证回调）**与端点探测并发**；
 /// 6. `runApp`。
 ///
 /// ## 为什么错误兜底必须是第一步
@@ -39,16 +39,31 @@ void main() {
     );
     SpbLog.info('启动 Super PartyB 移动端', {
       'env': SpbEnv.environment,
-      'api': SpbEnv.apiBaseUrl,
+      // 读解析后的基地址：启动探测可能已升级到 IPv6 源站域名。
+      'api': SpbEndpoints.current.apiBaseUrl,
     });
 
     final container = ProviderContainer();
     // 监听自定义 scheme 回跳（`partyb://oidc/callback`），把授权码交给
     // OIDC 客户端换取会话。见 `auth_deeplink.dart`。
     //
-    // 注：`ProviderScope` 是必需的——`SpbMobileApp` 是
+    // 它与端点探测**并发**：两者互不依赖，串行会把探测的耗时（无 IPv6 时
+    // ~10ms，黑洞场景最多 1.5s）叠加到启动延迟上。
+    //
+    // 注：`UncontrolledProviderScope` 是必需的——`SpbMobileApp` 是
     // `ConsumerStatefulWidget`，没有容器时会在 build 时抛异常。
-    await container.read(authDeepLinkReceiverProvider).start();
+    final results = await Future.wait<Object?>([
+      container.read(authDeepLinkReceiverProvider).start(),
+      resolveEndpointsAtStartup(),
+    ]);
+    final endpoints = results[1] as SpbEndpoints;
+
+    // 只记 host 名，不记完整 URL：日志会进「导出诊断日志」报告，
+    // 而报告会被贴进公开 issue。
+    SpbLog.info('服务端点已解析', {
+      'chosenHost': endpoints.chosenHost ?? '(未配置)',
+      'probeOutcome': endpoints.probeOutcome.name,
+    });
 
     runApp(
       UncontrolledProviderScope(

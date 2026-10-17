@@ -18,7 +18,7 @@
 /// | GET | `/api/chat/habit-insights/summary?days=` | `habit_insights.go` |
 ///
 /// 两者都挂在 `/api` 组下（`ext_routes.go`），故经 api-gateway 时前缀是
-/// `/pba/api/...`；`SpbEnv.apiBaseUrl` 已含 `/pba`，各方法拼的路径以 `/api/` 开头。
+/// `/pba/api/...`；`SpbEndpoints.current.apiBaseUrl` 已含 `/pba`，各方法拼的路径以 `/api/` 开头。
 ///
 /// ⚠️ **`/me/habits` 只有 create 与 trigger 两个别名**
 /// （`registerUserHabitAliasRoutes`），列表/详情/更新都在 `/api/habits` 下。

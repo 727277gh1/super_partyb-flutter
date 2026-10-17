@@ -13,7 +13,8 @@ import 'providers.dart';
 /// 1. `installGlobalErrorHandlers` —— 全局错误兜底（issue #45）；
 /// 2. `WidgetsFlutterBinding` —— 插件调用前必须先初始化绑定；
 /// 3. 日志 sink；
-/// 4. 桌面能力（窗口/托盘/快捷键）—— 依赖绑定已就绪；
+/// 4. 桌面能力（窗口/托盘/快捷键）**与端点探测并发** —— 前者依赖绑定已就绪，
+///    后者只读编译期常量 + 一次 TCP 探测，两者无依赖；
 /// 5. 依赖注入容器（ProviderScope overrides）；
 /// 6. `runApp`。
 ///
@@ -40,13 +41,29 @@ void main() {
     );
     SpbLog.info('启动 Super PartyB 桌面端', {
       'env': SpbEnv.environment,
-      'api': SpbEnv.apiBaseUrl,
+      // 读解析后的基地址：启动探测可能已升级到 IPv6 源站域名。
+      'api': SpbEndpoints.current.apiBaseUrl,
       'release': SpbEnv.isRelease,
     });
 
     // 桌面能力初始化必须在 runApp 之前：托盘与窗口需在首帧前就绪，
     // 否则启动瞬间会闪现默认窗口尺寸再跳到配置尺寸。
-    final capabilities = await bootstrapDesktop(binding);
+    //
+    // 端点探测与它**并发**：两者互不依赖，串行会把探测的耗时（无 IPv6 时
+    // ~10ms，黑洞场景最多 1.5s）叠加到启动延迟上。
+    final results = await Future.wait<Object?>([
+      bootstrapDesktop(binding),
+      resolveEndpointsAtStartup(),
+    ]);
+    final capabilities = results[0] as DesktopCapabilities;
+    final endpoints = results[1] as SpbEndpoints;
+
+    // 只记 host 名，不记完整 URL：日志会进「导出诊断日志」报告，
+    // 而报告会被贴进公开 issue。
+    SpbLog.info('服务端点已解析', {
+      'chosenHost': endpoints.chosenHost ?? '(未配置)',
+      'probeOutcome': endpoints.probeOutcome.name,
+    });
 
     runApp(
       ProviderScope(

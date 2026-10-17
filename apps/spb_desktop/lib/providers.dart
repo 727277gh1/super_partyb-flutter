@@ -215,7 +215,13 @@ final dioProvider = Provider<Dio>((ref) {
     },
   );
 
-  final dio = createDio(baseUrl: SpbEnv.apiBaseUrl, interceptors: [auth]);
+  // 基地址读 `SpbEndpoints.current` 而非编译期常量：启动探测可能已把 host
+  // 升级到 IPv6 源站域名（见 `packages/spb_core/lib/src/endpoints.dart`）。
+  // 未调用 resolve 时两者完全相等，行为零变化。
+  final dio = createDio(
+    baseUrl: SpbEndpoints.current.apiBaseUrl,
+    interceptors: [auth],
+  );
   // 回填重放用的 Dio：必须是同一个实例（否则丢掉连接池与其余拦截器），
   // 而它又是本拦截器的构造参数之一，只能构造后回填。
   auth.replayDio = dio;
@@ -343,7 +349,7 @@ String _describeGroupActionError(SpbError error) {
 final sseClientProvider = Provider<SseClient>((ref) {
   final client = SseClient(
     dio: ref.watch(dioProvider),
-    baseUrl: SpbEnv.apiBaseUrl,
+    baseUrl: SpbEndpoints.current.apiBaseUrl,
   );
   ref.onDispose(client.dispose);
   return client;
@@ -1017,7 +1023,10 @@ final ufsDioProvider = Provider<Dio>((ref) {
     },
   );
 
-  final dio = createDio(baseUrl: SpbEnv.ufsBaseUrl, interceptors: [auth]);
+  final dio = createDio(
+    baseUrl: SpbEndpoints.current.ufsBaseUrl,
+    interceptors: [auth],
+  );
   auth.replayDio = dio;
   return dio;
 });
