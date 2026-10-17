@@ -160,6 +160,7 @@ super_partyb-flutter/
     # 工具
     ├── coverage.sh                 # 逐包覆盖率采集 + 汇总表（剔除生成代码）
     ├── bundle_linux_deps.sh        # Linux 分发包依赖打包（非系统库 + RUNPATH）
+    ├── reverse_verify_issue50.sh   # 双栈降级/升级的变异验证（就地改代码再还原，见 §5.1.1）
     └── scrub-history.sh            # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
 ```
 
@@ -282,7 +283,7 @@ flutter build linux --release \
 
 见 `packages/spb_core/lib/src/env.dart`。
 
-#### 5.1.1 双栈端点选择（IPv6 源站优先，**启动时一次**）
+#### 5.1.1 双栈端点选择（IPv6 源站优先，启动探测 + 运行中降级/升级）
 
 `SPB_API_BASE_URL` / `SPB_UFS_BASE_URL` 是**编译期默认值**，它们必须
 「一定可达」（通常是双栈 CDN 域名）。若另有一个**仅 IPv6** 的源站域名，
@@ -314,12 +315,54 @@ HTTP），才需要逐请求 failover + 断路器 + 环形日志（见
 
 | 层 | 内容 |
 |---|---|
-| `spb_core` `endpoints.dart` | `SpbEndpoints`（`current` / `resolveAndUpdate` / `resolveEndpoints`）、`parsePreferredHosts`、`defaultEndpointProbe`、`resolveEndpointsAtStartup`（**启动用包装，吞异常**） |
+| `spb_core` `endpoints.dart` | `SpbEndpoints`（`current` / `changes` / `resolveAndUpdate` / `resolveEndpoints` / `downgrade` / `reprobeForUpgrade`）、`EndpointGuard`、`parsePreferredHosts`、`defaultEndpointProbe`、`resolveEndpointsAtStartup`（**启动用包装，吞异常**） |
 | 两端 `main.dart` | `Future.wait([bootstrap…, resolveEndpointsAtStartup()])`——探测与桌面能力/深链监听**并发**，延迟被隐藏；随后记 `chosenHost` / `probeOutcome` |
-| 消费点 | 一律读 `SpbEndpoints.current`（**不要**再直接读 `SpbEnv.apiBaseUrl`）；两端的 `dioProvider` / `sseClientProvider` / UFS 预览 URL / 诊断报告均如此 |
+| 消费点 | 一律读 `SpbEndpoints.current`（**不要**再直接读 `SpbEnv.apiBaseUrl`）；两端的 `dioProvider` / `ufsDioProvider` / `sseClientProvider` / UFS 预览 URL / 诊断报告均如此。Dio 侧经 `EndpointRewriteInterceptor` **逐请求**读取，故降级无需重建实例 |
 
-**已知边界**（有意不做）：不持久化上次结论、不做运行中网络切换重探、
-**不切 OIDC issuer**（授权走系统浏览器协议栈，token 交换走 CDN 也通）。
+#### 运行中降级 / 升级（issue #50，**不对称迟滞**）
+
+启动探测只解决「开机时有没有 IPv6」。用户带着笔记本在「有 IPv6 的 WiFi」与
+「只有 IPv4 的热点」之间移动时，升级后的源站域名会变成**黑洞**——连接超时、
+SSE 反复重连失败，而客户端此前只能重启。故补一条运行中通路：
+
+| 方向 | 触发条件 | 动作 |
+|---|---|---|
+| **降级**（快） | 连续 **3** 次**连接层**失败（`EndpointGuard.failureThreshold`） | 立即把基地址退回编译期值，结论记为 `EndpointProbeOutcome.downgraded` |
+| **升级**（慢） | 处于 `downgraded` / `kept` 态，且距上次切换/探测 ≥ **5 分钟**，且重探成功 | 基地址回到 preferred 域名 |
+| 成功响应 | 任意一次 | 清零连续失败计数；未升级时按冷却期触发一次重探 |
+
+**为什么降级不做探测、升级才做**：降级的触发信号本身就是「连不上」，再探一次
+只是把用户等待延长一个超时；而退回编译期地址（双栈 CDN）的代价极小。反过来，
+**错误升级 = 彻底连不上**，必须拿到「preferred 真的可达」的证据。
+
+**为什么只数连接层失败**：`badResponse`（4xx/5xx）恰恰说明 host 是通的，把它
+计入会让「服务端一次 500」把用户从源站踢回 CDN。判定用 `DioExceptionType`
+而非错误文本（见 `classifyDioFailure`）。
+
+**为什么用请求失败作信号而不是 `connectivity_plus`**：与 `outbox` 同一取向
+——「有默认路由」不等于「服务端可达」；且移动端 WiFi↔蜂窝切换时系统事件
+未必及时。
+
+**实现要点（改之前必读）**：
+
+| 位置 | 作用 | 易写错处 |
+|---|---|---|
+| `spb_core` `endpoints.dart` `EndpointGuard` | 计数 + 冷却 + 重探仲裁（纯逻辑，可无头单测） | `recordSuccess` 也要触发重探（否则启动即 `kept` 的场景永远升不上去）；且必须有**独立于切换时刻**的探测节流 `_lastProbeAt`，否则 `kept` 态下每个请求都探一次 |
+| 同上 `SpbEndpoints.reprobeForUpgrade` | 重探，**只在升级成功时写回** | 不能复用 `resolveAndUpdate`——它探测失败会写 `kept`，把 `downgraded` 盖掉，恢复循环静默终止 |
+| 同上 `SpbEndpoints.changes` | broadcast 流，**基地址真的变了**才发 | 别改成 `kept → downgraded` 也发：地址没变，重建连接无意义 |
+| `spb_api` `EndpointHealthInterceptor` | 把 Dio 成败喂给 guard | **必须排在错误映射拦截器之前**——dio 在某拦截器 `reject()` 后不再调下游 `onError`，排在后面则连接失败永不计数 |
+| `spb_api` `EndpointRewriteInterceptor` | 每次请求重读 `SpbEndpoints.current` | **不要**改成「降级时 invalidate `dioProvider`」：Dio 与 SseClient 的身份被 `ChatStreamController` 持有，而页面订阅是 `_itemsSub ??=`（只绑一次），重建会让时间线**静默冻结** |
+| `spb_api` `SseClient.switchBaseUrl` | 换 host 并重建连接 | 必须**清游标**（`_lastEventId = null`）：源站与 CDN 可能是不同后端实例，旧 eventId 回放会跳事件；且 `_closedByUser` 时不得复活连接 |
+| `SseClient.resume()` | 手动重连 | 顺带修正：**必须重置 `_retryCount`**，否则退避耗尽后手动重连只能赌一次 |
+
+**诊断可见性**：`EndpointProbeOutcome.downgraded` 与 `kept` 的基地址相同但语义
+不同（前者「本来在源站，因网络变化退回」，后者「从来就没通过」）。诊断报告
+另带 `endpoint_consecutive_failures` / `endpoint_upgrade_pending`——`downgraded`
+且**无**挂起重探，说明恢复循环断了（真正的异常）。
+
+**已知边界**（有意不做）：不持久化上次结论、**不切 OIDC issuer**（授权走系统
+浏览器协议栈，token 交换走 CDN 也通）、探测端口仍取自编译期 host（别名表只
+换 host，不能表达「不同端口」）。
 
 ### 5.2 路由前缀（易踩坑）
 
@@ -2831,6 +2874,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 测试文件拆分（issue #48）：11 个 >1000 行 → 34 个，全部 < 1500 行（见 §6.27）
 - [x] SSE 端到端（issue #48）：纯 Dart `dart:io HttpServer`，13 条（见 §6.27）
 - [x] 零调用者端点契约测试（issue #49）：31 条真实 `HttpServer`，并修掉 `groupConfirmations` 缺 `/api` 的真实缺陷（见 §6.28）
+- [x] 双栈端点运行中降级/升级（issue #50）：连续 3 次连接层失败降级、冷却 5 分钟后重探升级（见 §5.1.1）
 - [ ] iOS 出包（需 Apple Developer 账号 $99/年 + 签名证书，无法 ad-hoc 凑合）
 
 ### CI / 发布流水线速查
@@ -2903,6 +2947,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~无任何测试跨过真实 HTTP + 真实 SSE 字节流~~ | ✅ 已补（issue #48 第三部分）：`packages/spb_api/test/sse_end_to_end_test.dart`（13 条，纯 Dart `dart:io HttpServer`）。覆盖 UTF-8 跨分片（issue #41 的真实缺陷，`DioAdapter` 因一次投递完整字节而**永远复现不到**）、`\r\n` 分片、逐字节分片、cursor 契约、401/500 分类。**反向验证**：改回「每片独立 `utf8.decode`」→ 2 条失败 | issue #48、§6.27 |
 | ~~`groupConfirmations` 拼错路径（缺 `/api` 前缀，必然 404）~~ | ✅ **已修**（issue #49，本轮查出的真实缺陷）：客户端拼 `/chat/groups/:id/confirmations`，而服务端注册的是 `/api/chat/groups/:group_id/confirmations`（`ext_routes.go:40` + `router.go:168` 的 `apiv1 := r.Group("/api")`）。该方法此前零生产调用者，缺陷潜伏（与 §6.14 的 `createTurn` 同一模式）。⚠️ webapp 也拼错路径，属上游缺陷 | issue #49、§6.28 |
 | ~~`chat_api.dart` 覆盖率 66.9%，多个零调用者端点无契约测试~~ | ✅ 已补（issue #49）：`chat_api_contract_test.dart`（31 条，**真实 `HttpServer`**——`DioAdapter` 测不出路径缺陷）。覆盖 group CRUD / timeline / turns / confirmations / sendMessage。`chat_api.dart` 66.9% → **85.8%**，`spb_api` 82.6% → **87.8%**（用例 386 → 430）。**反向验证** 6 项逐条实测（含 `groupConfirmations` 缺 `/api`、`patchGroup` 发全量键、`sendMessage` 无条件发 `group_id`） | issue #49、§6.28 |
+| ~~双栈端点只降不升（切网后需重启才能回到 IPv6 源站）~~ | ✅ 已修（issue #50）：`EndpointGuard` 不对称迟滞——连续 3 次**连接层**失败立即降级回编译期地址，冷却 5 分钟后在有请求成功时重探，可达即升回源站。只数连接层失败（4xx/5xx 不算）；`EndpointProbeOutcome.downgraded` 与 `kept` 区分开；全程不重建 Dio/SSE（`EndpointRewriteInterceptor` 逐请求重读 + `SseClient.switchBaseUrl` 换 host），故对话时间线不会冻结。顺带修掉 `SseClient.resume()` 不重置退避计数（手动重连只能赌一次）。共 40 条用例，19 项反向验证逐条实测（`tools/reverse_verify_issue50.sh`） | issue #50、§5.1.1 |
 | 契约同步靠人工 | 可接受 | §6.2 |
 | ~~客户端无崩溃上报与远程日志通道（只能靠用户口头描述）~~ | ✅ **第一层已实现**（issue #40）：设置页「导出诊断日志」→ 环境信息（版本/平台/Flutter/服务地址，**非机密**）+ `SpbLog` 环形缓冲（最近 500 条）→ 系统「另存为」。导出前过 `redactSecrets`（Bearer/JWT/已知前缀令牌/PEM/`user:pass@`/凭据类键名）；四态反馈（已导出/取消/失败/不支持），取消不弹提示。**第 2、3 层（崩溃上报、`integration_test/`）有意不做** | issue #40、§6.20 |
 | ~~无全局错误处理（异常进不了诊断报告）+ outbox 三处静默吞异常~~ | ✅ 已修（issue #45）：`spb_platform` 新增 `installGlobalErrorHandlers`（`FlutterError.onError` + `PlatformDispatcher.onError` + `runZonedGuarded` **三道防线**，两端 `main()` 第一步装配），异常第一次能进「导出诊断日志」；`outbox.dart` 三处 `catch (_) {}` 补日志（`upsert(failed)` 用 warn），另补 `sync_scope_config` / SSE 载荷丢弃 / 角标 / 标题预取 / habits / confirmations 六处；新增 `tools/check_silent_catches.sh`（269 处 catch 零误报）+ 6 条自测断言 | issue #45、§6.24 |
