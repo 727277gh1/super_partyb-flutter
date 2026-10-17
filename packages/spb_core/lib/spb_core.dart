@@ -4,6 +4,7 @@
 /// 「分层规则」——本包要能在无 Flutter 引擎的环境下被单测。
 library;
 
+export 'src/endpoints.dart';
 export 'src/env.dart';
 export 'src/errors.dart';
 export 'src/logger.dart';

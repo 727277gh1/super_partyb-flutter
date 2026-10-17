@@ -32,6 +32,28 @@ class SpbEnv {
     defaultValue: 'http://127.0.0.1:9000/ufs',
   );
 
+  /// IPv6/IPv4 端点别名表（`compiledHost=preferredHost`，`;`/`,` 分隔多个，
+  /// 也兼容 JSON 对象）。
+  ///
+  /// ## 语义：编译期默认用**安全**域名，运行期探测**升级**
+  ///
+  /// 左值是编译期已注入的 host（[apiBaseUrl] / [ufsBaseUrl] 里那个，通常是
+  /// 双栈 CDN 域名，IPv4-only 网络也一定可达）；右值是希望优先使用的 host
+  /// （通常是只有 AAAA 的源站域名）。启动时探测右值，**可达才切**，不可达
+  /// 就保持左值——所以「配置写错 / 源站挂了」最坏结果是退回 CDN，而不是
+  /// 让客户端连不上。
+  ///
+  /// 这与小程序的 `TARO_APP_HOST_FALLBACKS` 方向相反（那边 primary 是 IPv6
+  /// 域名、失败才回退），原因是小程序没有 socket API，只能「先试再切」；
+  /// 客户端有 `dart:io`，可以「先探测再决定」。
+  ///
+  /// 留空 = 不启用（退化为完全使用编译期地址，行为与未引入本机制一致）。
+  /// 解析与探测逻辑见 `endpoints.dart` 的 [SpbEndpoints]。
+  static const String preferredHostsRaw = String.fromEnvironment(
+    'SPB_PREFERRED_HOSTS',
+    defaultValue: '',
+  );
+
   /// 环境名（`dev` / `staging` / `prod`），仅用于日志与诊断上报。
   static const String environment = String.fromEnvironment(
     'SPB_ENV',
