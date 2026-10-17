@@ -60,6 +60,10 @@ on:
         description: 'OIDC client_id（留空则登录不可用，其余功能正常）'
         required: false
         type: string
+      host_preferred:
+        description: 'IPv6/IPv4 双栈端点别名表（形如 api-v6.example.com=api.example.com，留空即禁用探测）'
+        required: false
+        type: string
 
 # 创建 Release 需要写权限；其余权限全部收窄（最小权限原则）。
 permissions:
@@ -89,6 +93,7 @@ jobs:
       ufs: ${{ steps.defines.outputs.ufs }}
       iss: ${{ steps.defines.outputs.iss }}
       cid: ${{ steps.defines.outputs.cid }}
+      host_pref: ${{ steps.defines.outputs.host_pref }}
     steps:
       - name: Resolve build defines
         id: defines
@@ -100,10 +105,12 @@ jobs:
           IN_UFS: ${{ inputs.ufs_base_url }}
           IN_ISS: ${{ inputs.oidc_issuer }}
           IN_CID: ${{ inputs.oidc_client_id }}
+          IN_HPREF: ${{ inputs.host_preferred }}
           VAR_API: ${{ vars.SPB_API_BASE_URL }}
           VAR_UFS: ${{ vars.SPB_UFS_BASE_URL }}
           VAR_ISS: ${{ vars.SPB_OIDC_ISSUER }}
           VAR_CID: ${{ vars.SPB_OIDC_CLIENT_ID }}
+          VAR_HPREF: ${{ vars.SPB_PREFERRED_HOSTS }}
         run: |
           set -euo pipefail
           pick() { if [ -n "$1" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
@@ -112,6 +119,9 @@ jobs:
           ufs=$(pick "$IN_UFS" "$VAR_UFS")
           iss=$(pick "$IN_ISS" "$VAR_ISS")
           cid=$(pick "$IN_CID" "$VAR_CID")
+          # 端点别名表：编译期默认地址是「一定可达」的那个（CDN），运行期
+          # 探测 preferred 源站域名，可达才升级。留空 → 客户端完全不探测。
+          hpref=$(pick "$IN_HPREF" "$VAR_HPREF")
 
           # 逐个写而非拼一个 here-string：值里若含换行会破坏 GITHUB_OUTPUT 的
           # `key=value` 行格式，故先单行化。
@@ -120,6 +130,7 @@ jobs:
           write_out ufs "$ufs"
           write_out iss "$iss"
           write_out cid "$cid"
+          write_out host_pref "$hpref"
 
           # 只打印「配没配」，不打印值本身——地址可能含内网主机名，且 Actions
           # 日志会长期留档。
@@ -127,6 +138,7 @@ jobs:
           echo "UFS  base   : $([ -n "$ufs" ] && echo set || echo 'unset (默认 127.0.0.1:9000/ufs)')"
           echo "OIDC issuer : $([ -n "$iss" ] && echo set || echo unset)"
           echo "OIDC cid    : $([ -n "$cid" ] && echo set || echo 'unset (登录不可用，其余功能正常)')"
+          echo "Host pref   : $([ -n "$hpref" ] && echo set || echo 'unset (不探测，固定用编译期地址)')"
 
   # ── Windows x64（2× 配额）────────────────────────────────────────
   windows:
@@ -156,12 +168,15 @@ jobs:
           DEF_UFS: ${{ needs.config.outputs.ufs }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
         run: |
           $defines = @()
           if ($env:DEF_API) { $defines += "--dart-define=SPB_API_BASE_URL=$env:DEF_API" }
           if ($env:DEF_UFS) { $defines += "--dart-define=SPB_UFS_BASE_URL=$env:DEF_UFS" }
           if ($env:DEF_ISS) { $defines += "--dart-define=SPB_OIDC_ISSUER=$env:DEF_ISS" }
           if ($env:DEF_CID) { $defines += "--dart-define=SPB_OIDC_CLIENT_ID=$env:DEF_CID" }
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          if ($env:DEF_HOST) { $defines += "--dart-define=SPB_PREFERRED_HOSTS=$env:DEF_HOST" }
           $defines += '--dart-define=SPB_ENV=prod'
 
           Write-Host "flutter build windows --release $($defines -join ' ')"
@@ -247,6 +262,7 @@ jobs:
           DEF_UFS: ${{ needs.config.outputs.ufs }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
         run: |
           set -euo pipefail
           cd apps/spb_desktop
@@ -256,6 +272,8 @@ jobs:
           [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
           [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
           [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
           args+=("--dart-define=SPB_ENV=prod")
           flutter build linux --release "${args[@]}"
 
@@ -351,6 +369,7 @@ jobs:
           DEF_UFS: ${{ needs.config.outputs.ufs }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
         run: |
           set -euo pipefail
           cd apps/spb_mobile
@@ -359,6 +378,8 @@ jobs:
           [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
           [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
           [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
           args+=("--dart-define=SPB_ENV=prod")
           flutter build apk --release "${args[@]}"
 
@@ -435,6 +456,7 @@ jobs:
           DEF_UFS: ${{ needs.config.outputs.ufs }}
           DEF_ISS: ${{ needs.config.outputs.iss }}
           DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
         run: |
           set -euo pipefail
           # 只传非空 define（理由同 Windows job：空串会覆盖 defaultValue）。
@@ -443,6 +465,8 @@ jobs:
           [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
           [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
           [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
           args+=("--dart-define=SPB_ENV=prod")
           flutter build macos --release "${args[@]}"
 
