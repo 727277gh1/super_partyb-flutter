@@ -3,6 +3,7 @@ import 'package:spb_core/spb_core.dart';
 
 // mapDioError 与 AuthInterceptor 同文件（auth_interceptor.dart）。
 import 'auth_interceptor.dart';
+import 'endpoint_health_interceptor.dart';
 
 /// Dio 工厂：统一 baseUrl、超时、拦截器与错误映射。
 ///
@@ -48,6 +49,25 @@ Dio createDio({
   );
 
   dio.interceptors.addAll(interceptors);
+
+  // 端点健康观测（issue #50）**必须紧跟用户拦截器、在错误映射之前**。
+  //
+  // 两个理由：
+  // 1. 它要看 `DioException.type` 的**原始形态**（connectionTimeout /
+  //    connectionError …）。错误映射拦截器会把它们包成新的 DioException
+  //    并把 SpbError 塞进 `error` 字段，但 `type` 是原样拷贝的，所以位置
+  //    不影响分类——真正影响的是下一行；
+  // 2. 它必须在**成功路径**上也能被调。错误映射拦截器只覆了 `onError`，
+  //    本身不拦成功；但若健康拦截器放在它**后面**，dio 的链式结构会让
+  //    「错误映射 reject 后」不再调下游 onError，于是连接层失败就**永远不会**
+  //    被计数——降级永不触发（issue #50 的主症状）。
+  //
+  // 放在 AuthInterceptor **之后**（用户拦截器整体在前）也很关键：
+  // 「401 → 刷新 → 重放成功」由 AuthInterceptor 自己处理掉，不会走到这里。
+  //
+  // 未配 `SPB_PREFERRED_HOSTS` 时 `EndpointGuard.recordFailure` 内部会判空
+  // 直接返回（见其守卫），故零开销、无需在此处分支。
+  dio.interceptors.add(EndpointHealthInterceptor());
 
   // 错误映射拦截器放在最后，保证它看到的是其余拦截器处理后的状态。
   //

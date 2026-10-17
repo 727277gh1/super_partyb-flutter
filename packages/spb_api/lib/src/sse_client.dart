@@ -104,7 +104,20 @@ class SseClient {
   }) : _dio = dio;
 
   final Dio _dio;
-  final String baseUrl;
+
+  /// 当前基地址。
+  ///
+  /// ## 为什么**不是** `final`（issue #50）
+  ///
+  /// 双栈端点选择会在运行中降级/升级（`SpbEndpoints.changes`），而
+  /// `baseUrl` 是构造期快照。若保持 final，降级后 SSE 会继续重连**同一个
+  /// 已不可达的 host**，而「SSE 连上了」又是离线队列与看门狗的恢复信号
+  /// （见 `ChatStreamController` 的 `SseState.connected` 分支）——那个信号
+  /// 永远不会来，用户只能重启 App。
+  ///
+  /// 改基地址必须走 [switchBaseUrl]（它同时清游标与重建连接），不能直接
+  /// 赋值。
+  String baseUrl;
 
   /// 首次重连退避时长（指数增长起点）。
   final Duration initialBackoff;
@@ -164,11 +177,45 @@ class SseClient {
   }
 
   /// 从上次事件续接（断线后由上层手动触发，或自动重连时内部调用）。
+  ///
+  /// ## 必须重置退避计数（issue #50 顺带修正）
+  ///
+  /// 曾经只有 [connect] 重置 `_retryCount`，`resume` 不重置。于是一旦自动
+  /// 重连走到 `maxRetries` 进入 [SseState.failed]，用户点「重连」只会赌一次：
+  /// 再失败一次就立即又 `failed`（`_retryCount(10) >= maxRetries`），
+  /// 指数退避形同虚设。而手动重连的语义就是「从现在重新开始」——
+  /// 与 [connect] 同待遇。
   Future<void> resume() async {
     if (_path == null) return;
     _closedByUser = false;
+    _retryCount = 0;
     await _teardown();
     await _openStream();
+  }
+
+  /// 换基地址并重建连接（issue #50 降级/升级）。
+  ///
+  /// ## 为什么要清游标（不能复用 [resume]）
+  ///
+  /// `eventId` 是**某个服务端实例**的事件序号。降级时 host 从源站换回 CDN，
+  /// 两者可能是不同的服务端实例（源站与 CDN 边缘缓存的后端），用旧 host 的
+  /// 游标去新 host 请求回放，轻则跳过事件、重则拿到空页而客户端以为「已同步」。
+  /// 故换 host 必须当新连接处理（`_lastEventId = null`），让上层整段回填。
+  ///
+  /// 返回 `false` 表示当前未处于连接状态（没有 path，或用户已主动关闭）——
+  /// 此时只更新基地址，不发起连接。
+  Future<bool> switchBaseUrl(String nextBaseUrl) async {
+    if (nextBaseUrl == baseUrl) return false;
+    baseUrl = nextBaseUrl;
+    final path = _path;
+    if (path == null || _closedByUser) return false;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryCount = 0;
+    _lastEventId = null;
+    await _teardown();
+    await _openStream();
+    return true;
   }
 
   Future<void> _openStream() async {

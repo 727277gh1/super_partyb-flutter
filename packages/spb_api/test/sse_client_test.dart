@@ -292,6 +292,106 @@ void main() {
       expect(adapter.requests[1].queryParameters['cursor'], 'evt_7');
       await client.dispose();
     });
+
+    test('resume 重置退避计数（否则手动重连只能赌一次）', () async {
+      // 曾经的缺陷：只有 connect 重置 _retryCount，resume 不重置。于是自动
+      // 重连耗尽 maxRetries 进入 failed 后，用户点「重连」再失败一次就
+      // 立即又 failed（10 >= 10），指数退避形同虚设。
+      final adapter = _ScriptedAdapter([
+        _fail(DioExceptionType.connectionError),
+      ]);
+      final client = _client(
+        adapter,
+        initialBackoff: const Duration(milliseconds: 1),
+        maxBackoff: const Duration(milliseconds: 2),
+        maxRetries: 1,
+      );
+      client.frames.listen((_) {}, onError: (_) {});
+
+      await client.connect(path: '/s');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(client.state, SseState.failed);
+
+      // 手动重连：应重新给满重试额度（至少再退避一次，而不是直接 failed）。
+      final states = <SseState>[];
+      client.states.listen(states.add);
+      await client.resume();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(
+        states,
+        contains(SseState.reconnecting),
+        reason: '重置计数后应重新进入退避重连，而不是立即 failed',
+      );
+      await client.dispose();
+    });
+  });
+
+  group('switchBaseUrl（issue #50 降级/升级）', () {
+    test('换 host 后用新基地址重连，且不携带旧游标', () async {
+      final adapter = _ScriptedAdapter([
+        _ok('data: one\n\n'),
+        _ok('data: two\n\n'),
+      ]);
+      final client = _client(adapter);
+      await client.connect(path: '/users/u/chat/stream');
+      await _drain();
+      client.recordEventId('evt_from_origin');
+
+      final switched = await client.switchBaseUrl('https://cdn.test/pba');
+      await _drain();
+
+      expect(switched, isTrue);
+      expect(client.baseUrl, 'https://cdn.test/pba');
+      expect(adapter.requests, hasLength(2));
+      // dio 对「path 已是绝对 URL」的情况不重写 `baseUrl` 字段，只影响 `uri`。
+      expect(adapter.requests[1].uri.toString(), contains('cdn.test'));
+      expect(
+        adapter.requests[1].queryParameters['cursor'],
+        isNull,
+        reason: '旧 host 的 eventId 不能用于新 host 回放（可能是不同后端实例）',
+      );
+      await client.dispose();
+    });
+
+    test('同一基地址时不重连（避免无意义抖动）', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(stream);
+      await client.connect(path: '/s');
+      await _drain();
+
+      final switched = await client.switchBaseUrl('https://api.test');
+      expect(switched, isFalse);
+      expect(stream.connectionCount, 1);
+      await client.dispose();
+      await stream.endStream();
+    });
+
+    test('未连接时只更新基地址，不发起连接', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(stream);
+
+      final switched = await client.switchBaseUrl('https://cdn.test/pba');
+      expect(switched, isFalse);
+      expect(client.baseUrl, 'https://cdn.test/pba');
+      expect(stream.connectionCount, 0);
+      await client.dispose();
+    });
+
+    test('用户主动 close 后不因换基地址而复活连接', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(stream);
+      await client.connect(path: '/s');
+      await _drain();
+      await client.close();
+      await _drain();
+
+      final switched = await client.switchBaseUrl('https://cdn.test/pba');
+      expect(switched, isFalse);
+      expect(stream.connectionCount, 1, reason: '主动关闭的连接不得被降级逻辑唤醒');
+      await client.dispose();
+      await stream.endStream();
+    });
   });
 
   group('状态机', () {

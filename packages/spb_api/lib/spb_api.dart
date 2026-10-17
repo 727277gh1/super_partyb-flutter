@@ -10,6 +10,7 @@ library;
 export 'src/agents_api.dart';
 export 'src/auth_interceptor.dart';
 export 'src/chat_api.dart';
+export 'src/endpoint_health_interceptor.dart';
 export 'src/goal_api.dart';
 export 'src/habit_api.dart';
 export 'src/http_client.dart';
