@@ -162,6 +162,15 @@ Map<String, String> diagnosticsEnvironment() {
     // 否则报告里看起来像「这一行没生成出来」。
     'endpoint_host': SpbEndpoints.current.chosenHost ?? '(未探测)',
     'endpoint_probe': SpbEndpoints.current.probeOutcome.name,
+    // 运行中升降级的实时状态（issue #50）。与 `endpoint_probe` 配合才能
+    // 回答「为什么用户连的是 CDN」：
+    //   outcome=downgraded + 有挂起重探 → 正在等冷却期，会自己恢复；
+    //   outcome=downgraded + 无挂起重探 → 恢复循环断了（真正的异常）。
+    // 只记整数与布尔，不记 host 以外的地址信息。
+    'endpoint_consecutive_failures': EndpointGuard.instance.consecutiveFailures
+        .toString(),
+    'endpoint_upgrade_pending': EndpointGuard.instance.hasPendingUpgrade
+        .toString(),
     'oidc_issuer': SpbEnv.oidcIssuer,
     'oidc_client_id': SpbEnv.oidcClientId.isEmpty
         ? '（未配置）'

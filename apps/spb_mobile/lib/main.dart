@@ -65,6 +65,20 @@ void main() {
       'probeOutcome': endpoints.probeOutcome.name,
     });
 
+    // 运行中端点切换要落一条日志（issue #50）：用户报「突然变慢/突然连不上」
+    // 时，诊断报告里得能看出「当时降级了」。降级/升级本身的 warn/info 已由
+    // `SpbEndpoints.downgrade` 与 `EndpointGuard.tryUpgrade` 记录，这里只补
+    // 「切换后的基地址」这一条，避免重复刷屏。
+    //
+    // 订阅不取消是有意的：它是进程级监听，活到进程结束；`EndpointGuard` 的
+    // 计时器在 App 退出时无需清理（进程退出即结束）。
+    SpbEndpoints.changes.listen((next) {
+      SpbLog.info('服务端点已切换', {
+        'host': next.chosenHost ?? '(unknown)',
+        'outcome': next.probeOutcome.name,
+      });
+    });
+
     runApp(
       UncontrolledProviderScope(
         container: container,

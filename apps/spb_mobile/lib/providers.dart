@@ -177,6 +177,26 @@ final sessionManagerProvider = Provider<SessionManager>((ref) {
   );
 });
 
+/// 每次请求都把基地址重写成「当前生效的端点」（issue #50 运行中降级/升级）。
+///
+/// ## 为什么不 `ref.watch` 端点状态
+///
+/// `SpbEndpoints.current` 是 `spb_core` 的静态字段（纯 Dart 包，无 Riverpod）。
+/// 让 `dioProvider` 去 watch 它意味着「端点变化 → 重建 Dio」——而 Dio 与
+/// SseClient 的身份被 `ChatStreamController` 与页面的 `??=` 订阅持有，重建会
+/// 让旧订阅挂在已 dispose 的实例上（时间线静默冻结）。
+///
+/// 拦截器把「读哪个 host」推迟到**每次请求**，Dio 实例因此可以长命。
+/// 详见 `EndpointRewriteInterceptor` 的文档。
+///
+/// [ufs] 为真时读 `ufsBaseUrl`（文件服务的基地址与前缀都和 API 不同）。
+EndpointRewriteInterceptor _endpointRewrite({bool ufs = false}) {
+  return EndpointRewriteInterceptor(
+    resolveBaseUrl: () =>
+        ufs ? SpbEndpoints.current.ufsBaseUrl : SpbEndpoints.current.apiBaseUrl,
+  );
+}
+
 /// 全局 Dio 实例（单例）。
 final dioProvider = Provider<Dio>((ref) {
   final tokenProvider = ref.watch(sessionTokenProvider);
@@ -199,7 +219,7 @@ final dioProvider = Provider<Dio>((ref) {
   // 未调用 resolve 时两者完全相等，行为零变化。
   final dio = createDio(
     baseUrl: SpbEndpoints.current.apiBaseUrl,
-    interceptors: [auth],
+    interceptors: [auth, _endpointRewrite()],
   );
   // 回填重放用的 Dio：必须是同一个实例（否则丢掉连接池与其余拦截器）。
   auth.replayDio = dio;
@@ -329,7 +349,27 @@ final sseClientProvider = Provider<SseClient>((ref) {
     dio: ref.watch(dioProvider),
     baseUrl: SpbEndpoints.current.apiBaseUrl,
   );
-  ref.onDispose(client.dispose);
+  // 端点降级/升级时换 host 重连（issue #50）。
+  //
+  // ## 为什么是「换 host」而不是「重建 SseClient」
+  //
+  // SseClient 的身份被 `ChatStreamController` 持有，而页面里的帧订阅是
+  // `_itemsSub ??=` 形式（只绑一次）。重建实例会让旧订阅挂在已 dispose 的
+  // 控制器上——表现为**时间线静默冻结**（比不降级更难排查）。
+  // `switchBaseUrl` 保持实例身份，只换连接。
+  //
+  // ## 为什么 switchBaseUrl 会清游标
+  //
+  // 源站与 CDN 可能是不同后端实例，旧 host 的 eventId 不能用于新 host 回放
+  // （见 `SseClient.switchBaseUrl` 的说明）。清游标后服务端会当作全新订阅，
+  // 由控制器按需整段回填。
+  final sub = SpbEndpoints.changes.listen((next) {
+    unawaited(client.switchBaseUrl(next.apiBaseUrl));
+  });
+  ref.onDispose(() {
+    unawaited(sub.cancel());
+    client.dispose();
+  });
   return client;
 });
 
@@ -947,7 +987,7 @@ final ufsDioProvider = Provider<Dio>((ref) {
 
   final dio = createDio(
     baseUrl: SpbEndpoints.current.ufsBaseUrl,
-    interceptors: [auth],
+    interceptors: [auth, _endpointRewrite(ufs: true)],
   );
   auth.replayDio = dio;
   return dio;
