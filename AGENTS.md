@@ -276,10 +276,50 @@ Flutter 客户端 ──(会话凭证 Cookie/OIDC token)──► api-gateway
 flutter build linux --release \
   --dart-define=SPB_API_BASE_URL=https://api.example.com/pba \
   --dart-define=SPB_UFS_BASE_URL=https://api.example.com/ufs \
+  --dart-define=SPB_PREFERRED_HOSTS=api-v6.example.com=api.example.com \
   --dart-define=SPB_ENV=prod
 ```
 
 见 `packages/spb_core/lib/src/env.dart`。
+
+#### 5.1.1 双栈端点选择（IPv6 源站优先，**启动时一次**）
+
+`SPB_API_BASE_URL` / `SPB_UFS_BASE_URL` 是**编译期默认值**，它们必须
+「一定可达」（通常是双栈 CDN 域名）。若另有一个**仅 IPv6** 的源站域名，
+用 `SPB_PREFERRED_HOSTS` 声明别名表，客户端**启动时探测一次**：
+
+```
+SPB_PREFERRED_HOSTS="api.example.com=api-v6.example.com"
+```
+
+| 项 | 行为 |
+|---|---|
+| 格式 | `编译期域名=首选域名`，多对用 `;` 或 `,` 分隔；也接受 JSON 对象（`{"a":"b"}`） |
+| 留空（默认） | **完全不探测**，`SpbEndpoints.current` 恒等于编译期值（零开销） |
+| 可达 | 把 api/ufs 里 host == 编译期域名的部分换成首选域名（`Uri.replace(host:)` 保留 scheme/port/path） |
+| 不可达 / 超时 / 抛异常 | 保持编译期默认值 |
+| 探测方式 | **真 TCP 连接**（`Socket.connect`，默认超时 1.5s）。不能只查 `NetworkInterface.list(type: IPv6)`——后者识别不出「有 IPv6 地址但路由黑洞」 |
+
+**为什么默认用安全域名、运行期才「升级」**：配置写错或源站挂掉的最坏结果
+是退回 CDN，而不是连不上；且零 CI 配置也能跑（不配 `SPB_PREFERRED_HOSTS`
+即透传）。
+
+**为什么是启动时探一次、而不是逐请求 failover**：客户端有 socket，可以
+直接 TCP 探测并记下结论，整个会话摊销一次；小程序没有 socket（只能发
+HTTP），才需要逐请求 failover + 断路器 + 环形日志（见
+`super_partyb/docs/miniapp-dualstack-failover-design.md`）。故**不要**把
+小程序那套搬过来——那是另一层需求，不是这里的缺失。
+
+**实现位置**（改之前先读）：
+
+| 层 | 内容 |
+|---|---|
+| `spb_core` `endpoints.dart` | `SpbEndpoints`（`current` / `resolveAndUpdate` / `resolveEndpoints`）、`parsePreferredHosts`、`defaultEndpointProbe`、`resolveEndpointsAtStartup`（**启动用包装，吞异常**） |
+| 两端 `main.dart` | `Future.wait([bootstrap…, resolveEndpointsAtStartup()])`——探测与桌面能力/深链监听**并发**，延迟被隐藏；随后记 `chosenHost` / `probeOutcome` |
+| 消费点 | 一律读 `SpbEndpoints.current`（**不要**再直接读 `SpbEnv.apiBaseUrl`）；两端的 `dioProvider` / `sseClientProvider` / UFS 预览 URL / 诊断报告均如此 |
+
+**已知边界**（有意不做）：不持久化上次结论、不做运行中网络切换重探、
+**不切 OIDC issuer**（授权走系统浏览器协议栈，token 交换走 CDN 也通）。
 
 ### 5.2 路由前缀（易踩坑）
 

@@ -58,11 +58,34 @@ flutter build linux --release \
   --dart-define=SPB_UFS_BASE_URL=https://api.example.com/ufs \
   --dart-define=SPB_OIDC_ISSUER=https://example.com/idp \
   --dart-define=SPB_OIDC_CLIENT_ID=client_xxxxxxxx \
+  --dart-define=SPB_PREFERRED_HOSTS=api-v6.example.com=api.example.com \
   --dart-define=SPB_ENV=prod
 
 # Linux 分发前必须打包依赖库（否则 RUNPATH 会指向构建机路径）
 bash tools/bundle_linux_deps.sh
 ```
+
+### 双栈端点选择（`SPB_PREFERRED_HOSTS`）
+
+上面那组地址是**编译期默认值**，客户端要求它**一定可达**（通常是双栈 CDN
+域名）。若另外有一个**仅 IPv6** 的源站域名，可用 `SPB_PREFERRED_HOSTS` 声明
+别名表，客户端会在**启动时探测一次**：可达就把基地址升级过去（绕开 CDN），
+不可达则保持编译期默认值。
+
+格式是 `编译期域名=首选域名`，多对用 `;` 或 `,` 分隔（也接受 JSON 对象）：
+
+```
+SPB_PREFERRED_HOSTS="api.example.com=api-v6.example.com"
+```
+
+- **留空即完全禁用**（不发起任何探测，零开销）——不配就是原来的行为；
+- 探测有 1.5s 超时，且与桌面能力初始化/深链监听**并发**，不叠加启动延迟；
+- 探测失败/超时/抛异常一律视为「不可达」，**绝不影响启动**；
+- 与微信小程序的逐请求 failover 不同：客户端只在**启动时**探一次并摊销
+  整个会话，不做运行期重探或断路器（机制说明见 `AGENTS.md` §5.1）。
+
+CI 里对应仓库 Variables `SPB_PREFERRED_HOSTS`（或手动触发时的
+`host_preferred` 输入）。
 
 CI 里这些值来自**仓库 Variables**（Settings → Secrets and variables → Actions →
 Variables），打 tag 即自动出包并挂到 Release。完整说明见
