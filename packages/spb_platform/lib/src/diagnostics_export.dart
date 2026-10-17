@@ -124,6 +124,7 @@ class DiagnosticsExporter {
 /// | `platform` / `os` | 否 | 平台名与内核版本（`Platform.operatingSystemVersion`） |
 /// | `env` | 否 | `dev`/`staging`/`prod` 短名 |
 /// | `api` / `ufs` / `oidc_issuer` | 否 | 服务地址。`env.dart` 已说明发布包的地址由 CI Variables 注入，而 Variables 在公开仓库里**本来就是公开的** |
+/// | `endpoint_host` / `endpoint_probe` | 否 | 启动探测选中的**主机名**与状态短名（`upgraded`/`kept`/`skipped`）。主机名与同组的 `api`/`ufs` 同源（就是它们 host 部分的副本），不含路径/查询串/凭证 |
 /// | `oidc_client_id` | 否 | `env.dart` 明写「client_id 是公开值（会出现在授权 URL 里）」 |
 /// | `verbose_log` / `release` | 否 | 布尔开关 |
 ///
@@ -150,8 +151,17 @@ Map<String, String> diagnosticsEnvironment() {
     'platform': SpbEnv.platformName,
     'os': Platform.operatingSystemVersion,
     'env': SpbEnv.environment,
-    'api': SpbEnv.apiBaseUrl,
-    'ufs': SpbEnv.ufsBaseUrl,
+    'api': SpbEndpoints.current.apiBaseUrl,
+    'ufs': SpbEndpoints.current.ufsBaseUrl,
+    // 端点选择的**结论**。只记 host 名与状态短名（非完整 URL）：
+    // 报告要回答的是「客户端到底连的哪个域名」，而完整 URL 里的路径与
+    // 查询串对排障无意义、却可能含用户标识。
+    //
+    // `chosenHost` 为 null 只出现在「未调用启动探测」的路径（如单元测试、
+    // 或 SPB_PREFERRED_HOSTS 留空 → `skipped`）——写「(未探测)」而不是空串，
+    // 否则报告里看起来像「这一行没生成出来」。
+    'endpoint_host': SpbEndpoints.current.chosenHost ?? '(未探测)',
+    'endpoint_probe': SpbEndpoints.current.probeOutcome.name,
     'oidc_issuer': SpbEnv.oidcIssuer,
     'oidc_client_id': SpbEnv.oidcClientId.isEmpty
         ? '（未配置）'

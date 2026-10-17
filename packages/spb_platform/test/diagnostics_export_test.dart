@@ -168,6 +168,49 @@ void main() {
       expect(env['platform'], isNotEmpty);
     });
 
+    test('环境信息含端点选择结论（endpoint_host / endpoint_probe）', () {
+      // 报告要能回答「客户端到底连的哪个域名」——否则用户报「连不上」时，
+      // 无法判断是不是探测把地址升级到了一个不可达的源站。
+      SpbEndpoints.resetForTest();
+      final env = diagnosticsEnvironment();
+
+      // 未探测：chosenHost 为 null → 写「(未探测)」而不是空串。
+      expect(env['endpoint_host'], '(未探测)');
+      expect(env['endpoint_probe'], 'skipped');
+    });
+
+    test('端点可达时报告里是 upgraded + preferred host', () async {
+      SpbEndpoints.resetForTest();
+      final compiledHost = Uri.parse(SpbEnv.apiBaseUrl).host;
+      await resolveEndpointsAtStartup(
+        preferred: <String, String>{compiledHost: 'v6.example.com'},
+        probe: (_, _, _) async => true,
+        timeout: const Duration(milliseconds: 5),
+      );
+
+      final env = diagnosticsEnvironment();
+      expect(env['endpoint_probe'], 'upgraded');
+      expect(env['endpoint_host'], 'v6.example.com');
+      // 报告里的 api 也应已是升级后的地址（两者必须一致，否则报障时
+      // 「连的哪个域名」这个问题会有两个互相矛盾的答案）。
+      expect(env['api'], contains('v6.example.com'));
+    });
+
+    test('端点不可达时报告里是 kept + 编译期 host', () async {
+      SpbEndpoints.resetForTest();
+      final compiledHost = Uri.parse(SpbEnv.apiBaseUrl).host;
+      await resolveEndpointsAtStartup(
+        preferred: <String, String>{compiledHost: 'v6.example.com'},
+        probe: (_, _, _) async => false,
+        timeout: const Duration(milliseconds: 5),
+      );
+
+      final env = diagnosticsEnvironment();
+      expect(env['endpoint_probe'], 'kept');
+      expect(env['endpoint_host'], compiledHost);
+      expect(env['api'], SpbEnv.apiBaseUrl);
+    });
+
     test('环境信息**不含**任何 token / secret 键', () {
       // 这是本功能的安全红线：报告会被用户贴进公开 issue。
       // 键名黑名单（而非白名单）在这里是刻意的——将来新增环境字段时，
