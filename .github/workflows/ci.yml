@@ -39,9 +39,9 @@ env:
 jobs:
   # ── 质量门禁：全包 analyze / format / layering / test ──────────────
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -203,7 +203,7 @@ jobs:
         run: bash tools/coverage.sh
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-lcov
           path: coverage/lcov.info
@@ -226,9 +226,9 @@ jobs:
 
   # ── Linux 桌面端出包（验证可构建 + 自包含）────────────────────────
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 编译 C++ runner 的最低需求 + **插件的编译期依赖**（AGENTS.md §7）。
       #
@@ -286,7 +286,7 @@ jobs:
           fi
           echo '✅ bundle 自包含'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-release
           path: apps/spb_desktop/build/linux/x64/release/bundle/
@@ -294,21 +294,16 @@ jobs:
 
   # ── Android APK ───────────────────────────────────────────────────
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
-        # ⚠️ 不能省略 packages：action 默认装 `tools platform-tools`，而 `tools` 包在
-        # cmdline-tools 16 已移除，会在 CI 上报 `Failed to find package 'tools'`
-        # （2026-10 GitHub runner 实测）。runner 已预装 Android SDK，只需 platform-tools。
-        with:
-          packages: platform-tools
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -323,7 +318,7 @@ jobs:
           cd apps/spb_mobile
           flutter build apk --release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: android-apk
           path: apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
@@ -334,7 +329,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -362,7 +357,7 @@ jobs:
       # 注意路径必须从**仓库根**写起：upload-artifact 的 path 相对 GITHUB_WORKSPACE，
       # 不继承上面 step 的 working-directory。写成 `build/...` 会静默传一个空目录
       # （v4 默认 warn 而非 fail），产物看似上传成功实则没有 exe。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows-release
           path: apps/spb_desktop/build/windows/x64/runner/Release/

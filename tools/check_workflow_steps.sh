@@ -87,8 +87,11 @@ else:
     else:
         uses = [s.get('uses', '') for s in steps]
 
-        if 'actions/download-artifact@v4' not in uses:
-            print(f'❌ {path}: release job 缺 actions/download-artifact@v4'
+        # 断言「有下载步骤」，**不绑主版本号**：这里要守的是「产物会被下载」
+        # 这个结构事实，不是某个具体版本。绑死版本会让升级 action 时
+        # 守卫误报（而误报的守卫很快会被加进忽略列表，反而失去保护）。
+        if not any(u.startswith('actions/download-artifact@v') for u in uses):
+            print(f'❌ {path}: release job 缺 actions/download-artifact@v*'
                   f'（产物不会被下载，gh release create 必失败）')
             failed = True
 

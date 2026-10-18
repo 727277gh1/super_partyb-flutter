@@ -87,7 +87,7 @@ jobs:
   # 设置页上。若地址不宜公开，改用 workflow_dispatch 输入：输入值不进设置页，
   # 且下面的日志只打印 set/unset、不打印值本身。
   config:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     outputs:
       api: ${{ steps.defines.outputs.api }}
       ufs: ${{ steps.defines.outputs.ufs }}
@@ -145,7 +145,7 @@ jobs:
     needs: config
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -229,7 +229,7 @@ jobs:
           if (-not (Test-Path $zip)) { throw 'zip 未生成' }
           Write-Host "已生成 $(Split-Path $zip -Leaf)（$([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB）"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows-x64
           path: spb_desktop-windows-x64.zip
@@ -238,9 +238,9 @@ jobs:
   # ── Linux x64（1× 配额）──────────────────────────────────────────
   linux:
     needs: config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 编译 C++ runner 的最低需求（AGENTS.md §7）。
       - name: Install build dependencies
@@ -306,7 +306,7 @@ jobs:
           tar -czf "$GITHUB_WORKSPACE/spb_desktop-linux-x64.tar.gz" spb_desktop
           ls -lh "$GITHUB_WORKSPACE/spb_desktop-linux-x64.tar.gz"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-x64
           path: spb_desktop-linux-x64.tar.gz
@@ -315,21 +315,16 @@ jobs:
   # ── Android APK（1× 配额）────────────────────────────────────────
   android:
     needs: config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
-        # ⚠️ 不能省略 packages：action 默认装 `tools platform-tools`，而 `tools` 包在
-        # cmdline-tools 16 已移除，会在 CI 上报 `Failed to find package 'tools'`
-        # （2026-10 GitHub runner 实测）。runner 已预装 Android SDK，只需 platform-tools。
-        with:
-          packages: platform-tools
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -396,7 +391,7 @@ jobs:
           cp "$src" spb_mobile-android.apk
           ls -lh spb_mobile-android.apk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: android-apk
           path: spb_mobile-android.apk
@@ -442,7 +437,7 @@ jobs:
     needs: config
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -508,7 +503,7 @@ jobs:
             "$GITHUB_WORKSPACE/spb_desktop-macos-universal.zip"
           ls -lh "$GITHUB_WORKSPACE/spb_desktop-macos-universal.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: macos-universal
           path: spb_desktop-macos-universal.zip
@@ -518,19 +513,19 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [windows, linux, android, macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
       # fetch-depth: 0 + fetch-tags 是**必须**的：下面的「本次变更」用
       # `git log <上一个 tag>..HEAD` 生成。默认 depth=1 且不带 tag，
       # 命令会退化成「列不出任何提交」或「找不到上一个 tag」——而那是
       # 静默的（release notes 少一段，没人会注意）。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           fetch-tags: true
 
       # 四端产物合并到同一目录；merge-multiple 让它们平铺而不是各自一层子目录。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           merge-multiple: true
 

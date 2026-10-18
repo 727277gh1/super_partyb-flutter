@@ -2272,7 +2272,7 @@ Dependabot 不生效（Gitea 用 Renovate）。保留仍值得：零成本、若
 | action | pin |
 |---|---|
 | `subosito/flutter-action` | `1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0` |
-| `android-actions/setup-android` | `9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2` |
+| `android-actions/setup-android` | `be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4` |
 
 官方 `actions/*` 保留 `@v4`：由 GitHub 维护，且 pin SHA 后 Dependabot 仍能升。
 Dependabot **认** `uses: x@<sha> # v2.23.0` 的写法，会把 SHA 与注释一并升级
@@ -2669,6 +2669,76 @@ Gitea 保留完整历史。
 - 脚本产物与手工推送的 GitHub HEAD **逐文件 diff 一致**（`diff -r --brief` 无输出）；
 - `--dry-run` 报「替换 2 处、涉及 2 个文件」+「23 条规则全部无残留」，
   与手工流程的数字完全一致。
+
+---
+
+### 6.30 CI 基础镜像固定与 action 运行时升级
+
+#### 一、`ubuntu-latest` → `ubuntu-24.04`（**必做**，否则会随机变红）
+
+GitHub 官方公告（`actions/runner-images#14748`）：`ubuntu-latest` 自
+**2026-10-19 起滚动数周**切到 Ubuntu 26.04，11-19 完成。
+
+**为什么这条必须处理**：`ubuntu-latest` 会在某个**不可预测的时刻**翻转。
+同一份代码今天绿、下周某次 push 莫名红——而且红在 `apt-get install` 或
+CMake 链接阶段，报错指向系统库而不是我们的代码。
+
+我们依赖的、Ubuntu 26 可能变化的点：
+
+| 依赖 | 风险 |
+|---|---|
+| `libkeybinder-3.0-dev` / `libayatana-appindicator3-dev` | 第三方包，可能改名或消失 |
+| `libglu1-mesa-dev` | 老包，历来是迁移牺牲品 |
+| `patchelf` 修的 RUNPATH | glibc 换代后 loader 行为可能变 |
+
+故 7 处 `runs-on: ubuntu-latest` 全部钉为 `ubuntu-24.04`（LTS，官方明确仍可用）。
+**固定版本才能让 CI 结果可复现**——与「锁 Flutter 3.47.5」同一取向。
+
+> 等 Ubuntu 26 生态稳定、或我们主动验证过依赖齐全，再改成 `ubuntu-26.04`
+> （**不是**改回 `ubuntu-latest`：那会再次把不确定性引回来）。
+
+#### 二、action 运行时 node20 → node24
+
+GitHub 用 `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` 强制 node20 的 action 跑在
+node24 上，故**功能正常、只是警告**。但这是临时兜底，某天移除后 node20
+action 会直接失败。
+
+升级时选了**每个 action 首次支持 node24 的最低版本**（最小变更原则，
+避免顺带引入无关 breaking）：
+
+| action | 旧 | 新 | 选择依据 |
+|---|---|---|---|
+| `actions/checkout` | v4 | **v5** | v5 是首个 node24；v6/v7 的 breaking 只涉 `pull_request_target`（本仓零使用） |
+| `actions/upload-artifact` | v4 | **v6** | v6 是首个**默认** node24（v5 仅预备支持、默认仍 node20） |
+| `actions/download-artifact` | v4 | **v7** | v7 是首个 node24；**特意避开 v8**——v8 把 digest 不匹配从「警告」改为「直接失败」（新的破坏性默认值） |
+| `actions/setup-java` | v4 | **v6** | 官方已明确「v1–v4 deprecated」，该直接升 v6；我们用 `distribution`+`java-version`，未碰 v5/v6 改名的 `jdkFile`/GPG 选项 |
+| `android-actions/setup-android` | v3.2.2 | **v4.0.4** | v4.0.4 changelog 正是「Fix for removed tools package」 |
+| `subosito/flutter-action` | v2.23.0 | **不变** | 它是 `using: composite`，**不跑 Node**，无需升级 |
+
+#### 三、顺带删掉 `packages: platform-tools` 补丁
+
+上一轮为绕过「`tools` 包被 cmdline-tools 16 移除」加的 `packages: platform-tools`
+已可删：`setup-android@v4` 的 `action.yml` 里 `packages` **默认值就是**
+`platform-tools`，即 v4 内置了这个修复。
+
+#### 四、守卫不能绑死 action 主版本号
+
+`check_workflow_steps.sh` 原本断言 `'actions/download-artifact@v4' not in uses`。
+升到 v7 后它会误报。
+
+**改法**：断言 `any(u.startswith('actions/download-artifact@v'))`。这里要守的是
+「release job 有下载步骤」这个**结构事实**，不是某个具体版本。
+
+> 绑死版本的守卫很快会被加进忽略列表——而误报的守卫比没有守卫更危险
+> （§6.17 的同一教训）。
+
+#### 反向验证（实测）
+
+- 两个 workflow 的 YAML 语法：`yaml.safe_load` 通过；
+- `check_workflow_steps` + 自测（5 条）全绿——证明版本断言改宽后仍能
+  抓住「download-artifact 被注释吞掉」那个历史缺陷形态；
+- `check_agents_refs` / `check_format` 通过；
+- 全仓 `uses:` 无残留 `@v4`（`grep -c` 为 0）。
 
 ---
 
