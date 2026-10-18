@@ -161,6 +161,7 @@ super_partyb-flutter/
     ├── coverage.sh                 # 逐包覆盖率采集 + 汇总表（剔除生成代码）
     ├── bundle_linux_deps.sh        # Linux 分发包依赖打包（非系统库 + RUNPATH）
     ├── reverse_verify_issue50.sh   # 双栈降级/升级的变异验证（就地改代码再还原，见 §5.1.1）
+    ├── sync-to-github.sh           # 导出 HEAD 为单提交干净仓库并推 GitHub（值无关，见 §6.29）
     └── scrub-history.sh            # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
 ```
 
@@ -2609,6 +2610,65 @@ issue 要求逐项给出结论。实际核实后：**除了新查出的 `groupCo
 `ChatTurn.fromJson` 把 `created_at` 做了 **`.toLocal()`**（与 `spb_models`
 其余模型一致）。故断言时间不能写 `expect(t.createdAt, DateTime.utc(...))`
 ——本机是 UTC+8，实际得到 `16:09:10`。要写 `expect(t.createdAt.toUtc(), DateTime.utc(...))`。
+
+---
+
+### 6.29 开源镜像同步（`tools/sync-to-github.sh`）
+
+权威源是 **Gitea**（完整历史 + blame）。GitHub 上另有一份**公开镜像**，用 squash
+方案导出：只含「恰好 HEAD 这一棵树」，一条提交。
+
+```bash
+export SPB_OS_MAP="$HOME/.config/spb-flutter/opensource-map.env"
+export SPB_OS_EXTRA_RULES="$HOME/.config/spb-flutter/extra-rules.txt"
+export SPB_GITHUB_REMOTE="git@github.com:<owner>/<repo>.git"
+
+bash tools/sync-to-github.sh --verify    # 只校验当前树是否已干净
+bash tools/sync-to-github.sh --dry-run   # 预演：报替换处数，不推送
+bash tools/sync-to-github.sh             # 执行（force-push）
+```
+
+#### 为什么是 squash 而不是重写历史
+
+Gitea 历史含生产部署标识。把它们从**历史**里清掉需重写所有提交哈希
+（`tools/scrub-history.sh`），而 Gitea 是权威源，不该为了一次镜像而改写。
+`git archive HEAD` 只导出当前树，用一条新提交承载：GitHub 看到干净的现状，
+Gitea 保留完整历史。
+
+#### ⚠️ 代价（务必知晓）
+
+| 代价 | 后果 |
+|---|---|
+| 历史全丢 | GitHub 上永远只有一条提交，`git blame` / `git log -p` 退化为单条；`release.yml` 的「由 `git log` 生成发布说明」在镜像上无意义 |
+| 两边无共同祖先 | GitHub 那份是**孤立仓库**。**绝不**把 Gitea 合并进来或反向拉取——两个无关联历史的合并极难收拾 |
+| 每次都是 force-push | GitHub 历史每次被整体替换，有人在那边开 PR 会被打断（故它只适合「只读镜像」） |
+
+#### 为什么脚本里没有任何真实值
+
+与 `scrub-history.sh` 同一取向：本脚本会入库、会被公开。若把「真实值 → 占位符」
+的映射（或真实值的任何片段）写进脚本，同步本身就**成了泄露渠道**。故真实值与
+规则**全部**来自仓库外的映射文件，脚本里只出现变量名与文件名。
+
+规则文件是**两份**：
+
+| 文件 | 内容 |
+|---|---|
+| `$SPB_OS_MAP` | 11 个 `SPB_REAL_*` 变量 + 对应 `*_PLACEHOLDER`（与 `scrub-history.sh` 共用同一份） |
+| `$SPB_OS_EXTRA_RULES` | 映射表装不下的形态（`查找==>替换`），如「主机名嵌在一整条 SSH URL 里」 |
+
+#### 两个易写错的点
+
+1. **必须跳过二进制**。本仓库有 44 个 golden 基线 PNG，是**逐字节比对**的；
+   用 `perl -i` 之类的文本工具处理会损坏文件。故一律用 `grep -I` 筛出文本文件。
+2. **规则行要跳过 `#` 注释**。`extra-rules.txt` 里为可读性写了注释行；
+   不跳过会把 `# 内网 Gitea 端点…` 当成「查找串」（实测踩过：产物多出无意义替换）。
+
+#### 反向验证（实测）
+
+- `--verify` 在未清理的树上报告残留（实测 2 条规则 / 2 个文件）；
+- 脚本产物与手工推送的 GitHub HEAD **逐文件 diff 一致**（`diff -r --brief` 无输出）；
+- `--dry-run` 报「替换 2 处、涉及 2 个文件」+「23 条规则全部无残留」，
+  与手工流程的数字完全一致。
 
 ---
 
