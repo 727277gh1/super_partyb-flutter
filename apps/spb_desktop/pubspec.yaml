@@ -51,7 +51,7 @@ dependencies:
   # ---- 凭证安全存储（Keychain / libsecret / DPAPI）----
   flutter_secure_storage: ^9.2.2
 
-  cupertino_icons: ^1.0.8
+  cupertino_icons: ^2.0.0
 
 dev_dependencies:
   flutter_test:

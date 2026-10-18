@@ -45,7 +45,7 @@ dependencies:
   path: ^1.9.0
   url_launcher: ^6.3.1
 
-  cupertino_icons: ^1.0.8
+  cupertino_icons: ^2.0.0
   app_links: ^7.2.1
 
 dev_dependencies:
