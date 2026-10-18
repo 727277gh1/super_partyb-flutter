@@ -1,0 +1,92 @@
+# 依赖自动更新配置（issue #47）。
+#
+# ## 为什么需要它
+#
+# `pubspec.lock` 有 189 个包，`tools/check_unused_deps.sh` 与 CI 的
+# `--enforce-lockfile` 只保证「锁得住」，**不保证会升级**——安全补丁只能靠人
+# 想起来。这条配置让 GitHub 每周开 PR 提依赖升级。
+#
+# ## ⚠️ 前提：本文件只在 GitHub 上生效
+#
+# 本仓库的**权威远端是 Gitea**（`git@<gitea-host>:dever/super_partyb-flutter`），
+# 而 `.github/workflows/*.yml` 是为 GitHub Actions 写的（`release.yml` 的
+# macOS job 需要 GitHub 的 macOS runner）。若 CI 实际跑在 Gitea Actions 上，
+# **Dependabot 不生效**——Gitea 用 Renovate 或 `renovate.json`。
+#
+# 保留本文件仍然值得：① 它零成本（不生效也无害）；② 若将来镜像到 GitHub
+# （或 Gitea 支持读 dependabot.yml）即刻生效；③ 它本身就是「升级策略」的
+# 书面记录。若确认只在 Gitea 跑，请把 `pub` 段的 `schedule` 抄进
+# `renovate.json`（见文件末的说明）。
+#
+# ## 为什么 pub 只开 weekly + 限制 PR 数
+#
+# Pub Workspaces 是**单一 lockfile**（根 `pubspec.lock`，11 个成员包共享）。
+# 一次 `pub upgrade` 可能牵动几十个传递依赖，拆成多个 PR 会让每个 PR 都
+# 无法独立通过 CI（互相依赖）。故：
+#
+# - `open-pull-requests-limit: 5`：避免一次开几十个 PR 淹没 review；
+# - `versioning-strategy: increase-if-necessary`：**不**主动放宽 `pubspec.yaml`
+#   里的约束（本仓库的约束是刻意选的，如 `flutter: ">=3.47.0"` 对齐 CI 的
+#   `FLUTTER_VERSION`）。只在「现有约束无法装新版本」时才改约束。
+#
+# ## ⚠️ Dependabot 对 `resolution: workspace` 的支持需实测
+#
+# 根 `pubspec.yaml` 用了 Dart Pub Workspaces（`workspace:` 列出 11 个成员，
+# 每个成员声明 `resolution: workspace`）。Dependabot 的 `pub` ecosystem 对
+# 该特性的支持**未经验证**——若它不认，会报「无法解析依赖」而静默不开 PR。
+#
+# 那时退化为「只升 github-actions」（下面第二段）也比完全没有好：action 的
+# 供应链风险（见下）比依赖陈旧更紧迫。
+version: 2
+updates:
+  # ── Dart / Flutter 依赖 ────────────────────────────────────────────
+  - package-ecosystem: pub
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    # 让 PR 带上标签，便于在 Gitea/GitHub 里筛选。
+    labels:
+      - dependencies
+    commit-message:
+      # Conventional Commits（见 AGENTS.md §12）。
+      prefix: 'chore'
+      include: scope
+    groups:
+      # 把「同一批 Flutter 生态」的补丁级更新合成一个 PR——单 lockfile 下
+      # 它们本就会一起解析，分开反而互相阻塞。
+      flutter-patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+        patterns:
+          - 'flutter*'
+          - 'dart*'
+
+  # ── GitHub Actions ─────────────────────────────────────────────────
+  #
+  # ⚠️ 与 issue #47 第三节相关：第三方 action（`subosito/flutter-action`、
+  # `android-actions/setup-android`）已 **pin 到 commit SHA**（tag 可被移动，
+  # 是供应链风险）；官方 `actions/*` 保留 `@v4`（GitHub 维护）。
+  #
+  # Dependabot **认** `uses: x@<sha> # v2.23.0` 这种写法：它会开 PR 把 SHA
+  # 与后面的注释一并升级（官方文档："Dependabot will also update the comment"）。
+  # 故 pin SHA 不会让 action 变成永久不升级的死区。
+  #
+  # 这里先用 monthly：action 的 major 升级常带 breaking（如 `checkout@v4`
+  # → `v5` 改了默认 `fetch-depth`），需要人工读 changelog。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: 'chore'
+      include: scope

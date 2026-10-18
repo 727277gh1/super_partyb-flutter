@@ -1,0 +1,644 @@
+# 发布流水线：产出可直接下载运行的安装包（Windows / Linux / macOS / Android）
+#
+# ## 为什么单独一个文件，而不是塞进 ci.yml
+#
+# `ci.yml` 的职责是**验证**（analyze/test/能否构建），产物只在 Actions 页
+# 存 7 天且必须登录才能下载；本文件的职责是**交付**（挂到 GitHub Release 上
+# 免登录长期可下载）。两者触发条件、保留期、失败语义都不同：CI 挂了说明
+# 代码有问题，Release 挂了只说明出包环节有问题，不该互相阻断。
+#
+# ## 触发方式
+#
+# 1. **打 tag**（`git push <remote> v0.1.0`）→ 四端出包并创建 Release，
+#    全部作为 Release asset 长期可下载。
+# 2. **手动**（Actions → release → Run workflow）→ 出 Windows/Linux/Android
+#    的 Actions artifact（存 30 天），用来验证「构建参数改了之后能不能跑」
+#    而不必打 tag。
+#
+# ## 配额
+#
+# | 平台 | 计费倍数 | 本流水线何时跑 |
+# |---|---|---|
+# | linux / android | 1× | tag + 手动 |
+# | windows | 2× | tag + 手动 |
+# | **macos** | **10×** | **仅 tag**（PR/手动不跑，避免烧额度） |
+#
+# macOS 的 10× 是硬成本：私有仓库 Free 计划 2,000 分钟/月，单次 macOS
+# 构建约 15 分钟即消耗 150 分钟额度。
+#
+# ## 为什么锁 windows-2022 / macos-14 而不是 latest
+#
+# runner 版本漂移会带走 VS / Xcode / SDK 版本，出包结果不可复现。发布
+# 流水线对「可复现」的要求高于「用最新」。
+#
+# ## 没有 iOS
+#
+# iOS 必须用 Apple Developer 账号（$99/年）签名 + 描述文件，无法像
+# macOS 那样 ad-hoc 签名凑合（见 macos job 的说明）。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: 'PartyB Go API 基地址（含网关前缀，如 https://api.example.com/pba）'
+        required: false
+        type: string
+      ufs_base_url:
+        description: 'UFS 文件服务基地址（如 https://api.example.com/ufs）'
+        required: false
+        type: string
+      oidc_issuer:
+        description: 'OIDC issuer（IdP 基地址，含 basePath）'
+        required: false
+        type: string
+      oidc_client_id:
+        description: 'OIDC client_id（留空则登录不可用，其余功能正常）'
+        required: false
+        type: string
+      host_preferred:
+        description: 'IPv6/IPv4 双栈端点别名表（形如 api-v6.example.com=api.example.com，留空即禁用探测）'
+        required: false
+        type: string
+
+# 创建 Release 需要写权限；其余权限全部收窄（最小权限原则）。
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.47.5'
+
+jobs:
+  # ── 解析构建参数（各平台 job 共用同一份结果）──────────────────────
+  #
+  # 优先级：workflow_dispatch 输入 > 仓库 Variables > 代码内置默认值。
+  #
+  # WHY 用 Variables 而不是硬编码：这些地址是**部署方**的属性，不是代码的
+  # 属性。仓库 fork 出去之后，构建者应该能在 Settings → Variables 里改掉
+  # 而不必改 workflow 文件。OIDC client_id 同理——它虽是可公开的值（会出现
+  # 在授权 URL 里），但写死会让 fork 出来的包指向原作者的 IdP。
+  #
+  # ⚠️ **公开仓库里 `vars` 是全局可见的**（与 secrets 不同）。不要把内网
+  # 主机名 / 未公开域名填进 Variables——那些值会出现在任何人都能读到的仓库
+  # 设置页上。若地址不宜公开，改用 workflow_dispatch 输入：输入值不进设置页，
+  # 且下面的日志只打印 set/unset、不打印值本身。
+  config:
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    outputs:
+      api: ${{ steps.defines.outputs.api }}
+      ufs: ${{ steps.defines.outputs.ufs }}
+      iss: ${{ steps.defines.outputs.iss }}
+      cid: ${{ steps.defines.outputs.cid }}
+      host_pref: ${{ steps.defines.outputs.host_pref }}
+    steps:
+      - name: Resolve build defines
+        id: defines
+        # 一律走 env 而非把 `${{ }}` 直接插进脚本：插值发生在 shell 解析之前，
+        # 地址里的引号/分号会把命令拼坏（乃至变成命令注入）。workflow_dispatch
+        # 只有写权限成员能触发，但仍不该依赖调用方的输入卫生。
+        env:
+          IN_API: ${{ inputs.api_base_url }}
+          IN_UFS: ${{ inputs.ufs_base_url }}
+          IN_ISS: ${{ inputs.oidc_issuer }}
+          IN_CID: ${{ inputs.oidc_client_id }}
+          IN_HPREF: ${{ inputs.host_preferred }}
+          VAR_API: ${{ vars.SPB_API_BASE_URL }}
+          VAR_UFS: ${{ vars.SPB_UFS_BASE_URL }}
+          VAR_ISS: ${{ vars.SPB_OIDC_ISSUER }}
+          VAR_CID: ${{ vars.SPB_OIDC_CLIENT_ID }}
+          VAR_HPREF: ${{ vars.SPB_PREFERRED_HOSTS }}
+        run: |
+          set -euo pipefail
+          pick() { if [ -n "$1" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
+
+          api=$(pick "$IN_API" "$VAR_API")
+          ufs=$(pick "$IN_UFS" "$VAR_UFS")
+          iss=$(pick "$IN_ISS" "$VAR_ISS")
+          cid=$(pick "$IN_CID" "$VAR_CID")
+          # 端点别名表：编译期默认地址是「一定可达」的那个（CDN），运行期
+          # 探测 preferred 源站域名，可达才升级。留空 → 客户端完全不探测。
+          hpref=$(pick "$IN_HPREF" "$VAR_HPREF")
+
+          # 逐个写而非拼一个 here-string：值里若含换行会破坏 GITHUB_OUTPUT 的
+          # `key=value` 行格式，故先单行化。
+          write_out() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')" >> "$GITHUB_OUTPUT"; }
+          write_out api "$api"
+          write_out ufs "$ufs"
+          write_out iss "$iss"
+          write_out cid "$cid"
+          write_out host_pref "$hpref"
+
+          # 只打印「配没配」，不打印值本身——地址可能含内网主机名，且 Actions
+          # 日志会长期留档。
+          echo "API  base   : $([ -n "$api" ] && echo set || echo 'unset (默认 127.0.0.1:8000)')"
+          echo "UFS  base   : $([ -n "$ufs" ] && echo set || echo 'unset (默认 127.0.0.1:9000/ufs)')"
+          echo "OIDC issuer : $([ -n "$iss" ] && echo set || echo unset)"
+          echo "OIDC cid    : $([ -n "$cid" ] && echo set || echo 'unset (登录不可用，其余功能正常)')"
+          echo "Host pref   : $([ -n "$hpref" ] && echo set || echo 'unset (不探测，固定用编译期地址)')"
+
+  # ── Windows x64（2× 配额）────────────────────────────────────────
+  windows:
+    needs: config
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # 只把**非空**的 define 传给 flutter：空串会覆盖掉 SpbEnv 里的
+      # defaultValue，让「没配」变成「配成了空」——例如 apiBaseUrl 会从
+      # http://127.0.0.1:8000 变成 ''，所有请求都打到空地址。
+      - name: Build Windows release
+        shell: pwsh
+        working-directory: apps/spb_desktop
+        # 走 env 而不是把值直接插进脚本：地址里若含引号/空格会把命令拼坏
+        # （GitHub 的 `${{ }}` 插值在 shell 之前发生，没有转义）。
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          $defines = @()
+          if ($env:DEF_API) { $defines += "--dart-define=SPB_API_BASE_URL=$env:DEF_API" }
+          if ($env:DEF_UFS) { $defines += "--dart-define=SPB_UFS_BASE_URL=$env:DEF_UFS" }
+          if ($env:DEF_ISS) { $defines += "--dart-define=SPB_OIDC_ISSUER=$env:DEF_ISS" }
+          if ($env:DEF_CID) { $defines += "--dart-define=SPB_OIDC_CLIENT_ID=$env:DEF_CID" }
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          if ($env:DEF_HOST) { $defines += "--dart-define=SPB_PREFERRED_HOSTS=$env:DEF_HOST" }
+          $defines += '--dart-define=SPB_ENV=prod'
+
+          Write-Host "flutter build windows --release $($defines -join ' ')"
+          flutter build windows --release @defines
+
+      # VC++ 运行库不在产物里（AGENTS.md §8 坑 1），必须手动拷。
+      - name: Bundle VC++ runtime
+        shell: pwsh
+        working-directory: apps/spb_desktop
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $crt) { throw "找不到 Microsoft.VC143.CRT（VS 版本或工作负载变了？）" }
+          Copy-Item "$($crt.FullName)\*.dll" build\windows\x64\runner\Release\ -Force
+
+          $required = @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+          $have = Get-ChildItem build\windows\x64\runner\Release\*.dll | Select-Object -ExpandProperty Name
+          foreach ($dll in $required) {
+            if ($have -notcontains $dll) { throw "产物缺 $dll——目标机会闪退，出包中止" }
+          }
+          Write-Host "已打入运行库：$($have -join ', ')"
+
+      - name: Verify and package
+        shell: pwsh
+        run: |
+          $bundle = Resolve-Path 'apps\spb_desktop\build\windows\x64\runner\Release'
+          foreach ($f in @('spb_desktop.exe', 'flutter_windows.dll')) {
+            if (-not (Test-Path (Join-Path $bundle $f))) { throw "产物缺 $f" }
+          }
+          $size = [math]::Round((Get-ChildItem $bundle -Recurse | Measure-Object Length -Sum).Sum / 1MB, 1)
+          Write-Host "bundle 大小：$size MB"
+
+          $zip = Join-Path $PWD 'spb_desktop-windows-x64.zip'
+          if (Test-Path $zip) { Remove-Item $zip }
+
+          # 用 7z 而非 Compress-Archive：后者对几万个文件（Flutter 的 data/
+          # 目录）慢一个数量级，且中文路径下偶发失败。7z 在 windows runner
+          # 上预装；万一将来镜像去掉，退回 Compress-Archive 而不是整个失败。
+          if (Get-Command 7z -ErrorAction SilentlyContinue) {
+            # 在 bundle 目录内打包，让 zip 根目录就是 exe 所在层——用户解压后
+            # 直接双击，不需要再进一层。
+            Push-Location $bundle
+            try { & 7z a -tzip -mx=7 $zip . | Out-Null } finally { Pop-Location }
+          } else {
+            Write-Warning '7z 不可用，退回 Compress-Archive（较慢）'
+            Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $zip
+          }
+
+          if (-not (Test-Path $zip)) { throw 'zip 未生成' }
+          Write-Host "已生成 $(Split-Path $zip -Leaf)（$([math]::Round((Get-Item $zip).Length / 1MB, 1)) MB）"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64
+          path: spb_desktop-windows-x64.zip
+          retention-days: 30
+
+  # ── Linux x64（1× 配额）──────────────────────────────────────────
+  linux:
+    needs: config
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    steps:
+      - uses: actions/checkout@v5
+
+      # 编译 C++ runner 的最低需求（AGENTS.md §7）。
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build Linux release
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          set -euo pipefail
+          cd apps/spb_desktop
+          # 只传非空 define（理由同 Windows job）。
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build linux --release "${args[@]}"
+
+      # 必须打包非系统库（否则 RUNPATH 指向构建机路径，分发即挂，AGENTS.md §7）。
+      # CI 用系统 GTK，keybinder 在 Ubuntu 上是 apt 包，ldconfig 能找到；
+      # patchelf 不在默认镜像里，先装。
+      - name: Bundle native dependencies
+        run: |
+          sudo apt-get install -y patchelf
+          bash tools/bundle_linux_deps.sh
+
+      # 自包含验证：ldd 不得缺库，RUNPATH 不得指向 /home。
+      - name: Verify bundle is self-contained
+        run: |
+          cd apps/spb_desktop/build/linux/x64/release/bundle
+          if ldd spb_desktop | grep 'not found'; then
+            echo "❌ 缺动态库"; exit 1
+          fi
+          if find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \; ; then
+            echo "❌ RUNPATH 仍指向构建机 /home 路径"; exit 1
+          fi
+          echo "✅ bundle 自包含"
+
+      - name: Package tar.gz
+        run: |
+          set -euo pipefail
+          cd apps/spb_desktop/build/linux/x64/release
+          # 顶层目录名固定，解压后不会散落一地。
+          mv bundle spb_desktop
+          tar -czf "$GITHUB_WORKSPACE/spb_desktop-linux-x64.tar.gz" spb_desktop
+          ls -lh "$GITHUB_WORKSPACE/spb_desktop-linux-x64.tar.gz"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-x64
+          path: spb_desktop-linux-x64.tar.gz
+          retention-days: 30
+
+  # ── Android APK（1× 配额）────────────────────────────────────────
+  android:
+    needs: config
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # 可选签名：配了 secrets 就签正式包，没配则 build.gradle.kts 回退到
+      # debug 签名并打印醒目警告（见该文件顶部注释的取舍说明）。
+      # 公开仓库里 secrets 不会被访客读到，但仍建议只在确实要上架时配置。
+      - name: Configure release signing (optional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "未配置 ANDROID_KEYSTORE_BASE64 —— 将产出 debug 签名的 APK（不可上架）"
+            exit 0
+          fi
+          cd apps/spb_mobile/android
+          # base64 单行展开成二进制 keystore。用 tr -d 去掉可能的换行，
+          # 否则 base64 -d 会在换行处报 invalid input。
+          printf '%s' "$KEYSTORE_BASE64" | tr -d '\r\n' | base64 -d > upload-keystore.jks
+          # 用 printf 而非 heredoc：密码里若含 $ 或反引号会被 shell 展开。
+          {
+            printf 'storeFile=upload-keystore.jks\n'
+            printf 'storePassword=%s\n' "$STORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+          } > key.properties
+          chmod 600 key.properties upload-keystore.jks
+          echo "已写入签名配置（值不打印）"
+
+      - name: Build APK (release)
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          set -euo pipefail
+          cd apps/spb_mobile
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build apk --release "${args[@]}"
+
+      - name: Rename APK
+        run: |
+          set -euo pipefail
+          src=apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
+          [ -f "$src" ] || { echo "❌ 未找到 $src"; exit 1; }
+          cp "$src" spb_mobile-android.apk
+          ls -lh spb_mobile-android.apk
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: android-apk
+          path: spb_mobile-android.apk
+          retention-days: 30
+
+  # ── macOS（10× 配额！）────────────────────────────────────────────
+  #
+  # ## 为什么单独说明计费
+  #
+  # GitHub Actions 的 macOS runner 按 **10× 分钟**计费（Windows 2×，
+  # Linux/Android 1×）。私有仓库 Free 计划 2,000 分钟/月，单次 macOS
+  # 构建（约 15 分钟）就吃掉 150 分钟额度。故本 job 只在 **tag 触发**
+  # 时跑，PR 与普通 push 不跑（workflow_dispatch 手动触发不受此限，
+  # 用于验证构建参数）。
+  #
+  # ## 为什么锁 macos-14
+  #
+  # 与 windows-2022 同理：runner 版本漂移会带走 Xcode / macOS SDK 版本，
+  # 出包不可复现。macos-14 预装 Xcode 15/16，满足 Flutter 3.47.5 的要求。
+  #
+  # ## 为什么不需要签名证书
+  #
+  # Flutter 的 macOS 模板在 project 级设了 `CODE_SIGN_IDENTITY = "-"`
+  # （ad-hoc 签名）。ad-hoc 签名**不需要** Apple Developer 账号或证书，
+  # 且 Apple Silicon **强制要求**二进制至少被 ad-hoc 签过——所以不能像
+  # iOS 那样「完全跳过签名」（那样产物在 M 系列芯片上根本起不来）。
+  #
+  # 代价：产物未用 Developer ID 签名、也未公证，用户首次打开会被
+  # Gatekeeper 拦下，需手动绕过（见 Release 说明与 docs）。要免除这一步
+  # 必须买 Apple Developer 账号（$99/年）做签名 + 公证。
+  #
+  # ## 为什么用 ditto 而不是 zip
+  #
+  # `.app` 是个**目录**，内含符号链接（Frameworks 里大量使用）与
+  # 可执行位。`zip` 会把符号链接存成普通文件、丢掉权限位，解压后 app
+  # 启动即崩（签名校验失败）。`ditto -c -k --keepParent` 是 Apple 官方
+  # 推荐的打包方式，能完整保留这些元数据。
+  macos:
+    # 仅 tag 触发。手动 workflow_dispatch 时**不**跑：macOS 是 10× 计费，
+    # 而手动的用途是「验构建参数」，Windows/Linux/Android 已足够覆盖
+    # Dart 层参数是否生效。真要手验 macOS 就临时改这一行。
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: config
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # Release 构建默认产出 **universal**（arm64 + x86_64）二进制，
+      # 无需显式指定 ARCHS。单个产物同时支持 Intel 与 Apple Silicon。
+      - name: Build macOS release
+        working-directory: apps/spb_desktop
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          set -euo pipefail
+          # 只传非空 define（理由同 Windows job：空串会覆盖 defaultValue）。
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          # 端点别名表（IPv6/IPv4 双栈选择）。留空则客户端完全不探测。
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build macos --release "${args[@]}"
+
+      # 校验产物确实存在、且签名有效，再打包。
+      # `codesign -v` 失败说明签名环节出了问题——这种包发出去必然起不来，
+      # 不如在这里就失败。
+      - name: Verify app bundle
+        working-directory: apps/spb_desktop
+        run: |
+          set -euo pipefail
+          APP=build/macos/Build/Products/Release/spb_desktop.app
+          [ -d "$APP" ] || { echo "❌ 未找到 $APP"; exit 1; }
+          [ -x "$APP/Contents/MacOS/spb_desktop" ] || { echo "❌ 缺可执行文件"; exit 1; }
+
+          echo "=== 架构 ==="
+          lipo -archs "$APP/Contents/MacOS/spb_desktop"
+
+          echo "=== 签名校验 ==="
+          codesign --verify --deep --strict --verbose=1 "$APP" || {
+            echo "❌ 签名校验失败（产物无法启动）"; exit 1;
+          }
+
+          echo "=== 体积 ==="
+          du -sh "$APP"
+
+      # ditto 保留符号链接与权限位（见本 job 顶部说明）。
+      - name: Package zip
+        working-directory: apps/spb_desktop/build/macos/Build/Products/Release
+        run: |
+          set -euo pipefail
+          # --keepParent 让 zip 内保留 spb_desktop.app 这一层，
+          # 用户解压后直接得到 app 包，而不是散落的 Contents/。
+          ditto -c -k --keepParent spb_desktop.app \
+            "$GITHUB_WORKSPACE/spb_desktop-macos-universal.zip"
+          ls -lh "$GITHUB_WORKSPACE/spb_desktop-macos-universal.zip"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos-universal
+          path: spb_desktop-macos-universal.zip
+          retention-days: 30
+
+  # ── 汇总发布（仅 tag 触发）──────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, linux, android, macos]
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    steps:
+      # fetch-depth: 0 + fetch-tags 是**必须**的：下面的「本次变更」用
+      # `git log <上一个 tag>..HEAD` 生成。默认 depth=1 且不带 tag，
+      # 命令会退化成「列不出任何提交」或「找不到上一个 tag」——而那是
+      # 静默的（release notes 少一段，没人会注意）。
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # 四端产物合并到同一目录；merge-multiple 让它们平铺而不是各自一层子目录。
+      - uses: actions/download-artifact@v7
+        with:
+          merge-multiple: true
+
+      # 断言四个产物都在，再交给 gh release create。
+      #
+      # WHY 不能只 `ls -lh`：download-artifact 缺失/改名时它只打印空目录，
+      # 直到最后一步 gh release create 才报「文件不存在」，错误指向的是**结果**
+      # 而不是原因。这里提前失败并点名缺哪个（与 Windows job 的
+      # `if (-not (Test-Path ...)) { throw }` 同一取向）。
+      - name: Verify assets
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in spb_desktop-windows-x64.zip spb_desktop-linux-x64.tar.gz \
+                   spb_desktop-macos-universal.zip spb_mobile-android.apk; do
+            if [ -f "$f" ]; then
+              echo "✅ $f"
+            else
+              echo "❌ 缺产物 $f"; missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || { echo "产物不全，出包中止"; exit 1; }
+          ls -lh
+
+      # 写成文件再用 --notes-file：内联 here-string 要同时过 YAML 缩进、
+      # shell 的 $ 插值、gh 的转义三关，很容易静默产生错的 Release 正文。
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          cat > RELEASE_NOTES.md <<'EOF'
+          Super PartyB 客户端发布包。
+
+          ## 下载
+
+          | 平台 | 文件 | 运行方式 |
+          |---|---|---|
+          | Windows 10/11 x64 | `spb_desktop-windows-x64.zip` | 解压后双击 `spb_desktop.exe` |
+          | Linux x64 | `spb_desktop-linux-x64.tar.gz` | 解压后运行 `spb_desktop/spb_desktop` |
+          | macOS 12+（通用） | `spb_desktop-macos-universal.zip` | 解压后把 `spb_desktop.app` 拖进「应用程序」 |
+          | Android | `spb_mobile-android.apk` | 传到手机安装（需允许「未知来源」） |
+
+          **Windows 已内置 VC++ 运行库**，无需额外安装。
+          未做代码签名，首次运行会被 SmartScreen 拦下——选「更多信息 → 仍要运行」。
+
+          Linux 包已内嵌非系统依赖库（keybinder 等），无需 apt 安装。
+          若仍缺 GTK/GL 相关系统库，按发行版装 `libgtk-3-0` / `libglu1-mesa`。
+
+          ### macOS 首次运行
+
+          macOS 包是 **ad-hoc 签名**（无 Apple Developer 证书、未公证），
+          首次打开会被 Gatekeeper 拦下。二选一：
+
+          - 右键点 app → 「打开」→ 在弹窗里再点「打开」（只需一次）
+          - 或终端执行：`xattr -dr com.apple.quarantine /Applications/spb_desktop.app`
+
+          ## 已知限制
+
+          - **未做代码签名**（Windows / Android / macOS）：会弹 SmartScreen、
+            「未知来源」或 Gatekeeper 提示
+          - **无自动更新**：升级需重新下载
+          - **无 iOS 包**：需 Apple Developer 账号（$99/年）与签名证书
+          - Android 包若未配置签名 secrets，则为 **debug 签名**，仅供测试安装，
+            不可上架、不可覆盖安装正式包
+
+          ## 本次变更
+
+          EOF
+
+          # 变更列表由 git 生成而非手写：CHANGELOG.md 每版都要人工同步，
+          # 忘了就腐化；提交历史本就是权威记录（仓库强制 Conventional
+          # Commits，故 `--oneline` 直接可读）。
+          #
+          # `|| true`：首个 tag 没有「上一个 tag」；或历史被浅克隆截断。
+          # 此时退化成「列最近 50 条提交」而不是让整个 release 失败——
+          # 发布产物已经构建完成，不该因一段正文而中止。
+          PREV=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..$GITHUB_REF_NAME"
+            echo "变更范围：$RANGE"
+          else
+            RANGE=""
+            echo "未找到上一个 tag，退化为列最近 50 条提交"
+          fi
+          {
+            echo "以下为提交历史（Conventional Commits）："
+            echo
+            if [ -n "$RANGE" ]; then
+              git log --oneline --no-merges "$RANGE" || true
+            else
+              git log --oneline --no-merges -n 50 || true
+            fi
+          } >> RELEASE_NOTES.md
+
+          cat >> RELEASE_NOTES.md <<EOF
+
+          ## 构建信息
+
+          - Flutter `${{ env.FLUTTER_VERSION }}`
+          - 提交：`${{ github.sha }}`
+          - 触发：`${{ github.ref_name }}`
+          EOF
+
+          cat RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            spb_desktop-windows-x64.zip \
+            spb_desktop-linux-x64.tar.gz \
+            spb_desktop-macos-universal.zip \
+            spb_mobile-android.apk \
+            --title "Super PartyB $GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md

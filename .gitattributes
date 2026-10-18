@@ -1,0 +1,94 @@
+# 行尾与二进制属性（issue #47）。
+#
+# ## 为什么需要它
+#
+# 仓库同时面向 Linux / Windows / macOS 开发（`apps/spb_desktop/windows/`、
+# `macos/`），CI 也在 `windows-2022` 出包。
+#
+# Windows 上 `core.autocrlf=true`（Git for Windows 默认）会把文本文件检出成
+# CRLF。而 `tools/check_format.sh` 跑 `dart format --set-exit-if-changed`——
+# `dart format` **会**把 CRLF 规范化成 LF，于是 Windows 开发者本地**永远**
+# 格式检查失败（或提交时被改回 LF，产生整文件 diff）。
+#
+# ⚠️ 本仓库当前**没有** CRLF 文件（`file` 逐个检查过），所以这是一条**预防性**
+# 规则，不是修复既有问题。但一旦有 Windows 贡献者 clone，缺了它就会立刻出现
+# 「在我机器上格式检查失败」这种极难归因的问题。
+#
+# ## `* text=auto eol=lf` 的含义
+#
+# - `text=auto`：让 Git 自动判定哪些是文本（据此做行尾规范化）；
+# - `eol=lf`：**检出的文本一律 LF**，无论开发者本地的 `core.autocrlf`。
+#
+# 后者是关键：只写 `text=auto` 时，Windows 上仍会检出 CRLF（只是入库时统一
+# 成 LF）——那正是 `dart format` 会报错的情形。故必须显式 `eol=lf`。
+
+* text=auto eol=lf
+
+# ---------------------------------------------------------------------------
+# 二进制：禁止任何行尾/编码转换
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **golden 基线 PNG（12 个）是逐字节比对的**（`flutter test --goldens`）。
+# 任何行尾转换或「文本规范化」都会让它们全部失败，且报错只说「像素不匹配」
+# ——指不到根因。这一条不能删。
+#
+# 其余类型是预防性覆盖：本仓库当前只跟踪 PNG 与 ICO（`file` 逐个确认过），
+# 但 Windows/macOS 出包与 Android 签名会在将来引入其它二进制。
+
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+
+# 字体（golden 测试从 Flutter SDK 取字体，但将来可能入库自备字体）
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+
+# 签名与密钥（已被 .gitignore 排除，此处是双保险：万一被 `-f` 加进来，
+# 也绝不做行尾转换——那会破坏密钥文件）
+*.jks binary
+*.keystore binary
+*.p12 binary
+*.pfx binary
+*.mobileprovision binary
+
+# 归档与原生库
+*.zip binary
+*.tar binary
+*.gz binary
+*.jar binary
+*.so binary
+*.dll binary
+*.dylib binary
+
+# ---------------------------------------------------------------------------
+# Windows 平台脚本保持 CRLF
+# ---------------------------------------------------------------------------
+#
+# 本仓库当前**没有** `.bat` / `.ps1`（`git ls-files` 确认过），故下面是
+# 预防性规则：将来加 Windows 构建脚本时，`.bat` 用 LF 会导致 `cmd.exe`
+# 解析异常（尤其 `goto` 标签与多行 `if`），`.ps1` 则对 LF 宽容但惯例是 CRLF。
+#
+# ⚠️ 注意 `apps/spb_mobile/android/gradlew.bat` 是 **untracked**（Flutter
+# 模板生成物，被 `.gitignore` 排除），故不在此列。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# ---------------------------------------------------------------------------
+# 生成物：标记为「不要 diff」
+# ---------------------------------------------------------------------------
+#
+# `database.g.dart` 是**提交进 git 的生成物**（唯一一个，见 issue #43 与
+# `tools/check_codegen.sh`）。它由 build_runner 生成，diff 里几千行的噪音
+# 会淹没真正的人工改动——`linguist-generated` 让 GitHub/Gitea 折叠它。
+#
+# ⚠️ **不是** `-diff`：那会让 `git diff` 完全不显示它，而
+# `tools/check_codegen.sh` 正是靠比对生成物来发现漂移的。
+packages/spb_data/lib/src/database.g.dart linguist-generated=true
