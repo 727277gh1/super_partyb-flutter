@@ -273,8 +273,16 @@ jobs:
             echo '❌ 缺动态库'; exit 1
           fi
           # 修正后 lib/ 里插件 .so 的 rpath 应为 $ORIGIN（见 bundle_linux_deps.sh）。
-          if find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \;; then
-            echo '❌ RUNPATH 仍指向 /home'; exit 1
+          #
+          # ⚠️ 不要写成 `if find ... -exec sh -c '... | grep -q /home/' \;; then`：
+          # `find` 只要成功遍历就返回 0，**不看 -exec 的退出码**，于是那个 if 恒为真
+          # → 恒报错（假红）。必须先收集命中项再判空。
+          bad=$(find lib -name '*.so*' -exec sh -c \
+            'patchelf --print-rpath "$1" | grep -q /home/ && echo "$1"' _ {} \;)
+          if [ -n "$bad" ]; then
+            echo "❌ 以下库的 RUNPATH 仍指向 /home："
+            echo "$bad"
+            exit 1
           fi
           echo '✅ bundle 自包含'
 

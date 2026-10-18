@@ -24,6 +24,19 @@ class DriftTimelineCacheStore implements TimelineCacheStore {
 
   final AppDatabase _db;
 
+  /// 上一次写入的 `lastAccessedAt`（微秒）。
+  ///
+  /// ## 为什么要单调递增（issue: CI 上 LRU 淘汰测试偶发失败）
+  ///
+  /// 淘汰按 `lastAccessedAt` 升序排序。若两次访问落在**同一时间单位**内，
+  /// 排序退化到不确定（`List.sort` 不保证稳定）——CI 跑得快，
+  /// `save(a) → load(a) → save(c)` 可能全在同一毫秒，于是「最久未访问」
+  /// 判错，淘汰了刚访问过的 group。
+  ///
+  /// 用微秒提升分辨率、再用 `max(now, _lastAccess + 1)` 保证**严格递增**：
+  /// 即使同微秒内的多次调用，也各有不同的值，LRU 语义确定。
+  int _lastAccess = 0;
+
   /// 每 group 事件条数上限（§5.2）。对齐 `ChatStreamController.maxBufferEvents`
   /// ——缓存比内存缓冲区多没有意义（多出来的部分归约器根本不会用）。
   final int maxEventsPerGroup;
@@ -92,7 +105,7 @@ class DriftTimelineCacheStore implements TimelineCacheStore {
     if (cacheable.isEmpty) return;
 
     try {
-      final now = DateTime.now().millisecondsSinceEpoch;
+      final now = _nextAccessTime();
       final rows = <CachedEventsCompanion>[];
       for (final e in cacheable) {
         final encoded = jsonEncode(e.toJson());
@@ -151,10 +164,26 @@ class DriftTimelineCacheStore implements TimelineCacheStore {
     }
   }
 
+  /// 下一个 `lastAccessedAt` 值：微秒精度 + 严格单调递增。
+  ///
+  /// 单调保证使同单位内的多次访问各有不同值，LRU 排序因此确定。
+  int _nextAccessTime() {
+    var now = DateTime.now().microsecondsSinceEpoch;
+    if (now <= _lastAccess) now = _lastAccess + 1;
+    _lastAccess = now;
+    return now;
+  }
+
   /// 标记该 group 被访问（LRU 淘汰依据）。
+  ///
+  /// ## 为什么用微秒 + 单调递增而非干等
+  ///
+  /// 原实现用 `DateTime.now().millisecondsSinceEpoch`：两次访问若在同一毫秒，
+  /// 淘汰排序不确定（见 `_lastAccess` 字段注释）。测试曾用 `delay(5ms)` 分隔，
+  /// 但 CI 上 5ms 也可能不够（调度抖动时两个调用仍可能同毫秒）。
   Future<void> _touch(String groupId) async {
     try {
-      final now = DateTime.now().millisecondsSinceEpoch;
+      final now = _nextAccessTime();
       await (_db.update(_db.cachedEvents)
             ..where((t) => t.groupId.equals(groupId)))
           .write(CachedEventsCompanion(lastAccessedAt: Value(now)));
