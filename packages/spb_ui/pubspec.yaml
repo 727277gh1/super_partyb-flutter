@@ -1,0 +1,20 @@
+name: spb_ui
+description: 通用组件库（无业务语义，仅依赖设计令牌）
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  spb_design:
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

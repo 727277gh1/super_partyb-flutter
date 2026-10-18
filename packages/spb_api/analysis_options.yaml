@@ -1,0 +1,10 @@
+include:
+  - package:lints/recommended.yaml
+  - ../../analysis_options.yaml
+
+linter:
+  rules:
+    use_null_aware_elements: false
+    # 构造参数名与私有字段名有意不同（公开 `dio` / 私有 `_dio`）：
+    # 用 `this._dio` 会让具名参数变成 `_dio`，调用方无法传参。
+    prefer_initializing_formals: false
