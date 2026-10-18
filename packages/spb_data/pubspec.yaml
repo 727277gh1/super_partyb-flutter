@@ -30,7 +30,7 @@ dependencies:
   # 故不能靠 sqlite3 的 native-asset hook 替代。
   #
   # 它只属于 spb_data（两个 app 都通过本包间接得到），故留在这里而非下移到 app。
-  sqlite3_flutter_libs: ^0.5.28
+  sqlite3_flutter_libs: ^0.6.0+eol
   # 会话凭证的加密存储（Keychain / Keystore / libsecret）。
   # 与两个 app 声明的版本保持一致，避免同一工作区解析出两份。
   flutter_secure_storage: ^9.2.2
