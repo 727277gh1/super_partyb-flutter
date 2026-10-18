@@ -525,7 +525,7 @@ jobs:
           fetch-tags: true
 
       # 四端产物合并到同一目录；merge-multiple 让它们平铺而不是各自一层子目录。
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
