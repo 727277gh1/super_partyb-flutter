@@ -70,6 +70,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 python3 <<'PY'
+import os
 import pathlib
 import re
 import subprocess
@@ -80,13 +81,15 @@ DOC = pathlib.Path("AGENTS.md")
 # name → 复现命令。**单一定义处**：AGENTS.md 里展示的命令必须与此逐字相同
 # （去掉连续空白后比较），由本守卫断言。
 CHECKS = {
+    # ⚠️ 用 raw string（r"""）而非普通字符串：`\x{4e00}` 在普通字符串里会被
+    # Python 转义成别的形态，而自测脚本按**文件原文**抽取命令——两边必须一致。
     "spb_features_hardcoded_zh": (
-        """cd packages/spb_features && grep -rhoE "'[^']*[一-龥][^']*'" """
-        """--include=*.dart lib | wc -l"""
+        r"""cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" """
+        r"""--include=*.dart lib | wc -l"""
     ),
     "repo_hardcoded_zh": (
-        """grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart """
-        """packages/*/lib apps/*/lib | wc -l"""
+        r"""grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart """
+        r"""packages/*/lib apps/*/lib | wc -l"""
     ),
 }
 
@@ -146,7 +149,13 @@ for m in matches:
         continue
 
     # 2) 实跑命令，比对数字。
-    proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    # 强制 UTF-8 locale：`grep -P` 的 \x{4e00} 需要在 Unicode 语义下解析。
+    # GitHub runner 默认 LC_ALL=C.UTF-8，但本地可能是别的值——显式指定避免环境差异
+    # 导致同一命令在不同机器上命中数不同（2026-10 CI 实测：C.UTF-8 下 \x{4e00} 不匹配）。
+    env = dict(os.environ, LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8")
+    proc = subprocess.run(
+        ["bash", "-c", cmd], capture_output=True, text=True, env=env
+    )
     if proc.returncode != 0:
         bad.append(
             f"AGENTS.md:{line}: 复现命令失败（exit {proc.returncode}）\n"

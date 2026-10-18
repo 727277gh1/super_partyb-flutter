@@ -1064,12 +1064,12 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 
 # 决策时（issue #23 创建于 f446250）的基线：782
 # 当前（HEAD）量：878
-cd packages/spb_features && grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart lib | wc -l
+cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
 # <!-- number-check: name=spb_features_hardcoded_zh value=878 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
 # 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1569
-grep -rhoE "'[^']*[一-龥][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
+grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
 # <!-- number-check: name=repo_hardcoded_zh value=1569 -->
 
 # 是否已接入 i18n（应为空输出）
@@ -2183,7 +2183,7 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（§6.20）——本
 当前 878——5% 的漂移（约 44 条）远不足以改变「离阈值还有多远」的判断。
 
 **命令定义在脚本里，不在文档的标记里**：两条复现命令**自身含单引号**
-（`grep -rhoE "'[^']*[一-龥][^']*'"`），塞进标记属性就得转义、属性解析会先崩。
+（`grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'"`），塞进标记属性就得转义、属性解析会先崩。
 故标记只写 `name=` 与 `value=`，命令单一定义在脚本的 `CHECKS` 表。
 
 这带来一个额外好处：守卫**断言文档展示的命令与脚本里的逐字相同**（去空白后

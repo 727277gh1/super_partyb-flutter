@@ -258,16 +258,21 @@ jobs:
           flutter build linux --release
 
       # 自包含验证（AGENTS.md §7）：ldd 不得缺库，RUNPATH 不得指向 /home。
-      # CI 用系统 GTK/keybinder（apt 装的），本来就没有 /home 路径；这条检查
-      # 防的是将来有人把 bundle_linux_deps.sh 的产物误提交或构建方式漂移。
+      #
+      # ⚠️ 必须先跑 `bundle_linux_deps.sh`（同 release.yml）。Flutter 构建出来的
+      # 插件 `.so` 在 `bundle/lib/` 下，它们的 RUNPATH 默认指向 **Flutter SDK 路径**
+      # （CI 上是 `/home/runner/...`）——不修正就会在这条检查上失败。
+      # 2026-10 实测：漏了这一步，CI 报 `❌ RUNPATH 仍指向 /home`。
+      - name: Bundle Linux deps (RUNPATH fixup)
+        run: bash tools/bundle_linux_deps.sh
+
       - name: Verify bundle is self-contained
         run: |
           cd apps/spb_desktop/build/linux/x64/release/bundle
           if ldd spb_desktop | grep 'not found'; then
             echo '❌ 缺动态库'; exit 1
           fi
-          # 注意：此处先 build 完再查 lib/ 的 RUNPATH。lib/ 里是插件 .so，
-          # 它们的 rpath 应为 $ORIGIN（见 bundle_linux_deps.sh 的说明）。
+          # 修正后 lib/ 里插件 .so 的 rpath 应为 $ORIGIN（见 bundle_linux_deps.sh）。
           if find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \;; then
             echo '❌ RUNPATH 仍指向 /home'; exit 1
           fi
@@ -291,6 +296,11 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        # ⚠️ 不能省略 packages：action 默认装 `tools platform-tools`，而 `tools` 包在
+        # cmdline-tools 16 已移除，会在 CI 上报 `Failed to find package 'tools'`
+        # （2026-10 GitHub runner 实测）。runner 已预装 Android SDK，只需 platform-tools。
+        with:
+          packages: platform-tools
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:

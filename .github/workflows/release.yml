@@ -325,6 +325,11 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        # ⚠️ 不能省略 packages：action 默认装 `tools platform-tools`，而 `tools` 包在
+        # cmdline-tools 16 已移除，会在 CI 上报 `Failed to find package 'tools'`
+        # （2026-10 GitHub runner 实测）。runner 已预装 Android SDK，只需 platform-tools。
+        with:
+          packages: platform-tools
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
