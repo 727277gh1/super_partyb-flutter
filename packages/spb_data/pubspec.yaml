@@ -33,7 +33,7 @@ dependencies:
   sqlite3_flutter_libs: ^0.5.28
   # 会话凭证的加密存储（Keychain / Keystore / libsecret）。
   # 与两个 app 声明的版本保持一致，避免同一工作区解析出两份。
-  flutter_secure_storage: ^9.2.2
+  flutter_secure_storage: ^10.3.4
 
   # ⚠️ 曾声明 path_provider / path / shared_preferences，但本包 lib 从未 import：
   # - `path_provider`：应用数据目录由**两个 app** 解析后传进来（见 database.dart
@@ -52,4 +52,4 @@ dev_dependencies:
   # 测试用：替换 flutter_secure_storage 的 MethodChannel 后端，
   # 使「写入/读取 round-trip」能在无平台通道的 flutter test 里跑。
   plugin_platform_interface: ^2.1.8
-  flutter_secure_storage_platform_interface: ^1.1.2
+  flutter_secure_storage_platform_interface: ^2.1.1

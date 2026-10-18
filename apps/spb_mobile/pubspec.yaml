@@ -40,7 +40,7 @@ dependencies:
   go_router: ^16.0.0
 
   # ---- 移动端平台能力 ----
-  flutter_secure_storage: ^9.2.2   # Keychain / Keystore
+  flutter_secure_storage: ^10.3.4   # Keychain / Keystore
   path_provider: ^2.1.4
   path: ^1.9.0
   url_launcher: ^6.3.1
@@ -58,7 +58,7 @@ dev_dependencies:
   # 测试用：替换 flutter_secure_storage 的 MethodChannel 后端，
   # 使「待验证登录请求跨进程恢复」能在无平台通道的 flutter test 里跑。
   plugin_platform_interface: ^2.1.8
-  flutter_secure_storage_platform_interface: ^1.1.2
+  flutter_secure_storage_platform_interface: ^2.1.1
   build_runner: ^2.4.13
 
 flutter:

@@ -49,7 +49,7 @@ dependencies:
   path: ^1.9.0
 
   # ---- 凭证安全存储（Keychain / libsecret / DPAPI）----
-  flutter_secure_storage: ^9.2.2
+  flutter_secure_storage: ^10.3.4
 
   cupertino_icons: ^1.0.8
 
