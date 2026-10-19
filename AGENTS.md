@@ -3230,6 +3230,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 ## 12. 提交约定
 
+<!-- PR 验证：build-windows 在 PR 路径下也执行 -->
+
 Conventional Commits，scope 用包名或平台：
 
 ```
