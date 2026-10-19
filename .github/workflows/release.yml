@@ -246,7 +246,10 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev
+          # 后三个与 patchelf 见 ci.yml 同名步骤的注释：插件 CMake REQUIRED +
+          # bundle_linux_deps.sh 修 RUNPATH 需要，缺任一构建/打包即失败。
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev \
+            libkeybinder-3.0-dev libayatana-appindicator3-dev libsecret-1-dev patchelf
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
