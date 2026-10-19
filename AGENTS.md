@@ -2836,30 +2836,59 @@ bad=$(find lib -name '*.so*' -exec sh -c \
 [ -n "$bad" ] && { echo "❌ $bad"; exit 1; }
 ```
 
-#### 四、`tbcc6.atjog.com` **不应**配进 `SPB_PREFERRED_HOSTS`
+#### 四、`tbcc6.atjog.com` **应该**配进 `SPB_PREFERRED_HOSTS`（含一次错误判断的纠正）
 
-曾考虑用 §5.1.1 的双栈机制把 api/ufs 升到 `tbcc6`。DNS 实测证明它**不是可用的
-生产端点**：
+**本节最初写的是「不应配置」，结论错了。** 记录纠正过程，因为错误的推理方式
+比错误本身更值得防。
+
+**当时的错误推理**：DNS 实测显示 tbcc6 指向家宽动态地址，于是判为「不是可用
+的生产端点」，并认为配置它会「制造随机故障」。DNS 事实（下列仍准确）：
 
 | 证据 | 值 |
 |---|---|
 | CNAME 链 | `tbcc6.atjog.com` → `qpoweiurty.atjog.com`（随机串，DDNS 特征） |
 | AAAA | `2409:8a55:a20:8570:be24:11ff:fee3:581a` |
-| 地址段 | `2409:8a55::/32` = **中国移动**（家宽段，非机房） |
-| 接口标识 | `be24:11ff:fee3:581a` = **EUI-64**（由网卡 MAC 推导）→ 动态地址 |
+| 地址段 | `2409:8a55::/32` = 中国移动（家宽段） |
+| 接口标识 | `be24:11ff:fee3:581a` = EUI-64（由网卡 MAC 推导）→ 动态地址 |
 | TTL | CNAME 600s（DDNS 常用短 TTL，便于换 IP） |
 
-对照 `tbcc.atjog.com` → `tbcc.atjog.com.eo.dnse0.com` → `240d:c010::/32`
-（腾讯 EdgeOne CDN），**本身已是双栈**——无需 `SPB_PREFERRED_HOSTS` 就能走 IPv6。
+**错在哪**：§5.1.1 的机制**就是为「首选端点可能不可达」设计的**，把
+「地址会变」当成否决理由，等于把设计要容错的情形当成了缺陷。逐条看代码：
 
-**结论**：配 tbcc6 只会让「中国移动 IPv6 + 恰好解析到当前地址」的极少数用户绕到
-一台家宽机器，而地址随时会变、证书未必匹配、其他网络一律连不上。这是「看起来
-优化、实际制造随机故障」。
+| 顾虑 | 代码事实 |
+|---|---|
+| 地址随时会变 | 旧地址变黑洞 → 3 次连接失败降级回 CDN；**下次启动重解析 DNS** 拿新地址 → 再探 → 可达则升级。自愈 |
+| 证书未必匹配 | `classifyDioFailure` 把 `badCertificate` 归为 `connectivity`（`endpoint_health_interceptor.dart:63`）→ 计入降级。但**探测是纯 TCP**（`Socket.connect`，`endpoints.dart:96`）不校验证书，故证书问题只影响升级后的前几个请求 |
+| 其他网络连不上 | 探测失败 → `kept` → **保持编译期地址**，与不配置**完全相同** |
+| 中途切网 | 降级是**快路径**：不探测、不等冷却，连续 3 次即退回 |
 
-> ⚠️ **本机与 bcc 都无 IPv6 出口**，无法直接验证 tbcc6 可达性；check-host.net
-> 的节点也只解析 A 记录（连 `ipv6.google.com` 都报 `Unknown host`），故此判定
-> 基于 DNS 特征而非连通性实测。若将来要启用，**必须**先在有 IPv6 的机器上确认
-> `https://tbcc6.atjog.com/pba/healthz` 返回 200 且证书 SAN 覆盖该域名。
+**失败模式枚举**（没有任何一行比不配置更差）：
+
+| 场景 | 结果 |
+|---|---|
+| 无 IPv6（多数用户） | 探测失败 → 保持 CDN |
+| 有 IPv6、tbcc6 可达、证书对 | **升级到直连源站**（收益） |
+| 有 IPv6、tbcc6 不可达 | 探测失败 → 保持 CDN |
+| 升级后断网/换网/证书失效 | 3 次失败 → 降级 CDN，冷却后重探 |
+
+**第二个错误**：曾说「`tbcc.atjog.com` 本身已是双栈，不需要 preferred hosts」。
+**双栈 ≠ 直连源站**——`tbcc.atjog.com` 的 AAAA 是 EdgeOne **边缘节点**
+（`240d:c010::/32`），流量仍过 CDN；`tbcc6` 是**绕过 CDN 直连源站**，两者目的
+完全不同，IPv6 只是顺带的。把两件事混为一谈，就得出了「不需要配」的错误结论。
+
+**实际配置**：
+
+```
+SPB_PREFERRED_HOSTS = tbcc.atjog.com=tbcc6.atjog.com
+```
+
+一条规则即可：`api` 与 `ufs` 的 host 都是 `tbcc.atjog.com`，`resolveEndpoints`
+在循环里对两者各调一次 `_rewriteHost`。**issuer 不受影响**（`SpbEndpoints`
+无 issuer 字段），且桌面端 loopback 回调打 `127.0.0.1`，与 tbcc6 完全正交。
+
+> ⚠️ **本机与 bcc 都无 IPv6 出口**，无法直接验证 tbcc6 可达性（check-host.net
+> 的节点也只解析 A 记录，连 `ipv6.google.com` 都报 `Unknown host`）。证书由部署
+> 方确认覆盖该域名。若将来 tbcc6 下线，**改/删这个 Variable 即可**，无需发版。
 
 #### 五、GitHub Variables（公开仓库，值全部会进二进制）
 
@@ -2869,10 +2898,14 @@ bad=$(find lib -name '*.so*' -exec sh -c \
 | `SPB_UFS_BASE_URL` | `https://tbcc.atjog.com/ufs` |
 | `SPB_OIDC_ISSUER` | `https://tbcc.atjog.com/idp` |
 | `SPB_OIDC_CLIENT_ID` | public client 的 `clientId`（**公开值**，会出现在授权 URL） |
+| `SPB_PREFERRED_HOSTS` | `tbcc.atjog.com=tbcc6.atjog.com`（见上节四） |
 
 `--dart-define` 的值**必然编译进二进制**（在 `lib/libapp.so` 的 Dart AOT 常量区，
 `strings` 可提取），故配进公开 Variables 不构成新泄露。验证方式：下载产物后
 `strings -a lib/libapp.so | grep tbcc`——同时应确认旧默认值 `127.0.0.1:8000` 已消失。
+
+`release.yml` 四个平台均接入了全部 5 个 define（windows `:179`、linux `:279`、
+android `:393`、macos `:480`），config job 会逐项打印 `set` / `unset`。
 
 ⚠️ **`gh` 的 fine-grained PAT 需要 `Actions: Read and write`** 才能读写 Variables：
 只有 read 时 `POST /actions/variables` 报 403 `Resource not accessible by personal
