@@ -295,8 +295,16 @@ jobs:
           if ldd spb_desktop | grep 'not found'; then
             echo "❌ 缺动态库"; exit 1
           fi
-          if find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \; ; then
-            echo "❌ RUNPATH 仍指向构建机 /home 路径"; exit 1
+          # ⚠️ 不能写成 `if find ... -exec sh -c '... | grep -q ...' \;`：
+          # find **不看** -exec 的退出码，只要遍历完就返回 0 → if 恒为真 → 恒报错
+          # （假红）。必须先收集命中项再判空。ci.yml 同一条检查已修过（2026-10），
+          # release.yml 当时漏改，导致 linux job 在打包步骤全部成功后仍判失败。
+          bad=$(find lib -name '*.so*' -exec sh -c \
+            'patchelf --print-rpath "$1" | grep -q /home/ && echo "$1"' _ {} \;)
+          if [ -n "$bad" ]; then
+            echo "❌ 以下库的 RUNPATH 仍指向 /home："
+            echo "$bad"
+            exit 1
           fi
           echo "✅ bundle 自包含"
 
