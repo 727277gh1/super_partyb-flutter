@@ -2742,6 +2742,144 @@ action 会直接失败。
 
 ---
 
+### 6.31 生产部署接线：public client、release.yml 的两个缺陷、tbcc6 判定
+
+把客户端接到 `tbcc.atjog.com` 的过程中查出四件事，其中**两个是 release.yml
+的真实缺陷**（CI 绿不代表 release 绿——两条 workflow 的构建步骤从未对齐过）。
+
+#### 一、桌面端 OIDC client 必须是 **public + loopback**
+
+生产 IdP 的 `flutter-client` 初始配置有两处不对，逐一有代码依据：
+
+| 字段 | 错值 | 正确值 | 依据 |
+|---|---|---|---|
+| `tokenEndpointAuthMethod` | `client_secret_basic` | **`none`** | 客户端**从不下发 secret**：`env.dart` 无 `SPB_OIDC_CLIENT_SECRET`，所有调用点都是 `OidcConfig.fromEnv()` 无参（`providers.dart:160`、`auth_browser.dart:42`），`oidc_client.dart:427` 仅 secret 非空才加 `Basic` 头；`auth_loopback.dart:77` 还会**主动拒绝**带 secret 的配置 |
+| `redirectUris` | 两个 https 网关回调 | **`["http://127.0.0.1/callback"]`** | 见下 |
+
+**注册值的四条硬约束**（fosite v0.49.0 `authorize_helper.go:117` 的
+`isMatchingAsLoopback`）：
+
+```go
+if requested.Scheme == "http" &&
+    isLoopbackAddress(requested.Hostname()) &&
+    registered.Hostname() == requested.Hostname() &&
+    // The port is skipped here - see codedoc above!
+    registered.Path == requested.Path &&
+    registered.RawQuery == requested.RawQuery {
+```
+
+1. **scheme 必须 `http`**（不是 https）；
+2. **hostname 必须是字面 `127.0.0.1`**——`registered.Hostname() == requested.Hostname()`
+   是字面比较，注册成 `localhost` 时客户端发 `127.0.0.1` → 精确匹配与 loopback
+   匹配**双双失败**；
+3. **path 必须 `/callback`**（`LoopbackRedirectServer.defaultPath`）；
+4. **不能带端口**——端口被显式跳过比对（源码注释原文 `The port is skipped here`）。
+
+且 `redirectUris` 的值与 `env.dart:101` 的 `SPB_OIDC_REDIRECT_URI` 默认值
+**逐字相同**（运行时由 `auth_loopback.dart:103` 的 `copyWithRedirectUri` 覆盖为
+随机端口，故注册值必须是不带端口的那个）。
+
+**PKCE 不可关闭**：`provider.go:63` 硬编码 `EnforcePKCEForPublicClients: true`，
+与可配的 `EnforcePKCE`（`cfg.RequirePKCE`）是**两个不同开关**。故 `requirePkce`
+字段对 public client 不产生实际差异，但仍应写 `true`（如实反映 + 防将来改为
+confidential 时静默降级）。
+
+**活体验证**（直接打生产 authorize 端点，比查库更有说服力）：
+
+| 发送的 `redirect_uri` | 期望 | 实测 |
+|---|---|---|
+| `http://127.0.0.1:8347/callback`（随机端口） | 通过 | **302 → 登录页** ✅ |
+| `http://127.0.0.1/callback` | 通过 | **302 → 登录页** ✅ |
+| `http://localhost:8347/callback` | 拒绝 | 400 `invalid_request` ✅ |
+| `https://evil.example.com/callback` | 拒绝 | 400 `invalid_request` ✅ |
+
+⚠️ **IdP 的 admin API 不认 API key**：`adminRoute`（`server.go:495`）只挂
+`adminauth.Middleware`（`adminauth.go:23`）——`idp_access_token` Cookie 或
+`Authorization: Bearer` + 角色含 `admin`/`super_admin`。`serviceauth`
+（X-App-ID/X-App-Secret）只挂在 wechat/feishu/dingtalk/ilink binding 路由上；
+`applications` 表的 `apiKeyEnabled/apiKeyConfig` 是**应用自身**的属性，与
+admin clients 无关。另：`oidc/provider.go:364` 的 `RegisterClient`（RFC 7591
+动态注册风格）**无任何 HTTP 路由与调用方，是死代码**。
+
+#### 二、`release.yml` 的 linux job 缺 4 个依赖（真实缺陷）
+
+ci.yml 装了 8 个包，release.yml 只有 5 个——**两条 workflow 的依赖清单从未对齐**。
+缺的四个都会让构建**直接失败**（不是功能降级）：
+
+| 缺失包 | 谁需要 | 后果 |
+|---|---|---|
+| `libsecret-1-dev` | `flutter_secure_storage_linux` | CMake `REQUIRED`，构建即失败 |
+| `libkeybinder-3.0-dev` | `hotkey_manager_linux` | 同上（AGENTS.md §7 已记） |
+| `libayatana-appindicator3-dev` | `tray_manager` | 同上 |
+| `patchelf` | `bundle_linux_deps.sh` | 修 RUNPATH 失败 → 分发即挂 |
+
+⚠️ **第一个失败掩盖了第二个**：修好依赖后才走到 RUNPATH 检查，才暴露下一个缺陷。
+
+#### 三、`release.yml` 的 RUNPATH 检查是**假红**（真实缺陷）
+
+```bash
+if find lib -name '*.so*' -exec sh -c 'patchelf --print-rpath "$1" | grep -q /home/' _ {} \; ; then
+  echo "❌ RUNPATH 仍指向构建机 /home 路径"; exit 1
+fi
+```
+
+`find` **不看** `-exec` 的退出码，遍历完即返回 0 → `if` 恒为真 → **恒报错**。
+于是 linux job 在「构建成功 + 依赖打包成功」后仍判失败。
+
+这与 §6.30 之前修过的 ci.yml 同一条检查是**同一个 bug**——当时只修了 ci.yml，
+release.yml 漏改。**改这类检查时必须全仓 grep 同型模式**（本次复查：只剩注释里
+的说明文字，无其他实例）。正确写法是先收集命中项再判空：
+
+```bash
+bad=$(find lib -name '*.so*' -exec sh -c \
+  'patchelf --print-rpath "$1" | grep -q /home/ && echo "$1"' _ {} \;)
+[ -n "$bad" ] && { echo "❌ $bad"; exit 1; }
+```
+
+#### 四、`tbcc6.atjog.com` **不应**配进 `SPB_PREFERRED_HOSTS`
+
+曾考虑用 §5.1.1 的双栈机制把 api/ufs 升到 `tbcc6`。DNS 实测证明它**不是可用的
+生产端点**：
+
+| 证据 | 值 |
+|---|---|
+| CNAME 链 | `tbcc6.atjog.com` → `qpoweiurty.atjog.com`（随机串，DDNS 特征） |
+| AAAA | `2409:8a55:a20:8570:be24:11ff:fee3:581a` |
+| 地址段 | `2409:8a55::/32` = **中国移动**（家宽段，非机房） |
+| 接口标识 | `be24:11ff:fee3:581a` = **EUI-64**（由网卡 MAC 推导）→ 动态地址 |
+| TTL | CNAME 600s（DDNS 常用短 TTL，便于换 IP） |
+
+对照 `tbcc.atjog.com` → `tbcc.atjog.com.eo.dnse0.com` → `240d:c010::/32`
+（腾讯 EdgeOne CDN），**本身已是双栈**——无需 `SPB_PREFERRED_HOSTS` 就能走 IPv6。
+
+**结论**：配 tbcc6 只会让「中国移动 IPv6 + 恰好解析到当前地址」的极少数用户绕到
+一台家宽机器，而地址随时会变、证书未必匹配、其他网络一律连不上。这是「看起来
+优化、实际制造随机故障」。
+
+> ⚠️ **本机与 bcc 都无 IPv6 出口**，无法直接验证 tbcc6 可达性；check-host.net
+> 的节点也只解析 A 记录（连 `ipv6.google.com` 都报 `Unknown host`），故此判定
+> 基于 DNS 特征而非连通性实测。若将来要启用，**必须**先在有 IPv6 的机器上确认
+> `https://tbcc6.atjog.com/pba/healthz` 返回 200 且证书 SAN 覆盖该域名。
+
+#### 五、GitHub Variables（公开仓库，值全部会进二进制）
+
+| Variable | 值 |
+|---|---|
+| `SPB_API_BASE_URL` | `https://tbcc.atjog.com/pba` |
+| `SPB_UFS_BASE_URL` | `https://tbcc.atjog.com/ufs` |
+| `SPB_OIDC_ISSUER` | `https://tbcc.atjog.com/idp` |
+| `SPB_OIDC_CLIENT_ID` | public client 的 `clientId`（**公开值**，会出现在授权 URL） |
+
+`--dart-define` 的值**必然编译进二进制**（在 `lib/libapp.so` 的 Dart AOT 常量区，
+`strings` 可提取），故配进公开 Variables 不构成新泄露。验证方式：下载产物后
+`strings -a lib/libapp.so | grep tbcc`——同时应确认旧默认值 `127.0.0.1:8000` 已消失。
+
+⚠️ **`gh` 的 fine-grained PAT 需要 `Actions: Read and write`** 才能读写 Variables：
+只有 read 时 `POST /actions/variables` 报 403 `Resource not accessible by personal
+access token`（`PUT` 对不存在的变量报 404，容易误判成路径错）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -3055,7 +3193,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
-| IdP 生产未注册桌面 public client | **当前登录阻塞项**（粘贴导入可降级） | `docs/rfc8252-loopback-signin.md` §7 |
+| ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |
 | ~~`#14` 回归：未知容器不递归 `children`~~ | ✅ 已修（issue #27）：未知容器下钻 + 占位符打印原始 type；**顺带修掉两个既有缺陷**——渲染层用扁平子树导致重复渲染（叶子 ×2）、渲染路径无环检测导致 `A→B→A` 栈溢出 | issue #27、§6.9.4 |
 | ~~`map` spec 文件预览未实现~~ | ✅ 已实现（issue #12）：`MapSpecCard` + `parseMapSchema` / `MapProjection`（零新依赖），接入预览框与两端 router | issue #12、§6.9.5 |
 | ~~`dashboard` 网格格式渲染器未实现~~ | ✅ 已闭环（issue #12）：按「不做」处理——真实 `dashboard.spec.json` 走的是 `spec` 路径（已支持），网格格式**无已知生产者** | issue #12、§6.9.3 |

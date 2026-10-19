@@ -324,9 +324,11 @@ jobs:
           path: apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 7
 
-  # ── Windows 桌面端（2× 配额，仅 main 推送时跑，PR 不跑省额度）──────
+  # ── Windows 桌面端（public 仓库标准 runner 免费，PR 也验证）─────────
+  # 曾带 `if: github.event_name == 'push'`，为省私有仓库 2× 配额；仓库转
+  # public 后该前提已不成立，而 Windows 是本机唯一无法构建的平台，
+  # PR 阶段必须验证（否则 Windows 特有编译错误只在合并后才暴露）。
   build-windows:
-    if: github.event_name == 'push'
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
