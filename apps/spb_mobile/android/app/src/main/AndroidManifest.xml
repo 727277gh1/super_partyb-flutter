@@ -1,0 +1,81 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      联网权限。
+
+      ⚠️ 必须声明在 **main** 源集，不能只依赖 debug/profile 源集：
+      `src/debug/AndroidManifest.xml` 与 `src/profile/AndroidManifest.xml` 里
+      各有一份 INTERNET，但那只用于 Flutter 工具的热重载/断点通信，**release
+      构建不会合并它们**。
+
+      也不能指望插件贡献：已逐个核对全部依赖的 `android/src/main/
+      AndroidManifest.xml`，贡献 INTERNET 的插件数为 **0**（flutter_secure_
+      storage / app_links / file_selector_android / sqlite3_flutter_libs 等
+      都没有）。
+
+      缺失时的表现是「debug 能跑、release 包一联网就失败」——而且不是崩
+      溃，是 API 调用抛 SocketException / 登录无响应，排查成本高。
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application
+        android:label="spb_mobile"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!--
+              OIDC 授权回调（自定义 scheme）。
+
+              ⚠️ 与 `lib/auth_deeplink.dart` 的 OidcCallbackUri 常量必须一致：
+              scheme=partyb, host=oidc, pathPrefix=/callback。
+              三处（此处、iOS 的 Info.plist、Dart 常量）任一不一致都会表现为
+              「登录后应用毫无反应」，而不是报错。
+
+              ⚠️ 当前 IdP 尚未注册该 redirect_uri（实测返回 400，见
+              docs/mobile-oidc-deeplink.md）。此 intent-filter 是**目标形态**的
+              注册，不影响其他功能（未注册的 scheme 只会让系统把链接交给
+              本应用，而本应用会按 matches() 过滤掉非 OIDC 的链接）。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

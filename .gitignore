@@ -1,0 +1,88 @@
+# ---- Dart / Flutter ----
+.dart_tool/
+.packages
+build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# 覆盖率产物（issue #25，由 tools/coverage.sh 生成）
+#
+# ⚠️ 只忽略 coverage/，**不要**把 test/goldens/ 也忽略掉——golden 基线 PNG
+# 是**要提交**的（它们就是「期望的像素」，不提交则 CI 上永远没有可比对的基线，
+# `matchesGoldenFile` 会报「golden file not found」）。
+coverage/
+
+# golden 失败产物（`flutter test --update-goldens` 不产生；只在**比对失败**时产生）
+#
+# `matchesGoldenFile` 失败时会在 `test/failures/` 落下 `*_masterImage.png`
+# （期望）、`*_testImage.png`（实际）、`*_maskedDiff.png` / `*_isolatedDiff.png`
+# （差异图）四类文件。它们是**本地排障用的临时物**，绝不应提交：
+#   - 体积大（每次失败重生成）；
+#   - 内容是「当时的错误输出」，提交后下次比对仍失败，只是把噪音固化；
+#   - 真正的基线在 `test/goldens/`（上面那条警告）。
+# 不加这一条时它们会出现在 `git status` 的未跟踪列表里，很容易被 `git add -A` 误提交。
+#
+# ⚠️ 必须写成 `**/test/failures/`：含斜杠的模式相对 .gitignore 所在目录锚定，
+# `test/failures/` 只能匹配**根目录**下的 `test/`，而本仓库是 melos 工作区，
+# 失败产物落在 `packages/*/test/failures/`（同文件下方 `*.g.dart` 那段的坑）。
+**/test/failures/
+
+# 生成物（build_runner 产出）
+#
+# ⚠️ 例外必须写成 `!**/lib/**/*.g.dart`（带 `**/` 前缀）。
+# gitignore 的模式若含斜杠则相对 .gitignore 所在目录锚定，
+# `!lib/**/*.g.dart` 只能匹配**根目录**下的 lib/，对
+# `packages/spb_data/lib/src/database.g.dart` 这种嵌套路径无效——
+# 而本仓库是 melos 工作区，所有包都在 packages/*/lib/ 下。
+*.g.dart
+*.freezed.dart
+!**/lib/**/*.g.dart
+
+# 依赖
+#
+# ⚠️ 工作区根的 lockfile **必须提交**，不要加回忽略列表。
+# 它是 Pub Workspaces 的唯一解析结果，保证 CI 与本地解析出同一组版本。
+# 理由与配套的 `--enforce-lockfile` 见 AGENTS.md §2 与 issue #35。
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- 平台构建产物 ----
+apps/*/android/.gradle/
+apps/*/android/local.properties
+apps/*/android/app/debug/
+apps/*/android/app/profile/
+apps/*/android/app/release/
+apps/*/ios/Pods/
+apps/*/ios/.symlinks/
+apps/*/ios/Flutter/Flutter.framework
+apps/*/ios/Flutter/Flutter.podspec
+apps/*/linux/flutter/ephemeral/
+apps/*/macos/Flutter/ephemeral/
+apps/*/windows/flutter/ephemeral/
+
+# ---- 签名与密钥（绝不提交）----
+*.jks
+*.keystore
+key.properties
+*.p12
+*.mobileprovision
+*.pfx
+
+# ---- 本地配置 ----
+.env
+.env.*
+!.env.example
+
+# ---- 其他 ----
+.DS_Store
+*.log
+
+# ---- AI Agent 本地状态 ----
+# pi harness 的目标追踪文件（objective / journal / task cursor），
+# 属本机会话状态而非项目源码，不入库。
+.pi/

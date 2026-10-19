@@ -1,0 +1,12 @@
+analyzer:
+  exclude:
+    - build/**
+include:
+  - package:flutter_lints/flutter.yaml
+  - ../../analysis_options.yaml
+
+linter:
+  rules:
+    # API 请求体里 `if (x != null) 'k': x` 比 null-aware 元素更易读，
+    # 且能一眼看出「该字段可选」的语义。
+    use_null_aware_elements: false

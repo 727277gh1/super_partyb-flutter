@@ -1,0 +1,40 @@
+# release 签名配置模板
+#
+# ## 用法
+#
+#   cp key.properties.example key.properties
+#   然后填入真实值。
+#
+# 文件位置：apps/spb_mobile/android/key.properties
+# （与本文件同目录；build.gradle.kts 用 rootProject.file() 相对本目录解析，
+#   故下面 storeFile 也相对本目录，例如 ../app/upload-keystore.jks
+#   或 upload-keystore.jks。绝对路径同样可用。）
+#
+# ## ⚠️ 这个文件本身绝不能填值，也绝不能提交
+#
+# 仓库根 .gitignore 已排除 `key.properties` / `*.jks` / `*.keystore`
+# （见 AGENTS.md §12）。**只有本 .example 文件入库**，它必须永远只含
+# 键名与占位符，不含任何真实密钥。
+#
+# 生成 keystore（一次即可，务必离线备份）：
+#
+#   keytool -genkeypair -v \
+#     -keystore upload-keystore.jks \
+#     -storetype JKS \
+#     -keyalg RSA -keysize 2048 -validity 10000 \
+#     -alias upload
+#
+# 备份提醒：keystore 丢失后**无法**再以同一签名发布更新（Google Play 与
+# 应用覆盖安装都要求签名一致），只能换 applicationId 重新上架。
+
+# keystore 文件路径（相对 apps/spb_mobile/android/，或绝对路径）
+storeFile=<keystore 路径，例如 upload-keystore.jks>
+
+# keystore 密码
+storePassword=<keystore 密码>
+
+# 密钥别名（keytool -genkeypair 的 -alias 值）
+keyAlias=<密钥别名>
+
+# 该别名对应密钥的密码（JKS 下通常与 storePassword 相同）
+keyPassword=<密钥密码>
