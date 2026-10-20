@@ -417,6 +417,142 @@ void main() {
       expect(always401.calls, 2, reason: '原请求 + 一次重放');
     });
   });
+
+  group('AuthInterceptor onSessionExpired（会话失效 → 回登录页的触发点）', () {
+    // ## 这个 group 防的是什么
+    //
+    // 修复前，401 只被归一化成 `AuthError` 抛给调用方，而各页面拿到它只翻成
+    // 一句 SnackBar 文案，**没有任何一处**把认证状态推进到未登录。于是会话
+    // 真的过期后用户卡在当前页，只能手动进设置页点「退出登录」。
+    //
+    // 这三条分别钉住「该触发时触发」「不该触发时绝不触发」两个相反方向
+    // ——后者同样重要：误触发会把人从正常的无权限操作里踢出登录。
+
+    test('401 且刷新失败 → 回调被调用一次', () async {
+      final scripted = _Always401Adapter();
+      final messages = <String>[];
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 'stale',
+        onUnauthorized: () async => false,
+        onSessionExpired: messages.add,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('应当抛出 DioException');
+      } on DioException catch (e) {
+        expect(e.error, isA<AuthError>());
+      }
+
+      expect(messages, ['会话已失效，请重新登录']);
+    });
+
+    test('刷新成功且重放成功 → 回调不触发（静默续期，不该踢人）', () async {
+      final scripted = _ScriptedAdapter();
+      var expired = 0;
+      var token = 'stale';
+      final auth = AuthInterceptor(
+        tokenProvider: () async => token,
+        onUnauthorized: () async {
+          token = 'fresh';
+          return true;
+        },
+        onSessionExpired: (_) => expired++,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      final res = await client.get<dynamic>('/x');
+
+      expect(res.statusCode, 200);
+      expect(expired, 0, reason: '续期成功就不该让用户重新登录');
+    });
+
+    test('403 → 回调绝不触发（已认证但无权限，不是会话失效）', () async {
+      // 若 403 也当登出，用户「点了一个没权限的按钮」就会被直接踢出登录。
+      final forbidden = _StatusAdapter(403);
+      var expired = 0;
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 't',
+        onUnauthorized: () async => true,
+        onSessionExpired: (_) => expired++,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = forbidden;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('403 应抛出');
+      } on DioException catch (e) {
+        expect(e.error, isA<AuthError>());
+        expect((e.error! as AuthError).isForbidden, isTrue);
+      }
+
+      expect(expired, 0, reason: '403 不是会话失效');
+    });
+
+    test('刷新成功但重放仍 401 → 回调触发（新凭证也被拒）', () async {
+      // 账号被禁 / 会话被服务端撤销：刷新能拿到新 token，但它同样无效。
+      // 这条路径不触发的话，用户会停在旧页面上而没有任何提示。
+      final always401 = _Always401Adapter();
+      final messages = <String>[];
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 't',
+        onUnauthorized: () async => true,
+        onSessionExpired: messages.add,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = always401;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('应当抛出 DioException');
+      } on DioException catch (e) {
+        expect(e.error, isA<AuthError>());
+      }
+
+      expect(messages, hasLength(1), reason: '只通知一次，不随重放次数叠加');
+    });
+
+    test('未配置回调时行为不变（不崩、仍抛 AuthError）', () async {
+      final scripted = _Always401Adapter();
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 't',
+        onUnauthorized: () async => false,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('应当抛出 DioException');
+      } on DioException catch (e) {
+        expect(e.error, isA<AuthError>());
+      }
+    });
+  });
 }
 
 /// 确定性适配器：第 1 次 401，之后 200（用于验证「重放」真的发生）。
@@ -444,6 +580,33 @@ class _ScriptedAdapter implements HttpClientAdapter {
     return ResponseBody.fromString(
       '{"ok":true}',
       200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+/// 固定状态码的适配器（用于验证 403 之类的分支）。
+class _StatusAdapter implements HttpClientAdapter {
+  _StatusAdapter(this.status);
+
+  final int status;
+  int calls = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    calls++;
+    return ResponseBody.fromString(
+      '{"error":"x"}',
+      status,
       headers: {
         Headers.contentTypeHeader: [Headers.jsonContentType],
       },

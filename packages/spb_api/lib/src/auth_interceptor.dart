@@ -22,6 +22,7 @@ class AuthInterceptor extends Interceptor {
     required this.tokenProvider,
     this.userHeaderOverride,
     this.onUnauthorized,
+    this.onSessionExpired,
   });
 
   /// 异步获取当前会话凭证（OIDC access token / session cookie）。
@@ -41,6 +42,30 @@ class AuthInterceptor extends Interceptor {
   /// 由 `SessionManager.refresh` 实现。为 null 时不做刷新，401 直接归一化为
   /// [AuthError]。
   final Future<bool> Function()? onUnauthorized;
+
+  /// 会话**确定**失效时的通知（401 且刷新重放也没救回来）。
+  ///
+  /// ## 为什么需要它（此前这个回调不存在，于是「跳登录页」无处发生）
+  ///
+  /// 本拦截器只把 401 归一化成 [AuthError] 抛给调用方，而**各页面**拿到它
+  /// 只翻成一句 SnackBar 文案（如「登录已过期，请重新登录」），没有任何一处
+  /// 把认证状态推进到未登录。结果是：会话真的过期后，用户卡在首页/对话页，
+  /// 只能手动进设置页点「退出登录」才能回登录页。
+  ///
+  /// 装配层（两端 `providers.dart`）把它接到
+  /// `authStateProvider.notifier.markUnauthenticated`，由路由守卫做**唯一一次**
+  /// 重定向（`resolveAuthRedirect`）。
+  ///
+  /// ## 三个约束（改之前必读）
+  ///
+  /// 1. **只在 401 触发，403 绝不触发**：403 是「已认证但无权限」，把它当登出
+  ///    会让「点了一个没权限的按钮」直接把用户踢出登录。
+  /// 2. **只在「刷新也失败」之后触发**：`SessionManager._doRefresh` 明确保留
+  ///    了「临时网络故障不该让用户登出」这一取向。唯一可信的信号是
+  ///    「刷新过了，服务端仍然 401」。
+  /// 3. **不在这里导航**：同一时刻可能有多个请求同时 401，导航副作用会互相
+  ///    打架。回调只改状态，重定向交给路由守卫。
+  final void Function(String message)? onSessionExpired;
 
   /// 重放请求用的 Dio。
   ///
@@ -94,8 +119,22 @@ class AuthInterceptor extends Interceptor {
       final refreshed = await _tryRefreshAndReplay(err, handler);
       if (refreshed) return;
       SpbLog.warn('收到 401，会话凭证可能已失效');
-      // 不在此处自动跳登录：拦截器不应有导航副作用（可能同时多个请求触发）。
-      // 由上层统一监听 AuthError 并跳转登录页。
+      // 通知装配层把认证状态推进到未登录（由路由守卫做唯一一次重定向）。
+      //
+      // 不在此处导航：拦截器不应有导航副作用（可能同时多个请求触发）。
+      // 也不在此处清凭证：401 可能是网关侧临时问题，清掉会让用户丢掉
+      // refresh_token（见 `markUnauthenticated` 的说明）。
+      //
+      // ## 为什么带 `_retriedKey` 守卫（否则会通知两次）
+      //
+      // 重放请求也是**经过本拦截器**的：它在内部再走一次 `onError`，那时
+      // `_tryRefreshAndReplay` 因 `_retriedKey` 直接返回 false。若这里不判，
+      // 「刷新成功但重放仍 401」会先由重放那次通知一遍，再由下面
+      // `_tryRefreshAndReplay` 的 catch 通知一遍（实测：回调被调 2 次）。
+      // 两次通知虽幂等（状态一样），但会污染日志与测试断言。
+      if (err.requestOptions.extra[_retriedKey] != true) {
+        onSessionExpired?.call('会话已失效，请重新登录');
+      }
     }
 
     handler.next(_normalizeAuthError(err));
@@ -134,7 +173,17 @@ class AuthInterceptor extends Interceptor {
       return true;
     } on DioException catch (e) {
       // 重放也失败：按重放响应归一化（它带着更准确的状态码）。
-      handler.next(_normalizeAuthError(e));
+      //
+      // 若重放仍是 401，说明**刷新成功但新凭证依然被拒**（账号被禁、会话被
+      // 服务端撤销）。这也是确定的会话失效，故同样要通知装配层；否则这条
+      // 路径（刷新成功但重放 401）会静默停在旧页面上。
+      final normalized = _normalizeAuthError(e);
+      final mapped = normalized.error;
+      if (mapped is AuthError && mapped.isUnauthorized) {
+        SpbLog.warn('刷新后重放仍 401，会话确定失效');
+        onSessionExpired?.call(mapped.message);
+      }
+      handler.next(normalized);
       return true;
     }
   }
