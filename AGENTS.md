@@ -3284,6 +3284,93 @@ EXIT trap 会把整个脚本的退出码改成 1。实测现象：16 条断言�
 
 ---
 
+### 6.35 Windows 打不开浏览器：`explorer` 成功也返回 1
+
+**症状**：Windows 客户端点「SSO 登录」后弹出「无法打开浏览器，请手动访问：…」
+——而**浏览器其实已经打开了**。同一根因还让「打开文件」「打开同步目录」
+（交付物面板）与 Markdown 链接点击**点了没反应**。
+
+#### 根因：把「非 0 退出码」当成「没打开」
+
+`spb_platform` 的 `spawnSystemOpen` 统一三平台分派（`xdg-open` / `open` /
+`explorer`），原先的判定是：
+
+```dart
+if (result.exitCode != 0) return false;   // ❌ 在 Windows 上等于「永远失败」
+```
+
+而 `explorer.exe` 不是「打开某个东西」的工具，它是 **shell 本身**：收到参数时
+把请求转交给已运行的 explorer 实例 / 默认浏览器，然后**自己立即退出**，退出码
+与「目标是否真的被打开」无关。实测与上游一致：`explorer.exe https://…` 会打开
+浏览器，但退出码是 **1**（microsoft/WSL#6565，维护者确认「退出码 1 是 Windows
+应用的常态，控制台程序成功才返回 0」）。
+
+失败链路（每一段都在，只是判据错了）：
+
+```
+openInBrowser → spawnSystemOpenHere → spawnSystemOpen(explorer) → exitCode==1
+  → return false → openInBrowser 抛 PlatformError
+  → loopbackSignIn 返回 failure('无法打开浏览器，请手动访问：…')
+  → 登录页显示该文案，且**放弃等待 loopback 回调**（监听器在 finally 里关掉）
+```
+
+#### 修法：成功退出码按平台区分
+
+```dart
+Set<int> _successExitCodes(HostPlatform platform) => switch (platform) {
+  HostPlatform.windows => const {0, 1},
+  HostPlatform.linux || HostPlatform.macos || HostPlatform.other => const {0},
+};
+```
+
+⚠️ **不要把这条放宽到全平台**。`xdg-open` / `open` 有正常的退出码语义，把 1 也
+算成功会掩盖「没有默认浏览器」等真实故障。有两条用例专门钉住这个反方向
+（`linux 的退出码 1 → false` / `macos 的退出码 1 → false`）。
+
+⚠️ **也不要放宽成「Windows 一律成功」**：`{0,1}` 之外的退出码仍是失败信号
+（有用例 `windows 退出码 2 → false`）。
+
+#### 接受 1 的代价（诚实记录）
+
+`explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在 / 协议未
+注册」。可接受，因为：
+
+- 「打开文件 / 打开目录」在 spawn **之前**已探测过路径存在（`bootstrap.dart`
+  的 `revealPath` / `openFile`），可靠性不依赖退出码；
+- 对 URL 而言，误报「成功」的后果是「浏览器没开、登录页停在等待回调」，
+  而误报「失败」的后果是**每次登录都失败**——后者确定发生，前者只在
+  `http(s)` 协议未注册这类罕见环境下发生。
+
+#### 为什么测试没抓到（**假绿**）
+
+修复前 `system_open_test.dart` 的假 runner 在所有「成功」用例里返回
+`exitCode = 0`，于是「`explorer` 成功也返回 1」这条**平台事实从未被断言**。
+Windows 分支只能靠注入测试（本机是 Linux，`HostPlatform.current()` 的断言也
+写死 linux），所以这个错误前提一直被固化着——与 §6.21 / §6.26 / §6.33 同一类
+「绿不代表对」。
+
+现新增一组用例（`Windows 的退出码语义（explorer 成功也返回 1）`）：
+退出码 1 → 成功、0 → 成功、2 → 失败。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `windows => const {0, 1}` 改回 `const {0}` | `windows 退出码 1 → 视为成功` 失败 |
+| 把 `_successExitCodes` 改成全平台 `const {0, 1}` | `linux/macos 的退出码 1 → false` 两条失败 |
+
+#### 有意不做
+
+- **不改用 `cmd /c start`**：多一层 shell 就多一层注入面（`Process.run` 不经过
+  shell，参数按数组传递），且 `start` 的引号规则（第一个参数是窗口标题）更容易
+  踩坑。
+- **不改用 `ShellExecuteW`**：需要平台通道（Dart 侧拿不到），与「桌面能力不引
+  插件」的取向不符；`explorer` + 退出码豁免已足够。
+- **不改用 `Process.start(detached)`**：只判「能否 spawn」会丢失「命令确实失败」
+  的信号，比误报失败更糟（用户会看到「什么都没发生」）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -3602,6 +3689,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
 | ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
+| ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：根因是 `spawnSystemOpen` 按「非 0 退出码即失败」判定，而 `explorer.exe` **成功也返回 1**（microsoft/WSL#6565：它把请求转交给已运行的 shell / 默认浏览器后自己立即退出）。失败链路：`openInBrowser` 抛 `PlatformError` → `loopbackSignIn` 返回「无法打开浏览器」→ 登录页显示该文案并**放弃等待 loopback 回调**。同一根因还让「打开文件 / 打开同步目录 / Markdown 链接」点了没反应。改为成功退出码按平台区分（Windows `{0,1}`，其余 `{0}`），并补 5 条用例（Windows 1/0 成功、2 失败，linux/macos 的 1 仍失败）。⚠️ 修复前测试**假绿**：假 runner 在「成功」用例里一律返回 `exitCode = 0`，那条平台事实从未被断言 | §6.35 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |
