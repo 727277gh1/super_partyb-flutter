@@ -15,6 +15,13 @@
 /// 根因不是「不想支持」，而是两条路径各自实现了一遍、其中一条忘了补分支。
 /// 集中到本文件后只剩**一份**平台分支，新增平台只改这里。
 ///
+/// ## 平台内还要按**目标形态**分派（Windows）
+///
+/// 「哪个平台 spawn 哪个命令」不足以描述 Windows：URL 与文件/目录路径要用
+/// **不同**的命令（`rundll32` vs `explorer`），见 [looksLikeUrl] 与
+/// [spawnSystemOpen] 的文档——用 `explorer` 打开带 query string 的 URL 会得到
+/// 一个文件浏览器窗口，而 OIDC 授权 URL 必然带 query string。
+///
 /// ## 为什么不是简单的 `Process.run`
 ///
 /// 用 [ProcessRunner] 注入而非直接调 `Process.run`：三平台的命令分派是
@@ -86,9 +93,10 @@ class SystemProcessRunner implements ProcessRunner {
 
 /// 用系统默认程序打开 [target]（URL 或文件/目录路径）。
 ///
-/// 返回 `true` 表示**已成功发起**（系统程序已启动，且退出码命中该平台的
-/// 成功集合——Windows 的 `explorer` 成功也返回 1，见 [_successExitCodes]）；
-/// `false` 表示平台不支持、可执行文件不存在或退出码不表示成功。
+/// 返回 `true` 表示**已成功发起**（系统程序已启动；在退出码有意义的路径上
+/// 还要求它命中该平台的成功集合，见 [_successExitCodes] 与
+/// [looksLikeUrl] 的说明）；`false` 表示平台不支持、可执行文件不存在或退出码
+/// 不表示成功。
 ///
 /// ## 为什么返回 bool 而不是抛异常
 ///
@@ -102,24 +110,40 @@ class SystemProcessRunner implements ProcessRunner {
 ///
 /// ## 命令选择依据
 ///
-/// | 平台 | 命令 | 说明 |
-/// |---|---|---|
-/// | Linux | `xdg-open` | freedesktop 标准，按目标类型（URL/文件/目录）自行分派 |
-/// | macOS | `open` | 同上，系统级 |
-/// | Windows | `explorer` | `explorer <target>` 会用默认程序打开；**不要**用 `start`——它是 `cmd.exe` 内建命令，不是可执行文件，`Process.run` 会找不到 |
+/// | 平台 | 目标 | 命令 | 说明 |
+/// |---|---|---|---|
+/// | Linux | 任意 | `xdg-open` | freedesktop 标准，按目标类型（URL/文件/目录）自行分派 |
+/// | macOS | 任意 | `open` | 同上，系统级 |
+/// | Windows | URL（含 `://`） | `rundll32 url.dll,FileProtocolHandler` | **不能用 `explorer`**，见下 |
+/// | Windows | 文件/目录路径 | `explorer` | 在资源管理器里定位/用默认程序打开 |
 ///
-/// ## 为什么 Windows 传 `explorer` 而不是 `rundll32`
+/// 三平台都**不要**用 `start`：它是 `cmd.exe` 内建命令，不是可执行文件，
+/// `Process.run` 找不到；经 `cmd /c` 又会被重新解析一遍命令行，URL 里的 `&`
+/// 会变成命令分隔符（注入面）。
 ///
-/// `explorer` 对 URL 与文件路径都能工作，且不需要拼 shell 引号（`Process.run`
-/// 不经过 shell，参数按数组传递，路径里的空格/引号不会被解释）。`start` 必须
-/// 经 `cmd /c`，多一层 shell 就多一层注入面。
+/// ## ⚠️ 为什么 Windows 上 URL 必须走 `rundll32` 而不是 `explorer`
 ///
-/// ## ⚠️ Windows 的「成功」退出码是 0 **或 1**
+/// 这是**踩过的真实缺陷**：SSO 登录每次都会打开一个**文件浏览器窗口**而不是
+/// 浏览器。`explorer.exe <url>` 只在 URL **不带 query string** 时才委托给默认
+/// 浏览器；一旦带 `?a=1&b=2`，它会把参数当成路径去浏览（实测与上游一致：
+/// microsoft/WSL#3832 *"Actual result: Generic file explorer window opens"*、
+/// dotnet/runtime#108817 *"Process.Start opens explorer itself instead of URL"*）。
 ///
-/// 见 [_successExitCodes]：`explorer <target>` 委托给已运行的 shell / 默认
-/// 浏览器后自己立刻退出，**成功也返回 1**。按「非 0 即失败」判定会让每一次
-/// 成功的打开都被判成失败——Windows 上表现为登录时弹「无法打开浏览器，请手动
-/// 访问…」（浏览器其实已经打开了）、以及「打开文件 / 打开同步目录」点了没反应。
+/// 而 OIDC 授权 URL **必然**带 query string（`response_type` / `client_id` /
+/// `redirect_uri` / `scope` / `state` / `nonce` / `code_challenge` /
+/// `code_challenge_method`，见 `OidcPkce.buildAuthorizeUrl`），故每次登录都命中。
+/// 后果不是「报错」，而是**更糟的静默失败**：文件浏览器开了、退出码仍算成功，
+/// 客户端继续等 loopback 回调，用户看到的是「点了没反应」+ 一个莫名的窗口。
+///
+/// `rundll32 url.dll,FileProtocolHandler <url>` 是 Windows 上按 URL 协议分派
+/// 给默认处理程序的正确入口，query string 原样保留。
+///
+/// ## ⚠️ Windows 文件/目录的「成功」退出码是 0 **或 1**
+///
+/// 见 [_successExitCodes]：`explorer <target>` 委托给已运行的 shell 后自己立刻
+/// 退出，**成功也返回 1**（microsoft/WSL#6565）。按「非 0 即失败」判定会让
+/// 每一次成功的打开都被判成失败——Windows 上表现为「打开文件 / 打开同步目录」
+/// 点了没反应。
 Future<bool> spawnSystemOpen(
   String target, {
   required HostPlatform platform,
@@ -133,21 +157,34 @@ Future<bool> spawnSystemOpen(
   }
 
   final String exe;
+  final List<String> args;
+  // `rundll32` 的退出码恒为 0（见 [_successExitCodes]），故该分支不据退出码
+  // 判定成败——判了也恒为「成功」，只是把「无法判定」伪装成「已判定」。
+  var exitCodeIsMeaningful = true;
   switch (platform) {
     case HostPlatform.linux:
       exe = 'xdg-open';
+      args = [target];
     case HostPlatform.macos:
       exe = 'open';
+      args = [target];
+    case HostPlatform.windows when looksLikeUrl(target):
+      // URL 走 rundll32：`explorer <带 query 的 URL>` 会打开文件浏览器。
+      exe = 'rundll32';
+      args = ['url.dll,FileProtocolHandler', target];
+      exitCodeIsMeaningful = false;
     case HostPlatform.windows:
       exe = 'explorer';
+      args = [target];
     case HostPlatform.other:
       SpbLog.warn('当前平台不支持打开目标', {'target': target, 'platform': platform.name});
       return false;
   }
 
   try {
-    final result = await runner.run(exe, [target]);
-    if (!_successExitCodes(platform).contains(result.exitCode)) {
+    final result = await runner.run(exe, args);
+    if (exitCodeIsMeaningful &&
+        !_successExitCodes(platform).contains(result.exitCode)) {
       SpbLog.warn('系统打开命令返回非成功退出码', {
         'exe': exe,
         'target': target,
@@ -169,33 +206,54 @@ Future<bool> spawnSystemOpen(
   }
 }
 
+/// [target] 是否是**带 scheme 的 URL**（而非文件/目录路径）。
+///
+/// 只用于 Windows 的命令分派（URL → `rundll32`，路径 → `explorer`）。
+///
+/// ## 为什么用正则而不是 `Uri.parse(target).scheme`
+///
+/// `Uri.parse` 会把 Windows 路径解析出 scheme：实测 `C:\Users\me\file.md`
+/// 得到 `scheme=c`、`path=/Users/me/file.md`。据此判定会让**每一个** Windows
+/// 文件路径都走 URL 分支（交给 `rundll32`），比原缺陷更难查。
+///
+/// 故只认 `scheme://` 形态（`file://` / `https://` / 自定义 scheme 都命中；
+/// `C:\` 与 `C:/` 都不命中——前者是 `:\`，后者只有单个 `/`）。
+bool looksLikeUrl(String target) =>
+    RegExp(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://').hasMatch(target);
+
 /// 该平台视为「已成功发起」的退出码集合。
 ///
 /// ## 为什么 Windows 要额外接受 1
 ///
 /// `explorer.exe` 不是「打开某个东西」的工具，而是**shell 本身**：收到参数时
-/// 它把请求转交给已运行的 explorer 实例 / 默认浏览器，然后**自己立即退出**，
-/// 退出码与「目标是否真的被打开」无关。实测与上游一致：`explorer.exe https://…`
-/// 会打开浏览器，但退出码是 **1**（microsoft/WSL#6565 —— *"The process exits
-/// with 1 and opens the GitHub website"*，维护者确认「退出码 1 是 Windows 应用
-/// 的常态，控制台程序成功才返回 0」）。
+/// 它把请求转交给已运行的 explorer 实例，然后**自己立即退出**，退出码与
+/// 「目标是否真的被打开」无关。实测与上游一致：`explorer.exe <路径>` 打开了
+/// 目标，但退出码是 **1**（microsoft/WSL#6565 —— *"The process exits with 1
+/// and opens the GitHub website"*，维护者确认「退出码 1 是 Windows 应用的常态，
+/// 控制台程序成功才返回 0」）。
 ///
-/// 于是「非 0 即失败」在 Windows 上等于「永远失败」：浏览器打开了，客户端却
-/// 报「无法打开浏览器」并放弃等待 loopback 回调（`auth_loopback.dart`）。
+/// 于是「非 0 即失败」在 Windows 上等于「永远失败」：目录打开了，客户端却报
+/// 失败，用户表现为「点了没反应」。
 ///
 /// ## 接受 1 的代价（诚实记录）
 ///
-/// `explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在 / 协议
-/// 未注册」。这是可接受的：
+/// `explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在」。
+/// 这是可接受的：「打开文件 / 打开目录」两条调用链在 spawn 之前**已经探测过
+/// 路径存在**（`bootstrap.dart` 的 `revealPath` / `openFile`），可靠性不依赖
+/// 退出码。
 ///
-/// - 「打开文件 / 打开目录」两条调用链在 spawn 之前**已经探测过路径存在**
-///   （`bootstrap.dart` 的 `revealPath` / `openFile`），可靠性不依赖退出码；
-/// - 对 URL 而言，误报「成功」的后果是「浏览器没开、登录页停在等待回调」，
-///   而误报「失败」的后果是**每次登录都失败**——后者确定发生、前者只在
-///   `http(s)` 协议未注册这类罕见环境下发生。
+/// ## ⚠️ `rundll32` 分支**不看**退出码
 ///
-/// ⚠️ **不要把这条放宽到其他平台**：`xdg-open` / `open` 有正常的退出码语义，
-/// 把 1 也算成功会掩盖「没有默认浏览器」等真实故障（有用例钉住）。
+/// 它的退出码恒为 0（上游确认：*"rundll32 does not give you any return value,
+/// its exit code is always zero"*），即「URL 没打开」与「打开了」在退出码上
+/// 完全同形。故 URL 分支退化为「spawn 成功即视为已发起」——`spawnSystemOpen`
+/// 里用 `exitCodeIsMeaningful = false` 显式跳过判定，而不是假装 0 能说明什么。
+/// 代价：Windows 上 URL 打不开时不再有即时错误，而是由上层超时兜底
+/// （`auth_loopback.dart` 的 5 分钟 + 登录页的「手动访问 URL / 粘贴导入」降级
+/// 路径）。这与「误报失败导致每次登录都失败」相比仍是更好的取舍。
+///
+/// ⚠️ **不要把 `{0,1}` 放宽到其他平台**：`xdg-open` / `open` 有正常的退出码
+/// 语义，把 1 也算成功会掩盖「没有默认浏览器」等真实故障（有用例钉住）。
 Set<int> _successExitCodes(HostPlatform platform) => switch (platform) {
   HostPlatform.windows => const {0, 1},
   HostPlatform.linux || HostPlatform.macos || HostPlatform.other => const {0},

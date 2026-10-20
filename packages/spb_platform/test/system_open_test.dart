@@ -17,17 +17,22 @@ import 'package:spb_platform/spb_platform.dart';
 /// 3. 退出码不表示成功 → `false`；
 /// 4. runner 抛异常（可执行文件不存在）→ `false`，不向上抛；
 /// 5. [HostPlatform.other] → `false` 且**不 spawn**（静默成功比报错更糟）；
-/// 6. **Windows 的退出码 1 视为成功**（`explorer` 委托后即退出，成功也返回 1）。
+/// 6. **Windows 的退出码 1 视为成功**（`explorer` 委托后即退出，成功也返回 1）；
+/// 7. **Windows 上 URL 走 `rundll32` 而不是 `explorer`**，且该分支**不据退出码
+///    判定**（`rundll32` 恒返回 0，判了也只是把「无法判定」伪装成「已判定」）。
 ///
 /// 这些断言是「macOS / Windows 分支是否真的对」的唯一自动化保障——没有它，
 /// 那些分支要等到对应平台的用户点登录失败才发现。
 ///
-/// ## ⚠️ 第 6 组防的是一个**真实的假绿**
+/// ## ⚠️ 第 6、7 组各防一个**真实的假绿**
 ///
-/// 修复前本文件的假 runner 在所有「成功」用例里返回 `exitCode = 0`，于是
-/// 「`explorer` 成功也返回 1」这条平台事实**从未被断言**。而实现按「非 0 即
-/// 失败」判定——Windows 上每一次成功的打开都被判成失败，登录时表现为
-/// 「无法打开浏览器，请手动访问…」（浏览器其实已经打开）。
+/// - 第 6 组：修复前假 runner 在所有「成功」用例里返回 `exitCode = 0`，于是
+///   「`explorer` 成功也返回 1」这条平台事实**从未被断言**。而实现按「非 0 即
+///   失败」判定——Windows 上每一次成功的打开都被判成失败。
+/// - 第 7 组：修复前 Windows **一律** spawn `explorer`，而 `explorer <带 query
+///   的 URL>` 打开的是**文件浏览器**（SSO 登录因此每次「成功」地打开一个空
+///   窗口，客户端却继续等 loopback 回调）。断言只覆盖了「可执行文件名」而不区分
+///   URL/路径形态，那条缺陷因此从未被任何用例碰到。
 void main() {
   /// 记录调用并返回预设退出码的假 runner。
   late List<(String, List<String>)> calls;
@@ -73,7 +78,7 @@ void main() {
       expect(calls.single.$2, ['https://example.com/login']);
     });
 
-    test('windows 用 explorer', () async {
+    test('windows 路径用 explorer', () async {
       final ok = await spawnSystemOpen(
         r'C:\Users\me\file.md',
         platform: HostPlatform.windows,
@@ -83,6 +88,29 @@ void main() {
       expect(ok, isTrue);
       expect(calls.single.$1, 'explorer');
       expect(calls.single.$2, [r'C:\Users\me\file.md']);
+    });
+
+    test('windows 带 query 的 URL 用 rundll32（不是 explorer）', () async {
+      // 这是 SSO 登录的真实形态：OIDC 授权 URL 必然带 8 个 query 参数。
+      // `explorer <该 URL>` 会打开一个**文件浏览器窗口**（microsoft/WSL#3832），
+      // 且退出码仍算成功——用户看到「点了没反应」+ 一个莫名的窗口。
+      const url =
+          'https://app.example.com/idp/oauth2/authorize'
+          '?response_type=code&client_id=flutter-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A8347%2Fcallback'
+          '&scope=openid&state=st_1&nonce=no_1&code_challenge=abc&code_challenge_method=S256';
+
+      final ok = await spawnSystemOpen(
+        url,
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'rundll32');
+      // 参数必须是「dll 函数名」+「完整 URL」两段：URL 原样传递（含 `&`），
+      // 不经 shell 故不会被拆成命令分隔符。
+      expect(calls.single.$2, ['url.dll,FileProtocolHandler', url]);
+      expect(calls.single.$2.length, 2);
     });
 
     test('other 返回 false 且不 spawn', () async {
@@ -193,21 +221,21 @@ void main() {
   });
 
   group('Windows 的退出码语义（explorer 成功也返回 1）', () {
-    test('windows 退出码 1 → 视为成功', () async {
-      // 这是 Windows 上的**正常路径**：`explorer <target>` 把请求转交给已运行
-      // 的 shell / 默认浏览器后自己立即退出，退出码 1（microsoft/WSL#6565）。
+    test('windows 文件路径退出码 1 → 视为成功', () async {
+      // 这是 Windows 上的**正常路径**：`explorer <路径>` 把请求转交给已运行
+      // 的 shell 后自己立即退出，退出码 1（microsoft/WSL#6565）。
       // 修复前此处返回 false，导致每次成功打开都被判失败。
       exitCode = 1;
 
       final ok = await spawnSystemOpen(
-        'https://example.com/login',
+        r'C:\Users\me\Downloads',
         platform: HostPlatform.windows,
         runner: fakeRunner(),
       );
 
       expect(ok, isTrue);
       expect(calls.single.$1, 'explorer');
-      expect(calls.single.$2, ['https://example.com/login']);
+      expect(calls.single.$2, [r'C:\Users\me\Downloads']);
     });
 
     test('windows 退出码 0 → 视为成功', () async {
@@ -235,6 +263,65 @@ void main() {
 
       expect(ok, isFalse);
       expect(calls.length, 1);
+    });
+
+    test('windows URL（rundll32）不据退出码判定 → 退出码 2 也算已发起', () async {
+      // `rundll32` 的退出码**恒为 0**，与「URL 是否真的被打开」无关（上游确认：
+      // "rundll32 does not give you any return value, its exit code is always
+      // zero"）。故该分支显式跳过退出码判定——否则「换个退出码」会让
+      // Windows 登录行为再次反转，而用户什么都看不出来。
+      exitCode = 2;
+
+      final ok = await spawnSystemOpen(
+        'https://example.com/login?state=st_1',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'rundll32');
+    });
+
+    test('windows URL 的 spawn 异常仍降级为 false', () async {
+      // 「不看退出码」不等于「吞掉 spawn 失败」：可执行文件不存在仍要报 false，
+      // 否则登录页会静静地等到 5 分钟超时。
+      throwThis = const ProcessException('rundll32', []);
+
+      final ok = await spawnSystemOpen(
+        'https://example.com/login',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+      expect(calls.length, 1);
+    });
+  });
+
+  group('looksLikeUrl（Windows 命令分派的分支依据）', () {
+    test('带 scheme:// 的 URL → true', () {
+      expect(looksLikeUrl('https://example.com/a?b=1'), isTrue);
+      expect(looksLikeUrl('http://127.0.0.1:8347/callback'), isTrue);
+      expect(looksLikeUrl('file:///tmp/x.md'), isTrue);
+      expect(looksLikeUrl('partyb://oidc/callback?code=x'), isTrue);
+      // 只认 `scheme://`：`mailto:` / `C:` 这类单冒号形态不算（后者正是 Windows
+      // 盘符路径被 Uri.parse 误判成 scheme 的那种情形）。
+      expect(looksLikeUrl('mailto:me@example.com'), isFalse);
+    });
+
+    test('Windows 盘符路径 → false（Uri.parse 会把它解出 scheme=c，不能用它判定）', () {
+      // 实测：`Uri.parse(r'C:\Users\me\file.md')` 得到 scheme=`c`、
+      // path=`/Users/me/file.md`。若按「scheme 非空」判定，**每个** Windows
+      // 文件路径都会走进 URL 分支（交给 rundll32），比原缺陷更难查。
+      expect(looksLikeUrl(r'C:\Users\me\file.md'), isFalse);
+      expect(looksLikeUrl('C:/Users/me/file.md'), isFalse);
+      expect(looksLikeUrl(r'\\server\share\x.md'), isFalse);
+    });
+
+    test('Unix 路径 / 相对路径 / 空串 → false', () {
+      expect(looksLikeUrl('/home/me/x.md'), isFalse);
+      expect(looksLikeUrl('x.md'), isFalse);
+      expect(looksLikeUrl(''), isFalse);
     });
   });
 

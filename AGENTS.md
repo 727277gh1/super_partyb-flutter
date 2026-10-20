@@ -3284,26 +3284,74 @@ EXIT trap 会把整个脚本的退出码改成 1。实测现象：16 条断言�
 
 ---
 
-### 6.35 Windows 打不开浏览器：`explorer` 成功也返回 1
+### 6.35 Windows 打不开浏览器：`explorer` 既吃不下带 query 的 URL，成功也返回 1
 
-**症状**：Windows 客户端点「SSO 登录」后弹出「无法打开浏览器，请手动访问：…」
-——而**浏览器其实已经打开了**。同一根因还让「打开文件」「打开同步目录」
-（交付物面板）与 Markdown 链接点击**点了没反应**。
+这一节记**两个**Windows 缺陷，症状都是「点登录没反应」。第二个是第一个修完
+之后才暴露的——修第一个并不能让 SSO 登录真正可用。
 
-#### 根因：把「非 0 退出码」当成「没打开」
+| # | 缺陷 | 用户看到什么 | 何时发现 |
+|---|---|---|---|
+| ① | `explorer <带 query 的 URL>` 打开的是**文件浏览器** | 一个莫名的文件管理器窗口 + 登录页干等 | 用户报「SSO 打开的是文件浏览器」 |
+| ② | `explorer` 成功也返回 **1**，被判成失败 | 弹「无法打开浏览器，请手动访问…」（浏览器其实已开） | 修 ① 之前一直掩盖着 |
 
-`spb_platform` 的 `spawnSystemOpen` 统一三平台分派（`xdg-open` / `open` /
-`explorer`），原先的判定是：
+#### 缺陷 ①：URL 与路径必须用不同命令
+
+`spawnSystemOpen` 原先对 Windows **一律** spawn `explorer`：
+
+```dart
+case HostPlatform.windows:
+  exe = 'explorer';   // ❌ 对带 query 的 URL 会打开文件浏览器
+```
+
+而 `explorer.exe` 只在 URL **不带 query string** 时才委托给默认浏览器。一旦带
+`?a=1&b=2`，它把参数当路径去浏览（上游一致：microsoft/WSL#3832 *"Actual
+result: Generic file explorer window opens"*、dotnet/runtime#108817
+*"Process.Start opens explorer itself instead of URL"*）。
+
+**为什么必然命中**：OIDC 授权 URL 有 8 个 query 参数（`response_type` /
+`client_id` / `redirect_uri` / `scope` / `state` / `nonce` / `code_challenge` /
+`code_challenge_method`，见 `OidcPkce.buildAuthorizeUrl`），**不可能**不带 query。
+故这不是「偶发」，而是每次登录都发生。
+
+**为什么比报错更糟**：`explorer` 对文件浏览器窗口同样返回「成功」，于是
+`openInBrowser` 不抛 `PlatformError`，`loopbackSignIn` 继续 `server.wait()` 等
+回调——用户看到的是「点了没反应」+ 一个空窗口，5 分钟后才超时。
+
+修法：按**目标形态**分派，而不是只按平台分派。
+
+```dart
+case HostPlatform.windows when looksLikeUrl(target):
+  exe = 'rundll32';
+  args = ['url.dll,FileProtocolHandler', target];
+  exitCodeIsMeaningful = false;   // 见缺陷 ② 末尾
+case HostPlatform.windows:
+  exe = 'explorer';
+  args = [target];
+```
+
+`rundll32 url.dll,FileProtocolHandler <url>` 是 Windows 上按 URL 协议分派给
+默认处理程序的正确入口，query string 原样保留。
+
+⚠️ **URL 判定不能用 `Uri.parse(target).scheme`**：实测
+`Uri.parse(r'C:\Users\me\file.md')` 得到 `scheme=c`、`path=/Users/me/file.md`，
+据此判定会让**每一个** Windows 文件路径都走进 URL 分支（交给 `rundll32`）——
+比原缺陷更难查。故 `looksLikeUrl` 只认 `scheme://` 形态（正则，不用 `Uri`）：
+`file://` / `https://` / `partyb://` 命中；`C:\` 与 `C:/` 都不命中；
+`mailto:`（单冒号）也不命中。有用例逐条钉住这三类。
+
+#### 缺陷 ②：把「非 0 退出码」当成「没打开」
+
+原先的判定是：
 
 ```dart
 if (result.exitCode != 0) return false;   // ❌ 在 Windows 上等于「永远失败」
 ```
 
-而 `explorer.exe` 不是「打开某个东西」的工具，它是 **shell 本身**：收到参数时
-把请求转交给已运行的 explorer 实例 / 默认浏览器，然后**自己立即退出**，退出码
-与「目标是否真的被打开」无关。实测与上游一致：`explorer.exe https://…` 会打开
-浏览器，但退出码是 **1**（microsoft/WSL#6565，维护者确认「退出码 1 是 Windows
-应用的常态，控制台程序成功才返回 0」）。
+`explorer.exe` 不是「打开某个东西」的工具，它是 **shell 本身**：收到参数时把
+请求转交给已运行的 explorer 实例，然后**自己立即退出**，退出码与「目标是否真的
+被打开」无关。实测与上游一致：`explorer.exe <路径>` 打开了目标，退出码却是
+**1**（microsoft/WSL#6565，维护者确认「退出码 1 是 Windows 应用的常态，控制台
+程序成功才返回 0」）。
 
 失败链路（每一段都在，只是判据错了）：
 
@@ -3314,7 +3362,7 @@ openInBrowser → spawnSystemOpenHere → spawnSystemOpen(explorer) → exitCode
   → 登录页显示该文案，且**放弃等待 loopback 回调**（监听器在 finally 里关掉）
 ```
 
-#### 修法：成功退出码按平台区分
+修法：成功退出码按平台区分。
 
 ```dart
 Set<int> _successExitCodes(HostPlatform platform) => switch (platform) {
@@ -3330,44 +3378,63 @@ Set<int> _successExitCodes(HostPlatform platform) => switch (platform) {
 ⚠️ **也不要放宽成「Windows 一律成功」**：`{0,1}` 之外的退出码仍是失败信号
 （有用例 `windows 退出码 2 → false`）。
 
-#### 接受 1 的代价（诚实记录）
+#### ⚠️ `rundll32` 分支**不看**退出码（缺陷 ① 的代价）
 
-`explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在 / 协议未
-注册」。可接受，因为：
+`rundll32` 的退出码**恒为 0**（上游确认：*"rundll32 does not give you any
+return value, its exit code is always zero"*），即「URL 没打开」与「打开了」在
+退出码上完全同形。故该分支用 `exitCodeIsMeaningful = false` **显式跳过**判定，
+而不是假装 0 能说明什么（后者会把「无法判定」伪装成「已判定」）。
 
-- 「打开文件 / 打开目录」在 spawn **之前**已探测过路径存在（`bootstrap.dart`
-  的 `revealPath` / `openFile`），可靠性不依赖退出码；
-- 对 URL 而言，误报「成功」的后果是「浏览器没开、登录页停在等待回调」，
-  而误报「失败」的后果是**每次登录都失败**——后者确定发生，前者只在
-  `http(s)` 协议未注册这类罕见环境下发生。
+代价（诚实记录）：Windows 上 URL 打不开时**没有即时错误**，而是由上层超时兜底
+（`auth_loopback.dart` 的 5 分钟 + 登录页的「手动访问 URL / 粘贴导入」降级路径）。
+仍优于替代方案：误报失败会导致**每次登录都失败**。
 
-#### 为什么测试没抓到（**假绿**）
+⚠️ 「不看退出码」**不等于**「吞掉 spawn 失败」：可执行文件不存在仍返回 `false`
+（有用例 `windows URL 的 spawn 异常仍降级为 false`），否则登录页会静静地等到
+5 分钟超时。
 
-修复前 `system_open_test.dart` 的假 runner 在所有「成功」用例里返回
-`exitCode = 0`，于是「`explorer` 成功也返回 1」这条**平台事实从未被断言**。
-Windows 分支只能靠注入测试（本机是 Linux，`HostPlatform.current()` 的断言也
-写死 linux），所以这个错误前提一直被固化着——与 §6.21 / §6.26 / §6.33 同一类
+#### 接受 `explorer` 返回 1 的代价（诚实记录）
+
+`explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在」。可接受，
+因为「打开文件 / 打开目录」两条调用链在 spawn **之前**已经探测过路径存在
+（`bootstrap.dart` 的 `revealPath` / `openFile`），可靠性不依赖退出码。
+
+#### 为什么测试没抓到（**两个假绿**）
+
+| 假绿 | 成因 |
+|---|---|
+| 「`explorer` 成功也返回 1」从未被断言 | 假 runner 在所有「成功」用例里返回 `exitCode = 0` |
+| 「URL 会被交给 `explorer`」从未被断言 | 断言只看**可执行文件名**，不区分目标形态——`windows 用 explorer` 那条用例传的是 `C:\Users\me\file.md`（路径），于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 |
+
+Windows 分支只能靠注入测试（本机是 Linux，`HostPlatform.current()` 的断言也写死
+linux），所以这两个错误前提一直被固化着——与 §6.21 / §6.26 / §6.33 同一类
 「绿不代表对」。
 
-现新增一组用例（`Windows 的退出码语义（explorer 成功也返回 1）`）：
-退出码 1 → 成功、0 → 成功、2 → 失败。
+现补的用例：`Windows 的退出码语义` 组 5 条（路径 1 → 成功 / 0 → 成功 / 2 → 失败
+/ URL 退出码 2 仍算已发起 / URL 的 spawn 异常仍 false）+ `looksLikeUrl` 组 3 条
+（URL → true / 盘符路径 → false / Unix 与相对路径 → false）。
 
 #### 反向验证（逐条实测）
 
 | 改坏 | 结果 |
 |---|---|
-| `windows => const {0, 1}` 改回 `const {0}` | `windows 退出码 1 → 视为成功` 失败 |
-| 把 `_successExitCodes` 改成全平台 `const {0, 1}` | `linux/macos 的退出码 1 → false` 两条失败 |
+| 去掉 `windows when looksLikeUrl` 分支（退回「一律 explorer」） | 2 条失败 |
+| `rundll32` 分支也看退出码（去掉 `exitCodeIsMeaningful`） | 1 条失败 |
+| `looksLikeUrl` 改成 `Uri.parse(target).scheme` 非空 | 5 条失败 |
+| `windows => const {0, 1}` 改回 `const {0}` | 1 条失败 |
+| 把 `_successExitCodes` 改成全平台 `const {0, 1}` | 2 条失败 |
 
 #### 有意不做
 
 - **不改用 `cmd /c start`**：多一层 shell 就多一层注入面（`Process.run` 不经过
   shell，参数按数组传递），且 `start` 的引号规则（第一个参数是窗口标题）更容易
-  踩坑。
+  踩坑。`start` 还会把 URL 里的 `&` 当成命令分隔符。
 - **不改用 `ShellExecuteW`**：需要平台通道（Dart 侧拿不到），与「桌面能力不引
-  插件」的取向不符；`explorer` + 退出码豁免已足够。
+  插件」的取向不符；`rundll32`（URL）+ `explorer`（路径）已覆盖全部调用场景。
 - **不改用 `Process.start(detached)`**：只判「能否 spawn」会丢失「命令确实失败」
   的信号，比误报失败更糟（用户会看到「什么都没发生」）。
+- **不在 URL 分支做「打开了吗」的二次校验**：Windows 没有廉价可靠的探测手段
+  （查默认浏览器进程、读注册表都不可靠且要额外依赖），收益不抵成本。
 
 ---
 
@@ -3689,7 +3756,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
 | ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
-| ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：根因是 `spawnSystemOpen` 按「非 0 退出码即失败」判定，而 `explorer.exe` **成功也返回 1**（microsoft/WSL#6565：它把请求转交给已运行的 shell / 默认浏览器后自己立即退出）。失败链路：`openInBrowser` 抛 `PlatformError` → `loopbackSignIn` 返回「无法打开浏览器」→ 登录页显示该文案并**放弃等待 loopback 回调**。同一根因还让「打开文件 / 打开同步目录 / Markdown 链接」点了没反应。改为成功退出码按平台区分（Windows `{0,1}`，其余 `{0}`），并补 5 条用例（Windows 1/0 成功、2 失败，linux/macos 的 1 仍失败）。⚠️ 修复前测试**假绿**：假 runner 在「成功」用例里一律返回 `exitCode = 0`，那条平台事实从未被断言 | §6.35 |
+| ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：两个独立的 Windows 缺陷。① **URL 与路径必须用不同命令**——原先一律 `explorer`，而 `explorer <带 query 的 URL>` 打开的是**文件浏览器**（microsoft/WSL#3832），而 OIDC 授权 URL 必然带 8 个 query 参数，故每次 SSO 登录都会「成功」地打开一个空窗口、客户端继续等 loopback 回调。现 URL → `rundll32 url.dll,FileProtocolHandler`，路径 → `explorer`；`looksLikeUrl` 只认 `scheme://`（**不能**用 `Uri.parse().scheme`——它把 `C:\Users\me` 解成 `scheme=c`，会让每个 Windows 路径都走 URL 分支）。② **`explorer` 成功也返回 1**（microsoft/WSL#6565），原先按「非 0 即失败」判定 → 每次成功打开都被判失败。现 Windows 成功集合为 `{0,1}`，其余平台仍 `{0}`；`rundll32` 分支的退出码恒为 0，故用 `exitCodeIsMeaningful = false` **显式跳过**判定（代价：URL 打不开时靠上层 5 分钟超时兜底，不再有即时错误）。共 8 条新用例 + 5 项反向验证逐条实测。⚠️ 修复前测试有**两个假绿**：假 runner 一律返回 `exitCode = 0`；`windows 用 explorer` 那条用例传的是**路径**，于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 | §6.35 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |
