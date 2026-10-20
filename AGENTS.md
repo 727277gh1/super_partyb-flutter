@@ -2617,18 +2617,72 @@ issue 要求逐项给出结论。实际核实后：**除了新查出的 `groupCo
 
 ### 6.29 开源镜像同步（`tools/sync-to-github.sh`）
 
-权威源是 **Gitea**（完整历史 + blame）。GitHub 上另有一份**公开镜像**，用 squash
+权威源是 **Gitea**（`git@git.atjog.com:dever/super_partyb-flutter.git`，完整历史 +
+blame）。GitHub 上另有一份**公开镜像**：
+**`git@github.com:727277gh1/super_partyb-flutter.git`**（`main` 分支），用 squash
 方案导出：只含「恰好 HEAD 这一棵树」，一条提交。
 
+> 镜像地址写在这里是**有意的**：它本来就是公开信息（GitHub 页面 + 提交 author
+> 都可见，`727277gh1` 同时是 noreply 邮箱前缀），不写只会让下次同步的人再问一遍。
+> 真正需要隐藏的是**生产部署标识**（域名 / IP / 目录 / 邮箱），那些在仓库外的
+> 映射文件里。
+
 ```bash
+# 三个变量都没有内置默认值以外的必需项：前两个有默认路径，第三个**必须**设。
 export SPB_OS_MAP="$HOME/.config/spb-flutter/opensource-map.env"
 export SPB_OS_EXTRA_RULES="$HOME/.config/spb-flutter/extra-rules.txt"
-export SPB_GITHUB_REMOTE="git@github.com:<owner>/<repo>.git"
+export SPB_GITHUB_REMOTE="git@github.com:727277gh1/super_partyb-flutter.git"
 
-bash tools/sync-to-github.sh --verify    # 只校验当前树是否已干净
-bash tools/sync-to-github.sh --dry-run   # 预演：报替换处数，不推送
+bash tools/sync-to-github.sh --verify    # 只校验**当前工作区**是否已干净
+bash tools/sync-to-github.sh --dry-run   # 预演：导出 + 替换 + 校验，不推送
 bash tools/sync-to-github.sh             # 执行（force-push）
+bash tools/sync-to-github.sh --help      # 打印脚本头部的说明
 ```
+
+`--verify` 与 `--dry-run` 的区别（易混）：前者查的是**工作区**（回答「我的仓库
+里还有没有真实值」），后者查的是**导出的临时树**（回答「这次推送会带出什么」）。
+未清理干净时 `--verify` 报残留而 `--dry-run` 也报——但只有后者会真的中止推送。
+
+#### 可选环境变量（文档曾漏记，实测补齐）
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `SPB_GITHUB_REMOTE` | **无（必填）** | 目标仓库。未设时 `run` 模式直接报错退出 |
+| `SPB_OS_MAP` | `$HOME/.config/spb-flutter/opensource-map.env` | 真实值 → 占位符映射 |
+| `SPB_OS_EXTRA_RULES` | `$HOME/.config/spb-flutter/extra-rules.txt` | 映射表装不下的形态 |
+| `SPB_GITHUB_BRANCH` | `main` | 推送到哪个分支 |
+| `SPB_SYNC_COMMIT_MSG` | `chore: import super_partyb-flutter (Flutter 客户端)` | 镜像上那条提交的正文 |
+
+⚠️ **GitHub 上那条 `chore: import super_partyb-flutter (Flutter 客户端)` 是脚本
+产物，不是手写提交**。看到它不要以为是有人手工 import——它的作者信息
+（`jim <727277gh1@users.noreply.github.com>`）也**继承自主仓库的 `git config`**
+（脚本显式用 `git -c user.name=... -c user.email=...` 传入，避免公开仓库里出现
+意外的作者信息）。
+
+#### 它内部在 `/tmp` 里建了一个一次性仓库（退出即删）
+
+`/tmp` 那个临时仓库不是人工建的，是脚本自己建的：
+
+```bash
+work=$(mktemp -d)          # 第 94 行
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT          # 第 96 行：退出时自动删除，故事后找不到
+```
+
+六个步骤（对应脚本第 215–256 行）：
+
+| # | 动作 | 行 |
+|---|---|---|
+| 1 | `git archive HEAD \| tar -x -C "$work/tree"` — 只导出 HEAD 那棵树（不含 `.git` / 未跟踪 / 构建产物） | 215 |
+| 2 | `apply_rules` — 按规则替换**文本**文件（`grep -I` 跳过二进制） | 218 |
+| 3 | `verify_clean` — 任一真实值残留则**中止，不推送** | 221 |
+| 4 | `git init -q -b "$BRANCH"` — 在临时树里建**全新孤立仓库** | 245 |
+| 5 | `commit -m "$COMMIT_MSG"` — 单条提交 | 250 |
+| 6 | `git push -f -u github "$BRANCH"` — force-push | 256 |
+
+⚠️ **工作区有未提交改动时脚本只警告、不中止**（第 205–208 行）：`git archive`
+只导出 HEAD，未提交的东西**不会**进镜像。想包含就先提交——否则会出现「本地
+改了但 GitHub 上没变」的困惑。
 
 #### 为什么是 squash 而不是重写历史
 
@@ -2671,6 +2725,27 @@ Gitea 保留完整历史。
 - 脚本产物与手工推送的 GitHub HEAD **逐文件 diff 一致**（`diff -r --brief` 无输出）；
 - `--dry-run` 报「替换 2 处、涉及 2 个文件」+「23 条规则全部无残留」，
   与手工流程的数字完全一致。
+
+#### 实测：镜像对应哪个 Gitea 提交（2026-10-20）
+
+GitHub 上当时的 HEAD `8715622` 对应 Gitea 的 **`30cbbf2`**（品牌图标那次）：
+
+```bash
+git worktree add --detach /tmp/gitea-x 30cbbf2
+diff -rq --exclude=.git /tmp/gitea-x /tmp/gh-clone
+# → 只有 2 个文件不同，且差异全是**脱敏替换**：
+#     AGENTS.md              （idp.atjog.com → idp.<internal-domain>，tbcc → app.example.com）
+#     .github/dependabot.yml （git.atjog.com → git@<gitea-host>）
+```
+
+时间戳也对得上（Gitea `11:23:52` → GitHub `11:24:03`）。故**核对镜像是否落后**
+的可靠办法不是看提交标题（每次都一样），而是逐文件 diff：
+
+```bash
+git clone --depth 1 https://github.com/727277gh1/super_partyb-flutter /tmp/gh-check
+git worktree add --detach /tmp/gitea-head HEAD
+diff -rq --exclude=.git /tmp/gitea-head /tmp/gh-check   # 只应有脱敏替换造成的差异
+```
 
 ---
 
