@@ -86,8 +86,9 @@ class SystemProcessRunner implements ProcessRunner {
 
 /// 用系统默认程序打开 [target]（URL 或文件/目录路径）。
 ///
-/// 返回 `true` 表示**已成功发起**（系统程序已启动且退出码为 0）；`false` 表示
-/// 平台不支持、可执行文件不存在或返回非 0。
+/// 返回 `true` 表示**已成功发起**（系统程序已启动，且退出码命中该平台的
+/// 成功集合——Windows 的 `explorer` 成功也返回 1，见 [_successExitCodes]）；
+/// `false` 表示平台不支持、可执行文件不存在或退出码不表示成功。
 ///
 /// ## 为什么返回 bool 而不是抛异常
 ///
@@ -112,6 +113,13 @@ class SystemProcessRunner implements ProcessRunner {
 /// `explorer` 对 URL 与文件路径都能工作，且不需要拼 shell 引号（`Process.run`
 /// 不经过 shell，参数按数组传递，路径里的空格/引号不会被解释）。`start` 必须
 /// 经 `cmd /c`，多一层 shell 就多一层注入面。
+///
+/// ## ⚠️ Windows 的「成功」退出码是 0 **或 1**
+///
+/// 见 [_successExitCodes]：`explorer <target>` 委托给已运行的 shell / 默认
+/// 浏览器后自己立刻退出，**成功也返回 1**。按「非 0 即失败」判定会让每一次
+/// 成功的打开都被判成失败——Windows 上表现为登录时弹「无法打开浏览器，请手动
+/// 访问…」（浏览器其实已经打开了）、以及「打开文件 / 打开同步目录」点了没反应。
 Future<bool> spawnSystemOpen(
   String target, {
   required HostPlatform platform,
@@ -139,11 +147,12 @@ Future<bool> spawnSystemOpen(
 
   try {
     final result = await runner.run(exe, [target]);
-    if (result.exitCode != 0) {
-      SpbLog.warn('系统打开命令返回非 0', {
+    if (!_successExitCodes(platform).contains(result.exitCode)) {
+      SpbLog.warn('系统打开命令返回非成功退出码', {
         'exe': exe,
         'target': target,
         'exit': result.exitCode,
+        'platform': platform.name,
       });
       return false;
     }
@@ -159,6 +168,38 @@ Future<bool> spawnSystemOpen(
     return false;
   }
 }
+
+/// 该平台视为「已成功发起」的退出码集合。
+///
+/// ## 为什么 Windows 要额外接受 1
+///
+/// `explorer.exe` 不是「打开某个东西」的工具，而是**shell 本身**：收到参数时
+/// 它把请求转交给已运行的 explorer 实例 / 默认浏览器，然后**自己立即退出**，
+/// 退出码与「目标是否真的被打开」无关。实测与上游一致：`explorer.exe https://…`
+/// 会打开浏览器，但退出码是 **1**（microsoft/WSL#6565 —— *"The process exits
+/// with 1 and opens the GitHub website"*，维护者确认「退出码 1 是 Windows 应用
+/// 的常态，控制台程序成功才返回 0」）。
+///
+/// 于是「非 0 即失败」在 Windows 上等于「永远失败」：浏览器打开了，客户端却
+/// 报「无法打开浏览器」并放弃等待 loopback 回调（`auth_loopback.dart`）。
+///
+/// ## 接受 1 的代价（诚实记录）
+///
+/// `explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在 / 协议
+/// 未注册」。这是可接受的：
+///
+/// - 「打开文件 / 打开目录」两条调用链在 spawn 之前**已经探测过路径存在**
+///   （`bootstrap.dart` 的 `revealPath` / `openFile`），可靠性不依赖退出码；
+/// - 对 URL 而言，误报「成功」的后果是「浏览器没开、登录页停在等待回调」，
+///   而误报「失败」的后果是**每次登录都失败**——后者确定发生、前者只在
+///   `http(s)` 协议未注册这类罕见环境下发生。
+///
+/// ⚠️ **不要把这条放宽到其他平台**：`xdg-open` / `open` 有正常的退出码语义，
+/// 把 1 也算成功会掩盖「没有默认浏览器」等真实故障（有用例钉住）。
+Set<int> _successExitCodes(HostPlatform platform) => switch (platform) {
+  HostPlatform.windows => const {0, 1},
+  HostPlatform.linux || HostPlatform.macos || HostPlatform.other => const {0},
+};
 
 /// 便捷入口：用当前平台与真实进程执行器打开 [target]。
 ///

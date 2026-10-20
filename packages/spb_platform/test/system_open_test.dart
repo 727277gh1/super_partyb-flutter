@@ -14,12 +14,20 @@ import 'package:spb_platform/spb_platform.dart';
 ///
 /// 1. 每个平台 spawn 的**可执行文件名**正确（`xdg-open` / `open` / `explorer`）；
 /// 2. 目标作为**单个参数**传递（不经 shell，路径含空格不会被拆）；
-/// 3. 退出码非 0 → `false`；
+/// 3. 退出码不表示成功 → `false`；
 /// 4. runner 抛异常（可执行文件不存在）→ `false`，不向上抛；
-/// 5. [HostPlatform.other] → `false` 且**不 spawn**（静默成功比报错更糟）。
+/// 5. [HostPlatform.other] → `false` 且**不 spawn**（静默成功比报错更糟）；
+/// 6. **Windows 的退出码 1 视为成功**（`explorer` 委托后即退出，成功也返回 1）。
 ///
-/// 这些断言是「macOS 分支是否真的对」的唯一自动化保障——没有它，那个分支要
-/// 等到 macOS 用户点登录失败才发现。
+/// 这些断言是「macOS / Windows 分支是否真的对」的唯一自动化保障——没有它，
+/// 那些分支要等到对应平台的用户点登录失败才发现。
+///
+/// ## ⚠️ 第 6 组防的是一个**真实的假绿**
+///
+/// 修复前本文件的假 runner 在所有「成功」用例里返回 `exitCode = 0`，于是
+/// 「`explorer` 成功也返回 1」这条平台事实**从未被断言**。而实现按「非 0 即
+/// 失败」判定——Windows 上每一次成功的打开都被判成失败，登录时表现为
+/// 「无法打开浏览器，请手动访问…」（浏览器其实已经打开）。
 void main() {
   /// 记录调用并返回预设退出码的假 runner。
   late List<(String, List<String>)> calls;
@@ -117,7 +125,7 @@ void main() {
   });
 
   group('失败降级（返回 false，不抛异常）', () {
-    test('退出码非 0 → false', () async {
+    test('退出码非成功 → false', () async {
       exitCode = 3;
 
       final ok = await spawnSystemOpen(
@@ -129,6 +137,32 @@ void main() {
       expect(ok, isFalse);
       // 关键：确实尝试过 spawn（不是提前 return）。
       expect(calls.length, 1);
+    });
+
+    test('linux 的退出码 1 → false（不随 Windows 放宽）', () async {
+      // `xdg-open` 有正常的退出码语义：1 表示「没有默认程序」等真实故障。
+      // 若把 Windows 的「1 也算成功」误用到全平台，这条会失败。
+      exitCode = 1;
+
+      final ok = await spawnSystemOpen(
+        'https://example.com',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+    });
+
+    test('macos 的退出码 1 → false（不随 Windows 放宽）', () async {
+      exitCode = 1;
+
+      final ok = await spawnSystemOpen(
+        '/tmp/x',
+        platform: HostPlatform.macos,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
     });
 
     test('runner 抛异常（可执行文件不存在）→ false，不向上抛', () async {
@@ -155,6 +189,52 @@ void main() {
       );
 
       expect(ok, isFalse);
+    });
+  });
+
+  group('Windows 的退出码语义（explorer 成功也返回 1）', () {
+    test('windows 退出码 1 → 视为成功', () async {
+      // 这是 Windows 上的**正常路径**：`explorer <target>` 把请求转交给已运行
+      // 的 shell / 默认浏览器后自己立即退出，退出码 1（microsoft/WSL#6565）。
+      // 修复前此处返回 false，导致每次成功打开都被判失败。
+      exitCode = 1;
+
+      final ok = await spawnSystemOpen(
+        'https://example.com/login',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'explorer');
+      expect(calls.single.$2, ['https://example.com/login']);
+    });
+
+    test('windows 退出码 0 → 视为成功', () async {
+      exitCode = 0;
+
+      final ok = await spawnSystemOpen(
+        r'C:\Users\me\file.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+    });
+
+    test('windows 退出码 2 → false（仍能报出真实失败）', () async {
+      // 放宽到 {0,1} 而不是「Windows 一律成功」：其它退出码仍是失败信号，
+      // 否则「spawn 了但确实出错」会变成静默成功。
+      exitCode = 2;
+
+      final ok = await spawnSystemOpen(
+        r'C:\Users\me\file.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+      expect(calls.length, 1);
     });
   });
 
