@@ -3,7 +3,7 @@
 > 用途：为 `super_partyb-flutter` 的客户端功能实现提供**官方文档依据**。
 > 只留结论与最小可用片段，不复制大段文档。
 >
-> 调研工具：`uv run /home/jim/.pi/agent/skills/context7/scripts/context7_search.py`
+> 调研工具：`uv run $HOME/.pi/agent/skills/context7/scripts/context7_search.py`
 > （`--check-auth` 已通过）。命令可复现，库 ID 与版本见下表。
 
 ---
@@ -21,9 +21,9 @@
 复现命令（任一）：
 
 ```bash
-timeout 180 uv run /home/jim/.pi/agent/skills/context7/scripts/context7_search.py \
+timeout 180 uv run $HOME/.pi/agent/skills/context7/scripts/context7_search.py \
   search --library go_router --topic StatefulShellRoute
-timeout 180 uv run /home/jim/.pi/agent/skills/context7/scripts/context7_search.py \
+timeout 180 uv run $HOME/.pi/agent/skills/context7/scripts/context7_search.py \
   docs --library-id /flutter/packages --topic "go_router StatefulShellRoute"
 ```
 

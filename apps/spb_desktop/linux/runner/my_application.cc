@@ -50,7 +50,7 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 //    hostname 出参告诉我们 host 是 `evil.com`，据此可以拒掉。
 //
 // 2. **反转义只能做一次。** 文件名里字面含 `%` 时，URI 是双写的
-//    （`100%.txt` → `file:///home/jim/100%25.txt`）。g_filename_from_uri
+//    （`100%.txt` → `file:///path/to/100%25.txt`）。g_filename_from_uri
 //    解出的已经是字面 `100%.txt`；再调一次 g_uri_unescape_string 会因
 //    `%.t` 不是合法转义而返回 NULL（实测），把合法文件丢掉。
 //
