@@ -1,4 +1,8 @@
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_api/spb_api.dart';
@@ -562,4 +566,132 @@ void main() {
       );
     });
   });
+
+  group('会话失效 → 回登录页（AuthInterceptor.onSessionExpired 接线）', () {
+    /// 把测试窗口调高（设置页是惰性 ListView，目标条目可能在屏幕外）。
+    void useTallWindow(WidgetTester tester) {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+    }
+    // ## 这个 group 防的是什么
+    //
+    // 修复前，401 只被归一化成 `AuthError` 抛给调用方，而各页面拿到它只翻成
+    // 一句 SnackBar 文案（「登录已过期，请重新登录」）——**没有任何一处**把
+    // 认证状态推进到未登录。于是会话真的过期后，用户卡在当前页面，只能手动
+    // 进设置页点「退出登录」。
+    //
+    // 这两条从**装配层**断言整条链路：401 → `onSessionExpired` →
+    // `markUnauthenticated` → `AuthRefreshNotifier` → 路由守卫重定向。
+    // 只测拦截器回调不够——回调接错了地方（如忘了 `dioProvider` 那一行）
+    // 时拦截器单测仍绿，而用户仍然卡住。
+
+    testWidgets('已登录时收到 401 → 回到登录页（且不清凭证）', (tester) async {
+      useTallWindow(tester);
+      final store = InMemoryTokenStore(freshTokens());
+      final h = await pumpApp(tester, tokenStore: store, mockGroups: false);
+
+      // 前置条件：确实处于已登录态（否则本用例空洞通过）。
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '前置条件：必须先处于已登录态',
+      );
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      // 模拟一次「刷新也救不回来」的 401。真实触发点是 `dioProvider` 里的
+      // `AuthInterceptor.onSessionExpired`，它调的就是这个 notifier 方法。
+      h.container
+          .read(authStateProvider.notifier)
+          .markUnauthenticated('会话已失效，请重新登录');
+      await tester.pumpAndSettle();
+
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.login,
+        reason: '会话失效必须回到登录页（修复前这里仍停在 /settings）',
+      );
+      expect(
+        h.router.state.uri.queryParameters['from'],
+        SpbRoutes.settings,
+        reason: '登录成功后可回跳原页面',
+      );
+      expect(
+        find.text('会话已失效，请重新登录'),
+        findsOneWidget,
+        reason: '登录页要如实说明为什么被踢回来',
+      );
+      expect(
+        store.clearCount,
+        0,
+        reason: '会话失效不清凭证：401 可能是网关侧临时问题，清掉会丢 refresh_token',
+      );
+    });
+
+    test('dioProvider 的拦截器真的接了 onSessionExpired（接线断言）', () async {
+      // 上一条直接调 notifier，本用例验证**装配**：`dioProvider` 构造的
+      // `AuthInterceptor` 必须把 `onSessionExpired` 接到同一个 notifier。
+      //
+      // ## 为什么不能走 harness 的 dio
+      //
+      // `pumpApp` 把 `dioProvider` **整体覆盖**成“挂了 DioAdapter 的 dio”，
+      // 那个 dio 没有 AuthInterceptor——在那里发 401 只能得到裸 DioException，
+      // 无法验证接线（实测：断言路由仍停在 /settings）。
+      //
+      // 故这里另建一个只覆盖 `tokenStoreProvider` 的容器，让 `dioProvider`
+      // 走**真实实现**，再把它的适配器换成“一律 401”。
+      final store = InMemoryTokenStore(freshTokens());
+      final container = ProviderContainer(
+        overrides: [tokenStoreProvider.overrideWithValue(store)],
+      );
+      addTearDown(container.dispose);
+
+      final dio = container.read(dioProvider);
+      dio.httpClientAdapter = _UnauthorizedAdapter();
+
+      // 先等启动恢复完成，确认起点是“已登录”（否则本用例空洞通过）。
+      await container.read(authStateProvider.notifier).restore();
+      expect(
+        container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '前置条件：必须先处于已登录态',
+      );
+
+      await expectLater(
+        dio.get<dynamic>('/api/auth/me'),
+        throwsA(isA<DioException>()),
+      );
+
+      expect(
+        container.read(authStateProvider).isUnauthenticated,
+        isTrue,
+        reason: '拦截器的 401 必须推进认证状态（漏接 onSessionExpired 时会停在已登录）',
+      );
+      expect(store.clearCount, 0, reason: '会话失效不清凭证');
+    });
+  });
+}
+
+/// 一律 401 的适配器（用于验证拦截器的会话失效路径）。
+class _UnauthorizedAdapter implements HttpClientAdapter {
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async => ResponseBody.fromString(
+    '{"error":"unauthorized"}',
+    401,
+    headers: {
+      Headers.contentTypeHeader: [Headers.jsonContentType],
+    },
+  );
+
+  @override
+  void close({bool force = false}) {}
 }

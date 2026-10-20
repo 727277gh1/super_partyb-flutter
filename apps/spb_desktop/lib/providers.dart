@@ -228,11 +228,12 @@ final dioProvider = Provider<Dio>((ref) {
     // 生产为 null（见 devUserHeaderOverrideProvider 的说明）。
     userHeaderOverride: override,
     // 401 时刷新凭证并重放原请求。返回 false（无法刷新）则归一化为
-    // AuthError，由上层跳登录页。
+    // AuthError，并由下面的 onSessionExpired 推进认证状态。
     onUnauthorized: () async {
       final refreshed = await manager.refresh();
       return refreshed != null;
     },
+    onSessionExpired: _sessionExpiredHandler(ref),
   );
 
   // 基地址读 `SpbEndpoints.current` 而非编译期常量：启动探测可能已把 host
@@ -247,6 +248,31 @@ final dioProvider = Provider<Dio>((ref) {
   auth.replayDio = dio;
   return dio;
 });
+
+/// 把「会话确定失效」接到认证状态（两端 `dioProvider` / `ufsDioProvider` 共用）。
+///
+/// ## 为什么必须有这一行（否则「跳登录页」永远不会发生）
+///
+/// `AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方，而各页面拿到它
+/// 只翻成一句 SnackBar 文案（如「登录已过期，请重新登录」），**没有任何一处**
+/// 把认证状态推进到未登录。于是会话真的过期后用户卡在当前页面，只能手动进
+/// 设置页点「退出登录」。
+///
+/// 接上之后链路是：401 → `onSessionExpired` → [markUnauthenticated] →
+/// [AuthRefreshNotifier] 通知 → 路由守卫重定向到 `/login?from=<当前页>`。
+///
+/// ## 用 `read` 而非 `watch`
+///
+/// `dioProvider` 若 watch 认证状态，**每次登录/登出都会重建 Dio**——而 Dio 与
+/// SseClient 的身份被 `ChatStreamController` 与页面的 `??=` 订阅持有，重建会让
+/// 旧订阅挂在已 dispose 的实例上（时间线静默冻结，见 [sseClientProvider] 的
+/// 同一条说明）。回调只在**触发时**读 notifier，不建立依赖。
+void Function(String message) _sessionExpiredHandler(Ref ref) {
+  return (message) {
+    SpbLog.warn('会话失效，回到登录页', {'reason': message});
+    ref.read(authStateProvider.notifier).markUnauthenticated(message);
+  };
+}
 
 /// Chat API 客户端。
 final chatApiProvider = Provider<ChatApi>((ref) {
@@ -1061,6 +1087,9 @@ final ufsDioProvider = Provider<Dio>((ref) {
       final refreshed = await manager.refresh();
       return refreshed != null;
     },
+    // UFS 请求也会 401（同一个网关会话）。必须与 [dioProvider] 接到**同一个**
+    // 状态推进点，否则「文件预览失败」不会把人带回登录页。
+    onSessionExpired: _sessionExpiredHandler(ref),
   );
 
   final dio = createDio(
