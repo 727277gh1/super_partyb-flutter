@@ -531,7 +531,23 @@ class AuthStateNotifier extends Notifier<AuthState> {
       state = AuthState.failed(error);
       return error;
     }
-    state = const AuthState(status: AuthStatus.unknown, message: null);
+    // 已发起：清掉旧的错误提示。
+    //
+    // ## 为什么**不能**无条件写 `unknown`（与桌面端同一条回归防线）
+    //
+    // 移动端的真实流程是「只发起 → 等深链回调」，返回时确实该是 unknown；
+    // 但回调接收器（`authDeepLinkReceiverProvider` 的 `onCode`）可能在
+    // 本方法返回**之前**就已完成并调了 [signedIn]。若无条件写 `unknown`，
+    // 刚拿到的已登录会被盖掉，而守卫在 unknown 时**不重定向**（那是启动期的
+    // 正常态），于是用户永远停在 `/login`。
+    //
+    // 判据不是「谁先谁后」，而是「**别把已登录改回未判定**」——`unknown`
+    // 的语义是「还不知道」，已经知道的事不该被它覆盖。
+    if (!state.isAuthenticated) {
+      state = const AuthState(status: AuthStatus.unknown, message: null);
+    } else if (state.message != null) {
+      state = state.copyWith(clearMessage: true);
+    }
     return null;
   }
 

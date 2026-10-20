@@ -752,6 +752,42 @@ void main() {
       expect(find.textContaining('client_id'), findsOneWidget);
     });
 
+    testWidgets('点 SSO 完成登录后离开登录页（signIn 不得把已登录状态盖回 unknown）', (tester) async {
+      // 与桌面端同一回归防线（详细成因见桌面端同名用例）。
+      //
+      // 移动端更隐蔽：真实流程是「只发起 → 等深链回调」，`signIn()` 返回时
+      // 状态确实应该是 unknown。但 `signInAction` 与回调接收器可能**同轮**
+      // 完成（回调先到、`signIn` 后返回），或将来某天把登录改成同步——那时
+      // 无条件写 unknown 就会把刚拿到的 authenticated 盖掉。故判据不是
+      // 「谁先谁后」，而是「**别把已登录改回未判定**」。
+      final store = InMemoryTokenStore();
+      late TestHarness h;
+      h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.login,
+        tokenStore: store,
+        mockGroups: false,
+        signInAction: () async {
+          await store.write(freshTokens());
+          h.container.read(authStateProvider.notifier).signedIn();
+          return null;
+        },
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+
+      await tester.tap(find.byKey(const ValueKey('login-sso-button')));
+      await tester.pumpAndSettle();
+
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: 'signIn 收尾不得把已登录状态盖回 unknown',
+      );
+      expect(h.router.state.matchedLocation, SpbRoutes.conversations);
+      expect(find.byKey(const ValueKey('login-sso-button')), findsNothing);
+    });
+
     testWidgets('凭证落盘后状态推进到已登录', (tester) async {
       final store = InMemoryTokenStore();
       final h = await pumpApp(tester, tokenStore: store, mockGroups: false);

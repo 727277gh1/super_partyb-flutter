@@ -544,8 +544,24 @@ class AuthStateNotifier extends Notifier<AuthState> {
       state = AuthState.failed(error);
       return error;
     }
-    // 已发起：清掉旧的错误提示，但状态保持 unknown（等待凭证落盘）。
-    state = const AuthState(status: AuthStatus.unknown, message: null);
+    // 已发起：清掉旧的错误提示。
+    //
+    // ## 为什么**不能**无条件写 `unknown`（曾因此「登录成功却停在登录页」）
+    //
+    // 桌面端 `signInAction` 是**同步等到 token** 的（loopback 流程）：它在内部
+    // 落盘凭证并调 [signedIn]，返回时状态已是 `authenticated`。若无条件写
+    // `unknown`，刚拿到的已登录会被盖掉，而守卫在 unknown 时**不重定向**
+    // （那是启动期的正常态），于是用户永远停在 `/login`。
+    //
+    // 移动端的真实流程是「只发起 → 等深链回调」，返回时确实该是 unknown；
+    // 但回调可能先于本方法返回（同轮完成），故判据不是「谁先谁后」，而是
+    // 「**别把已登录改回未判定**」——`unknown` 的语义是「还不知道」，
+    // 已经知道的事不该被它覆盖。
+    if (!state.isAuthenticated) {
+      state = const AuthState(status: AuthStatus.unknown, message: null);
+    } else if (state.message != null) {
+      state = state.copyWith(clearMessage: true);
+    }
     return null;
   }
 

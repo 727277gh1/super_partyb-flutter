@@ -3438,6 +3438,74 @@ linux），所以这两个错误前提一直被固化着——与 §6.21 / §6.2
 
 ---
 
+### 6.36 登录成功后停在登录页：`signIn()` 把已登录盖回 `unknown`
+
+**症状**：点「使用 SSO 登录」，浏览器里确实登录成功、`loopbackSignIn` 也拿到了
+token（安全存储里**有凭证**），但客户端仍停在 `/login`，界面显示「已发起，等待
+浏览器回调」。**重启应用就正常了**——因为 `restore()` 从存储里读到了 token。
+
+#### 根因：旧实现的收尾分支在新实现里变成数据破坏
+
+`AuthStateNotifier.signIn()` 收尾时**无条件**写：
+
+```dart
+state = const AuthState(status: AuthStatus.unknown, message: null);
+```
+
+这条是给**旧实现**（`openGatewaySignIn`，只发起、等浏览器 Cookie 回调）留的
+——那时本进程确实不知道结果。而 `2d453cf` 把桌面端换成 RFC 8252 loopback 后，
+`signInAction` 变成了**同步等到 token**：
+
+```
+loopbackSignIn → 收 code → 换 token → tokenStore.write() → signedIn()
+                → 状态已是 authenticated
+                → signIn() 返回 null
+                → signIn() 收尾写 state = unknown   ← 把 authenticated 盖掉
+```
+
+守卫 `buildAuthRedirect` 对 `unknown` 是**明确放行**的（§6.34 里那条：读凭证是
+异步的，启动瞬间不能重定向）。于是状态停在 `unknown` → 守卫不重定向 → 用户
+永远停在 `/login`。
+
+**为什么重启就好**：`restore()` 走的是另一条路径（读存储 → `authenticated`），
+不经过 `signIn()` 的收尾分支。这也解释了「凭证明明在，界面就是不进去」。
+
+#### 修法：判据不是「谁先谁后」，而是「别把已登录改回未判定」
+
+```dart
+if (!state.isAuthenticated) {
+  state = const AuthState(status: AuthStatus.unknown, message: null);
+} else if (state.message != null) {
+  state = state.copyWith(clearMessage: true);   // 只清旧错误，不动 status
+}
+```
+
+`unknown` 的语义是「**还不知道**」，已经知道的事不该被它覆盖。
+
+⚠️ **移动端一并修**，虽然它的真实流程是「只发起 → 等深链回调」（返回时确实该是
+`unknown`）：回调接收器（`authDeepLinkReceiverProvider` 的 `onCode`）可能在
+`signIn()` 返回**之前**就完成并调了 `signedIn()`。那时同样会被盖掉。两端共用
+一条判据比「各按各的时序假设」更安全。
+
+#### 为什么测试没抓到（**两个假绿**）
+
+| 既有用例 | 它断言了什么 | 漏了什么 |
+|---|---|---|
+| `登录页点击 SSO 按钮调用注入的 signInAction` | 动作被调用 **1 次** | 完全没看状态 |
+| `登录成功后守卫放行首页` | 绕过 `signIn()` 直接调 `signedIn()` | 跳过了唯一有缺陷的那段代码 |
+
+两条都绿而缺陷在。这与 §6.21 / §6.26 / §6.33 同一类：**绿不代表对**。
+
+现补的用例（两端各 1 条）从**按钮**出发、走完整链路，断言「状态是
+`authenticated`」+「路由已离开 `/login`」+「登录按钮消失」。修复前红（
+`isAuthenticated` 为 false），修复后绿。
+
+#### 反向验证（实测）
+
+把 `if (!state.isAuthenticated)` 改回无条件赋值 → 两端各 1 条失败。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -3757,6 +3825,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
 | ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
 | ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：两个独立的 Windows 缺陷。① **URL 与路径必须用不同命令**——原先一律 `explorer`，而 `explorer <带 query 的 URL>` 打开的是**文件浏览器**（microsoft/WSL#3832），而 OIDC 授权 URL 必然带 8 个 query 参数，故每次 SSO 登录都会「成功」地打开一个空窗口、客户端继续等 loopback 回调。现 URL → `rundll32 url.dll,FileProtocolHandler`，路径 → `explorer`；`looksLikeUrl` 只认 `scheme://`（**不能**用 `Uri.parse().scheme`——它把 `C:\Users\me` 解成 `scheme=c`，会让每个 Windows 路径都走 URL 分支）。② **`explorer` 成功也返回 1**（microsoft/WSL#6565），原先按「非 0 即失败」判定 → 每次成功打开都被判失败。现 Windows 成功集合为 `{0,1}`，其余平台仍 `{0}`；`rundll32` 分支的退出码恒为 0，故用 `exitCodeIsMeaningful = false` **显式跳过**判定（代价：URL 打不开时靠上层 5 分钟超时兜底，不再有即时错误）。共 8 条新用例 + 5 项反向验证逐条实测。⚠️ 修复前测试有**两个假绿**：假 runner 一律返回 `exitCode = 0`；`windows 用 explorer` 那条用例传的是**路径**，于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 | §6.35 |
+| ~~登录成功后客户端仍停在登录页（重启就好）~~ | ✅ 已修（§6.36）：`AuthStateNotifier.signIn()` 收尾**无条件**写 `state = unknown`，那是给旧实现（`openGatewaySignIn` 只发起、等浏览器 Cookie 回调）留的分支。而 `2d453cf` 换成 RFC 8252 loopback 后 `signInAction` 是**同步等到 token** 的——它在内部落盘并调 `signedIn()`，返回时状态已是 `authenticated`，随后被这条无条件赋值盖回 `unknown`。守卫对 `unknown` 明确放行（§6.34 的启动期语义），于是**永远停在 `/login`**，而凭证其实已在安全存储里（重启走 `restore()` 就正常，这也是「为什么重启就好」）。现判据改为「**别把已登录改回未判定**」（`if (!state.isAuthenticated)`），两端一并修（移动端回调接收器可能在 `signIn()` 返回前就完成）。两端各补 1 条从按钮出发的端到端用例；⚠️ 修复前测试有**两个假绿**——一条只断言「动作被调用 1 次」不看状态，另一条绕过 `signIn()` 直接调 `signedIn()` | §6.36 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |

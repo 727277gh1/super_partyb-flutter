@@ -119,6 +119,55 @@ void main() {
       expect(find.text('OIDC client_id 未配置'), findsOneWidget);
     });
 
+    testWidgets('点 SSO 完成登录后离开登录页（signIn 不得把已登录状态盖回 unknown）', (tester) async {
+      // 回归防线（真实缺陷：登录成功却仍停在登录页）。
+      //
+      // ## 缺陷成因
+      //
+      // 桌面端 `signInAction` 是**同步等到 token** 的（loopback 流程）：它在
+      // 内部落盘凭证并调 `signedIn()`，此时状态已是 `authenticated`。而
+      // `AuthStateNotifier.signIn` 收尾时**无条件**写
+      // `state = AuthState(status: unknown)`——那是给「只发起、等回调」的
+      // 旧实现（`openGatewaySignIn`）留的分支。于是刚拿到的 authenticated 被
+      // 盖回 unknown，守卫在 unknown 时放行、不重定向，用户**永远停在
+      // /login**（界面还显示「已发起，等待浏览器回调」）。
+      //
+      // 既有用例抓不到它：`登录页点击 SSO 按钮调用注入的 signInAction` 只断言
+      // 动作被调用一次；`登录成功后守卫放行首页` 绕过了 `signIn()` 直接调
+      // `signedIn()`。故两条都绿而缺陷在。
+      final store = InMemoryTokenStore();
+      late TestHarness h;
+      h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.login,
+        tokenStore: store,
+        mockGroups: false,
+        signInAction: () async {
+          // 与真实 `loopbackSignIn` 收尾完全一致：先落盘，再推进状态。
+          await store.write(freshTokens());
+          h.container.read(authStateProvider.notifier).signedIn();
+          return null;
+        },
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+
+      await tester.tap(find.byKey(const ValueKey('login-sso-button')));
+      await tester.pumpAndSettle();
+
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: 'signIn 收尾不得把已登录状态盖回 unknown',
+      );
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.home,
+        reason: '登录完成后守卫应把用户送离 /login',
+      );
+      expect(find.byKey(const ValueKey('login-sso-button')), findsNothing);
+    });
+
     testWidgets('登录成功后守卫放行首页（状态从 unknown 推进到 authenticated）', (tester) async {
       // 端到端验证「凭证落盘 → 守卫放行」这条链路，而不只是「路由表里有 /login」。
       final store = InMemoryTokenStore();
