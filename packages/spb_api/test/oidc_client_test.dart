@@ -534,6 +534,28 @@ void main() {
   });
 
   group('OIDC token 模型', () {
+    // ⚠️ 这一组钉的是「登录成功后立刻 401」那个真实缺陷：
+    // IdP 的 access_token 是 fosite 不透明串（`ory_at_…`，没有点号），
+    // 而 api-gateway 只验 RS256 JWT（JWKS）+ go-oidc 的 compact JWS，
+    // 两者都对不透明串报「must have three parts」。故落盘/注入给网关的
+    // Bearer 必须是 **id_token**。
+    test('bearerToken 优先 id_token（网关只验 RS256 JWT）', () {
+      final t = OidcTokens.fromJson({
+        'access_token': 'ory_at_opaque',
+        'id_token': 'header.payload.signature',
+      });
+      expect(
+        t.bearerToken,
+        'header.payload.signature',
+        reason: '用 ory_at_… 当 Bearer 会让网关直接 401',
+      );
+    });
+
+    test('无 id_token 时回退 access_token（不构造空凭证）', () {
+      final t = OidcTokens.fromJson({'access_token': 'at_only'});
+      expect(t.bearerToken, 'at_only');
+    });
+
     test('fromJson 解析可选字段', () {
       final t = OidcTokens.fromJson({
         'access_token': 'at',

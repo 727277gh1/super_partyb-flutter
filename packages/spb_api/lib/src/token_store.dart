@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:spb_core/spb_core.dart';
 
+import 'oidc_client.dart';
+
 /// 持久化的会话凭证。
 ///
 /// ## 只存「换 token 必需」的字段
@@ -19,6 +21,14 @@ class StoredTokens {
     this.scope,
   });
 
+  /// 送给网关的 Bearer 凭证。
+  ///
+  /// ## 名字是历史包袱，语义是「Bearer 凭证」而非 OIDC 的 `access_token`
+  ///
+  /// 实际存的是 [OidcTokens.bearerToken]——有 `id_token` 时**就是 `id_token`**
+  /// （网关只验 RS256 JWT，不认 `ory_at_…` 不透明串）。改名会牵动存储格式与
+  /// 全部测试，故保留字段名但在此说明；新代码请用
+  /// [StoredTokens.fromOidcTokens] 构造，不要手写映射。
   final String accessToken;
 
   /// 续期用。为空表示无法刷新（需重新登录）。
@@ -44,6 +54,35 @@ class StoredTokens {
     final exp = expiresAt;
     if (exp == null) return false;
     return !(now ?? DateTime.now().toUtc()).add(skew).isBefore(exp);
+  }
+
+  /// 从 OIDC token 响应构造要落盘的凭证。
+  ///
+  /// ## 为什么收成一个工厂
+  ///
+  /// 这个映射此前在**四处**各写了一遍（两端 `providers.dart` 的登录回调与
+  /// 刷新实现），全都写成 `accessToken: tokens.accessToken`——于是
+  /// 「登录成功后立刻 401」这个缺陷同时存在于两端两条路径上，改一处漏三处。
+  /// 收敛到一处后，`bearerToken` 的取值规则只有一份。
+  ///
+  /// 注意它**不做**「保留旧 refresh_token」：那是 [SessionManager._doRefresh]
+  /// 的职责（它知道旧值），在这里做反而会拿到 null。
+  factory StoredTokens.fromOidcTokens(
+    OidcTokens tokens, {
+    DateTime Function()? now,
+  }) {
+    final expiresIn = tokens.expiresIn;
+    return StoredTokens(
+      accessToken: tokens.bearerToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: expiresIn == null
+          ? null
+          : (now ?? () => DateTime.now().toUtc())().add(
+              Duration(seconds: expiresIn),
+            ),
+      tokenType: tokens.tokenType,
+      scope: tokens.scope,
+    );
   }
 
   /// 复制并覆盖部分字段（刷新后使用）。

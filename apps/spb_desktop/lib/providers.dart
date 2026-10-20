@@ -181,7 +181,11 @@ final sessionManagerProvider = Provider<SessionManager>((ref) {
       final tokens = await oidc.refresh(refreshToken: refreshToken);
       final expiresIn = tokens.expiresIn;
       return StoredTokens(
-        accessToken: tokens.accessToken,
+        // 必须用 `bearerToken`（有 id_token 时就是它），不能写
+        // `tokens.accessToken`——那是 fosite 不透明串，网关验不了。
+        // 刷新路径尤其容易漏：fosite 的 OpenIDConnectRefreshHandler 在 scope
+        // 含 openid 时会**一并重发新的 id_token**，所以这里同样有值可用。
+        accessToken: tokens.bearerToken,
         // 保留旧 refresh_token 由 SessionManager 负责（新响应常不下发）。
         refreshToken: tokens.refreshToken ?? refreshToken,
         expiresAt: expiresIn == null
@@ -441,30 +445,44 @@ final sseClientProvider = Provider<SseClient>((ref) {
 /// （`token_endpoint_auth_method=none` + `http://127.0.0.1/callback` 注册），
 /// 见 `docs/rfc8252-loopback-signin.md`。未配置时登录页会显示导入会话入口，
 /// 粘贴导入仍是可用的降级路径。
+/// loopback 登录的实现（可注入，供测试替换真实的网络/浏览器流程）。
+///
+/// ## 为什么抽成 provider
+///
+/// `signInActionProvider` 里除了「跑流程」还有一步**落盘**（把 [OidcTokens]
+/// 转成 [StoredTokens] 写入安全存储）。那一步正是「登录成功后立刻 401」的
+/// 缺陷所在（曾写 `accessToken: tokens.accessToken`，而网关只验 RS256 JWT）。
+/// 真实 `loopbackSignIn` 要开浏览器 + 监听本地端口，测试里不可能跑，于是
+/// 那段代码只能靠 `StoredTokens.fromOidcTokens` 的单测间接覆盖——
+/// **接线本身**没人钉住。注入后可以喂一份「真实形态」的 token 响应，
+/// 断言落盘的是 `id_token`（见 `test/router_chat_test.dart`）。
+typedef LoopbackSignIn = Future<LoopbackSignInResult> Function({
+  required OidcConfig config,
+});
+
+final loopbackSignInProvider = Provider<LoopbackSignIn>((ref) {
+  return ({required OidcConfig config}) => loopbackSignIn(config: config);
+});
+
 final signInActionProvider = Provider<Future<String?> Function()>((ref) {
   return () async {
-    final result = await loopbackSignIn(config: ref.read(oidcConfigProvider));
+    final result = await ref.read(loopbackSignInProvider)(
+      config: ref.read(oidcConfigProvider),
+    );
     final err = result.error;
     if (err != null) return err;
 
     // 落盘并推进状态（与移动端 onCode 相同的三步）。
+    //
+    // ⚠️ 用 `fromOidcTokens`，**不要**手写映射：这里曾写成
+    // `accessToken: tokens.accessToken`，把 fosite 的不透明 `ory_at_…` 当
+    // Bearer 发给网关，导致「登录刚成功就提示会话已失效」（网关只验 RS256
+    // JWT，见 `OidcTokens.bearerToken` 的说明）。
     final tokens = result.tokens!;
     try {
       await ref
           .read(tokenStoreProvider)
-          .write(
-            StoredTokens(
-              accessToken: tokens.accessToken,
-              refreshToken: tokens.refreshToken,
-              expiresAt: tokens.expiresIn == null
-                  ? null
-                  : DateTime.now().toUtc().add(
-                      Duration(seconds: tokens.expiresIn!),
-                    ),
-              tokenType: tokens.tokenType,
-              scope: tokens.scope,
-            ),
-          );
+          .write(StoredTokens.fromOidcTokens(tokens));
     } on SpbError catch (e) {
       SpbLog.warn('loopback 登录后写入安全存储失败', {'error': e.toString()});
       return e.message;

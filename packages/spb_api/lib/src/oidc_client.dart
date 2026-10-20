@@ -344,6 +344,34 @@ class OidcTokens {
   /// 是否可用 [refreshToken] 续期。
   bool get canRefresh => refreshToken != null && refreshToken!.isNotEmpty;
 
+  /// 送给 api-gateway 的 Bearer 凭证——**优先 [idToken]**。
+  ///
+  /// ## 为什么不是 [accessToken]（这曾是一个真实缺陷）
+  ///
+  /// IdP 签发的 `access_token` 是 **fosite 不透明令牌**（形如 `ory_at_…`，
+  /// 没有点号分隔的三段结构），而网关只认 **RS256 JWT**：
+  ///
+  /// - `pkg/auth/jwt_authenticate.go`：用 IdP 的 JWKS 验 RS256 签名，
+  ///   身份取 `user_id`，缺失时回退 `sub`；
+  /// - `pkg/auth/oidc_auth.go`：`go-oidc` 的 `verifier.Verify`，要求
+  ///   compact JWS（三段）。
+  ///
+  /// 两者都对 `ory_at_…` 报「token contains an invalid number of segments」/
+  /// 「compact JWS format must have three parts」，结果是**登录刚成功就 401**，
+  /// 客户端据此判定「会话已失效」并把用户踢回登录页。
+  ///
+  /// 网关也没有 opaque token 的 introspect 通路（`pkg/auth/manager.go` 只装配
+  /// JWT / OIDC / APIKey / mTLS 四个认证器），所以 `access_token` 在本系统里
+  /// **没有消费者**——它只对 IdP 自己的 `/oauth2/userinfo`、`/oauth2/introspect`
+  /// 有意义。
+  ///
+  /// 回退到 [accessToken] 只为兼容「服务端没下发 id_token」的响应（如未请求
+  /// `openid` scope）；那种响应下请求仍会 401，但至少不会构造出空凭证。
+  ///
+  /// 与粘贴导入路径的取向一致：`session_credential.dart` 的
+  /// `parseSessionCredential` 也是 `idToken ?? accessToken`。
+  String get bearerToken => idToken ?? accessToken;
+
   /// 诊断用的安全描述（**不含 token 值**）。
   @override
   String toString() =>

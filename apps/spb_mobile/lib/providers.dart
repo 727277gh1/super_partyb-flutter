@@ -164,7 +164,11 @@ final sessionManagerProvider = Provider<SessionManager>((ref) {
       final tokens = await oidc.refresh(refreshToken: refreshToken);
       final expiresIn = tokens.expiresIn;
       return StoredTokens(
-        accessToken: tokens.accessToken,
+        // 必须用 `bearerToken`（有 id_token 时就是它），不能写
+        // `tokens.accessToken`——那是 fosite 不透明串，网关验不了。
+        // 刷新路径尤其容易漏：fosite 的 OpenIDConnectRefreshHandler 在 scope
+        // 含 openid 时会**一并重发新的 id_token**，所以这里同样有值可用。
+        accessToken: tokens.bearerToken,
         // 保留旧 refresh_token 由 SessionManager 负责（新响应常不下发）。
         refreshToken: tokens.refreshToken ?? refreshToken,
         expiresAt: expiresIn == null
@@ -442,34 +446,7 @@ final authDeepLinkReceiverProvider = Provider<AuthDeepLinkReceiver>((ref) {
   final receiver = AuthDeepLinkReceiver(
     source: ref.watch(deepLinkSourceProvider),
     pendingState: ref.read(pendingAuthStoreProvider).consume,
-    onCode: (code, pkce) async {
-      try {
-        final tokens = await ref
-            .read(oidcClientProvider)
-            .exchangeCode(code: code, pkce: pkce);
-        await ref
-            .read(tokenStoreProvider)
-            .write(
-              StoredTokens(
-                accessToken: tokens.accessToken,
-                refreshToken: tokens.refreshToken,
-                expiresAt: tokens.expiresIn == null
-                    ? null
-                    : DateTime.now().toUtc().add(
-                        Duration(seconds: tokens.expiresIn!),
-                      ),
-                tokenType: tokens.tokenType,
-                scope: tokens.scope,
-              ),
-            );
-        ref.read(authStateProvider.notifier).signedIn();
-        return null;
-      } on SpbError catch (e) {
-        return e.message;
-      } catch (e) {
-        return '登录失败：$e';
-      }
-    },
+    onCode: ref.watch(oidcCallbackHandlerProvider),
     onError: (message) {
       // 把失败原因显示在登录页（它 watch 的就是 authStateProvider）。
       ref.read(authStateProvider.notifier).markUnauthenticated(message);
@@ -477,6 +454,47 @@ final authDeepLinkReceiverProvider = Provider<AuthDeepLinkReceiver>((ref) {
   );
   ref.onDispose(receiver.dispose);
   return receiver;
+});
+
+/// 把授权码换成会话的处理函数（**移动端登录的落盘点**）。
+///
+/// 返回失败原因（null 表示成功）。
+typedef OidcCallbackHandler = Future<String?> Function(
+  String code,
+  PkcePair pkce,
+);
+
+/// 登录落盘的处理函数。
+///
+/// ## 为什么抽成一个 provider
+///
+/// 它原先内联在 `authDeepLinkReceiverProvider` 的 `onCode` 闭包里，于是
+/// 这段代码**只能**从 `main.dart`（调 `receiver.start()`）或 widget 树走
+/// 全链路才能触达——而 `main.dart` 不在测试树中，它实际是零覆盖的。
+/// 「落盘的 Bearer 取错了字段」这个缺陷就活在那个空档里。
+///
+/// 抽成 provider 后可以 `container.read(oidcCallbackHandlerProvider)` 直接调，
+/// 回归防线见 `test/router_chat_test.dart`。
+final oidcCallbackHandlerProvider = Provider<OidcCallbackHandler>((ref) {
+  return (code, pkce) async {
+    try {
+      final tokens = await ref
+          .read(oidcClientProvider)
+          .exchangeCode(code: code, pkce: pkce);
+      // ⚠️ 用 `fromOidcTokens` 而非手写映射：落盘的必须是 **id_token**
+      // （网关只验 RS256 JWT，不认 `ory_at_…` 不透明串），见
+      // `OidcTokens.bearerToken`。
+      await ref
+          .read(tokenStoreProvider)
+          .write(StoredTokens.fromOidcTokens(tokens));
+      ref.read(authStateProvider.notifier).signedIn();
+      return null;
+    } on SpbError catch (e) {
+      return e.message;
+    } catch (e) {
+      return '登录失败：$e';
+    }
+  };
 });
 
 /// 深链来源（生产为 `app_links` 插件；测试可覆盖）。

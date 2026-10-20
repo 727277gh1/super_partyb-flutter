@@ -472,6 +472,45 @@ UfsFileEntry ufsFile(String gid, String rel, {String? id}) =>
       'updated_at': '2026-01-01T00:00:00Z',
     });
 
+/// `OidcClient` 的桩：不发 HTTP，直接返回一份**真实形态**的 token 响应。
+///
+/// ## 为什么 `access_token` 要写成 `ory_at_…`
+///
+/// IdP（fosite）签发的 access_token 就是这种不透明串（无点号分隔），而
+/// api-gateway 只验 RS256 JWT。用真实形态的假数据才能钉住「落盘的 Bearer
+/// 必须是 id_token」这条回归防线（见 `test/router_chat_test.dart`）。
+class FakeOidcClient extends OidcClient {
+  FakeOidcClient({OidcTokens? tokens})
+    : tokens =
+          tokens ??
+          OidcTokens.fromJson({
+            'access_token': 'ory_at_2Xk9opaque',
+            'token_type': 'Bearer',
+            'expires_in': 3600,
+            'id_token': 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c3JfMSJ9.sig',
+            'refresh_token': 'ory_rt_1',
+            'scope': 'openid profile email',
+          }),
+      super(
+        config: const OidcConfig(
+          issuer: 'https://idp.test/idp',
+          clientId: 'client_test',
+          redirectUri: 'partyb://oidc/callback',
+        ),
+      );
+
+  final OidcTokens tokens;
+
+  @override
+  Future<OidcTokens> exchangeCode({
+    required String code,
+    required PkcePair pkce,
+  }) async => tokens;
+
+  @override
+  Future<OidcTokens> refresh({required String refreshToken}) async => tokens;
+}
+
 /// 固定值的前后台状态（测试用：不随生命周期事件变化）。
 class FixedWindowFocused extends WindowFocusedNotifier {
   FixedWindowFocused(this._value);

@@ -6,6 +6,7 @@ import 'package:spb_api/spb_api.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'package:spb_desktop/auth_loopback.dart';
 import 'package:spb_desktop/providers.dart';
 import 'package:spb_desktop/router.dart';
 
@@ -166,6 +167,76 @@ void main() {
         reason: '登录完成后守卫应把用户送离 /login',
       );
       expect(find.byKey(const ValueKey('login-sso-button')), findsNothing);
+    });
+
+    testWidgets('loopback 登录落盘的 Bearer 是 id_token 而不是 ory_at_ 不透明串', (
+      tester,
+    ) async {
+      // 回归防线（真实缺陷：Windows 客户端登录成功后立刻提示「会话已失效」）。
+      //
+      // ## 缺陷成因
+      //
+      // `signInActionProvider` 曾写成 `accessToken: tokens.accessToken`，于是
+      // 把 IdP（fosite）签发的**不透明** access_token（`ory_at_…`，无点号）
+      // 当 Bearer 发给 api-gateway。网关的两个认证器都要求 compact JWS：
+      //   - `pkg/auth/jwt_authenticate.go`（JWKS + RS256）
+      //   - `pkg/auth/oidc_auth.go`（go-oidc `verifier.Verify`）
+      // 分别报「token contains an invalid number of segments」与
+      // 「compact JWS format must have three parts」，于是登录刚完成就 401
+      // → 客户端判定会话失效 → 把用户踢回登录页。
+      //
+      // ## 为什么用注入的 loopback 实现而不是替换 `signInAction`
+      //
+      // 要测的是**真实 `signInActionProvider` 的落盘代码**。替换掉它就等于
+      // 把被测的那一行删了——这正是既有用例（`登录页点击 SSO 按钮调用注入的
+      // signInAction` 只断言调用次数）抓不到本缺陷的原因。
+      final store = InMemoryTokenStore();
+      final h = await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.login,
+        tokenStore: store,
+        mockGroups: false,
+        loopbackSignIn: ({required OidcConfig config}) async =>
+            LoopbackSignInResult.success(
+              OidcTokens.fromJson({
+                'access_token': 'ory_at_2Xk9opaque',
+                'token_type': 'Bearer',
+                'expires_in': 3600,
+                'id_token': 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c3JfMSJ9.sig',
+                'refresh_token': 'ory_rt_1',
+                'scope': 'openid profile email',
+              }),
+            ),
+      );
+
+      expect(h.router.state.matchedLocation, SpbRoutes.login);
+
+      await tester.tap(find.byKey(const ValueKey('login-sso-button')));
+      await tester.pumpAndSettle();
+
+      final stored = await store.read();
+      expect(stored, isNotNull);
+      expect(
+        stored!.accessToken,
+        startsWith('eyJ'),
+        reason: '落盘的必须是 id_token（RS256 JWT），网关只认这个',
+      );
+      expect(
+        stored.accessToken,
+        isNot(startsWith('ory_at_')),
+        reason: 'ory_at_… 是 fosite 不透明串，网关验不了 → 登录后立刻 401',
+      );
+      expect(stored.refreshToken, 'ory_rt_1', reason: '刷新链路要用它续期');
+      expect(
+        h.container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '凭证落盘后应推进到已登录',
+      );
+      expect(
+        h.router.state.matchedLocation,
+        SpbRoutes.home,
+        reason: '登录完成后守卫应把用户送离 /login',
+      );
     });
 
     testWidgets('登录成功后守卫放行首页（状态从 unknown 推进到 authenticated）', (tester) async {

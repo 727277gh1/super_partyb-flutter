@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
@@ -799,6 +800,59 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(h.container.read(authStateProvider).isAuthenticated, isTrue);
+    });
+
+    test('深链回调落盘的 Bearer 是 id_token 而不是 ory_at_ 不透明串', () async {
+      // 回归防线（真实缺陷：登录成功后客户端立刻报「会话已失效」）。
+      //
+      // ## 缺陷成因
+      //
+      // `onCode` 曾写成 `accessToken: tokens.accessToken`，于是把 IdP 的
+      // fosite 不透明 access_token（`ory_at_…`，无点号）当 Bearer 发给
+      // api-gateway。网关的两个认证器都要求 compact JWS（三段），分别报
+      // 「token contains an invalid number of segments」与
+      // 「compact JWS format must have three parts」——登录刚完成就 401。
+      //
+      // ## 为什么直接调 `oidcCallbackHandlerProvider`
+      //
+      // 它就是 `authDeepLinkReceiverProvider.onCode` 的实体（内联版本曾在
+      // provider 的闭包里，测试只能从 `main.dart` 走全链路，而 `main.dart`
+      // 不在测试树中）。`StoredTokens.fromOidcTokens` 本身在 `spb_api` 已有单测；
+      // 这里钉的是**接线**：这段代码真的用了它，而不是又手写一份映射。
+      final store = InMemoryTokenStore();
+      final container = ProviderContainer(
+        overrides: [
+          tokenStoreProvider.overrideWithValue(store),
+          // 不真发 HTTP：直接返回一份「真实形态」的 token 响应。
+          oidcClientProvider.overrideWithValue(FakeOidcClient()),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final err = await container.read(oidcCallbackHandlerProvider)(
+        'CODE1',
+        OidcPkce.generatePair(),
+      );
+      expect(err, isNull, reason: '换 token 应成功');
+
+      final stored = await store.read();
+      expect(stored, isNotNull);
+      expect(
+        stored!.accessToken,
+        startsWith('eyJ'),
+        reason: '落盘的必须是 id_token（RS256 JWT）',
+      );
+      expect(
+        stored.accessToken,
+        isNot(startsWith('ory_at_')),
+        reason: 'ory_at_… 是 fosite 不透明串，网关验不了 → 登录后立刻 401',
+      );
+      expect(stored.refreshToken, 'ory_rt_1');
+      expect(
+        container.read(authStateProvider).isAuthenticated,
+        isTrue,
+        reason: '凭证落盘后应推进到已登录',
+      );
     });
   });
 

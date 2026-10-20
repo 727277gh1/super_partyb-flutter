@@ -254,6 +254,17 @@ Future<TestHarness> pumpApp(
   /// 用不到的用例不应被它拖慢。
   UfsApi? ufsApi,
 
+  /// loopback 登录的实现（可注入）。默认不 override（即真实实现）。
+  ///
+  /// ## 为什么要可注入
+  ///
+  /// `signInActionProvider` 除了跑流程还有一步**落盘**，而那一步正是
+  /// 「登录成功后立刻 401」的缺陷所在（曾写 `accessToken: tokens.accessToken`，
+  /// 而网关只验 RS256 JWT，不认 `ory_at_…` 不透明串）。真实实现要开浏览器 +
+  /// 监听本地端口，测试里跑不了——于是那段接线长期零覆盖。
+  /// 注入后可以喂一份真实形态的 token 响应并断言落盘结果。
+  LoopbackSignIn? loopbackSignIn,
+
   /// 「诊断」tab 的门控开关。默认不 override（即 `!SpbEnv.isRelease`）。
   ///
   /// 测试跑在 JIT 下，`SpbEnv.isRelease` 恒为 false → 诊断 tab 默认**可见**，
@@ -287,6 +298,17 @@ Future<TestHarness> pumpApp(
       'status': 'active',
     }),
   );
+
+  // `loopbackSignIn` 与 `signInAction` 同时传是调用方的错误（语义冲突，见下方
+  // override 处的说明）。用运行时判定而非 `assert`：`assert` 在 release 下被
+  // 去掉，而这个冲突会让用例**静默**测错对象（以为在测真实落盘代码，实际测的
+  // 是被替换掉的假实现）。
+  if (loopbackSignIn != null && signInAction != null) {
+    throw ArgumentError(
+      'pumpApp: loopbackSignIn 与 signInAction 不能同时传——'
+      '前者要测真实 signInAction 的落盘逻辑，后者直接把它替换掉。',
+    );
+  }
 
   // 供用例在 pumpWidget **之前**注册 mock。
   //
@@ -335,7 +357,18 @@ Future<TestHarness> pumpApp(
         tokenStore ?? InMemoryTokenStore(freshTokens()),
       ),
       // 真实实现要开系统浏览器，测试里换成可控的假实现。
-      signInActionProvider.overrideWithValue(signInAction ?? () async => null),
+      //
+      // 例外：传了 `loopbackSignIn` 时**保留真实** `signInActionProvider`，
+      // 只把它内部的 loopback 流程换掉——那样测的才是「真实落盘代码 +
+      // 可控 token 响应」这条组合（用于钉住 `id_token` 取值，见
+      // `router_chat_test.dart` 的同名用例）。此时 `signInAction` 必须为 null，
+      // 两者同时传是调用方的错误。
+      if (loopbackSignIn != null)
+        loopbackSignInProvider.overrideWithValue(loopbackSignIn)
+      else
+        signInActionProvider.overrideWithValue(
+          signInAction ?? () async => null,
+        ),
       // 默认注入假 SSE 客户端。
       //
       // ## 为什么不能再用真实的 SseClient

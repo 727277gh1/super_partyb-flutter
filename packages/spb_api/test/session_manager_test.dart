@@ -32,6 +32,58 @@ void main() {
         expiresAt: DateTime.utc(2999, 1, 1),
       );
 
+  group('StoredTokens.fromOidcTokens（落盘凭证的取值口径）', () {
+    test('落盘的是 id_token，不是 fosite 的 ory_at_… 不透明串', () {
+      // 回归防线（真实缺陷：Windows 客户端登录后立刻提示「会话已失效」）。
+      //
+      // 两端 `providers.dart` 曾各自手写映射为 `accessToken: tokens.accessToken`，
+      // 于是把 IdP 的不透明 access_token 当 Bearer 发给 api-gateway。网关只验
+      // RS256 JWT（`pkg/auth/jwt_authenticate.go` 的 JWKS 验签 + go-oidc 的
+      // compact JWS），对 `ory_at_…` 报「token contains an invalid number of
+      // segments」，于是登录刚成功就 401 → 判定会话失效 → 踢回登录页。
+      final tokens = OidcTokens.fromJson({
+        'access_token': 'ory_at_2Xk9opaque',
+        'id_token': 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c3JfMSJ9.sig',
+        'refresh_token': 'ory_rt_abc',
+        'expires_in': 3600,
+        'token_type': 'Bearer',
+        'scope': 'openid profile email',
+      });
+
+      final stored = StoredTokens.fromOidcTokens(
+        tokens,
+        now: () => DateTime.utc(2026, 1, 1),
+      );
+
+      expect(
+        stored.accessToken,
+        tokens.idToken,
+        reason: '必须是 id_token；换成 ory_at_… 会让网关 401',
+      );
+      expect(stored.accessToken, isNot(startsWith('ory_at_')));
+      expect(stored.refreshToken, 'ory_rt_abc');
+      expect(
+        stored.expiresAt,
+        DateTime.utc(2026, 1, 1).add(const Duration(seconds: 3600)),
+        reason: 'expires_in 必须换算成绝对时刻（重启后才有意义）',
+      );
+      expect(stored.tokenType, 'Bearer');
+      expect(stored.scope, 'openid profile email');
+    });
+
+    test('服务端未给 expires_in 时 expiresAt 为 null（不猜）', () {
+      final stored = StoredTokens.fromOidcTokens(
+        OidcTokens.fromJson({'access_token': 'at', 'id_token': 'a.b.c'}),
+      );
+      expect(stored.expiresAt, isNull);
+      expect(
+        stored.isExpired(now: DateTime.utc(2999, 1, 1)),
+        isFalse,
+        reason: '无 expiresAt 时不应判定过期',
+      );
+    });
+  });
+
   group('SessionManager 取可用凭证', () {
     test('无凭证时返回 null（不抛异常，让服务端 401 决定后续）', () async {
       final m = SessionManager(

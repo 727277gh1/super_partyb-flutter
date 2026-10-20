@@ -273,6 +273,11 @@ Flutter 客户端 ──(会话凭证 Cookie/OIDC token)──► api-gateway
 - 客户端 `baseUrl` 只到服务根（如 `https://api.example.com/pba`），具体路径由各 API 方法拼接
 - **`X-User-ID` 是网关注入的结果，客户端侧的值只用于拼 URL 路径**（`/users/:user_id/chat/*`），不得当作身份真源
 - 开发态直连 Go API 时用 `AuthInterceptor.userHeaderOverride` 手工指定（`AUTH_MODE=header`）；**生产必须为 null**
+- **Bearer 必须是 IdP 的 `id_token`（RS256 JWT），不能是 `access_token`**：后者是
+  fosite 的不透明串（`ory_at_…`），网关的 JWT / OIDC 两个认证器都要求 compact JWS
+  三段式，会直接 401。取值规则只有一处：`OidcTokens.bearerToken`
+  （`idToken ?? accessToken`），落盘统一走 `StoredTokens.fromOidcTokens`。
+  这是 2026-10 的真实缺陷，详见 §6.37
 
 配置方式（编译期注入，无运行时文件依赖）：
 
@@ -1200,17 +1205,26 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_data` | **98.3%** | `spb_platform` | 57.4% |
-| `spb_features` | **93.4%** | `spb_mobile` | 54.1% |
-| `spb_core` | **92.4%** | `spb_desktop` | 58.7% |
-| `spb_domain` | 88.8% | `spb_api` | **87.8%** |
-| `spb_models` | 88.0% | `spb_ui` | 79.8% |
-| `spb_design` | 78.6% | **总计** | **85.0%**（≈15497/18226） |
+| `spb_data` | **98.3%** | `spb_platform` | 59.3% |
+| `spb_features` | **93.4%** | `spb_mobile` | 55.3% |
+| `spb_core` | **91.5%** | `spb_desktop` | 59.9% |
+| `spb_domain` | 88.8% | `spb_api` | **88.3%** |
+| `spb_models` | 88.0% | `spb_ui` | 73.7% |
+| `spb_design` | 78.6% | **总计** | **85.2%**（≈15802/18539） |
 
-全仓用例 **3452 条**（issue #48 拆分后；拆分本身 0 变化，+13 是新增的 SSE
-端到端（§6.27），+31 是零调用者端点契约（§6.28））。
+全仓用例 **3550 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
+0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
+§6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线）。
+
+⚠️ **数用例时别用 `grep -c '"type":"testStart"'`**：它把 skipped 与
+`setUp`/`tearDown` 产生的条目也算进去（实测差 100+ 条）。用
+`testDone` 且 `hidden != true` 才是「真的跑过的用例数」。
 
 ⚠️ **这张表会漂移**——用上面的命令重跑，别把这里当权威数字。
+⚠️ `spb_ui` 从 79.8% 掉到 73.7% **不是回归**：`copy_icon_button.dart`
+（23 行）在 `spb_ui` **自己的**测试里零覆盖——它只被 `spb_features` 的
+气泡测试点过，而 `coverage.sh` 是**逐包**采集的，看不到跨包调用。
+这是既有缺口（要么给 `spb_ui` 补一条单测，要么接受），与 §6.37 无关。
 ⚠️ `spb_ui` / `spb_design` 这类小包的行数会在**±1 行**内波动（Dart 覆盖率的
 行归属不稳定，实测 `spb_ui` 多次重跑得到 90 或 91）。总计小数位可能随之跳 0.1，
 不是回归。
@@ -3504,6 +3518,94 @@ if (!state.isAuthenticated) {
 
 把 `if (!state.isAuthenticated)` 改回无条件赋值 → 两端各 1 条失败。
 
+### 6.37 登录成功后立刻「会话已失效」：把不透明 `access_token` 当 Bearer
+
+**症状**：SSO 登录在浏览器里成功、`idp-go` 的 `/oauth2/token` 返回 200，但客户端
+一进首页就弹「会话已失效，请重新登录」，并被踢回 `/login`。
+
+#### 根因：IdP 的 `access_token` 是 fosite 不透明串，网关只认 RS256 JWT
+
+两边的契约从来没对齐过：
+
+| 侧 | 事实 |
+|---|---|
+| IdP（`id-provider/go/internal/oidc/provider.go:81`） | `compose.ComposeAllEnabled` → `NewOAuth2HMACStrategy`：`access_token` 是 **`ory_at_…` 不透明串**（无点号）；只有 `id_token` 由 `NewOpenIDConnectStrategy` 签成 **RS256 JWT** |
+| 网关（`api-gateway/pkg/auth/`） | `jwt_authenticate.go`（JWKS + RS256）与 `oidc_auth.go`（go-oidc `verifier.Verify`）**都要求 compact JWS（三段）**；`manager.go` 只装配 JWT / OIDC / APIKey / mTLS，**没有 opaque token 的 introspect 通路** |
+| 客户端（修复前） | 四处 `StoredTokens(accessToken: tokens.accessToken)`——把不透明串当 Bearer 发出去 |
+
+于是网关日志是这两句（2026-10-20 19:55，bcc 的 `journalctl -u api-gateway`）：
+
+```
+"OIDC ID Token验证失败" error:"oidc: malformed jwt: go-jose/go-jose: compact JWS format must have three parts"
+"JWT validation failed"  error:"token is malformed: token contains an invalid number of segments"
+```
+
+客户端 `AuthInterceptor` 收到 401 → 刷新也失败 → `onSessionExpired` → 路由守卫
+把用户送回登录页（§6.34 那条链路，本身是对的）。
+
+**与 `tbcc6.atjog.com` 无关**：登录走编译期 issuer（`SpbEndpoints` 没有 issuer
+字段，端点升级只改 API/UFS 的 host），出问题的是登录**之后**的每个请求。
+
+#### 修法：取值规则收敛到一处，不再让四个调用点各写一遍
+
+```dart
+// packages/spb_api/lib/src/oidc_client.dart
+String get bearerToken => idToken ?? accessToken;
+
+// packages/spb_api/lib/src/token_store.dart
+factory StoredTokens.fromOidcTokens(OidcTokens tokens, {DateTime Function()? now})
+```
+
+四端（桌面 `signInAction` / `refresh`，移动 `onCode` / `refresh`）全部改用它。
+**回退到 `accessToken` 只为兼容「服务端没下发 id_token」的响应**（未请求
+`openid` scope），那种响应下请求仍会 401，但至少不会构造出空凭证。
+
+刷新路径同样要取 `id_token`：fosite 的 `OpenIDConnectRefreshHandler`
+（`handler/openid/flow_refresh_token.go:99`）在 scope 含 `openid` 时会
+**一并重发新的 id_token**。
+
+⚠️ `StoredTokens.accessToken` **字段名是历史包袱**，语义已是「Bearer 凭证」。
+改名会牵动存储格式与全部测试，故保留字段名并在文档注释里说明。
+
+#### 为什么是客户端改，而不是网关加 introspect
+
+网关加 RFC 7662 introspect 会让**每个请求**多一次远程调用（且要处理缓存、
+失效、IdP 不可用时的降级），而 `id_token` 本来就在客户端手里、网关也早已
+支持验它。改客户端是一行取值规则。跨仓库的方案已另开 issue 跟踪（见下）。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `bearerToken` 改成 `=> accessToken` | `spb_api` 2 条失败（`oidc_client_test` + `session_manager_test`） |
+| `fromOidcTokens` 改回 `tokens.accessToken` | 桌面端 1 条 + 移动端 1 条 + `spb_api` 1 条失败 |
+
+#### ⚠️ 修复前测试是绿的（**两处假绿**）
+
+| 既有用例 | 它断言了什么 | 漏了什么 |
+|---|---|---|
+| `auth_loopback_test.dart` 的 `exchangeCode` 用例 | `r.tokens!.accessToken == 'at-test'` | 断言的是 **`OidcTokens` 的原始字段**，与「落盘成什么」无关 |
+| 桌面 `登录页点击 SSO 按钮调用注入的 signInAction` | 动作被调用 **1 次** | 完全不看落盘内容 |
+| 移动端 `onCode` | **零覆盖**——它内联在 `authDeepLinkReceiverProvider` 的闭包里，只能从 `main.dart`（不在测试树中）走全链路触达 | 整个落盘逻辑 |
+
+这是 §6.21 / §6.26 / §6.33 / §6.36 同一类：**绿不代表对**。
+
+现补的用例都从**真实入口**出发、断言**落盘结果**：
+
+| 层 | 用例 | 怎么做到可测 |
+|---|---|---|
+| `spb_api` | `bearerToken` 优先 `id_token` / 无 `id_token` 时回退 | 纯模型 |
+| `spb_api` | `fromOidcTokens` 落盘的是 `id_token`、`expires_in` 换算成绝对时刻 | 纯模型 |
+| 桌面 | `loopback 登录落盘的 Bearer 是 id_token 而不是 ory_at_ 不透明串` | 新增 `loopbackSignInProvider` 注入点，喂真实形态 token，走**真实** `signInActionProvider` 的落盘代码 |
+| 移动 | `深链回调落盘的 Bearer 是 id_token 而不是 ory_at_ 不透明串` | 把内联闭包抽成 `oidcCallbackHandlerProvider`（否则零覆盖） |
+
+两个注入点都是**为可测性而抽**，不是为功能——桌面端若替换整个
+`signInAction` 就等于把被测的那一行删掉（那正是既有用例抓不到本缺陷的原因），
+故 `pumpApp` 里 `loopbackSignIn` 与 `signInAction` 互斥（同时传抛
+`ArgumentError`，不用 `assert`——release 下会被去掉而静默测错对象）。
+
+---
+
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
@@ -3825,6 +3927,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
 | ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
 | ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：两个独立的 Windows 缺陷。① **URL 与路径必须用不同命令**——原先一律 `explorer`，而 `explorer <带 query 的 URL>` 打开的是**文件浏览器**（microsoft/WSL#3832），而 OIDC 授权 URL 必然带 8 个 query 参数，故每次 SSO 登录都会「成功」地打开一个空窗口、客户端继续等 loopback 回调。现 URL → `rundll32 url.dll,FileProtocolHandler`，路径 → `explorer`；`looksLikeUrl` 只认 `scheme://`（**不能**用 `Uri.parse().scheme`——它把 `C:\Users\me` 解成 `scheme=c`，会让每个 Windows 路径都走 URL 分支）。② **`explorer` 成功也返回 1**（microsoft/WSL#6565），原先按「非 0 即失败」判定 → 每次成功打开都被判失败。现 Windows 成功集合为 `{0,1}`，其余平台仍 `{0}`；`rundll32` 分支的退出码恒为 0，故用 `exitCodeIsMeaningful = false` **显式跳过**判定（代价：URL 打不开时靠上层 5 分钟超时兜底，不再有即时错误）。共 8 条新用例 + 5 项反向验证逐条实测。⚠️ 修复前测试有**两个假绿**：假 runner 一律返回 `exitCode = 0`；`windows 用 explorer` 那条用例传的是**路径**，于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 | §6.35 |
+| ~~登录成功后**立刻**提示「会话已失效」并被踢回登录页（Windows 用户报障）~~ | ✅ 已修（§6.37）：客户端把 IdP 的 `access_token` 当 Bearer 发给网关，而那是 **fosite 不透明串**（`ory_at_…`，无点号）。网关的 `jwt_authenticate.go`（JWKS+RS256）与 `oidc_auth.go`（go-oidc compact JWS）**都要求三段式**，分别报「token contains an invalid number of segments」/「compact JWS format must have three parts」→ 登录刚完成就 401 → `onSessionExpired` 踢人。修法：`OidcTokens.bearerToken`（`idToken ?? accessToken`）+ `StoredTokens.fromOidcTokens` 单点转换，四端（两端登录 + 两端刷新）全部改用它。**与 `tbcc6.atjog.com` 无关**（登录走编译期 issuer，端点升级只改 API/UFS host）。⚠️ 修复前测试全绿：既有用例只断言 `OidcTokens` 原始字段或动作调用次数，而移动端 `onCode` **零覆盖**（内联在 provider 闭包里，只能从 `main.dart` 触达）——故另加了两个注入点（`loopbackSignInProvider` / `oidcCallbackHandlerProvider`）让落盘逻辑可测 | §6.37 |
 | ~~登录成功后客户端仍停在登录页（重启就好）~~ | ✅ 已修（§6.36）：`AuthStateNotifier.signIn()` 收尾**无条件**写 `state = unknown`，那是给旧实现（`openGatewaySignIn` 只发起、等浏览器 Cookie 回调）留的分支。而 `2d453cf` 换成 RFC 8252 loopback 后 `signInAction` 是**同步等到 token** 的——它在内部落盘并调 `signedIn()`，返回时状态已是 `authenticated`，随后被这条无条件赋值盖回 `unknown`。守卫对 `unknown` 明确放行（§6.34 的启动期语义），于是**永远停在 `/login`**，而凭证其实已在安全存储里（重启走 `restore()` 就正常，这也是「为什么重启就好」）。现判据改为「**别把已登录改回未判定**」（`if (!state.isAuthenticated)`），两端一并修（移动端回调接收器可能在 `signIn()` 返回前就完成）。两端各补 1 条从按钮出发的端到端用例；⚠️ 修复前测试有**两个假绿**——一条只断言「动作被调用 1 次」不看状态，另一条绕过 `signIn()` 直接调 `signedIn()` | §6.36 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
