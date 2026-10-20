@@ -14,6 +14,14 @@ dependencies:
     sdk: flutter
   spb_design:
 
+# 品牌标志随本包分发（见 lib/src/spb_logo.dart）。
+#
+# 放在 spb_ui 而不是各端 assets/：两端各存一份必然漂移，而标志是
+# 「一眼看出是哪个产品」的东西——两份颜色略有差异比没有还糟。
+flutter:
+  assets:
+    - assets/brand/logo.png
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

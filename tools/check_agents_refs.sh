@@ -77,6 +77,10 @@ EXEMPT = {
     # 已废弃，重名概率低）。
     '_summarize': '§6.19 历史漂移反例（实际是 searchConversationItems 内联截取）',
     '_narrowActions': '§6.19 历史漂移反例（已改名 _appBarActions）',
+    # GTK 的窗口属性名（X11 `_NET_WM_ICON`）。下划线开头是因为 **X11 协议**
+    # 就这么命名，与 Dart 私有成员无关。§6.32 用它解释「Linux 窗口图标不会
+    # 自动从包内资源取」——Flutter 的 Linux 嵌入层不设这个属性。
+    '_NET_WM_ICON': 'X11/GTK 协议常量，非本仓库符号（§6.32）',
 }
 
 with open(DOC, encoding='utf-8') as fh:

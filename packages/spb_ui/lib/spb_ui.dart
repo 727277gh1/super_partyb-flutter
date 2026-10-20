@@ -17,6 +17,7 @@
 ///   emptyState      —— 空状态（对话页 / 对话列表页 / 搜索页各一份，样式互不相同）
 ///   errorState      —— 整页错误 + 重试（对话列表页 / 搜索页各一份，逐字段相同）
 ///   highlightedText —— 搜索命中高亮（搜索页 / 对话内搜索各一份，逐字段相同）
+///   spbLogo         —— 品牌标志（登录页首屏；资源随本包分发，避免两端各存一份）
 ///
 /// ## 与 `spb_design` 的分工
 ///
@@ -31,3 +32,4 @@ export 'src/error_state.dart';
 export 'src/hint_line.dart';
 export 'src/highlighted_text.dart';
 export 'src/section_title.dart';
+export 'src/spb_logo.dart';

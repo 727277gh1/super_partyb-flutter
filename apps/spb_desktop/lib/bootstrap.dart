@@ -88,10 +88,20 @@ class PlatformDesktopCapabilities
         WindowFocusTarget,
         PlatformDesktopQuit,
         OverlayWindowController {
-  PlatformDesktopCapabilities({this.trayIconAsset = 'assets/tray_icon.png'});
+  PlatformDesktopCapabilities({
+    this.trayIconAsset = 'assets/tray_icon.png',
+    this.windowIconAsset = 'assets/app_icon.png',
+  });
 
   /// 托盘图标资源路径（相对 `flutter_assets`）。
   final String trayIconAsset;
+
+  /// 窗口 / 任务栏图标资源路径（相对 `flutter_assets`）。
+  ///
+  /// 与 [trayIconAsset] 是**两个文件**而不是一个：托盘图标只有 64px 且
+  /// 被系统缩放展示，窗口图标会被 Alt+Tab / 任务栏放大，用同一张会让其中
+  /// 一处变糊。两者都是同一品牌标志的不同尺寸。
+  final String windowIconAsset;
 
   bool _initialized = false;
 
@@ -137,6 +147,7 @@ class PlatformDesktopCapabilities
     await windowManager.ensureInitialized();
     windowManager.addListener(this);
 
+    await _initWindowIcon();
     await _initLaunchAtStartup();
     await _initTray();
     await _registerDefaultHotkeys();
@@ -146,6 +157,29 @@ class PlatformDesktopCapabilities
       // 明确记录「单窗口」这一限制，便于排查「悬浮窗为何不独立」的疑问。
       'multiWindow': false,
     });
+  }
+
+  /// 设置窗口 / 任务栏图标。
+  ///
+  /// ## 为什么 Linux 也要显式设置
+  ///
+  /// Linux 上窗口图标**没有**从包内资源自动取：GTK 靠 `_NET_WM_ICON` 属性，
+  /// Flutter 的 Linux 嵌入层不会设它（模板 `my_application.cc` 里也没有
+  /// `gtk_window_set_icon`）。结果是任务栏/Alt+Tab 显示一个默认占位方块
+  /// ——而托盘图标是正确的，两者不一致。
+  ///
+  /// 调用的是 `window_manager` 的 `setIcon`（其 Linux 实现就是
+  /// `gtk_window_set_icon_from_file`）；Windows 侧同一 API 改的是窗口图标
+  /// （exe 文件图标由 `Runner.rc` 的 `IDI_APP_ICON` 静态决定，两者互补）。
+  /// macOS 不需要：dock 图标来自 `.app` 包里的 `AppIcon.appiconset`。
+  Future<void> _initWindowIcon() async {
+    if (Platform.isMacOS) return;
+    try {
+      await windowManager.setIcon(windowIconAsset);
+    } catch (e) {
+      // 同托盘：图标缺失不影响功能，只影响观感。
+      SpbLog.warn('窗口图标设置失败', {'error': '$e'});
+    }
   }
 
   /// 配置开机自启。

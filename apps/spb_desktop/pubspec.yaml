@@ -65,7 +65,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # 托盘图标。
+  # 托盘图标与窗口图标。
   #
   # ## 为什么必须是真实文件而不是 IconData
   #
@@ -73,5 +73,10 @@ flutter:
   # （见 tray_manager 的 `setIcon(String iconPath)`）。用 Flutter 的
   # `IconData` 需要先渲染成位图再落盘，多一层失败点（无 DISPLAY 时渲染
   # 会失败），而托盘是启动期能力，失败会连带影响主窗口显示。
+  #
+  # 两者都是 super_partyb 的品牌标志（源：apps/webapp/src/app/icon.svg），
+  # 尺寸不同：托盘 64px（被系统缩小展示），窗口 256px（Alt+Tab / 任务栏
+  # 会放大，用 64 会糊）。
   assets:
     - assets/tray_icon.png
+    - assets/app_icon.png

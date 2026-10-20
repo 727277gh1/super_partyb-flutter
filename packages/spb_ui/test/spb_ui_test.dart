@@ -433,4 +433,49 @@ void main() {
       expect(joined, 'ab cd ab');
     });
   });
+
+  group('SpbLogo', () {
+    testWidgets('按传入尺寸渲染，且资源路径带包前缀', (tester) async {
+      await tester.pumpWidget(_host(const SpbLogo(size: 48)));
+
+      final image = tester.widget<Image>(
+        find.descendant(of: find.byType(SpbLogo), matching: find.byType(Image)),
+      );
+      expect(image.width, 48);
+      expect(image.height, 48);
+      expect(
+        (image.image as AssetImage).assetName,
+        'packages/spb_ui/assets/brand/logo.png',
+        reason: '包内资源必须带 packages/<pkg>/ 前缀，否则运行时找不到',
+      );
+    });
+
+    testWidgets('装饰性：不进入语义树（旁边已有标题文案）', (tester) async {
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(_host(const SpbLogo(size: 48)));
+
+      expect(
+        find.descendant(
+          of: find.byType(SpbLogo),
+          matching: find.bySemanticsLabel(RegExp('.')),
+        ),
+        findsNothing,
+        reason: '纯装饰标志不该被屏幕阅读器念出来',
+      );
+      handle.dispose();
+    });
+
+    testWidgets('大图用 md 圆角、小图用 sm 圆角', (tester) async {
+      await tester.pumpWidget(_host(const SpbLogo(size: 64)));
+      final big = tester.widget<ClipRRect>(find.byType(ClipRRect).first);
+      expect(big.borderRadius, SpbRadius.cardAll);
+
+      await tester.pumpWidget(_host(const SpbLogo(size: 16)));
+      final small = tester.widget<ClipRRect>(find.byType(ClipRRect).first);
+      expect(
+        small.borderRadius,
+        const BorderRadius.all(Radius.circular(SpbRadius.sm)),
+      );
+    });
+  });
 }

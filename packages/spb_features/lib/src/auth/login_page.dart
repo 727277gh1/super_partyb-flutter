@@ -189,10 +189,19 @@ class _LoginPageState extends State<LoginPage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Icon(
-                    Icons.shield_outlined,
-                    size: SpbSpacing.xxxl,
-                    color: scheme.primary,
+                  // 品牌标志（成蹊 / Super PartyB）。
+                  //
+                  // 此前是 `Icons.shield_outlined` 占位——盾牌与产品无关，且
+                  // 与「统一身份认证」的暗示重复（下面的副标题已说明）。换成
+                  // 真正的品牌标志后，用户第一眼就知道自己装的是哪个应用。
+                  //
+                  // 尺寸用 xxxl（48）：登录页首屏不宜过大，且它下面紧跟标题，
+                  // 再大就会把 SSO 按钮挤出小屏（320dp 高度）。
+                  const Center(
+                    child: SpbLogo(
+                      key: ValueKey('login-logo'),
+                      size: SpbSpacing.xxxl,
+                    ),
                   ),
                   const SizedBox(height: SpbSpacing.lg),
                   Text(
