@@ -23,12 +23,18 @@
 #
 # | 规则 | 理由 | 实测 |
 # |---|---|---|
-# | `_privateMember`（下划线开头） | 只可能来自本仓库 Dart | 20 候选 / 0 误报 |
-# | `foo()`（snake_case 调用） | 只可能来自本仓库 Dart | 4 候选 / 0 误报 |
+# | `_privateMember`（下划线开头） | 只可能来自本仓库 Dart / tools 脚本 | 20 候选 / 0 误报 |
+# | `foo()`（snake_case 调用） | 只可能来自本仓库 Dart / tools 脚本 | 4 候选 / 0 误报 |
 # | `xxx.dart`（文件名） | 只可能来自本仓库文件 | 22 候选 / 0 误报 |
 #
 # 私有成员/小写调用**不可能**是 Go 导出符号（Go 导出首字母大写）、也不可能是
 # webapp 的 React 组件（PascalCase），故这两类天然无歧义。
+#
+# ⚠️ 扫描范围含 `tools/*.py`：`tools/` 下不只有 shell 脚本，也有 Python 工具
+# （`gen_brand_assets.py`）。文档会引用它们的私有函数（如 `_extract_bubble`），
+# 而那些符号在 Dart 里当然找不到——不纳入扫描会得到一个真实的假红。
+# 纳入 Python 只会减少误报（本规则是「文档引用必须存在」，源越多越宽松），
+# 不会把真问题藏掉：被引用的标识符在任何一个源码文件里存在即算通过。
 #
 # ## 另加一条：`tools/` 脚本清单不得漏列（issue #47 第六项）
 #
@@ -86,9 +92,10 @@ basenames = {os.path.basename(f) for f in files}
 
 # 源码 + 测试的内容（给标识符规则用）。
 # 注意也扫 test/：文档会引用测试辅助/用例里的符号。
+# 也扫 tools/*.py：见头注「扫描范围含 tools/*.py」。
 blob = []
 for f in files:
-    if f.endswith('.dart'):
+    if f.endswith(('.dart', '.py')):
         with open(f, encoding='utf-8', errors='ignore') as fh:
             blob.append(fh.read())
 blob = '\n'.join(blob)

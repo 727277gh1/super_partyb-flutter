@@ -155,11 +155,13 @@ super_partyb-flutter/
     ├── check_agents_refs.sh        # AGENTS.md 标识符引用检查
     ├── check_agents_numbers.sh     # AGENTS.md 数字漂移检查（容差 5%）
     ├── check_silent_catches.sh     # 静默吞异常检查（空 catch 必须留痕）
+    ├── check_build_defines.sh      # 发布构建必须传 --dart-define（见 §6.33）
     ├── check_format.sh             # dart format 门禁
     ├── check_test_support_sync.sh  # 跨包重复的测试辅助文件必须逐字节相同
     # 工具
     ├── coverage.sh                 # 逐包覆盖率采集 + 汇总表（剔除生成代码）
     ├── bundle_linux_deps.sh        # Linux 分发包依赖打包（非系统库 + RUNPATH）
+    ├── gen_brand_assets.py         # 从品牌 SVG 生成各端图标（见 §6.32）
     ├── reverse_verify_issue50.sh   # 双栈降级/升级的变异验证（就地改代码再还原，见 §5.1.1）
     ├── sync-to-github.sh           # 导出 HEAD 为单提交干净仓库并推 GitHub（值无关，见 §6.29）
     └── scrub-history.sh            # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
@@ -2904,12 +2906,223 @@ SPB_PREFERRED_HOSTS = tbcc.atjog.com=tbcc6.atjog.com
 `strings` 可提取），故配进公开 Variables 不构成新泄露。验证方式：下载产物后
 `strings -a lib/libapp.so | grep tbcc`——同时应确认旧默认值 `127.0.0.1:8000` 已消失。
 
-`release.yml` 四个平台均接入了全部 5 个 define（windows `:179`、linux `:279`、
-android `:393`、macos `:480`），config job 会逐项打印 `set` / `unset`。
+`release.yml` 四个平台均接入了全部 5 个 define（windows `:174`、linux `:274`、
+android `:388`、macos `:475`），config job 会逐项打印 `set` / `unset`。
+
+⚠️ **`ci.yml` 同样必须传**（2026-10 修）：它的 `build-*` job 曾一个 define 都
+没传，而产物被上传成 Actions artifact 供人下载——于是拿到的是「连 127.0.0.1」
+的包，运行时报「远程计算机拒绝网络连接」。详见 §6.33。
+`tools/check_build_defines.sh` 守这件事。
 
 ⚠️ **`gh` 的 fine-grained PAT 需要 `Actions: Read and write`** 才能读写 Variables：
 只有 read 时 `POST /actions/variables` 报 403 `Resource not accessible by personal
 access token`（`PUT` 对不存在的变量报 404，容易误判成路径错）。
+
+---
+
+### 6.32 品牌图标：真源在 super_partyb，41 个文件由脚本生成
+
+客户端此前用的是 **Flutter 模板的默认图标**（macOS/iOS/Android 都是那个蓝白
+「F」字）。它与产品无关——装到桌面上，用户看到的不是「Super PartyB」。
+
+品牌真源在姊妹仓库：`super_partyb/apps/webapp/src/app/icon.svg`（成蹊 logo，
+1024×1024，底色 `#1a5cd7`，浅色气泡 + 镂空对勾）。本仓库不复制 SVG，而是
+**由 `tools/gen_brand_assets.py` 从它渲染出全部平台图标**。
+
+#### 为什么是脚本而不是手工导出
+
+不是「慢」，而是**漂移**：改一次品牌色要重新导出 36 个文件，漏掉的那几个
+只在真机上看图标时才会发现——而本仓库恰好验证不了 macOS / iOS / Windows
+（§9）。写成脚本后，改品牌 = 重跑一次。
+
+```bash
+# 1) 渲染真源 SVG（PIL 不支持 SVG，需 rsvg-convert；本机可免 sudo 装）
+cd /tmp && mkdir -p rsvg && cd rsvg
+apt-get download librsvg2-bin && dpkg-deb -x librsvg2-bin_*.deb root
+cd /path/to/super_partyb
+/tmp/rsvg/root/usr/bin/rsvg-convert -w 1024 -h 1024 \
+  apps/webapp/src/app/icon.svg -o /tmp/logo-master.png
+
+# 2) 生成全部图标（先 --dry-run 看清单）
+cd /path/to/super_partyb-flutter
+python3 tools/gen_brand_assets.py --master /tmp/logo-master.png \
+  --svg ../super_partyb/apps/webapp/src/app/icon.svg --dry-run
+python3 tools/gen_brand_assets.py --master /tmp/logo-master.png \
+  --svg ../super_partyb/apps/webapp/src/app/icon.svg
+```
+
+#### 各端的形状约定（**不是随便填满**）
+
+| 平台 | 形态 | 为什么 |
+|---|---|---|
+| iOS | 满幅正方形、**无 alpha** | App Store 拒绝带透明通道的 1024 图标；系统自己加圆角遮罩 |
+| Android legacy | 满幅正方形 | 系统按 density 选图，不做裁切 |
+| Android adaptive | 背景色 + **透明底**前景区 | API 26+ 由启动器按厂商形状裁切（见下） |
+| macOS | **圆角方形 + 留白** | Big Sur 栅格：1024 画布内 824×824 圆角矩形（圆角 185），四周各留 100 |
+| Windows `.ico` | 满幅多尺寸内嵌 | 资源管理器按尺寸挑帧 |
+| 桌面运行时 | 托盘 64 / 窗口 256 | GTK 自己缩放；窗口图标会被 Alt+Tab 放大，用 64 会糊 |
+
+#### Android 自适应图标的两个硬约束（实测踩过）
+
+1. **启动器只显示画布中央 72dp**（108dp 的 66%），其余会被裁掉或压到相邻图标下；
+2. **圆形 / squircle 遮罩会再切掉四角**。
+
+品牌 logo 里气泡占源图 49%。第一版直接铺满 108dp 画布，气泡就等于可见区的
+**74%**——圆形遮罩下贴着边（预览图确认过）。现在先提取气泡、按「气泡 = 画布的
+40%」重新居中（`ADAPTIVE_LOGO_RATIO`），可见区内气泡占 60%，四周约 20% 呼吸空间。
+
+前景区必须**透明底**：logo 里的对勾是背景色**透出来**的（浅色气泡上挖空），
+不是画上去的蓝。故按亮度反解 alpha 再反预乘还原颜色（`_extract_bubble`），
+边缘自然过渡；直接阈值化抠图会留一圈蓝边。背景色由
+`values/colors.xml` 的 `ic_launcher_background` 提供。
+
+#### 颜色一致性：同一品牌蓝在**三处**出现
+
+| 位置 | 用途 |
+|---|---|
+| `packages/spb_ui/lib/src/spb_logo.dart` 的 `SpbLogo.brandBlue` | 应用内标志 / 降级占位 |
+| `apps/spb_mobile/android/app/src/main/res/values/colors.xml` | 自适应图标背景层 |
+| `apps/spb_mobile/ios/Runner/Base.lproj/LaunchScreen.storyboard` | 启动画面底色 |
+
+不一致时对勾会变成另一种蓝（前景洞透出背景），启动画面会与首屏「闪一下」。
+生成脚本从 SVG 的 `rect fill` 读品牌色，不写死。
+
+#### 应用内标志：`SpbLogo` 随 `spb_ui` 分发
+
+登录页首屏此前是 `Icons.shield_outlined` 占位（盾牌与产品无关）。现在是
+`SpbLogo`——资源在 **`packages/spb_ui/assets/brand/logo.png`**，由本包分发。
+
+⚠️ **不要改成各端 `assets/` 各存一份**：两份必然漂移，而标志是「一眼看出
+是哪个产品」的东西，两份颜色略有差异比没有还糟（同 §6.13 的
+`golden_fonts.dart` 教训）。包内资源的路径必须带 `packages/<pkg>/` 前缀。
+
+`SpbLogo` 自带 `errorBuilder` 降级（同色系方块 + 对勾）：单元测试宿主与将来
+某个未打包资源的端会让 `Image.asset` 异步失败——在登录页上表现为**一片红色
+错误块**，而那正是「用户进不来」的首屏。品牌是装饰，登录能力才是功能。
+
+#### 桌面端：窗口图标要**显式**设置
+
+Linux 上窗口图标**不会**从包内资源自动取：GTK 靠 `_NET_WM_ICON`，而 Flutter
+的 Linux 嵌入层不设它（模板 `my_application.cc` 里没有 `gtk_window_set_icon`）。
+结果是任务栏 / Alt+Tab 显示默认占位方块——而托盘图标是正确的，两者不一致。
+故 `bootstrap.dart` 的 `_initWindowIcon` 调 `windowManager.setIcon`
+（其 Linux 实现就是 `gtk_window_set_icon_from_file`）。macOS 跳过：dock 图标
+来自 `.app` 里的 `AppIcon.appiconset`。
+
+#### 启动画面
+
+Android（`drawable*/launch_background.xml`）与 iOS（`LaunchImage.imageset` +
+`LaunchScreen.storyboard`）都是「品牌蓝底 + 居中标志」。
+
+⚠️ **不要换成 `flutter_native_splash` 之类的生成器**：那会重写
+`LaunchScreen.storyboard`，而该文件同时承载 OIDC 回调的窗口配置（见
+`docs/mobile-oidc-deeplink.md`）。
+
+⚠️ **Android XML 注释里不能出现 `--`**（XML 规范禁止）：写「A -- B」这种
+中文破折号转写会让 `mergeReleaseResources` 报
+`The string "--" is not permitted within comments`。实测踩过一次。
+
+---
+
+### 6.33 CI 产物也用 127.0.0.1：构建参数没传（2026-10 真实缺陷）
+
+**症状**：下载 CI 构建的 Windows 包，双击运行后弹「远程计算机拒绝网络连接」
+（`ECONNREFUSED`）。包能启动、界面正常、**所有请求都失败**。
+
+**根因不是参数写错，而是根本没传**。`ci.yml` 的三个 `build-*` job 都只写了
+`flutter build <platform> --release`，整文件 `dart-define` **零命中**。于是产物
+用的是 `SpbEnv` 的编译期默认值：
+
+| 常量 | 默认值 |
+|---|---|
+| `apiBaseUrl` | `http://127.0.0.1:8000` |
+| `ufsBaseUrl` | `http://127.0.0.1:9000/ufs` |
+| `oidcIssuer` | `http://127.0.0.1:3000/idp` |
+
+客户端去连**用户自己机器的 8000 端口**——那里什么都没有。
+
+#### 为什么所有门禁都是绿的
+
+这是本仓库反复出现的那一类「绿不代表对」（同 §6.21 的 codegen 漂移、§6.26 的
+`analysis_options` 未生效）：
+
+| 门禁 | 结果 | 为什么抓不到 |
+|---|---|---|
+| `dart analyze` | ✅ | 默认值是**合法字符串**，不是错误 |
+| 3400+ 用例 | ✅ | 测试注入 Fake API，不碰真实地址 |
+| `flutter build windows` | ✅ | 编译成功，参数缺失不影响编译 |
+| Linux 自包含检查 | ✅ | 查的是 `ldd` 与 RUNPATH，与地址无关 |
+
+#### 为什么 `release.yml` 是对的、`ci.yml` 是错的
+
+`release.yml` 有独立的 `config` job 解析「dispatch 输入 > 仓库 Variables >
+内置默认值」，四个平台各 5 条 define 全部传了。`ci.yml` 只打算「验证能不能编译」，
+却把产物**上传成 Actions artifact 供人下载**（`retention-days: 7`）。
+
+两者的**意图**不同（验证 vs 交付），**产物却是同一种**。用户不会区分——
+他看到一个能下载的 zip，就会去运行它。故现在 ci.yml 也复用同一套参数解析。
+
+#### 守卫：`tools/check_build_defines.sh`（两道，缺一漏一类）
+
+| 道 | 做法 | 能抓什么 |
+|---|---|---|
+| **静态** | 每个执行 `flutter build <p> --release` 的 job 必须在该 job 内出现 `--dart-define=SPB_API_BASE_URL` | 「没传」 |
+| **动态** | AOT 快照里不得残留 `127.0.0.1:8000` | 「传了但没生效」 |
+
+动态那条是**直接证据**，且实测可靠：传了 `--dart-define` 后，未被使用的默认值
+字符串会被 **tree-shake 掉**。同一份代码实测：
+
+```
+flutter build linux --release
+  → strings -a lib/libapp.so | grep -c 127.0.0.1:8000  →  1
+
+flutter build linux --release --dart-define=SPB_API_BASE_URL=https://example.test/pba
+  → 同上 → 0；grep -c example.test/pba → 1
+```
+
+故「产物含 127.0.0.1:8000」**等价于**「这个包连的是本机」。
+
+快照位置各端不同：Linux `bundle/lib/libapp.so`、Windows `Release/data/app.so`、
+Android `lib/<abi>/libapp.so`（在 APK 里，需先 `unzip`）。
+
+#### ⚠️ 按 **job** 切块检查，不能整文件 grep
+
+这是最容易写错的一处，也是自测用例 3 专门钉住的：`release.yml` 的 define 在
+`config` job 里**解析**、在 `build` job 里**使用**——两者是分开的 job。若守卫对
+整个文件 grep，就会因为「config 里出现过这个字符串」而放行一个没传的构建 job。
+按 job 切块后才拦得住。
+
+#### 只要求 api 那一个 define
+
+不要求 UFS / OIDC 齐全：`apiBaseUrl` 是「连不上就什么都做不了」的根，其余缺失是
+**功能降级**（OIDC 缺失 → 登录不可用，其余正常）。要求全部齐全会让守卫在「故意
+只配 api」的场景误报，而误报的守卫很快会被加进忽略列表。
+
+#### 自测（`check_build_defines_selftest.sh`，16 条断言）
+
+在 `mktemp -d` 里造最小仓库、把真守卫**逐字节复制**过去执行（不是副本实现）。
+钉住四处相反方向的判定：漏报（没传必须报错）/ 误报（传了必须放行）/
+按 job 切块（别的 job 传了不算）/ 防空转（一个构建 job 都没有时必须报错）。
+
+反向验证逐条实测：撤掉 `build-windows` 的 define → 报错；把守卫改回整文件 grep
+→ 用例 3 失败；去掉二进制检查 → 用例 6 失败。
+
+#### ⚠️ 本地 `.so` 的陷阱（写这类守卫时）
+
+`cleanup` 里别写 `for d in "${arr[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done`
+——空数组时 `${arr[@]:-}` 展开成空串，`[ -n "" ]` 失败让**函数返回 1**，
+EXIT trap 会把整个脚本的退出码改成 1。实测现象：16 条断言全绿、最后一行打印
+「自测通过」，退出码却是 1。写成 `for d in ${arr[@]+"${arr[@]}"}` 并显式
+`return 0`。
+
+#### 若将来新增出包平台
+
+必须同时做两件事，否则复发：
+
+1. 在该 job 内传 `--dart-define=SPB_API_BASE_URL`（`check_build_defines.sh`
+   会拦）；
+2. 把该平台的 AOT 快照路径加进守卫的 `SNAPSHOTS` 数组（否则二进制断言
+   对它静默跳过）。
 
 ---
 
@@ -3182,8 +3395,12 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 
 | 文件 | 职责 | 触发 | 产物保留 |
 |---|---|---|---|
-| `.github/workflows/ci.yml` | **验证**：analyze / format / 11 个守卫 + 6 个自测 / test / 能否构建 | push main + PR | Actions 7 天 |
+| `.github/workflows/ci.yml` | **验证**：analyze / format / 12 个守卫 + 7 个自测 / test / 能否构建 | push main + PR | Actions 7 天 |
 | `.github/workflows/release.yml` | **交付**：三端出包 + 建 Release | `v*` tag + 手动 | Release 长期 / Actions 30 天 |
+
+⚠️ **两条流水线的产物都会被人下载运行**。`ci.yml` 名义上是「验证能否构建」，
+但 artifact 在 Actions 页 7 天内可下载——用户不会区分它和 release 的包。故两边
+必须传同一套构建参数（§6.33）。
 
 发布构建的地址参数（API/UFS/webapp/OIDC）由仓库 **Variables** 提供
 （Settings → Secrets and variables → Actions → Variables），优先级：
@@ -3225,6 +3442,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
+| ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
+| ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |
 | ~~`#14` 回归：未知容器不递归 `children`~~ | ✅ 已修（issue #27）：未知容器下钻 + 占位符打印原始 type；**顺带修掉两个既有缺陷**——渲染层用扁平子树导致重复渲染（叶子 ×2）、渲染路径无环检测导致 `A→B→A` 栈溢出 | issue #27、§6.9.4 |

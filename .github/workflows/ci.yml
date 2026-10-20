@@ -21,6 +21,23 @@
 # `flutter build linux` 需要 clang/cmake/ninja + libgtk-3-dev 编译 C++ runner。
 # 只跑 analyze/test 的 job 不需要（dart/flutter test 不编译原生侧），
 # 故拆成两个 job：quality（快，全部包）+ build-linux（真出包，验证可构建）。
+#
+# ## ⚠️ 构建产物**也会被人下载运行**（2026-10 的真实缺陷）
+#
+# 这三个 build-* job 原本只传 `--release`、**一个 define 都没传**，于是产物用
+# `SpbEnv` 的编译期默认值 `http://127.0.0.1:8000`。用户下载 CI 的 Windows 包，
+# 运行后提示「远程计算机拒绝网络连接」——包能启动、界面正常、所有请求都失败。
+# 而 analyze / 3400+ 用例 / Windows 构建**全是绿的**：默认值不是错误，只是连
+# 的是用户自己机器。
+#
+# 两者的意图不同（CI 是验证、release 是交付），产物却是同一种，且都挂到
+# Actions 页供人下载。故现在与 release.yml 共用同一套参数解析：
+# dispatch 输入（ci 没有）> 仓库 Variables > 内置默认值。
+#
+# `tools/check_build_defines.sh` 守这件事：静态断言每个 release 构建 job 传了
+# `--dart-define=SPB_API_BASE_URL`，并在本地产物存在时直接 grep AOT 快照
+# 里有没有残留 `127.0.0.1:8000`（传了 define 后默认值会被 tree-shake 掉，
+# 实测确认过，故这条是可靠证据而非启发式）。
 
 name: ci
 
@@ -37,6 +54,43 @@ env:
   FLUTTER_VERSION: '3.47.5'
 
 jobs:
+  # ── 解析构建参数（build-* job 共用）─────────────────────────────
+  #
+  # 与 release.yml 的 config job 同源同义：地址是**部署方**的属性，不是代码的
+  # 属性。CI 没有 workflow_dispatch 输入，故只有 Variables → 内置默认值两级。
+  #
+  # ⚠️ 公开仓库里 `vars` 全局可见（与 secrets 不同）。这里只读、不写。
+  config:
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    outputs:
+      api: ${{ steps.defines.outputs.api }}
+      ufs: ${{ steps.defines.outputs.ufs }}
+      iss: ${{ steps.defines.outputs.iss }}
+      cid: ${{ steps.defines.outputs.cid }}
+      host_pref: ${{ steps.defines.outputs.host_pref }}
+    steps:
+      - name: Resolve build defines
+        id: defines
+        env:
+          VAR_API: ${{ vars.SPB_API_BASE_URL }}
+          VAR_UFS: ${{ vars.SPB_UFS_BASE_URL }}
+          VAR_ISS: ${{ vars.SPB_OIDC_ISSUER }}
+          VAR_CID: ${{ vars.SPB_OIDC_CLIENT_ID }}
+          VAR_HPREF: ${{ vars.SPB_PREFERRED_HOSTS }}
+        run: |
+          set -euo pipefail
+          write_out() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')" >> "$GITHUB_OUTPUT"; }
+          write_out api "$VAR_API"
+          write_out ufs "$VAR_UFS"
+          write_out iss "$VAR_ISS"
+          write_out cid "$VAR_CID"
+          write_out host_pref "$VAR_HPREF"
+
+          # 只报「配没配」，不打印值本身（日志长期留档）。
+          echo "API base : $([ -n "$VAR_API" ] && echo set || echo 'unset → 产物会连 127.0.0.1:8000') "
+          echo "UFS base : $([ -n "$VAR_UFS" ] && echo set || echo unset)"
+          echo "OIDC     : $([ -n "$VAR_ISS" ] && echo set || echo unset)"
+
   # ── 质量门禁：全包 analyze / format / layering / test ──────────────
   quality:
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
@@ -152,6 +206,17 @@ jobs:
       - name: Silent catch guard self-test
         run: bash tools/check_silent_catches_selftest.sh
 
+      # 构建参数守卫：每个 release 构建 job 必须传 --dart-define=SPB_API_BASE_URL。
+      # 不传则产物用 SpbEnv 默认值 http://127.0.0.1:8000，用户运行时报
+      # 「远程计算机拒绝网络连接」——而 analyze/test/构建全部是绿的（2026-10
+      # 真实缺陷，见 ci.yml 头注与 AGENTS.md §6.33）。
+      # 本机无 release 产物时只做静态检查，二进制断言在 build-* job 之后另跑。
+      - name: Build defines check
+        run: bash tools/check_build_defines.sh
+
+      - name: Build defines guard self-test
+        run: bash tools/check_build_defines_selftest.sh
+
       - name: Analyze
         run: dart analyze --fatal-infos .
 
@@ -226,6 +291,7 @@ jobs:
 
   # ── Linux 桌面端出包（验证可构建 + 自包含）────────────────────────
   build-linux:
+    needs: config
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
       - uses: actions/checkout@v5
@@ -253,9 +319,25 @@ jobs:
       - run: flutter pub get
 
       - name: Build Linux release
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
         run: |
+          set -euo pipefail
           cd apps/spb_desktop
-          flutter build linux --release
+          # 只传非空 define：空串会覆盖掉 SpbEnv 的 defaultValue，让「没配」
+          # 变成「配成了空」（理由详 release.yml 同名 step）。
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build linux --release "${args[@]}"
 
       # 自包含验证（AGENTS.md §7）：ldd 不得缺库，RUNPATH 不得指向 /home。
       #
@@ -286,6 +368,13 @@ jobs:
           fi
           echo '✅ bundle 自包含'
 
+      # 产物**会被人下载运行**：必须确认构建参数真的进了二进制。
+      # 传了 --dart-define 后 SpbEnv 的默认值会被 tree-shake 掉（实测），
+      # 故 AOT 快照里不应再有 127.0.0.1:8000。守卫的静态部分已在上游 quality
+      # job 跑过；这里跑同一条命令是为了让它的二进制断言拿到刚构建的产物。
+      - name: Verify build defines reached the binary
+        run: bash tools/check_build_defines.sh
+
       - uses: actions/upload-artifact@v6
         with:
           name: linux-release
@@ -294,6 +383,7 @@ jobs:
 
   # ── Android APK ───────────────────────────────────────────────────
   build-android:
+    needs: config
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
       - uses: actions/checkout@v5
@@ -314,9 +404,44 @@ jobs:
       - run: flutter pub get
 
       - name: Build APK (release)
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
         run: |
+          set -euo pipefail
           cd apps/spb_mobile
-          flutter build apk --release
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build apk --release "${args[@]}"
+
+      # APK 里的 AOT 快照是 lib/arm64-v8a/libapp.so（等）。同样断言默认地址
+      # 已被替换——APK 是最容易被随手发给别人安装的产物。
+      - name: Verify build defines reached the APK
+        run: |
+          set -euo pipefail
+          apk=apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
+          [ -f "$apk" ] || { echo "❌ 未找到 $apk"; exit 1; }
+          tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+          unzip -o -q "$apk" 'lib/*/libapp.so' -d "$tmp"
+          shopt -s nullglob
+          snaps=("$tmp"/lib/*/libapp.so)
+          [ "${#snaps[@]}" -gt 0 ] || { echo "❌ APK 里没有 libapp.so"; exit 1; }
+          for snap in "${snaps[@]}"; do
+            n=$(strings -a "$snap" | grep -c '127\.0\.0\.1:8000' || true)
+            if [ "$n" -gt 0 ]; then
+              echo "❌ $(basename "$(dirname "$snap")")/libapp.so 残留默认地址（$n 处）"
+              exit 1
+            fi
+            echo "✅ $(basename "$(dirname "$snap")")/libapp.so 未残留默认地址"
+          done
 
       - uses: actions/upload-artifact@v6
         with:
@@ -329,6 +454,7 @@ jobs:
   # public 后该前提已不成立，而 Windows 是本机唯一无法构建的平台，
   # PR 阶段必须验证（否则 Windows 特有编译错误只在合并后才暴露）。
   build-windows:
+    needs: config
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
@@ -342,8 +468,27 @@ jobs:
       - run: flutter pub get
 
       - name: Build Windows release
-        run: flutter build windows --release
+        shell: pwsh
         working-directory: apps/spb_desktop
+        # 走 env 而非把值插进脚本：`${{ }}` 插值发生在 shell 解析之前，
+        # 地址里含引号/空格会把命令拼坏。
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          $defines = @()
+          if ($env:DEF_API) { $defines += "--dart-define=SPB_API_BASE_URL=$env:DEF_API" }
+          if ($env:DEF_UFS) { $defines += "--dart-define=SPB_UFS_BASE_URL=$env:DEF_UFS" }
+          if ($env:DEF_ISS) { $defines += "--dart-define=SPB_OIDC_ISSUER=$env:DEF_ISS" }
+          if ($env:DEF_CID) { $defines += "--dart-define=SPB_OIDC_CLIENT_ID=$env:DEF_CID" }
+          if ($env:DEF_HOST) { $defines += "--dart-define=SPB_PREFERRED_HOSTS=$env:DEF_HOST" }
+          $defines += '--dart-define=SPB_ENV=prod'
+
+          Write-Host "flutter build windows --release $($defines -join ' ')"
+          flutter build windows --release @defines
 
       # VC++ 运行库不在构建产物里：目标机没装 VC++ Redistributable 会直接
       # 闪退且报错不友好（AGENTS.md §8 坑 1）。必须手动拷进产物目录。

@@ -32,6 +32,9 @@ scripts:
   silent-catches:
     description: 静默吞异常的 catch 必须有说明或日志（issue #45）
     run: bash tools/check_silent_catches.sh
+  build-defines:
+    description: 发布构建必须传 --dart-define，且产物不残留 127.0.0.1（§6.33）
+    run: bash tools/check_build_defines.sh
   agents-refs:
     description: AGENTS.md 引用的标识符存在，且 tools/ 脚本都被列出（issue #37/#47）
     run: bash tools/check_agents_refs.sh
