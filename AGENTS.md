@@ -3126,6 +3126,89 @@ EXIT trap 会把整个脚本的退出码改成 1。实测现象：16 条断言�
 
 ---
 
+### 6.34 会话失效 → 回登录页（`AuthInterceptor.onSessionExpired`）
+
+**症状**：会话真的过期后，客户端弹一句「会话已失效，请重新登录」，然后**卡在
+当前页面**——不会回登录页，用户只能手动进设置页点「退出登录」。
+
+#### 根因：链路上每一段都在，唯独中间那段是断的
+
+| 环节 | 修复前 |
+|---|---|
+| `AuthInterceptor.onError` | 401 → 尝试刷新 → 失败则归一化成 `AuthError` 抛给调用方。注释写着「**由上层统一监听 AuthError 并跳转登录页**」 |
+| 那个「上层监听」 | **不存在**。全仓 `markUnauthenticated` 只有 3 个调用点：移动端深链登录失败 1 处 + 两端各 1 处定义。生产路径**零调用** |
+| 各页面 catch 到 `AuthError` | 只翻成一句 SnackBar 文案（`_describeGroupActionError` / `_describeGoalError` / `_describeSwitchError`…），不做导航 |
+| SSE 401 | `SseClient` 置 `SseState.failed` 并推 `frames` 的 error → `ChatStreamController.errors`，而**没有任何装配层订阅它** |
+| 路由守卫 | 逻辑本身是对的（`buildAuthRedirect` + `AuthRefreshNotifier`），只要 `authState` 变成 `unauthenticated` 就会重定向到 `/login?from=…` |
+
+即：**下游（守卫）一直是好的，上游（把状态推进到未登录）根本没人做**。
+
+#### 修法：拦截器给一个回调，装配层接到 `markUnauthenticated`
+
+```
+401 → AuthInterceptor.onSessionExpired(message)
+  → authStateProvider.notifier.markUnauthenticated(message)
+  → AuthRefreshNotifier.notifyListeners()（只在 status 变化时）
+  → go_router 重跑 buildAuthRedirect
+  → '/login?from=<当前页>'
+```
+
+`markUnauthenticated` 的既有语义正好合适：**不清凭证**（401 可能是网关侧临时
+问题，清掉会让用户丢 refresh_token），只把状态置为 `unauthenticated`。
+
+#### 五个不得违反的约束（改之前必读）
+
+| 约束 | 为什么 |
+|---|---|
+| **403 绝不触发** | 403 是「已认证但无权限」。把它当登出，用户「点了一个没权限的按钮」就会被直接踢出登录 |
+| **只在「刷新也失败」之后触发** | `SessionManager._doRefresh` 明确保留「临时网络故障不该让用户登出」这一取向。唯一可信的信号是「刷新过了，服务端仍然 401」 |
+| **重放路径也要触发，但要带 `_retriedKey` 守卫** | 「刷新成功但重放仍 401」（账号被禁/会话被撤销）同样是确定失效。但重放请求**也经过本拦截器**，不带守卫会通知两次（实测：回调被调 2 次） |
+| **回调里不导航** | 同一时刻可能有多个请求同时 401，导航副作用会打架。重定向只由路由守卫做一次 |
+| **装配层用 `ref.read` 而非 `watch`** | `dioProvider` 若 watch 认证状态，每次登录/登出都会重建 Dio——而 Dio 与 SseClient 的身份被 `ChatStreamController` 与页面的 `??=` 订阅持有，重建会让时间线**静默冻结**（同 §5.1.1 的 `EndpointRewriteInterceptor` 那条） |
+
+#### 接线点：**4 处**，不是 2 处
+
+两端各有 `dioProvider` 与 `ufsDioProvider`，**四个都要接**：UFS 请求走的是同一个
+网关会话，也会 401。只接 API 那个会让「文件预览失败」不把人带回登录页。
+
+两端各自抽了一个私有 helper `_sessionExpiredHandler(ref)`，四个构造点共用。
+
+#### 测试（拦截器 5 条 + 两端各 2 条）
+
+| 层 | 用例 | 钉住 |
+|---|---|---|
+| `spb_api` | 401 且刷新失败 → 回调调用一次 | 该触发时触发 |
+| 同上 | 刷新成功且重放成功 → **不触发** | 静默续期不该踢人 |
+| 同上 | **403 → 绝不触发** | 反方向（误触发会踢掉正常无权限操作） |
+| 同上 | 刷新成功但重放仍 401 → 触发一次 | 通知不随重放叠加 |
+| 同上 | 未配置回调时行为不变 | 向后兼容 |
+| 两端 router | 已登录时状态被推进 → 停在 `/login?from=<原页>`、登录页显示原因、`clearCount == 0` | 整条链路 + 不清凭证 |
+| 两端 router | `dioProvider` 真实构造的拦截器接上了回调 | **接线漏接** |
+
+⚠️ **第二条 router 用例为什么不能用 harness 的 dio**：`pumpApp` 把 `dioProvider`
+**整体覆盖**成「挂了 `DioAdapter` 的 dio」，那个 dio 没有 `AuthInterceptor`。
+在那里发 401 只能得到裸 `DioException`（实测：断言路由仍停在 `/settings`）。
+故它另建一个只覆盖 `tokenStoreProvider` 的容器，让 `dioProvider` 走真实实现，
+再把适配器换成「一律 401」。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `dioProvider` 去掉 `onSessionExpired` 接线 | 接线用例失败（`isUnauthenticated` 为 false） |
+| `onError` 里去掉回调调用 | 拦截器 1 条失败 |
+| 去掉 `_retriedKey` 守卫 | 「重放仍 401」用例失败（回调被调 2 次） |
+
+#### 有意不做
+
+- **不在拦截器里 `context.go('/login')`**：拦截器是传输层，不应持有导航知识；
+  且多请求并发 401 会重复导航。
+- **不订阅 `ChatStreamController.errors` 做 SSE 兜底**：SSE 的 401 在绝大多数
+  场景下会伴随一次普通 HTTP 401（时间线回填 / `/api/auth/me`），主路径已覆盖。
+  单独做需要额外一条用例钉住「只有 SSE 在跑」的时序，收益不足以在本轮引入。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -3444,6 +3527,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
 | ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
+| ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |
 | ~~`#14` 回归：未知容器不递归 `children`~~ | ✅ 已修（issue #27）：未知容器下钻 + 占位符打印原始 type；**顺带修掉两个既有缺陷**——渲染层用扁平子树导致重复渲染（叶子 ×2）、渲染路径无环检测导致 `A→B→A` 栈溢出 | issue #27、§6.9.4 |
