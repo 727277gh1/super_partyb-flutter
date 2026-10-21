@@ -243,7 +243,7 @@ Future<void> pumpPage(
   WidgetTester tester, {
   String? title = '测试对话',
   void Function(String, String, String)? onResolveConfirmation,
-  void Function(String token, bool correct)? onResolveFeedback,
+  Future<void> Function(String token, bool correct)? onResolveFeedback,
   void Function(SpecUiAction action)? onSpecAction,
   void Function(String agentId)? onSelectAgent,
   void Function(HabitSuggestionItem suggestion)? onAcceptHabit,

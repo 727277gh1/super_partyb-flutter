@@ -638,4 +638,73 @@ void main() {
       expect(r.deduped, isTrue);
     });
   });
+
+  group('契约：resolveFeedback（POST /chat/feedback/:token/resolve）', () {
+    // ## 这组用例防的是什么（2026-10 的真实缺陷）
+    //
+    // 客户端曾发 `{'correct': bool}`，而服务端 `feedback_resolve.go` 的入参
+    // 结构只有 `reply` / `index` / `group_id`。`ShouldBindJSON` 会**静默忽略**
+    // 未知字段，于是 `Reply` 留空 → `composeFeedbackReply` 返回 "" →
+    // `400 {"error":"reply is required"}`。
+    //
+    // 用户看到的是「点了没反应」：客户端 fire-and-forget 且只 debugPrint。
+    // 该方法当时**零契约测试**，两端 router 测试又恰好断言了错误的 `correct`
+    // 键，等于把 bug 固化成了预期（与 §6.14 的 `createTurn`、§6.28 的
+    // `groupConfirmations` 同一类）。
+    //
+    // 真源：`apps/go-api/internal/server/feedback_resolve.go` 的
+    // `resolveFeedbackRequest` + `composeFeedbackReply`（后者用
+    // `confirmtext.IsAffirmVerdict` / `IsDenyVerdict` 判定词表）。
+    test('肯定回执：路径 + 请求体键是 reply（不是 correct）', () async {
+      final rec = await startRecorder((_) => {'resolved': true});
+      addTearDown(rec.close);
+
+      await apiFor(rec).resolveFeedback('tok_1', correct: true);
+
+      expect(rec.paths, ['/chat/feedback/tok_1/resolve']);
+      final b = rec.bodies.single;
+      expect(b['reply'], '准确', reason: '必须落在 confirmtext 的肯定词表里');
+      expect(
+        b.containsKey('correct'),
+        isFalse,
+        reason: 'correct 不是服务端字段，发了会被静默忽略（就是那个 bug）',
+      );
+    });
+
+    test('否定回执：reply 落在否定词表里', () async {
+      final rec = await startRecorder((_) => {'resolved': true});
+      addTearDown(rec.close);
+
+      await apiFor(rec).resolveFeedback('tok_2', correct: false);
+
+      expect(rec.paths, ['/chat/feedback/tok_2/resolve']);
+      expect(rec.bodies.single['reply'], '不准确');
+    });
+
+    test('token 原样进路径（服务端按它直查 + 一次性 CAS）', () async {
+      final rec = await startRecorder((_) => {'resolved': true});
+      addTearDown(rec.close);
+
+      await apiFor(rec).resolveFeedback('evt_abc123', correct: true);
+
+      expect(rec.paths, ['/chat/feedback/evt_abc123/resolve']);
+    });
+
+    test('404 抛 HttpError（页面据此提示「已失效」而不是反复重试）', () async {
+      // 服务端把「已过期 / 已消费 / 非本人」三者统一成 404（避免存在性探针）。
+      // 客户端必须把它变成一个可识别的错误，否则页面无法给出准确文案。
+      final rec = await startRecorder(
+        (_) => {'error': '反馈请求不存在或已处理'},
+        statusCode: 404,
+      );
+      addTearDown(rec.close);
+
+      await expectLater(
+        apiFor(rec).resolveFeedback('tok_x', correct: true),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 404),
+        ),
+      );
+    });
+  });
 }

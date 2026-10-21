@@ -158,8 +158,21 @@ class ConversationPage extends StatefulWidget {
   /// `POST /chat/feedback/:token/resolve`，页面只收集意图，请求与错误翻译
   /// 归调用方（也使 widget test 无需 HTTP mock）。
   ///
+  /// ## 返回 `Future` 而不是 `void`（与 [onResolveConfirmation] 不同）
+  ///
+  /// 归属反馈的回执是**一次性 CAS**，而确认卡的失败会由服务端在下个 turn 内
+  /// 回 `confirmation_resolved`/`confirmation_expired` 重新收敛；反馈没有这条
+  /// 回路。若回调不把结果交回来，页面就只能盲目置灰或什么都不做：
+  ///
+  /// - 盲目置灰 → 一次网络故障就把卡片变成只读，用户再无重试入口；
+  /// - 什么都不做 → 用户看到「点了没反应」（2026-10 的真实报障，当时还叠加了
+  ///   请求体键名错误，见 `ChatApi.resolveFeedback` 的说明）。
+  ///
+  /// 故这里要求返回 `Future`：成功才置灰，失败由页面提示并保留可重试。
+  /// 回调抛出的异常按「失败」处理（调用方无需自己吞）。
+  ///
   /// 为 null 时反馈卡按钮禁用。
-  final void Function(String token, bool correct)? onResolveFeedback;
+  final Future<void> Function(String token, bool correct)? onResolveFeedback;
 
   /// 习惯建议卡：接受（`action=accept`）。
   ///
@@ -561,6 +574,14 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 服务端 CAS 保证重复请求无数据错误，但会让 UI 出现两次 loading。
   final _resolvingFeedback = <String>{};
+
+  /// 本地已提交回执的 token（乐观置灰）。
+  ///
+  /// 与 `FeedbackRequestItem.resolved` 的关系：后者是**服务端权威**（来自
+  /// `routing_feedback` 事件），本集合是「请求已发出」的本地事实。渲染时取
+  /// 两者之并——事件到达后置灰来源变成权威，事件永不到达时也不会退化成
+  /// 「没点过」。见 [_handleResolveFeedback] 的说明。
+  final _submittedFeedback = <String>{};
 
   /// 已提交过操作的**建议 id**（防重复点击，与上面两个同理）。
   ///
@@ -1255,15 +1276,39 @@ class _ConversationPageState extends State<ConversationPage> {
 
   /// 提交归属反馈（防重复点击；与 [_handleResolve] 同构）。
   ///
-  /// 解锁时机也一致：成功与失败都解锁——服务端 CAS 保证重复请求无数据错误，
-  /// 失败时允许重试（不弹错误打断阅读）。
+  /// ## 为什么这里比确认卡多一层「乐观置灰」与失败提示
+  ///
+  /// 确认卡有 `busy` 态，且服务端**一定会在同一个 turn 内**回
+  /// `confirmation_resolved`/`confirmation_expired`（它阻塞 turn）。归属反馈
+  /// 不阻塞任何东西，`routing_feedback` 是旁路事件：SSE 断线、回放窗口被
+  /// 穿透、或服务端写标注失败时，它可能永不到达。
+  ///
+  /// 而回执是**一次性 CAS**：重试的第二次必然 404。故「点了没反应」在这里
+  /// 不是体验问题，是功能失效——用户会把卡片当成坏的。
+  ///
+  /// 故：成功后才本地置灰（[item.resolved] 仍是权威，事件到达时两者一致），
+  /// 失败则提示且**保留可点**（不把一次网络故障变成只读卡）。
   Future<void> _handleResolveFeedback(String token, bool correct) async {
     final callback = widget.onResolveFeedback;
     if (callback == null || _resolvingFeedback.contains(token)) return;
 
     setState(() => _resolvingFeedback.add(token));
     try {
-      callback(token, correct);
+      await callback(token, correct);
+      if (mounted) setState(() => _submittedFeedback.add(token));
+    } on HttpError catch (e) {
+      // 404 在这里有确定含义：token 已过期 / 已被消费 / 不是本人的请求
+      // （服务端三者统一 404，避免存在性探针）。文案不能只说「提交失败」
+      // ——那会让用户反复重试一个永远不会成功的请求。
+      if (mounted) {
+        _showMessage(
+          e.statusCode == 404 ? '这条反馈已失效，无法再作答' : '反馈提交失败：${e.message}',
+        );
+      }
+    } on SpbError catch (e) {
+      if (mounted) _showMessage('反馈提交失败：${e.message}');
+    } catch (e) {
+      if (mounted) _showMessage('反馈提交失败：$e');
     } finally {
       if (mounted) setState(() => _resolvingFeedback.remove(token));
     }
@@ -1697,7 +1742,11 @@ class _ConversationPageState extends State<ConversationPage> {
     FeedbackRequestItem() => FeedbackRequestCard(
       question: item.question,
       options: item.options,
-      resolved: item.resolved,
+      // 已作答的两个来源：服务端的 `routing_feedback` 事件（权威），或本地提交
+      // 成功后的标记（见 [_submittedFeedback]）。后者不是多余的——回执成功后
+      // 只有服务端广播能置灰，而它可能因 SSE 断线/回放窗口缺失而永不到达，
+      // 届时用户会看到「点了没反应」并反复重试（第二次必然 404）。
+      resolved: item.resolved || _submittedFeedback.contains(item.token),
       busy: _resolvingFeedback.contains(item.token),
       // 三个条件都要满足才给可点按钮：
       //   - app 层注入了回执通道（未注入时点了没反应，不如直接禁用）；

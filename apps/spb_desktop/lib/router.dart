@@ -1772,23 +1772,25 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   /// 提交归属反馈（「这条消息归到这个对话对吗」）。
   ///
-  /// 与 [_resolveConfirmation] 同构：成功与失败都解锁，失败允许重试。
+  /// ## 为什么这里**不**吞异常（与 [_resolveConfirmation] 不同）
+  ///
+  /// 确认卡失败后服务端会在同一个 turn 内回 `confirmation_resolved`/
+  /// `confirmation_expired` 重新收敛，UI 不会卡在中间态。归属反馈没有这条
+  /// 回路：回执是一次性 CAS，失败就是失败，必须把错误交给页面去提示。
+  ///
+  /// 此前这里 `.catchError(debugPrint)`，加上请求体键名错误，就变成了用户
+  /// 报障的「点了没反应」（见 `ChatApi.resolveFeedback` 的说明）。
+  ///
   /// busy 集合按 token 去重——页面内 busy 已有一层，这里是第二层（
   /// 与 [_resolvingConfirmations] 同样防止「两处可点」时的重复提交）。
-  void _resolveFeedback(String token, bool correct) {
+  Future<void> _resolveFeedback(String token, bool correct) async {
     if (_resolvingFeedback.contains(token)) return;
     setState(() => _resolvingFeedback.add(token));
-    ref
-        .read(chatApiProvider)
-        .resolveFeedback(token, correct: correct)
-        .whenComplete(() {
-          if (mounted) {
-            setState(() => _resolvingFeedback.remove(token));
-          }
-        })
-        .catchError((Object e) {
-          debugPrint('归属反馈提交失败: $e');
-        });
+    try {
+      await ref.read(chatApiProvider).resolveFeedback(token, correct: correct);
+    } finally {
+      if (mounted) setState(() => _resolvingFeedback.remove(token));
+    }
   }
 
   /// 接受习惯建议。

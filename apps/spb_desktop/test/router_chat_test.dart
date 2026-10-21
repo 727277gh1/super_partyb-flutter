@@ -635,9 +635,8 @@ void main() {
     );
 
     await tester.runAsync(() async {
-      page.onResolveFeedback!('tok_fb1', true);
-      // onResolveFeedback 返回 void（页面内 fire-and-forget），真实 dio 往返
-      // 需要真实事件循环跑完——短 delay 会拿不到请求（实测 Duration.zero 不够）。
+      await page.onResolveFeedback!('tok_fb1', true);
+      // onResolveFeedback 返回 Future，但真实 dio 往返需要真实事件循环跑完。
       await Future<void>.delayed(const Duration(milliseconds: 50));
     });
     await tester.pump();
@@ -646,8 +645,15 @@ void main() {
     expect(hit.single.$1, '/chat/feedback/tok_fb1/resolve');
     expect(
       hit.single.$2,
-      containsPair('correct', true),
-      reason: 'correct 必须进请求体，否则服务端拿不到标注',
+      containsPair('reply', '准确'),
+      reason:
+          '服务端入参只有 reply/index/group_id（feedback_resolve.go）；'
+          '发 correct 会被 ShouldBindJSON 忽略 → Reply 空 → 400 reply is required',
+    );
+    expect(
+      (hit.single.$2! as Map).containsKey('correct'),
+      isFalse,
+      reason: 'correct 是错误键名，发出去只会让服务端静默忽略',
     );
   });
 

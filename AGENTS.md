@@ -2673,6 +2673,110 @@ issue 要求逐项给出结论。实际核实后：**除了新查出的 `groupCo
 
 ---
 
+### 6.28.1 归属反馈「点了没反应」：两个叠加的缺陷（2026-10）
+
+用户报障「归属反馈卡点了没反应」。查下来是**两个独立缺陷叠加**，且都属
+§6.28 同一类「零契约测试 + 错误断言把 bug 固化成预期」。
+
+#### 缺陷一：请求体键名错（`correct` vs `reply`）——请求根本到不了 CAS
+
+客户端发 `{'correct': bool}`，而服务端 `feedback_resolve.go` 的入参结构只有：
+
+```go
+type resolveFeedbackRequest struct {
+    Reply   string `json:"reply"`
+    Index   int    `json:"index"`
+    GroupID string `json:"group_id"`
+}
+```
+
+`ShouldBindJSON` **静默忽略未知字段**，于是 `Reply` 留空 →
+`composeFeedbackReply` 返回 `""` → `400 {"error":"reply is required"}`。
+
+实测（真实路由 + 临时探针）：
+
+```
+{"correct": true}  → 400 {"error":"reply is required"}
+{"reply": "准确"}   → 200 {"resolved":true,"turn_id":"t1"}
+```
+
+修法：`ChatApi.resolveFeedback` 改发 `{'reply': correct ? '准确' : '不准确'}`。
+两个词都落在 `confirmtext` 的肯定/否定词表里（端点会先 `Canonicalize`），
+合成出的回执是 `反馈#<token>#正确`。文案选「准确」而非「正确」是为了与
+卡片按钮 label（`FeedbackRequestCard.defaultOptions`）一致。
+
+#### 缺陷二：置灰只依赖服务端旁路事件 —— 修完键名仍可能「没反应」
+
+卡片 `resolved` 此前**只**看 `routing_feedback` 事件（`event_reducer.dart:542`）。
+而回执是**一次性 CAS**，且该事件是旁路事件：
+
+| 场景 | 结果 |
+|---|---|
+| SSE 断线 / 回放窗口被穿透 | 事件永不到达 → 卡片永久显示「这次归属准确吗？」且按钮可点 |
+| 用户重试 | 第二次必然 404（CAS 已消费） |
+
+用户看到的就是「点了没反应」，且越点越坏。
+
+修法（三处协同）：
+
+| 位置 | 改动 |
+|---|---|
+| `ConversationPage.onResolveFeedback` | 签名 `void` → **`Future<void>`**。确认卡可以 fire-and-forget（服务端会在同一 turn 内回 `confirmation_resolved` 收敛），反馈没有这条回路，必须把结果交回来 |
+| `ConversationPage._handleResolveFeedback` | 成功才 `_submittedFeedback.add(token)`（乐观置灰）；失败 `_showMessage` 且**保留可点** |
+| 渲染 | `resolved: item.resolved \|\| _submittedFeedback.contains(item.token)`——事件到达后权威接管，永不到达时也不退化 |
+| 两端 router | 去掉 `.catchError(debugPrint)`，让异常上抛给页面 |
+
+**404 的文案单独处理**：服务端把「已过期 / 已消费 / 非本人」三者**统一返回
+404**（避免存在性探针，`interactive_request.go:120`）。写成「提交失败」会让
+用户反复重试一个永远不会成功的请求，故提示「这条反馈已失效，无法再作答」。
+
+#### 为什么修复前测试全绿（三处假绿）
+
+| 既有测试 | 它断言了什么 | 漏了什么 |
+|---|---|---|
+| `spb_api` 全包 | **零条** `resolveFeedback` 用例 | 路径与请求体从未被验过 |
+| `apps/spb_desktop/test/router_chat_test.dart` | `containsPair('correct', true)` | 断言的正是**错误键名**，把 bug 固化成了预期 |
+| `apps/spb_mobile/test/router_chat_test.dart` | `containsPair('correct', false)` | 同上 |
+| `conversation_page_timeline_test.dart` | 「点击回调收到 token 与 bool」 | 只测回调被调用，不看卡片后续状态 |
+
+#### 本轮补的用例（共 11 条）
+
+| 层 | 用例 |
+|---|---|
+| `spb_api` 契约（真实 `HttpServer`） | 肯定回执 `reply='准确'` 且**不含** `correct` 键；否定回执 `reply='不准确'`；token 原样进路径；404 抛 `HttpError` |
+| `spb_features` | 提交成功后**本地置灰**（显示「已反馈」、按钮 `onPressed == null`）；提交失败提示且**保留可点**；404 提示「已失效」而非「提交失败」 |
+| 两端 router | 断言改为 `containsPair('reply', …)` + 显式断言不含 `correct` |
+
+#### 反向验证（实测）
+
+| 改坏 | 结果 |
+|---|---|
+| 请求体改回 `{'correct': bool}` | `spb_api` 契约 **2 条失败** |
+| 去掉 `_submittedFeedback` 乐观置灰 | 「提交成功后本地置灰」**1 条失败** |
+| 失败也置灰 | 「失败时保留可点」**1 条失败** |
+
+#### 与 TTL 的关系（**别再往那个方向修**）
+
+`AttributionFeedbackTTL` 已是 **24h**（`domain.go:35`，按 kind 分派见
+`InteractiveRequestTTLForKind`），生产实测 `expires_at - created_at = 24.0h`，
+2026-10-18 起生效。用户报障时 34 条请求、0 条标注——**在请求根本发不出去
+的情况下，TTL 多长都拿不到数据**。
+
+「事件不超时、等归档后自然不能改」这个提案**不成立**，三条硬依据：
+
+1. **`pending` 行的存在本身就是「待答」语义**。`LatestPendingAttributionFeedback`
+   取「本 group 最近一条 pending」作隐式锚点（IM 纯文本路径）。永不超时 = 三个月前
+   的请求仍可能被一句无关短回复命中。代码为此已单独加了
+   `ImplicitAttributionFeedbackWindow = 2h`，但那只是**查询侧**的窄窗。
+2. **归档拦不住回执**。`requireOwnedGroup` 的 SQL 是 `WHERE id = ? AND user_id = ?`
+   ——**不校验 status**，且 `feedback_resolve.go` 的 handler 根本没调它（只有
+   `currentUser` + token 直查）。要做到「归档即失效」得新增一道 status 校验。
+3. **`pending` 堆积会污染去重闸**。`CountPendingInteractiveRequestsByGroup`
+   的语义是「同 group 不重复问」，永久 pending 会让该 group 的后续反馈永久被堵。
+
+注意三者是**不同的量**，不该合并：`chat_events` 保留（永久，eventretention
+白名单明确保 `routing_feedback_request`）/ 回执窗口（24h）/ 隐式锚点窗口（2h）。
+
 ### 6.29 开源镜像同步（`tools/sync-to-github.sh`）
 
 权威源是 **Gitea**（`git@git.atjog.com:dever/super_partyb-flutter.git`，完整历史 +
@@ -4079,7 +4183,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | macOS 包未签名/未公证，首次打开需绕过 Gatekeeper | 已知限制（免签名分发） | §8 |
 | iOS 出包需 Apple Developer 账号 | 待决策 | §8、`super_partyb` issue #31 |
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
-| ~~窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp）~~ | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
+| ~~归属反馈卡「点了没反应」~~ | ✅ 已修（§6.28.1）：**两个叠加的缺陷**。① `ChatApi.resolveFeedback` 发 `{'correct': bool}`，而服务端入参只有 `reply`/`index`/`group_id`（`ShouldBindJSON` 静默忽略未知字段 → `Reply` 空 → `400 reply is required`）。实测：`{"correct":true}` → 400，`{"reply":"准确"}` → 200。改发 `{'reply': correct ? '准确' : '不准确'}`。② 即使请求成功，卡片置灰**只**看 `routing_feedback` 事件（旁路事件，SSE 断线时永不到达），而回执是一次性 CAS——用户重试必然 404，越点越坏。故 `onResolveFeedback` 签名 `void` → `Future<void>`，成功才本地置灰（`_submittedFeedback`）、失败提示且保留可点，404 单独提示「已失效」。⚠️ 修复前三处**假绿**：`spb_api` 零条 `resolveFeedback` 用例；两端 router 测试断言的正是**错误键名** `containsPair('correct', …)`，把 bug 固化成了预期；页面用例只看回调被调用不看卡片后续状态。新增 11 条用例（含真实 `HttpServer` 契约），3 项反向验证逐条实测 | §6.28.1 |
+| 窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp） | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
 | ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `upperHistoryUnloaded` 时告知边界 | §6.15 |
 | ~~移动端宽屏（≥720dp）对话内搜索入口不可达~~ | ✅ 已修（issue #33）：宽屏 `enableSearch: true` 摆独立图标，窄屏仍走溢出菜单；两端 router 层各有用例钉住 | issue #33、§6.16 |
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |

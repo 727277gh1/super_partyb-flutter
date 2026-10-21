@@ -2094,13 +2094,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             .catchError((Object e) => debugPrint('确认提交失败: $e'));
       },
       // 归属反馈：POST /chat/feedback/:token/resolve（可视化渠道直接解决，
-      // 不经消息通道；一次性 CAS）。与桌面端 _resolveFeedback 同语义：
-      // 失败只记日志不打断阅读。
-      onResolveFeedback: (token, correct) {
-        api
-            .resolveFeedback(token, correct: correct)
-            .catchError((Object e) => debugPrint('归属反馈提交失败: $e'));
-      },
+      // 不经消息通道；一次性 CAS）。与桌面端 _resolveFeedback 同语义。
+      //
+      // ⚠️ **不吞异常**：回执没有「服务端稍后用事件收敛」的回路，失败就是失败，
+      // 必须交给页面提示（页面在失败时保留可点，不把卡片变成只读）。此前这里
+      // `.catchError(debugPrint)`，叠加请求体键名错误，就成了「点了没反应」。
+      onResolveFeedback: (token, correct) =>
+          api.resolveFeedback(token, correct: correct),
       // 习惯建议：接受/忽略/稍后。与桌面端逐字同构——端点是习惯域的
       // `/api/chat/habit-suggestions/:id/resolve`，**不走发消息通道**。
       //

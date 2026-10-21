@@ -1112,8 +1112,34 @@ class ChatApi {
   ///
   /// 用户在「这条消息归属对吗」卡片上点按钮时调用（可视化渠道直接解决，
   /// 不经消息通道）。与 IM 文本回执共用同一套消费逻辑。
-  Future<void> resolveFeedback(String token, {required bool correct}) =>
-      _post('/chat/feedback/$token/resolve', body: {'correct': correct});
+  ///
+  /// ## ⚠️ 请求体键是 `reply`（字符串），不是 `correct`（布尔）
+  ///
+  /// 服务端 `feedback_resolve.go` 的入参结构只有 `reply` / `index` / `group_id`：
+  ///
+  /// ```go
+  /// type resolveFeedbackRequest struct {
+  ///     Reply   string `json:"reply"`
+  ///     Index   int    `json:"index"`
+  ///     GroupID string `json:"group_id"`
+  /// }
+  /// ```
+  ///
+  /// 它把 `reply` 交给 `confirmtext.IsAffirmVerdict` / `IsDenyVerdict` 判定，
+  /// 再合成回执文本 `反馈#<token>#正确` 交给统一的 `ParseFeedback`。
+  ///
+  /// **发 `{'correct': bool}` 会静默失败**：`ShouldBindJSON` 忽略未知字段，
+  /// `Reply` 留空 → `composeFeedbackReply` 返回 `""` → `400 reply is required`。
+  /// 这是 2026-10 的真实缺陷（与 §6.14 的 `createTurn` 发 `input` 而非
+  /// `inputText` 同一类）：卡片点了没反应，而客户端把 400 吞成了 `debugPrint`。
+  ///
+  /// 文案用「准确 / 不准确」而不是「正确 / 错误」——两者都在服务端词表里，
+  /// 但前者正是卡片上按钮的 label（`FeedbackRequestCard.defaultOptions`），
+  /// 保持一致可减少「我点的是准确、发出去的是正确」这类疑问。
+  Future<void> resolveFeedback(String token, {required bool correct}) => _post(
+    '/chat/feedback/$token/resolve',
+    body: {'reply': correct ? '准确' : '不准确'},
+  );
 
   // ==================== 内部 HTTP 辅助 ====================
   //

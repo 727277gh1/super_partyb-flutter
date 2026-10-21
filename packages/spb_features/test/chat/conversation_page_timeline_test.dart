@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -404,6 +405,30 @@ void main() {
   });
 
   group('ConversationPage 归属反馈卡', () {
+    /// 推一条归属反馈请求事件。
+    Future<void> pushFeedback(
+      WidgetTester tester, {
+      String id = 'evt_fb',
+      String token = 'evt_fb',
+      bool includeToken = true,
+    }) => pushEvent(
+      tester,
+      EventTypes.routingFeedbackRequest,
+      sseEvent(
+        'routing_feedback_request',
+        id: id,
+        payload: {
+          'question': '这条消息我归到了《团队周报》，准确吗？',
+          'options': [
+            {'label': '准确', 'reply': '反馈#正确'},
+            {'label': '不准确', 'reply': '反馈#错误'},
+          ],
+          if (includeToken) 'token': token,
+          'evaluated_turn_id': 'turn_1',
+        },
+      ),
+    );
+
     testWidgets('routing_feedback_request 渲染为卡片，点击回调收到 token 与 bool', (
       tester,
     ) async {
@@ -412,26 +437,10 @@ void main() {
       await startController(tester);
       await pumpPage(
         tester,
-        onResolveFeedback: (token, correct) => calls.add((token, correct)),
+        onResolveFeedback: (token, correct) async =>
+            calls.add((token, correct)),
       );
-
-      await pushEvent(
-        tester,
-        EventTypes.routingFeedbackRequest,
-        sseEvent(
-          'routing_feedback_request',
-          id: 'evt_fb',
-          payload: {
-            'question': '这条消息我归到了《团队周报》，准确吗？',
-            'options': [
-              {'label': '准确', 'reply': '反馈#正确'},
-              {'label': '不准确', 'reply': '反馈#错误'},
-            ],
-            'token': 'evt_fb',
-            'evaluated_turn_id': 'turn_1',
-          },
-        ),
-      );
+      await pushFeedback(tester);
 
       expect(find.text('这次归属准确吗？'), findsOneWidget);
       expect(find.text('这条消息我归到了《团队周报》，准确吗？'), findsOneWidget);
@@ -444,29 +453,83 @@ void main() {
       expect(calls.single.$2, isTrue);
     });
 
+    testWidgets('提交成功后本地置灰（不等 routing_feedback 事件）', (tester) async {
+      // ## 这条用例钉住的真实报障
+      //
+      // 回执是一次性 CAS，而卡片置灰此前**只**看服务端的 `routing_feedback`
+      // 事件。该事件是旁路事件：SSE 断线/回放窗口缺失时永不到达，于是用户
+      // 看到按钮仍可点 → 再点 → 404 → 反复重试一张已作答的卡。
+      //
+      // 修复前本断言会失败（卡片仍显示「这次归属准确吗？」）。
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onResolveFeedback: (token, correct) async {});
+      await pushFeedback(tester);
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('已反馈'),
+        findsOneWidget,
+        reason: '成功提交后必须立即置灰，不能等服务端旁路事件',
+      );
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('feedback-option-准确')),
+      );
+      expect(button.onPressed, isNull, reason: '已作答的卡不得再可点（重试必然 404）');
+    });
+
+    testWidgets('提交失败时提示且保留可点（不把网络故障变成只读卡）', (tester) async {
+      // 反方向：若失败也置灰，一次网络抖动就让用户永久失去作答机会。
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) async =>
+            throw const NetworkError('连接超时'),
+      );
+      await pushFeedback(tester);
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('反馈提交失败'), findsOneWidget);
+      expect(find.text('这次归属准确吗？'), findsOneWidget, reason: '失败不得置灰');
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('feedback-option-准确')),
+      );
+      expect(button.onPressed, isNotNull, reason: '失败后必须可重试');
+    });
+
+    testWidgets('404 的提示是「已失效」而不是「提交失败」', (tester) async {
+      // 404 在服务端有确定含义（已过期 / 已消费 / 非本人，三者统一 404）。
+      // 文案若写成「提交失败」，用户会反复重试一个永远不会成功的请求。
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) async =>
+            throw const HttpError(404, 'HTTP 404'),
+      );
+      await pushFeedback(tester);
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('这条反馈已失效，无法再作答'), findsOneWidget);
+    });
+
     testWidgets('token 缺失时按钮禁用（提交必然失败，不退化用事件 id）', (tester) async {
       final calls = <(String, bool)>[];
       mockTimeline();
       await startController(tester);
       await pumpPage(
         tester,
-        onResolveFeedback: (token, correct) => calls.add((token, correct)),
+        onResolveFeedback: (token, correct) async =>
+            calls.add((token, correct)),
       );
-
-      await pushEvent(
-        tester,
-        EventTypes.routingFeedbackRequest,
-        sseEvent(
-          'routing_feedback_request',
-          id: 'evt_fb',
-          payload: const {
-            'question': '准确吗？',
-            'options': [
-              {'label': '准确', 'reply': '反馈#正确'},
-            ],
-          },
-        ),
-      );
+      await pushFeedback(tester, includeToken: false);
 
       final button = tester.widget<FilledButton>(
         find.byKey(const ValueKey('feedback-option-准确')),
@@ -479,22 +542,7 @@ void main() {
       mockTimeline();
       await startController(tester);
       await pumpPage(tester);
-
-      await pushEvent(
-        tester,
-        EventTypes.routingFeedbackRequest,
-        sseEvent(
-          'routing_feedback_request',
-          id: 'evt_fb',
-          payload: const {
-            'question': '准确吗？',
-            'options': [
-              {'label': '准确', 'reply': '反馈#正确'},
-            ],
-            'token': 'evt_fb',
-          },
-        ),
-      );
+      await pushFeedback(tester);
 
       final button = tester.widget<FilledButton>(
         find.byKey(const ValueKey('feedback-option-准确')),
