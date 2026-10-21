@@ -545,6 +545,10 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 注册 + 回收的规则见 [RowLocateRegistry]（issue #39：此前只 `putIfAbsent`
   /// 从不回收，跨 group 切换持续累积）。
+  ///
+  /// ⚠️ 同一行内多个 `item.id`（批量卡）只是**别名**，不共享键实例——
+  /// 共享会让「同一段文件被拆成多行」时多行撞同一个 `GlobalKey`，
+  /// 后出现的行渲染为空白（见该类的类文档）。
   final _rowKeys = RowLocateRegistry();
 
   /// 已提交 resolve 的卡行 id（本地去重，避免重复点击发出两次请求）。
@@ -1567,13 +1571,18 @@ class _ConversationPageState extends State<ConversationPage> {
           // 换成 `GlobalKey` 会让框架按「全局唯一」语义搬移 Element，
           // 流式更新时的复用行为会变。两者目的不同，故各占一层。
           //
-          // ## 批量卡为什么给每个成员都注册同一个 key
+          // ## 批量卡为什么给每个成员都登记定位入口
           //
           // 搜索命中拿到的 `itemId` 是**具体某条**的 id（可能是批里的第 3 个
-          // 文件），而行 key 是 `batch:<首成员 id>`。若只注册首成员，搜到批内
-          // 其他文件时 `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——
-          // 而那条明明就在屏幕上。同一批共用一个定位点是对的：它们本来就渲染
-          // 在同一张卡里。
+          // 文件），而行 key 是首成员 id。若只登记首成员，搜到批内其他文件时
+          // `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——而那条明明就
+          // 在屏幕上。
+          //
+          // ⚠️ 登记的是**别名**，不是把同一个 `GlobalKey` 实例分给每个成员：
+          // 那样一旦这段文件被拆成多行（缓冲区裁剪 / 翻页拼接都会），多行就会
+          // 共用一个 `GlobalKey` → Flutter 抛 `Multiple widgets used the same
+          // GlobalKey` → 后出现的那几行**渲染为空白**。详见
+          // `RowLocateRegistry` 的类文档。
           final locateKeys = locateIdsOf(row);
           final locateKey = _rowKeys.keyFor(locateKeys);
 
