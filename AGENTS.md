@@ -1588,7 +1588,51 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 行的键删掉。
 
 `RowLocateRegistry` 与 `locateIdsOf` 都是纯函数/纯逻辑，故可在无 widget 环境逐条
-断言（`row_locate_registry_test.dart` 12 条、`agent_file_batch_test.dart` 新增 5 条）。
+断言（`row_locate_registry_test.dart` 17 条、`agent_file_batch_test.dart` 新增 5 条）。
+
+#### ⚠️ 键的**所有权**必须与「成员定位入口」分开（一次真实事故）
+
+上面那句「批内 5 个文件共用同一张卡、同一个定位点」曾被实现成「把同一个
+`GlobalKey` 实例写给每个成员」。那是错的，用户报障是
+**「对话内容一滚动就会丢失，然后继续滚动又出现」**。
+
+| 表 | 内容 | 用途 |
+|---|---|---|
+| `_owned` | 行主键（`ids.first`）→ `GlobalKey` | **真正挂在 widget 上的键**，一行一个，绝不共享 |
+| `_aliases` | 成员 id → 行主键**名** | 只供 `operator []` 查（批内任一成员都要能定位到那张卡） |
+
+**为什么「共享键实例」会渲染空白**：一旦**同一段文件被拆成多行**，多行就会拿到
+同一个 `GlobalKey` → Flutter 抛 `Multiple widgets used the same GlobalKey` →
+**后出现的那几行渲染为空白**（滚走再滚回来又重建出来）。而 `recycle` 拦不住
+——它按 id 是否在时间线上过滤，那些 id 确实还在。
+
+拆分是真实会发生的，有两条路径：
+
+1. **缓冲区裁剪**（`ChatStreamController._trimBuffer`，上限 `maxBufferEvents`=2000）
+   从头部丢最旧事件，边界可能落在批量卡中间：7 个文件剩 4 个，不足
+   `FILE_BATCH_MIN_COUNT`（5）→ 退回 4 个 `SingleItemRow`；
+2. **翻页拼接**：`loadOlder` 前插的一页与缓冲区头部同 turn 同秒时会**合并**成
+   批量卡；页边界若切在批中间，头部那段先以「不足阈值」落单，补上更早那一页后
+   又并回批量卡。用户「滚上去、再滚下来」就能让它在两种形态间反复翻转。
+
+故 `keyFor` 里**只有 `ids.first` 能成为键的所有者**，其余 id 只登记别名；且
+`keyFor` 会把「上一帧还是主键、现在变成别名」的那个 id 从 `_owned` 里摘掉
+（否则 `operator []` 按「主键优先」返回悬空键）。
+
+#### 两个易写错的点（写测试时踩过）
+
+1. **纯逻辑测试抓不到它**。`row_locate_registry_test.dart` 自己构造拆分状态，能
+   钉住「各行拿到不同的键」，但钉不住「页面真的这样用它」。故另加页面级用例
+   `conversation_page_row_keys_test.dart`（真实控制器 + 真实 `_trimBuffer`）。
+2. **页面级用例必须分两阶段推事件，中间真正 `pump` 一次**。缺陷只在「页面已经
+   为批量卡建好键、随后该卡被拆散」时触发；若把 2003 条一次推完再 pump，页面
+   首次构建看到的**已经**是 4 个落单行，撞键根本不发生——用例会在**修复前的
+   代码上变绿**（实测踩过）。
+
+那条用例用 `executor_started`（诊断事件，进缓冲区但不产对话项、也不产
+`executionStatus`）当填充物：既让裁剪逻辑与真实场景一致，又只渲染 4 行，
+耗时 ~1s。换成 `user_message` 会让时间线真有 2000 行（`pumpAndSettle` 十几秒），
+换成 `queue_state` 会挂出转圈的「排队中」条（`pumpAndSettle` 永不静止）。
 
 ### 6.19 AGENTS.md 标识符引用守卫（issue #37）
 
@@ -3606,6 +3650,123 @@ factory StoredTokens.fromOidcTokens(OidcTokens tokens, {DateTime Function()? now
 
 ---
 
+### 6.38 Windows 上「门」显示畸形：主题从未指定 CJK 字体
+
+**症状**：Windows 上「门」被画成「一个方框 + 正中一根竖」（正确字形是「框 + 左上角
+一点」）。截图证据：`/home/jim/spb.png`，标题与正文各一处。
+
+#### 根因：Flutter **没有**「用系统默认字体」这回事
+
+`ThemeData(fontFamily: null)` 时，Flutter 按平台从 `Typography.material2021` 取一个
+**写死了字体名**的 TextTheme（`packages/flutter/lib/src/material/typography.dart`）：
+
+| 平台 | TextTheme | 写死的 fontFamily | 带 fallback 列表？ |
+|---|---|---|---|
+| android / fuchsia | `blackMountainView` | `Roboto` | ❌ |
+| **windows** | **`blackRedmond`** | **`Segoe UI`** | ❌ |
+| macOS | `blackRedwoodCity` | `.SF NS …` | ❌ |
+| iOS | `blackCupertino` | `CupertinoSystem…` | ❌ |
+| linux | `blackHelsinki` | `Roboto` | ✅ 6 个 |
+
+除 Linux 外都是**纯拉丁字体**——中文字形只能靠引擎的 **last-resort 回退**。
+`SpbTheme` 此前完全没设 `fontFamily`，走的就是这条路。
+
+#### 回退到哪了：`Segoe UI` 的 FontLink 链里**日文排在简体中文前面**
+
+这是根因的确切机制（Windows 字体替换配置在注册表
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink`）：
+
+```
+MEIRYO.TTC,Meiryo UI            ← 日文，排在前面
+MSGOTHIC.TTC,MS UI Gothic       ← 日文
+MSJH.TTC,Microsoft JhengHei UI  ← 繁体
+MSYH.TTC,Microsoft YaHei UI     ← 简体（被前三个抢走）
+MALGUN.TTF,Malgun Gothic        ← 韩文
+SIMSUN.TTC,SimSun               ← 宋体排到第 11 位
+```
+
+于是简体中文字形优先由**日文字体**提供。「门」在日文里是「門」的简化形——
+**框内一根居中的竖**；简体中文标准字形是「框 + 左上的点」。这与像素测量
+完全吻合（用户截图里上笔中心精确在 50%，而 WenQuanYi 等中文标准字形上笔
+偏左，实测 x=38..46 vs 横条 39..105）。
+
+**同类现象在其它软件里反复出现**（都是同一个根因：基字体不含 CJK → 回退链
+先命中日文字体）：
+
+| 软件 | 表现 |
+|---|---|
+| Notepad++ #17476 | 「门」被渲染成「内」 |
+| Notepad++ #16742 | 8.5 后某版本「门限」的「门」显示不对 |
+| Excel / Office | Arial 单元格里「门」异常（输入框正常） |
+| Sublime Text | 默认字体下「门」显示异常 |
+| Ubuntu fontconfig | `64-language-selector-prefer.conf` 日文优先级高于中文 → 「门」「复」显示成日文异形 |
+
+**排查时排除的假线索**：
+
+- 不是字符问题：全仓扫描真繁体独有字，只命中「案」（简繁同形）；没有「闩」。
+- 不是本机字体能重现的：用本机 181 个字体做 IoU 匹配，最高 0.338 且全是 Latin
+  字体误配——**没有任何本地字体画得出那个形态**（本机无日文 CJK 字体），
+  故只能是 Windows 侧回退所致。
+
+⚠️ **`'sans-serif'` 在 Flutter 里不是救命稻草**：`fontFamilyFallback` 只认
+**具体字体名**，CSS 的通用族名（`sans-serif` / `serif` / `monospace`）**不被解析**。
+链尾那一项留着只是可读性，真正兜底的是引擎「fallback 耗尽 → 用平台默认字体」
+（`TextStyle.fontFamilyFallback` 官方文档）。故测试**不**断言末位是通用族名——
+那会给出「这一项在起作用」的错觉。
+
+#### 修法：**只给 Windows** 指定字体，其余平台保持 `null`
+
+`packages/spb_design/lib/src/fonts.dart` 的 `SpbFonts.sansFor` /
+`sansFallbackFor` 只在 `TargetPlatform.windows` 返回非 null
+（`Microsoft YaHei UI` + `['Microsoft YaHei', 'Segoe UI', 'sans-serif']`）。
+
+**为什么不是「所有平台都指定」**——两个理由，第二个是实测出来的：
+
+1. 其余平台的系统级 CJK 回退本来就正确（CoreText / fontconfig / Android 按 locale
+   选 Noto CJK）。显式钉 `PingFang SC` 会让**日语用户被强制套上简体字形**。
+2. ⚠️ **给全部平台配 fallback 链会让 4 张 golden 基线全红**。原因**不是**渲染
+   退化，而是 `flutter test` 里 `defaultTargetPlatform` 恒为 **android** 且环境
+   **没有 CJK 字体**：
+   - 无 fallback 链 → 中文落到 Roboto 缺字的**细线空心 tofu**（基线原样）；
+   - 有 fallback 链 → 链耗尽落到 Ahem 的**粗实心方块** → 基线全废。
+
+   两份都是 tofu，只是画法不同。故非 Windows 配 fallback 是**零收益且制造基线
+   噪音**。`test/fonts_test.dart` 有一条专门钉住这件事（比 4 张 golden 报「像素
+   不匹配」更容易定位根因）。
+
+#### ⚠️ 不要在 `flutter test` 里「验证字形」
+
+测试环境没有 CJK 字体，**中文永远是 tofu，改成什么字体名都看不出来**。能验证的
+只有结构性断言（主题里带了正确的字体名）。真实字形**必须靠目标平台手测**
+（本机无 Windows，见 §8/§9）。
+
+`SpbTheme` 为此加了 `lightFor(platform)` / `darkFor(platform)`
+（`@visibleForTesting`），生产仍走 `light()` / `dark()`。
+
+#### 顺带统一 4 处 `fontFamily: 'monospace'` 的 CJK 兜底
+
+`'monospace'` 不是真实字体名，是「问系统要等宽字体」——四个平台拿到的都是纯拉丁
+（Windows = `Consolas`）。而**工具调用的入参/结果经常含中文**。三处原本**没有**
+fallback（`tool_call_tile.dart` ×2、`group_gate_panel.dart` ×1），现统一改用
+`SpbFonts.monoFallback`（`agent_file_preview.dart` 原有那条也一并收敛）。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `sansFor(windows)` 改回 `null` | `fonts_test.dart` 1 条失败 |
+| 给全部平台加 fallback 链 | `spb_features` **4 张 golden 失败** + `fonts_test` 1 条失败 |
+| 主字体名改成 `'Noto Sans CJK SC'`（仅 android） | golden 仍失败 2 张（证明**主字体名无关**，问题在 fallback 链） |
+| 只删 `fontFamilyFallback`、保留主字体名 | golden 全绿（定位到根因） |
+
+#### 未做
+
+- **打包 CJK 字体子集**：能彻底摆脱对目标机器字体的依赖，但代价 5–10 MB + 全部
+  golden 基线重出，且要处理字体许可。当前修法对 Windows 已够（雅黑是系统必备）。
+- **接 `flutter_localizations` + `supportedLocales`**：那会改 `scriptCategory`
+  （`englishLike` → `dense`）、基线从 `alphabetic` 变 `ideographic`，golden 需一并
+  重出。与 §6.12（i18n 暂不做）一致，未纳入本轮。
+
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
@@ -3925,6 +4086,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
+| ~~Windows 上「门」显示成「方框 + 正中一根竖」~~ | ✅ 已修（§6.38）：根因**不是字符写错**，而是 `SpbTheme` 从未设 `fontFamily`。Flutter **没有**「用系统默认字体」——`ThemeData(fontFamily: null)` 时按平台取 `Typography.material2021` 里**写死字体名**的 TextTheme（Windows = `blackRedmond` = `Segoe UI`，纯拉丁、**零 fallback 列表**，而 Linux 的 `blackHelsinki` 有 6 个）。中文字形只能靠引擎的 last-resort 回退，取决于目标机器装了什么（日文 Yu Gothic / 繁体 JhengHei / 畸形字体）。修法：`SpbFonts.sansFor` **只给 Windows** 返回 `Microsoft YaHei UI` + `['Microsoft YaHei','Segoe UI','sans-serif']`，其余平台**有意留 null**（它们的 CoreText/fontconfig/Android 按 locale 匹配已正确，钉死 `PingFang SC` 会让日语用户被迫用简体字形）。⚠️ 踩过的坑：**给全部平台配 fallback 链会让 4 张 golden 全红**——不是渲染退化，而是 `flutter test` 里平台恒为 android 且**没有 CJK 字体**，中文从「Roboto 缺字的细线空心 tofu」变成「链耗尽落到 Ahem 的粗实心方块」，两份都是 tofu 只是画法不同。故非 Windows 配 fallback 是零收益且制造基线噪音，`fonts_test.dart` 有专门一条钉住。顺带统一 4 处 `fontFamily: 'monospace'` 的 CJK 兜底（`SpbFonts.monoFallback`，其中 3 处原本**没有** fallback，而工具入参经常含中文）。⚠️ **无法在 `flutter test` 里验证字形**（永远是 tofu），只能做结构性断言；真实字形需 Windows 手测（本机无，见 §8/§9） | §6.38 |
 | ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
 | ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：两个独立的 Windows 缺陷。① **URL 与路径必须用不同命令**——原先一律 `explorer`，而 `explorer <带 query 的 URL>` 打开的是**文件浏览器**（microsoft/WSL#3832），而 OIDC 授权 URL 必然带 8 个 query 参数，故每次 SSO 登录都会「成功」地打开一个空窗口、客户端继续等 loopback 回调。现 URL → `rundll32 url.dll,FileProtocolHandler`，路径 → `explorer`；`looksLikeUrl` 只认 `scheme://`（**不能**用 `Uri.parse().scheme`——它把 `C:\Users\me` 解成 `scheme=c`，会让每个 Windows 路径都走 URL 分支）。② **`explorer` 成功也返回 1**（microsoft/WSL#6565），原先按「非 0 即失败」判定 → 每次成功打开都被判失败。现 Windows 成功集合为 `{0,1}`，其余平台仍 `{0}`；`rundll32` 分支的退出码恒为 0，故用 `exitCodeIsMeaningful = false` **显式跳过**判定（代价：URL 打不开时靠上层 5 分钟超时兜底，不再有即时错误）。共 8 条新用例 + 5 项反向验证逐条实测。⚠️ 修复前测试有**两个假绿**：假 runner 一律返回 `exitCode = 0`；`windows 用 explorer` 那条用例传的是**路径**，于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 | §6.35 |
 | ~~登录成功后**立刻**提示「会话已失效」并被踢回登录页（Windows 用户报障）~~ | ✅ 已修（§6.37）：客户端把 IdP 的 `access_token` 当 Bearer 发给网关，而那是 **fosite 不透明串**（`ory_at_…`，无点号）。网关的 `jwt_authenticate.go`（JWKS+RS256）与 `oidc_auth.go`（go-oidc compact JWS）**都要求三段式**，分别报「token contains an invalid number of segments」/「compact JWS format must have three parts」→ 登录刚完成就 401 → `onSessionExpired` 踢人。修法：`OidcTokens.bearerToken`（`idToken ?? accessToken`）+ `StoredTokens.fromOidcTokens` 单点转换，四端（两端登录 + 两端刷新）全部改用它。**与 `tbcc6.atjog.com` 无关**（登录走编译期 issuer，端点升级只改 API/UFS host）。⚠️ 修复前测试全绿：既有用例只断言 `OidcTokens` 原始字段或动作调用次数，而移动端 `onCode` **零覆盖**（内联在 provider 闭包里，只能从 `main.dart` 触达）——故另加了两个注入点（`loopbackSignInProvider` / `oidcCallbackHandlerProvider`）让落盘逻辑可测 | §6.37 |
@@ -3945,6 +4107,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~接线守卫只覆盖 1 个组件 + 守卫自身假绿~~ | ✅ 已修（issue #42）：覆盖面扩到 `ConversationPage` / `GroupListPage` / `SettingsPage` / `SyncPage`（差异逐条写进豁免并注明理由）；**修掉守卫自身的假绿**——裸子串匹配命中了 `_SyncPage(` 私有包装（零参数被当成「两端一致」），改用词边界 + 返回全部调用点取并集；新增 `tools/check_wiring_parity_selftest.sh`（7 组合成输入，`awk` 抽真身而非副本）钉住解析器行为 | issue #42、§6.17 |
 | ~~`database.g.dart` 无生成物漂移守卫~~ | ✅ 已修（issue #43）：新增 `tools/check_codegen.sh`（CI quality job）+ `tools/check_codegen_selftest.sh`（8 组用例）。守卫涉及**四个反直觉的坑**：① 根目录跑 build_runner 是静默空转（`wrote 0 outputs`）→ 必须按包执行；② 生成物不是 `dart format` 形态 → 比对前必须 format；③ build_runner 增量资产图使守卫**非幂等**（第一轮报漂移、第二轮报一致）→ 比对前先删输出；④ `diff \| head` + `pipefail` 会 SIGPIPE 中止在还原之前 → 落临时文件再 head。顺带清理 `melos.yaml` 的空转 + 已失效 flag、`coverage.sh` 的漂移分母、AGENTS.md §6.2 的过时说法 | issue #43、§6.21 |
 | ~~对话页 `_rowKeys` 只注册不回收（跨 group 累积）~~ | ✅ 已修（issue #39）：抽 `RowLocateRegistry`（注册 + 按「当前行 id 集合」回收，**不** `clear()` 重建）+ 领域层唯一口径 `locateIdsOf` / `locateIdsOfAll`；17 条用例，3 项反向验证逐条实测 | issue #39、§6.18 |
+| ~~**对话内容一滚动就丢失，再滚又出现**（用户报障）~~ | ✅ 已修：`RowLocateRegistry.keyFor` 把批量卡的**每个成员**都写成同一个 `GlobalKey` 实例。一旦同一段文件被拆成多行（缓冲区裁剪切进批中间 / 翻页拼接使批先落单后合并），多行就撞同一个 `GlobalKey` → Flutter 抛 `Multiple widgets used the same GlobalKey` → **后出现的那几行渲染为空白**（release 下那条校验不跑，用户只看到空白）。修法：`_owned`（行主键 → 键，一行一个）与 `_aliases`（成员 id → 行主键名，仅查询用）分开，只有 `ids.first` 能成为键的所有者。⚠️ **纯逻辑测试抓不到它**（它自己构造拆分状态），另加页面级用例 `conversation_page_row_keys_test.dart`：真实控制器 + 真实 `_trimBuffer`，且**必须分两阶段推事件、中间真正 pump 一次**——否则页面首次构建看到的已是 4 个落单行，用例会在修复前的代码上变绿 | §6.18 |
 | ~~多个包声明了「全仓零 import」的依赖~~ | ✅ 已修（issue #36）：删 20 个零引用依赖（spb_core 的 meta/collection；spb_models 的 freezed/json_serializable 全家桶；spb_api 的 http_parser/meta；spb_domain 的 collection；spb_data 的 path_provider/path/shared_preferences；spb_features 的 flutter_riverpod/go_router/spb_data），桌面插件从 spb_platform **下移到 apps/spb_desktop**；新增 `tools/check_unused_deps.sh` 守防复发 | issue #36、§6.2/§6.4 |
 | `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：它是原生插件（把 `libsqlite3.so` 打进 Android/iOS 包），drift 移动端运行时需要；已写进 `check_unused_deps.sh` 的显式豁免。实测 apk 含 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so` | issue #36、§6.4 |
 | 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |

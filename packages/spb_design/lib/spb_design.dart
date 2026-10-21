@@ -4,6 +4,7 @@
 /// 若主题放在 `spb_ui` 里会造成「features 依赖 ui 只为拿颜色」的循环味道。
 library;
 
+export 'src/fonts.dart';
 export 'src/theme.dart';
 export 'src/theme_mode.dart';
 export 'src/tokens.dart';

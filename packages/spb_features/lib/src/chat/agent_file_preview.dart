@@ -406,11 +406,8 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
                     preview.content,
                     style: theme.textTheme.bodySmall?.copyWith(
                       fontFamily: 'monospace',
-                      fontFamilyFallback: const [
-                        'Menlo',
-                        'Consolas',
-                        'monospace',
-                      ],
+                      // 与另两处 monospace 调用点共用同一条链（含 CJK 兜底）。
+                      fontFamilyFallback: SpbFonts.monoFallback,
                     ),
                   ),
           ),

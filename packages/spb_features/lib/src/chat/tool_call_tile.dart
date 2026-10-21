@@ -53,6 +53,9 @@ class ToolCallTile extends StatelessWidget {
 
     final mono = textTheme.bodySmall?.copyWith(
       fontFamily: 'monospace',
+      // 等宽字体四个平台都不含 CJK（Windows 是 Consolas）。不接 fallback 时
+      // 工具入参里的中文只能靠引擎隐式回退，字形不可控。见 SpbFonts 类文档。
+      fontFamilyFallback: SpbFonts.monoFallback,
       color: scheme.onSurfaceVariant,
     );
 
@@ -76,7 +79,10 @@ class ToolCallTile extends StatelessWidget {
             : Icon(icon, size: SpbSpacing.lg, color: color),
         title: Text(
           name,
-          style: textTheme.labelLarge?.copyWith(fontFamily: 'monospace'),
+          style: textTheme.labelLarge?.copyWith(
+            fontFamily: 'monospace',
+            fontFamilyFallback: SpbFonts.monoFallback,
+          ),
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: Text(
