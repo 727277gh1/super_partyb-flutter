@@ -278,7 +278,21 @@ Future<void> pumpPage(
   Future<bool> Function(String id)? onCancelOutbox,
   Future<bool> Function(String id)? onRetryOutbox,
   Future<void> Function(String id)? onRemoveOutbox,
+
+  /// 注入归属反馈有效期（`ChatStreamController.attributionFeedbackTTL`）。
+  ///
+  /// 生产路径上它由控制器从 `GET /api/chat/turn-runtime` 拉取后持有；测试里
+  /// 直接覆盖字段，避免为一条 TTL 断言造一个 HTTP mock（且 `turnRuntime()`
+  /// 的响应还得过 DioAdapter）。
+  ///
+  /// null = 不覆盖（保持控制器已有值，通常是 null = 不做失效判定）。
+  Duration? feedbackTTL,
 }) async {
+  if (feedbackTTL != null) {
+    // `_attributionFeedbackTTL` 是私有的，但测试夹具在另一个库里——用
+    // @visibleForTesting 的 setter 暴露。见 ChatStreamController.
+    controller.debugSetAttributionFeedbackTTL(feedbackTTL);
+  }
   await tester.pumpWidget(
     MaterialApp(
       home: ConversationPage(

@@ -27,6 +27,7 @@ class FeedbackRequestCard extends StatelessWidget {
     required this.onResolve,
     this.busy = false,
     this.resolved = false,
+    this.expired = false,
   });
 
   /// 问句（来自 payload 的 `question`，如「这条消息我归到了《X》，准确吗？」）。
@@ -46,6 +47,19 @@ class FeedbackRequestCard extends StatelessWidget {
 
   /// 是否已作答（`routing_feedback` 已到达，或本地提交成功）。true 时按钮禁用。
   final bool resolved;
+
+  /// 是否已超过服务端下发的有效期。
+  ///
+  /// 与 [resolved] **不是同一件事**，必须分开渲染：
+  ///
+  ///   - `resolved=true`  → 用户答过了，标题「已反馈」；
+  ///   - `expired=true`   → 用户没答，但服务端已不再接受（回执会 404），
+  ///                        标题「已失效」。
+  ///
+  /// 若把两者合并成 [resolved]，用户会看到「已反馈」——那是在说他答过，
+  /// 而他实际上没答。这类「把未发生的事显示成已发生」比不显示更糟
+  /// （同 AGENTS.md 对 stale 的判据：没有终态事件就不写「已中断」）。
+  final bool expired;
 
   /// 服务端未给 options 时的兜底选项。
   ///
@@ -68,7 +82,15 @@ class FeedbackRequestCard extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
 
     final effectiveOptions = options.isEmpty ? defaultOptions : options;
-    final interactive = !resolved && !busy && onResolve != null;
+    final interactive = !resolved && !expired && !busy && onResolve != null;
+
+    // 标题与图标按三态分派：已反馈 / 已失效 / 待作答。
+    // 「已失效」用单独的图标与文案，不与「已反馈」共用——两者语义相反。
+    final (title, icon) = resolved
+        ? ('已反馈', Icons.task_alt)
+        : expired
+        ? ('已失效', Icons.timer_off_outlined)
+        : ('这次归属准确吗？', Icons.rule);
 
     return Card(
       color: scheme.secondaryContainer,
@@ -81,14 +103,14 @@ class FeedbackRequestCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  resolved ? Icons.task_alt : Icons.rule,
+                  icon,
                   size: SpbSpacing.lg,
                   color: scheme.onSecondaryContainer,
                 ),
                 const SizedBox(width: SpbSpacing.sm),
                 Expanded(
                   child: Text(
-                    resolved ? '已反馈' : '这次归属准确吗？',
+                    title,
                     style: textTheme.labelLarge?.copyWith(
                       color: scheme.onSecondaryContainer,
                     ),

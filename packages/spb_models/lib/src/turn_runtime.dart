@@ -29,6 +29,7 @@ class TurnRuntime {
     required this.requestTimeoutSeconds,
     required this.inactivityTimeoutSeconds,
     required this.clientTurnTimeoutSeconds,
+    this.attributionFeedbackTTLSeconds = 0,
   });
 
   /// 单 turn 墙钟总预算（秒）。
@@ -40,6 +41,41 @@ class TurnRuntime {
   /// 客户端「距最后一条事件」超时兜底应使用的秒数（服务端已按 inactivity
   /// 优先解析好）。
   final int clientTurnTimeoutSeconds;
+
+  /// 归属反馈卡片（「这次归属准确吗？」）的有效期秒数。
+  ///
+  /// ## 为什么卡片需要它
+  ///
+  /// 反馈请求事件（`routing_feedback_request`）的 payload **不带** `expires_at`
+  /// ——它只描述语义（问句 / 选项 / token），不含生命周期。而回执走服务端的
+  /// 一次性 CAS，过期后统一返 404（避免存在性探针）。
+  ///
+  /// 于是卡片有两个状态客户端无法区分：「还没答」与「已经失效」——两者都只是
+  /// 「本地没收到 `routing_feedback`」。用户点一张早就过期的卡会得到 404，
+  /// 表现就是「点了没反应」。
+  ///
+  /// 拿到 TTL 后，卡片用「事件 `createdAt` + TTL」自行判定失效并置灰，把 404
+  /// 从主路径降为兼容路径（旧事件 / 客户端与服务端时钟偏差）。
+  ///
+  /// `0` 表示服务端未下发该字段（旧版后端）——此时**不做**失效判定，保持
+  /// 旧行为（永远可点，靠 404 兜底），不要把它当成「立即过期」。
+  final int attributionFeedbackTTLSeconds;
+
+  /// 归属反馈卡片的有效期；服务端未下发时返回 null（不做失效判定）。
+  ///
+  /// 上限 [maxFeedbackTTL]：配置写错（多敲几个 0）时不能变成「永不过期」
+  /// ——那等于没判定，且卡片会永久留在时间线上。
+  Duration? get attributionFeedbackTTL {
+    if (attributionFeedbackTTLSeconds <= 0) return null;
+    final d = Duration(seconds: attributionFeedbackTTLSeconds);
+    return d > maxFeedbackTTL ? maxFeedbackTTL : d;
+  }
+
+  /// 归属反馈有效期的上限（7 天）。
+  ///
+  /// 与服务端 runtimeCatalog 的 `Max` 一致：再长则「上周那次归属」仍会被
+  /// 一句无关短回复命中（隐式锚点误标），且时间线上会积一堆没人会答的卡。
+  static const Duration maxFeedbackTTL = Duration(days: 7);
 
   /// 拉取失败或服务端下发不可用值时的兜底阈值。
   ///
@@ -72,6 +108,9 @@ class TurnRuntime {
     requestTimeoutSeconds: _int(json['request_timeout_seconds']),
     inactivityTimeoutSeconds: _int(json['inactivity_timeout_seconds']),
     clientTurnTimeoutSeconds: _int(json['client_turn_timeout_seconds']),
+    attributionFeedbackTTLSeconds: _int(
+      json['attribution_feedback_ttl_seconds'],
+    ),
   );
 
   /// 取整数；非 num / 字符串数字均可解析，其余归 0。
@@ -90,5 +129,6 @@ class TurnRuntime {
   String toString() =>
       'TurnRuntime(request=${requestTimeoutSeconds}s, '
       'inactivity=${inactivityTimeoutSeconds}s, '
-      'client=${clientTurnTimeoutSeconds}s)';
+      'client=${clientTurnTimeoutSeconds}s, '
+      'feedbackTTL=${attributionFeedbackTTLSeconds}s)';
 }

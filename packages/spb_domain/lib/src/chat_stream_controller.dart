@@ -449,6 +449,30 @@ class ChatStreamController {
   @visibleForTesting
   Duration? get turnTimeout => _turnTimeout;
 
+  /// 归属反馈卡片的有效期；null = 服务端未下发（不做失效判定）。
+  ///
+  /// ## 为什么由控制器持有
+  ///
+  /// 它和 [turnTimeout] 来自**同一个** `GET /api/chat/turn-runtime` 响应，而
+  /// 那次往返已经在 [_resolveTurnTimeout] 里发生。让页面自己再拉一次会多一次
+  /// 请求，且两次响应可能不一致（管理员刚改了 TTL）。
+  ///
+  /// 页面用它给 [FeedbackRequestItem.isExpired] 传 `ttl`，从而把「已失效」的卡
+  /// 直接置灰——而不是等用户点下去才得到 404。
+  Duration? get attributionFeedbackTTL => _attributionFeedbackTTL;
+
+  /// 见 [attributionFeedbackTTL]。
+  ///
+  /// 与 [_turnTimeout] 同寿命：切 group / 重启时**不**清空——它是服务端级配置，
+  /// 与具体对话无关，清了只会让卡片暂时变回可点。
+  Duration? _attributionFeedbackTTL;
+
+  /// 测试专用：直接注入归属反馈有效期（跳过 HTTP 拉取）。
+  @visibleForTesting
+  void debugSetAttributionFeedbackTTL(Duration? ttl) {
+    _attributionFeedbackTTL = ttl;
+  }
+
   /// 阈值解析完成（仅测试用）。
   @visibleForTesting
   Future<void> get turnTimeoutResolved =>
@@ -491,6 +515,9 @@ class ChatStreamController {
       // stale 集合又填回来。
       if (_disposed || !identical(_turnTimeoutResolved, resolved)) return;
       final next = rt.effectiveClientTurnTimeout;
+      // 归属反馈有效期与阈值同批下发，顺手记下（见 [attributionFeedbackTTL]）。
+      // 与 next 不同，它**不参与** stale 判定的撤销逻辑，故不触发 _syncStaleWatch。
+      _attributionFeedbackTTL = rt.attributionFeedbackTTL;
       // 先前若已用较小值判过 stale，而真实阈值更大，说明判早了——撤销。
       final grew = _turnTimeout != null && next > _turnTimeout!;
       _turnTimeout = next;

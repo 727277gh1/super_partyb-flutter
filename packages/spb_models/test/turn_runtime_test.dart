@@ -17,10 +17,12 @@ void main() {
     Object? request = 600,
     Object? inactivity = 0,
     Object? client = 600,
+    Object? feedbackTTL,
   }) => {
     'request_timeout_seconds': request,
     'inactivity_timeout_seconds': inactivity,
     'client_turn_timeout_seconds': client,
+    if (feedbackTTL != null) 'attribution_feedback_ttl_seconds': feedbackTTL,
   };
 
   group('TurnRuntime.fromJson', () {
@@ -107,6 +109,54 @@ void main() {
 
       expect(rt.effectiveClientTurnTimeout, TurnRuntime.fallback);
       expect(TurnRuntime.fallback, const Duration(minutes: 5));
+    });
+  });
+
+  group('attributionFeedbackTTL（归属反馈有效期）', () {
+    test('解析服务端下发值', () {
+      final rt = TurnRuntime.fromJson(shape(feedbackTTL: 86400));
+
+      expect(rt.attributionFeedbackTTLSeconds, 86400);
+      expect(rt.attributionFeedbackTTL, const Duration(hours: 24));
+    });
+
+    test('未下发（旧版后端）时为 null —— 不做失效判定', () {
+      // 方向很重要：若把「未下发」当成 0 秒，所有卡片会一次性变灰，
+      // 比不判定更糟（同 clientTurnTimeout 对 0 的取向）。
+      final rt = TurnRuntime.fromJson(shape());
+
+      expect(rt.attributionFeedbackTTLSeconds, 0);
+      expect(rt.attributionFeedbackTTL, isNull);
+    });
+
+    test('0 / 负数同样视为未下发', () {
+      expect(
+        TurnRuntime.fromJson(shape(feedbackTTL: 0)).attributionFeedbackTTL,
+        isNull,
+      );
+      expect(
+        TurnRuntime.fromJson(shape(feedbackTTL: -5)).attributionFeedbackTTL,
+        isNull,
+      );
+    });
+
+    test('离谱大值截到 7 天（配置写错时不能变成永不过期）', () {
+      final rt = TurnRuntime.fromJson(shape(feedbackTTL: 999999999));
+
+      expect(rt.attributionFeedbackTTL, TurnRuntime.maxFeedbackTTL);
+      expect(TurnRuntime.maxFeedbackTTL, const Duration(days: 7));
+    });
+
+    test('恰好 7 天不截断', () {
+      final rt = TurnRuntime.fromJson(shape(feedbackTTL: 7 * 24 * 60 * 60));
+
+      expect(rt.attributionFeedbackTTL, const Duration(days: 7));
+    });
+
+    test('字符串数字也可解析（与其它字段同一容错取向）', () {
+      final rt = TurnRuntime.fromJson(shape(feedbackTTL: '3600'));
+
+      expect(rt.attributionFeedbackTTL, const Duration(hours: 1));
     });
   });
 }

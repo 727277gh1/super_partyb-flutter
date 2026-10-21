@@ -583,6 +583,13 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 「没点过」。见 [_handleResolveFeedback] 的说明。
   final _submittedFeedback = <String>{};
 
+  /// 当前生效的归属反馈有效期；null = 服务端未下发（不做失效判定）。
+  ///
+  /// 由控制器在拉取 turn 运行时参数时一并记下（见
+  /// `ChatStreamController.attributionFeedbackTTL`）。用它把已过期的卡片直接
+  /// 置灰，而不是等用户点下去才得到 404。
+  Duration? get _feedbackTTL => widget.controller.attributionFeedbackTTL;
+
   /// 已提交过操作的**建议 id**（防重复点击，与上面两个同理）。
   ///
   /// 用 suggestionId 而非事件 id：resolved 事件到达后卡片会换成结果行，
@@ -1747,12 +1754,27 @@ class _ConversationPageState extends State<ConversationPage> {
       // 只有服务端广播能置灰，而它可能因 SSE 断线/回放窗口缺失而永不到达，
       // 届时用户会看到「点了没反应」并反复重试（第二次必然 404）。
       resolved: item.resolved || _submittedFeedback.contains(item.token),
+      // 已失效是**另一个**状态，不能并进 resolved：
+      //
+      //   请求事件的 payload 不带 expires_at，而回执过期后服务端统一返 404。
+      //   没有它时「还没答」与「已经失效」在客户端看来完全一样——用户点一张
+      //   早就过期的卡得到 404，表现就是「点了没反应」。
+      //
+      // 传 expired 而不是把它折进 resolved：后者会把标题写成「已反馈」，
+      // 而用户其实没答过（把未发生的事显示成已发生）。
+      //
+      // `_feedbackTTL` 为 null（旧版后端未下发）时 isExpired 恒 false。
+      expired: item.isExpired(ttl: _feedbackTTL),
       busy: _resolvingFeedback.contains(item.token),
-      // 三个条件都要满足才给可点按钮：
+      // 四个条件都要满足才给可点按钮：
       //   - app 层注入了回执通道（未注入时点了没反应，不如直接禁用）；
       //   - token 非空（服务端按 token 直查请求，一次性 CAS，缺它必然失败）；
-      //   - 尚未作答。
-      onResolve: (widget.onResolveFeedback != null && item.canResolve)
+      //   - 尚未作答；
+      //   - **未超过服务端下发的有效期**（否则点下去必然 404）。
+      onResolve:
+          (widget.onResolveFeedback != null &&
+              item.canResolve &&
+              !item.isExpired(ttl: _feedbackTTL))
           ? (correct) => _handleResolveFeedback(item.token, correct)
           : null,
     ),

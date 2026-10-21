@@ -2777,6 +2777,136 @@ type resolveFeedbackRequest struct {
 注意三者是**不同的量**，不该合并：`chat_events` 保留（永久，eventretention
 白名单明确保 `routing_feedback_request`）/ 回执窗口（24h）/ 隐式锚点窗口（2h）。
 
+#### 6.28.2 TTL 的实质优化：不改数值，改它的三个实现缺陷（2026-10）
+
+上一节论证了「24h 这个数值不该动」。用户随后要求「优化 TTL」——正确的解读是
+**优化 TTL 的实现**，而不是调那个数字。实测（bcc，36 行 `chat_confirmations`）
+确认了三个真实缺陷，全部与数值无关：
+
+| # | 缺陷 | 后果 |
+|---|---|---|
+| 1 | `HasPendingChatConfirmation` **不按 kind 过滤** | 一条 pending 的归属反馈会让该 group 在**24 小时**内建不出任何确认卡，且完全静默 |
+| 2 | TTL 是**编译期常量** | 调一个数字要重新构建 + 部署整个 `go-api`；`domain.go` 注释自己早就预留了「如需运维按部署调谐，再升级到 runtimeconfig」 |
+| 3 | 客户端**无从知道卡片已失效** | 请求事件 payload 不带 `expires_at`，而回执过期后服务端统一 404 → 用户点一张早已过期的卡，「点了没反应」 |
+
+##### 缺陷 1：确认卡被反馈静默吞掉
+
+`HasPendingChatConfirmation`（`internal/repo/sqlite/schedules.go`）是
+`EnsureConfirmationCard` 的**去重闸**：有 pending 就不建新卡。而归属反馈与确认卡
+**共用 `chat_confirmations` 表**，只是 kind 不同。
+
+历史上两者 TTL 都是 10 分钟，不过滤 kind 也无大碍。24h 之后：
+
+```
+Turn A 完成 → 发归属反馈 → 一行 pending 挂 24h
+Turn B 需要用户确认 → 去重闸看到 pending → 跳过
+                    → 不发 confirmation_required → 用户永远看不到卡
+```
+
+两个 kind 的 pending 语义**本来就不同**：确认卡 pending = 「有一个 turn 卡在那里
+等人拍板」（阻塞、必须处理）；反馈 pending = 「有个可选问卷还没填」（不答无害）。
+拿后者去堵前者是**语义错位**，不只是过滤漏项。
+
+修法：SQL 加 `AND kind <> ?`（参数 `domain.KindAttributionFeedback`）。
+
+⚠️ 当前生产 `ARBITER_MODE` 未设置（默认 shadow → `commitConfirm` 不建卡），故
+这个缺陷是**潜伏态**——一旦切 `enforce` 立刻生效。而它**没有任何日志**：
+`skip, group already has pending` 看起来就像一次正常去重。
+
+##### 缺陷 2：TTL 改为可热调（runtimeconfig）
+
+只让**归属反馈**可覆盖，确认卡保持编译期常量——后者的寿命不是产品选择而是结构
+约束（它挂在 pending turn 上，turn 的墙钟预算就是上限；调大只会让「卡还在但 turn
+已经死了」变得可能）。
+
+| 层 | 改动 |
+|---|---|
+| `runtimeconfig.Snapshot` | 新增 `AttributionFeedbackTTL`（`runtime.attribution_feedback_ttl_seconds`） |
+| `runtimeconfig.apply` | `>= 0` 才写入——**0 是合法值**（「不覆盖，用 domain 默认」） |
+| `domain.InteractiveRequestTTLForKindWithOverride` | 新函数；`override <= 0` 回落到 `InteractiveRequestTTLForKind` |
+| `chatgate.IssueInteractiveRequest` | 新增 `feedbackTTLOverride time.Duration` 参数 |
+| `chatpipeline.Pipeline.attributionFeedbackTTL()` | 从 `runtimeCfg.Current()` 读 |
+| `runtimeCatalog` + `envValueForKey` | 登记（**漏任一处即静默失效**，见 §6.26 的三处登记规则） |
+
+⚠️ **`envValueForKey` 必须返回 domain 默认的 24h，不能走 default 分支的 0**：
+页面把 0 展示给管理员会被读成「功能关闭」。这与 `runtime.gate_timeout_seconds`
+曾经踩过的坑同型——**守卫精确抓到了这一处**（`TestRuntimeCatalogEnvValueResolvable`
+在只加了 catalog、没加 `envValueForKey` 时立刻 FAIL）。
+
+⚠️ **`0` 的语义是「不覆盖」而不是「立即过期」**：`Snapshot` 的零值就是 0，故
+「没配这个参数」时走的就是这条路径。方向写反会让所有反馈请求在签发的同一秒失效，
+现场表现是「卡片点一下就说过期」，**比不配置更糟**。
+
+##### 缺陷 3：把有效期下发给客户端
+
+`GET /api/chat/turn-runtime` 新增 `attribution_feedback_ttl_seconds`。客户端用
+「事件 `createdAt` + TTL」自行判定失效并**置灰为「已失效」**，把 404 从主路径
+降为兼容路径（旧事件 / 时钟偏差）。
+
+| 层 | 改动 |
+|---|---|
+| `server/chat_runtime.go` | 响应新增字段；下发**生效值**（含管理员覆盖），不是编译期常量 |
+| `spb_models.TurnRuntime` | `attributionFeedbackTTLSeconds` + `attributionFeedbackTTL`（上限 7 天，`null` = 未下发） |
+| `spb_domain.FeedbackRequestItem.isExpired({ttl, now})` | 纯判据，`now` 可注入便于固定时钟 |
+| `spb_domain.ChatStreamController` | 与 `_turnTimeout` 同批记下（同一次 HTTP 往返） |
+| `spb_features.FeedbackRequestCard` | 新增 `expired` 参数 |
+| `spb_features.ConversationPage` | `expired: item.isExpired(ttl: _feedbackTTL)` |
+
+⚠️ **`expired` 不能折进 `resolved`**。若合并，过期卡片的标题会写成「已反馈」
+——用户**没答过**，那是在说一件没发生的事。与 §5.4「没有终态事件就不写已中断」
+同一取向。故卡片是三态：`已反馈` / `已失效` / `这次归属准确吗？`（图标也分开：
+`task_alt` / `timer_off_outlined` / `rule`）。
+
+⚠️ **`ttl == null` 时 `isExpired` 恒 false**（旧版后端）：把「未下发」当成
+「立即过期」会让所有卡片一次性变灰，比不判定更糟。同 `TurnRuntime.clientTurnTimeout`
+对 0 的处理取向。
+
+⚠️ **`canResolve` 有意不包含有效期判定**：它拿不到 TTL。若把 TTL 折进去，就得给
+getter 加参数、改所有调用点——那是一次接口变更，不是「顺手修个 bug」。故判据分成
+两个：`canResolve`（token + resolved）与 `isExpired(ttl:)`，调用方两者都看。
+
+##### 数据依据（bcc 实测，2026-10-21）
+
+| 观测 | 值 | 说明 |
+|---|---|---|
+| `chat_confirmations` 总行数 | 36 | 全部是 `attribution_feedback`（无确认卡，因 Arbiter 是 shadow） |
+| 按 TTL 分组 | `0.2h`×30 expired / `24.0h`×3 expired + 1 pending + **2 resolved** | 24h 生效后回执率从 **0/30** 变成 **2/6** |
+| 两条 resolved 的作答耗时 | **1.8 分钟**、**13.6 分钟** | 后者超过原 10min TTL，直接佐证 24h 的必要性 |
+| 单 group 一天内请求数 | 23（`fd648ced`） | 全 expired（10min 时代的产物） |
+| 表占用 | 28 KB | 清理**不是**当前瓶颈，故本轮**未**加保留期 janitor |
+
+⚠️ 第 3 行是本轮**没有**调数值的依据：数据证明 24h 是对的。故「优化 TTL」落到
+实现上——修复 3 个会让它**静默失效**的缺陷，而不是再猜一个数字。
+
+##### 新增用例（Go 7 条 + Flutter 12 条）
+
+| 文件 | 条数 | 钉住 |
+|---|---|---|
+| `internal/repo/sqlite/has_pending_confirmation_test.go` | 3 | 反馈 pending **不**堵确认卡；真确认卡仍拦；已过期不算待处理 |
+| `internal/chatgate/interactive_request_ttl_test.go` | +2 | 覆盖值只作用于归属反馈（确认卡仍 10min）；**0 = 回落默认**（不是立即过期） |
+| `internal/server/chat_runtime_test.go` | +1 | 下发 domain 默认 24h（**不是 0**）；覆盖后下发覆盖值 |
+| `packages/spb_models/test/turn_runtime_test.dart` | +6 | 解析 / 未下发为 null / 0 与负数 / 7 天截断 / 恰好 7 天 / 字符串数字 |
+| `packages/spb_domain/test/feedback_request_item_test.dart` | 10 | `isExpired` 六态（超/未超/恰好/ttl=null/已 resolved/时钟偏差）+ `canResolve` 四态 |
+| `packages/spb_features/test/chat/conversation_page_timeline_test.dart` | +2 | 过期置灰为「已失效」且**不**显示「已反馈」；TTL 未下发时保持可点 |
+
+##### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `HasPendingChatConfirmation` 去掉 `AND kind <> ?` | 1 条失败（`归属反馈的 pending 行不应让确认卡去重闸返回 true`） |
+| `InteractiveRequestTTLForKindWithOverride` 忽略 override | 1 条失败（实际 86400s，期望 5400s） |
+| override 误用到所有 kind | 1 条失败（确认卡 5400s，期望 600s） |
+| `override > 0` 改成 `>= 0` | 1 条失败（0 时实际 600s，期望 86400s） |
+| 页面 `expired: item.isExpired(...)` → `false` | 1 条失败（找不到「已失效」） |
+| `isExpired` 里 `ttl == null` 改成 `return true` | **5 条失败**（全部卡片变灰） |
+
+⚠️ 最后一项的反向验证**踩了一次自己的坑**：用 `git checkout` 还原时把
+`conversation_item.dart` 的**新增代码整段冲掉了**（那是未提交的工作区改动）。
+反向验证若用 `git checkout` 还原，必须确认该文件**没有未提交的新增内容**
+——本轮改用 `cp` 备份/还原。
+
+---
+
 ### 6.29 开源镜像同步（`tools/sync-to-github.sh`）
 
 权威源是 **Gitea**（`git@git.atjog.com:dever/super_partyb-flutter.git`，完整历史 +
@@ -4183,6 +4313,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | macOS 包未签名/未公证，首次打开需绕过 Gatekeeper | 已知限制（免签名分发） | §8 |
 | iOS 出包需 Apple Developer 账号 | 待决策 | §8、`super_partyb` issue #31 |
 | Windows 包无代码签名，每次运行弹 SmartScreen | 已知限制 | `docs/windows-release.md` §4 |
+| ~~归属反馈 TTL 的三个实现缺陷（确认卡被静默吞掉 / 不可热调 / 客户端不知道已失效）~~ | ✅ 已修（§6.28.2）：**数值本身经数据验证是对的**（24h 下回执率从 0/30 变成 2/6，实测作答耗时 1.8min 与 13.6min，后者超过原 10min TTL），故「优化 TTL」落到实现上。① `HasPendingChatConfirmation` 不按 kind 过滤——一条 pending 反馈会让该 group **24 小时**内建不出任何确认卡，且完全静默（两个 kind 的 pending 语义本就不同：确认卡阻塞待拍板 / 反馈是可选问卷）。② TTL 从编译期常量改为 `runtime.attribution_feedback_ttl_seconds`（**只让归属反馈可覆盖**，确认卡仍 10min——它挂在 pending turn 上，调大只会让「卡还在但 turn 已死」变得可能）。③ `GET /api/chat/turn-runtime` 新增 `attribution_feedback_ttl_seconds`，客户端用「事件 createdAt + TTL」自行判失效并置灰为「已失效」，把 404 从主路径降为兼容路径。⚠️ 三处易写错：`envValueForKey` 必须返回 24h 而非 0（页面会读成「功能关闭」——守卫精确抓到了这一处）；`0` 是「不覆盖」不是「立即过期」（Snapshot 零值就走这条）；`expired` 不能折进 `resolved`（否则把没答过的卡写成「已反馈」）。Go +7 条 / Flutter +12 条用例，6 项反向验证逐条实测 | §6.28.2 |
 | ~~归属反馈卡「点了没反应」~~ | ✅ 已修（§6.28.1）：**两个叠加的缺陷**。① `ChatApi.resolveFeedback` 发 `{'correct': bool}`，而服务端入参只有 `reply`/`index`/`group_id`（`ShouldBindJSON` 静默忽略未知字段 → `Reply` 空 → `400 reply is required`）。实测：`{"correct":true}` → 400，`{"reply":"准确"}` → 200。改发 `{'reply': correct ? '准确' : '不准确'}`。② 即使请求成功，卡片置灰**只**看 `routing_feedback` 事件（旁路事件，SSE 断线时永不到达），而回执是一次性 CAS——用户重试必然 404，越点越坏。故 `onResolveFeedback` 签名 `void` → `Future<void>`，成功才本地置灰（`_submittedFeedback`）、失败提示且保留可点，404 单独提示「已失效」。⚠️ 修复前三处**假绿**：`spb_api` 零条 `resolveFeedback` 用例；两端 router 测试断言的正是**错误键名** `containsPair('correct', …)`，把 bug 固化成了预期；页面用例只看回调被调用不看卡片后续状态。新增 11 条用例（含真实 `HttpServer` 契约），3 项反向验证逐条实测 | §6.28.1 |
 | 窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp） | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
 | ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `upperHistoryUnloaded` 时告知边界 | §6.15 |

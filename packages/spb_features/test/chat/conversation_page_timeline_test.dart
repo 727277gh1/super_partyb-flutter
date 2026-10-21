@@ -549,6 +549,65 @@ void main() {
       );
       expect(button.onPressed, isNull);
     });
+
+    testWidgets('超过服务端下发的有效期时直接置灰为「已失效」', (tester) async {
+      // ## 这条用例钉住的真实报障
+      //
+      // 请求事件的 payload 不带 expires_at，而回执过期后服务端统一返 404。
+      // 修复前客户端无从判断「还没答」与「已经失效」——用户点一张早就过期的
+      // 卡得到 404，表现就是「点了没反应」。
+      //
+      // 夹具里事件 createdAt 固定为 2024-03-05T08:09:10Z（见 sseEvent），
+      // 故注入一个**极短**的 TTL 就能让它在「现在」看来已过期。
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) async {},
+        feedbackTTL: const Duration(seconds: 1),
+      );
+      await pushFeedback(tester);
+
+      expect(
+        find.text('已失效'),
+        findsOneWidget,
+        reason: '过期卡片必须显式告知已失效，而不是让用户点下去才得到 404',
+      );
+      expect(
+        find.text('已反馈'),
+        findsNothing,
+        reason: '用户没答过，不能显示成「已反馈」（把未发生的事显示成已发生）',
+      );
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('feedback-option-准确')),
+      );
+      expect(button.onPressed, isNull, reason: '过期后点下去必然 404，不得可点');
+    });
+
+    testWidgets('TTL 未下发（旧版后端）时不做失效判定，保持可点', (tester) async {
+      // 反方向：把「未下发」当成「立即过期」会让所有卡片一次性变灰，
+      // 比不判定更糟（同 TurnRuntime.clientTurnTimeout 对 0 的处理取向）。
+      final calls = <(String, bool)>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) async =>
+            calls.add((token, correct)),
+        // 不传 feedbackTTL → 控制器保持 null。
+      );
+      await pushFeedback(tester);
+
+      expect(find.text('这次归属准确吗？'), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('feedback-option-准确')),
+      );
+      expect(button.onPressed, isNotNull, reason: '未下发 TTL 时应保持旧行为（可点）');
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+      expect(calls, hasLength(1));
+    });
   });
 
   group('ConversationPage 习惯建议卡', () {

@@ -308,9 +308,34 @@ final class FeedbackRequestItem extends ConversationItem {
   /// 用户是否已作答（`routing_feedback` 已到达，或本地提交成功后本地标记）。
   final bool resolved;
 
+  /// 是否已超过服务端下发的有效期（卡片无法再作答）。
+  ///
+  /// ## 为什么需要它（而不是靠 404 兜底）
+  ///
+  /// 请求事件的 payload 不带 `expires_at`，而回执过期后服务端统一返 404。
+  /// 没有本判据时，「还没答」与「已经失效」在客户端看来完全一样——用户点
+  /// 一张早就过期的卡得到 404，表现就是「点了没反应」（下一轮才提示「已失效」，
+  /// 但那已经是失败之后）。
+  ///
+  /// 现在卡片自己在渲染时就置灰，用户一眼看出「这张已经不能答了」。
+  ///
+  /// `ttl == null`（服务端未下发 / 旧版后端）时恒为 false——保持旧行为，
+  /// **不要**退化成「全部失效」。
+  ///
+  /// [now] 可注入，便于测试固定时钟（默认取当前时间）。
+  bool isExpired({Duration? ttl, DateTime? now}) {
+    if (ttl == null || resolved) return false;
+    final at = now ?? DateTime.now();
+    return at.difference(createdAt) > ttl;
+  }
+
   /// 是否可提交回执。
   ///
   /// 缺 token 时服务端直查不到请求，提交必然失败。
+  ///
+  /// ⚠️ 本 getter **不包含**有效期判定（它拿不到 TTL）——调用方需另行调用
+  /// [isExpired]，两者都满足才能点。保留本 getter 的原语义，避免把所有调用点
+  /// 都改成必须传 TTL。
   bool get canResolve => token.isNotEmpty && !resolved;
 
   /// 复制并覆盖部分字段（标记已解决时用）。
