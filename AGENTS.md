@@ -1071,23 +1071,23 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：878
+# 当前（HEAD）量：882
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=878 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=882 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1569
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1601
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1569 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1601 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 878、`spb_domain` 172、
-`spb_desktop` 149、`spb_models` 97、`spb_mobile` 89、`spb_platform` 67、
-`spb_api` 62、`spb_data` 39、`spb_core` 8、`spb_ui` 5、`spb_design` 3。
+量级分布（HEAD，字符串字面量数）：`spb_features` 882、`spb_domain` 172、
+`spb_desktop` 151、`spb_models` 97、`spb_mobile` 92、`spb_platform` 76、
+`spb_api` 71、`spb_data` 39、`spb_core` 13、`spb_ui` 5、`spb_design` 3。
 
 ⚠️ **`spb_core` 从 0 涨到 8 是 issue #40/#45 引入的**（诊断报告文案、错误分类
 文案）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
@@ -1212,9 +1212,10 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 | `spb_models` | 88.0% | `spb_ui` | 73.7% |
 | `spb_design` | 78.6% | **总计** | **85.2%**（≈15802/18539） |
 
-全仓用例 **3550 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
+全仓用例 **3649 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
 0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
-§6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线）。
+§6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线，+38 是 §6.41 的
+定位与下载布局）。
 
 ⚠️ **数用例时别用 `grep -c '"type":"testStart"'`**：它把 skipped 与
 `setUp`/`tearDown` 产生的条目也算进去（实测差 100+ 条）。用
@@ -3689,7 +3690,12 @@ return value, its exit code is always zero"*），即「URL 没打开」与「�
 
 `explorer` 返回 1 时我们**无法区分**「已交给默认程序」与「目标不存在」。可接受，
 因为「打开文件 / 打开目录」两条调用链在 spawn **之前**已经探测过路径存在
-（`bootstrap.dart` 的 `revealPath` / `openFile`），可靠性不依赖退出码。
+（`openFile` 用 `File(path).exists()`，定位走 `revealSystemEntry` 的 `probe`），
+可靠性不依赖退出码。
+
+⚠️ **这一段曾经是错的**：当时的 `revealPath` 用 `Directory(path).exists()` 探测，
+而调用方传的是**文件**——探测本身就不成立（但**仍然**返回 false，所以「不依赖
+退出码」这个结论巧合地成立）。详见 §6.41。
 
 #### 为什么测试没抓到（**两个假绿**）
 
@@ -4140,6 +4146,134 @@ return refreshed?.accessToken;       // → null
 
 ---
 
+### 6.41 「在文件管理器中定位」全平台失效 + 下载平铺覆盖（2026-10）
+
+Windows 用户报「在文件管理器中定位已下载的文档，总是失败」。查下来是**三个
+独立缺陷**叠加，且**没有一个会报错**——用户只看到「点了没反应」或「无法定位文件」。
+
+#### 缺陷 ①：`revealPath` 用目录校验挡掉了所有文件
+
+`DesktopCapabilities.revealPath` 的文档写的是「在系统文件管理器中打开本地**目录**」
+（`desktop_capabilities.dart:179`），实现按此用 `Directory(path).exists()` 校验。
+而**两个真实调用点传的都是文件路径**：
+
+| 调用点 | 传什么 |
+|---|---|
+| `router.dart` 的 `_revealAgentFile`（时间线卡片） | `_ensureAgentFileLocal` 刚写下的**文件** |
+| `providers.dart` 的 `revealDeliverableProvider`（交付物面板） | 同步/下载得到的**文件** |
+
+实测（`dart run`）：
+
+```
+File('/tmp/revtest/a.txt').exists()      = true
+Directory('/tmp/revtest/a.txt').exists() = false   ← 恒 false
+Directory('/tmp/revtest').exists()       = true
+```
+
+即：**在校验处就返回了，根本没 spawn 任何进程**。与平台无关——Linux/macOS 同样
+失效，只是 Windows 用户先报上来。
+
+#### 缺陷 ②：Windows 上「定位」被实现成了「打开」
+
+即使放行，`spawnSystemOpen` 的 Windows 分支是 `explorer <path>` = **用默认程序
+打开它**（Word/编辑器弹出来，或无关联时什么都不发生），不是「在资源管理器里选中」。
+正确命令是 `explorer /select,<path>`。
+
+三个平台三种命令，一个都不能混：
+
+| 目标 | Windows | macOS | Linux |
+|---|---|---|---|
+| 打开目录 | `explorer <dir>` | `open <dir>` | `xdg-open <dir>` |
+| **选中文件** | **`explorer /select,<file>`** | **`open -R <file>`** | `xdg-open <parentDir>`（无选中概念） |
+
+⚠️ `/select,<path>` 必须是**一个**参数：`['/select,', path]` 会让 explorer 把
+`/select,` 当成要打开的路径（explorer 的参数解析不走标准 CRT）。
+
+#### 缺陷 ③：下载平铺，同名文件互相覆盖
+
+两条手动下载链路的落盘位置都是**平铺**的：
+
+| 链路 | 修复前 | 修复后 |
+|---|---|---|
+| 时间线内联卡 | `downloads/agent/<文件名>` | `downloads/agent/{groupId}/<group 内相对路径>` |
+| 交付物面板 | `downloads/deliverables/<文件名>` | `downloads/deliverables/{groupId}/<group 内相对路径>` |
+| 交付物同步（本来对） | `{用户选目录}/{gid}/reports/a.md` | 不变 |
+
+后果三条：**互相覆盖**（每个 group 都有自己的 `README.md`）、**丢目录结构**
+（`reports/a.md` 压成 `a.md`，与面板显示的树形路径不一致，用户按面板去找必然
+找不到）、**分不清归属**（磁盘上没有信息说明文件属于哪个对话）。
+
+#### 修法
+
+| 层 | 改动 |
+|---|---|
+| `spb_platform` `system_open.dart` | 新增 `spawnSystemReveal`（三平台命令见上表）+ `revealSystemEntry`（按 `FileSystemEntityType` 分流：目录 → 打开、文件 → 选中、`notFound` → false）+ 可注入的 `EntityTypeProbe` |
+| `spb_domain` `local_download_path.dart` | 新增纯函数 `deliverableDownloadRelPath` / `agentFileDownloadRelPath`：`{groupId}/<相对路径>`，逐段过 `isValidPathSegment` |
+| `apps/*` `providers.dart` / `router.dart` | 四条下载链路改用上面两个函数（桌面 + 移动**同构**） |
+| `bootstrap.dart` `revealPath` | 一行转发给 `revealSystemEntryHere`（分流逻辑放在 `spb_platform`，因为 `bootstrap.dart` 依赖 window_manager 等插件、测试里构造不起来） |
+
+#### 为什么分流放在 `spb_platform` 而不是 `bootstrap.dart`
+
+「目录就打开、文件就选中」是**正确性核心**（写反会让「定位」变成「用默认程序
+打开」），必须能在无桌面环境的 CI 里逐条断言。`bootstrap.dart` 的
+`PlatformDesktopCapabilities` 要 `window_manager`/`tray_manager` 才能构造，而
+`revealSystemEntry` 只需注入 `platform` + `runner` + `probe` 三个参数。
+
+#### 为什么口径放在 `spb_domain` 而不是两个 app 各写一份
+
+这是**同一份**计算被抄了三遍（桌面 router / 桌面 providers / 移动两处）。
+只改一端就会出现「桌面端修好了、移动端还在覆盖」——正是 §6.17 接线守卫想防的
+那类漂移，而它**查不到函数内部实现**。故收敛成纯函数（可无头单测）。
+
+#### 路径穿越防御（两段的来源都是服务端可控输入）
+
+- `UfsFileEntry.path` 是服务端物化的（`/workspace/groups/{gid}/reports/a.md/`，
+  **文件也带尾斜杠**——不剥会得到空文件名）；
+- `AgentFileItem.relativePath` 是事件载荷。
+
+两者逐段过 `isValidPathSegment`（空段 / `.` / `..` / `\` / NUL 一律拒绝）。
+**非法时退化为单文件名而不是报错**：文件还是能拿到，只是没有目录结构；报错会让
+「点下载」在一个路径异常的文件上永久失败。退化后仍写在下载目录内——
+**不会**逃到目标目录之外。
+
+⚠️ `groupId` 也要校验：它是 `widget.groupId`（路由参数），直接拼进去时含 `../`
+就能把整个下载目录指到别处。
+
+#### 测试（17 + 12 + 1 + 1 条）
+
+| 层 | 条数 | 钉住 |
+|---|---|---|
+| `spb_domain` `local_download_path_test.dart` | 16 | groupId 段 / 保留子目录 / 尾斜杠 / 穿越退化 / 非交付物路径 / 两端同名文件落不同目录 |
+| `spb_platform` `system_open_test.dart` | 12 | `/select,` 是单参数 / macOS `-R` / Linux 父目录 / 尾斜杠剥离 / 相对路径不 spawn / 退出码语义 / spawn 异常降级 |
+| 同上（`revealSystemEntry`） | 7 | 文件 → 选中、目录 → 打开、`notFound` → 不 spawn、空路径、探测异常、真实 `realEntityType` 接线 |
+| `apps/spb_desktop` `router_workbench_test.dart` | 1 | 从**真实 router** 点「在文件管理器中定位」，断言 `caps.revealedPaths` 收到文件的绝对路径 |
+
+⚠️ **最后一条为什么必须打真实 router**：页面测试自己传参（接不接线它不管）——
+这正是 §6.16 移动端宽屏搜索入口丢失的成因。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `revealSystemEntry` 对文件也调 `spawnSystemOpen` | 2 条失败 |
+| `/select,` 拆成两个参数 | 1 条失败 |
+| `deliverableDownloadRelPath` 去掉 groupId 段（退回平铺） | 3 条失败 |
+| `agentFileDownloadRelPath` 去掉段级校验 | 1 条失败 |
+| Linux 分支不剥尾斜杠 | 1 条失败 |
+
+#### 有意不做
+
+- **不合并 `openFile` 与 `revealPath`**：接口文档明确拒绝合并（会抹掉调用方的
+  意图）；两者校验与命令都不同。
+- **不在 Windows 上做「打开了吗」的二次校验**：`explorer /select,` 的退出码同样
+  不可靠（见 §6.35），且没有廉价可靠的探测手段。
+- **不改用保存对话框**：需要额外平台插件与权限面，而「下载」本身只需要一个
+  稳定路径。
+- **移动端不接定位**：注入的是 `NoopDesktopCapabilities`（§6.10 的取向：隐藏
+  菜单项比「点了报错」好），但**下载布局仍与桌面端同构**——覆盖问题一样存在。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -4465,6 +4599,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~登录成功后**立刻**提示「会话已失效」并被踢回登录页（Windows 用户报障）~~ | ✅ 已修（§6.37）：客户端把 IdP 的 `access_token` 当 Bearer 发给网关，而那是 **fosite 不透明串**（`ory_at_…`，无点号）。网关的 `jwt_authenticate.go`（JWKS+RS256）与 `oidc_auth.go`（go-oidc compact JWS）**都要求三段式**，分别报「token contains an invalid number of segments」/「compact JWS format must have three parts」→ 登录刚完成就 401 → `onSessionExpired` 踢人。修法：`OidcTokens.bearerToken`（`idToken ?? accessToken`）+ `StoredTokens.fromOidcTokens` 单点转换，四端（两端登录 + 两端刷新）全部改用它。**与 `tbcc6.atjog.com` 无关**（登录走编译期 issuer，端点升级只改 API/UFS host）。⚠️ 修复前测试全绿：既有用例只断言 `OidcTokens` 原始字段或动作调用次数，而移动端 `onCode` **零覆盖**（内联在 provider 闭包里，只能从 `main.dart` 触达）——故另加了两个注入点（`loopbackSignInProvider` / `oidcCallbackHandlerProvider`）让落盘逻辑可测 | §6.37 |
 | ~~登录成功后客户端仍停在登录页（重启就好）~~ | ✅ 已修（§6.36）：`AuthStateNotifier.signIn()` 收尾**无条件**写 `state = unknown`，那是给旧实现（`openGatewaySignIn` 只发起、等浏览器 Cookie 回调）留的分支。而 `2d453cf` 换成 RFC 8252 loopback 后 `signInAction` 是**同步等到 token** 的——它在内部落盘并调 `signedIn()`，返回时状态已是 `authenticated`，随后被这条无条件赋值盖回 `unknown`。守卫对 `unknown` 明确放行（§6.34 的启动期语义），于是**永远停在 `/login`**，而凭证其实已在安全存储里（重启走 `restore()` 就正常，这也是「为什么重启就好」）。现判据改为「**别把已登录改回未判定**」（`if (!state.isAuthenticated)`），两端一并修（移动端回调接收器可能在 `signIn()` 返回前就完成）。两端各补 1 条从按钮出发的端到端用例；⚠️ 修复前测试有**两个假绿**——一条只断言「动作被调用 1 次」不看状态，另一条绕过 `signIn()` 直接调 `signedIn()` | §6.36 |
 | ~~放置一段时间后被登出、关闭重开又正常~~ | ✅ 已修（§6.39）：`SessionManager` 曾把**所有**刷新失败折叠成 `null`（断网、超时、IdP 503、`invalid_grant` 全长得一样），而 `currentAccessToken()` 返回 null 会让拦截器发出**匿名**请求——那必然 401，而那个 401 又被当成「会话失效」把人登出。凭证其实完好，所以重开应用（新进程网络栈干净）就正常。修法：新增三态 `TokenRefreshStatus`（`refreshed` / `rejected` / `transient`），判据是「这个失败是否携带关于凭证有效性的信息」——网络层错误从不携带。① `currentAccessToken` 在 transient 时返回**旧 token**（交给服务端判定，而不是替它提前判「已失效」）；② 拦截器拿到 transient 时**不调** `onSessionExpired`、不重放，只把 401 归一化为 `AuthError` 让页面提示网络异常。⚠️ **最易写错的一处**：`OidcClient._tokenRequest` 对任何非 2xx 都抛 `AuthError(cause: HttpError(status))`，只按最外层类型判会把「IdP 回了 503」也当成「凭证作废」——必须下探 `cause`。旧布尔回调 `onUnauthorized` 保留（新回调优先，`false` 一律当 rejected），`refresh()` 保留为 `refreshWithOutcome()` 的薄包装以兼容 6 处既有调用点。新增 21 条用例，5 项反向验证逐条实测 | §6.39 |
+| ~~「在文件管理器中定位」全平台失效（Windows 用户报「总是定位不到已下载的文档」）~~ | ✅ 已修（§6.41）：**三个独立缺陷叠加**，且都不报错。① `revealPath` 文档写的是「打开本地**目录**」，实现按此用 `Directory(path).exists()` 校验——而**两个真实调用点传的都是文件路径**，实测 `Directory('/tmp/a.txt').exists() == false` 恒成立，于是在 spawn **之前**就返回了（与平台无关，Linux/macOS 同样失效）。② 即使放行，Windows 上 spawn 的是 `explorer <path>` = **用默认程序打开**，不是选中；正确命令是 `explorer /select,<path>`（且必须是**一个**参数，拆成 `['/select,', path]` 会被 explorer 当成要打开的路径）。macOS 对应 `open -R`，Linux 退化为 `xdg-open <父目录>`（无选中概念）。③ **下载平铺**：两条手动链路都写到 `downloads/{agent,deliverables}/<文件名>`，不同 group 的同名文件互相覆盖、目录结构被压平、磁盘上分不清归属。修法：`spb_platform` 新增 `spawnSystemReveal` + `revealSystemEntry`（按 `FileSystemEntityType` 分流，可注入 probe 以便无头测试）；`spb_domain` 新增纯函数 `deliverableDownloadRelPath` / `agentFileDownloadRelPath`（`{groupId}/<相对路径>`，逐段过 `isValidPathSegment`，非法时退化为单文件名而非报错），**四条下载链路（桌面 2 + 移动 2）共用同一口径**。共 36 条用例（领域 16 + 平台 19 + 装配 1），5 项反向验证逐条实测 | §6.41 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |

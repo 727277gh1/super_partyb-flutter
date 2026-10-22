@@ -2100,13 +2100,28 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   }
 
   /// 确保文件已在本地，返回其绝对路径；不可用（无 id / 已删除 / 无字节）返回 null。
-  //
-  // ## 为什么每次都重新下载而不缓存路径
-  //
-  // 卡片是**无状态透传**的（不持有本地路径），且落地目录可能被清理计划动。
-  // 每次重拉由服务端 etag/304 与本地小文件写盘兑底，换来的是「不缓存就不会
-  // 指向一个已被删掉的位置」（与 `resolveLocalDeliverableProvider` 校验
-  // `existsSync` 同一理由）。
+  ///
+  /// ## 为什么每次都重新下载而不缓存路径
+  ///
+  /// 卡片是**无状态透传**的（不持有本地路径），且落地目录可能被清理计划动。
+  /// 每次重拉由服务端 etag/304 与本地小文件写盘兑底，换来的是「不缓存就不会
+  /// 指向一个已被删掉的位置」（与 `resolveLocalDeliverableProvider` 校验
+  /// `existsSync` 同一理由）。
+  ///
+  /// ## 落地布局：`downloads/agent/{groupId}/<group 内相对路径>`
+  ///
+  /// ⚠️ **不是平铺**。修复前所有文件都写到 `downloads/agent/<文件名>`，于是
+  /// 不同对话的同名交付物（每个对话都有 `QWEN.md` / `README.md`）**互相
+  /// 覆盖**，而且文件与对话的对应关系在磁盘上完全消失——用户点「定位」
+  /// 后看到的是一个分不清属于哪个对话的文件。
+  ///
+  /// 用 [AgentFileItem.relativePath]（已归一化、已剥掉 workspace 前缀）作
+  /// 子路径，保留目录结构；与同步链路 / 交付物面板下载**同一个形状**
+  /// （`{gid}/reports/a.md`），用户只需记一种布局。
+  ///
+  /// 具体口径在领域层（`agentFileDownloadRelPath`，纯函数、可无头单测）——
+  /// 与移动端共用同一份，避免「桌面端改了移动端没改」。段级校验（穿越防御）
+  /// 与退化规则见该函数的文档。
   Future<String?> _ensureAgentFileLocal(AgentFileItem file) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return null;
@@ -2114,17 +2129,25 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final res = await ufs.download(fileId);
     if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return null;
     final dir = await getApplicationSupportDirectory();
-    final target = Directory(p.join(dir.path, 'downloads', 'agent'));
+    final root = Directory(p.join(dir.path, 'downloads', 'agent'));
+
+    final rel = _agentFileRelPath(file);
+    final target = Directory(p.join(root.path, p.dirname(rel)));
     if (!await target.exists()) {
       await target.create(recursive: true);
     }
-    final safeName = p.basename(
-      file.fileName.isEmpty ? 'agent-file' : file.fileName,
-    );
-    final out = p.join(target.path, safeName);
+    final out = p.join(root.path, rel);
     await File(out).writeAsBytes(res.bytes!, flush: true);
     return out;
   }
+
+  /// 时间线交付物在下载目录内的相对路径：`{groupId}/<relativePath>`。
+  ///
+  /// 口径在领域层（`agentFileDownloadRelPath`，纯函数、可无头单测）——
+  /// 两端的下载链路共用同一份，避免「桌面端改了移动端没改」的漂移。
+  /// 段级校验（穿越防御）与退化规则见该函数的文档。
+  String _agentFileRelPath(AgentFileItem file) =>
+      agentFileDownloadRelPath(file, widget.groupId);
 
   /// 拉取 agent 文件缩略图（仅图片类）。
   //

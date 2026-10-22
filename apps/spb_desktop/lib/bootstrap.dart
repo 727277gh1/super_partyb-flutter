@@ -617,18 +617,14 @@ class PlatformDesktopCapabilities
 
   @override
   Future<bool> revealPath(String path) async {
-    // 先校验目录存在（对齐 Tauri 的「同步目录已不存在」检查）：避免 spawn
-    // 一个打开空路径的文件管理器而用户以为是应用坏了。
-    try {
-      if (!await Directory(path).exists()) {
-        SpbLog.warn('revealPath 目录不存在', {'path': path});
-        return false;
-      }
-    } on Object catch (e) {
-      SpbLog.warn('revealPath 校验目录失败', {'path': path, 'error': '$e'});
-      return false;
-    }
-    return _spawnSystemOpen(path, what: '目录');
+    // 语义：**目录就打开它，文件就选中它**（见 `revealSystemEntry`）。
+    //
+    // ⚠️ 修复前这里用 `Directory(path).exists()` 校验——对**文件**恒为 false
+    // （实测），于是两个「定位」入口在所有平台上都立即失败。
+    // 现在校验与分流都在 `spb_platform` 的 `revealSystemEntry` 里（可无头测试）。
+    final ok = await revealSystemEntryHere(path);
+    if (!ok) SpbLog.debug('定位条目失败', {'path': path});
+    return ok;
   }
 
   // ---------------------------------------------------------------------------

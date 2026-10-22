@@ -63,6 +63,7 @@ library;
 //   buildTextPreview / TextPreview     —— 文本预览裁剪（大文件截断 + 明确提示）
 //   groupFileEventsForDisplay / FILE_BATCH_MIN_COUNT —— 时间线 → 展示行（同 turn 同秒批量聚合，纯逻辑）
 //   TimelineDisplayRow / SingleItemRow / AgentFileBatchRow —— 展示行 sealed 家族（不改归约结果）
+//   deliverableDownloadRelPath / agentFileDownloadRelPath —— 下载到本地的落地相对路径（{groupId}/<group 内相对路径>，两端同一口径）
 export 'src/agent_file_batch.dart';
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
@@ -82,6 +83,7 @@ export 'src/gate_decision.dart';
 export 'src/goal_update.dart';
 export 'src/group_cache.dart';
 export 'src/local_deliverable_path.dart';
+export 'src/local_download_path.dart';
 export 'src/map_schema.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';

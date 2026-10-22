@@ -206,6 +206,182 @@ Future<bool> spawnSystemOpen(
   }
 }
 
+/// 在系统文件管理器中**定位**（选中）[path] 这个文件或目录。
+///
+/// 与 [spawnSystemOpen] 的区别是**意图**：后者是「用默认程序打开它」
+/// （`.md` 交给编辑器、目录交给文件管理器），本函数是「在文件管理器里
+/// 把我带到它面前并选中」。`DesktopCapabilities.revealPath` 走的是本函数。
+///
+/// ## ⚠️ 这是「定位」在 Windows 上恒失败的真实缺陷的修法
+///
+/// 修复前 `revealPath` 只 spawn `explorer <路径>`——那是**用默认程序打开**，
+/// 不是定位。用户点「在文件管理器中定位」时，Windows 会把文件交给 Word/
+/// 编辑器打开，而**不会**在资源管理器里选中它；对某些扩展名（或无关联的
+/// 文件）则什么都不发生。三个平台各需要不同的参数形态：
+///
+/// | 平台 | 命令 | 说明 |
+/// |---|---|---|
+/// | Windows | `explorer /select,<path>` | `/select,` 与路径**必须是同一个参数**（见下） |
+/// | macOS | `open -R <path>` | `-R` = reveal in Finder |
+/// | Linux | `xdg-open <父目录>` | freedesktop **没有**「选中某个文件」的概念 |
+///
+/// ## Linux 为什么只能打开父目录（诚实记录）
+///
+/// `xdg-open` 只接受「要打开的目标」，没有 `--select`。要真正选中需要
+/// D-Bus 调 `org.freedesktop.FileManager1.ShowItems`（依赖文件管理器实现该
+/// 接口），或按 `xdg-mime query default inode/directory` 分派到 nautilus/
+/// dolphin/thunar 各自的命令行（`nautilus --select` / `dolphin --select`…），
+/// 两条都脆弱。打开父目录已能满足「我要找这个文件在哪」的诉求。
+///
+/// ## ⚠️ Windows 的 `/select,` 必须与路径**拼成一个参数**
+///
+/// `explorer` 的参数解析不走标准 CRT：写成两个参数（`['/select,', path]`）时
+/// 它把 `/select,` 当成「要打开的路径」，行为不可预测。实测与上游一致：
+/// `explorer.exe /select,"C:\path\file.txt"` 是唯一正确形态。
+///
+/// 路径含空格时**不加引号**：`Process.run` 按数组传参、不经 shell，Windows 侧
+/// 会自己处理参数边界；加引号反而会让引号成为路径的一部分。
+///
+/// 退出码语义与 [spawnSystemOpen] 的 Windows 分支一致（`explorer` 成功也返回
+/// 1，见 [_successExitCodes]）。
+Future<bool> spawnSystemReveal(
+  String path, {
+  required HostPlatform platform,
+  required ProcessRunner runner,
+}) async {
+  if (path.isEmpty) {
+    SpbLog.warn('spawnSystemReveal 目标为空，跳过', {'platform': platform.name});
+    return false;
+  }
+
+  final String exe;
+  final List<String> args;
+  switch (platform) {
+    case HostPlatform.linux:
+      // 没有「选中条目」的概念：退化为打开所在目录。
+      final parent = _parentOf(path);
+      if (parent == null) {
+        SpbLog.warn('无法推导父目录，跳过定位', {'path': path});
+        return false;
+      }
+      exe = 'xdg-open';
+      args = [parent];
+    case HostPlatform.macos:
+      exe = 'open';
+      args = ['-R', path];
+    case HostPlatform.windows:
+      exe = 'explorer';
+      // 单个参数：`/select,` 与路径之间**不能**有空格分隔成两个 argv。
+      args = ['/select,$path'];
+    case HostPlatform.other:
+      SpbLog.warn('当前平台不支持定位条目', {'target': path, 'platform': platform.name});
+      return false;
+  }
+
+  try {
+    final result = await runner.run(exe, args);
+    if (!_successExitCodes(platform).contains(result.exitCode)) {
+      SpbLog.warn('系统定位命令返回非成功退出码', {
+        'exe': exe,
+        'target': path,
+        'exit': result.exitCode,
+        'platform': platform.name,
+      });
+      return false;
+    }
+    return true;
+  } on Object catch (e) {
+    SpbLog.warn('系统定位命令 spawn 异常', {'exe': exe, 'target': path, 'error': '$e'});
+    return false;
+  }
+}
+
+/// 探测路径类型（可注入，便于在 Linux 上断言「文件 → 定位 / 目录 → 打开」）。
+typedef EntityTypeProbe = Future<FileSystemEntityType> Function(String path);
+
+/// 真实探测：直接问 `dart:io`。
+Future<FileSystemEntityType> realEntityType(String path) =>
+    FileSystemEntity.type(path);
+
+/// 「定位一个本地条目」的完整语义：**目录就打开它，文件就选中它**。
+///
+/// `DesktopCapabilities.revealPath` 的真实实现就是本函数（经 `bootstrap.dart`
+/// 一行转发）。把它放在本包而不是 `bootstrap.dart`，是为了让「按类型分流 +
+/// 存在性校验」这段**正确性核心**能在无桌面环境的 CI 里逐条断言——
+/// `bootstrap.dart` 依赖 window_manager 等插件，测试里构造不起来。
+///
+/// ## ⚠️ 它修的是一个「三平台全不工作」的真实缺陷
+///
+/// 修复前的实现只接受目录：用 `Directory(path).exists()` 校验，而对**文件**
+/// 恒为 false（实测）。于是时间线卡片与交付物面板的「在文件管理器中定位」
+/// 传文件路径时，在 spawn **之前**就返回 false 了——用户看到「无法定位文件」。
+///
+/// ## 为什么要分两种命令
+///
+/// | 目标 | 命令 | 语义 |
+/// |---|---|---|
+/// | 目录 | `spawnSystemOpen` | 在文件管理器里打开它 |
+/// | 文件 | `spawnSystemReveal` | 在文件管理器里**选中**它 |
+///
+/// 在 Windows 上前者是 `explorer <dir>`、后者是 `explorer /select,<file>`。
+/// 把文件交给 `explorer <file>` 会用默认程序**打开它**（Word/编辑器弹出来）
+/// ——那正是修复前「定位」的第二个缺陷。
+Future<bool> revealSystemEntry(
+  String path, {
+  required HostPlatform platform,
+  required ProcessRunner runner,
+  EntityTypeProbe probe = realEntityType,
+}) async {
+  if (path.isEmpty) {
+    SpbLog.warn('revealSystemEntry 目标为空，跳过', {'platform': platform.name});
+    return false;
+  }
+
+  final FileSystemEntityType type;
+  try {
+    type = await probe(path);
+  } on Object catch (e) {
+    // 权限不足 / 路径含非法字符等：记日志后静默降级（与 [spawnSystemOpen]
+    // 的 spawn 异常同一取向），不向上抛。
+    SpbLog.warn('revealSystemEntry 探测目标失败', {'path': path, 'error': '$e'});
+    return false;
+  }
+
+  if (type == FileSystemEntityType.notFound) {
+    // 不存在就不 spawn：启动一个打开空路径的文件管理器只会让用户以为
+    // 应用坏了（对齐 `openFile` 的校验取向）。
+    SpbLog.warn('revealSystemEntry 目标不存在', {'path': path});
+    return false;
+  }
+
+  return type == FileSystemEntityType.directory
+      ? spawnSystemOpen(path, platform: platform, runner: runner)
+      : spawnSystemReveal(path, platform: platform, runner: runner);
+}
+
+/// 便捷入口：用当前平台与真实进程执行器定位条目。
+Future<bool> revealSystemEntryHere(String path) => revealSystemEntry(
+  path,
+  platform: HostPlatform.current(),
+  runner: const SystemProcessRunner(),
+);
+
+/// 取 [path] 的父目录（去掉末尾分隔符后再退一级）；已是根或无分隔符时返回 null。
+///
+/// 只用于 Linux 的定位降级（打开所在目录）。用 `package:path` 的 `dirname`
+/// 会引入本包当前没有的依赖，而这里只需处理 `/` 与 `\` 两种分隔符。
+String? _parentOf(String path) {
+  var end = path.length;
+  while (end > 0 && (path[end - 1] == '/' || path[end - 1] == '\\')) {
+    end--;
+  }
+  if (end == 0) return null;
+  final trimmed = path.substring(0, end);
+  final idx = trimmed.lastIndexOf(RegExp(r'[/\\]'));
+  if (idx <= 0) return null;
+  return trimmed.substring(0, idx);
+}
+
 /// [target] 是否是**带 scheme 的 URL**（而非文件/目录路径）。
 ///
 /// 只用于 Windows 的命令分派（URL → `rundll32`，路径 → `explorer`）。

@@ -20,8 +20,8 @@ library;
 ///   DroppedFile                 —— 拖入文件的归一形态（惰性读字节）
 ///   scanLocalGroups / scanLocalStats —— 本地同步目录扫描（只认 group_id 形状）
 ///   executePrunePlan            —— 按计划清理本地目录（删除前重新校验）
-///   HostPlatform / ProcessRunner / spawnSystemOpen
-///                               —— 系统「打开」命令的三平台分派（可注入以便测试）
+///   HostPlatform / ProcessRunner / spawnSystemOpen / spawnSystemReveal
+///                               —— 系统「打开 / 定位」命令的三平台分派（可注入以便测试）
 ///   installGlobalErrorHandlers   —— 全局错误兜底（FlutterError / PlatformDispatcher
 ///                                  / Zone 三道防线 → SpbLog 环形缓冲，issue #45）
 export 'src/desktop_capabilities.dart';

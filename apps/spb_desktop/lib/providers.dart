@@ -1809,18 +1809,35 @@ final groupDeliverablesProvider = FutureProvider.autoDispose
 
 /// 下载一个交付物到本地，返回**用户可见的落地路径**。
 ///
+/// ## 落地布局：`downloads/deliverables/{groupId}/<group 内相对路径>`
+///
+/// ⚠️ **不是平铺**。修复前所有 group 的文件都写到同一个
+/// `downloads/deliverables/` 目录下，于是：
+///
+/// 1. 不同 group 的同名文件（每个 group 都有自己的 `README.md` /
+///    `reports/a.md`）**互相覆盖**——用户看到的是「下载完内容变了」；
+/// 2. 下载到 `reports/a.md` 时会被压成 `a.md`，丢失目录结构，而交付物面板
+///    里显示的是树形路径；
+/// 3. 下载完用户去文件管理器里根本分不清哪个文件属于哪个对话。
+///
+/// 现在保留两段：`{groupId}/` + group 内相对路径，与同步链路的 workspace
+/// 布局（`{gid}/reports/a.md`）**形状一致**——同一个文件无论走同步还是走
+/// 手动下载，相对位置相同，用户只需记一种布局。
+///
 /// ## 为什么落到应用支持目录而不是弹保存对话框
 ///
-/// 与 `_downloadAgentFile`（时间线内联卡）同一取舍：保存对话框需要额外的
+/// 与 `_ensureAgentFileLocal`（时间线内联卡）同一取舍：保存对话框需要额外的
 /// 平台插件与权限面，而侧边栏的「打开 / 定位」只需要一个稳定的本地路径。
 /// 落盘目录用 `downloads/deliverables/`，与时间线的 `downloads/agent/` 隔离
 /// ——后者会被清理计划动，用户手动下载的不能被带上（与同步目录也隔离）。
 ///
-/// ## 文件名防御
+/// ## 路径穿越防御
 ///
-/// 用 `p.basename` 取最后一段：UFS 的 `name` 是服务端可控输入，若含 `../`
-/// 或绝对路径就能写到目标目录之外。这与同步链路的 `groupRelativePath` 防御
-/// 同源（那是目录内相对路径，这里是单文件名）。
+/// UFS 的 `path` 是**服务端可控输入**。相对路径由 `groupRelativePath` /
+/// `workspaceRelativePath` 生成（`spb_domain`，含段级校验：空段 / `.` / `..` /
+/// `\` / NUL 一律拒绝），并再 `p.join` 一次确保没有逃出目标目录。
+/// 生成不了安全相对路径时**退化为单文件名**（`p.basename`），而不是报错
+/// ——文件还是能拿到，只是没有目录结构。
 final downloadDeliverableProvider = Provider<DownloadDeliverable>((ref) {
   return (UfsFileEntry file) async {
     final ufs = ref.read(ufsApiProvider);
@@ -1830,13 +1847,14 @@ final downloadDeliverableProvider = Provider<DownloadDeliverable>((ref) {
       return '';
     }
     final dir = await getApplicationSupportDirectory();
-    final target = Directory(p.join(dir.path, 'downloads', 'deliverables'));
+    final root = Directory(p.join(dir.path, 'downloads', 'deliverables'));
+    // 相对路径的口径在领域层（`spb_domain`，与移动端逐条同构、可无头单测）。
+    final rel = deliverableDownloadRelPath(file);
+    final target = Directory(p.join(root.path, p.dirname(rel)));
     if (!await target.exists()) {
       await target.create(recursive: true);
     }
-    final rawName = file.name.isNotEmpty ? file.name : file.path;
-    final safeName = p.basename(rawName);
-    final out = p.join(target.path, safeName.isEmpty ? file.id : safeName);
+    final out = p.join(root.path, rel);
     await File(out).writeAsBytes(res.bytes!, flush: true);
     return out;
   };

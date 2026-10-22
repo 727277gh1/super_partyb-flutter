@@ -167,15 +167,31 @@ abstract interface class DesktopCapabilities {
   /// 返回字符串让上层（含 web 构建）无需为「拿到一个目录」引入 `dart:io`。
   Future<String?> pickDirectory({String? title});
 
-  /// 在系统文件管理器中打开本地目录（对齐 Tauri 的 `reveal_sync_dir`）。
-  //
-  // 调用方传入**绝对路径**。实现应先校验目录存在（不存在返回 false，避免
-  // 启动一个打开空路径的文件管理器让用户以为应用坏了），再按平台 spawn
-  // （Linux `xdg-open`、macOS `open`、Windows `explorer`）。
-  //
-  // 返回 true 表示成功启动了文件管理器；false 表示不支持、目录不存在或
-  // spawn 失败。**不抛异常**——对齐本接口既有的静默降级哲学：上层只在
-  // false 时提示用户一次，不写 try/catch。
+  /// 在系统文件管理器中**定位**一个本地条目（文件或目录）。
+  ///
+  /// 调用方传入**绝对路径**。实现应校验它存在（不存在返回 false，避免
+  /// 启动一个打开空路径的文件管理器让用户以为应用坏了），再按平台 spawn：
+  ///
+  /// | 平台 | 命令 | 行为 |
+  /// |---|---|---|
+  /// | Windows | `explorer /select,<path>` | 在资源管理器里**选中**它 |
+  /// | macOS | `open -R <path>` | 在 Finder 里选中它 |
+  /// | Linux | `xdg-open <父目录>` | 打开所在目录（freedesktop 无选中概念） |
+  ///
+  /// 返回 true 表示已成功发起；false 表示不支持、路径不存在或 spawn 失败。
+  /// **不抛异常**——对齐本接口既有的静默降级哲学：上层只在 false 时提示
+  /// 用户一次，不写 try/catch。
+  ///
+  /// ## ⚠️ 必须同时接受**文件**（这是一次真实缺陷的修法）
+  ///
+  /// 修复前本方法只接受目录：实现里用 `Directory(path).exists()` 校验，
+  /// 而 `Directory(<文件路径>).exists()` 恒为 false（实测）。于是时间线卡片与
+  /// 交付物面板的「在文件管理器中定位」**在三个平台上都**立即返回 false，
+  /// 用户看到的就是「点了没反应 / 无法定位文件」。
+  ///
+  /// 同一处还有第二个缺陷：即使放行，Windows 分支 spawn 的是
+  /// `explorer <path>`——那是**用默认程序打开**，不是定位。两者现已一并修正
+  /// （定位走 `spawnSystemReveal`，打开走 `spawnSystemOpen`）。
   Future<bool> revealPath(String path);
 
   /// 用系统默认程序打开**文件**（非目录）。

@@ -17,6 +17,21 @@ typedef LoadGroupDeliverables = Future<List<UfsFileEntry>> Function();
 ///
 /// 与小程序工作台 `SaveArtifactBytes` 同一形态：页面负责展示与防重复点，
 /// 落盘由 app 层决定（桌面端固定目录、移动端沙箱、或弹保存框）。
+///
+/// ## 落地布局：按 groupId 分目录
+///
+/// 实现方**应当**把文件写到 `…/downloads/deliverables/{groupId}/<group 内相对路径>`，
+/// 而不是平铺成一个目录。理由：
+///
+/// 1. 不同 group 各有自己的 `README.md` / `reports/a.md`，平铺会**互相覆盖**
+///    （用户看到的是「下载完内容变了」）；
+/// 2. 平铺后用户根本分不清文件属于哪个对话——而下载的用途就是去文件管理器里
+///    找它。
+///
+/// 传入的是整个 [UfsFileEntry]，它同时带 `path`（UFS 物化路径）与
+/// `parentId`，故实现方有足够信息推导出 group 内相对路径；本 typedef 不额外
+/// 传 groupId，避免「同一个值两个来源」（面板的 `groupId` 与文件的 `path`
+/// 不一致时以谁为准无解）。
 typedef DownloadDeliverable = Future<String> Function(UfsFileEntry file);
 
 /// 用系统默认程序打开已下载到本地的文件。返回是否成功发起。
@@ -220,7 +235,18 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
       if (!mounted) return;
       if (path.isNotEmpty) {
         setState(() => _localPaths[id] = path);
-        _showMessage('已下载到 $path');
+        // 带上「定位」动作：落盘目录现在是 `{groupId}/<相对路径>`（见
+        // `deliverableDownloadRelPath`），比平铺深了一层，用户手动翻到的
+        // 成本更高。有回调时给一个直接入口，把「下载完还得自己找」补上。
+        //
+        // 提示文案保留完整路径：没接回调（移动端）或定位失败时，它是
+        // 用户唯一的线索。
+        _showMessage(
+          '已下载到 $path',
+          action: widget.onReveal == null
+              ? null
+              : SnackBarAction(label: '定位', onPressed: () => _reveal(node)),
+        );
       } else {
         _showMessage('已下载');
       }
@@ -258,13 +284,13 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
     }
   }
 
-  void _showMessage(String message) {
+  void _showMessage(String message, {SnackBarAction? action}) {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
     messenger
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+      ..showSnackBar(SnackBar(content: Text(message), action: action));
   }
 
   @override

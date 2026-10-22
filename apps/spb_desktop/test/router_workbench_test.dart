@@ -1221,6 +1221,47 @@ void main() {
       // 关键断言：没有发生下载（UFS 下载端点一次都没被请求）。
       expect(ufs.downloadCalls, isEmpty, reason: '已同步的文件不应触发下载');
     });
+
+    testWidgets('已同步的交付物可直接「定位」（不触发下载，且传的是文件路径）', (tester) async {
+      // ## 这条防的是什么
+      //
+      // 修复前「在文件管理器中定位」对**文件**恒失败：`revealPath` 用
+      // `Directory(path).exists()` 校验，而它对文件恒为 false（实测）——
+      // 于在 spawn 之前就返回了，用户看到「无法定位文件」。
+      //
+      // 这里从**真实 router 装配**出发（不是页面测试自己传参），断言
+      // `caps.revealedPaths` 收到的是**文件的绝对路径**。
+      const gid = 'grp_sync_reveal';
+      const rel = 'reports/spec.md';
+      final root = await seedSyncState(tester, gid: gid, rel: rel);
+
+      final sse = FakeSseClient();
+      final caps = FakeDesktopCapabilities();
+      final ufs = FakeUfsApi();
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat(gid),
+        mockGroups: false,
+        sseClient: sse,
+        ufsApi: ufs,
+        capabilities: caps,
+        database: seededDb,
+        beforePump: (adapter) => mockChat(adapter, gid),
+      );
+      ufs.entries = [ufsFile(gid, rel)];
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('在文件管理器中定位'));
+      await tester.pumpAndSettle();
+
+      expect(caps.revealedPaths, hasLength(1));
+      expect(caps.revealedPaths.single, p.join(root.path, gid, rel));
+      expect(ufs.downloadCalls, isEmpty, reason: '已同步的文件不应触发下载');
+    });
   });
   group('导入会话（粘贴凭证 → 落盘 → 请求带 Bearer）', () {
     testWidgets('导入合法会话后状态变为已登录', (tester) async {

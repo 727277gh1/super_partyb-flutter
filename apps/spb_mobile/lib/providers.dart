@@ -1223,16 +1223,18 @@ final groupDeliverablesProvider = FutureProvider.autoDispose
 ///
 /// ## 为什么落到应用支持目录而不是弹保存对话框
 ///
+/// 下载一个交付物到本地，返回**用户可见的落地路径**。
+///
+/// 与桌面端同名 provider **同构**（布局、穿越防御、退化规则逐条一致）：
+/// `downloads/deliverables/{groupId}/<group 内相对路径>`。
+/// 移动端虽不能「定位到文件管理器」，但按 group 分目录仍然必要——否则
+/// 不同对话的同名交付物会互相覆盖，而且用户在系统「文件」应用里分不清
+/// 哪个文件属于哪个对话。
+///
 /// 与 `_downloadAgentFile`（时间线内联卡）同一取舍：保存对话框需要额外的
 /// 平台插件与权限面，而「下载」本身只需要一个稳定的本地路径。落盘目录用
 /// `downloads/deliverables/`，与时间线的 `downloads/agent/` 隔离——后者会被
 /// 清理计划动，用户手动下载的不能被带上（与同步目录也隔离）。
-///
-/// ## 文件名防御
-///
-/// 用 `p.basename` 取最后一段：UFS 的 `name` 是服务端可控输入，若含 `../`
-/// 或绝对路径就能写到目标目录之外。这与同步链路的 `groupRelativePath` 防御
-/// 同源（那是目录内相对路径，这里是单文件名）。
 final downloadDeliverableProvider = Provider<DownloadDeliverable>((ref) {
   return (UfsFileEntry file) async {
     final ufs = ref.read(ufsApiProvider);
@@ -1242,13 +1244,13 @@ final downloadDeliverableProvider = Provider<DownloadDeliverable>((ref) {
       return '';
     }
     final dir = await getApplicationSupportDirectory();
-    final target = Directory(p.join(dir.path, 'downloads', 'deliverables'));
+    final root = Directory(p.join(dir.path, 'downloads', 'deliverables'));
+    final rel = deliverableDownloadRelPath(file);
+    final target = Directory(p.join(root.path, p.dirname(rel)));
     if (!await target.exists()) {
       await target.create(recursive: true);
     }
-    final rawName = file.name.isNotEmpty ? file.name : file.path;
-    final safeName = p.basename(rawName);
-    final out = p.join(target.path, safeName.isEmpty ? file.id : safeName);
+    final out = p.join(root.path, rel);
     await File(out).writeAsBytes(res.bytes!, flush: true);
     return out;
   };

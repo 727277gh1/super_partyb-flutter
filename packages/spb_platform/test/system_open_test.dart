@@ -325,6 +325,280 @@ void main() {
     });
   });
 
+  group('spawnSystemReveal（在文件管理器中定位条目）', () {
+    // ## 这个 group 防的是什么
+    //
+    // 修复前 `revealPath` 在三个平台上都不工作，两个独立原因：
+    //
+    // 1. 实现用 `Directory(path).exists()` 校验——对**文件**恒为 false，于是
+    //    「在文件管理器中定位」在 spawn 之前就返回了；
+    // 2. 即使放行，Windows 分支 spawn 的是 `explorer <path>`——那是**用默认
+    //    程序打开**，不是定位（文件交给 Word/编辑器打开，或无关联时什么都不发生）。
+    //
+    // 这两个都不报错，用户只看到「点了没反应」。故这里逐平台钉住**参数形态**。
+
+    test('windows 用 explorer /select,（与路径同一个参数）', () async {
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\Downloads\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'explorer');
+      // ⚠️ 必须是**一个**参数：写成 ['/select,', path] 时 explorer 把
+      // `/select,` 当成要打开的路径，行为不可预测（explorer 的参数解析不走
+      // 标准 CRT）。
+      expect(calls.single.$2, [r'/select,C:\Users\me\Downloads\a.md']);
+      expect(calls.single.$2.length, 1);
+    });
+
+    test('windows 路径含空格也不加引号（Process.run 不经 shell）', () async {
+      const target = r'C:\Users\me\My Docs\a b.md';
+
+      await spawnSystemReveal(
+        target,
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      // 加引号会让引号成为路径的一部分（Windows 侧自己处理参数边界）。
+      expect(calls.single.$2, ['/select,$target']);
+    });
+
+    test('macos 用 open -R', () async {
+      final ok = await spawnSystemReveal(
+        '/Users/me/Downloads/a.md',
+        platform: HostPlatform.macos,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'open');
+      // -R = reveal in Finder（`open` 本身是「用默认程序打开」）。
+      expect(calls.single.$2, ['-R', '/Users/me/Downloads/a.md']);
+    });
+
+    test('linux 退化为打开父目录（xdg-open 无选中概念）', () async {
+      final ok = await spawnSystemReveal(
+        '/home/me/Downloads/reports/a.md',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'xdg-open');
+      expect(calls.single.$2, ['/home/me/Downloads/reports']);
+    });
+
+    test('linux 尾斜杠被剥掉后再取父目录', () async {
+      await spawnSystemReveal(
+        '/home/me/Downloads/reports/',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+      );
+
+      // 不剥尾斜杠会得到 `/home/me/Downloads/reports`（把目录本身当成条目名，
+      // 打开的是它的**父**目录——用户看到的是上一级，与期望差一层）。
+      expect(calls.single.$2, ['/home/me/Downloads']);
+    });
+
+    test('other 返回 false 且不 spawn', () async {
+      final ok = await spawnSystemReveal(
+        '/tmp/x.md',
+        platform: HostPlatform.other,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('空目标返回 false 且不 spawn', () async {
+      final ok = await spawnSystemReveal(
+        '',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('linux 无法推导父目录（相对路径）→ false，不 spawn', () async {
+      final ok = await spawnSystemReveal(
+        'a.md',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('windows 退出码 1 视为成功（explorer 的常态）', () async {
+      exitCode = 1;
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+    });
+
+    test('windows 退出码 2 → false', () async {
+      exitCode = 2;
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+    });
+
+    test('linux 退出码 1 → false（不随 Windows 放宽）', () async {
+      exitCode = 1;
+
+      final ok = await spawnSystemReveal(
+        '/home/me/a.md',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+    });
+
+    test('spawn 异常降级为 false，不向上抛', () async {
+      throwThis = const ProcessException('explorer', []);
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isFalse);
+      expect(calls.length, 1);
+    });
+  });
+
+  group('revealSystemEntry（目录就打开、文件就选中）', () {
+    // ## 这个 group 防的是什么
+    //
+    // 「定位」的完整语义有两半，此前**两半都不对**：
+    //
+    // 1. 只接受目录（`Directory(path).exists()` 对文件恒 false）→ 传文件时
+    //    在 spawn 之前就返回了；
+    // 2. 即使放行，目录与文件走的是同一个命令 → Windows 上「定位文件」变成
+    //    「用默认程序打开它」。
+    //
+    // 故这里钉住「按类型分流」与「不存在不 spawn」两个判据。
+    Future<FileSystemEntityType> probeFile(String _) async =>
+        FileSystemEntityType.file;
+    Future<FileSystemEntityType> probeDir(String _) async =>
+        FileSystemEntityType.directory;
+    Future<FileSystemEntityType> probeMissing(String _) async =>
+        FileSystemEntityType.notFound;
+
+    test('文件 → 走定位（windows 上 /select,）', () async {
+      final ok = await revealSystemEntry(
+        r'C:\Users\me\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        probe: probeFile,
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'explorer');
+      expect(calls.single.$2, [r'/select,C:\Users\me\a.md']);
+    });
+
+    test('目录 → 走打开（windows 上 explorer <dir>，不带 /select）', () async {
+      final ok = await revealSystemEntry(
+        r'C:\Users\me\Downloads',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        probe: probeDir,
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'explorer');
+      // 打开同步目录是 `explorer <dir>`；误用 `/select,` 会在父目录里选中它。
+      expect(calls.single.$2, [r'C:\Users\me\Downloads']);
+    });
+
+    test('文件 → macos 用 open -R（不是 open）', () async {
+      await revealSystemEntry(
+        '/Users/me/a.md',
+        platform: HostPlatform.macos,
+        runner: fakeRunner(),
+        probe: probeFile,
+      );
+
+      expect(calls.single.$1, 'open');
+      expect(calls.single.$2, ['-R', '/Users/me/a.md']);
+    });
+
+    test('不存在 → false 且不 spawn（避免打开空路径）', () async {
+      final ok = await revealSystemEntry(
+        '/no/such/file.md',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+        probe: probeMissing,
+      );
+
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('空路径 → false 且不 spawn', () async {
+      final ok = await revealSystemEntry(
+        '',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+        probe: probeFile,
+      );
+
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('探测本身抛异常 → false，不向上抛', () async {
+      Future<FileSystemEntityType> throwing(String _) async =>
+          throw const FileSystemException('permission denied');
+
+      final ok = await revealSystemEntry(
+        '/root/secret.md',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+        probe: throwing,
+      );
+
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('真实探测：临时目录 → 判为目录，临时文件 → 判为文件', () async {
+      // 用真实 `realEntityType` 跑一遍，钉住「默认 probe 接的是 dart:io」
+      // ——注入测试全用假 probe 的话，接线写反（比如把默认值指向一个恒返回
+      // file 的函数）永远不会被发现。
+      final dir = await Directory.systemTemp.createTemp('spb-reveal-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final file = File('${dir.path}/a.md')..writeAsStringSync('x');
+
+      expect(await realEntityType(dir.path), FileSystemEntityType.directory);
+      expect(await realEntityType(file.path), FileSystemEntityType.file);
+      expect(
+        await realEntityType('${dir.path}/nope'),
+        FileSystemEntityType.notFound,
+      );
+    });
+  });
+
   group('HostPlatform.current', () {
     test('在 Linux 测试机上推导出 HostPlatform.linux', () {
       // 本测试运行在 Linux CI / 开发机上；若将来在 macOS runner 上跑会失败，

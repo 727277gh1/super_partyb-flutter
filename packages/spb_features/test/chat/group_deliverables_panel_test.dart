@@ -361,6 +361,50 @@ void main() {
 
       expect(find.textContaining('下载失败'), findsOneWidget);
     });
+
+    testWidgets('下载提示带「定位」动作，点一下就定位到那个文件', (tester) async {
+      // 落盘目录现在是 `{groupId}/<相对路径>`（比平铺深一层），用户手动翻到的
+      // 成本更高。这条钉住「下载完能一步定位」——否则路径虽对，用户还是找不到。
+      final revealed = <String>[];
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onDownload: (f) async => '/tmp/g1/README.md',
+        onReveal: (path) async {
+          revealed.add(path);
+          return true;
+        },
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('下载'));
+      await tester.pumpAndSettle();
+
+      expect(find.widgetWithText(SnackBarAction, '定位'), findsOneWidget);
+      await tester.tap(find.text('定位'));
+      await tester.pumpAndSettle();
+
+      expect(revealed, ['/tmp/g1/README.md']);
+    });
+
+    testWidgets('无定位回调（移动端）时下载提示不带动作', (tester) async {
+      // 移动端注入 Noop 能力、不接 onReveal（§6.10 的取向：不展示做不到的
+      // 动作，而不是点了报错）。提示仍要带路径——那是用户唯一的线索。
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('README.md')],
+        onDownload: (f) async => '/tmp/g1/README.md',
+      );
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('下载'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('/tmp/g1/README.md'), findsOneWidget);
+      expect(find.byType(SnackBarAction), findsNothing);
+    });
   });
 
   // =========================================================================

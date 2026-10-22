@@ -2186,6 +2186,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   }
 
   /// 下载 agent 文件产物到本地（复用桌面端的语义，详见桌面 router）。
+  ///
+  /// 布局同样是 `downloads/agent/{groupId}/<group 内相对路径>`——不同对话的
+  /// 同名交付物不会互相覆盖。
   Future<void> _downloadAgentFile(AgentFileItem file, String userId) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return;
@@ -2193,15 +2196,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final res = await ufs.download(fileId);
     if (res.notModified || res.bytes == null || res.bytes!.isEmpty) return;
     final dir = await getApplicationSupportDirectory();
-    final target = Directory(p.join(dir.path, 'downloads', 'agent'));
+    final root = Directory(p.join(dir.path, 'downloads', 'agent'));
+    final rel = agentFileDownloadRelPath(file, widget.groupId);
+    final target = Directory(p.join(root.path, p.dirname(rel)));
     if (!await target.exists()) {
       await target.create(recursive: true);
     }
-    final safeName = p.basename(
-      file.fileName.isEmpty ? 'agent-file' : file.fileName,
-    );
-    await File(p.join(target.path, safeName))
-        .writeAsBytes(res.bytes!, flush: true);
+    await File(p.join(root.path, rel)).writeAsBytes(res.bytes!, flush: true);
   }
 
   /// 拉取 agent 文件缩略图（仅图片类）。详见桌面端同名方法。
