@@ -111,6 +111,11 @@ TARGETS = [
                 # `file_selector.getSaveLocation` 在 Android/iOS 未实现
                 # （AGENTS.md §6.20）。
                 'onExportDiagnostics',
+                # 自动同步排程器只在桌面端装配（移动端后台定时器不可靠，
+                # 系统会冻结/杀进程）。按「不展示点了没反应的开关」的
+                # 既有取向，移动端传 `showAutoSync: false`（默认值）。
+                # 见 AGENTS.md §6.42。
+                'showAutoSync',
             },
             # 微信小程序订阅消息额度（AGENTS.md §6.9.1）：桌面端没有小程序
             # 运行环境，展示它无法兑现。

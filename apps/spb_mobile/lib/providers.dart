@@ -1119,6 +1119,19 @@ const String scopePrefKey = 'sync.scope';
 /// 偏好键：拉取范围（天）。缺省 = 不限历史。
 const String sinceDaysPrefKey = 'sync.since_days';
 
+/// 偏好键：自动同步（JSON，见 `AutoSyncConfig.encode`）。
+///
+/// ## 移动端为什么也读写它
+///
+/// 移动端**不装配排程器**（后台定时器在 Android/iOS 上不可靠，系统会冻结
+/// 或杀掉进程），设置页也不渲染该区块（`SettingsPage.showAutoSync` 为
+/// false）。但仍然原样读写这个键：同一份 `SyncSettings` 会在两端之间被
+/// 传递（例如用户先在桌面端开过自动同步），若这里把字段丢掉，一次移动端
+/// 保存就会**静默清掉**桌面端的配置——而用户完全不知道发生了什么。
+///
+/// 即：移动端「不实现」不等于「可以破坏」。
+const String autoSyncPrefKey = 'sync.auto';
+
 /// 触发一轮同步。
 final runSyncActionProvider = Provider<RunSyncAction>((ref) {
   return () async {
@@ -1392,6 +1405,7 @@ final loadSyncSettingsProvider = Provider<LoadSyncSettings>((ref) {
         ),
       ),
       sinceDays: await _readSinceDays(prefs),
+      auto: AutoSyncConfig.decode(await prefs.getString(autoSyncPrefKey)),
     );
   };
 });
@@ -1417,6 +1431,9 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
     } else {
       await prefs.setInt(sinceDaysPrefKey, value: days);
     }
+
+    // 原样写回（本端不消费它，但**不能丢**，见 [autoSyncPrefKey] 的说明）。
+    await prefs.setString(autoSyncPrefKey, settings.auto.encode());
 
     // 无需 invalidate：过滤/范围/天数的真源是 `SyncSettings`，而
     // `loadSyncSettingsProvider` 是个普通 `Provider`（不是 FutureProvider），

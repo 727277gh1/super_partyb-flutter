@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_features/spb_features.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'desktop_integration.dart';
@@ -77,6 +78,9 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
   /// 托盘提示的订阅（同步在途状态变化时重推）。
   ProviderSubscription<bool>? _syncInFlightSub;
 
+  /// 认证状态的订阅（登录/登出时武装或暂停自动同步）。
+  ProviderSubscription<AuthState>? _authSub;
+
   @override
   void initState() {
     super.initState();
@@ -93,6 +97,7 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     // 预热后，重试计时器与 `drain` 从 App 启动起就在跑。
     ref.read(outboxQueueProvider);
     _installNotifications();
+    _installAutoSync();
     // 移动端的能力是 NoopDesktopCapabilities，attach 会自行跳过。
     // 但移动端连 spb_desktop 都不该走，故这里只在桌面端接线。
     final caps = ref.read(desktopCapabilitiesProvider);
@@ -150,6 +155,38 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     _syncInFlightSub = ref.listenManual<bool>(syncInFlightProvider, (_, _) {
       controller.push();
     });
+  }
+
+  /// 接线自动同步（启动 / 登录态变化 / 设置变更）。
+  ///
+  /// ## 为什么在这里预热
+  ///
+  /// 与 `outboxQueueProvider` 同一理由：provider 是**惰性**的，没人读就永不
+  /// 构造。若只在设置页里读，则「用户开了自动同步但从不打开设置页」这个
+  /// **最常见**的情形下，排程器根本不会被创建——自动同步等于没开。
+  ///
+  /// ## 为什么订阅认证状态，而不是只在启动时 reconcile 一次
+  ///
+  /// 启动时 `authState` 是 [AuthStatus.unknown]（正在读凭证），此时**不能**
+  /// 武装：拿不到 token 会白跑一轮。而 `unknown → authenticated` 是异步
+  /// 发生的（可能在几秒后），故必须订阅。
+  ///
+  /// 登出也必须响应（→ `pause`）：否则登出后计时器仍在跑，每轮都在无凭证
+  /// 状态下抛 401。
+  void _installAutoSync() {
+    // 先读一次触发订阅注册（`listenManual` 不读不生效）。
+    //
+    // ## 为什么用 `listenManual` 而不是 `ref.listen`
+    //
+    // `ref.listen` 只能在 `build` 期间调用；本方法是 `initState` 里的副作用，
+    // 与 `_installTrayTooltip` 同一约束（见那里的说明）。
+    _authSub = ref.listenManual<AuthState>(authStateProvider, (previous, next) {
+      if (previous?.status == next.status) return;
+      unawaited(ref.read(reconcileAutoSyncProvider)());
+    });
+    // 启动时的那一次 reconcile：`authState` 此刻多半还是 unknown，
+    // `reconcileAutoSync` 会 pause（无害），真正的武装发生在状态变化时。
+    unawaited(ref.read(reconcileAutoSyncProvider)());
   }
 
   /// 接线本地通知（issue #21）。
@@ -212,6 +249,7 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
         ..onBlur = null;
     }
     _syncInFlightSub?.close();
+    _authSub?.close();
     _trayTooltip?.dispose();
     _integration?.detach();
     if (_ownsRouter) _router.dispose();

@@ -567,6 +567,120 @@ void main() {
     });
   });
 
+  group('自动同步（桌面端）', () {
+    /// 设置页是惰性 `ListView`，「自动同步」区块在「过滤与范围」之后，
+    /// 默认 800×600 下落在屏幕外。
+    void useTallWindow(WidgetTester tester) {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+    }
+
+    testWidgets('桌面端渲染自动同步区块（启动同步 + 周期档位）', (tester) async {
+      useTallWindow(tester);
+      final h = await pumpApp(tester, syncLocalRoot: '/home/u/out');
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('自动同步初值来自注入的设置', (tester) async {
+      useTallWindow(tester);
+      final h = await pumpApp(
+        tester,
+        syncLocalRoot: '/home/u/out',
+        loadSyncSettings: () async => const SyncSettings(
+          localRoot: '/home/u/out',
+          auto: AutoSyncConfig(onLaunch: true, intervalMinutes: 30),
+        ),
+      );
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+      );
+      expect(tile.value, isTrue);
+      expect(find.text('每 30 分钟'), findsOneWidget);
+    });
+
+    testWidgets('改动自动同步会随整份提交一起落盘', (tester) async {
+      useTallWindow(tester);
+      SyncSettings? saved;
+      final h = await pumpApp(
+        tester,
+        syncLocalRoot: '/home/u/out',
+        saveSyncSettings: (s) async => saved = s,
+      );
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(saved, isNotNull);
+      expect(saved!.auto.onLaunch, isTrue);
+      expect(saved!.auto.intervalMinutes, 0);
+    });
+
+    testWidgets('保存设置后把新配置喂给调度器', (tester) async {
+      // ## 这条守的是「配置改了但排程没跟着变」
+      //
+      // 只断言 `saveSyncSettings` 收到新值是不够的——那只证明落盘了，
+      // 不证明**当前会话**的排程器看到了它（用户会以为要重启才生效）。
+      useTallWindow(tester);
+      final scheduler = NoopAutoSyncScheduler();
+      // 可变的「已落盘设置」：保存后 `reconcile` 会**再读一次**，故必须
+      // 让它读到新值，否则断言只证明「喂了旧值」。
+      var stored = const SyncSettings(localRoot: '/home/u/out');
+      final h = await pumpApp(
+        tester,
+        syncLocalRoot: '/home/u/out',
+        autoSyncScheduler: scheduler,
+        saveSyncSettings: (s) async => stored = s,
+        loadSyncSettings: () async => stored,
+      );
+
+      h.router.go(SpbRoutes.settings);
+      await tester.pumpAndSettle();
+
+      // 打开周期同步（默认「关闭」），再保存。
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('每 15 分钟').last);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(
+        scheduler.applied,
+        contains(const AutoSyncConfig(intervalMinutes: 15)),
+        reason: '保存后必须 reconcile，否则新配置要等重启才生效',
+      );
+    });
+  });
+
   group('会话失效 → 回登录页（AuthInterceptor.onSessionExpired 接线）', () {
     /// 把测试窗口调高（设置页是惰性 ListView，目标条目可能在屏幕外）。
     void useTallWindow(WidgetTester tester) {

@@ -1071,14 +1071,14 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：882
+# 当前（HEAD）量：895
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=882 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=895 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1601
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1620
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1601 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1620 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
@@ -1205,17 +1205,17 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 
 | 包 | 覆盖率 | 包 | 覆盖率 |
 |---|---|---|---|
-| `spb_data` | **98.3%** | `spb_platform` | 59.3% |
-| `spb_features` | **93.4%** | `spb_mobile` | 55.3% |
-| `spb_core` | **91.5%** | `spb_desktop` | 59.9% |
-| `spb_domain` | 88.8% | `spb_api` | **88.3%** |
+| `spb_data` | **98.3%** | `spb_platform` | 62.6% |
+| `spb_features` | **93.5%** | `spb_mobile` | 56.7% |
+| `spb_core` | **91.5%** | `spb_desktop` | 60.7% |
+| `spb_domain` | 89.3% | `spb_api` | **88.5%** |
 | `spb_models` | 88.0% | `spb_ui` | 73.7% |
-| `spb_design` | 78.6% | **总计** | **85.2%**（≈15802/18539） |
+| `spb_design` | 86.0% | **总计** | **85.6%**（≈16134/18853） |
 
-全仓用例 **3649 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
+全仓用例 **3715 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
 0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
 §6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线，+38 是 §6.41 的
-定位与下载布局）。
+定位与下载布局，+66 是 §6.42 的自动同步）。
 
 ⚠️ **数用例时别用 `grep -c '"type":"testStart"'`**：它把 skipped 与
 `setUp`/`tearDown` 产生的条目也算进去（实测差 100+ 条）。用
@@ -4274,7 +4274,159 @@ Directory('/tmp/revtest').exists()       = true
 
 ---
 
+### 6.42 自动同步：可配置的启动 / 周期拉取（2026-10）
+
+交付物同步此前只有**手动**入口（托盘「立即同步交付物」/ 同步页按钮）。用户
+得记得点，本地目录才会跟得上远端——而「本地有一份可离线打开的交付物」正是
+同步这个功能的全部意义。本轮补上**可配置的自动同步**。
+
+#### 两条入口，各自独立
+
+| 项 | 语义 |
+|---|---|
+| 「启动后自动同步一次」 | 打开应用并完成登录后拉一轮 |
+| 「周期同步」 | 运行期间每隔 N 分钟拉一轮（关闭 / 15 / 30 / 60 / 180） |
+
+两者**相互独立**：「只在启动时同步一次」是合法且常用组合（每天开一次应用的
+用户不需要周期拉取）。故 `AutoSyncConfig.isEnabled = onLaunch || isPeriodic`，
+而非要求两者都开。
+
+#### 默认全关，且这是**有数据依据**的
+
+生产实测首次全量同步 **5666 条 / 4.7 GB**。静默替用户拉这么多不可接受（计费
+网络、小容量磁盘）。故 `AutoSyncConfig.disabled` 是默认值，用户显式开启后
+才排程。
+
+#### 分层
+
+| 层 | 内容 | 为什么在这一层 |
+|---|---|---|
+| `spb_domain` `sync_auto_config.dart` | `AutoSyncConfig`（`onLaunch` / `intervalMinutes` / `allowedIntervals` / `encode` / `decode`） | 序列化与档位钳制是**正确性核心**（错一点就静默不工作），须能无头单测 |
+| `spb_domain` `auto_sync_scheduler.dart` | `AutoSyncScheduler`（`apply` / `pause` / `dispose` / `isScheduled` / `isRunning`） | 排程判据同理；注入 `run` 后可用 `fake_async` 逐条断言 |
+| `spb_features` `settings_page.dart` | 「自动同步」区块（`showAutoSync` 参数） | 渲染与表单交互 |
+| `apps/spb_desktop` | `autoSyncSchedulerProvider` / `reconcileAutoSyncProvider` / `app.dart` 的 `_installAutoSync` | 装配：进程生命周期 + 登录态订阅 |
+| `apps/spb_mobile` | **只读写偏好，不装配排程器** | 见下「移动端为何不参与」 |
+
+#### 五条不得违反的设计判据
+
+**1. 自续排的一次性 `Timer`，不是 `Timer.periodic`。**
+
+`periodic` 在回调里做异步工作时会让两轮重叠（上一轮没跑完就排下一轮）。
+`DeliverableSyncUseCase` 会按 stateKey 读写同一份游标，两轮并发推进**不安全**
+（可能重复下载，或跳过未下载的区间）。故用一次性 Timer，**结束后**才续排
+——「本轮结束 → 距下一轮 N 分钟」。
+
+代价（诚实记录）：长轮次（首轮全量可能跑很久）期间 `isScheduled` 为 false。
+这是**正确**状态（现在确实没排着东西），不是缺陷。
+
+**2. `pause` 必须清空已应用配置（否则第二次登录后永久失效）。**
+
+若 `pause` 只取消计时器而保留 `_applied`，重新登录时装配层会喂一份**相同**
+配置，`apply` 的幂等判定让它直接返回 → 自动同步在第二次登录后永久失效，且
+没有任何征兆。有用例专门钉住（`pause 后 apply **相同**配置必须重新武装`）。
+
+**3. `apply` 以配置相等做幂等键（否则周期被无限重置）。**
+
+装配层有三个信号源（启动、登录态变化、保存设置）都会 reconcile。若每次都
+重排计时器，用户每次切前台 / 保存设置都会把周期重置，实际间隔被无限拉长。
+
+**4. 认证未就绪 / 无目录 / 单 group 模式 → `pause`，不武装。**
+
+- `AuthStatus.unknown` 期间（启动读凭证那一瞬间）发起同步拿不到 token，白跑
+  一轮并留下 401 日志；
+- 没目录 → `_runSync` 每轮抛「请先选择同步目录」；
+- 单 group 模式（`!allGroups && groupIds.isEmpty`）→ `toScope()` 每轮抛。
+
+三者都是**每 N 分钟复现一次**的纯噪音。注意「勾选若干对话」是**可以**同步的
+（`canSync` 只排除单 group 模式），别误判。
+
+**5. `runSyncActionProvider` 必须单飞。**
+
+自动同步引入后有三个触发源，**自动 tick 与手动触发可以重叠**。语义选择
+「**复用同一个 Future**」而不是「静默跳过」：手动触发若被跳过，用户会看到
+按钮点了没反应、也没有进度；复用则让等待方拿到同一份结果，UI 的 busy 态
+自然一致。
+
+#### 移动端为何不参与（但**必须**读写偏好）
+
+移动端**不装配排程器**：后台定时器在 Android/iOS 上不可靠（系统会冻结或杀掉
+进程），排一个不会响的计时器等于骗用户。故：
+
+- `SettingsPage.showAutoSync` 为 `false` → **整段不渲染**（不是渲染成禁用、
+  也不是渲染后静默不生效）。这是「不展示点了没反应的开关」的既有取向
+  （§6.10 同一判据）。
+- 但 `loadSyncSettingsProvider` / `saveSyncSettingsProvider` **仍原样读写**
+  `sync.auto` 键。因为同一份 `SyncSettings` 会在两端之间流转：用户在桌面端
+  开过「每 30 分钟」，然后到移动端只改了「同步图片」并保存——若不写回，
+  桌面端的配置就被**静默清掉**了。
+
+即：移动端「不实现」不等于「可以破坏」。
+
+#### 两个易写错的实现细节
+
+**1. `_tick` 里必须 `_cancelTimer()` 而不是 `_timer = null`。**
+
+`apply` 的顺序是「先排周期，再跑启动轮」——启动轮进 `_tick` 时那个计时器
+**是活的**。只把字段置 null 会丢掉引用但留下僵尸 Timer，它到期后再触发一次
+`_tick`，于是「一轮」变成两轮并发。这条被 `fake_async` 用例抓到过（最初的
+写法就是错的）。
+
+**2. 间隔钳制是「就近」而不是「非法即 0」。**
+
+0 意味着**关掉周期同步**。若某天档位集合调整，老用户存的 180 被判成「非法」
+→ 静默变成「不周期」，用户会以为自动同步坏了。就近钳制至少保住「仍在自动
+同步」这个意图。等距时取**较小**档位。
+
+同理 `decode` 遇损坏值退回**全关**而不是全开：退回全开会在用户毫不知情时
+持续拉取 4.7 GB，退回全关只是回到手动模式（点一次同步就发现了，代价可逆）。
+
+#### 反向验证（14 项逐条实测）
+
+| 改坏 | 失败用例 |
+|---|---|
+| `pause` 不清 `_applied` | 3（重新武装 ×2 + 从启用改全关） |
+| `_tick` 不续排 | 4 |
+| `_tick` 用 `_timer = null` 而非 cancel | 1 |
+| `apply` 去掉幂等 | 1 |
+| `SyncSettings.==` 不含 `auto` | 1 |
+| `decode` 损坏时退回「全开」 | 1 |
+| 非法间隔钳到 0 | 3 |
+| `reconcile` 不检查认证状态 | 1 |
+| `reconcile` 不检查 `canSync` | 2 |
+| 保存设置后不 reconcile | 1 |
+| 去掉单飞守卫 | 1 |
+| 移动端不写回 `sync.auto` | 1 |
+| 移动端读设置时丢掉 `auto` | 2 |
+| `showAutoSync` 不生效 | 4 |
+
+#### 与既有同步语义的关系（**未改变**）
+
+自动同步只是**触发时机**变了，同步本身的行为完全不变（AGENTS.md §10 的
+既有语义逐条保留）：单向 UFS → 本地、`updated_since` 游标 + etag 增量、
+删除只凭 `deleted_at`、跳过 `reports/tts/**`、媒体默认不同步、单文件上限、
+`{root}/{group_id}/…` 目录结构、失败项不写状态。
+
+**不会**因为「自动」而变成双向：反向同步会触发服务端 groupsync 写入回路
+（见 `docs/deliverable-upload-and-conflict.md` §0 结论速览），那是用户显式
+点「回传」时才走的路径。
+
+#### 有意不做
+
+- **不做文件系统监听（watch 目录变化）**：远端才是真源，本地改动不回传；
+  监听只会在用户手动改本地文件时触发一轮空拉取。
+- **不做「同步完成后弹通知」**：已有托盘提示（`TrayTooltipController` 显示
+  「同步中…」）与 `syncInFlightProvider` 的 busy 态。再加系统通知需移动端
+  与桌面端各自的权限流程，收益不足。
+- **不做「上次同步时间」的持久化展示**：`SyncStateStore` 里已有 per-stateKey
+  的游标（含时间戳），但那是同步正确性状态，不是 UI 数据；为展示它而多读
+  一次库不值得。
+- **不在移动端实现前台定时器**：应用在前台时用户就在看界面，手动点一下比
+  「每 15 分钟自己拉一次」更符合预期；且移动端没有托盘，同步发生与否不可见。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
+
 
 ### 编译期依赖
 
@@ -4523,6 +4675,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 §6.14）
 - [x] 对话内搜索（搜已加载时间线，见 §6.15）+ 窄屏 AppBar 溢出修复（issue #31，见 §6.16）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
+- [x] 自动同步（启动后一次 / 周期 N 分钟，默认关闭；仅桌面端装配，见 §6.42）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 §6.24）
@@ -4600,6 +4753,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~登录成功后客户端仍停在登录页（重启就好）~~ | ✅ 已修（§6.36）：`AuthStateNotifier.signIn()` 收尾**无条件**写 `state = unknown`，那是给旧实现（`openGatewaySignIn` 只发起、等浏览器 Cookie 回调）留的分支。而 `2d453cf` 换成 RFC 8252 loopback 后 `signInAction` 是**同步等到 token** 的——它在内部落盘并调 `signedIn()`，返回时状态已是 `authenticated`，随后被这条无条件赋值盖回 `unknown`。守卫对 `unknown` 明确放行（§6.34 的启动期语义），于是**永远停在 `/login`**，而凭证其实已在安全存储里（重启走 `restore()` 就正常，这也是「为什么重启就好」）。现判据改为「**别把已登录改回未判定**」（`if (!state.isAuthenticated)`），两端一并修（移动端回调接收器可能在 `signIn()` 返回前就完成）。两端各补 1 条从按钮出发的端到端用例；⚠️ 修复前测试有**两个假绿**——一条只断言「动作被调用 1 次」不看状态，另一条绕过 `signIn()` 直接调 `signedIn()` | §6.36 |
 | ~~放置一段时间后被登出、关闭重开又正常~~ | ✅ 已修（§6.39）：`SessionManager` 曾把**所有**刷新失败折叠成 `null`（断网、超时、IdP 503、`invalid_grant` 全长得一样），而 `currentAccessToken()` 返回 null 会让拦截器发出**匿名**请求——那必然 401，而那个 401 又被当成「会话失效」把人登出。凭证其实完好，所以重开应用（新进程网络栈干净）就正常。修法：新增三态 `TokenRefreshStatus`（`refreshed` / `rejected` / `transient`），判据是「这个失败是否携带关于凭证有效性的信息」——网络层错误从不携带。① `currentAccessToken` 在 transient 时返回**旧 token**（交给服务端判定，而不是替它提前判「已失效」）；② 拦截器拿到 transient 时**不调** `onSessionExpired`、不重放，只把 401 归一化为 `AuthError` 让页面提示网络异常。⚠️ **最易写错的一处**：`OidcClient._tokenRequest` 对任何非 2xx 都抛 `AuthError(cause: HttpError(status))`，只按最外层类型判会把「IdP 回了 503」也当成「凭证作废」——必须下探 `cause`。旧布尔回调 `onUnauthorized` 保留（新回调优先，`false` 一律当 rejected），`refresh()` 保留为 `refreshWithOutcome()` 的薄包装以兼容 6 处既有调用点。新增 21 条用例，5 项反向验证逐条实测 | §6.39 |
 | ~~「在文件管理器中定位」全平台失效（Windows 用户报「总是定位不到已下载的文档」）~~ | ✅ 已修（§6.41）：**三个独立缺陷叠加**，且都不报错。① `revealPath` 文档写的是「打开本地**目录**」，实现按此用 `Directory(path).exists()` 校验——而**两个真实调用点传的都是文件路径**，实测 `Directory('/tmp/a.txt').exists() == false` 恒成立，于是在 spawn **之前**就返回了（与平台无关，Linux/macOS 同样失效）。② 即使放行，Windows 上 spawn 的是 `explorer <path>` = **用默认程序打开**，不是选中；正确命令是 `explorer /select,<path>`（且必须是**一个**参数，拆成 `['/select,', path]` 会被 explorer 当成要打开的路径）。macOS 对应 `open -R`，Linux 退化为 `xdg-open <父目录>`（无选中概念）。③ **下载平铺**：两条手动链路都写到 `downloads/{agent,deliverables}/<文件名>`，不同 group 的同名文件互相覆盖、目录结构被压平、磁盘上分不清归属。修法：`spb_platform` 新增 `spawnSystemReveal` + `revealSystemEntry`（按 `FileSystemEntityType` 分流，可注入 probe 以便无头测试）；`spb_domain` 新增纯函数 `deliverableDownloadRelPath` / `agentFileDownloadRelPath`（`{groupId}/<相对路径>`，逐段过 `isValidPathSegment`，非法时退化为单文件名而非报错），**四条下载链路（桌面 2 + 移动 2）共用同一口径**。共 36 条用例（领域 16 + 平台 19 + 装配 1），5 项反向验证逐条实测 | §6.41 |
+| ~~交付物同步只能手动点（用户问「PC 端能不能自动下载 / 同步」）~~ | ✅ 已实现（§6.42）：新增 `AutoSyncConfig`（`onLaunch` + `intervalMinutes`，档位 关闭/15/30/60/180）与 `AutoSyncScheduler`（**纯 Dart + `fake_async` 可测**，放 `spb_domain`）。两条入口**相互独立**（「只在启动时同步一次」是合法组合）。**默认全关**——生产实测首次全量 5666 条 / 4.7 GB，静默替用户拉这么多不可接受。排程用**自续排的一次性 `Timer`** 而非 `periodic`：`periodic` 会在上一轮未跑完时叠加触发，而游标并发推进不安全；代价是长轮次期间 `isScheduled == false`（正确状态）。三条易写错的判据：① `pause()` 必须清空已应用配置，否则重新登录后 `apply(同一配置)` 被幂等吞掉 → 自动同步永久失效；② `apply` 以配置相等做幂等键，否则三个信号源反复喂同一份配置会把周期无限重置；③ `_tick` 必须 `_cancelTimer()` 而不是 `_timer = null`（`apply` 是「先排周期再跑启动轮」，启动轮进 `_tick` 时计时器是活的 → 僵尸 Timer → 一轮变两轮，被用例抓到过）。`runSyncActionProvider` 加**单飞**（语义选「复用同一 Future」而非「静默跳过」，否则手动触发点了没反应）。移动端**不装配排程器**（后台定时器在 Android/iOS 不可靠）→ `showAutoSync: false` 整段不渲染（不渲染禁用态），但**仍读写 `sync.auto`**——同一份 `SyncSettings` 两端流转，不写回会静默清掉桌面端配置。共 48 条用例（领域 39 + 设置页 8 + 装配 7 + 移动端持久化 4 …），**14 项反向验证逐条实测** | §6.42 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |

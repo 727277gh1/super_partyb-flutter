@@ -48,6 +48,7 @@ void main() {
     Future<ThemeMode> Function()? loadThemeMode,
     Future<void> Function(ThemeMode)? saveThemeMode,
     Future<DiagnosticsExportOutcome> Function()? onExportDiagnostics,
+    bool showAutoSync = false,
   }) async {
     // ## 为什么要把测试窗口调高
     //
@@ -83,6 +84,7 @@ void main() {
           loadThemeMode: loadThemeMode,
           saveThemeMode: saveThemeMode,
           onExportDiagnostics: onExportDiagnostics,
+          showAutoSync: showAutoSync,
         ),
       ),
     );
@@ -375,6 +377,154 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(saved!.sinceDays, isNull);
+    });
+  });
+
+  group('设置页：自动同步（showAutoSync）', () {
+    testWidgets('showAutoSync=false（移动端）整段不渲染', (tester) async {
+      await pumpSettings(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('showAutoSync=true（桌面端）渲染两个入口', (tester) async {
+      await pumpSettings(tester, showAutoSync: true);
+
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+        findsOneWidget,
+      );
+      // 默认全关：下拉显示「关闭」。
+      expect(find.text('关闭'), findsOneWidget);
+    });
+
+    testWidgets('初值来自注入的设置', (tester) async {
+      await pumpSettings(
+        tester,
+        showAutoSync: true,
+        initial: const SyncSettings(
+          auto: AutoSyncConfig(onLaunch: true, intervalMinutes: 60),
+        ),
+      );
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+      );
+      expect(tile.value, isTrue);
+      expect(find.text('每小时'), findsOneWidget);
+    });
+
+    testWidgets('改动启动同步后出现保存按钮，保存时整份提交', (tester) async {
+      SyncSettings? saved;
+      await pumpSettings(
+        tester,
+        showAutoSync: true,
+        onSave: (s) async => saved = s,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(saved!.auto.onLaunch, isTrue);
+      expect(saved!.auto.intervalMinutes, 0);
+    });
+
+    testWidgets('选择周期档位后保存', (tester) async {
+      SyncSettings? saved;
+      await pumpSettings(
+        tester,
+        showAutoSync: true,
+        onSave: (s) async => saved = s,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('每 3 小时').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(saved!.auto.intervalMinutes, 180);
+    });
+
+    testWidgets('改回「关闭」会真的清掉周期（copyWith 不能吃掉 0）', (tester) async {
+      // `copyWith(intervalMinutes: 0)` 若写成 `?? 保留旧值`，0 是非 null
+      // 所以没问题；但若有人改成「0 视为未传」的写法，用户就再也关不掉。
+      SyncSettings? saved;
+      await pumpSettings(
+        tester,
+        showAutoSync: true,
+        initial: const SyncSettings(
+          auto: AutoSyncConfig(onLaunch: true, intervalMinutes: 60),
+        ),
+        onSave: (s) async => saved = s,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('关闭').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(saved!.auto.intervalMinutes, 0);
+      expect(saved!.auto.onLaunch, isTrue, reason: '只改周期，启动同步保持不变');
+    });
+
+    testWidgets('启用后展示「只拉取不上传 / 首次可能很大」的提示', (tester) async {
+      // 不说清楚会让用户以为「开了自动同步却卡住」——那其实是正在下第一批
+      // （生产实测首次全量 5666 条 / 4.7 GB）。
+      await pumpSettings(tester, showAutoSync: true);
+      expect(
+        find.textContaining('首次同步会拉取全部历史交付物'),
+        findsNothing,
+        reason: '全关时不展示提示（避免无谓的视觉噪音）',
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('自动同步只从云端拉取到本地'), findsOneWidget);
+      expect(find.textContaining('首次同步会拉取全部历史交付物'), findsOneWidget);
+    });
+
+    testWidgets('自动同步的改动参与「有未保存改动」判定', (tester) async {
+      await pumpSettings(tester, showAutoSync: true);
+      expect(find.byKey(const ValueKey('settings-save')), findsNothing);
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-interval')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('每 15 分钟').last);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('settings-save')),
+        findsOneWidget,
+        reason: 'SyncSettings 的相等性必须包含 auto 字段，否则改了看不到保存按钮',
+      );
     });
   });
 

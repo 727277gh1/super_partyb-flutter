@@ -210,6 +210,16 @@ Future<TestHarness> pumpApp(
   /// 设置页注入点：执行清理。
   ExecutePrune? executePrune,
 
+  /// 自动同步调度器。默认 [NoopAutoSyncScheduler]（什么都不做）。
+  ///
+  /// ## 为什么必须可注入
+  ///
+  /// 真实调度器会排一次性 `Timer`（最长 3 小时）。`flutter test` 在用例结束
+  /// 时检查「还有没有未结算的 Timer」，一个 15 分钟的计时器会让**所有**打开
+  /// 过应用壳的用例报 `A Timer is still pending`——而报错指向 `flutter_test`
+  /// 内部，看不出根因是这里。
+  AutoSyncScheduler? autoSyncScheduler,
+
   /// 平台能力。默认空实现（不展示桌面集成项）。
   DesktopCapabilities? capabilities,
 
@@ -393,6 +403,10 @@ Future<TestHarness> pumpApp(
       ),
       runSyncActionProvider.overrideWithValue(
         runSync ?? () async => SyncReport(),
+      ),
+      // 调度器：默认桩（不排任何计时器，见参数文档）。
+      autoSyncSchedulerProvider.overrideWithValue(
+        autoSyncScheduler ?? NoopAutoSyncScheduler(),
       ),
       // 设置页的注入点：全部换成可控假实现（真实的会读库/走网络/扫磁盘）。
       loadSyncSettingsProvider.overrideWithValue(
@@ -713,5 +727,63 @@ class RecordingNotificationSink implements NotificationSink {
   @override
   Future<void> show(LocalNotification notification) async {
     sent.add(notification);
+  }
+}
+
+/// 只记录、不排程的调度器桩（默认值，见 `autoSyncScheduler` 参数说明）。
+///
+/// ## 为什么用 `implements` 而不是继承真身
+///
+/// 真身的价值在 `_tick` / `_armTimer` 的排程逻辑，而那是**另一个包**的单测
+/// 对象（`packages/spb_domain/test/auto_sync_scheduler_test.dart` 用
+/// `fake_async` 逐条钉住）。widget 测试只关心「装配层有没有把正确的配置喂
+/// 进来」，真排一个 15 分钟的计时器只会让 `flutter_test` 报未结算 Timer。
+///
+/// 用 `implements` 明确表达「这里没有排程逻辑」，也避免继承来的 `Timer`
+/// 字段被误用。
+class NoopAutoSyncScheduler implements AutoSyncScheduler {
+  /// 依次收到的配置（断言装配层喂了什么）。
+  final applied = <AutoSyncConfig>[];
+
+  /// `pause` 被调用的次数（登出 / 未就绪时）。
+  int pauseCalls = 0;
+
+  /// `dispose` 被调用的次数。
+  int disposeCalls = 0;
+
+  @override
+  bool isScheduled = false;
+
+  @override
+  bool isRunning = false;
+
+  bool _applied = false;
+
+  @override
+  bool get isApplied => _applied;
+
+  @override
+  Future<void> apply(AutoSyncConfig config) async {
+    applied.add(config);
+    // 镜像真身的语义：未启用的配置等价于 `pause`（见
+    // `AutoSyncScheduler.apply`）。不镜像的话「全关」用例会断言不到任何东西
+    // ——桩会静静地「接受」一个本该被当成暂停的配置。
+    if (!config.isEnabled) {
+      pause();
+      return;
+    }
+    _applied = true;
+  }
+
+  @override
+  void pause() {
+    pauseCalls++;
+    _applied = false;
+  }
+
+  @override
+  void dispose() {
+    disposeCalls++;
+    _applied = false;
   }
 }

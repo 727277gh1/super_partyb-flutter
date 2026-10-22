@@ -60,6 +60,13 @@ void main() {
           '在 Android/iOS 上未实现），未注入即隐藏，'
           '而非展示一个点了必失败的按钮（AGENTS.md §6.10 同一取舍）',
     );
+    expect(
+      find.byKey(const ValueKey('settings-auto-sync-on-launch')),
+      findsNothing,
+      reason:
+          '移动端不装配自动同步排程器（后台定时器在 Android/iOS 上不可靠，'
+          '系统会冻结/杀进程），故不渲染该区块——而不是渲染一个不会生效的开关',
+    );
   });
 
   testWidgets('设置页「默认 Agent」下拉拿到真实 agent 列表（调用点传参）', (tester) async {

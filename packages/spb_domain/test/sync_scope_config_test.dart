@@ -203,5 +203,43 @@ void main() {
       expect(a == a.copyWith(sinceDays: 30), isFalse);
       expect(a == a.copyWith(filter: const SyncFilterConfig()), isFalse);
     });
+
+    test('相等性含自动同步配置', () {
+      // ## 为什么这条必须存在
+      //
+      // 设置页的「有未保存改动」判定是 `_draft != _saved`。若 `auto` 不参与
+      // `==`，用户改了自动同步后**看不到保存按钮**——改动永远无法提交，
+      // 而界面上没有任何错误提示。
+      const a = SyncSettings(localRoot: '/tmp/out');
+      expect(a, const SyncSettings(localRoot: '/tmp/out'));
+      expect(
+        a == a.copyWith(auto: const AutoSyncConfig(onLaunch: true)),
+        isFalse,
+      );
+      expect(
+        a == a.copyWith(auto: const AutoSyncConfig(intervalMinutes: 15)),
+        isFalse,
+      );
+      expect(a.hashCode, const SyncSettings(localRoot: '/tmp/out').hashCode);
+    });
+
+    test('copyWith 能改自动同步，且不影响其余字段', () {
+      const s = SyncSettings(localRoot: '/tmp/out', sinceDays: 7);
+      final next = s.copyWith(
+        auto: const AutoSyncConfig(onLaunch: true, intervalMinutes: 30),
+      );
+      expect(
+        next.auto,
+        const AutoSyncConfig(onLaunch: true, intervalMinutes: 30),
+      );
+      expect(next.localRoot, '/tmp/out');
+      expect(next.sinceDays, 7);
+    });
+
+    test('默认 auto 是全关（自动同步默认关闭）', () {
+      // 首次全量同步生产实测 5666 条 / 4.7 GB——静默替用户拉这么多不可接受。
+      expect(const SyncSettings().auto, AutoSyncConfig.disabled);
+      expect(const SyncSettings().auto.isEnabled, isFalse);
+    });
   });
 }

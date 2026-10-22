@@ -144,6 +144,7 @@ class SettingsPage extends StatefulWidget {
     this.preferenceAgentOptions = const [],
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
+    this.showAutoSync = false,
     this.title = '设置',
   });
 
@@ -262,6 +263,21 @@ class SettingsPage extends StatefulWidget {
   ///
   /// 见 [ExportDiagnostics] 的说明。
   final ExportDiagnostics? onExportDiagnostics;
+
+  /// 是否展示「自动同步」区块（启动时 / 周期）。
+  ///
+  /// ## 为什么必须由装配层显式打开，而不是「有 draft 字段就渲染」
+  ///
+  /// 自动同步的值虽然存在 [SyncSettings.auto] 里（随表单整份提交），但**排程
+  /// 器只在桌面端装配**：移动端没有常驻进程，后台定时器在 Android/iOS 上
+  /// 不可靠（系统会冻结/杀掉），排一个不会响的计时器等于骗用户。
+  ///
+  /// 按「不展示点了没反应的开关」的既有取向（见本类文档的「桌面能力项的
+  /// 显示条件」），移动端传 `false`，该区块整段不渲染——而不是渲染成禁用
+  /// 或渲染后静默不生效。
+  ///
+  /// 默认 `false`：未显式注入时按「本端没有排程器」处理。
+  final bool showAutoSync;
 
   final String title;
 
@@ -633,6 +649,26 @@ class _SettingsPageState extends State<SettingsPage> {
     if (draft == null) return;
     setState(() {
       _draft = draft.copyWith(sinceDays: days, clearSinceDays: days == null);
+      _savedHint = false;
+    });
+  }
+
+  void _setAutoOnLaunch(bool value) {
+    final draft = _draft;
+    if (draft == null) return;
+    setState(() {
+      _draft = draft.copyWith(auto: draft.auto.copyWith(onLaunch: value));
+      _savedHint = false;
+    });
+  }
+
+  void _setAutoInterval(int? minutes) {
+    final draft = _draft;
+    if (draft == null || minutes == null) return;
+    setState(() {
+      _draft = draft.copyWith(
+        auto: draft.auto.copyWith(intervalMinutes: minutes),
+      );
       _savedHint = false;
     });
   }
@@ -1050,6 +1086,67 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
         const SizedBox(height: SpbSpacing.lg),
+
+        // 自动同步：仅桌面端渲染（见 [SettingsPage.showAutoSync] 的说明）。
+        if (widget.showAutoSync) ...[
+          const SectionTitle('自动同步', highlight: true),
+          Card(
+            margin: EdgeInsets.zero,
+            child: Column(
+              children: [
+                SwitchListTile(
+                  key: const ValueKey('settings-auto-sync-on-launch'),
+                  value: draft.auto.onLaunch,
+                  onChanged: _setAutoOnLaunch,
+                  title: const Text('启动后自动同步一次'),
+                  subtitle: const Text('打开应用并完成登录后拉取一轮'),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  title: const Text('周期同步'),
+                  subtitle: const Text('应用运行期间每隔一段时间自动拉取一轮'),
+                  trailing: DropdownButton<int>(
+                    key: const ValueKey('settings-auto-sync-interval'),
+                    value: draft.auto.intervalMinutes,
+                    onChanged: _setAutoInterval,
+                    items: const [
+                      DropdownMenuItem(value: 0, child: Text('关闭')),
+                      DropdownMenuItem(value: 15, child: Text('每 15 分钟')),
+                      DropdownMenuItem(value: 30, child: Text('每 30 分钟')),
+                      DropdownMenuItem(value: 60, child: Text('每小时')),
+                      DropdownMenuItem(value: 180, child: Text('每 3 小时')),
+                    ],
+                  ),
+                ),
+                if (draft.auto.isEnabled) ...[
+                  const Divider(height: 1),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.info_outline, size: 16),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            // 首次全量同步可能很大（生产实测 5666 条 / 4.7 GB）。
+                            // 不说清楚会让用户以为「开了自动同步却卡住」——
+                            // 那其实是正在下第一批。
+                            '自动同步只从云端拉取到本地（不会上传本地改动）。'
+                            '首次同步会拉取全部历史交付物，可能较慢且占用较多流量，'
+                            '可用上方「拉取范围」限制。',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.lg),
+        ],
 
         const SectionTitle('本地数据', highlight: true),
         _StatsCard(

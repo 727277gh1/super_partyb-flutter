@@ -1245,6 +1245,12 @@ const String scopePrefKey = 'sync.scope';
 /// 偏好键：拉取范围（天）。缺省 = 不限历史。
 const String sinceDaysPrefKey = 'sync.since_days';
 
+/// 偏好键：自动同步（JSON，见 [AutoSyncConfig.encode]）。
+///
+/// 与 [scopePrefKey] 同一理由存成单个 JSON 键：`onLaunch` 与
+/// `intervalMinutes` 是一个意图的两个维度，分开存会留下「写了一半」的中间态。
+const String autoSyncPrefKey = 'sync.auto';
+
 /// 触发一轮同步的动作（供同步页注入）。
 ///
 /// ## 为什么每次读最新的目录与配置
@@ -1255,22 +1261,53 @@ const String sinceDaysPrefKey = 'sync.since_days';
 /// 同理，落盘器按**当前**目录新建（`LocalFileSink(root)`），而不是复用一个
 /// 绑定旧目录的实例。
 final runSyncActionProvider = Provider<RunSyncAction>((ref) {
-  return () async {
-    // 标记「同步在途」，供托盘提示显示「同步中…」。
-    //
-    // ## 为什么状态放在 Provider 里而不是页面的 State 里
-    //
-    // 托盘提示是**应用级**的，它看不到同步页的 State；而同步可能由设置页、
-    // 同步页或将来其他入口发起。把「在途」放在一处，所有入口自动生效。
-    //
-    // `finally` 保证异常路径也会复位：否则一次失败会让托盘永远显示
-    // 「同步中…」，用户会以为同步卡死。
-    ref.read(syncInFlightProvider.notifier).set(true);
-    try {
-      return await _runSync(ref);
-    } finally {
-      ref.read(syncInFlightProvider.notifier).set(false);
+  // 单飞（single-flight）：同一时刻只允许一轮同步。
+  //
+  // ## 为什么必须有它（自动同步引入后）
+  //
+  // 现在有三个入口能触发同步：托盘「立即同步交付物」、同步页按钮、自动同步
+  // 调度器。前两者靠用户手动，天然不会同时点；但自动 tick 与手动触发**可以
+  // 重叠**——而 `DeliverableSyncUseCase` 会按 stateKey 读写同一份游标，
+  // 两轮并发推进同一游标不安全（可能互相覆盖，导致已下载的文件被重复下载、
+  // 或未下载的区间被跳过）。
+  //
+  // 语义选择「**复用同一个 Future**」而不是「直接跳过」：手动触发若被静默
+  // 跳过，用户会看到按钮点了没反应、也没有任何进度；复用则让等待方拿到同一
+  // 份结果，UI 的 busy 态自然一致。
+  //
+  // ## 为什么用闭包变量而不是一个 provider
+  //
+  // 它是「正在进行中的调用」这一**瞬态**，不需要被 watch，也不该在重建时
+  // 丢失。放 provider 里反而要处理 dispose/重建的语义（重建会让在途状态
+  // 凭空消失，于是单飞失效）。
+  Future<SyncReport>? inFlight;
+
+  return () {
+    final existing = inFlight;
+    if (existing != null) {
+      SpbLog.debug('同步已在途，复用同一轮结果');
+      return existing;
     }
+    final future = () async {
+      // 标记「同步在途」，供托盘提示显示「同步中…」。
+      //
+      // ## 为什么状态放在 Provider 里而不是页面的 State 里
+      //
+      // 托盘提示是**应用级**的，它看不到同步页的 State；而同步可能由设置页、
+      // 同步页或将来其他入口发起。把「在途」放在一处，所有入口自动生效。
+      //
+      // `finally` 保证异常路径也会复位：否则一次失败会让托盘永远显示
+      // 「同步中…」，用户会以为同步卡死。
+      ref.read(syncInFlightProvider.notifier).set(true);
+      try {
+        return await _runSync(ref);
+      } finally {
+        ref.read(syncInFlightProvider.notifier).set(false);
+        inFlight = null;
+      }
+    }();
+    inFlight = future;
+    return future;
   };
 });
 
@@ -1298,6 +1335,83 @@ class SyncInFlightNotifier extends Notifier<bool> {
     state = value;
   }
 }
+
+/// 自动同步调度器（应用级单例）。
+///
+/// ## 为什么在装配层持有，而不是放进 `SyncSettings` 的读写里
+///
+/// 「什么时候该同步」是**进程生命周期**的事：它跨越设置页的打开与关闭，也
+/// 必须在用户从未打开过设置页时照常工作（配置从偏好读）。放 provider 里由
+/// `ProviderScope` 持有，与 `outboxQueueProvider` 同一取向。
+///
+/// ## 三个触发源，一个调度器
+///
+/// 1. 启动（`app.dart` 预热，见 `_installAutoSync`）；
+/// 2. 登录态变化（登出 → `pause`，登录 → 按配置重新武装）；
+/// 3. 保存设置（新配置立即生效）。
+///
+/// 调度器自身按 `apply` 的配置相等做幂等，故三个源反复喂同一份配置是安全的。
+///
+/// ## 为什么 `onDispose` 必须 dispose
+///
+/// 一次性 `Timer` 持有回调闭包，而闭包又持有 `ref`。不取消的话，测试里
+/// `ProviderContainer.dispose()` 之后计时器仍会在到期时执行——那是
+/// 「测试之间互相污染」的经典来源。
+final autoSyncSchedulerProvider = Provider<AutoSyncScheduler>((ref) {
+  final scheduler = AutoSyncScheduler(
+    run: () async {
+      // 自动轮次**不得**把错误抛给调度器之外：调度器已记日志，但这里也
+      // 需要把「没有目录 / 范围配置不通」这类**配置问题**降级成 debug——
+      // 它们每 15 分钟就会复现一次，用 error 级会淹没真正的故障。
+      try {
+        await ref.read(runSyncActionProvider)();
+      } on PlatformError catch (e) {
+        SpbLog.debug('自动同步跳过：配置尚不完整', {'error': e.message});
+      }
+    },
+  );
+  ref.onDispose(scheduler.dispose);
+  return scheduler;
+});
+
+/// 把当前设置同步到调度器（幂等）。
+///
+/// ## 为什么包成 `Provider<Future<void> Function()>` 而不是一个顶层函数
+///
+/// 调用方有**两种 `ref`**：`app.dart` 里是 `WidgetRef`（组件的 ref），
+/// 设置页的保存闭包里也是 `WidgetRef`，而本文件里是 `Ref`。Riverpod 3 的
+/// 这两个类型**不互相赋值**（`WidgetRef` 不是 `Ref` 的子类型）。收成一个
+/// 无参闭包后，两边都只需 `ref.read(reconcileAutoSyncProvider)()`——不必为
+/// 两种 ref 各写一份实现（两份必然漂移）。
+///
+/// ## 为什么读 `loadSyncSettingsProvider` 而不是 watch 某个 provider
+///
+/// 设置的真源是**偏好 + 目录绑定**（两张表），没有单一 provider 承载它。
+/// 每次现读是既有取向（`_runSync` 也这么做），且这里的调用点都在「明确的
+/// 事件之后」（启动、登录、保存），不是高频路径。
+///
+/// ## 认证未就绪时不武装
+///
+/// `AuthStatus.unknown` 期间（启动读凭证的那一瞬间）发起同步会拿不到
+/// token，白跑一轮并留下一条 401 日志。故只在 `authenticated` 时武装；
+/// 其余状态 `pause`。
+final reconcileAutoSyncProvider = Provider<Future<void> Function()>((ref) {
+  return () async {
+    final scheduler = ref.read(autoSyncSchedulerProvider);
+    final auth = ref.read(authStateProvider);
+    if (!auth.isAuthenticated) {
+      scheduler.pause();
+      return;
+    }
+    final settings = await ref.read(loadSyncSettingsProvider)();
+    // 没目录就不排程：`_runSync` 会抛「请先选择同步目录」，每轮一次纯噪音。
+    if (!settings.canSync) {
+      scheduler.pause();
+      return;
+    }
+    await scheduler.apply(settings.auto);
+  };
+});
 
 /// 一轮同步的实际执行（不含在途状态管理）。
 Future<SyncReport> _runSync(Ref ref) async {
@@ -1508,6 +1622,7 @@ final loadSyncSettingsProvider = Provider<LoadSyncSettings>((ref) {
         ),
       ),
       sinceDays: await _readSinceDays(prefs),
+      auto: AutoSyncConfig.decode(await prefs.getString(autoSyncPrefKey)),
     );
   };
 });
@@ -1543,6 +1658,8 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
     } else {
       await prefs.setInt(sinceDaysPrefKey, value: days);
     }
+
+    await prefs.setString(autoSyncPrefKey, settings.auto.encode());
 
     // 让同步相关 provider 重新读取（设置已变）。
     //

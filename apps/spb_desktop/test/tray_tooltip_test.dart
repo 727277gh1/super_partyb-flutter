@@ -151,6 +151,45 @@ void main() {
       await expectLater(future, throwsA(isA<PlatformError>()));
       expect(container.read(syncInFlightProvider), isFalse);
     });
+
+    test('单飞：在途期间再次触发复用同一轮，不并发跑两遍', () async {
+      // ## 为什么必须有这条
+      //
+      // 自动同步引入后有三个触发源（托盘 / 同步页 / 调度器），**自动 tick
+      // 与手动触发可以重叠**。`DeliverableSyncUseCase` 会按 stateKey 读写同一
+      // 份游标，两轮并发推进不安全（可能重复下载，或跳过未下载的区间）。
+      //
+      // 语义选择「复用同一个 Future」而不是「静默跳过」：手动触发若被跳过，
+      // 用户会看到按钮点了没反应；复用则让等待方拿到同一份结果。
+      var calls = 0;
+      final gate = Completer<SyncSettings>();
+      final container = ProviderContainer(
+        overrides: [
+          loadSyncSettingsProvider.overrideWithValue(() {
+            calls++;
+            return gate.future;
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final run = container.read(runSyncActionProvider);
+      final first = run();
+      final second = run();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(identical(first, second), isTrue, reason: '在途时必须复用同一个 Future');
+      expect(calls, 1, reason: '第二轮不得真的开始读设置（那意味着并发两轮）');
+
+      gate.complete(const SyncSettings());
+      await expectLater(first, throwsA(isA<PlatformError>()));
+      await expectLater(second, throwsA(isA<PlatformError>()));
+      expect(calls, 1);
+
+      // 上一轮结束后，新触发必须能真的再跑一轮（不能永久粘住旧 Future）。
+      await expectLater(run(), throwsA(isA<PlatformError>()));
+      expect(calls, 2, reason: '结束后必须允许新一轮');
+    });
   });
 
   group('TrayTooltipController', () {

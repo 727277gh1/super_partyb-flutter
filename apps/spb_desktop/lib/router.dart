@@ -2311,7 +2311,15 @@ class _SettingsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
       loadSettings: ref.watch(loadSyncSettingsProvider),
-      saveSettings: ref.watch(saveSyncSettingsProvider),
+      saveSettings: (settings) async {
+        await ref.read(saveSyncSettingsProvider)(settings);
+        // 新配置立即生效（不必等下次启动）。
+        //
+        // 失败在 `reconcileAutoSync` 内部降级（读不到偏好就 pause），
+        // 故这里不额外 try：保存本身已成功，排程失败不该让用户看到
+        // 「保存失败」——那会让他以为设置没落盘。
+        await ref.read(reconcileAutoSyncProvider)();
+      },
       loadGroups: ref.watch(loadSyncGroupsProvider),
       scanGroups: ref.watch(scanLocalGroupsProvider),
       executePrune: ref.watch(executePruneProvider),
@@ -2366,6 +2374,9 @@ class _SettingsPage extends ConsumerWidget {
       // 未注入 → 不展示入口（而非展示一个点了必失败的按钮）。
       onExportDiagnostics: () =>
           exportDiagnosticsReport(ref.read(desktopCapabilitiesProvider)),
+      // 自动同步：**仅桌面端**渲染（移动端没有可靠的后台排程，见
+      // `SettingsPage.showAutoSync` 的说明）。
+      showAutoSync: true,
       // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
       onOpenSync: () => context.go(SpbRoutes.sync),
       // 退出登录：清凭证 → 回登录页。

@@ -14,12 +14,13 @@
 /// | 字段 | 落库位置 |
 /// |---|---|
 /// | [localRoot] | `sync_bindings` 表（**不是**偏好表）——见 `DriftSyncStateStore.bindLocalRoot` |
-/// | [scope] / [filter] / [sinceDays] | `preferences` 表 |
+/// | [scope] / [filter] / [sinceDays] / [auto] | `preferences` 表 |
 ///
 /// 目录单独落表是既有设计：它必须与「清空同步状态」同事务。
 library;
 
 import 'deliverable_sync.dart';
+import 'sync_auto_config.dart';
 import 'sync_scope_config.dart';
 
 /// 同步设置。
@@ -29,6 +30,7 @@ class SyncSettings {
     this.scope = const SyncScopeConfig(),
     this.filter = const SyncFilterConfig(),
     this.sinceDays,
+    this.auto = AutoSyncConfig.disabled,
   });
 
   /// 本地同步目录。null = 尚未选择（此时不能同步）。
@@ -44,6 +46,12 @@ class SyncSettings {
   ///
   /// 见 `sync_cursor.dart` 的 `effectiveCursor`：`null` 与 `0` 都表示不限。
   final int? sinceDays;
+
+  /// 自动同步配置（启动时 / 周期）。
+  ///
+  /// 默认 [AutoSyncConfig.disabled]——自动同步**默认关闭**。首次全量同步在
+  /// 生产实测是 5666 条 / 4.7 GB，静默替用户拉这么多不可接受。
+  final AutoSyncConfig auto;
 
   bool get hasLocalRoot => localRoot != null && localRoot!.trim().isNotEmpty;
 
@@ -63,12 +71,14 @@ class SyncSettings {
     SyncScopeConfig? scope,
     SyncFilterConfig? filter,
     int? sinceDays,
+    AutoSyncConfig? auto,
     bool clearSinceDays = false,
   }) => SyncSettings(
     localRoot: localRoot ?? this.localRoot,
     scope: scope ?? this.scope,
     filter: filter ?? this.filter,
     sinceDays: clearSinceDays ? null : (sinceDays ?? this.sinceDays),
+    auto: auto ?? this.auto,
   );
 
   @override
@@ -78,7 +88,8 @@ class SyncSettings {
       other.scope == scope &&
       other.filter.includeMedia == filter.includeMedia &&
       other.filter.maxFileSize == filter.maxFileSize &&
-      other.sinceDays == sinceDays;
+      other.sinceDays == sinceDays &&
+      other.auto == auto;
 
   @override
   int get hashCode => Object.hash(
@@ -87,13 +98,14 @@ class SyncSettings {
     filter.includeMedia,
     filter.maxFileSize,
     sinceDays,
+    auto,
   );
 
   @override
   String toString() =>
       'SyncSettings(root: $localRoot, scope: $scope, '
       'media: ${filter.includeMedia}, maxSize: ${filter.maxFileSize}, '
-      'sinceDays: $sinceDays)';
+      'sinceDays: $sinceDays, auto: $auto)';
 }
 
 /// 本地同步目录的总体统计（设置页「本地统计」展示）。
