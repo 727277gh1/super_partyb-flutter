@@ -212,6 +212,206 @@ void main() {
     });
   });
 
+  group('刷新失败的三态分类（「放置一段时间后被登出」的回归防线）', () {
+    // ## 这个 group 防的是什么
+    //
+    // 2026-10 用户报障：应用放置一段时间后弹「会话已失效」并跳登录页，但
+    // **关闭重开就正常**。根因是一条把「网络抖动」当成「凭证失效」的判定链：
+    //
+    // ```
+    // currentAccessToken → 刷新失败（其实是休眠唤醒后的断网）→ 返回 null
+    //   → 请求不带 Authorization → 401 → 又刷一次 → 又失败
+    //   → onSessionExpired → 回登录页
+    // ```
+    //
+    // 而 refresh_token 完好（所以重启就好了）。下面逐条钉住分类边界。
+
+    Future<TokenRefreshStatus> classify(Object error) async {
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired()),
+        refresher: (_) async => throw error,
+      );
+      return (await m.refreshWithOutcome()).status;
+    }
+
+    test('NetworkError → transient（断网不能把人登出）', () async {
+      expect(
+        await classify(const NetworkError('断网')),
+        TokenRefreshStatus.transient,
+      );
+    });
+
+    test('HttpError(503) → transient（IdP 自己挂了）', () async {
+      expect(
+        await classify(const HttpError(503, 'HTTP 503')),
+        TokenRefreshStatus.transient,
+      );
+    });
+
+    test('HttpError(400) → rejected（请求被拒，重试无用）', () async {
+      expect(
+        await classify(const HttpError(400, 'HTTP 400')),
+        TokenRefreshStatus.rejected,
+      );
+    });
+
+    test('AuthError(cause: HttpError(500)) → transient', () async {
+      // ⚠️ 这是**真实链路**的形态：`OidcClient._tokenRequest` 对任何非 2xx 都抛
+      // `AuthError(message, cause: HttpError(status))`。只看最外层类型会把
+      // 「IdP 回了 503」也当成「凭证作废」——同一缺陷的另一条路径。
+      expect(
+        await classify(
+          const AuthError('token 端点失败', cause: HttpError(503, 'HTTP 503')),
+        ),
+        TokenRefreshStatus.transient,
+      );
+    });
+
+    test('AuthError(cause: HttpError(400)) → rejected', () async {
+      // invalid_grant / invalid_client 的真实形态。
+      expect(
+        await classify(
+          const AuthError('invalid_grant', cause: HttpError(400, 'HTTP 400')),
+        ),
+        TokenRefreshStatus.rejected,
+      );
+    });
+
+    test('AuthError 无 cause → rejected（登录流程本身的拒绝）', () async {
+      expect(
+        await classify(const AuthError('state 不匹配')),
+        TokenRefreshStatus.rejected,
+      );
+    });
+
+    test('ParseError → transient（契约漂移不该把人登出）', () async {
+      expect(
+        await classify(const ParseError('响应不是 JSON')),
+        TokenRefreshStatus.transient,
+      );
+    });
+
+    test('非 SpbError 的异常 → transient（无法归因时保守）', () async {
+      expect(await classify(StateError('boom')), TokenRefreshStatus.transient);
+    });
+
+    test('刷新实现返回 null → rejected（它明确表示无可用结果）', () async {
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired()),
+        refresher: (_) async => null,
+      );
+      expect(
+        (await m.refreshWithOutcome()).status,
+        TokenRefreshStatus.rejected,
+      );
+    });
+
+    test('本地无 refresh_token → rejected（确定的无法续期）', () async {
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired(refresh: null)),
+        refresher: (_) async => fresh(),
+      );
+      expect(
+        (await m.refreshWithOutcome()).status,
+        TokenRefreshStatus.rejected,
+      );
+    });
+
+    test('刷新成功 → refreshed 且带新凭证', () async {
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired()),
+        refresher: (_) async => fresh(access: 'at_ok'),
+      );
+      final outcome = await m.refreshWithOutcome();
+      expect(outcome.status, TokenRefreshStatus.refreshed);
+      expect(outcome.tokens!.accessToken, 'at_ok');
+    });
+
+    test('并发调用只刷新一次（refreshWithOutcome 同样去重）', () async {
+      var refreshes = 0;
+      final gate = Completer<void>();
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired()),
+        refresher: (_) async {
+          refreshes++;
+          await gate.future;
+          return fresh();
+        },
+      );
+
+      final futures = List.generate(3, (_) => m.refreshWithOutcome());
+      gate.complete();
+      await Future.wait(futures);
+      expect(refreshes, 1);
+    });
+  });
+
+  group('currentAccessToken 在刷新失败时的取信策略', () {
+    test('暂时性失败时返回**旧** token（交给服务端判定，而非匿名请求）', () async {
+      // ## 这是整个修复的核心
+      //
+      // 返回 null 会让 `AuthInterceptor` 发出**匿名**请求（连 Authorization 头
+      // 都不带）——那必然 401，而那个 401 又被当成「会话失效」把人登出。
+      // 旧 token 可能仍被服务端接受（时钟偏移 / 服务端宽限），就算不接受，
+      // 也让服务端而不是客户端来做这个判断。
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired(access: 'at_stale')),
+        refresher: (_) async => throw const NetworkError('断网'),
+      );
+
+      expect(
+        await m.currentAccessToken(),
+        'at_stale',
+        reason: '断网时不能降级成匿名请求——那必然 401 并导致误登出',
+      );
+    });
+
+    test('明确被拒时返回 null（确实需要重新登录）', () async {
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired()),
+        refresher: (_) async =>
+            throw const AuthError('invalid_grant', cause: HttpError(400, 'x')),
+      );
+
+      expect(await m.currentAccessToken(), isNull);
+    });
+
+    test('刷新成功时返回新 token', () async {
+      final m = SessionManager(
+        store: InMemoryTokenStore(expired()),
+        refresher: (_) async => fresh(access: 'at_new'),
+      );
+
+      expect(await m.currentAccessToken(), 'at_new');
+    });
+
+    test('未过期时直接用缓存的 token（不触发刷新）', () async {
+      var refreshes = 0;
+      final m = SessionManager(
+        store: InMemoryTokenStore(fresh(access: 'at_cached')),
+        refresher: (_) async {
+          refreshes++;
+          return fresh();
+        },
+      );
+
+      expect(await m.currentAccessToken(), 'at_cached');
+      expect(refreshes, 0);
+    });
+
+    test('临时失败后旧凭证仍在存储里（不 clear）', () async {
+      final store = InMemoryTokenStore(expired());
+      final m = SessionManager(
+        store: store,
+        refresher: (_) async => throw const NetworkError('断网'),
+      );
+
+      await m.currentAccessToken();
+      expect(await store.read(), isNotNull);
+      expect(store.clearCount, 0);
+    });
+  });
+
   group('SessionManager 刷新结果处理', () {
     test('刷新后写回存储', () async {
       final store = InMemoryTokenStore(expired());
@@ -603,6 +803,137 @@ void main() {
       } on DioException catch (e) {
         expect(e.error, isA<AuthError>());
       }
+    });
+  });
+
+  group('AuthInterceptor：刷新暂时性失败时**不得**登出', () {
+    // ## 这个 group 防的是什么
+    //
+    // `onSessionExpired` 是「回登录页」的唯一触发点。一旦它把网络抖动也当成
+    // 会话失效，用户就会「放置一段时间后被踢出去，而关闭重开又正常」。
+    //
+    // 两条用例分别钉住相反方向：transient 不能登出（否则复发）、
+    // rejected 必须登出（否则真失效时用户卡在页面上）。
+
+    test('401 且刷新为 transient → 不调 onSessionExpired、不重放', () async {
+      final scripted = _Always401Adapter();
+      final messages = <String>[];
+      var refreshes = 0;
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 'stale',
+        onUnauthorizedOutcome: () async {
+          refreshes++;
+          return const TokenRefreshOutcome.transient(error: NetworkError('断网'));
+        },
+        onSessionExpired: messages.add,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('应当抛出 DioException');
+      } on DioException catch (e) {
+        // 仍归一化为 AuthError（上层能识别这是凭证问题），但不触发登出。
+        expect(e.error, isA<AuthError>());
+      }
+
+      expect(messages, isEmpty, reason: '断网不是会话失效，不能把人踢回登录页');
+      expect(refreshes, 1, reason: '只尝试刷新一次');
+      expect(scripted.calls, 1, reason: '暂时性失败不重放（重放也必然失败）');
+    });
+
+    test('401 且刷新为 rejected → 调 onSessionExpired 一次', () async {
+      final scripted = _Always401Adapter();
+      final messages = <String>[];
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 'stale',
+        onUnauthorizedOutcome: () async => const TokenRefreshOutcome.rejected(
+          error: AuthError('invalid_grant'),
+        ),
+        onSessionExpired: messages.add,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('应当抛出 DioException');
+      } on DioException catch (e) {
+        expect(e.error, isA<AuthError>());
+      }
+
+      expect(messages, ['会话已失效，请重新登录']);
+    });
+
+    test('onUnauthorizedOutcome 刷新成功 → 重放并带新 token', () async {
+      final scripted = _ScriptedAdapter();
+      var token = 'stale';
+      final auth = AuthInterceptor(
+        tokenProvider: () async => token,
+        onUnauthorizedOutcome: () async {
+          token = 'fresh';
+          return TokenRefreshOutcome.refreshed(
+            StoredTokens(
+              accessToken: 'fresh',
+              expiresAt: DateTime.utc(2999, 1, 1),
+            ),
+          );
+        },
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      final res = await client.get<dynamic>('/x');
+
+      expect(res.statusCode, 200);
+      expect(scripted.calls, 2);
+      expect(scripted.seenAuth, ['Bearer stale', 'Bearer fresh']);
+    });
+
+    test('onUnauthorizedOutcome 优先级高于旧的布尔回调', () async {
+      // 两个都配时只认新的——否则升级到一半的接线会拿到错的三态。
+      final scripted = _Always401Adapter();
+      final messages = <String>[];
+      var legacyCalled = 0;
+      final auth = AuthInterceptor(
+        tokenProvider: () async => 'stale',
+        onUnauthorized: () async {
+          legacyCalled++;
+          return true;
+        },
+        onUnauthorizedOutcome: () async =>
+            const TokenRefreshOutcome.transient(error: NetworkError('断网')),
+        onSessionExpired: messages.add,
+      );
+      final client = createDio(
+        baseUrl: 'https://api.test/pba',
+        interceptors: [auth],
+      );
+      client.httpClientAdapter = scripted;
+      auth.replayDio = client;
+
+      try {
+        await client.get<dynamic>('/x');
+        fail('应当抛出 DioException');
+      } on DioException {
+        // 预期
+      }
+
+      expect(legacyCalled, 0, reason: '新回调优先，旧回调不应被调用');
+      expect(messages, isEmpty);
     });
   });
 }

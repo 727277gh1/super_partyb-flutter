@@ -231,12 +231,15 @@ final dioProvider = Provider<Dio>((ref) {
     tokenProvider: tokenProvider,
     // 生产为 null（见 devUserHeaderOverrideProvider 的说明）。
     userHeaderOverride: override,
-    // 401 时刷新凭证并重放原请求。返回 false（无法刷新）则归一化为
-    // AuthError，并由下面的 onSessionExpired 推进认证状态。
-    onUnauthorized: () async {
-      final refreshed = await manager.refresh();
-      return refreshed != null;
-    },
+    // 401 时刷新凭证并重放原请求。用 `refreshWithOutcome` 而非 `refresh`：
+    //
+    // 刷新失败有**两种含义相反**的情形（见 `TokenRefreshStatus`）：
+    // - 服务端明确拒绝（`invalid_grant`）→ 确实该回登录页；
+    // - 网络层失败（休眠唤醒 / 切网）→ **保留登录态**，下次请求再试。
+    //
+    // 用旧的布尔回调会把后者也当成「无法刷新」，于是「放置一段时间就被登出、
+    // 关闭重开又正常」（2026-10 用户报障）。
+    onUnauthorizedOutcome: manager.refreshWithOutcome,
     onSessionExpired: _sessionExpiredHandler(ref),
   );
 
@@ -1117,10 +1120,8 @@ final ufsDioProvider = Provider<Dio>((ref) {
   final auth = AuthInterceptor(
     tokenProvider: tokenProvider,
     userHeaderOverride: override,
-    onUnauthorized: () async {
-      final refreshed = await manager.refresh();
-      return refreshed != null;
-    },
+    // 与 [dioProvider] 同一取向：三态结论，暂时性失败不登出。
+    onUnauthorizedOutcome: manager.refreshWithOutcome,
     // UFS 请求也会 401（同一个网关会话）。必须与 [dioProvider] 接到**同一个**
     // 状态推进点，否则「文件预览失败」不会把人带回登录页。
     onSessionExpired: _sessionExpiredHandler(ref),

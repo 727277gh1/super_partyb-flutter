@@ -4,6 +4,8 @@ import 'package:dio/dio.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'token_store.dart';
+
 /// 认证头注入器 + 401/403 归一化 + 刷新后重放。
 ///
 /// ## 认证模型（重要）
@@ -22,6 +24,7 @@ class AuthInterceptor extends Interceptor {
     required this.tokenProvider,
     this.userHeaderOverride,
     this.onUnauthorized,
+    this.onUnauthorizedOutcome,
     this.onSessionExpired,
   });
 
@@ -41,7 +44,34 @@ class AuthInterceptor extends Interceptor {
   ///
   /// 由 `SessionManager.refresh` 实现。为 null 时不做刷新，401 直接归一化为
   /// [AuthError]。
+  ///
+  /// ## 新代码请用 [onUnauthorizedOutcome]
+  ///
+  /// 它把失败分成「明确被拒」与「暂时性失败」，避免一次断网就把用户登出
+  /// （见 [TokenRefreshStatus]）。本字段保留只为兼容既有构造点与测试。
   final Future<bool> Function()? onUnauthorized;
+
+  /// 401 时的刷新回调（**带三态结论**）。
+  ///
+  /// 由 `SessionManager.refreshWithOutcome` 实现。优先级高于
+  /// [onUnauthorized]（两者同时配置时只用本字段）。
+  ///
+  /// ## 为什么需要三态（一个真实缺陷）
+  ///
+  /// 2026-10 用户报障「放置一段时间后跳到登录页，关闭重开又正常」。根因是
+  /// 笔记本休眠 / 切网后第一个请求的刷新因**连接层失败**返回 null，被当成
+  /// 「凭证失效」：
+  ///
+  /// ```
+  /// currentAccessToken → 刷新失败（其实是断网）→ 返回 null
+  ///   → 请求不带 Authorization → 401 → 又刷一次 → 又失败
+  ///   → onSessionExpired → 回登录页
+  /// ```
+  ///
+  /// 而 refresh_token 完好，所以「关闭重开」（新进程的网络栈干净）就正常了。
+  /// 拿到 [TokenRefreshStatus.transient] 时本拦截器**不会**调
+  /// [onSessionExpired]，只把原错误抛给调用方（页面提示「网络异常」）。
+  final Future<TokenRefreshOutcome> Function()? onUnauthorizedOutcome;
 
   /// 会话**确定**失效时的通知（401 且刷新重放也没救回来）。
   ///
@@ -116,9 +146,26 @@ class AuthInterceptor extends Interceptor {
 
     // 只有 401 值得刷新：403 是「已认证但无权限」，刷新 token 也变不出权限。
     if (status == 401) {
-      final refreshed = await _tryRefreshAndReplay(err, handler);
-      if (refreshed) return;
-      SpbLog.warn('收到 401，会话凭证可能已失效');
+      final outcome = await _tryRefreshAndReplay(err, handler);
+      if (outcome.handled) return;
+
+      // ## 暂时性失败：**不登出**（这是「放置一段时间后被登出」的修法）
+      //
+      // 刷新因断网 / 超时 / IdP 5xx 失败时，我们**无法判定**凭证是否有效。
+      // 此时通知 onSessionExpired 等于把一次网络抖动升级成强制重新登录。
+      // 只把原错误抛给调用方，由页面提示「网络异常」——用户恢复网络后
+      // 下一次请求会自己刷成功（凭证一直保留在存储里）。
+      if (outcome.isTransient) {
+        SpbLog.warn('401 且凭证刷新暂时失败，保留登录态（不跳登录页）', {
+          'path': err.requestOptions.path,
+          'error': outcome.error.toString(),
+        });
+        // 仍归一化为 AuthError 让上层能识别「这是凭证问题」，但不触发登出。
+        handler.next(_normalizeAuthError(err));
+        return;
+      }
+
+      SpbLog.warn('收到 401，会话凭证已失效');
       // 通知装配层把认证状态推进到未登录（由路由守卫做唯一一次重定向）。
       //
       // 不在此处导航：拦截器不应有导航副作用（可能同时多个请求触发）。
@@ -140,24 +187,40 @@ class AuthInterceptor extends Interceptor {
     handler.next(_normalizeAuthError(err));
   }
 
-  /// 刷新凭证并重放原请求。返回 true 表示已 resolve（调用方不应再继续处理）。
-  Future<bool> _tryRefreshAndReplay(
+  /// 刷新凭证并重放原请求。
+  ///
+  /// 返回值三态（而不是 bool）是因为「刷新失败」有两种含义相反的处置，
+  /// 见 [TokenRefreshStatus] 与 [onUnauthorizedOutcome] 的说明：
+  ///
+  /// - `handled == true`：已 resolve（重放成功，或重放仍 401 并已通知登出）；
+  /// - `isTransient == true`：无法判定凭证有效性 → 调用方**不得**登出；
+  /// - 其余：确定失效 → 调用方应通知登出。
+  Future<_RefreshResult> _tryRefreshAndReplay(
     DioException err,
     ErrorInterceptorHandler handler,
   ) async {
-    final refresh = onUnauthorized;
     final dio = replayDio;
-    if (refresh == null || dio == null) return false;
-    if (err.requestOptions.extra[_retriedKey] == true) return false;
-
-    bool refreshed;
-    try {
-      refreshed = await refresh();
-    } catch (e) {
-      SpbLog.warn('刷新会话凭证时异常', {'error': e.toString()});
-      return false;
+    // 两个回调都没配：无从刷新，交给调用方按「确定失效」处理。
+    if (dio == null ||
+        (onUnauthorized == null && onUnauthorizedOutcome == null)) {
+      return const _RefreshResult.failed();
     }
-    if (!refreshed) return false;
+    if (err.requestOptions.extra[_retriedKey] == true) {
+      return const _RefreshResult.failed();
+    }
+
+    TokenRefreshOutcome outcome;
+    try {
+      outcome = await _refreshOnce();
+    } catch (e) {
+      // 刷新实现自己抛了（理论上不该：它内部已 catch）：无法归因，按暂时性
+      // 处理——保守方向很重要，把未知错误当成「凭证失效」会随机把人登出。
+      SpbLog.warn('刷新会话凭证时异常', {'error': e.toString()});
+      return _RefreshResult.transient(e);
+    }
+
+    if (outcome.isTransient) return _RefreshResult.transient(outcome.error);
+    if (!outcome.isRefreshed) return const _RefreshResult.failed();
 
     // 重放：复制原请求并把新 token 交给 onRequest 重新注入。
     // 打上标记避免「刷新成功但服务端仍 401」时无限循环。
@@ -170,7 +233,7 @@ class AuthInterceptor extends Interceptor {
       final response = await dio.fetch<dynamic>(options);
       SpbLog.debug('401 后刷新凭证并重放成功', {'path': options.path});
       handler.resolve(response);
-      return true;
+      return const _RefreshResult.handled();
     } on DioException catch (e) {
       // 重放也失败：按重放响应归一化（它带着更准确的状态码）。
       //
@@ -184,8 +247,28 @@ class AuthInterceptor extends Interceptor {
         onSessionExpired?.call(mapped.message);
       }
       handler.next(normalized);
-      return true;
+      return const _RefreshResult.handled();
     }
+  }
+
+  /// 调一次刷新，统一成 [TokenRefreshOutcome]。
+  ///
+  /// [onUnauthorizedOutcome] 优先；回退到旧的布尔回调时，`false` 一律当作
+  /// 「确定失效」——旧回调没有能力表达「暂时性」，那是它被替换的原因。
+  ///
+  /// 旧路径不校验「新凭证是否真的落盘」：`onRequest` 会在重放时重新读存储，
+  /// 若没刷成则重放仍 401，会走到 `_tryRefreshAndReplay` 的重放失败分支
+  /// （那里会通知登出）。多一次往返，但只影响已弃用的旧回调。
+  Future<TokenRefreshOutcome> _refreshOnce() async {
+    final withOutcome = onUnauthorizedOutcome;
+    if (withOutcome != null) return withOutcome();
+
+    final ok = await onUnauthorized!();
+    // 旧回调只回 bool，没有凭证可传；`refreshed` 的 `tokens` 为 null，
+    // 重放时由 `onRequest` 重新注入（那里才是唯一的 token 来源）。
+    return ok
+        ? const TokenRefreshOutcome.refreshed(null)
+        : const TokenRefreshOutcome.rejected();
   }
 
   /// 把 401/403 归一化为 [AuthError]。
@@ -212,6 +295,32 @@ class AuthInterceptor extends Interceptor {
       stackTrace: err.stackTrace,
     );
   }
+}
+
+/// 刷新 + 重放的内部三态结果。
+///
+/// 与 [TokenRefreshOutcome] 的区别：它额外包含「已处理完毕（handler 已被
+/// resolve 或 reject）」这一终态，调用方据此决定要不要继续走 onError 的后续。
+class _RefreshResult {
+  const _RefreshResult._({
+    required this.handled,
+    this.isTransient = false,
+    this.error,
+  });
+
+  /// 已 resolve（重放成功）或已 reject（重放仍 401 且已通知登出）。
+  const _RefreshResult.handled() : this._(handled: true);
+
+  /// 无法判定凭证有效性（断网 / 超时 / IdP 5xx）——调用方**不得**登出。
+  const _RefreshResult.transient(Object? error)
+    : this._(handled: false, isTransient: true, error: error);
+
+  /// 确定失效（服务端拒绝 / 无 refresh_token / 未配置刷新）。
+  const _RefreshResult.failed() : this._(handled: false);
+
+  final bool handled;
+  final bool isTransient;
+  final Object? error;
 }
 
 /// 把 dio 异常统一转成 [SpbError]，使上层只处理一种错误类型。

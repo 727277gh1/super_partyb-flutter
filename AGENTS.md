@@ -4003,6 +4003,99 @@ fallback（`tool_call_tile.dart` ×2、`group_gate_panel.dart` ×1），现统�
 
 ---
 
+### 6.39 放置一段时间后被登出、关闭重开又正常：一次断网被当成「凭证失效」
+
+**症状**：应用放一段时间（笔记本合盖 / 切网）后，第一次操作弹「会话已失效，
+请重新登录」并跳回登录页。而**关掉重开就一切正常**——凭证一直在安全存储里。
+
+#### 根因：刷新失败的两种含义被合并成了一种
+
+`SessionManager.currentAccessToken()` 曾是这样：
+
+```dart
+final refreshed = await refresh();   // 失败（无论为什么）都返回 null
+return refreshed?.accessToken;       // → null
+```
+
+而 `_doRefresh()` 用 `catch (e) { return null; }` 把**所有**失败折叠成 null：断网、
+超时、IdP 503、`invalid_grant` 全长得一样。于是：
+
+```
+休眠唤醒 → 刷新因连接层失败返回 null
+  → 请求不带 Authorization（匿名）→ 必然 401
+  → 拦截器再刷一次 → 又失败 → onUnauthorized 返回 false
+  → onSessionExpired → 回登录页
+```
+
+`markUnauthenticated` **不清凭证**（§6.34 的有意设计），所以重开应用后
+`restore()` 读到完好的 refresh_token、网络栈也是干净的 → 刷新成功。这正是
+「重启就好」的来源，也是本缺陷的确认证据。
+
+#### 修法：三态结论 + 「让服务端判定」
+
+`spb_api` 的 `token_store.dart` 新增 `TokenRefreshStatus`（`refreshed` /
+`rejected` / `transient`）与 `TokenRefreshOutcome`。判据是**「这个失败是否携带
+了关于凭证有效性的信息」**——网络层错误从不携带。
+
+| 结论 | 触发 | 处置 |
+|---|---|---|
+| `refreshed` | 拿到新凭证并已落盘 | 继续 |
+| `rejected` | 无 refresh_token / `invalid_grant` / 4xx | 回登录页 |
+| `transient` | `NetworkError` / `ParseError` / 5xx / 未知 | **保留登录态** |
+
+两处协同才修好：
+
+| 位置 | 改动 |
+|---|---|
+| `SessionManager.currentAccessToken` | `transient` 时返回**旧 token**（而不是 null）。发匿名请求等于替服务端提前判了「已失效」；拿旧 token 再试，让唯一有权限判定的角色回答 |
+| `AuthInterceptor.onError` | 拿到 `transient` 时**不调** `onSessionExpired`，也不重放（重放必然失败），把原 401 归一化为 `AuthError` 抛给页面提示「网络异常」 |
+
+#### ⚠️ 必须下探 `AuthError.cause`（最易写错的一处）
+
+`OidcClient._tokenRequest` 对**任何**非 2xx 都抛
+`AuthError(message, cause: HttpError(status))`——最外层永远是 `AuthError`，
+`statusCode` 字段是 null（它只描述「登录失败」），真正的状态码在 `cause` 里。
+
+只按最外层类型判的话，`AuthError → rejected` 会把「IdP 回了 503」也当成「凭证
+被作废」——那是同一缺陷的另一条路径（IdP 重启期间所有用户被登出）。故
+`_statusOf` 对 `AuthError` 显式下探 `cause`。
+
+#### 三处接口取向
+
+| 项 | 决定 | 理由 |
+|---|---|---|
+| 保留 `onUnauthorized`（旧布尔回调） | 保留，`onUnauthorizedOutcome` 优先 | 既有测试与第三方接线不受影响；旧回调无能力表达 transient（`false` 一律当 `rejected`），这本身就是它被替换的原因 |
+| `refresh()` 仍返回 `StoredTokens?` | 保留为 `refreshWithOutcome()` 的薄包装 | 6 处既有调用点与测试依赖它；新代码一律用带三态的那个 |
+| 未知错误 | `transient` | 把未知错误当「凭证失效」会随机把人登出。保守方向必须偏向「保留登录态」 |
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 失败用例数 |
+|---|---|
+| `currentAccessToken` 的 transient 分支返回 null（修复前行为） | 1（`暂时性失败时返回**旧** token`） |
+| 拦截器去掉 `if (outcome.isTransient)` 守卫 | 2 |
+| `AuthError` 一律 `rejected`（不看 `cause`） | 1 |
+| `rejected` 时不调 `onSessionExpired`（反方向） | 2 |
+| `NetworkError` 分类改成 `rejected` | 2 |
+
+#### 新增用例（`session_manager_test.dart` +21 条）
+
+| group | 钉住 |
+|---|---|
+| 刷新失败的三态分类 | 9 种错误形态的归类（含 `AuthError(cause: HttpError(5xx))` 这个真实链路形态、`ParseError`、非 `SpbError`） |
+| `currentAccessToken` 的取信策略 | transient 返回旧 token / rejected 返回 null / 成功返回新 token / 未过期不刷新 / 临时失败不 clear |
+| 拦截器 transient 不登出 | transient → 不调回调、不重放、`calls == 1`；rejected → 调一次；新回调优先于旧回调 |
+
+#### 有意不做
+
+- **不在 `AuthInterceptor` 里自动重试**：transient 之后立刻重试会在真断网时
+  变成一个紧凑的失败循环。重试权属于用户操作与 `OutboxQueue`。
+- **不做全局「网络恢复后自动重试」**：那需要订阅连通性事件，而 §5.1.1 已明确
+  「有默认路由 ≠ 服务端可达」——`connectivity_plus` 给不出可信信号。下一次
+  用户操作会自己刷新成功。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
@@ -4327,6 +4420,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：两个独立的 Windows 缺陷。① **URL 与路径必须用不同命令**——原先一律 `explorer`，而 `explorer <带 query 的 URL>` 打开的是**文件浏览器**（microsoft/WSL#3832），而 OIDC 授权 URL 必然带 8 个 query 参数，故每次 SSO 登录都会「成功」地打开一个空窗口、客户端继续等 loopback 回调。现 URL → `rundll32 url.dll,FileProtocolHandler`，路径 → `explorer`；`looksLikeUrl` 只认 `scheme://`（**不能**用 `Uri.parse().scheme`——它把 `C:\Users\me` 解成 `scheme=c`，会让每个 Windows 路径都走 URL 分支）。② **`explorer` 成功也返回 1**（microsoft/WSL#6565），原先按「非 0 即失败」判定 → 每次成功打开都被判失败。现 Windows 成功集合为 `{0,1}`，其余平台仍 `{0}`；`rundll32` 分支的退出码恒为 0，故用 `exitCodeIsMeaningful = false` **显式跳过**判定（代价：URL 打不开时靠上层 5 分钟超时兜底，不再有即时错误）。共 8 条新用例 + 5 项反向验证逐条实测。⚠️ 修复前测试有**两个假绿**：假 runner 一律返回 `exitCode = 0`；`windows 用 explorer` 那条用例传的是**路径**，于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 | §6.35 |
 | ~~登录成功后**立刻**提示「会话已失效」并被踢回登录页（Windows 用户报障）~~ | ✅ 已修（§6.37）：客户端把 IdP 的 `access_token` 当 Bearer 发给网关，而那是 **fosite 不透明串**（`ory_at_…`，无点号）。网关的 `jwt_authenticate.go`（JWKS+RS256）与 `oidc_auth.go`（go-oidc compact JWS）**都要求三段式**，分别报「token contains an invalid number of segments」/「compact JWS format must have three parts」→ 登录刚完成就 401 → `onSessionExpired` 踢人。修法：`OidcTokens.bearerToken`（`idToken ?? accessToken`）+ `StoredTokens.fromOidcTokens` 单点转换，四端（两端登录 + 两端刷新）全部改用它。**与 `tbcc6.atjog.com` 无关**（登录走编译期 issuer，端点升级只改 API/UFS host）。⚠️ 修复前测试全绿：既有用例只断言 `OidcTokens` 原始字段或动作调用次数，而移动端 `onCode` **零覆盖**（内联在 provider 闭包里，只能从 `main.dart` 触达）——故另加了两个注入点（`loopbackSignInProvider` / `oidcCallbackHandlerProvider`）让落盘逻辑可测 | §6.37 |
 | ~~登录成功后客户端仍停在登录页（重启就好）~~ | ✅ 已修（§6.36）：`AuthStateNotifier.signIn()` 收尾**无条件**写 `state = unknown`，那是给旧实现（`openGatewaySignIn` 只发起、等浏览器 Cookie 回调）留的分支。而 `2d453cf` 换成 RFC 8252 loopback 后 `signInAction` 是**同步等到 token** 的——它在内部落盘并调 `signedIn()`，返回时状态已是 `authenticated`，随后被这条无条件赋值盖回 `unknown`。守卫对 `unknown` 明确放行（§6.34 的启动期语义），于是**永远停在 `/login`**，而凭证其实已在安全存储里（重启走 `restore()` 就正常，这也是「为什么重启就好」）。现判据改为「**别把已登录改回未判定**」（`if (!state.isAuthenticated)`），两端一并修（移动端回调接收器可能在 `signIn()` 返回前就完成）。两端各补 1 条从按钮出发的端到端用例；⚠️ 修复前测试有**两个假绿**——一条只断言「动作被调用 1 次」不看状态，另一条绕过 `signIn()` 直接调 `signedIn()` | §6.36 |
+| ~~放置一段时间后被登出、关闭重开又正常~~ | ✅ 已修（§6.39）：`SessionManager` 曾把**所有**刷新失败折叠成 `null`（断网、超时、IdP 503、`invalid_grant` 全长得一样），而 `currentAccessToken()` 返回 null 会让拦截器发出**匿名**请求——那必然 401，而那个 401 又被当成「会话失效」把人登出。凭证其实完好，所以重开应用（新进程网络栈干净）就正常。修法：新增三态 `TokenRefreshStatus`（`refreshed` / `rejected` / `transient`），判据是「这个失败是否携带关于凭证有效性的信息」——网络层错误从不携带。① `currentAccessToken` 在 transient 时返回**旧 token**（交给服务端判定，而不是替它提前判「已失效」）；② 拦截器拿到 transient 时**不调** `onSessionExpired`、不重放，只把 401 归一化为 `AuthError` 让页面提示网络异常。⚠️ **最易写错的一处**：`OidcClient._tokenRequest` 对任何非 2xx 都抛 `AuthError(cause: HttpError(status))`，只按最外层类型判会把「IdP 回了 503」也当成「凭证作废」——必须下探 `cause`。旧布尔回调 `onUnauthorized` 保留（新回调优先，`false` 一律当 rejected），`refresh()` 保留为 `refreshWithOutcome()` 的薄包装以兼容 6 处既有调用点。新增 21 条用例，5 项反向验证逐条实测 | §6.39 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |
