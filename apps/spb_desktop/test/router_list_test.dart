@@ -373,15 +373,10 @@ void main() {
       },
     );
 
+    // 新建不再需要输入标题：点一下就用默认占位标题建（见 GroupListPage 的
+    // `defaultGroupTitle`）。
     await tester.tap(find.byKey(const ValueKey('group-list-create')));
     await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byKey(const ValueKey('group-create-field')),
-      '新对话',
-    );
-    // 必须 pump 一帧让确认按钮解除禁用（见 GroupListPage 测试里的说明）。
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('group-create-confirm')));
 
     // 不能 pumpAndSettle：对话页的加载态是无限动画（同搜索跳转用例）。
     await tester.pump();

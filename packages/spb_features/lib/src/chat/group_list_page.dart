@@ -13,6 +13,16 @@ import 'package:spb_models/spb_models.dart';
 
 import 'group_management.dart';
 
+/// 新建对话时使用的**默认占位标题**。
+///
+/// 建对话不需要用户输入标题（见 [GroupListPage.onCreateGroup] 的说明），
+/// 故这里给一个固定占位，用户在对话设置里可随时改名。
+///
+/// 选「新对话」而非服务端的「新对话组」：后者是 `createGroup` 的**服务端**
+/// 兜底文案，而这里是我们主动发的值——两端（本页与 webapp）展示的都是用户
+/// 主动看到的那个词，保持一致即可。
+const String defaultGroupTitle = '新对话';
+
 /// 对话列表页（offset 分页）。
 ///
 /// ## 分页约定：offset 而非游标
@@ -65,14 +75,16 @@ class GroupListPage extends StatefulWidget {
   /// 点击某个对话时的回调。
   final void Function(ChatGroup group)? onOpenGroup;
 
-  /// 新建对话：入参是用户在对话框里输入的标题，返回值是服务端创建的**权威**
-  /// [ChatGroup]。
+  /// 新建对话：入参是标题，返回值是服务端创建的**权威** [ChatGroup]。
+  ///
+  /// 标题由本页给**默认占位**（[defaultGroupTitle]），用户不需要输入——点
+  /// 「新建对话」即建即进，之后再在对话设置里改名。这是 webapp 的既有取向
+  /// （`use-workbench-state.ts` 的 `createGroup(title?)` 也是可选的）。
   ///
   /// ## 为什么页面不自己调 `ChatApi.createGroup`
   ///
-  /// 与 [onGroupAction] 同一理由：页面只收集意图（对话框里的标题），请求与错误
-  /// 翻译归调用方。页面拿返回值做两件事——插到列表最前、交给 [onOpenGroup]
-  /// 导航进该对话。
+  /// 与 [onGroupAction] 同一理由：页面只收集意图，请求与错误翻译归调用方。
+  /// 页面拿返回值做两件事——插到列表最前、交给 [onOpenGroup] 导航进该对话。
   ///
   /// 为 null 时**不展示**新建入口：入口存在但点了没反应，比没有入口更糟。
   final Future<ChatGroup> Function(String title)? onCreateGroup;
@@ -510,25 +522,24 @@ class _GroupListPageState extends State<GroupListPage> {
     await _loadMore();
   }
 
-  /// 收集标题并创建对话，成功后进入该对话。
+  /// 用默认占位标题创建对话，成功后进入该对话。
+  ///
+  /// ## 为什么不弹「输入标题」对话框
+  ///
+  /// 建对话的**真实意图**是「开一个干净上下文继续聊」，不是「先起个名字」。
+  /// 逼用户先想名字会让最常见的动作多一步，而名字随后还能在对话设置里改
+  /// （`_RenameDialog`）。webapp 的 `createGroup(title?)` 也是这个取向。
+  ///
+  /// 标题用 [defaultGroupTitle]（`新对话`）：服务端在标题为空时会兜底成
+  /// 「新对话组」，显式传同一个词能让两端列表里的占位一致。
   Future<void> _createGroup() async {
     final handler = widget.onCreateGroup;
     if (handler == null || _creating) return;
 
-    final title = await showDialog<String>(
-      context: context,
-      builder: (_) => const _CreateGroupDialog(),
-    );
-    final trimmed = title?.trim();
-    // 空标题服务端会拒绝（且「建一个没名字的对话」几乎不可能是用户意图）。
-    // 对话框已在空输入时禁用确认按钮，这里是兜底（如输入全是空格）。
-    if (trimmed == null || trimmed.isEmpty) return;
-    if (!mounted) return;
-
     setState(() => _creating = true);
     ChatGroup? created;
     try {
-      created = await handler(trimmed);
+      created = await handler(defaultGroupTitle);
     } on SpbError catch (e) {
       // 网络/解析失败只提示、不崩溃（与 [_handleAction] 的容错策略一致）。
       //
@@ -1135,67 +1146,6 @@ class _RenameDialogState extends State<_RenameDialog> {
           key: const ValueKey('group-rename-confirm'),
           onPressed: () => Navigator.of(context).pop(_controller.text),
           child: const Text('保存'),
-        ),
-      ],
-    );
-  }
-}
-
-/// 新建对话对话框。
-///
-/// ## 为什么与 [_RenameDialog] 分开而不是加一个 `mode`
-///
-/// 两者只在「标题/按钮文案」上相似，行为要求不同：重命名时原标题已存在，空值
-/// 只需「不改动」；新建时输入框**初始为空**，若沿用「关掉对话框再丢弃」的做法，
-/// 用户在空输入下点确认会看到对话框莫名消失且毫无反馈。故这里用
-/// [ValueListenableBuilder] 在空输入时**禁用**确认按钮，把非法状态挡在提交前。
-///
-/// 仍是 StatefulWidget 的理由与 [_RenameDialog] 相同：对话框有退场动画，
-/// 期间 `TextField` 仍在树上读 controller，交给 State 管理 dispose 时序才安全。
-class _CreateGroupDialog extends StatefulWidget {
-  const _CreateGroupDialog();
-
-  @override
-  State<_CreateGroupDialog> createState() => _CreateGroupDialogState();
-}
-
-class _CreateGroupDialogState extends State<_CreateGroupDialog> {
-  final _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      key: const ValueKey('group-create-dialog'),
-      title: const Text('新建对话'),
-      content: TextField(
-        key: const ValueKey('group-create-field'),
-        controller: _controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: '标题'),
-        onSubmitted: (v) => Navigator.of(context).pop(v),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-        // 用 trim 后的空判定，而不是 `isEmpty`：全空格同样应被禁用
-        // （服务端会拒绝空标题，本地拦掉省一次必然失败的往返）。
-        ValueListenableBuilder<TextEditingValue>(
-          valueListenable: _controller,
-          builder: (context, value, _) => FilledButton(
-            key: const ValueKey('group-create-confirm'),
-            onPressed: value.text.trim().isEmpty
-                ? null
-                : () => Navigator.of(context).pop(_controller.text),
-            child: const Text('创建'),
-          ),
         ),
       ],
     );

@@ -4096,6 +4096,50 @@ return refreshed?.accessToken;       // → null
 
 ---
 
+### 6.40 新建对话不需要输入标题（用默认占位 `新对话`）
+
+`GroupListPage` 的「新建对话」按钮此前会弹一个输入框要求先起名字，空输入
+（含全空格）时确认按钮禁用。现已去掉这个对话框：**点一下就用
+`defaultGroupTitle`（`新对话`）建并直接进入该对话**。
+
+#### 为什么
+
+1. 建对话的**真实意图**是「开一个干净上下文继续聊」，不是「先起个名字」。
+   逼用户先想名字会让最常见的动作多一步，而名字随后能在对话设置里改
+   （`_RenameDialog` 仍在）。
+2. **webapp 本来就是这个取向**：`use-workbench-state.ts` 的
+   `createGroup(title?)` 标题可选，`WorkbenchShell.handleCreateGroup(title?)`
+   在无参调用时不传 title；`ChatInputArea` 的「新对话」按钮就是直接建。
+   客户端此前是**独有**的多一步。
+3. 服务端 `POST /chat/groups` 对空标题**不报错**，而是兜底成「新对话组」
+   （`chat.go` 的 `if title == "" { title = "新对话组" }`）——即「必须有标题」
+   从来不是服务端约束，是客户端自己加的。
+
+#### 实现要点
+
+| 项 | 变化 |
+|---|---|
+| `defaultGroupTitle` | 新增公开常量（`新对话`），`_createGroup` 与测试共用同一个值 |
+| 新建标题对话框（原私有类，已删除） | **删除**（连同 `group-create-dialog` / `group-create-field` / `group-create-confirm` 三个 key） |
+| `onCreateGroup` 签名 | **不变**（仍收 `String title`）：装配层仍能改标题策略，页面只是不再问用户 |
+| `_creating` 防重入 | 保留并新增用例：请求在飞时入口 `onPressed == null` |
+
+#### 测试的连带改动（不是放宽断言）
+
+删掉对话框后，三处「填标题 → pump → 点确认」的前置步骤**全部消失**（`enterText`
+与随后那次 `pump` 都是为解除确认按钮禁用而存在的）。受影响的用例：
+
+| 文件 | 改动 |
+|---|---|
+| `group_list_page_test.dart` | 「trim 后的标题」「空标题禁用确认」两条**删除**（被测对象已不存在）；「成功后插到最前」拆成「不弹框 + 默认标题 + 导航」与「插到最前」两条；新增「往返期间禁用入口」 |
+| 两端 `router_list_test.dart` | 去掉 `enterText` + `pump` + 点确认，只留「点入口」 |
+
+⚠️ **`adapter.onPost(..., data: {'title': '新对话'})` 的精确匹配必须保留**：它是
+「标题确实发出去了」的唯一断言点——只断言导航会漏掉「回调拿了标题却没用」
+（与 `createTurn` 的 `inputText` 那类缺陷同型，见 §6.14）。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 ### 编译期依赖
