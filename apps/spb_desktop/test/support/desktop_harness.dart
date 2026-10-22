@@ -264,6 +264,24 @@ Future<TestHarness> pumpApp(
   /// 用不到的用例不应被它拖慢。
   UfsApi? ufsApi,
 
+  /// 进入对话时的同步判定（可注入）。默认「无需同步」。
+  ///
+  /// ## 为什么必须默认 override
+  ///
+  /// 真实实现会读同步设置 + 打 UFS 列表端点。默认设置里 `onGroupOpen` 是关
+  /// 的，故真实实现会**提前返回**——但那要先 `await loadSyncSettingsProvider`，
+  /// 而那是异步的，于是每个对话页用例都多一次微任务往返，且一旦某个用例
+  /// 打开了开关就会真的发 HTTP（DioAdapter 未注册 → NetworkError + Timer）。
+  /// 默认注入一个恒定结果，让「探测」这条路径对既有用例完全透明。
+  GroupSyncCheck? checkGroupSyncNeed,
+
+  /// 在容器创建后、页面挂载前对节流器做初始化（可注入）。
+  ///
+  /// 用于「冷却期内不该探测」这类用例：它需要在页面第一次判定**之前**就把
+  /// 该 group 记成「刚试过」。没有这个钩子就只能连开两次页面，而页面自己
+  /// 不会重探（`_syncCheck` 清空后没有触发点）。
+  void Function(GroupSyncThrottle)? seedThrottle,
+
   /// loopback 登录的实现（可注入）。默认不 override（即真实实现）。
   ///
   /// ## 为什么要可注入
@@ -432,6 +450,13 @@ Future<TestHarness> pumpApp(
       loadAgentsProvider.overrideWithValue(
         loadAgents ?? () async => const <Agent>[],
       ),
+      checkGroupSyncNeedProvider.overrideWithValue(
+        checkGroupSyncNeed ??
+            (groupId) async => GroupSyncCheckResult(
+              groupId: groupId,
+              need: GroupSyncNeed.unknown,
+            ),
+      ),
       if (ufsApi != null) ufsApiProvider.overrideWithValue(ufsApi),
       if (notificationSink != null)
         notificationSinkProvider.overrideWithValue(notificationSink),
@@ -449,6 +474,9 @@ Future<TestHarness> pumpApp(
     ],
   );
   addTearDown(container.dispose);
+
+  // 节流器预热：必须在页面挂载前（页面首次判定会读它）。
+  seedThrottle?.call(container.read(groupSyncThrottleProvider));
 
   // 路由必须在 pumpWidget 前建好，测试才能主动导航。
   //

@@ -385,6 +385,10 @@ void main() {
       await pumpSettings(tester);
 
       expect(
+        find.byKey(const ValueKey('settings-auto-sync-on-group-open')),
+        findsNothing,
+      );
+      expect(
         find.byKey(const ValueKey('settings-auto-sync-on-launch')),
         findsNothing,
       );
@@ -394,9 +398,13 @@ void main() {
       );
     });
 
-    testWidgets('showAutoSync=true（桌面端）渲染两个入口', (tester) async {
+    testWidgets('showAutoSync=true（桌面端）渲染三个入口', (tester) async {
       await pumpSettings(tester, showAutoSync: true);
 
+      expect(
+        find.byKey(const ValueKey('settings-auto-sync-on-group-open')),
+        findsOneWidget,
+      );
       expect(
         find.byKey(const ValueKey('settings-auto-sync-on-launch')),
         findsOneWidget,
@@ -506,6 +514,41 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('自动同步只从云端拉取到本地'), findsOneWidget);
+      expect(find.textContaining('首次同步会拉取全部历史交付物'), findsOneWidget);
+    });
+
+    testWidgets('「进入对话时按需同步」默认关，且改动会整份提交', (tester) async {
+      SyncSettings? saved;
+      await pumpSettings(
+        tester,
+        showAutoSync: true,
+        onSave: (s) async => saved = s,
+      );
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-auto-sync-on-group-open')),
+      );
+      expect(tile.value, isFalse, reason: '首次全量 4.7 GB，不能默认开');
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-auto-sync-on-group-open')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(saved!.auto.onGroupOpen, isTrue);
+      expect(saved!.auto.onLaunch, isFalse, reason: '只改这一项，其余保持');
+    });
+
+    testWidgets('「按需同步」单独开启也会展示首次全量提示', (tester) async {
+      // 它触发的同样是全范围同步，代价与另两项一样——故提示必须一起出现，
+      // 否则用户只开这一项时看不到「首次可能很大」的警告。
+      await pumpSettings(
+        tester,
+        showAutoSync: true,
+        initial: const SyncSettings(auto: AutoSyncConfig(onGroupOpen: true)),
+      );
       expect(find.textContaining('首次同步会拉取全部历史交付物'), findsOneWidget);
     });
 

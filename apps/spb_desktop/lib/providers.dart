@@ -1413,6 +1413,142 @@ final reconcileAutoSyncProvider = Provider<Future<void> Function()>((ref) {
   };
 });
 
+/// 进入对话时的同步冷却闸（每 group 独立计时）。
+///
+/// 语义见 [GroupSyncThrottle]（`spb_domain`）。这里只负责持有实例。
+///
+/// **非** autoDispose：它记的是「刚才试过」，而用户会在多个对话之间来回切；
+/// 每次切对话重建实例等于没有冷却。
+final groupSyncThrottleProvider = Provider<GroupSyncThrottle>((ref) {
+  return GroupSyncThrottle();
+});
+
+/// 一次「进入对话时判定是否需要同步」的结果，供页面决定是否显示提示条。
+///
+/// [groupId] 同时作为身份：页面据此判断「这条结果说的是不是我当前这个对话」
+/// ——异步判定返回时用户可能已经切走了。
+class GroupSyncCheckResult {
+  const GroupSyncCheckResult({
+    required this.groupId,
+    required this.need,
+    this.pendingCount = 0,
+  });
+
+  final String groupId;
+  final GroupSyncNeed need;
+
+  /// 该 group 在远端有、但本地游标还没覆盖的文件数（用于提示文案）。
+  ///
+  /// 判定用 `page_size=1` 只拉一条就够**触发**，但要给用户一句可读的话
+  /// （「有 12 个交付物未同步」）就得知道规模。故判定命中后再花一次分页
+  /// 统计——只在**命中时**付这个成本，绝大多数打开是未命中。
+  ///
+  /// 超过 [GroupSyncCheckResult.countCap] 时被截断（只显示「至少 N 个」），
+  /// 避免为一个提示条拉几百页。
+  final int pendingCount;
+
+  /// 计数上限：5 页 × 100 条。
+  ///
+  /// 500 以上对用户已是「很多」，精确值没有意义，而拉更多页只为凑数字
+  /// 不值得（首次同步可能 5666 条）。
+  static const int countCap = 500;
+
+  bool get isStale => need == GroupSyncNeed.stale;
+}
+
+/// 「进入对话时判定是否需要同步」的注入点签名。
+///
+/// 抽成 typedef 是为了让测试 harness 能替换它——真实实现要读设置 + 打 UFS
+/// 列表端点，而绝大多数对话页用例关心的是别的东西。
+typedef GroupSyncCheck = Future<GroupSyncCheckResult> Function(String groupId);
+
+/// 进入对话时判定该 group 是否需要同步（**只判定，不触发**）。
+///
+/// ## 为什么判定与触发分开
+///
+/// 判定要发一次 HTTP（可能再发几次统计）。若判定完就直接同步，用户会看到
+/// 「点进对话 → 突然开始下载」而没有任何解释，且无法拒绝。分成两步后，
+/// 页面可以先问用户（提示条 + 「立即同步」按钮），也可以按配置直接触发
+/// ——那是**调用方的**决定，不是判定的。
+///
+/// ## 为什么用 `page_size=1` 判定
+///
+/// 列表按 `updated_at` 倒序，第一条即最晚的那份。取它的 `updated_at` 与
+/// workspace 游标比较即可（判据见 `groupSyncNeed`）。拉一页 100 条只为读
+/// 一个字段是浪费。
+///
+/// ## ⚠️ 命中的是「全范围」而不是「这个 group」
+///
+/// 单游标模型下只同步一个 group 会让游标越过其它 group 里未同步的文件，
+/// 它们此后再也不出现在增量清单里（静默永久漏文件，见 `groupSyncNeed`
+/// 的说明）。故判定只回答「要不要现在跑一轮」，跑的是**用户配置的全范围**。
+final checkGroupSyncNeedProvider =
+    Provider<Future<GroupSyncCheckResult> Function(String)>((ref) {
+      return (String groupId) async {
+        final settings = await ref.read(loadSyncSettingsProvider)();
+        if (!settings.canSync) {
+          return GroupSyncCheckResult(
+            groupId: groupId,
+            need: GroupSyncNeed.unknown,
+          );
+        }
+        // 该 group 根本没有交付物时不必再问游标：`page_size=1` 空页即结论。
+        final ufs = ref.read(ufsApiProvider);
+        final page = await ufs.listFiles(
+          pathPrefix: '$workspaceGroupsPrefix$groupId',
+          page: 1,
+          pageSize: 1,
+        );
+        final latest = latestUpdatedAtOf(page.items.map((e) => e.updatedAtRaw));
+        if (latest == null) {
+          return GroupSyncCheckResult(
+            groupId: groupId,
+            need: GroupSyncNeed.unknown,
+          );
+        }
+
+        final store = ref.read(syncStateStoreProvider);
+        final workspace = await store.load(workspaceStateKey);
+        final need = groupSyncNeed(
+          remoteLatestUpdatedAt: latest,
+          localCursor: workspace.cursor,
+        );
+        if (need != GroupSyncNeed.stale) {
+          return GroupSyncCheckResult(groupId: groupId, need: need);
+        }
+
+        // 命中后才统计规模（只在命中路径付这个成本）。
+        var count = 0;
+        var pageNo = 1;
+        const pageSize = 100;
+        while (count < GroupSyncCheckResult.countCap) {
+          final res = await ufs.listFiles(
+            pathPrefix: '$workspaceGroupsPrefix$groupId',
+            page: pageNo,
+            pageSize: pageSize,
+          );
+          for (final entry in res.items) {
+            final at = entry.updatedAtRaw?.trim();
+            if (at == null || at.isEmpty) continue;
+            // 与判定同一口径：晚于游标才算「未同步」。
+            if (workspace.cursor == null ||
+                at.compareTo(workspace.cursor!) > 0) {
+              count++;
+            }
+          }
+          if (!res.hasMore(page: pageNo, pageSize: pageSize)) break;
+          pageNo++;
+          if (pageNo > 100) break;
+        }
+
+        return GroupSyncCheckResult(
+          groupId: groupId,
+          need: need,
+          pendingCount: count,
+        );
+      };
+    });
+
 /// 一轮同步的实际执行（不含在途状态管理）。
 Future<SyncReport> _runSync(Ref ref) async {
   // 每次都重新读设置：用户可能刚在设置页改了目录/范围/过滤就点同步。
@@ -1667,6 +1803,16 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
     // `SyncSettings.filter`（[loadSyncSettingsProvider] 每次现读），故无需
     // 在此额外通知。
     ref.invalidate(syncLocalRootProvider);
+
+    // 换目录 = 每个 group 都该重新判定（新目录下什么都没有）。
+    //
+    // ## 为什么必须显式清，而不是等冷却期过去
+    //
+    // 冷却闸记的是「这个 group 刚才试过」。换了目录之后，用户打开对话时
+    // 目录里**确实**没有那些文件——但闸还挡着，于是提示条不出现、用户以为
+    // 「同步坏了」。这与 `bindLocalRoot` 里「换目录必须重置同步状态」是
+    // 同一个道理：目录变了，所有「相对该目录」的判断都失效。
+    ref.read(groupSyncThrottleProvider).reset();
   };
 });
 

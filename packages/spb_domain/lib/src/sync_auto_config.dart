@@ -6,8 +6,8 @@
 /// 用户得记得去点，否则本地目录永远是上次同步时的样子——而「本地有一份可
 /// 离线打开的交付物」正是同步这个功能的全部意义。
 ///
-/// 本类型描述**用户表达的意图**（启动时同步一次 / 每 N 分钟同步一次），
-/// 排程由 `AutoSyncScheduler` 执行。
+/// 本类型描述**用户表达的意图**（进入对话时按需 / 启动时一次 / 每 N 分钟
+/// 一次），排程由 `AutoSyncScheduler` 执行。
 ///
 /// ## 为什么默认是「全关」
 ///
@@ -22,7 +22,28 @@ import 'package:spb_core/spb_core.dart';
 
 /// 自动同步配置。
 class AutoSyncConfig {
-  const AutoSyncConfig({this.onLaunch = false, this.intervalMinutes = 0});
+  const AutoSyncConfig({
+    this.onGroupOpen = false,
+    this.onLaunch = false,
+    this.intervalMinutes = 0,
+  });
+
+  /// 打开对话时按需同步（判定该 group 有未同步内容才触发）。
+  ///
+  /// ## 为什么它与另外两项**语义不同**
+  ///
+  /// [onLaunch] 与 [intervalMinutes] 是**定时**触发：不管有没有变化都跑一轮
+  /// （引擎会算出空计划，成本是拉一遍清单）。本项是**事件**触发：先花一次
+  /// 单条查询判定「这个 group 有没有新的」，有才跑。
+  ///
+  /// 故它解决的是定时器**覆盖不到**的场景——「用户正看着这个对话」：那时
+  /// 目录应该立刻是新鲜的，而不是等下一个 15 分钟。
+  ///
+  /// ## 为什么默认也是关
+  ///
+  /// 触发的是**全范围**同步（不能只同步单个 group，见 [groupSyncNeed] 的
+  /// 说明），而首次全量是 4.7 GB。与另外两项同一取向：有代价的动作不默认开。
+  final bool onGroupOpen;
 
   /// 启动后是否自动同步一次。
   ///
@@ -52,25 +73,32 @@ class AutoSyncConfig {
 
   /// 是否**任何**自动同步被开启。
   ///
-  /// 为 false 时调度器不排任何计时器（零开销），设置页也应据此提示
-  /// 「完全手动」。
-  bool get isEnabled => onLaunch || isPeriodic;
+  /// 为 false 时调度器不排任何计时器、进对话也不探测（零开销），设置页也应
+  /// 据此提示「完全手动」。
+  bool get isEnabled => onGroupOpen || onLaunch || isPeriodic;
 
-  AutoSyncConfig copyWith({bool? onLaunch, int? intervalMinutes}) =>
-      AutoSyncConfig(
-        onLaunch: onLaunch ?? this.onLaunch,
-        intervalMinutes: intervalMinutes ?? this.intervalMinutes,
-      );
+  AutoSyncConfig copyWith({
+    bool? onGroupOpen,
+    bool? onLaunch,
+    int? intervalMinutes,
+  }) => AutoSyncConfig(
+    onGroupOpen: onGroupOpen ?? this.onGroupOpen,
+    onLaunch: onLaunch ?? this.onLaunch,
+    intervalMinutes: intervalMinutes ?? this.intervalMinutes,
+  );
 
   /// 序列化为持久化字符串。
   ///
   /// ## 为什么两个字段存成一个 JSON 键
   ///
-  /// 与 `SyncScopeConfig.encode` 同一理由：`onLaunch` 与 `intervalMinutes`
-  /// 是一个**意图**的两个维度，分开存会出现「启动了但不知道要不要周期」的
-  /// 中间态（写了一半的偏好）。存一个键天然原子。
-  String encode() =>
-      jsonEncode({'on_launch': onLaunch, 'interval_minutes': intervalMinutes});
+  /// 与 `SyncScopeConfig.encode` 同一理由：三个字段是同一个**意图**的三个
+  /// 维度，分开存会出现「启动了但不知道要不要周期」的中间态（写了一半的
+  /// 偏好）。存一个键天然原子。
+  String encode() => jsonEncode({
+    'on_group_open': onGroupOpen,
+    'on_launch': onLaunch,
+    'interval_minutes': intervalMinutes,
+  });
 
   /// 从持久化字符串解析；`null`/空串/损坏一律退回 [disabled]。
   ///
@@ -86,12 +114,16 @@ class AutoSyncConfig {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return disabled;
+      final groupOpen = decoded['on_group_open'];
       final launch = decoded['on_launch'];
       final rawInterval = decoded['interval_minutes'];
       final interval = rawInterval is int
           ? rawInterval
           : int.tryParse('$rawInterval') ?? 0;
       return AutoSyncConfig(
+        // 缺这个键 = 旧版本写下的配置 → false。**不能**回退成 true：
+        // 那会让升级后的用户突然开始在每次进对话时拉 4.7 GB。
+        onGroupOpen: groupOpen is bool ? groupOpen : false,
         onLaunch: launch is bool ? launch : false,
         intervalMinutes: _normalizeInterval(interval),
       );
@@ -138,13 +170,15 @@ class AutoSyncConfig {
   @override
   bool operator ==(Object other) =>
       other is AutoSyncConfig &&
+      other.onGroupOpen == onGroupOpen &&
       other.onLaunch == onLaunch &&
       other.intervalMinutes == intervalMinutes;
 
   @override
-  int get hashCode => Object.hash(onLaunch, intervalMinutes);
+  int get hashCode => Object.hash(onGroupOpen, onLaunch, intervalMinutes);
 
   @override
   String toString() =>
-      'AutoSyncConfig(onLaunch: $onLaunch, intervalMinutes: $intervalMinutes)';
+      'AutoSyncConfig(onGroupOpen: $onGroupOpen, onLaunch: $onLaunch, '
+      'intervalMinutes: $intervalMinutes)';
 }

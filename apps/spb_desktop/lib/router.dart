@@ -714,6 +714,21 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 无头环境用内存桩完整验证。
   int _deliverablesReloadToken = 0;
 
+  /// 进入本对话时探测到的同步需求（null = 未探测 / 已忽略）。
+  ///
+  /// ## 为什么由本 State 持有而不是 provider
+  ///
+  /// 它的生命周期就是「这个对话页这一次打开」：切 group 要重新探测、忽略
+  /// 之后要消失。做成 provider 反而要处理「哪个 group 的哪次结果」的失效
+  /// 问题，而 State 天然随页面/groupId 变化。
+  GroupSyncCheckResult? _syncCheck;
+
+  /// 探测是否在途（防重复：`didUpdateWidget` 与登录态变化都可能触发）。
+  bool _checkingSync = false;
+
+  /// 用户点了「立即同步」且正在进行。
+  bool _syncingFromHint = false;
+
   /// 建议卡标注的「下一条消息由谁回答」（follow_up 的 agent_id）。
   ///
   /// 点击建议时设置，发送时经 [ConversationPage.onSend] 透传给控制器。
@@ -862,6 +877,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // （State 被 Flutter 复用，_group 不会自动失效）。
       _group = null;
       _groupError = null;
+      // 上一个对话的同步提示对新对话无意义（它说的是那个 group 的文件）。
+      _syncCheck = null;
       _resolveUserAndFocus();
       _loadGroup();
     }
@@ -1112,12 +1129,97 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       if (!mounted) return;
       setState(() => _userId = userId);
       await _focus(userId);
+      // 探测放在聚焦之后：先让时间线连上（用户立刻看到内容），再在后台问
+      // 「有没有交付物没同步」。反过来会让打开对话多等一次 HTTP 往返。
+      await _checkGroupSync(userId);
     } on SpbError catch (e) {
       // 取身份失败（未登录 / 网络不可达）：保持加载态并记录。
       // 不构造空 userId 的控制器——那只会发出畸形请求。
       SpbLog.warn('解析当前用户失败，对话页停留在加载态', {'error': e.toString()});
     } finally {
       _resolvingUser = false;
+    }
+  }
+
+  /// 进入对话时判定「本对话有没有未同步到本地目录的交付物」。
+  ///
+  /// ## 为什么在这里（而不是 ConversationPage 里）
+  ///
+  /// 页面（`spb_features`）不掌握「游标 / updated_at / 同步目录」这些概念，
+  /// 与它不掌握归约逻辑同一取向。判定与触发都是装配层的事，页面只渲染
+  /// 一个纯展示组件 [GroupSyncHint]。
+  ///
+  /// ## 三重门控（任一不满足就不探测）
+  ///
+  /// 1. **用户开了这个开关**（`auto.onGroupOpen`，默认关）——不探测即零开销；
+  /// 2. **已配置可同步**（有目录、范围非空）——没目录时判定必然 unknown，
+  ///    探测只是白跑一次 HTTP；
+  /// 3. **冷却期未到**——见 [GroupSyncThrottle]（被过滤掉的文件不推游标，
+  ///    会让判定长期命中）。
+  ///
+  /// ## 为什么判定与同步分两步
+  ///
+  /// 判定命中只意味着「有东西没同步」。直接开始拉会让用户在毫无预告的情况下
+  /// 看到下载，且首次全量是 4.7 GB。故先显示提示条，由用户点「立即同步」。
+  Future<void> _checkGroupSync(String userId) async {
+    if (!mounted || _checkingSync) return;
+    _checkingSync = true;
+    final groupId = widget.groupId;
+    try {
+      final settings = await ref.read(loadSyncSettingsProvider)();
+      if (!mounted) return;
+      if (!settings.auto.onGroupOpen || !settings.canSync) return;
+
+      final throttle = ref.read(groupSyncThrottleProvider);
+      if (!throttle.allows(groupId)) {
+        SpbLog.debug('进入对话触发同步仍在冷却期，跳过', {'group': groupId});
+        return;
+      }
+
+      final result = await ref.read(checkGroupSyncNeedProvider)(groupId);
+      if (!mounted) return;
+      // 判定期间用户可能已切走（异步返回）：只接受仍指向当前对话的结果，
+      // 否则会把上一个对话的提示条画在新对话上。
+      if (widget.groupId != groupId) return;
+      if (!result.isStale) {
+        setState(() => _syncCheck = null);
+        return;
+      }
+      // 只在**即将展示**时记冷却：判定为 upToDate 不该消耗掉冷却期，
+      // 否则用户下次进来时真的有新文件了却不提示。
+      throttle.markTriggered(groupId);
+      setState(() => _syncCheck = result);
+    } on SpbError catch (e) {
+      // 探测失败不影响对话：静默降级（提示条不出现），只记日志。
+      // 用户仍可手动同步——那条路径的失败有明确反馈。
+      SpbLog.debug('进入对话时探测同步需求失败', {'error': e.toString()});
+    } finally {
+      _checkingSync = false;
+    }
+  }
+
+  /// 用户在提示条上点了「立即同步」。
+  ///
+  /// 跑的是**全范围**同步而不是本 group——单游标模型下只同步一个 group 会
+  /// 把共享游标推过其它 group 未同步的文件（永久漏下载且报告成功），
+  /// 详见 `spb_domain` 的 `groupSyncNeed` 说明。
+  Future<void> _syncFromHint() async {
+    if (_syncingFromHint) return;
+    setState(() => _syncingFromHint = true);
+    try {
+      final report = await ref.read(runSyncActionProvider)();
+      if (!mounted) return;
+      setState(() => _syncCheck = null);
+      _showSettingsError(
+        report.failed.isEmpty
+            ? '已同步 ${report.downloaded} 个交付物'
+            : '已同步 ${report.downloaded} 个，${report.failed.length} 个失败',
+      );
+    } on SpbError catch (e) {
+      if (!mounted) return;
+      _showSettingsError(e.message);
+    } finally {
+      if (mounted) setState(() => _syncingFromHint = false);
     }
   }
 
@@ -1432,298 +1534,343 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       enableSearch: true,
     );
 
-    if (!_showSidebar) return conversation;
+    // 「本对话有交付物未同步」提示条。
+    //
+    // ## 为什么包在对话页**外面**而不是塞进 ConversationPage
+    //
+    // 1. 语义上它属于**装配层**：判定要读同步游标与用户配置，而页面不掌握
+    //    这些概念（见 `_checkGroupSync`）。
+    // 2. 实际好处：`ConversationPage` 已有 46 个构造参数，且两端接线由
+    //    `tools/check_wiring_parity.sh` 逐参数比对。加一个「只有桌面端会传」
+    //    的参数就得再往守卫的豁免清单里加一条，而豁免清单每多一条，守卫能
+    //    发现真实差异的能力就少一分。
+    //
+    // 位置选在 Scaffold **之上**（整页顶部）：它是关于「这个对话的产出」
+    // 的整页级提示，不是某一轮 turn 的状态——故与 `ConversationPage` 内部
+    // 那些状态条（活动 / 等待 / 离线）不在同一层级。
+    final check = _syncCheck;
+    Widget withHint(Widget child) {
+      if (check == null) return child;
+      return Column(
+        children: [
+          Material(
+            // 提示条自带背景色，但外层 Material 提供 Scaffold 之上的
+            // elevation/裁剪上下文（否则 Material 3 的 tint 会叠到页面底色上）。
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: SafeArea(
+              bottom: false,
+              child: GroupSyncHint(
+                pendingCount: check.pendingCount,
+                syncing: _syncingFromHint,
+                onSync: _syncingFromHint ? null : () => _syncFromHint(),
+                onDismiss: _syncingFromHint
+                    ? null
+                    : () => setState(() => _syncCheck = null),
+              ),
+            ),
+          ),
+          Expanded(child: child),
+        ],
+      );
+    }
+
+    if (!_showSidebar) return withHint(conversation);
 
     // 待办面板按 turn 聚合待确认卡。groupItemsByTurn 是纯函数（领域层），
     // 分组逻辑与侧边栏渲染解耦。
     final turns = groupItemsByTurn(_items);
 
-    return Row(
-      children: [
-        Expanded(child: conversation),
-        // 侧边栏宽度固定：交付物树/待办列表都是窄列表，定宽比自适应更可预测
-        // （自适应会随文件名长度抽动，阅读时很干扰）。
-        const VerticalDivider(width: 1, thickness: 1),
-        SizedBox(
-          width: 320,
-          child: ChatSidebar(
-            onClose: () => setState(() => _showSidebar = false),
-            tabs: [
-              ChatSidebarTab(
-                label: '交付物',
-                icon: Icons.folder_outlined,
-                content: GroupDeliverablesPanel(
-                  // groupId 变化时面板自行清空本地路径并重拉（见其类文档）。
-                  groupId: widget.groupId,
-                  // tab 标签已显示「交付物」，面板内不再重复标题（仅保留刷新按钮 +
-                  // 文件计数这个工具条），避免与 tab 标签在视觉上紧邻重复。
-                  title: '',
-                  // 用 provider 取数：注入的是**不带参数的取数函数**，
-                  // groupId 已由面板自己传入。
-                  loadFiles: () => ref.read(
-                    groupDeliverablesProvider(widget.groupId).future,
-                  ),
-                  onDownload: (file) =>
-                      ref.read(downloadDeliverableProvider)(file),
-                  onOpen: (path) => ref.read(openDeliverableProvider)(path),
-                  onReveal: (path) => ref.read(revealDeliverableProvider)(path),
-                  // 已同步到本地目录的交付物直接可打开（不必先在本面板下载）。
-                  //
-                  // 用 `watch` 而不是 `read`：索引是异步加载的（FutureProvider），
-                  // watch 让「加载完成」触发本页重建，菜单项从禁用变为可用；
-                  // read 会永远拿到第一次构建时那个「尚未加载」的版本。
-                  resolveLocalPath: ref.watch(
-                    resolveLocalDeliverableProvider(widget.groupId),
-                  ),
-                  // SSE 推送新文件时 bump（见 _onItemsChanged）。
-                  reloadToken: _deliverablesReloadToken,
-                ),
-              ),
-              ChatSidebarTab(
-                label: '待办',
-                icon: Icons.checklist_outlined,
-                // 徽标 = 未解决确认卡数量（用户一眼看出有多少事要处理）。
-                badge: turns.fold(
-                  0,
-                  (sum, t) => sum + t.pendingConfirmations.length,
-                ),
-                content: GroupTodosPanel(
-                  turns: turns,
-                  onResolveConfirmation: _resolveConfirmation,
-                  resolvingIds: _resolvingConfirmations,
-                  // 切 group 时清空折叠状态（旧对话的展开位置对新对话无意义）。
-                  reloadKey: widget.groupId,
-                  // tab 标签已命名「待办」，不重复面板标题。
-                  showHeader: false,
-                ),
-              ),
-              ChatSidebarTab(
-                label: '设置',
-                icon: Icons.tune,
-                content: _group == null
-                    // 权威状态未就绪：不能渲染面板——面板的每个控件都要读
-                    // metadata（键缺失会被当成「全部关闭」），先渲染会显示一个
-                    // 假的「全关」状态，用户可能在加载完成前就去点它。
-                    ? GroupSettingsLoading(
-                        error: _groupError,
-                        onRetry: _loadGroup,
-                      )
-                    : GroupSettingsPanel(
-                        group: _group!,
-                        busy: _settingsBusy,
-                        // tab 标签已命名「设置」，不重复面板标题。
-                        showHeader: false,
-                        // 每个回调都只带**变化的那一个键**，由
-                        // GroupSettingsUseCase 补一次 getGroup 拿权威状态
-                        // （写端点只回布尔）。
-                        onSaveGoal: (text) => _runSetting(
-                          () => ref
-                              .read(groupSettingsUseCaseProvider)
-                              .saveGoal(widget.groupId, text),
-                        ),
-                        onToggleGoalGate: (enabled) => _runSetting(
-                          () => ref
-                              .read(groupSettingsUseCaseProvider)
-                              .toggleGoalGate(widget.groupId, enabled),
-                        ),
-                        onSaveMaxAutoTurns: (turns) => _runSetting(
-                          () => ref
-                              .read(groupSettingsUseCaseProvider)
-                              .saveMaxAutoTurns(widget.groupId, turns),
-                        ),
-                        onToggleFollowUpSuggest: (enabled) => _runSetting(
-                          () => ref
-                              .read(groupSettingsUseCaseProvider)
-                              .toggleFollowUpSuggest(widget.groupId, enabled),
-                        ),
-                        onToggleHabitSuggest: (enabled) => _runSetting(
-                          () => ref
-                              .read(groupSettingsUseCaseProvider)
-                              .toggleHabitSuggest(widget.groupId, enabled),
-                        ),
-                        onSaveTts:
-                            ({
-                              enabled,
-                              narrateThinking,
-                              narrationMode,
-                              fileSummary,
-                            }) => _runSetting(
-                              () => ref
-                                  .read(groupSettingsUseCaseProvider)
-                                  .saveTts(
-                                    widget.groupId,
-                                    enabled: enabled,
-                                    narrateThinking: narrateThinking,
-                                    narrationMode: narrationMode,
-                                    fileSummary: fileSummary,
-                                  ),
-                            ),
-                      ),
-              ),
-              ChatSidebarTab(
-                label: '目标',
-                icon: Icons.history,
-                content: GoalHistoryPanel(
-                  // 历史列表是**独立端点**（`GET /chat/groups/:id/goals`），
-                  // 与 `_group.currentGoal` 快照不同源。故不用 `_group`，
-                  // 由面板自己拉；写完后它也会自己回读（见面板的 `_run`）。
-                  load: () =>
-                      ref.read(goalApiProvider).listGoals(widget.groupId),
-                  currentGoalId: _goalId.isEmpty ? null : _goalId,
-                  busy: _settingsBusy,
-                  // tab 标签已命名「目标」，不重复面板标题。
-                  showHeader: false,
-                  // 切对话时重拉（Flutter 会复用面板 State）。
-                  reloadToken: widget.groupId,
-                  onSwitch: (goalId) => _runGoalWrite(
-                    // 切回必须允许「当前无目标」——那正是它存在的场景。
-                    () => ref
-                        .read(goalApiProvider)
-                        .switchGoal(widget.groupId, goalId),
-                    requireGoal: false,
-                  ),
-                  onSetStatus: (goalId, status) => _runGoalWrite(
-                    // 同上：给一个无当前目标的对话归档旧目标，是清理历史的
-                    // 正常用法。
-                    () => ref
-                        .read(goalApiProvider)
-                        .updateGoalStatus(goalId, status),
-                    requireGoal: false,
-                  ),
-                  // 新建目标（issue #17）。`requireGoal: false`：正是**没有**
-                  // 当前目标时才最需要它。
-                  //
-                  // `tasksSource: manual` 必须显式传：它决定重新展开时能否
-                  // 覆盖任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
-                  onCreate: (goalText) => _runGoalWrite(
-                    () => ref
-                        .read(goalApiProvider)
-                        .createGoal(
-                          widget.groupId,
-                          goalText: goalText,
-                          tasksSource: GoalTasksSource.manual,
-                        ),
-                    requireGoal: false,
-                  ),
-                ),
-              ),
-              ChatSidebarTab(
-                label: '任务',
-                icon: Icons.flag_outlined,
-                // 徽标 = 未完成任务数（用户一眼看出还剩几件事）。
-                badge: _unfinishedTaskCount,
-                content: GoalTasksPanel(
-                  // 快照来自 `_group.currentGoal`，而它由 `goal_updated` SSE
-                  // 事件实时刷新（见 `_onGoalUpdated`）——本面板不自己轮询。
-                  snapshot: _goalSnapshot,
-                  decisions: _gateDecisions,
-                  busy: _settingsBusy,
-                  // tab 标签已命名「任务」，不重复面板标题。
-                  showHeader: false,
-                  // 切对话时清掉新增框里的半截草稿。
-                  reloadToken: widget.groupId,
-                  onReload: _reloadGoalTasks,
-                  onSetStatus: (taskId, status) => _runGoalWrite(
-                    () => ref
-                        .read(goalApiProvider)
-                        .setTaskStatus(_goalId, taskId, status),
-                  ),
-                  onCreate: ({required title, description}) => _runGoalWrite(
-                    () => ref
-                        .read(goalApiProvider)
-                        .createTask(
-                          _goalId,
-                          title: title,
-                          description: description,
-                          // ⚠️ 必须显式传 manual：服务端只在 origin != 'llm' 时
-                          // 把 tasks_source 置为 manual，否则人工新增的任务会在
-                          // 下次 LLM 展开时被当作可覆盖项删掉。
-                          origin: GoalTaskOrigin.manual,
-                        ),
-                  ),
-                  // 编辑任务标题/描述。
-                  //
-                  // ⚠️ 服务端语义：`''` = 清除、`null` = 不改。面板已把
-                  // 输入框的当前值（含空串）显式传下来，故这里**不能**再用
-                  // `?? ` 或条件判断把它转回 null——那会把「用户清空描述」
-                  // 变成「不修改描述」。
-                  onUpdateTask: (taskId, {title, description}) => _runGoalWrite(
-                    () => ref
-                        .read(goalApiProvider)
-                        .updateTask(
-                          _goalId,
-                          taskId,
-                          title: title,
-                          description: description,
-                        ),
-                  ),
-                  onDelete: (taskId) => _runGoalWrite(
-                    () => ref.read(goalApiProvider).deleteTask(_goalId, taskId),
-                  ),
-                  onReorder: (taskIds) => _runGoalWrite(
-                    () => ref
-                        .read(goalApiProvider)
-                        .reorderTasks(_goalId, taskIds),
-                  ),
-                  onResetForExpand: () => _runGoalWrite(
-                    () => ref.read(goalApiProvider).resetForExpand(_goalId),
-                  ),
-                ),
-              ),
-              // 续跑 tab：查看 / 停用 Goal Gate 自动续跑排程。
-              //
-              // ## 为什么与「任务」分开而不是并入
-              //
-              // 「任务」是当前目标的任务清单（`chat_goal_tasks`），本 tab 是
-              // **到点自动接着跑**的排程（`chat_turn_schedules`）。前者回答
-              // 「还剩什么事」，后者回答「它接下来还要自己跑几次、怎么叫停」
-              // ——不同实体、不同端点、不同时间方向（将来时 vs 现在时）。
-              ChatSidebarTab(
-                label: '续跑',
-                icon: Icons.schedule_outlined,
-                content: AutoSchedulesPanel(
-                  // 列表是独立端点（`GET /api/chat/groups/:id/auto-schedules`），
-                  // 与 `_group` 快照不同源。用例内部会先取 `_group` 的
-                  // activeSession.agentId，再本地按 group 过滤（见其类文档）。
-                  load: () => ref
-                      .read(autoSchedulesUseCaseProvider)
-                      .load(widget.groupId),
-                  onStopAll: () async =>
-                      (await ref
-                              .read(autoSchedulesUseCaseProvider)
-                              .stopAll(widget.groupId))
-                          .items,
-                  // tab 标签已命名「续跑」，不重复面板标题。
-                  showHeader: false,
-                  // 切对话时重拉（Flutter 会复用面板 State）。
-                  reloadToken: widget.groupId,
-                ),
-              ),
-              // 诊断 tab：仅在非发布构建展示。
-              //
-              // 面板内容含工具调用入参与 gate 决策明细，是开发/排查用的内部
-              // 视图，不应随发布包分发。门控走 provider 而非直接判
-              // `SpbEnv.isRelease`：后者是编译期常量，测试无法切换，也就无法
-              // 验证「发布包里它真的消失了」。
-              //
-              // ## 删掉这个 tab 不会让侧边栏默认落到别的 tab
-              //
-              // `ChatSidebar` 用 `initialIndex`（默认 0，即「交付物」）初始化
-              // `_index`，不依赖 tab 数量；且 `didUpdateWidget` 只在
-              // `_index` 越界时才夹取。少一个尾部 tab 不影响任何既有索引。
-              if (ref.watch(showDebugPanelProvider))
+    return withHint(
+      Row(
+        children: [
+          Expanded(child: conversation),
+          // 侧边栏宽度固定：交付物树/待办列表都是窄列表，定宽比自适应更可预测
+          // （自适应会随文件名长度抽动，阅读时很干扰）。
+          const VerticalDivider(width: 1, thickness: 1),
+          SizedBox(
+            width: 320,
+            child: ChatSidebar(
+              onClose: () => setState(() => _showSidebar = false),
+              tabs: [
                 ChatSidebarTab(
-                  label: '诊断',
-                  icon: Icons.insights_outlined,
-                  content: GroupDebugPanel(
-                    toolCalls: _toolCalls,
-                    decisions: _gateDecisions,
+                  label: '交付物',
+                  icon: Icons.folder_outlined,
+                  content: GroupDeliverablesPanel(
+                    // groupId 变化时面板自行清空本地路径并重拉（见其类文档）。
+                    groupId: widget.groupId,
+                    // tab 标签已显示「交付物」，面板内不再重复标题（仅保留刷新按钮 +
+                    // 文件计数这个工具条），避免与 tab 标签在视觉上紧邻重复。
+                    title: '',
+                    // 用 provider 取数：注入的是**不带参数的取数函数**，
+                    // groupId 已由面板自己传入。
+                    loadFiles: () => ref.read(
+                      groupDeliverablesProvider(widget.groupId).future,
+                    ),
+                    onDownload: (file) =>
+                        ref.read(downloadDeliverableProvider)(file),
+                    onOpen: (path) => ref.read(openDeliverableProvider)(path),
+                    onReveal: (path) =>
+                        ref.read(revealDeliverableProvider)(path),
+                    // 已同步到本地目录的交付物直接可打开（不必先在本面板下载）。
+                    //
+                    // 用 `watch` 而不是 `read`：索引是异步加载的（FutureProvider），
+                    // watch 让「加载完成」触发本页重建，菜单项从禁用变为可用；
+                    // read 会永远拿到第一次构建时那个「尚未加载」的版本。
+                    resolveLocalPath: ref.watch(
+                      resolveLocalDeliverableProvider(widget.groupId),
+                    ),
+                    // SSE 推送新文件时 bump（见 _onItemsChanged）。
+                    reloadToken: _deliverablesReloadToken,
                   ),
                 ),
-            ],
+                ChatSidebarTab(
+                  label: '待办',
+                  icon: Icons.checklist_outlined,
+                  // 徽标 = 未解决确认卡数量（用户一眼看出有多少事要处理）。
+                  badge: turns.fold(
+                    0,
+                    (sum, t) => sum + t.pendingConfirmations.length,
+                  ),
+                  content: GroupTodosPanel(
+                    turns: turns,
+                    onResolveConfirmation: _resolveConfirmation,
+                    resolvingIds: _resolvingConfirmations,
+                    // 切 group 时清空折叠状态（旧对话的展开位置对新对话无意义）。
+                    reloadKey: widget.groupId,
+                    // tab 标签已命名「待办」，不重复面板标题。
+                    showHeader: false,
+                  ),
+                ),
+                ChatSidebarTab(
+                  label: '设置',
+                  icon: Icons.tune,
+                  content: _group == null
+                      // 权威状态未就绪：不能渲染面板——面板的每个控件都要读
+                      // metadata（键缺失会被当成「全部关闭」），先渲染会显示一个
+                      // 假的「全关」状态，用户可能在加载完成前就去点它。
+                      ? GroupSettingsLoading(
+                          error: _groupError,
+                          onRetry: _loadGroup,
+                        )
+                      : GroupSettingsPanel(
+                          group: _group!,
+                          busy: _settingsBusy,
+                          // tab 标签已命名「设置」，不重复面板标题。
+                          showHeader: false,
+                          // 每个回调都只带**变化的那一个键**，由
+                          // GroupSettingsUseCase 补一次 getGroup 拿权威状态
+                          // （写端点只回布尔）。
+                          onSaveGoal: (text) => _runSetting(
+                            () => ref
+                                .read(groupSettingsUseCaseProvider)
+                                .saveGoal(widget.groupId, text),
+                          ),
+                          onToggleGoalGate: (enabled) => _runSetting(
+                            () => ref
+                                .read(groupSettingsUseCaseProvider)
+                                .toggleGoalGate(widget.groupId, enabled),
+                          ),
+                          onSaveMaxAutoTurns: (turns) => _runSetting(
+                            () => ref
+                                .read(groupSettingsUseCaseProvider)
+                                .saveMaxAutoTurns(widget.groupId, turns),
+                          ),
+                          onToggleFollowUpSuggest: (enabled) => _runSetting(
+                            () => ref
+                                .read(groupSettingsUseCaseProvider)
+                                .toggleFollowUpSuggest(widget.groupId, enabled),
+                          ),
+                          onToggleHabitSuggest: (enabled) => _runSetting(
+                            () => ref
+                                .read(groupSettingsUseCaseProvider)
+                                .toggleHabitSuggest(widget.groupId, enabled),
+                          ),
+                          onSaveTts:
+                              ({
+                                enabled,
+                                narrateThinking,
+                                narrationMode,
+                                fileSummary,
+                              }) => _runSetting(
+                                () => ref
+                                    .read(groupSettingsUseCaseProvider)
+                                    .saveTts(
+                                      widget.groupId,
+                                      enabled: enabled,
+                                      narrateThinking: narrateThinking,
+                                      narrationMode: narrationMode,
+                                      fileSummary: fileSummary,
+                                    ),
+                              ),
+                        ),
+                ),
+                ChatSidebarTab(
+                  label: '目标',
+                  icon: Icons.history,
+                  content: GoalHistoryPanel(
+                    // 历史列表是**独立端点**（`GET /chat/groups/:id/goals`），
+                    // 与 `_group.currentGoal` 快照不同源。故不用 `_group`，
+                    // 由面板自己拉；写完后它也会自己回读（见面板的 `_run`）。
+                    load: () =>
+                        ref.read(goalApiProvider).listGoals(widget.groupId),
+                    currentGoalId: _goalId.isEmpty ? null : _goalId,
+                    busy: _settingsBusy,
+                    // tab 标签已命名「目标」，不重复面板标题。
+                    showHeader: false,
+                    // 切对话时重拉（Flutter 会复用面板 State）。
+                    reloadToken: widget.groupId,
+                    onSwitch: (goalId) => _runGoalWrite(
+                      // 切回必须允许「当前无目标」——那正是它存在的场景。
+                      () => ref
+                          .read(goalApiProvider)
+                          .switchGoal(widget.groupId, goalId),
+                      requireGoal: false,
+                    ),
+                    onSetStatus: (goalId, status) => _runGoalWrite(
+                      // 同上：给一个无当前目标的对话归档旧目标，是清理历史的
+                      // 正常用法。
+                      () => ref
+                          .read(goalApiProvider)
+                          .updateGoalStatus(goalId, status),
+                      requireGoal: false,
+                    ),
+                    // 新建目标（issue #17）。`requireGoal: false`：正是**没有**
+                    // 当前目标时才最需要它。
+                    //
+                    // `tasksSource: manual` 必须显式传：它决定重新展开时能否
+                    // 覆盖任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
+                    onCreate: (goalText) => _runGoalWrite(
+                      () => ref
+                          .read(goalApiProvider)
+                          .createGoal(
+                            widget.groupId,
+                            goalText: goalText,
+                            tasksSource: GoalTasksSource.manual,
+                          ),
+                      requireGoal: false,
+                    ),
+                  ),
+                ),
+                ChatSidebarTab(
+                  label: '任务',
+                  icon: Icons.flag_outlined,
+                  // 徽标 = 未完成任务数（用户一眼看出还剩几件事）。
+                  badge: _unfinishedTaskCount,
+                  content: GoalTasksPanel(
+                    // 快照来自 `_group.currentGoal`，而它由 `goal_updated` SSE
+                    // 事件实时刷新（见 `_onGoalUpdated`）——本面板不自己轮询。
+                    snapshot: _goalSnapshot,
+                    decisions: _gateDecisions,
+                    busy: _settingsBusy,
+                    // tab 标签已命名「任务」，不重复面板标题。
+                    showHeader: false,
+                    // 切对话时清掉新增框里的半截草稿。
+                    reloadToken: widget.groupId,
+                    onReload: _reloadGoalTasks,
+                    onSetStatus: (taskId, status) => _runGoalWrite(
+                      () => ref
+                          .read(goalApiProvider)
+                          .setTaskStatus(_goalId, taskId, status),
+                    ),
+                    onCreate: ({required title, description}) => _runGoalWrite(
+                      () => ref
+                          .read(goalApiProvider)
+                          .createTask(
+                            _goalId,
+                            title: title,
+                            description: description,
+                            // ⚠️ 必须显式传 manual：服务端只在 origin != 'llm' 时
+                            // 把 tasks_source 置为 manual，否则人工新增的任务会在
+                            // 下次 LLM 展开时被当作可覆盖项删掉。
+                            origin: GoalTaskOrigin.manual,
+                          ),
+                    ),
+                    // 编辑任务标题/描述。
+                    //
+                    // ⚠️ 服务端语义：`''` = 清除、`null` = 不改。面板已把
+                    // 输入框的当前值（含空串）显式传下来，故这里**不能**再用
+                    // `?? ` 或条件判断把它转回 null——那会把「用户清空描述」
+                    // 变成「不修改描述」。
+                    onUpdateTask: (taskId, {title, description}) =>
+                        _runGoalWrite(
+                          () => ref
+                              .read(goalApiProvider)
+                              .updateTask(
+                                _goalId,
+                                taskId,
+                                title: title,
+                                description: description,
+                              ),
+                        ),
+                    onDelete: (taskId) => _runGoalWrite(
+                      () =>
+                          ref.read(goalApiProvider).deleteTask(_goalId, taskId),
+                    ),
+                    onReorder: (taskIds) => _runGoalWrite(
+                      () => ref
+                          .read(goalApiProvider)
+                          .reorderTasks(_goalId, taskIds),
+                    ),
+                    onResetForExpand: () => _runGoalWrite(
+                      () => ref.read(goalApiProvider).resetForExpand(_goalId),
+                    ),
+                  ),
+                ),
+                // 续跑 tab：查看 / 停用 Goal Gate 自动续跑排程。
+                //
+                // ## 为什么与「任务」分开而不是并入
+                //
+                // 「任务」是当前目标的任务清单（`chat_goal_tasks`），本 tab 是
+                // **到点自动接着跑**的排程（`chat_turn_schedules`）。前者回答
+                // 「还剩什么事」，后者回答「它接下来还要自己跑几次、怎么叫停」
+                // ——不同实体、不同端点、不同时间方向（将来时 vs 现在时）。
+                ChatSidebarTab(
+                  label: '续跑',
+                  icon: Icons.schedule_outlined,
+                  content: AutoSchedulesPanel(
+                    // 列表是独立端点（`GET /api/chat/groups/:id/auto-schedules`），
+                    // 与 `_group` 快照不同源。用例内部会先取 `_group` 的
+                    // activeSession.agentId，再本地按 group 过滤（见其类文档）。
+                    load: () => ref
+                        .read(autoSchedulesUseCaseProvider)
+                        .load(widget.groupId),
+                    onStopAll: () async =>
+                        (await ref
+                                .read(autoSchedulesUseCaseProvider)
+                                .stopAll(widget.groupId))
+                            .items,
+                    // tab 标签已命名「续跑」，不重复面板标题。
+                    showHeader: false,
+                    // 切对话时重拉（Flutter 会复用面板 State）。
+                    reloadToken: widget.groupId,
+                  ),
+                ),
+                // 诊断 tab：仅在非发布构建展示。
+                //
+                // 面板内容含工具调用入参与 gate 决策明细，是开发/排查用的内部
+                // 视图，不应随发布包分发。门控走 provider 而非直接判
+                // `SpbEnv.isRelease`：后者是编译期常量，测试无法切换，也就无法
+                // 验证「发布包里它真的消失了」。
+                //
+                // ## 删掉这个 tab 不会让侧边栏默认落到别的 tab
+                //
+                // `ChatSidebar` 用 `initialIndex`（默认 0，即「交付物」）初始化
+                // `_index`，不依赖 tab 数量；且 `didUpdateWidget` 只在
+                // `_index` 越界时才夹取。少一个尾部 tab 不影响任何既有索引。
+                if (ref.watch(showDebugPanelProvider))
+                  ChatSidebarTab(
+                    label: '诊断',
+                    icon: Icons.insights_outlined,
+                    content: GroupDebugPanel(
+                      toolCalls: _toolCalls,
+                      decisions: _gateDecisions,
+                    ),
+                  ),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

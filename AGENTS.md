@@ -1071,22 +1071,22 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：895
+# 当前（HEAD）量：901
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=895 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=901 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1620
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1630
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1620 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1630 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 882、`spb_domain` 172、
-`spb_desktop` 151、`spb_models` 97、`spb_mobile` 92、`spb_platform` 76、
+量级分布（HEAD，字符串字面量数）：`spb_features` 901、`spb_domain` 176、
+`spb_desktop` 157、`spb_models` 97、`spb_mobile` 92、`spb_platform` 76、
 `spb_api` 71、`spb_data` 39、`spb_core` 13、`spb_ui` 5、`spb_design` 3。
 
 ⚠️ **`spb_core` 从 0 涨到 8 是 issue #40/#45 引入的**（诊断报告文案、错误分类
@@ -1207,15 +1207,15 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 |---|---|---|---|
 | `spb_data` | **98.3%** | `spb_platform` | 62.6% |
 | `spb_features` | **93.5%** | `spb_mobile` | 56.7% |
-| `spb_core` | **91.5%** | `spb_desktop` | 60.7% |
-| `spb_domain` | 89.3% | `spb_api` | **88.5%** |
+| `spb_core` | **91.5%** | `spb_desktop` | 63.2% |
+| `spb_domain` | 89.4% | `spb_api` | **88.5%** |
 | `spb_models` | 88.0% | `spb_ui` | 73.7% |
-| `spb_design` | 86.0% | **总计** | **85.6%**（≈16134/18853） |
+| `spb_design` | 86.0% | **总计** | **85.7%**（≈16291/19004） |
 
-全仓用例 **3715 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
+全仓用例 **3765 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
 0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
 §6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线，+38 是 §6.41 的
-定位与下载布局，+66 是 §6.42 的自动同步）。
+定位与下载布局，+66 是 §6.42 的自动同步，+50 是 §6.43 的进对话按需同步）。
 
 ⚠️ **数用例时别用 `grep -c '"type":"testStart"'`**：它把 skipped 与
 `setUp`/`tearDown` 产生的条目也算进去（实测差 100+ 条）。用
@@ -4274,22 +4274,28 @@ Directory('/tmp/revtest').exists()       = true
 
 ---
 
-### 6.42 自动同步：可配置的启动 / 周期拉取（2026-10）
+### 6.42 自动同步：可配置的启动 / 周期 / 进对话按需（2026-10）
 
 交付物同步此前只有**手动**入口（托盘「立即同步交付物」/ 同步页按钮）。用户
 得记得点，本地目录才会跟得上远端——而「本地有一份可离线打开的交付物」正是
 同步这个功能的全部意义。本轮补上**可配置的自动同步**。
 
-#### 两条入口，各自独立
+#### 三条入口，各自独立
 
-| 项 | 语义 |
-|---|---|
-| 「启动后自动同步一次」 | 打开应用并完成登录后拉一轮 |
-| 「周期同步」 | 运行期间每隔 N 分钟拉一轮（关闭 / 15 / 30 / 60 / 180） |
+| 项 | 语义 | 章节 |
+|---|---|---|
+| 「进入对话时按需同步」 | 打开对话时先判定该对话有没有新交付物，**有才提示** | §6.43 |
+| 「启动后自动同步一次」 | 打开应用并完成登录后拉一轮 | 本节 |
+| 「周期同步」 | 运行期间每隔 N 分钟拉一轮（关闭 / 15 / 30 / 60 / 180） | 本节 |
 
-两者**相互独立**：「只在启动时同步一次」是合法且常用组合（每天开一次应用的
-用户不需要周期拉取）。故 `AutoSyncConfig.isEnabled = onLaunch || isPeriodic`，
-而非要求两者都开。
+三者**相互独立**：「只在启动时同步一次」是合法且常用组合（每天开一次应用的
+用户不需要周期拉取）。故
+`AutoSyncConfig.isEnabled = onGroupOpen || onLaunch || isPeriodic`，
+而非要求全部开启。
+
+前两项是**定时**触发（不管有没有变化都跑一轮，引擎会算出空计划，成本是拉
+一遍清单）；「进对话按需」是**事件**触发（先花一次单条查询判定，有才动）。
+两者的分工见 §6.43 的「为什么两者不能互相替代」。
 
 #### 默认全关，且这是**有数据依据**的
 
@@ -4301,7 +4307,7 @@ Directory('/tmp/revtest').exists()       = true
 
 | 层 | 内容 | 为什么在这一层 |
 |---|---|---|
-| `spb_domain` `sync_auto_config.dart` | `AutoSyncConfig`（`onLaunch` / `intervalMinutes` / `allowedIntervals` / `encode` / `decode`） | 序列化与档位钳制是**正确性核心**（错一点就静默不工作），须能无头单测 |
+| `spb_domain` `sync_auto_config.dart` | `AutoSyncConfig`（`onGroupOpen` / `onLaunch` / `intervalMinutes` / `allowedIntervals` / `encode` / `decode`） | 序列化与档位钳制是**正确性核心**（错一点就静默不工作），须能无头单测 |
 | `spb_domain` `auto_sync_scheduler.dart` | `AutoSyncScheduler`（`apply` / `pause` / `dispose` / `isScheduled` / `isRunning`） | 排程判据同理；注入 `run` 后可用 `fake_async` 逐条断言 |
 | `spb_features` `settings_page.dart` | 「自动同步」区块（`showAutoSync` 参数） | 渲染与表单交互 |
 | `apps/spb_desktop` | `autoSyncSchedulerProvider` / `reconcileAutoSyncProvider` / `app.dart` 的 `_installAutoSync` | 装配：进程生命周期 + 登录态订阅 |
@@ -4331,6 +4337,8 @@ Directory('/tmp/revtest').exists()       = true
 重排计时器，用户每次切前台 / 保存设置都会把周期重置，实际间隔被无限拉长。
 
 **4. 认证未就绪 / 无目录 / 单 group 模式 → `pause`，不武装。**
+
+（「进对话按需」的同类门控见 §6.43，它有自己的三重门控 + 冷却闸。）
 
 - `AuthStatus.unknown` 期间（启动读凭证那一瞬间）发起同步拿不到 token，白跑
   一轮并留下 401 日志；
@@ -4422,6 +4430,163 @@ Directory('/tmp/revtest').exists()       = true
   一次库不值得。
 - **不在移动端实现前台定时器**：应用在前台时用户就在看界面，手动点一下比
   「每 15 分钟自己拉一次」更符合预期；且移动端没有托盘，同步发生与否不可见。
+
+---
+
+### 6.43 进入对话时按需同步（2026-10）：判定 → 提示条 → 用户点
+
+§6.42 的两条入口都是**定时**的：到点就跑，不管有没有变化。它们缺的是
+**用户的注意力落点**——「我正在看这个对话，它的交付物应该已经在本地了」。
+本节补上这条**事件**触发的通路。
+
+#### 为什么需要它：定时器解决不了「此刻」
+
+| 场景 | 定时器 | 进对话按需 |
+|---|---|---|
+| 用户正在看某个对话，希望目录里有它最新的产出 | 等下一个 15 分钟 | **立刻判定** |
+| 用户不在 app 里，目录要被编辑器 / 脚本读 | ✅ 唯一覆盖者 | ❌ 做不到 |
+| 用户只是点开一个对话看一眼 | 与该对话无关，照跑 | 未命中则零开销 |
+
+即：两者**不能互相替代**。定时器的不可替代价值是「人不在 app 里时目录仍
+新鲜」；进对话触发解决的是「人正看着的时候还差一段」。故本轮是**新增**而
+非替换。
+
+#### 为什么是「提示条」而不是静默自动同步
+
+判定命中后触发的是**全范围**同步（不能只同步单个 group，见下），而首次全量
+生产实测 **5666 条 / 4.7 GB**。用户只是点开一个对话看看时静默启动这种量级的
+下载，是把一次误判变成一次事故。故提示条把决定权交回用户：
+
+```
+本对话有 12 个交付物未同步到本地          [立即同步] [×]
+```
+
+#### ⚠️ 硬约束：**不能**只同步这一个 group
+
+这是本节最容易被误改的一处。
+
+| 事实 | 位置 |
+|---|---|
+| `SyncGroupsScope` 与 `SyncWorkspaceScope` **共用** `workspaceStateKey`（`__workspace__`） | `sync_state.dart` |
+| `SyncState.advanceCursor` 取 `max()`（字典序即时序） | `sync_state.dart` |
+| `DeliverableSyncUseCase._pathPrefixFor(scope)` **恒返回** `workspaceGroupsPrefix`，无视 scope | `deliverable_sync_usecase.dart` |
+
+三者叠加的后果：**任何只扫部分 group 的同步都会把共享游标推过其它 group
+未同步的文件**，它们此后再也不出现在增量清单里——**永久漏下载，而报告显示
+成功**。故入口触发的同步必须仍是全范围，判定只回答「要不要现在跑一轮」。
+
+#### 分层
+
+| 层 | 内容 | 为什么在这一层 |
+|---|---|---|
+| `spb_domain` `group_sync_probe.dart` | `groupSyncNeed`（纯判据）/ `latestUpdatedAtOf` / `GroupSyncThrottle`（冷却闸） | 判据错一个方向都很糟（该同步却判 upToDate = 静默失效；不该同步却判 stale = 每次点对话拉 4.7 GB），须能无头测 |
+| `spb_features` `sync/group_sync_hint.dart` | `GroupSyncHint`（纯展示，入参 count / onSync / onDismiss / syncing） | 无业务语义的展示组件 |
+| `apps/spb_desktop` `providers.dart` | `checkGroupSyncNeedProvider`（判定 + 计数）/ `groupSyncThrottleProvider` | 取数要 UFS 端点与游标，属装配层 |
+| `apps/spb_desktop` `router.dart` `_ChatPage` | `_checkGroupSync` / `_syncFromHint` / `_syncCheck` | 生命周期就是「这个对话页这一次打开」 |
+| `apps/spb_mobile` | **不装配**（只读写 `sync.auto` 偏好） | 与 §6.42 同一取向：移动端没有托盘反馈，且判定要额外 HTTP |
+
+#### 判定判据（一条不变式）
+
+同步引擎的语义是「**只有成功下载或 304 才推进游标**」（`SyncEngine._merge`）。
+于是：
+
+> 任何 `updated_at > 游标` 的文件，都**不可能**是已成功同步的。
+
+故判定只需一次 `page_size=1` 的列表查询：取该 group 最晚的 `updated_at` 与
+`__workspace__` 游标比较。**严格大于**（等于说明那份文件就是推进游标的那个）。
+
+反向不成立（`updated_at <= 游标` 的文件也可能没同步过——首轮被体积/媒体过滤
+跳过的），但那不影响本判据的用途：它是**触发条件**而非正确性条件。
+
+#### 三重门控 + 冷却闸（任一不满足就零开销）
+
+| 门控 | 不满足时 |
+|---|---|
+| `auto.onGroupOpen`（默认 **false**） | 完全不探测 |
+| `settings.canSync`（有目录、范围非空） | 不探测——没目录时判定必然 unknown，白跑一次 HTTP |
+| `GroupSyncThrottle.allows(groupId)` | 不探测（见下） |
+
+**为什么必须有冷却闸**：`_merge` 只在 `_Downloaded` / `_NotModified` 时推游标；
+被过滤跳过（媒体 / `reports/tts/**` / 超体积）的文件**不推**。于是某个 group
+里只要有一个 500 MB 的视频，它的 `updated_at` 就永远大于游标 → 判定长期命中
+→ 每次点进去都同步一轮 → 每轮什么都不做。默认冷却 10 分钟（内存态，不持久化：
+重启后允许再试一次是合理的）。
+
+#### 三个易写错的地方
+
+**1. 只在**命中**时 `markTriggered`，不在判定之前。**
+
+若在判定前记冷却，那么「进来时没有新文件」也会把冷却期耗掉——用户之后真的
+产生了新文件，再进来却不提示。有用例专门钉住
+（`判定为 upToDate 时不消耗冷却期`）。
+
+**2. 判定与触发必须分成两步。**
+
+判定命中只意味着「有东西没同步」。直接开始拉会让用户在毫无预告的情况下看到
+下载，且无法拒绝。
+
+**3. 换同步目录时 `reset()` 节流器。**
+
+冷却闸记的是「这个 group 刚才试过」。换了目录之后，用户打开对话时目录里
+**确实**没有那些文件——但闸还挡着，于是提示条不出现、用户以为「同步坏了」。
+这与 `bindLocalRoot` 里「换目录必须重置同步状态」是同一个道理。
+
+#### 计数（只在命中时付成本）
+
+判定用 `page_size=1` 只够回答「要不要」，不够给用户一句可读的话（「有 12 个
+交付物未同步」）。故命中后再分页统计，且：
+
+- **按游标过滤**：远端那一页通常既有新文件也有已同步的旧文件，全算进去会报
+  虚高的数字；
+- **上限 500**（`GroupSyncCheckResult.countCap`）：首次全量 5666 条，一直翻到
+  tail 要发 57 次请求，而用户只需要知道「很多」。达到上限时文案写「500+」
+  而不是精确的 500（那会让人以为正好 500 个）。
+
+#### 已知限制（诚实记录）
+
+- **被过滤掉的文件会让判定长期命中**：靠冷却闸 + 仅提示（不自动下载）压低
+  代价。这不是缺陷而是模型限制（游标不推 = 引擎认为「还没同步」）。
+- **本地被手动删除的文件探测不到**：判定看的是「远端有比游标新的吗」，
+  而本地删除不改变远端 `updated_at`。这类情况靠同步引擎每轮的
+  `presentLocally` 探测兜住（它会对 `state.files` 里每个路径 `stat` 一次）。
+- **移动端不参与**：见上表。
+
+#### 反向验证（18 项逐条实测）
+
+| 改坏 | 失败用例数 |
+|---|---|
+| `groupSyncNeed` 用 `>=` 而非 `>` | 1 |
+| 旧配置缺 `on_group_open` 键时回退成 true | 2 |
+| `AutoSyncConfig.==` 不含 `onGroupOpen` | 1 |
+| `GroupSyncThrottle.allows` 内部记录（纯查询变副作用） | 1 |
+| 路由层不检查 `onGroupOpen` | 1 |
+| 路由层不检查 `canSync` | 1 |
+| 路由层不检查冷却 | 1（补测前为 **0**） |
+| 判定 upToDate 也 `markTriggered` | 1 |
+| 「忽略」按钮也触发同步 | 1 |
+| 探测读 group 级状态键而非 `workspaceStateKey` | 2 |
+| 统计不按游标过滤 | 1 |
+| upToDate 也继续统计（漏提前 return） | 1 |
+| 不判 `canSync` 就发请求 | 1 |
+| 计数上限去掉（无限翻页） | 1 |
+| 设置页不渲染 `onGroupOpen` 开关 | 2 |
+| 提示条把 0 写成「0 个」 | 1 |
+| 提示条 `syncing` 时不禁用同步按钮 | 1 |
+| 提示条 `syncing` 时不禁用关闭按钮 | 1 |
+
+⚠️ 「路由层不检查冷却」这条**最初是假绿**：我的断言查的是节流器自己的状态
+（`throttle.allows` 为 false），而没有验证路由层真的**调用**了它。修法是新增
+一条「预置节流器 → 打开对话 → 断言一次探测都没跑」的用例。这与 §6.17 / §6.33
+同一类：**只测被调用的组件、不测调用点**，接线断了也绿。
+
+#### 有意不做
+
+- **不做「只同步这个 group」**：硬约束，见上（会把共享游标推过其它 group）。
+- **不做自动下载（静默）**：首次全量 4.7 GB，用户需要看得见、能拒绝。
+- **不做「提示条里显示具体文件列表」**：侧边栏「交付物」tab 已经承担这个
+  职责，提示条只需回答「有没有、多少个」。
+- **不做探测结果持久化**：它是「这一刻的事实」，落盘会在下次启动时变成过期
+  信息（与 §5.4 的 `schedule_created` 不带绝对时间同一取向）。
 
 ---
 
@@ -4676,6 +4841,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 对话内搜索（搜已加载时间线，见 §6.15）+ 窄屏 AppBar 溢出修复（issue #31，见 §6.16）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 自动同步（启动后一次 / 周期 N 分钟，默认关闭；仅桌面端装配，见 §6.42）
+- [x] 进对话时按需同步（默认关闭；判定命中只提示、不静默下载，见 §6.43）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 §6.24）
@@ -4754,6 +4920,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~放置一段时间后被登出、关闭重开又正常~~ | ✅ 已修（§6.39）：`SessionManager` 曾把**所有**刷新失败折叠成 `null`（断网、超时、IdP 503、`invalid_grant` 全长得一样），而 `currentAccessToken()` 返回 null 会让拦截器发出**匿名**请求——那必然 401，而那个 401 又被当成「会话失效」把人登出。凭证其实完好，所以重开应用（新进程网络栈干净）就正常。修法：新增三态 `TokenRefreshStatus`（`refreshed` / `rejected` / `transient`），判据是「这个失败是否携带关于凭证有效性的信息」——网络层错误从不携带。① `currentAccessToken` 在 transient 时返回**旧 token**（交给服务端判定，而不是替它提前判「已失效」）；② 拦截器拿到 transient 时**不调** `onSessionExpired`、不重放，只把 401 归一化为 `AuthError` 让页面提示网络异常。⚠️ **最易写错的一处**：`OidcClient._tokenRequest` 对任何非 2xx 都抛 `AuthError(cause: HttpError(status))`，只按最外层类型判会把「IdP 回了 503」也当成「凭证作废」——必须下探 `cause`。旧布尔回调 `onUnauthorized` 保留（新回调优先，`false` 一律当 rejected），`refresh()` 保留为 `refreshWithOutcome()` 的薄包装以兼容 6 处既有调用点。新增 21 条用例，5 项反向验证逐条实测 | §6.39 |
 | ~~「在文件管理器中定位」全平台失效（Windows 用户报「总是定位不到已下载的文档」）~~ | ✅ 已修（§6.41）：**三个独立缺陷叠加**，且都不报错。① `revealPath` 文档写的是「打开本地**目录**」，实现按此用 `Directory(path).exists()` 校验——而**两个真实调用点传的都是文件路径**，实测 `Directory('/tmp/a.txt').exists() == false` 恒成立，于是在 spawn **之前**就返回了（与平台无关，Linux/macOS 同样失效）。② 即使放行，Windows 上 spawn 的是 `explorer <path>` = **用默认程序打开**，不是选中；正确命令是 `explorer /select,<path>`（且必须是**一个**参数，拆成 `['/select,', path]` 会被 explorer 当成要打开的路径）。macOS 对应 `open -R`，Linux 退化为 `xdg-open <父目录>`（无选中概念）。③ **下载平铺**：两条手动链路都写到 `downloads/{agent,deliverables}/<文件名>`，不同 group 的同名文件互相覆盖、目录结构被压平、磁盘上分不清归属。修法：`spb_platform` 新增 `spawnSystemReveal` + `revealSystemEntry`（按 `FileSystemEntityType` 分流，可注入 probe 以便无头测试）；`spb_domain` 新增纯函数 `deliverableDownloadRelPath` / `agentFileDownloadRelPath`（`{groupId}/<相对路径>`，逐段过 `isValidPathSegment`，非法时退化为单文件名而非报错），**四条下载链路（桌面 2 + 移动 2）共用同一口径**。共 36 条用例（领域 16 + 平台 19 + 装配 1），5 项反向验证逐条实测 | §6.41 |
 | ~~交付物同步只能手动点（用户问「PC 端能不能自动下载 / 同步」）~~ | ✅ 已实现（§6.42）：新增 `AutoSyncConfig`（`onLaunch` + `intervalMinutes`，档位 关闭/15/30/60/180）与 `AutoSyncScheduler`（**纯 Dart + `fake_async` 可测**，放 `spb_domain`）。两条入口**相互独立**（「只在启动时同步一次」是合法组合）。**默认全关**——生产实测首次全量 5666 条 / 4.7 GB，静默替用户拉这么多不可接受。排程用**自续排的一次性 `Timer`** 而非 `periodic`：`periodic` 会在上一轮未跑完时叠加触发，而游标并发推进不安全；代价是长轮次期间 `isScheduled == false`（正确状态）。三条易写错的判据：① `pause()` 必须清空已应用配置，否则重新登录后 `apply(同一配置)` 被幂等吞掉 → 自动同步永久失效；② `apply` 以配置相等做幂等键，否则三个信号源反复喂同一份配置会把周期无限重置；③ `_tick` 必须 `_cancelTimer()` 而不是 `_timer = null`（`apply` 是「先排周期再跑启动轮」，启动轮进 `_tick` 时计时器是活的 → 僵尸 Timer → 一轮变两轮，被用例抓到过）。`runSyncActionProvider` 加**单飞**（语义选「复用同一 Future」而非「静默跳过」，否则手动触发点了没反应）。移动端**不装配排程器**（后台定时器在 Android/iOS 不可靠）→ `showAutoSync: false` 整段不渲染（不渲染禁用态），但**仍读写 `sync.auto`**——同一份 `SyncSettings` 两端流转，不写回会静默清掉桌面端配置。共 48 条用例（领域 39 + 设置页 8 + 装配 7 + 移动端持久化 4 …），**14 项反向验证逐条实测** | §6.42 |
+| ~~定时自动同步解决不了「用户此刻正看着这个对话」~~ | ✅ 已实现（§6.43）：新增第三条入口「进入对话时按需同步」（`AutoSyncConfig.onGroupOpen`，**默认关**）。判定只需**一次** `page_size=1` 查询：取该 group 最晚 `updated_at` 与 `__workspace__` 游标比较（**严格大于**——等于游标的那份文件正是推进游标的那个）。依据是引擎的不变式「只有成功下载或 304 才推游标」→ 任何晚于游标的文件都不可能是已同步的。**判定命中只提示、不静默下载**（首次全量 4.7 GB，静默启动是把一次误判变成事故）。⚠️ **硬约束：不能只同步这一个 group**——`SyncGroupsScope`/`SyncWorkspaceScope` 共用 `__workspace__` 状态键、`advanceCursor` 取 `max()`、`_pathPrefixFor` 恒返回 `/workspace/groups/`，三者叠加使**任何部分扫描都会把共享游标推过其它 group 未同步的文件** → 永久漏下载而报告成功。三重门控（`onGroupOpen` / `canSync` / 冷却闸）+ `GroupSyncThrottle`（默认 10 分钟，内存态）：被过滤的文件（媒体 / `reports/tts/**` / 超体积）不推游标 → 判定长期命中，没有冷却会每次进对话白跑一轮。计数上限 500（命中后才分页统计、按游标过滤、超过显示「500+」）。提示条包在 `ConversationPage` **外面**（`withHint` 闭包）——避免给 46 参数的页面再加一条要写进 `check_wiring_parity.sh` 豁免的参数。共 50 条用例，**18 项反向验证逐条实测**（其中「路由层不检查冷却」最初是**假绿**：断言只查了节流器状态、没验路由层真的调了它） | §6.43 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |

@@ -653,6 +653,15 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
+  void _setAutoGroupOpen(bool value) {
+    final draft = _draft;
+    if (draft == null) return;
+    setState(() {
+      _draft = draft.copyWith(auto: draft.auto.copyWith(onGroupOpen: value));
+      _savedHint = false;
+    });
+  }
+
   void _setAutoOnLaunch(bool value) {
     final draft = _draft;
     if (draft == null) return;
@@ -1094,6 +1103,15 @@ class _SettingsPageState extends State<SettingsPage> {
             margin: EdgeInsets.zero,
             child: Column(
               children: [
+                SwitchListTile(
+                  key: const ValueKey('settings-auto-sync-on-group-open'),
+                  value: draft.auto.onGroupOpen,
+                  onChanged: _setAutoGroupOpen,
+                  title: const Text('进入对话时按需同步'),
+                  // 说清「按需」的含义：不是每次进都拉，而是先判定有没有新的。
+                  subtitle: const Text('打开对话时先检查该对话有没有新交付物，有才拉取'),
+                ),
+                const Divider(height: 1),
                 SwitchListTile(
                   key: const ValueKey('settings-auto-sync-on-launch'),
                   value: draft.auto.onLaunch,
