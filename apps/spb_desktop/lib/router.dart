@@ -1154,13 +1154,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 1. **用户开了这个开关**（`auto.onGroupOpen`，默认关）——不探测即零开销；
   /// 2. **已配置可同步**（有目录、范围非空）——没目录时判定必然 unknown，
   ///    探测只是白跑一次 HTTP；
-  /// 3. **冷却期未到**——见 [GroupSyncThrottle]（被过滤掉的文件不推游标，
+  /// 3. **冷却期未到**——见 [GroupSyncThrottle]（被过滤掉的文件不抬水位，
   ///    会让判定长期命中）。
   ///
   /// ## 为什么判定与同步分两步
   ///
   /// 判定命中只意味着「有东西没同步」。直接开始拉会让用户在毫无预告的情况下
-  /// 看到下载，且首次全量是 4.7 GB。故先显示提示条，由用户点「立即同步」。
+  /// 看到下载。故先显示提示条，由用户点「立即同步」。
   Future<void> _checkGroupSync(String userId) async {
     if (!mounted || _checkingSync) return;
     _checkingSync = true;
@@ -1200,14 +1200,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   /// 用户在提示条上点了「立即同步」。
   ///
-  /// 跑的是**全范围**同步而不是本 group——单游标模型下只同步一个 group 会
-  /// 把共享游标推过其它 group 未同步的文件（永久漏下载且报告成功），
-  /// 详见 `spb_domain` 的 `groupSyncNeed` 说明。
+  /// 只同步**这个 group**（[SyncSingleGroupScope]）：列举前缀收窄到它的子树，
+  /// 且**不推进** workspace 共享游标——故不会让其它 group 里未同步的文件
+  /// 被 `updated_since` 永久过滤掉（见 `SyncSingleGroupScope` 的文档）。
   Future<void> _syncFromHint() async {
     if (_syncingFromHint) return;
+    final groupId = widget.groupId;
     setState(() => _syncingFromHint = true);
     try {
-      final report = await ref.read(runSyncActionProvider)();
+      final report = await ref.read(runGroupSyncActionProvider)(groupId);
       if (!mounted) return;
       setState(() => _syncCheck = null);
       _showSettingsError(

@@ -1437,7 +1437,7 @@ class GroupSyncCheckResult {
   final String groupId;
   final GroupSyncNeed need;
 
-  /// 该 group 在远端有、但本地游标还没覆盖的文件数（用于提示文案）。
+  /// 该 group 在远端有、但本地还没有（或版本更旧）的文件数（用于提示文案）。
   ///
   /// 判定用 `page_size=1` 只拉一条就够**触发**，但要给用户一句可读的话
   /// （「有 12 个交付物未同步」）就得知道规模。故判定命中后再花一次分页
@@ -1473,15 +1473,17 @@ typedef GroupSyncCheck = Future<GroupSyncCheckResult> Function(String groupId);
 ///
 /// ## 为什么用 `page_size=1` 判定
 ///
-/// 列表按 `updated_at` 倒序，第一条即最晚的那份。取它的 `updated_at` 与
-/// workspace 游标比较即可（判据见 `groupSyncNeed`）。拉一页 100 条只为读
-/// 一个字段是浪费。
+/// 列表按 `updated_at` 倒序，第一条即最晚的那份。取它的 `updated_at` 与本
+/// group 的已同步水位比较即可（判据见 `groupSyncNeed`）。拉一页 100 条只为
+/// 读一个字段是浪费。
 ///
-/// ## ⚠️ 命中的是「全范围」而不是「这个 group」
+/// ## 命中的是「这个 group」而不是全范围
 ///
-/// 单游标模型下只同步一个 group 会让游标越过其它 group 里未同步的文件，
-/// 它们此后再也不出现在增量清单里（静默永久漏文件，见 `groupSyncNeed`
-/// 的说明）。故判定只回答「要不要现在跑一轮」，跑的是**用户配置的全范围**。
+/// 定向同步（[SyncSingleGroupScope]）只列该 group 子树、且**不推进**共享
+/// 游标，故不会让游标越过其它 group 里未同步的文件。
+///
+/// ⚠️ 水位必须从**本 group 的文件记录**里取（[groupSyncWatermark]），
+/// 不能拿 workspace 游标比：定向同步不动游标，拿它比会永远判 stale。
 final checkGroupSyncNeedProvider =
     Provider<Future<GroupSyncCheckResult> Function(String)>((ref) {
       return (String groupId) async {
@@ -1492,7 +1494,7 @@ final checkGroupSyncNeedProvider =
             need: GroupSyncNeed.unknown,
           );
         }
-        // 该 group 根本没有交付物时不必再问游标：`page_size=1` 空页即结论。
+        // 该 group 根本没有交付物时不必再问水位：`page_size=1` 空页即结论。
         final ufs = ref.read(ufsApiProvider);
         final page = await ufs.listFiles(
           pathPrefix: '$workspaceGroupsPrefix$groupId',
@@ -1508,10 +1510,19 @@ final checkGroupSyncNeedProvider =
         }
 
         final store = ref.read(syncStateStoreProvider);
-        final workspace = await store.load(workspaceStateKey);
+        // 状态键固定用 [workspaceStateKey]——因为提示条上的「立即同步」跑的是
+        // [SyncSingleGroupScope]，它按 workspace 布局落盘（`{gid}/` 前缀）
+        // 且写这个键。读另一个键会比不到东西，于是永远判 stale。
+        const stateKey = workspaceStateKey;
+        final state = await store.load(stateKey);
+        final watermark = groupSyncWatermark(
+          state: state,
+          stateKey: stateKey,
+          groupId: groupId,
+        );
         final need = groupSyncNeed(
           remoteLatestUpdatedAt: latest,
-          localCursor: workspace.cursor,
+          local: watermark,
         );
         if (need != GroupSyncNeed.stale) {
           return GroupSyncCheckResult(groupId: groupId, need: need);
@@ -1530,11 +1541,9 @@ final checkGroupSyncNeedProvider =
           for (final entry in res.items) {
             final at = entry.updatedAtRaw?.trim();
             if (at == null || at.isEmpty) continue;
-            // 与判定同一口径：晚于游标才算「未同步」。
-            if (workspace.cursor == null ||
-                at.compareTo(workspace.cursor!) > 0) {
-              count++;
-            }
+            // 与判定同一口径：晚于本 group 水位才算「未同步」。
+            final mine = watermark.latestUpdatedAt;
+            if (mine == null || at.compareTo(mine) > 0) count++;
           }
           if (!res.hasMore(page: pageNo, pageSize: pageSize)) break;
           pageNo++;
@@ -1581,6 +1590,57 @@ Future<SyncReport> _runSync(Ref ref) async {
     sinceDays: settings.sinceDays,
   );
 }
+
+/// 定向同步**一个 group**（进入对话时的「立即同步」走这里）。
+///
+/// ## 与 [_runSync] 的区别（两处，缺一不可）
+///
+/// | | [_runSync]（全范围） | 本方法 |
+/// |---|---|---|
+/// | 列举前缀 | 用户配置范围的全前缀 | 仅 `{gid}` 子树 |
+/// | 游标 | 推进 | **不推进**（[SyncSingleGroupScope.advancesCursor]）|
+///
+/// ## 为什么不能直接复用用户配置的 scope
+///
+/// 用户可能配的是「勾选若干」或「全部」。拿那个 scope 跑就是全范围同步
+/// （首次 4.7 GB），而用户只是点开了一个对话。
+///
+/// ## 为什么目录/过滤仍跟着用户配置
+///
+/// 同步到**哪里**、**哪些文件不要**（媒体/体积/`reports/tts`）是用户设定
+/// 的策略，与本轮只看一个 group 无关。混用两套过滤规则会让本地目录里
+/// 出现「手动同步时不会有的文件」。
+Future<SyncReport> _runSyncSingleGroup(Ref ref, String groupId) async {
+  final settings = await ref.read(loadSyncSettingsProvider)();
+
+  final root = settings.localRoot;
+  if (root == null || root.trim().isEmpty) {
+    throw const PlatformError('请先选择同步目录');
+  }
+
+  final ufs = ref.read(ufsApiProvider);
+  final useCase = DeliverableSyncUseCase(
+    ufs: ufs,
+    stateStore: ref.read(syncStateStoreProvider),
+    sink: LocalFileSink(root),
+    downloader: UfsFileDownloader(ufs),
+  );
+
+  return useCase.run(
+    scope: SyncSingleGroupScope(groupId),
+    filter: settings.filter,
+    sinceDays: settings.sinceDays,
+  );
+}
+
+/// 「立即同步本对话的交付物」（进入对话提示条上的按钮）。
+///
+/// 返回注入点形态（收 groupId），便于测试替掉整个动作而不碰 UFS。
+typedef GroupSyncRun = Future<SyncReport> Function(String groupId);
+
+final runGroupSyncActionProvider = Provider<GroupSyncRun>((ref) {
+  return (String groupId) => _runSyncSingleGroup(ref, groupId);
+});
 
 /// 保存同步目录（换目录时**在同一事务里**清空同步状态）。
 ///

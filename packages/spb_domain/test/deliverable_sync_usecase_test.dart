@@ -91,6 +91,8 @@ void main() {
 
   const gid = 'g1';
   const root = '/workspace/groups/';
+  // 单 group 范围收窄到该 group 的子树（见 `_pathPrefixFor`）。
+  const groupPrefix = '$root$gid';
 
   setUp(() {
     dio = createDio(baseUrl: 'https://api.test/ufs');
@@ -125,7 +127,7 @@ void main() {
         }),
         queryParameters: {
           'owner_type': 'user',
-          'path_prefix': root,
+          'path_prefix': groupPrefix,
           'include_deleted': 'true',
           'page': 1,
           'page_size': 2,
@@ -139,7 +141,7 @@ void main() {
         }),
         queryParameters: {
           'owner_type': 'user',
-          'path_prefix': root,
+          'path_prefix': groupPrefix,
           'include_deleted': 'true',
           'page': 2,
           'page_size': 2,
@@ -181,7 +183,7 @@ void main() {
         }),
         queryParameters: {
           'owner_type': 'user',
-          'path_prefix': root,
+          'path_prefix': groupPrefix,
           'include_deleted': 'true',
           'page': 1,
           'page_size': 2,
@@ -200,7 +202,7 @@ void main() {
         (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
         queryParameters: {
           'owner_type': 'user',
-          'path_prefix': root,
+          'path_prefix': groupPrefix,
           'include_deleted': 'true',
           'page': 1,
           'page_size': 2,
@@ -223,7 +225,7 @@ void main() {
         (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
         queryParameters: {
           'owner_type': 'user',
-          'path_prefix': root,
+          'path_prefix': groupPrefix,
           'updated_since': '2026-04-01T00:00:00Z',
           'include_deleted': 'true',
           'page': 1,
@@ -243,7 +245,7 @@ void main() {
         (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
         queryParameters: {
           'owner_type': 'user',
-          'path_prefix': root,
+          'path_prefix': groupPrefix,
           'include_deleted': 'true',
           'page': 1,
           'page_size': 2,
@@ -266,6 +268,134 @@ void main() {
       await useCase.run(scope: scope, filter: filter);
       expect(store.data.containsKey(gid), isTrue);
       expect(store.data.containsKey(workspaceStateKey), isFalse);
+    });
+  });
+
+  group('同步用例：列举前缀按范围收窄', () {
+    test('单 group 只列该 group 的子树（不拉整个 workspace）', () async {
+      // ## 为什么这条重要
+      //
+      // 「进入对话时同步该 group 的文档」若仍列全 workspace，就还是把
+      // 5666 条元数据拉一遍——用户感知不到「只同步这个对话」。
+      //
+      // 这里只注册 group 前缀的 mock：若实现仍用全前缀，DioAdapter 会因
+      // 「no mock found」失败（比断言更直接）。
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/g1/a.md')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      final report = await useCase.run(scope: scope, filter: filter);
+      expect(report.downloaded, 1);
+    });
+
+    test('workspace 范围仍列全 workspace（前缀不收窄）', () async {
+      // 选中若干 group 的过滤在 `SyncScope.relativePath` 里做（未选中的记为
+      // invalidPath）。若为它也收窄成多个前缀，就得分多次列举再合并——
+      // 而「多次列举 + 单游标」正是漏文件的经典来源。
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/ga/a.md')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': root,
+          'include_deleted': 'true',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      await useCase.run(
+        scope: const SyncGroupsScope(['ga']),
+        filter: const SyncFilterConfig(),
+      );
+    });
+  });
+
+  group('同步用例：定向同步（SyncSingleGroupScope）', () {
+    test('不推进游标，但文件记录照常合并', () async {
+      // ## 为什么这是「只同步一个 group」能安全的前提
+      //
+      // 全部 / 勾选若干共用 `__workspace__` 单个游标。若定向同步也推进它，
+      // 游标就会越过其它 group 里从未同步过的文件——它们此后再也不出现在
+      // 增量清单里（`updated_since` 过滤），**永久漏下载而报告显示成功**。
+      await store.save(
+        workspaceStateKey,
+        const SyncState(cursor: '2026-04-01T00:00:00Z'),
+      );
+
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/g1/a.md')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'updated_since': '2026-04-01T00:00:00Z',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      final report = await useCase.run(
+        scope: const SyncSingleGroupScope(gid),
+        filter: const SyncFilterConfig(),
+      );
+
+      expect(report.downloaded, 1);
+      final saved = store.data[workspaceStateKey]!;
+      expect(
+        saved.cursor,
+        '2026-04-01T00:00:00Z',
+        reason: '定向同步不得推进游标（保持原值，不是清空）',
+      );
+      expect(
+        saved.contains('g1/a.md'),
+        isTrue,
+        reason: '文件记录要照常写（后续全范围同步靠 etag 命中跳过，不重复下载）',
+      );
+    });
+
+    test('仍然用游标做 updated_since（不重拉已同步区间）', () async {
+      // 「不推进游标」与「用游标做时间下限」是两件事：后者是安全的过滤，
+      // 前者是「不得断言已覆盖全部 group」。混为一谈会白白重拉。
+      await store.save(
+        workspaceStateKey,
+        const SyncState(cursor: '2026-04-01T00:00:00Z'),
+      );
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'updated_since': '2026-04-01T00:00:00Z',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      await useCase.run(
+        scope: const SyncSingleGroupScope(gid),
+        filter: const SyncFilterConfig(),
+      );
     });
   });
 

@@ -32,10 +32,14 @@ import 'sync_state.dart';
 /// 反之若为「选中」单开一个键，用户在两种模式间切换就会**来回全量重拉**
 /// （新键没有 etag 记录，每个文件都被判为「已变更」）。
 ///
-/// 单 group 模式则必须分开：它落盘**无** `{groupId}/` 前缀，布局不同，
-/// 状态跟着布局走。
+/// 单 group 模式（[SyncGroupScope]）则必须分开：它落盘**无** `{groupId}/`
+/// 前缀，布局不同，状态跟着布局走。
+///
+/// [SyncSingleGroupScope] 的布局与 workspace 相同，故**共用**
+/// [workspaceStateKey]——它的区别在「不推进游标」，不在布局。
 String syncStateKeyFor(SyncScope scope) => switch (scope) {
   SyncGroupScope(:final groupId) => groupId,
+  SyncSingleGroupScope() => workspaceStateKey,
   SyncWorkspaceScope() => workspaceStateKey,
   SyncGroupsScope() => workspaceStateKey,
 };
@@ -201,6 +205,16 @@ sealed class SyncScope {
 
   /// 把 UFS 绝对路径解析为本地相对路径；null = 不属于本次同步范围。
   String? relativePath(String ufsPath);
+
+  /// 本轮是否推进状态游标。
+  ///
+  /// ## 为什么这个属性属于「范围」而不是「调用参数」
+  ///
+  /// 只有 [SyncSingleGroupScope]（定向同步）需要 false，而它的「窄列举前缀」
+  /// 与「不推游标」是**同一个语义的两面**：只看了这一个 group 的清单，就没
+  /// 资格断言「整个 workspace 已同步到哪」。把它做成调用参数就会允许
+  /// 「窄列举 + 推游标」这种致命组合（静默永久漏文件）。
+  bool get advancesCursor => true;
 }
 
 /// 单个 group：剥掉 `{groupId}/` 前缀，本地直接是 group 内容。
@@ -213,6 +227,47 @@ class SyncGroupScope extends SyncScope {
 
   @override
   String? relativePath(String ufsPath) => groupRelativePath(ufsPath, groupId);
+}
+
+/// **定向**同步：只拉一个 group 的子树，且**不推进游标**。
+///
+/// 这是「进入对话时同步本对话的交付物」用的范围。与 [SyncGroupScope] 的
+/// 区别是**两个关键点**：
+///
+/// | | [SyncGroupScope] | 本类 |
+/// |---|---|---|
+/// | 本地布局 | `{root}/reports/a.md`（剥掉 gid） | `{root}/{gid}/reports/a.md`（与 workspace 一致） |
+/// | 状态键 | `groupId`（独立） | [workspaceStateKey]（与 workspace 共用） |
+/// | 推进游标 | 是 | **否**（[advancesCursor] 为 false） |
+///
+/// ## 为什么布局必须与 workspace 一致
+///
+/// 同一份文件若因入口不同落到两个位置（`{root}/reports/a.md` 与
+/// `{root}/{gid}/reports/a.md`），用户会看到重复文件，且回传时路径也对不上。
+///
+/// ## 为什么必须共用状态键且不推进游标
+///
+/// 共用状态键让「先定向同步 A，再全范围同步」时 A 的文件靠 etag 命中而
+/// **不重下**。而游标**不能**推进：workspace 类范围的游标是「整个 workspace
+/// 已同步到哪」的水位线，只看了 A 就把它抬到 A 的上界，B/C 里早于该上界的
+/// 文件下一轮会被 `updated_since` 过滤掉——**永久漏下载而报告显示成功**。
+class SyncSingleGroupScope extends SyncScope {
+  const SyncSingleGroupScope(this.groupId);
+
+  final String groupId;
+
+  @override
+  bool get advancesCursor => false;
+
+  /// 与 [SyncGroupsScope] 同一布局：保留 `{groupId}/` 分层。
+  @override
+  String? relativePath(String ufsPath) {
+    final rel = workspaceRelativePath(ufsPath);
+    if (rel == null) return null;
+    final slash = rel.indexOf('/');
+    if (slash <= 0) return null;
+    return rel.substring(0, slash) == groupId ? rel : null;
+  }
 }
 
 /// 整个 workspace：保留 `{groupId}/` 作为第一段。
@@ -566,6 +621,7 @@ class SyncRunResult {
 ///    「已同步」而跳过 → **永久漏更新**（用户永远拿不到这个文件的新版本）。
 /// 2. **游标只由成功的下载推进**。游标是「已同步到哪」的水位线；若由失败项
 ///    推进，那些文件会被下轮的 `updated_since` 过滤掉，同样永久漏更新。
+///    （定向同步时进一步收紧为**完全不推进**，见 `run` 的 `advanceCursor`。）
 /// 3. **304 也算成功**：内容未变但状态要刷新（服务端可能刚补上 etag，
 ///    不刷新的话下轮又会重新走一次条件请求）。
 ///
@@ -631,6 +687,13 @@ class SyncEngine {
   ///
   /// [state] 为执行前的状态（由调用方从 [SyncStateStore] 读出）。
   /// 返回新状态；调用方负责持久化。
+  ///
+  /// ## 游标是否推进由 [SyncScope.advancesCursor] 决定
+  ///
+  /// 故意**不做成调用参数**：只有 [SyncSingleGroupScope] 需要「不推进」，
+  /// 而它的「窄列举前缀」与「不推游标」是**同一个语义的两面**——只看了
+  /// 一个 group 的清单，就没资格断言「整个 workspace 已同步到哪」。做成参数
+  /// 就允许「窄列举 + 推游标」这个致命组合（静默永久漏文件）。
   Future<SyncRunResult> run({
     required List<UfsFileEntry> remote,
     required SyncState state,
@@ -695,7 +758,12 @@ class SyncEngine {
     );
 
     // ── 阶段 2：按原计划顺序串行合并状态 ──────────────────────────────────
-    return _merge(actions, state: state, skipped: plan.skipped);
+    return _merge(
+      actions,
+      state: state,
+      skipped: plan.skipped,
+      advanceCursor: scope.advancesCursor,
+    );
   }
 
   /// 并发执行全部动作，返回与输入**同序**的结果列表。
@@ -812,6 +880,7 @@ class SyncEngine {
     List<_ActionResult> results, {
     required SyncState state,
     required Map<SyncSkipReason, int> skipped,
+    required bool advanceCursor,
   }) {
     var next = state;
     final failed = <SyncFailure>[];
@@ -842,7 +911,7 @@ class SyncEngine {
             updatedAt: updatedAt,
             contentHash: next.files[relPath]?.contentHash,
           );
-          next = next.advanceCursor(updatedAt);
+          if (advanceCursor) next = next.advanceCursor(updatedAt);
           notModified++;
 
         case _Downloaded(
@@ -859,7 +928,7 @@ class SyncEngine {
             updatedAt: updatedAt,
             contentHash: contentHash,
           );
-          next = next.advanceCursor(updatedAt);
+          if (advanceCursor) next = next.advanceCursor(updatedAt);
           downloaded++;
 
         case _Failed(:final relPath, :final reason):

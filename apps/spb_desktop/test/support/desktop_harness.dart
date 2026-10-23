@@ -182,8 +182,15 @@ Future<TestHarness> pumpApp(
   /// 目录选择器（同步页用）。默认「用户取消」。
   PickSyncDirectory? pickDirectory,
 
-  /// 同步动作（同步页用）。默认返回空报告。
+  /// 同步动作（同步页 / 托盘用）。默认返回空报告。
   RunSyncAction? runSync,
+
+  /// 定向同步动作（对话页提示条上的「立即同步」用）。默认返回空报告。
+  ///
+  /// 与 [runSync] 分开是因为**它们不是同一个动作**：前者跑用户配置的全范围
+  /// 并推进游标，后者只同步一个 group 且**不推进**游标。合成一个会让用例
+  /// 无法断言「点提示条时到底跑了哪个」。
+  GroupSyncRun? runGroupSync,
 
   /// 同步目录初始值（同步页用）。默认未选。
   String? syncLocalRoot,
@@ -421,6 +428,9 @@ Future<TestHarness> pumpApp(
       ),
       runSyncActionProvider.overrideWithValue(
         runSync ?? () async => SyncReport(),
+      ),
+      runGroupSyncActionProvider.overrideWithValue(
+        runGroupSync ?? (String groupId) async => SyncReport(),
       ),
       // 调度器：默认桩（不排任何计时器，见参数文档）。
       autoSyncSchedulerProvider.overrideWithValue(

@@ -8,57 +8,68 @@ import 'package:spb_domain/spb_domain.dart';
 ///
 /// 判据是**正确性核心**：判错的方向有两个，都很糟。
 /// - 该同步却判成 upToDate → 用户开了功能却看不到任何效果（静默失效）；
-/// - 不该同步却判成 stale → 每次点对话都拉一轮全范围（首次 4.7 GB）。
+/// - 不该同步却判成 stale → 每次点对话都拉一轮（首次可能有几百 MB）。
 ///
-/// 两者都只在真实网络+真实游标下才暴露，故必须把判据抽成纯函数逐条钉住。
+/// 两者都只在真实网络+真实状态库下才暴露，故必须把判据抽成纯函数逐条钉住。
 void main() {
+  /// 构造一个「已同步 2 个文件、最晚 updated_at 为 08:00」的水位。
+  GroupSyncWatermark watermark([String? latest = '2026-10-21T08:00:00Z']) =>
+      GroupSyncWatermark(latestUpdatedAt: latest, fileCount: 2);
+
   group('groupSyncNeed 判定', () {
-    test('远端最晚时间晚于本地游标 → stale', () {
+    test('远端最晚时间晚于本地水位 → stale', () {
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: '2026-10-21T09:00:00Z',
-          localCursor: '2026-10-21T08:00:00Z',
+          local: watermark(),
         ),
         GroupSyncNeed.stale,
       );
     });
 
-    test('远端最晚时间早于本地游标 → upToDate', () {
+    test('远端最晚时间早于本地水位 → upToDate', () {
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: '2026-10-21T07:00:00Z',
-          localCursor: '2026-10-21T08:00:00Z',
+          local: watermark(),
         ),
         GroupSyncNeed.upToDate,
       );
     });
 
-    test('恰好等于游标 → upToDate（那份文件就是推进游标的那个）', () {
+    test('恰好等于水位 → upToDate（那份文件就是抬升水位的那个）', () {
       // 严格大于而非 >=：`>=` 会让「同步完最后一轮」永远判成 stale——
-      // 游标正是被那份文件推上去的。
+      // 水位正是被那份文件抬上去的。
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: '2026-10-21T08:00:00Z',
-          localCursor: '2026-10-21T08:00:00Z',
+          local: watermark(),
         ),
         GroupSyncNeed.upToDate,
       );
     });
 
-    test('本地游标为空（从未同步）→ stale', () {
+    test('从未同步过这个 group（水位为空）→ stale', () {
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: '2026-10-21T08:00:00Z',
-          localCursor: null,
+          local: GroupSyncWatermark.none,
         ),
         GroupSyncNeed.stale,
       );
+    });
+
+    test('有记录但都没带 updated_at → unknown（无从比较）', () {
+      // ## 为什么不是 stale
+      //
+      // 说 stale 会让这个 group 每轮都提示、每轮都追不上（下载完成后仍然
+      // 没有 updated_at 可抬升水位）——那是一个永不消失的提示条。
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: '2026-10-21T08:00:00Z',
-          localCursor: '   ',
+          local: watermark(null),
         ),
-        GroupSyncNeed.stale,
+        GroupSyncNeed.unknown,
       );
     });
 
@@ -66,14 +77,14 @@ void main() {
       // 语义区别：upToDate 是「比对过了，本地最新」，unknown 是「没东西可比」。
       // 当前用户可见后果相同，但混用会让将来加「本对话没有交付物」空态时无从区分。
       expect(
-        groupSyncNeed(
-          remoteLatestUpdatedAt: null,
-          localCursor: '2026-10-21T08:00:00Z',
-        ),
+        groupSyncNeed(remoteLatestUpdatedAt: null, local: watermark()),
         GroupSyncNeed.unknown,
       );
       expect(
-        groupSyncNeed(remoteLatestUpdatedAt: '  ', localCursor: null),
+        groupSyncNeed(
+          remoteLatestUpdatedAt: '  ',
+          local: GroupSyncWatermark.none,
+        ),
         GroupSyncNeed.unknown,
       );
     });
@@ -85,7 +96,7 @@ void main() {
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: '2026-10-21T09:00:00Z',
-          localCursor: '2026-10-21T08:00:00Z',
+          local: watermark(),
         ),
         GroupSyncNeed.stale,
       );
@@ -95,9 +106,132 @@ void main() {
       expect(
         groupSyncNeed(
           remoteLatestUpdatedAt: ' 2026-10-21T09:00:00Z ',
-          localCursor: '2026-10-21T08:00:00Z',
+          local: watermark(),
         ),
         GroupSyncNeed.stale,
+      );
+    });
+  });
+
+  group('groupSyncWatermark：从状态里取本 group 水位', () {
+    SyncState stateWith(Map<String, String?> files, {String? cursor}) =>
+        SyncState(
+          cursor: cursor,
+          files: {
+            for (final e in files.entries)
+              e.key: SyncedFile(size: 1, updatedAt: e.value),
+          },
+        );
+
+    test('workspace 布局：只取首段等于 groupId 的条目', () {
+      // ## 为什么这是本函数最易错的地方
+      //
+      // 状态表是**跨 group 共享**的（workspace 布局）。若不过滤，别的 group
+      // 里的新文件会把水位抬到很高，本 group 就永远判 upToDate——用户看不到
+      // 提示，而本地确实缺文件。
+      final wm = groupSyncWatermark(
+        state: stateWith({
+          'g1/a.md': '2026-10-21T08:00:00Z',
+          'g1/b.md': '2026-10-21T10:00:00Z',
+          'g2/c.md': '2026-10-21T23:00:00Z',
+        }),
+        stateKey: workspaceStateKey,
+        groupId: 'g1',
+      );
+      expect(wm.fileCount, 2);
+      expect(wm.latestUpdatedAt, '2026-10-21T10:00:00Z');
+      expect(wm.isEmpty, isFalse);
+    });
+
+    test('groupId 是前缀而不是首段时不算（g1 不能命中 g10/x）', () {
+      final wm = groupSyncWatermark(
+        state: stateWith({'g10/a.md': '2026-10-21T23:00:00Z'}),
+        stateKey: workspaceStateKey,
+        groupId: 'g1',
+      );
+      expect(wm.isEmpty, isTrue);
+      expect(wm.latestUpdatedAt, isNull);
+    });
+
+    test('单 group 布局：状态键就是该 group，全部条目都算', () {
+      // ## 为什么必须区分两种布局
+      //
+      // `syncStateKeyFor` 让单 group 模式用 groupId 作状态键、落盘**无**
+      // `{gid}/` 前缀。若一律按「首段 == gid」判定，这里一条都匹配不上，
+      // 水位恒空 → 判定永远 stale。
+      final wm = groupSyncWatermark(
+        state: stateWith({
+          'reports/a.md': '2026-10-21T08:00:00Z',
+          'reports/b.md': '2026-10-21T10:00:00Z',
+        }),
+        stateKey: 'g1',
+        groupId: 'g1',
+      );
+      expect(wm.fileCount, 2);
+      expect(wm.latestUpdatedAt, '2026-10-21T10:00:00Z');
+    });
+
+    test('单 group 布局下状态键与 groupId 不符 → 空', () {
+      final wm = groupSyncWatermark(
+        state: stateWith({'reports/a.md': '2026-10-21T08:00:00Z'}),
+        stateKey: 'g2',
+        groupId: 'g1',
+      );
+      expect(wm.isEmpty, isTrue);
+    });
+
+    test('空状态 / 空 groupId → 空', () {
+      expect(
+        groupSyncWatermark(
+          state: SyncState.empty,
+          stateKey: workspaceStateKey,
+          groupId: 'g1',
+        ).isEmpty,
+        isTrue,
+      );
+      expect(
+        groupSyncWatermark(
+          state: SyncState.empty,
+          stateKey: workspaceStateKey,
+          groupId: '',
+        ).isEmpty,
+        isTrue,
+      );
+    });
+
+    test('首段之后没有斜杠的条目不计（它是 group 根目录）', () {
+      final wm = groupSyncWatermark(
+        state: stateWith({'g1': '2026-10-21T08:00:00Z'}),
+        stateKey: workspaceStateKey,
+        groupId: 'g1',
+      );
+      expect(wm.isEmpty, isTrue);
+    });
+
+    test('条目里的 updated_at 为空时不计入最晚值，但仍计入条数', () {
+      final wm = groupSyncWatermark(
+        state: stateWith({'g1/a.md': null, 'g1/b.md': '2026-10-21T10:00:00Z'}),
+        stateKey: workspaceStateKey,
+        groupId: 'g1',
+      );
+      expect(wm.fileCount, 2);
+      expect(wm.latestUpdatedAt, '2026-10-21T10:00:00Z');
+    });
+
+    test('不看游标（游标跨 group 共享，定向同步不会推进它）', () {
+      // 这条钉住「判据已从游标改为水位」——若实现又改回读 cursor，
+      // 定向同步后会永远判 stale（游标不动而远端时间总大于它）。
+      final wm = groupSyncWatermark(
+        state: stateWith({
+          'g1/a.md': '2026-10-21T08:00:00Z',
+        }, cursor: '2026-10-21T23:00:00Z'),
+        stateKey: workspaceStateKey,
+        groupId: 'g1',
+      );
+      expect(
+        wm.latestUpdatedAt,
+        '2026-10-21T08:00:00Z',
+        reason: '水位来自文件记录，不是游标',
       );
     });
   });

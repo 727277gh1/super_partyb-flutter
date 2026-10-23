@@ -79,6 +79,9 @@ class DeliverableSyncUseCase {
     // 见 sync_cursor.dart 的 effectiveCursor（纯函数，已有单测）。
     //
     // [nowUnixOverride] 仅供测试注入固定时刻，生产不传。
+    //
+    // 定向同步（[SyncScope.advancesCursor] 为 false）**仍然用游标做时间下限**：
+    // 那是一个安全的过滤（已同步过的区间不需重拉），与「不推进游标」互不冲突。
     final cursor = effectiveCursor(
       saved: state.cursor,
       sinceDays: sinceDays,
@@ -158,19 +161,27 @@ class DeliverableSyncUseCase {
 
   /// 远端路径前缀。
   ///
-  /// group 交付物都在 `/workspace/groups/` 下（对齐 groupsync 与 workspace_sync
-  /// 的约定）。单 group 与 workspace 用同一个前缀，由 [SyncScope] 在本地过滤：
+  /// ## 定向同步（[SyncSingleGroupScope]）收窄到该 group 的子树
   ///
-  /// ## 为什么单 group 模式**也**用全 workspace 前缀
+  /// 直接 `path_prefix=/workspace/groups/{gid}`（尾斜杠由服务端
+  /// `NormalizePath` 补齐，故 `g1` 不会误匹配 `g10`）。这同时带来两个好处：
+  /// 少拉无关元数据，且「只同步这个对话」在请求层面就是真的定向。
   ///
-  /// 若单 group 用 `path_prefix=/workspace/groups/{gid}`，那么「切换到全部 group」
-  /// 时游标会从「只覆盖该 group 上界」变成「覆盖全 workspace」，这本身没问题；
-  /// 但反方向（全部 → 单 group）会因为**单游标**而让未选中 group 的变更被
-  /// 永久跳过。用统一前缀 + 本地过滤，游标语义在所有范围下完全一致。
+  /// ## workspace 类范围仍用全 workspace 前缀
   ///
-  /// 代价：单 group 模式会多拉一些元数据。收益：不会漏更新，且状态键可跨
-  /// 范围复用（见 [syncStateKeyFor]）。
-  String _pathPrefixFor(SyncScope scope) => workspaceGroupsPrefix;
+  /// `SyncWorkspaceScope` / `SyncGroupsScope` 共用 `__workspace__` 状态键与
+  /// 同一套游标语义，且后者的过滤在 [SyncScope.relativePath] 里做（未选中的
+  /// group 记为 `invalidPath` 跳过）。若为「勾选若干」也收窄成多个前缀，
+  /// 就得分多次列举再合并——而**多次列举 + 单游标**正是「漏文件」的经典
+  /// 来源（各页推游标的子集上界不一致）。保持一次列举，让过滤留在本地。
+  ///
+  /// [SyncGroupScope] 同样收窄（它的语义本就是「只要这一个 group」）。
+  String _pathPrefixFor(SyncScope scope) => switch (scope) {
+    SyncGroupScope(:final groupId) => '$workspaceGroupsPrefix$groupId',
+    SyncSingleGroupScope(:final groupId) => '$workspaceGroupsPrefix$groupId',
+    SyncWorkspaceScope() => workspaceGroupsPrefix,
+    SyncGroupsScope() => workspaceGroupsPrefix,
+  };
 }
 
 /// 把 [UfsApi] 适配成 [FileDownloader]。

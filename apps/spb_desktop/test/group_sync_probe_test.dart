@@ -17,12 +17,12 @@ import 'package:drift/native.dart';
 /// 判定本身是纯函数（`groupSyncNeed`，在 `spb_domain` 里逐条测过）。本文件测的
 /// 是**取数那一段**——它有三个易错点，且都不会被纯函数测试覆盖：
 ///
-/// 1. **游标必须取 `workspaceStateKey`**（`__workspace__`）而不是 group 级键。
-///    取错会让判定与「用户实际配置的范围」错配：勾选若干 / 全部共用同一个
-///    状态键，group 级键只存在于程序化的单 group 入口。
+/// 1. **水位必须取本 group 的文件记录**（`groupSyncWatermark`），不能拿
+///    workspace 游标比。定向同步（`SyncSingleGroupScope`）**不推进**游标，
+///    拿它比会永远判 stale。
 /// 2. **`page_size=1` 只够判定，不够统计**。判定命中后要再分页统计规模，
 ///    否则提示条只能写「有交付物未同步」而给不出数量。
-/// 3. **统计要按游标过滤**。远端那一页里可能既有新文件也有已同步的旧文件，
+/// 3. **统计要按同一水位过滤**。远端那一页里可能既有新文件也有已同步的旧文件，
 ///    把它们都算进去会让提示条报一个虚高的数字。
 ///
 /// 这些错误在真实环境里表现为「提示条说了个错数字」——很难被注意到，也很难
@@ -78,13 +78,25 @@ void main() {
   Future<GroupSyncCheckResult> check() =>
       container.read(checkGroupSyncNeedProvider)(groupId);
 
+  /// 预置「本 group 已同步到 [at]」。
+  ///
+  /// ## 为什么是文件记录而不是游标
+  ///
+  /// 提示条上的「立即同步」跑的是 `SyncSingleGroupScope`，它**不推进**共享
+  /// 游标（否则会越过其它 group 里未同步的文件，永久漏下载）。故判据必须
+  /// 建在本 group 的文件记录水位上——拿游标比会永远判 stale。
+  Future<void> seedWatermark(String at) => store.save(
+    workspaceStateKey,
+    SyncState(
+      cursor: at,
+      files: {'$groupId/reports/synced.md': SyncedFile(size: 1, updatedAt: at)},
+    ),
+  );
+
   group('checkGroupSyncNeed：判定', () {
     test('远端有晚于游标的文件 → stale，且带上未同步条数', () async {
       await configure(localRoot: '/tmp/sync');
-      await store.save(
-        workspaceStateKey,
-        const SyncState(cursor: '2026-10-21T08:00:00Z'),
-      );
+      await seedWatermark('2026-10-21T08:00:00Z');
 
       adapter.onGet(
         '/api/files',
@@ -128,10 +140,7 @@ void main() {
       // 统计是命中后才付的成本。若漏了 `if (need != stale) return`，每次
       // 打开对话都会多拉一页 100 条——而绝大多数打开是未命中。
       await configure(localRoot: '/tmp/sync');
-      await store.save(
-        workspaceStateKey,
-        const SyncState(cursor: '2026-10-21T10:00:00Z'),
-      );
+      await seedWatermark('2026-10-21T10:00:00Z');
 
       adapter.onGet(
         '/api/files',
@@ -221,10 +230,7 @@ void main() {
       // 远端那一页通常**既有**新文件也有已同步的旧文件（列表按 updated_at
       // 倒序，但一页 100 条会跨过游标）。全算进去会让提示条报虚高的数字。
       await configure(localRoot: '/tmp/sync');
-      await store.save(
-        workspaceStateKey,
-        const SyncState(cursor: '2026-10-21T08:00:00Z'),
-      );
+      await seedWatermark('2026-10-21T08:00:00Z');
 
       adapter.onGet(
         '/api/files',
@@ -264,10 +270,7 @@ void main() {
 
     test('跨页累加', () async {
       await configure(localRoot: '/tmp/sync');
-      await store.save(
-        workspaceStateKey,
-        const SyncState(cursor: '2026-10-21T08:00:00Z'),
-      );
+      await seedWatermark('2026-10-21T08:00:00Z');
 
       adapter.onGet(
         '/api/files',
@@ -320,10 +323,7 @@ void main() {
       // 首次全量生产实测 5666 条。若一直翻到 tail，光是显示「有 5666 个」
       // 就要发 57 次请求——而用户只需要知道「很多」。
       await configure(localRoot: '/tmp/sync');
-      await store.save(
-        workspaceStateKey,
-        const SyncState(cursor: '2026-10-21T08:00:00Z'),
-      );
+      await seedWatermark('2026-10-21T08:00:00Z');
 
       adapter.onGet(
         '/api/files',

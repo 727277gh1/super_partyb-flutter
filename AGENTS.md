@@ -4284,7 +4284,7 @@ Directory('/tmp/revtest').exists()       = true
 
 | 项 | 语义 | 章节 |
 |---|---|---|
-| 「进入对话时按需同步」 | 打开对话时先判定该对话有没有新交付物，**有才提示** | §6.43 |
+| 「进入对话时按需同步」 | 打开对话时先判定该对话有没有新交付物，**有才提示**，点了只同步**这个对话** | §6.43 |
 | 「启动后自动同步一次」 | 打开应用并完成登录后拉一轮 | 本节 |
 | 「周期同步」 | 运行期间每隔 N 分钟拉一轮（关闭 / 15 / 30 / 60 / 180） | 本节 |
 
@@ -4453,50 +4453,81 @@ Directory('/tmp/revtest').exists()       = true
 
 #### 为什么是「提示条」而不是静默自动同步
 
-判定命中后触发的是**全范围**同步（不能只同步单个 group，见下），而首次全量
-生产实测 **5666 条 / 4.7 GB**。用户只是点开一个对话看看时静默启动这种量级的
-下载，是把一次误判变成一次事故。故提示条把决定权交回用户：
+判定命中后同步的是**这个对话**（`SyncSingleGroupScope`，见下），但一个活跃
+对话仍可能有几百 MB 的产出。用户只是点开看看时静默启动下载，是把一次误判
+变成一次等待。故提示条把决定权交回用户：
 
 ```
 本对话有 12 个交付物未同步到本地          [立即同步] [×]
 ```
 
-#### ⚠️ 硬约束：**不能**只同步这一个 group
+#### 定向同步：`SyncSingleGroupScope`（**两个性质缺一不可**）
 
-这是本节最容易被误改的一处。
+「只同步这个对话」是安全的——但**前提是不得推进共享游标**。两者构成一个新
+范围类型（`spb_domain` 的 `deliverable_sync.dart`）：
 
-| 事实 | 位置 |
-|---|---|
-| `SyncGroupsScope` 与 `SyncWorkspaceScope` **共用** `workspaceStateKey`（`__workspace__`） | `sync_state.dart` |
-| `SyncState.advanceCursor` 取 `max()`（字典序即时序） | `sync_state.dart` |
-| `DeliverableSyncUseCase._pathPrefixFor(scope)` **恒返回** `workspaceGroupsPrefix`，无视 scope | `deliverable_sync_usecase.dart` |
+| 性质 | 本类 | 为什么 |
+|---|---|---|
+| 列举前缀收窄到 `{gid}` 子树 | ✅ | 否则「只同步这个对话」在请求层面仍是全量（5666 条元数据） |
+| **不推进** `__workspace__` 游标 | ✅ | 见下 |
+| 本地布局保留 `{gid}/` | ✅ | 与 workspace 模式一致；否则同一文件会落到两个位置 |
+| 状态键共用 `workspaceStateKey` | ✅ | 先定向同步 A 再全范围时，A 的文件靠 etag 命中而不重下 |
 
-三者叠加的后果：**任何只扫部分 group 的同步都会把共享游标推过其它 group
-未同步的文件**，它们此后再也不出现在增量清单里——**永久漏下载，而报告显示
-成功**。故入口触发的同步必须仍是全范围，判定只回答「要不要现在跑一轮」。
+**为什么「推进游标」是致命的**：`SyncGroupsScope` 与 `SyncWorkspaceScope`
+共用 `workspaceStateKey`，而 `SyncState.advanceCursor` 取 `max()`。若定向同步
+也推它，游标就会越过其它 group 里从未同步过的文件——它们此后再也不出现在
+增量清单里（`updated_since` 过滤掉），**永久漏下载而报告显示成功**。
+
+**为什么做成范围属性而不是调用参数**：`advancesCursor` 是 `SyncScope` 的
+getter，`run` 里从 `scope.advancesCursor` 派生。做成 `run(advanceCursor:)`
+参数就允许「窄列举 + 推游标」这个致命组合——而那正是上面的永久漏文件。
+
+⚠️ **`SyncGroupScope` 与 `SyncSingleGroupScope` 不是一回事**（易混）：
+
+| | `SyncGroupScope` | `SyncSingleGroupScope` |
+|---|---|---|
+| 本地布局 | `{root}/reports/a.md`（剥掉 gid） | `{root}/{gid}/reports/a.md` |
+| 状态键 | `groupId`（独立） | `workspaceStateKey`（共用） |
+| 推进游标 | 是 | **否** |
+| 谁在用 | 程序化入口（设置页不产出） | 进对话提示条的「立即同步」 |
+
+故判定必须读**与写入同一个状态键**（`workspaceStateKey`）：读 `gid` 那个键会
+比不到东西，永远判 stale。
 
 #### 分层
 
 | 层 | 内容 | 为什么在这一层 |
 |---|---|---|
-| `spb_domain` `group_sync_probe.dart` | `groupSyncNeed`（纯判据）/ `latestUpdatedAtOf` / `GroupSyncThrottle`（冷却闸） | 判据错一个方向都很糟（该同步却判 upToDate = 静默失效；不该同步却判 stale = 每次点对话拉 4.7 GB），须能无头测 |
+| `spb_domain` `group_sync_probe.dart` | `groupSyncNeed`（纯判据）/ `groupSyncWatermark`（取本 group 水位）/ `latestUpdatedAtOf` / `GroupSyncThrottle`（冷却闸） | 判据错一个方向都很糟（该同步却判 upToDate = 静默失效；不该同步却判 stale = 每次点对话都跑一轮同步），须能无头测 |
 | `spb_features` `sync/group_sync_hint.dart` | `GroupSyncHint`（纯展示，入参 count / onSync / onDismiss / syncing） | 无业务语义的展示组件 |
-| `apps/spb_desktop` `providers.dart` | `checkGroupSyncNeedProvider`（判定 + 计数）/ `groupSyncThrottleProvider` | 取数要 UFS 端点与游标，属装配层 |
+| `apps/spb_desktop` `providers.dart` | `checkGroupSyncNeedProvider`（判定 + 计数）/ `groupSyncThrottleProvider` / `runGroupSyncActionProvider`（定向同步） | 取数要 UFS 端点与同步状态，属装配层 |
 | `apps/spb_desktop` `router.dart` `_ChatPage` | `_checkGroupSync` / `_syncFromHint` / `_syncCheck` | 生命周期就是「这个对话页这一次打开」 |
 | `apps/spb_mobile` | **不装配**（只读写 `sync.auto` 偏好） | 与 §6.42 同一取向：移动端没有托盘反馈，且判定要额外 HTTP |
 
-#### 判定判据（一条不变式）
+#### 判定判据：**本 group 的水位**，不是共享游标
 
-同步引擎的语义是「**只有成功下载或 304 才推进游标**」（`SyncEngine._merge`）。
-于是：
+同步引擎的语义是「**只有成功下载或 304 才 `markSynced`**」（`SyncEngine._merge`），
+而 `markSynced` 记的是服务端那条的 `updated_at`。于是：
 
-> 任何 `updated_at > 游标` 的文件，都**不可能**是已成功同步的。
+> 任何 `updated_at > 本 group 已同步水位` 的文件，都**不可能**是已成功同步的。
 
-故判定只需一次 `page_size=1` 的列表查询：取该 group 最晚的 `updated_at` 与
-`__workspace__` 游标比较。**严格大于**（等于说明那份文件就是推进游标的那个）。
+**水位 = 本 group 文件记录里最晚的 `updated_at`**（`groupSyncWatermark`）。
 
-反向不成立（`updated_at <= 游标` 的文件也可能没同步过——首轮被体积/媒体过滤
-跳过的），但那不影响本判据的用途：它是**触发条件**而非正确性条件。
+⚠️ **不能拿 `__workspace__` 游标比**（这是本节的第二处易错点）。定向同步
+**不推进**游标（见上），于是「远端最晚时间 > 游标」在定向同步后会**永远成立**
+——每次进对话都提示一遍，而每轮同步什么都不做。
+
+水位则与进度同步前进：定向同步写文件记录 → 水位抬高 → 下次判定 upToDate。
+两种同步方式（全范围 / 定向）都适用。
+
+**水位函数必须区分两种布局**（`syncStateKeyFor` 决定）：workspace 布局按
+「首段 == groupId」过滤，单 group 布局（键就是 groupId、落盘无 `{gid}/`
+前缀）则全部条目都算。一律按首段判会让单 group 布局一条都匹配不上。
+
+**严格大于**（等于水位说明那份文件就是抬升水位的那个）。
+
+反向不成立（水位以下的文件也可能没同步过——首轮被体积/媒体过滤跳过的），
+但那不影响本判据的用途：它是**触发条件**而非正确性条件。
 
 #### 三重门控 + 冷却闸（任一不满足就零开销）
 
@@ -4506,11 +4537,11 @@ Directory('/tmp/revtest').exists()       = true
 | `settings.canSync`（有目录、范围非空） | 不探测——没目录时判定必然 unknown，白跑一次 HTTP |
 | `GroupSyncThrottle.allows(groupId)` | 不探测（见下） |
 
-**为什么必须有冷却闸**：`_merge` 只在 `_Downloaded` / `_NotModified` 时推游标；
-被过滤跳过（媒体 / `reports/tts/**` / 超体积）的文件**不推**。于是某个 group
-里只要有一个 500 MB 的视频，它的 `updated_at` 就永远大于游标 → 判定长期命中
-→ 每次点进去都同步一轮 → 每轮什么都不做。默认冷却 10 分钟（内存态，不持久化：
-重启后允许再试一次是合理的）。
+**为什么必须有冷却闸**：`_merge` 只在 `_Downloaded` / `_NotModified` 时
+`markSynced`；被过滤跳过（媒体 / `reports/tts/**` / 超体积）的文件**不记录**。
+于是某个 group 里只要有一个 500 MB 的视频，它的 `updated_at` 就永远大于本
+group 水位 → 判定长期命中 → 每次点进去都同步一轮 → 每轮什么都不做。默认冷却
+10 分钟（内存态，不持久化：重启后允许再试一次是合理的）。
 
 #### 三个易写错的地方
 
@@ -4536,8 +4567,8 @@ Directory('/tmp/revtest').exists()       = true
 判定用 `page_size=1` 只够回答「要不要」，不够给用户一句可读的话（「有 12 个
 交付物未同步」）。故命中后再分页统计，且：
 
-- **按游标过滤**：远端那一页通常既有新文件也有已同步的旧文件，全算进去会报
-  虚高的数字；
+- **按同一水位过滤**：远端那一页通常既有新文件也有已同步的旧文件，全算进去
+  会报虚高的数字；
 - **上限 500**（`GroupSyncCheckResult.countCap`）：首次全量 5666 条，一直翻到
   tail 要发 57 次请求，而用户只需要知道「很多」。达到上限时文案写「500+」
   而不是精确的 500（那会让人以为正好 500 个）。
@@ -4545,8 +4576,8 @@ Directory('/tmp/revtest').exists()       = true
 #### 已知限制（诚实记录）
 
 - **被过滤掉的文件会让判定长期命中**：靠冷却闸 + 仅提示（不自动下载）压低
-  代价。这不是缺陷而是模型限制（游标不推 = 引擎认为「还没同步」）。
-- **本地被手动删除的文件探测不到**：判定看的是「远端有比游标新的吗」，
+  代价。这不是缺陷而是模型限制（不 `markSynced` = 引擎认为「还没同步」）。
+- **本地被手动删除的文件探测不到**：判定看的是「远端有比水位新的吗」，
   而本地删除不改变远端 `updated_at`。这类情况靠同步引擎每轮的
   `presentLocally` 探测兜住（它会对 `state.files` 里每个路径 `stat` 一次）。
 - **移动端不参与**：见上表。
@@ -4573,6 +4604,13 @@ Directory('/tmp/revtest').exists()       = true
 | 提示条把 0 写成「0 个」 | 1 |
 | 提示条 `syncing` 时不禁用同步按钮 | 1 |
 | 提示条 `syncing` 时不禁用关闭按钮 | 1 |
+| 定向同步推进共享游标（`advancesCursor` 恒 true） | 1 |
+| `SyncSingleGroupScope.relativePath` 不保留 `{gid}/` 前缀 | 1 |
+| 判定读 `gid` 状态键而非 `workspaceStateKey` | 2 |
+| 提示条「立即同步」走全范围 `runSyncActionProvider` | 1 |
+| `groupSyncWatermark` 不区分单 group 布局 | 1 |
+| `groupSyncWatermark` 用 `startsWith(groupId)` 而非首段精确比较 | 1 |
+| 水位为空（有记录但无 `updated_at`）时判 stale 而非 unknown | 1 |
 
 ⚠️ 「路由层不检查冷却」这条**最初是假绿**：我的断言查的是节流器自己的状态
 （`throttle.allows` 为 false），而没有验证路由层真的**调用**了它。修法是新增
@@ -4920,7 +4958,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~放置一段时间后被登出、关闭重开又正常~~ | ✅ 已修（§6.39）：`SessionManager` 曾把**所有**刷新失败折叠成 `null`（断网、超时、IdP 503、`invalid_grant` 全长得一样），而 `currentAccessToken()` 返回 null 会让拦截器发出**匿名**请求——那必然 401，而那个 401 又被当成「会话失效」把人登出。凭证其实完好，所以重开应用（新进程网络栈干净）就正常。修法：新增三态 `TokenRefreshStatus`（`refreshed` / `rejected` / `transient`），判据是「这个失败是否携带关于凭证有效性的信息」——网络层错误从不携带。① `currentAccessToken` 在 transient 时返回**旧 token**（交给服务端判定，而不是替它提前判「已失效」）；② 拦截器拿到 transient 时**不调** `onSessionExpired`、不重放，只把 401 归一化为 `AuthError` 让页面提示网络异常。⚠️ **最易写错的一处**：`OidcClient._tokenRequest` 对任何非 2xx 都抛 `AuthError(cause: HttpError(status))`，只按最外层类型判会把「IdP 回了 503」也当成「凭证作废」——必须下探 `cause`。旧布尔回调 `onUnauthorized` 保留（新回调优先，`false` 一律当 rejected），`refresh()` 保留为 `refreshWithOutcome()` 的薄包装以兼容 6 处既有调用点。新增 21 条用例，5 项反向验证逐条实测 | §6.39 |
 | ~~「在文件管理器中定位」全平台失效（Windows 用户报「总是定位不到已下载的文档」）~~ | ✅ 已修（§6.41）：**三个独立缺陷叠加**，且都不报错。① `revealPath` 文档写的是「打开本地**目录**」，实现按此用 `Directory(path).exists()` 校验——而**两个真实调用点传的都是文件路径**，实测 `Directory('/tmp/a.txt').exists() == false` 恒成立，于是在 spawn **之前**就返回了（与平台无关，Linux/macOS 同样失效）。② 即使放行，Windows 上 spawn 的是 `explorer <path>` = **用默认程序打开**，不是选中；正确命令是 `explorer /select,<path>`（且必须是**一个**参数，拆成 `['/select,', path]` 会被 explorer 当成要打开的路径）。macOS 对应 `open -R`，Linux 退化为 `xdg-open <父目录>`（无选中概念）。③ **下载平铺**：两条手动链路都写到 `downloads/{agent,deliverables}/<文件名>`，不同 group 的同名文件互相覆盖、目录结构被压平、磁盘上分不清归属。修法：`spb_platform` 新增 `spawnSystemReveal` + `revealSystemEntry`（按 `FileSystemEntityType` 分流，可注入 probe 以便无头测试）；`spb_domain` 新增纯函数 `deliverableDownloadRelPath` / `agentFileDownloadRelPath`（`{groupId}/<相对路径>`，逐段过 `isValidPathSegment`，非法时退化为单文件名而非报错），**四条下载链路（桌面 2 + 移动 2）共用同一口径**。共 36 条用例（领域 16 + 平台 19 + 装配 1），5 项反向验证逐条实测 | §6.41 |
 | ~~交付物同步只能手动点（用户问「PC 端能不能自动下载 / 同步」）~~ | ✅ 已实现（§6.42）：新增 `AutoSyncConfig`（`onLaunch` + `intervalMinutes`，档位 关闭/15/30/60/180）与 `AutoSyncScheduler`（**纯 Dart + `fake_async` 可测**，放 `spb_domain`）。两条入口**相互独立**（「只在启动时同步一次」是合法组合）。**默认全关**——生产实测首次全量 5666 条 / 4.7 GB，静默替用户拉这么多不可接受。排程用**自续排的一次性 `Timer`** 而非 `periodic`：`periodic` 会在上一轮未跑完时叠加触发，而游标并发推进不安全；代价是长轮次期间 `isScheduled == false`（正确状态）。三条易写错的判据：① `pause()` 必须清空已应用配置，否则重新登录后 `apply(同一配置)` 被幂等吞掉 → 自动同步永久失效；② `apply` 以配置相等做幂等键，否则三个信号源反复喂同一份配置会把周期无限重置；③ `_tick` 必须 `_cancelTimer()` 而不是 `_timer = null`（`apply` 是「先排周期再跑启动轮」，启动轮进 `_tick` 时计时器是活的 → 僵尸 Timer → 一轮变两轮，被用例抓到过）。`runSyncActionProvider` 加**单飞**（语义选「复用同一 Future」而非「静默跳过」，否则手动触发点了没反应）。移动端**不装配排程器**（后台定时器在 Android/iOS 不可靠）→ `showAutoSync: false` 整段不渲染（不渲染禁用态），但**仍读写 `sync.auto`**——同一份 `SyncSettings` 两端流转，不写回会静默清掉桌面端配置。共 48 条用例（领域 39 + 设置页 8 + 装配 7 + 移动端持久化 4 …），**14 项反向验证逐条实测** | §6.42 |
-| ~~定时自动同步解决不了「用户此刻正看着这个对话」~~ | ✅ 已实现（§6.43）：新增第三条入口「进入对话时按需同步」（`AutoSyncConfig.onGroupOpen`，**默认关**）。判定只需**一次** `page_size=1` 查询：取该 group 最晚 `updated_at` 与 `__workspace__` 游标比较（**严格大于**——等于游标的那份文件正是推进游标的那个）。依据是引擎的不变式「只有成功下载或 304 才推游标」→ 任何晚于游标的文件都不可能是已同步的。**判定命中只提示、不静默下载**（首次全量 4.7 GB，静默启动是把一次误判变成事故）。⚠️ **硬约束：不能只同步这一个 group**——`SyncGroupsScope`/`SyncWorkspaceScope` 共用 `__workspace__` 状态键、`advanceCursor` 取 `max()`、`_pathPrefixFor` 恒返回 `/workspace/groups/`，三者叠加使**任何部分扫描都会把共享游标推过其它 group 未同步的文件** → 永久漏下载而报告成功。三重门控（`onGroupOpen` / `canSync` / 冷却闸）+ `GroupSyncThrottle`（默认 10 分钟，内存态）：被过滤的文件（媒体 / `reports/tts/**` / 超体积）不推游标 → 判定长期命中，没有冷却会每次进对话白跑一轮。计数上限 500（命中后才分页统计、按游标过滤、超过显示「500+」）。提示条包在 `ConversationPage` **外面**（`withHint` 闭包）——避免给 46 参数的页面再加一条要写进 `check_wiring_parity.sh` 豁免的参数。共 50 条用例，**18 项反向验证逐条实测**（其中「路由层不检查冷却」最初是**假绿**：断言只查了节流器状态、没验路由层真的调了它） | §6.43 |
+| ~~定时自动同步解决不了「用户此刻正看着这个对话」~~ | ✅ 已实现（§6.43）：新增第三条入口「进入对话时按需同步」（`AutoSyncConfig.onGroupOpen`，**默认关**）。判定只需**一次** `page_size=1` 查询，且命中的是**本 group 已同步水位**（`groupSyncWatermark` = 该 group 文件记录里最晚的 `updated_at`），**不是** `__workspace__` 游标——定向同步不推进游标，拿它比会永远判 stale（每进一次对话提示一遍却什么也不做）。**判定命中只提示、不静默下载**。点击「立即同步」跑 `SyncSingleGroupScope`：列举前缀收窄到 `{gid}` 子树、本地保留 `{gid}/` 布局、状态键共用 `workspaceStateKey`（先定向再全范围时靠 etag 命中不重下），**但不推进共享游标**（否则会越过其它 group 未同步的文件 → `updated_since` 永久过滤 → 漏下载而报告成功）。`advancesCursor` 是 `SyncScope` 的 getter 而非 `run()` 参数——做成参数就允许「窄列举 + 推游标」这个致命组合。三重门控（`onGroupOpen` / `canSync` / 冷却闸）+ `GroupSyncThrottle`（默认 10 分钟，内存态）：被过滤的文件不 `markSynced` → 判定长期命中。计数上限 500（命中后才分页统计、按同一水位过滤、超过显示「500+」）。提示条包在 `ConversationPage` **外面**（`withHint` 闭包）——避免给 46 参数的页面再加一条要写进 `check_wiring_parity.sh` 豁免的参数。共 58 条用例（领域 32 + 装配 10 + 提示条 16），**26 项反向验证逐条实测**（其中「路由层不检查冷却」与「点提示条跑的是定向还是全范围」最初都是**假绿**：前者只查了节流器状态、后者只看「同步跑了一次」而两者都返回 `SyncReport`） | §6.43 |
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |

@@ -57,7 +57,8 @@ void main() {
     WidgetTester tester, {
     GroupSyncCheck? check,
     LoadSyncSettings? loadSyncSettings,
-    RunSyncAction? runSync,
+    GroupSyncRun? runSync,
+    RunSyncAction? runFullSync,
     bool mockGroups = false,
     void Function(GroupSyncThrottle)? seedThrottle,
   }) async {
@@ -67,7 +68,8 @@ void main() {
       mockGroups: mockGroups,
       checkGroupSyncNeed: check,
       loadSyncSettings: loadSyncSettings,
-      runSync: runSync,
+      runGroupSync: runSync,
+      runSync: runFullSync,
       seedThrottle: seedThrottle,
       beforePump: (adapter) => mockChat(adapter, groupId),
     );
@@ -252,7 +254,7 @@ void main() {
           localRoot: '/tmp/spb-sync',
           auto: AutoSyncConfig(onGroupOpen: true),
         ),
-        runSync: () async {
+        runSync: (String gid) async {
           syncRuns++;
           return SyncReport(downloaded: 3);
         },
@@ -263,6 +265,42 @@ void main() {
 
       expect(syncRuns, 1);
       expect(find.byKey(const ValueKey('group-sync-hint')), findsNothing);
+    });
+
+    testWidgets('点「立即同步」走的是**定向**同步，不是全范围同步', (tester) async {
+      // ## 为什么必须钉住这条
+      //
+      // 两个动作长得像但代价差两个数量级：全范围首次是 5666 条 / 4.7 GB，
+      // 定向只是这个对话的几十个文件。而它们**都返回 SyncReport**，
+      // 光断言「同步跑了一次」分不出来（这里 `fullRuns` 恒为 0 才是关键）。
+      var fullRuns = 0;
+      String? targetedGroup;
+      await openChat(
+        tester,
+        check: (String groupId) async => GroupSyncCheckResult(
+          groupId: groupId,
+          need: GroupSyncNeed.stale,
+          pendingCount: 3,
+        ),
+        loadSyncSettings: () async => const SyncSettings(
+          localRoot: '/tmp/spb-sync',
+          auto: AutoSyncConfig(onGroupOpen: true),
+        ),
+        runSync: (String gid) async {
+          targetedGroup = gid;
+          return SyncReport(downloaded: 3);
+        },
+        runFullSync: () async {
+          fullRuns++;
+          return SyncReport();
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('group-sync-hint-sync')));
+      await tester.pumpAndSettle();
+
+      expect(fullRuns, 0, reason: '点提示条不该跑全范围同步');
+      expect(targetedGroup, groupId, reason: '定向同步收到的应是当前对话的 id');
     });
 
     testWidgets('点「忽略」只清掉提示条，不触发同步', (tester) async {
@@ -278,7 +316,7 @@ void main() {
           localRoot: '/tmp/spb-sync',
           auto: AutoSyncConfig(onGroupOpen: true),
         ),
-        runSync: () async {
+        runSync: (String gid) async {
           syncRuns++;
           return SyncReport();
         },

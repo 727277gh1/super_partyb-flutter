@@ -11,17 +11,19 @@
 /// 而最常见的场景恰恰是「我正在看这个对话，它的交付物应该已经在本地了」。
 /// 本文件把「这个 group 有没有未同步的内容」抽成一个可无头单测的判据。
 ///
-/// ## ⚠️ 判定命中后触发的仍然是**全范围**同步，不是单 group 同步
+/// ## 判定命中后同步的是**这个 group**（不是全范围）
 ///
-/// 这是本设计里最容易被误改的一处，理由见
-/// [GroupSyncNeed] 的类文档（单游标模型下「只同步这个 group」会静默漏文件）。
+/// 定向同步是安全的——前提是**不推进共享游标**（`SyncSingleGroupScope.
+/// advancesCursor` 为 false，见 `deliverable_sync.dart`）。故判据必须建在
+/// 「本 group 已同步到哪个时间点」上，而不是建在 workspace 游标上（那个
+/// 游标跨 group 共享，定向同步时不会动）。
 library;
 
 import 'sync_state.dart';
 
 /// 进入某个 group 时的同步判定结果。
 enum GroupSyncNeed {
-  /// 本地游标已覆盖该 group 的最新内容，无事可做。
+  /// 本地已覆盖该 group 的最新内容，无事可做。
   upToDate,
 
   /// 该 group 有本地还没有（或本地版本更旧）的文件。
@@ -38,58 +40,133 @@ enum GroupSyncNeed {
   unknown,
 }
 
+/// 某个 group 在本地状态里的「已同步水位」。
+///
+/// ## 为什么不用共享游标
+///
+/// workspace 类范围（全部 / 勾选若干）共用 [workspaceStateKey] 下的**单个**
+/// 游标。而定向同步（只拉一个 group）**不得**推进那个游标——否则它会越过
+/// 其它 group 里从未同步过的文件，它们此后再也不出现在增量清单里
+/// （`updated_since` 过滤掉，**永久漏下载而报告显示成功**）。
+///
+/// 游标不动，则「游标 vs 远端最晚时间」这种判据在定向同步后会**永远命中**
+/// （远端最晚时间总大于没动过的游标），于是每次进对话都提示一遍。故判据必须
+/// 换成「本 group 已同步记录里最晚的 `updated_at`」——它与同步进度同步前进，
+/// 两种同步方式都适用。
+class GroupSyncWatermark {
+  const GroupSyncWatermark({this.latestUpdatedAt, this.fileCount = 0});
+
+  /// 本 group 已同步记录里最晚的 `updated_at`（RFC3339）。
+  ///
+  /// null 有两种含义，用 [isEmpty] 区分：
+  /// - [isEmpty] 为真：**没有**该 group 的任何已同步记录；
+  /// - [isEmpty] 为假：有记录但都没带 `updated_at`（服务端未返回，极少见），
+  ///   此时无从比较。
+  final String? latestUpdatedAt;
+
+  /// 本 group 已同步记录条数。
+  final int fileCount;
+
+  /// 是否完全没有该 group 的已同步记录。
+  bool get isEmpty => fileCount == 0;
+
+  /// 「什么都没有」：从未同步过这个 group。
+  static const GroupSyncWatermark none = GroupSyncWatermark();
+
+  @override
+  String toString() =>
+      'GroupSyncWatermark(latest: $latestUpdatedAt, files: $fileCount)';
+}
+
+/// 从同步状态里取出某个 group 的已同步水位。
+///
+/// [stateKey] 必须是**读状态时用的那个键**：
+///
+/// | 状态键 | 本地相对路径形状 | 归属判定 |
+/// |---|---|---|
+/// | [workspaceStateKey] | `{gid}/reports/a.md` | 首段 == groupId |
+/// | `groupId`（单 group 布局） | `reports/a.md` | 全部条目 |
+///
+/// ## 为什么要区分两种布局
+///
+/// `syncStateKeyFor` 让单 group 模式用 groupId 作状态键、且落盘**无**
+/// `{gid}/` 前缀（见 `SyncGroupScope`）。若一律按「首段 == gid」判定，单 group
+/// 布局下**一条都匹配不上**，水位恒为空 → 判定永远 stale。
+GroupSyncWatermark groupSyncWatermark({
+  required SyncState state,
+  required String stateKey,
+  required String groupId,
+}) {
+  if (stateKey.isEmpty || groupId.isEmpty) return GroupSyncWatermark.none;
+  final isWorkspaceLayout = stateKey == workspaceStateKey;
+  // 单 group 布局下状态键必须**就是**这个 group；否则这份状态与它无关。
+  if (!isWorkspaceLayout && stateKey != groupId) return GroupSyncWatermark.none;
+
+  var count = 0;
+  String? latest;
+  for (final entry in state.files.entries) {
+    if (isWorkspaceLayout) {
+      // `{gid}/...`：首段必须精确等于 groupId（`g1` 不能命中 `g10/x`）。
+      final slash = entry.key.indexOf('/');
+      if (slash <= 0) continue;
+      if (entry.key.substring(0, slash) != groupId) continue;
+    }
+    count++;
+    final at = _normalize(entry.value.updatedAt);
+    if (at == null) continue;
+    if (latest == null || at.compareTo(latest) > 0) latest = at;
+  }
+  return GroupSyncWatermark(latestUpdatedAt: latest, fileCount: count);
+}
+
 /// 探测一个 group 是否有未同步内容的判据。
 ///
 /// ## 输入只有两个，且都来自现有接口
 ///
 /// 1. [remoteLatestUpdatedAt]：`GET /api/files?path_prefix=…&page_size=1`
 ///    返回的**最晚** `updated_at`（RFC3339 字符串）；
-/// 2. [localCursor]：本地 `__workspace__` 状态键下的游标。
+/// 2. [local]：本 group 的已同步水位（[GroupSyncWatermark]）。
 ///
 /// ## 为什么这个判据是可靠的
 ///
-/// 同步引擎的语义是：**只有成功下载（或 304 未变更）才推进游标**
-/// （`SyncState.advanceCursor`，见 `deliverable_sync.dart` 的 `_merge`）。
-/// 于是有不变式：
+/// 同步引擎的语义是：**只有成功下载（或 304 未变更）才 `markSynced`**。
+/// 而 `markSynced` 记录的是服务端那条记录的 `updated_at`。于是有不变式：
 ///
-/// > 任何 `updated_at > 游标` 的文件，都**不可能**是已成功同步的。
+/// > 任何 `updated_at > 本 group 已同步水位` 的文件，都**不可能**是已成功同步的。
 ///
-/// 反向不成立（`updated_at <= 游标` 的文件也可能没同步过——例如首轮被
-/// 体积/媒体过滤跳过的），但那不影响本判据的用途：它是**触发条件**而非
-/// 正确性条件。漏判的代价是「这次不自动同步」，用户可以手动点；误判的代价
-/// 只是多跑一轮（`SyncEngine` 会算出空计划，成本是拉一遍清单）。
-///
-/// ## ⚠️ 为什么要用 workspace 游标而不是 group 级游标
-///
-/// 状态键只有两种：单 group 模式用 `groupId`，其余（全部 / 勾选若干）共用
-/// [workspaceStateKey]。而 `SyncGroupsScope` 与 `SyncWorkspaceScope`
-/// **共用同一份状态**——这意味着「只同步一个 group」会让游标越过其它 group
-/// 里从未同步过的文件，它们此后再也不出现在增量清单里（静默永久漏文件）。
-///
-/// 故本判据只看 workspace 游标，命中后由调用方触发**全范围**同步。
-/// 单 group 状态键下的游标**有意不参与**：那是程序化入口（`SyncGroupScope`）
-/// 的遗留形态，设置页不产出，混进来会让判定与「用户实际配置的范围」错配。
+/// 反向不成立（水位以下的文件也可能没同步过——例如被体积/媒体过滤跳过的），
+/// 但那不影响本判据的用途：它是**触发条件**而非正确性条件。漏判的代价是
+/// 「这次不提示」，用户可以手动点；误判的代价只是多跑一轮（引擎会算出空计划）。
 GroupSyncNeed groupSyncNeed({
   required String? remoteLatestUpdatedAt,
-  required String? localCursor,
+  required GroupSyncWatermark local,
 }) {
   final remote = _normalize(remoteLatestUpdatedAt);
   if (remote == null) return GroupSyncNeed.unknown;
 
-  final local = _normalize(localCursor);
-  // 从未同步过（游标为空）→ 只要远端有文件就是 stale。
+  // 从未同步过这个 group → 只要远端有文件就是 stale。
   //
-  // ## 为什么这里不能用「首轮全量可能很大」为由跳过
+  // ## 为什么这里不能用「首轮可能很大」为由跳过
   //
-  // 那是**节流**要解决的问题（见调用方的冷却期），不是判定要解决的问题。
+  // 那是**节流**要解决的问题（见 [GroupSyncThrottle]），不是判定要解决的问题。
   // 判定若在这里返回 upToDate，用户开了自动同步却永远等不到第一次。
-  if (local == null) return GroupSyncNeed.stale;
+  if (local.isEmpty) return GroupSyncNeed.stale;
+
+  final mine = _normalize(local.latestUpdatedAt);
+  // 有记录但都没有 `updated_at`：无从比较。
+  //
+  // ## 为什么是 unknown 而不是 stale
+  //
+  // 说 stale 会让这个 group 每轮都提示、每轮都下载不到东西（永远无法
+  // 「追上」）。说 unknown 只是「不打扰」——与 [GroupSyncNeed.unknown] 的
+  // 语义（无法判定）一致。
+  if (mine == null) return GroupSyncNeed.unknown;
 
   // 字典序即时序：RFC3339 的 UTC 形式（`2026-10-21T08:00:00Z`）按字典序比较
   // 与按时刻比较等价（见 `sync_cursor.dart` 的 `unixToRfc3339` 说明）。
   //
-  // 严格大于：等于游标说明那份文件本身已同步过（它可能就是推进游标的那个）。
-  return remote.compareTo(local) > 0
+  // 严格大于：等于水位说明那份文件本身已同步过（它可能就是抬升水位的那个）。
+  return remote.compareTo(mine) > 0
       ? GroupSyncNeed.stale
       : GroupSyncNeed.upToDate;
 }
@@ -127,18 +204,18 @@ String? _normalize(String? raw) {
 /// ## 为什么必须有它
 ///
 /// 判定（[groupSyncNeed]）会在**每一次**打开对话时跑。而下面两种情况会让
-/// 判定**长期命中**，于是每次进对话都触发一轮全范围同步：
+/// 判定**长期命中**，于是每次进对话都触发一轮同步：
 ///
-/// 1. **被过滤掉的文件不推游标**。`SyncEngine._merge` 只在下载成功或 304 时
-///    调 `advanceCursor`；媒体（默认不同步）、`reports/tts/**`、超体积文件
-///    都是「跳过且不推游标」。于是某个 group 里只要有一个 500 MB 的视频，
-///    它的 `updated_at` 就永远大于游标 → 每次点进去都同步一轮 → 每轮什么都不做。
+/// 1. **被过滤掉的文件不推水位**。`SyncEngine._merge` 只在下载成功或 304 时
+///    `markSynced`；媒体（默认不同步）、`reports/tts/**`、超体积文件都是
+///    「跳过且不记录」。于是某个 group 里只要有一个 500 MB 的视频，它的
+///    `updated_at` 就永远大于本 group 已同步水位 → 每次点进去都判 stale
+///    → 每轮同步一轮却什么都不做。
 /// 2. **首次同步体积很大**（生产实测 5666 条 / 4.7 GB）。用户连点两个对话
 ///    不该拉两遍。
 ///
 /// 冷却期内的判定结果被**降级成 [GroupSyncNeed.upToDate]**（即「这次不触发」），
-/// 而不是加一个第四种枚举值——调用方本来也只需回答「要不要现在同步」。
-///
+/// 而不是加一个第四种枚举值——调用方本来也只需回答「要不要现在同步」。///
 /// ## 为什么是内存态而不是持久化
 ///
 /// 它表达的是「刚刚试过」。重启后允许再试一次是**合理**的（那时用户重新
