@@ -1,0 +1,39 @@
+name: spb_platform
+description: 平台能力抽象：多窗口、托盘、快捷键、文件选择、通知
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  spb_core:
+  # FileSink 契约（spb_domain 的 FileSink）——依赖方向 platform → domain
+  # 是允许的（见 AGENTS.md 的依赖图）；反向（domain → platform）被分层检查禁止。
+  spb_domain:
+  # ---- 本包真正封装的平台能力 ----
+  #
+  # 这四个在本包 lib 里实际 import（目录选择 / 拖放 / 本地通知），必须留。
+  file_selector: ^1.0.3
+  desktop_drop: ^0.8.4
+  cross_file: ^0.3.5+5
+  flutter_local_notifications: ^22.3.1
+
+  # ⚠️ 曾声明 window_manager / tray_manager / hotkey_manager / screen_retriever /
+  # launch_at_startup / path_provider，但本包 lib **一个都没 import**——实现全在
+  # `apps/spb_desktop/lib/bootstrap.dart`（本包只定义 `DesktopCapabilities` 接口）。
+  # 留着会让这些桌面插件**经本包传递进移动端构建**（移动端注入
+  # `NoopDesktopCapabilities`，用不到却要编译）。已删（issue #36）。
+  #
+  # 插件的**注册**不依赖本包：桌面端 app 自己声明它们，Flutter 按 app 的依赖树
+  # 注册（见 apps/spb_desktop/pubspec.yaml 的「桌面平台能力」段）。
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

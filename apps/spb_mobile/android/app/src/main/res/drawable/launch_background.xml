@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  启动画面（API < 21 用这一份，见同名的 drawable-v21/）。
+
+  ## 为什么放品牌标志而不是留白
+
+  冷启动到首帧之间有一段空白（Flutter 引擎初始化 + 首帧渲染）。什么都不放时
+  用户看到的是纯色闪一下，与「应用卡住了」无法区分。放标志既解释了这段时间
+  在干什么，也避免首屏「先白后蓝」的突兀。
+
+  ## 为什么是居中 + 固定 dp 而不是拉伸
+
+  `bitmap` 配 `gravity="center"` 时按**图片自身密度**渲染（drawable-mdpi 下
+  96dp），不会随屏幕宽度放大——拉伸会把圆角气泡拉成椭圆。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/ic_launcher_background" />
+
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/launch_logo" />
+    </item>
+</layer-list>

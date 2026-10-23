@@ -1,0 +1,82 @@
+name: spb_desktop
+description: Super PartyB 桌面端（Linux / Windows / macOS）
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ---- 本工作区内部包（分层顺序即依赖方向，禁止反向依赖）----
+  spb_core:
+  spb_models:
+  spb_api:
+  spb_domain:
+  spb_data:
+  spb_design:
+  spb_ui:
+  spb_platform:
+  spb_features:
+
+  # ---- 传输层 ----
+  # 直接 import 了 dio 类型（providers.dart 构造 createDio 的返回值类型），
+  # 故必须显式声明，否则 analyzer 报 depend_on_referenced_packages。
+  dio: ^5.7.0
+  # 测试里用 NativeDatabase.memory() 建内存库（避免测试污染真实的同步状态）。
+  # 运行时不需要 drift 类型（开库由 spb_data 的 openAppDatabaseAt 封装）。
+  drift: ^2.28.0
+
+  # ---- 状态管理 ----
+  flutter_riverpod: ^3.0.0
+
+  # ---- 路由 ----
+  go_router: ^16.0.0
+
+  # ---- 桌面平台能力 ----
+  window_manager: ^0.5.0      # 多窗口、窗口尺寸/位置
+  tray_manager: ^0.5.0        # 系统托盘
+  hotkey_manager: ^0.2.3      # 全局快捷键（Alt+Space 悬浮输入窗）
+  screen_retriever: ^0.2.0    # 多显示器定位
+  launch_at_startup: ^0.4.0   # 开机自启
+  file_selector: ^1.0.3       # 本地目录选择（交付物同步）
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+  # ---- 凭证安全存储（Keychain / libsecret / DPAPI）----
+  flutter_secure_storage: ^9.2.2
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # 测试用：mock HTTP 响应，禁止真实网络。必须显式声明，
+  # 否则 analyzer 报 depend_on_referenced_packages。
+  http_mock_adapter: ^0.6.1
+  build_runner: ^2.4.13
+
+flutter:
+  uses-material-design: true
+
+  # 托盘图标与窗口图标。
+  #
+  # ## 为什么必须是真实文件而不是 IconData
+  #
+  # Linux 的 appindicator 与 macOS 的 statusItem 都要求一个**磁盘路径**
+  # （见 tray_manager 的 `setIcon(String iconPath)`）。用 Flutter 的
+  # `IconData` 需要先渲染成位图再落盘，多一层失败点（无 DISPLAY 时渲染
+  # 会失败），而托盘是启动期能力，失败会连带影响主窗口显示。
+  #
+  # 两者都是 super_partyb 的品牌标志（源：apps/webapp/src/app/icon.svg），
+  # 尺寸不同：托盘 64px（被系统缩小展示），窗口 256px（Alt+Tab / 任务栏
+  # 会放大，用 64 会糊）。
+  assets:
+    - assets/tray_icon.png
+    - assets/app_icon.png

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<!--
+	  出站网络：与 Release.entitlements 的 network.client 同因（登录/SSE/API）。
+	  下面是 network.server（**入站**监听），两者不互相代替：Flutter 的
+	  debug/profile 需要 server 是为了 observatory/VM service 的回连调试。
+	-->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<!--
+	  用户所选文件的读写。与 Release.entitlements 同因（交付物同步用
+	  `LocalFileSink` 写用户选定目录），**两份文件必须同时声明**：
+	  只改 Release 会让 debug 构建与正式包行为不一致，问题被 debug
+	  构建掩盖（见 AGENTS.md §8）。
+	-->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+</dict>
+</plist>

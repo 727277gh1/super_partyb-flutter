@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  圆形图标变体（API 26+）。内容与 ic_launcher.xml 相同——形状由启动器决定，
+  这里声明的是「被要求圆形时用哪两层」。
+
+  ⚠️ 两个文件都必须在：只声明 ic_launcher.xml 时，部分启动器（尤其是
+  Pixel 原生）在「圆形图标」设置下仍会去找 ic_launcher_round，找不到就
+  回退成旧方图。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
