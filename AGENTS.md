@@ -4569,13 +4569,90 @@ getter，`run` 里从 `scope.advancesCursor` 派生。做成 `run(advanceCursor:
 反向不成立（水位以下的文件也可能没同步过——首轮被体积/媒体过滤跳过的），
 但那不影响本判据的用途：它是**触发条件**而非正确性条件。
 
+#### 探测查询**必须**带 `updated_since`（否则排序退化，判定静默失效）
+
+这是本节最隐蔽的一处，且**只在真实数据上才暴露**（2026-10 用户报「开了
+按需同步，数据还是不会自动下载」）：
+
+```go
+// unified-file-service/internal/store/file.go:418
+orderClause := "ORDER BY created_at DESC"
+if filter.UpdatedSince != nil { orderClause = "ORDER BY updated_at DESC" }
+```
+
+即：**不带 `updated_since` 时按 `created_at` 排序**。而 agent 覆盖写既有交付物
+走的是「上传新版本」（`ReplaceContentAndCreateVersion`）：`updated_at` 刷新，
+`created_at` / `id` / `path` **全部不变**。生产实测 6948 个 group 文件里
+**4974 个** `updated_at > created_at`。
+
+于是 `page_size=1` 取到的是「最晚**创建**」而非「最晚**更新**」：一个三个月前
+建、今天被重写的 `README.md`，在按 `created_at` 排序时排在很后面 →
+`latestUpdatedAtOf` 得到早于水位的时刻 → 判 `upToDate` → **提示条永不出现**。
+187 个 group 里 **56 个（30%）** 可复现（`created_at DESC` 的首条
+`updated_at` 严格早于该 group 的 `MAX(updated_at)`）。
+
+故判定与统计都**先取水位、再把它当 `updated_since` 传**。水位为空（首次同步
+这个 group）时两者都不传——带任何值都会漏掉一部分历史交付物。
+
+#### 目录条目要过滤（它永远同步不了）
+
+UFS 列表含目录（group 根、`reports/` 等）。`shouldSync` 第一条就跳过目录，
+故目录**不会** `markSynced`、也不会抬水位。把它算进「最晚时间」/「未同步数」
+会让「只多了几个空目录」的 group 永久 stale 且每轮同步什么都不做——与冷却闸
+那条（被过滤的文件同样不 `markSynced`）是同一个模型限制的两个面。
+
+> 生产数字的复现口径（2026-10-22，bcc `/opt/unified-file-service/data/files.db`；
+> 库会随部署变化，以实测为准）：
+>
+> ```sql
+> -- 覆盖写占比
+> SELECT COUNT(*) FROM files WHERE path LIKE '/workspace/groups/%'
+>   AND is_directory=0 AND updated_at > created_at;
+> -- 「created_at DESC 首条」早于该 group 最晚更新的 group 数（= 可复现数）
+> CREATE TEMP TABLE g AS SELECT substr(path,19,instr(substr(path,19),'/')-1) AS gid,
+>   created_at, updated_at FROM files
+>   WHERE path LIKE '/workspace/groups/%' AND is_directory=0;
+> CREATE TEMP TABLE top AS SELECT gid, updated_at FROM (
+>   SELECT gid, updated_at, ROW_NUMBER() OVER
+>     (PARTITION BY gid ORDER BY created_at DESC) rn FROM g) WHERE rn=1;
+> CREATE TEMP TABLE mx AS SELECT gid, MAX(updated_at) maxu FROM g GROUP BY gid;
+> SELECT COUNT(*) FROM mx;
+> SELECT COUNT(*) FROM top JOIN mx USING(gid) WHERE top.updated_at < mx.maxu;
+> ```
+
+⚠️ **过滤目录带来一个连带约束：首次同步（无水位）时探测页大小不能是 1**。
+那时服务端按 `created_at DESC`（没传 `updated_since`），而**新建的目录往往排在
+最前**；`page_size=1` 恰好取到一个目录、过滤后得到 `unknown`，即使下面明明有
+文件。故探测页大小按有无水位分档：有水位 `1`（`updated_at DESC` + 已过
+`updated_since`，一条即结论），无水位 `100`（一次多花一页元数据，只发生在该
+group 首次同步）。
+
+#### 定向同步的时间下限用**本 group 水位**，不是共享游标
+
+判定用本 group 水位（上节），同步若用共享游标，两者就不一致：提示条说「有 3 个
+未同步」，用户点下去却下载 0 个，且报告显示成功。
+
+共享游标是「整个 workspace 已同步到哪」，可能**远晚于**本 group 的进度（用户刚
+把它勾进范围、或上一轮全范围同步时它被过滤）。拿它当下限会把本 group 真正缺失
+的旧文件**过滤掉**。本 group 水位是更宽的下限（水位 ≤ 共享游标），故不会多漏
+任何文件；重复列出的靠 etag 命中跳过，代价只是一页元数据。
+
+故 `DeliverableSyncUseCase.run` 里 `saved` 按范围分派：`SyncSingleGroupScope`
+用 `groupSyncWatermark(...).latestUpdatedAt`，其余用 `state.cursor`。
+
 #### 三重门控 + 冷却闸（任一不满足就零开销）
 
 | 门控 | 不满足时 |
 |---|---|
 | `auto.onGroupOpen`（默认 **false**） | 完全不探测 |
 | `settings.canSync`（有目录、范围非空） | 不探测——没目录时判定必然 unknown，白跑一次 HTTP |
+| 该 group 在用户勾选范围内（仅「勾选若干」模式） | 不探测——否则提示条会邀请用户下载一个他明确排除在外的对话 |
 | `GroupSyncThrottle.allows(groupId)` | 不探测（见下） |
+
+⚠️ **第三道门控不能省**：「立即同步」跑的是 `SyncSingleGroupScope`，它只按
+`filter` 过滤、**不看** `scope`（那个 scope 在 `_runSyncSingleGroup` 里被有意
+绕过）。故勾了 3 个对话、又点开第 4 个时，若不禁这一层，提示条会邀请用户
+下载一个他明确排除在外的对话——而他会以为那是「当前对话的产出」。
 
 **为什么必须有冷却闸**：`_merge` 只在 `_Downloaded` / `_NotModified` 时
 `markSynced`；被过滤跳过（媒体 / `reports/tts/**` / 超体积）的文件**不记录**。
@@ -4639,6 +4716,7 @@ group 水位 → 判定长期命中 → 每次点进去都同步一轮 → 每�
 | 统计不按游标过滤 | 1 |
 | upToDate 也继续统计（漏提前 return） | 1 |
 | 不判 `canSync` 就发请求 | 1 |
+| 不判「该 group 是否在勾选范围内」就探测 | 1 |
 | 计数上限去掉（无限翻页） | 1 |
 | 设置页不渲染 `onGroupOpen` 开关 | 2 |
 | 提示条把 0 写成「0 个」 | 1 |
@@ -4651,6 +4729,11 @@ group 水位 → 判定长期命中 → 每次点进去都同步一轮 → 每�
 | `groupSyncWatermark` 不区分单 group 布局 | 1 |
 | `groupSyncWatermark` 用 `startsWith(groupId)` 而非首段精确比较 | 1 |
 | 水位为空（有记录但无 `updated_at`）时判 stale 而非 unknown | 1 |
+| 探测不传 `updated_since`（排序退化回 `created_at`） | 8 |
+| 统计不传 `updated_since` | 6 |
+| 目录条目计入「最晚时间」/「未同步数」 | 3 |
+| 无水位时探测页大小仍为 1（恰好取到目录 → 误判 unknown） | 3 |
+| `DeliverableSyncUseCase` 用共享游标作定向同步的时间下限 | 2 |
 
 ⚠️ 「路由层不检查冷却」这条**最初是假绿**：我的断言查的是节流器自己的状态
 （`throttle.allows` 为 false），而没有验证路由层真的**调用**了它。修法是新增

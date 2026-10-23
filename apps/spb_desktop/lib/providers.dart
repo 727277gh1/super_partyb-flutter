@@ -1473,9 +1473,13 @@ typedef GroupSyncCheck = Future<GroupSyncCheckResult> Function(String groupId);
 ///
 /// ## 为什么用 `page_size=1` 判定
 ///
-/// 列表按 `updated_at` 倒序，第一条即最晚的那份。取它的 `updated_at` 与本
-/// group 的已同步水位比较即可（判据见 `groupSyncNeed`）。拉一页 100 条只为
-/// 读一个字段是浪费。
+/// 带上 `updated_since` 后服务端按 `updated_at DESC` 排序，第一条即最晚的那
+/// 份。取它的 `updated_at` 与本 group 的已同步水位比较即可（判据见
+/// `groupSyncNeed`）。拉一页 100 条只为读一个字段是浪费。
+///
+/// ⚠️ **不带 `updated_since` 时排序不是 `updated_at`**（服务端改按
+/// `created_at DESC`），那时 `page_size=1` 会取到「最晚创建」而非「最晚更新」
+/// ——覆盖写既有文件后判不出变化。详见下面的内联说明。
 ///
 /// ## 命中的是「这个 group」而不是全范围
 ///
@@ -1494,14 +1498,78 @@ final checkGroupSyncNeedProvider =
             need: GroupSyncNeed.unknown,
           );
         }
-        // 该 group 根本没有交付物时不必再问水位：`page_size=1` 空页即结论。
-        final ufs = ref.read(ufsApiProvider);
-        final page = await ufs.listFiles(
-          pathPrefix: '$workspaceGroupsPrefix$groupId',
-          page: 1,
-          pageSize: 1,
+
+        // 勾选模式下的**范围外** group：不探测、不提示。
+        //
+        // ## 为什么这是正确性而不只是优化
+        //
+        // 「立即同步」跑的是 [SyncSingleGroupScope]，它只按 `filter` 过滤，
+        // **不看** `scope`（那个 scope 在 `_runSyncSingleGroup` 里被有意
+        // 绕过）。故用户勾了 3 个对话、又点开第 4 个时，若不禁这一层，
+        // 提示条会邀请他下载一个他明确排除在外的对话——而他会以为那是
+        // 「当前对话的产出」。
+        //
+        // 不提示也不丢功能：那是用户自己设的范围，手动全范围同步同样不会
+        // 包含它。
+        final scope = settings.scope;
+        if (scope.isSelectedGroups && !scope.groupIds.contains(groupId)) {
+          return GroupSyncCheckResult(
+            groupId: groupId,
+            need: GroupSyncNeed.unknown,
+          );
+        }
+
+        // 状态键固定用 [workspaceStateKey]——因为提示条上的「立即同步」跑的是
+        // [SyncSingleGroupScope]，它按 workspace 布局落盘（`{gid}/` 前缀）
+        // 且写这个键。读另一个键会比不到东西，于是永远判 stale。
+        const stateKey = workspaceStateKey;
+        final state = await ref.read(syncStateStoreProvider).load(stateKey);
+        final watermark = groupSyncWatermark(
+          state: state,
+          stateKey: stateKey,
+          groupId: groupId,
         );
-        final latest = latestUpdatedAtOf(page.items.map((e) => e.updatedAtRaw));
+        final mine = watermark.latestUpdatedAt;
+
+        // ## 为什么必须把水位当 `updated_since` 传下去（这不是优化，是正确性）
+        //
+        // UFS 的列表端点**只在带了 `updated_since` 时**才按 `updated_at DESC`
+        // 排序，否则按 `created_at DESC`
+        // （`unified-file-service/internal/store/file.go` 的 `orderClause`）。
+        // 而 agent 覆盖写既有交付物走的是「上传新版本」：`created_at` 不变，
+        // 只有 `updated_at` 刷新（生产 6948 个 group 文件里 4974 个如此）。
+        //
+        // 故不带 `updated_since` 的 `page_size=1` 拿到的是「最晚**创建**的那
+        // 份」，而不是「最晚**更新**的那份」。生产实测 187 个 group 里有 56
+        // 个的后者的时刻更晚——那些 group 只改既有文件时，判定会得出
+        // upToDate，提示条永不出现（这正是「开了自动同步却什么都不下载」）。
+        //
+        // 带上它之后服务端切到 `updated_at DESC`，第一条即最晚；同时把早已
+        // 同步过的旧文件挡在结果外，统计也更准。
+        //
+        // 无水位（首次同步这个 group）时不传：那时本地什么都没有，判据不看
+        // 具体时刻（见 `groupSyncNeed` 的 `local.isEmpty` 分支），全量清单只
+        // 需要回答「有没有非目录条目」。
+        final ufs = ref.read(ufsApiProvider);
+        final prefix = '$workspaceGroupsPrefix$groupId';
+        // 首次同步（无水位）时拉一页而不是一条：服务端此时按 `created_at DESC`
+        // 排序，而列表里**包含目录**（group 根、`reports/` 等）。`page_size=1`
+        // 恰好取到一个目录时，过滤后会得到 `unknown`——即使下面明明有文件。
+        // 有水位时按 `updated_at DESC` 且已过 `updated_since`，一条即结论。
+        final probeSize = mine == null ? 100 : 1;
+        final page = await ufs.listFiles(
+          pathPrefix: prefix,
+          updatedSince: mine,
+          // 软删除同样会刷新 `updated_at`，故删除也是一种「变化」。不带它
+          // 的话，「远端删了、本地还留着」永远判 upToDate，本地副本清不掉。
+          // 首次同步（无水位）不需要：那时本地没有可删的副本。
+          includeDeleted: mine != null,
+          page: 1,
+          pageSize: probeSize,
+        );
+        final latest = latestUpdatedAtOf(
+          page.items.where(_isDeliverableEntry).map((e) => e.updatedAtRaw),
+        );
         if (latest == null) {
           return GroupSyncCheckResult(
             groupId: groupId,
@@ -1509,17 +1577,6 @@ final checkGroupSyncNeedProvider =
           );
         }
 
-        final store = ref.read(syncStateStoreProvider);
-        // 状态键固定用 [workspaceStateKey]——因为提示条上的「立即同步」跑的是
-        // [SyncSingleGroupScope]，它按 workspace 布局落盘（`{gid}/` 前缀）
-        // 且写这个键。读另一个键会比不到东西，于是永远判 stale。
-        const stateKey = workspaceStateKey;
-        final state = await store.load(stateKey);
-        final watermark = groupSyncWatermark(
-          state: state,
-          stateKey: stateKey,
-          groupId: groupId,
-        );
         final need = groupSyncNeed(
           remoteLatestUpdatedAt: latest,
           local: watermark,
@@ -1534,15 +1591,17 @@ final checkGroupSyncNeedProvider =
         const pageSize = 100;
         while (count < GroupSyncCheckResult.countCap) {
           final res = await ufs.listFiles(
-            pathPrefix: '$workspaceGroupsPrefix$groupId',
+            pathPrefix: prefix,
+            updatedSince: mine,
+            includeDeleted: mine != null,
             page: pageNo,
             pageSize: pageSize,
           );
           for (final entry in res.items) {
+            if (!_isDeliverableEntry(entry)) continue;
             final at = entry.updatedAtRaw?.trim();
             if (at == null || at.isEmpty) continue;
             // 与判定同一口径：晚于本 group 水位才算「未同步」。
-            final mine = watermark.latestUpdatedAt;
             if (mine == null || at.compareTo(mine) > 0) count++;
           }
           if (!res.hasMore(page: pageNo, pageSize: pageSize)) break;
@@ -1557,6 +1616,16 @@ final checkGroupSyncNeedProvider =
         );
       };
     });
+
+/// 探测用的「算不算一份待同步交付物」判据：**排除目录条目**。
+///
+/// ## 为什么必须排除
+///
+/// UFS 列表里包含目录（group 根、`reports/`、`assets/` 等）。而目录**永远
+/// 同步不了**——`shouldSync` 的第一条就是跳过目录，故它不会被 `markSynced`、
+/// 也就不会抬水位。把它算进「最晚时间」会让一个「只多了几个空目录」的 group
+/// 被判 stale 且**永远追不上**：每次进对话都提示一遍，每轮同步什么都不做。
+bool _isDeliverableEntry(UfsFileEntry entry) => !entry.isDirectory;
 
 /// 一轮同步的实际执行（不含在途状态管理）。
 Future<SyncReport> _runSync(Ref ref) async {

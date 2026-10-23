@@ -332,6 +332,9 @@ void main() {
       // 全部 / 勾选若干共用 `__workspace__` 单个游标。若定向同步也推进它，
       // 游标就会越过其它 group 里从未同步过的文件——它们此后再也不出现在
       // 增量清单里（`updated_since` 过滤），**永久漏下载而报告显示成功**。
+      //
+      // 本 group 无文件记录 → 水位为空 → 不带 `updated_since`（全量列本 group
+      // 子树，代价仅一页元数据，且靠 etag 命中跳过已有文件）。
       await store.save(
         workspaceStateKey,
         const SyncState(cursor: '2026-04-01T00:00:00Z'),
@@ -347,7 +350,6 @@ void main() {
           'owner_type': 'user',
           'path_prefix': groupPrefix,
           'include_deleted': 'true',
-          'updated_since': '2026-04-01T00:00:00Z',
           'page': 1,
           'page_size': 2,
         },
@@ -372,12 +374,25 @@ void main() {
       );
     });
 
-    test('仍然用游标做 updated_since（不重拉已同步区间）', () async {
-      // 「不推进游标」与「用游标做时间下限」是两件事：后者是安全的过滤，
-      // 前者是「不得断言已覆盖全部 group」。混为一谈会白白重拉。
+    test('时间下限用**本 group 水位**，不用共享游标', () async {
+      // ## 为什么这不能是共享游标
+      //
+      // 共享游标是「整个 workspace 已同步到哪」，可能远晚于本 group 的进度
+      // （用户刚把本 group 勾进范围、或上一轮全范围同步时它被过滤）。拿它
+      // 当下限会把本 group 真正缺失的旧文件**过滤掉**——而判定
+      // （`checkGroupSyncNeedProvider`）用的是本 group 水位，于是会出现
+      // 「提示条说有 3 个未同步，点下去下载 0 个且报告成功」。
+      //
+      // 用本 group 水位是**更宽**的下限（水位 ≤ 共享游标），不会多漏文件；
+      // 重复列出的靠 etag 命中跳过。
       await store.save(
         workspaceStateKey,
-        const SyncState(cursor: '2026-04-01T00:00:00Z'),
+        const SyncState(
+          cursor: '2026-05-01T00:00:00Z',
+          files: {
+            'g1/old.md': SyncedFile(size: 1, updatedAt: '2026-04-01T00:00:00Z'),
+          },
+        ),
       );
       adapter.onGet(
         '/api/files',
@@ -386,6 +401,7 @@ void main() {
           'owner_type': 'user',
           'path_prefix': groupPrefix,
           'include_deleted': 'true',
+          // 共享游标是 05-01，这里必须是本 group 水位的 04-01。
           'updated_since': '2026-04-01T00:00:00Z',
           'page': 1,
           'page_size': 2,
@@ -396,6 +412,44 @@ void main() {
         scope: const SyncSingleGroupScope(gid),
         filter: const SyncFilterConfig(),
       );
+    });
+
+    test('共享游标晚于本 group 进度时，不拿它过滤本 group 的文件', () async {
+      // 回归防线：曾经用 `state.cursor` 当下限，于是「共享游标已到 05-01，
+      // 但本 group 只同步过 04-01 的文件」时，04-01 之后、05-01 之前的那些
+      // 文件永远不会被拉下来——报告却显示成功。
+      await store.save(
+        workspaceStateKey,
+        const SyncState(
+          cursor: '2026-05-01T00:00:00Z',
+          files: {
+            'g1/old.md': SyncedFile(size: 1, updatedAt: '2026-04-01T00:00:00Z'),
+          },
+        ),
+      );
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/g1/missed.md')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'updated_since': '2026-04-01T00:00:00Z',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      final report = await useCase.run(
+        scope: const SyncSingleGroupScope(gid),
+        filter: const SyncFilterConfig(),
+      );
+
+      expect(report.downloaded, 1);
+      expect(store.data[workspaceStateKey]!.contains('g1/missed.md'), isTrue);
     });
   });
 

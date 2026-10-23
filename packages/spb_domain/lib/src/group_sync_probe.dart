@@ -125,6 +125,9 @@ GroupSyncWatermark groupSyncWatermark({
 ///
 /// 1. [remoteLatestUpdatedAt]：`GET /api/files?path_prefix=…&page_size=1`
 ///    返回的**最晚** `updated_at`（RFC3339 字符串）；
+///    ⚠️ 该请求**必须**带 `updated_since`，否则服务端按 `created_at DESC`
+///    排序，取到的是「最晚创建」而非「最晚更新」（覆盖写判不出变化）。
+///    详见 `apps/spb_desktop` 的 `checkGroupSyncNeedProvider`。
 /// 2. [local]：本 group 的已同步水位（[GroupSyncWatermark]）。
 ///
 /// ## 为什么这个判据是可靠的
@@ -177,7 +180,14 @@ GroupSyncNeed groupSyncNeed({
 ///
 /// UFS 的列表端点没有「只返回最大 updated_at」这种形态，且不改服务端
 /// （见 AGENTS.md 的「Go API 一行不改」）。客户端用 `page_size=1` 拉一条
-/// 就够了——因为列表**按 updated_at 倒序**（服务端默认排序），第一条即最晚。
+/// 就够了——**前提是请求带了 `updated_since`**（那时服务端按 `updated_at`
+/// 倒序，第一条即最晚）。
+///
+/// ⚠️ **不带 `updated_since` 时服务端按 `created_at DESC` 排序**，那时第一条
+/// 是「最晚创建」而不是「最晚更新」——而 agent 覆盖写既有文件只刷新
+/// `updated_at`（`created_at` 不变），于是一个三个月前建、今天被重写的文件
+/// 会排在很后面。故调用方必须先取水位、再把它当 `updated_since` 传下去
+/// （水位为空时两者都不传，见 `checkGroupSyncNeedProvider`）。
 ///
 /// 但本函数仍然对整页取 max 而不直接取 `first`：排序是服务端的实现细节，
 /// 若将来改了排序（或某一页恰好乱序），直接取 first 会**静默给出错误结论**。
