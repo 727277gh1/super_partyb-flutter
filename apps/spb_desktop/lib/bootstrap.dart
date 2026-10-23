@@ -273,23 +273,60 @@ class PlatformDesktopCapabilities
   /// 单窗口下只有一份真实的窗口几何。对 `settings`/`quickCapture` 调用本方法
   /// 会**改变主窗口尺寸**（把它们的小尺寸应用上去），那不是调用方的意图。
   /// 故显式拒绝并记日志，而不是默默做错事。
+  ///
+  /// ## 主窗口尺寸按屏幕工作区自适应
+  ///
+  /// [WindowSpec.main] 的 1180×800 是硬编码逻辑像素，在 1080p + 150% 缩放的
+  /// 笔记本上逻辑工作区只有约 680 高——窗口比工作区还高，居中后 y 为负，
+  /// 标题栏（拖拽区 + 最大化按钮）出屏，用户表现为「不能移动、不能全屏」。
+  /// 故这里不直接用 `spec.width/height`，而是经 [MainWindowSize.compute]
+  /// 按实际工作区收缩。详见该类文档的对照表。
   Future<void> applyWindowSpec(WindowSpec spec) async {
     if (spec.role != WindowRole.main) {
       SpbLog.debug('忽略非主窗口的 WindowSpec（单窗口模型）', {'role': spec.role.name});
       return;
     }
     try {
+      final computed = await _mainWindowSize(spec);
+      final width = computed?.$1 ?? spec.width;
+      final height = computed?.$2 ?? spec.height;
+
       await windowManager.setTitle(spec.title);
       // 先设最小尺寸再设尺寸：反过来时，若目标尺寸小于**当前**的最小尺寸，
       // 窗口管理器会把 setSize 钳到最小值，最终尺寸偏小。
       await windowManager.setMinimumSize(Size(spec.minWidth, spec.minHeight));
-      await windowManager.setSize(Size(spec.width, spec.height));
+      await windowManager.setSize(Size(width, height));
       await windowManager.setResizable(spec.resizable);
       if (spec.alwaysOnTop) await windowManager.setAlwaysOnTop(true);
       if (spec.skipTaskbar) await windowManager.setSkipTaskbar(true);
       if (spec.center) await windowManager.center();
+      SpbLog.info('应用主窗口尺寸', {
+        'size': '${width.toInt()}x${height.toInt()}',
+        'spec': '${spec.width.toInt()}x${spec.height.toInt()}',
+      });
     } catch (e) {
       SpbLog.warn('应用窗口配置失败', {'role': spec.role.name, 'error': '$e'});
+    }
+  }
+
+  /// 按主显示器的工作区算出主窗口尺寸。
+  ///
+  /// 判据与降级全在 [MainWindowSize.fromDisplay]（可无头单测）；这里只负责
+  /// 取 `screen_retriever` 的 `Display` 并转发。取不到显示器信息时返回 null，
+  /// 由调用方退回 spec 的静态值——**不能**因此让应用起不来。
+  Future<(double, double)?> _mainWindowSize(WindowSpec spec) async {
+    try {
+      final display = await screenRetriever.getPrimaryDisplay();
+      return MainWindowSize.fromDisplay(
+        visibleSize: display.visibleSize,
+        fullSize: display.size,
+        minWidth: spec.minWidth,
+        minHeight: spec.minHeight,
+      );
+    } catch (e) {
+      // 静默降级：退回规格值（与改动前行为一致），只记一条日志。
+      SpbLog.debug('获取显示器工作区失败，主窗口用规格尺寸', {'error': '$e'});
+      return null;
     }
   }
 

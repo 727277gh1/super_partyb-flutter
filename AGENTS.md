@@ -4715,6 +4715,105 @@ String get _appBarTitle {
 
 ---
 
+### 6.45 主窗口尺寸按屏幕工作区自适应（2026-10）
+
+**症状**：1080p 的 14 寸笔记本上打开应用，窗口上下都超出屏幕——标题栏跑到
+屏幕外，**既不能拖动也不能点最大化**。
+
+#### 根因：硬编码的是**逻辑像素**，与 DPI 缩放无关
+
+`WindowSpec.main` 是 `1180×800` 的**逻辑像素**。1080p 在 Windows 上默认
+125%~150% 缩放，逻辑屏高只有 864 / 720：
+
+| 系统缩放 | 逻辑屏高 | 工作区高 | 800 高窗口居中后的 y |
+|---|---|---|---|
+| 100% | 1080 | 1040 | 120 ✅ |
+| 125% | 864 | 824 | 12 ⚠️ 贴顶 |
+| **150%** | **720** | **680** | **−60 ❌ 标题栏出屏** |
+| 175% | 617 | 577 | −111 ❌ |
+
+负的 y = 标题栏（可拖拽区 + 最大化/关闭按钮）在屏幕外。用户没有别的办法把它
+挪回来——那是窗口唯一可拖拽的地方。
+
+#### ⚠️ **不是「没考虑任务栏」**
+
+这个方向的猜测值得记下来，因为它会把人引向错误修法。`window_manager.center()`
+用的就是 `visibleSize`（**已排除任务栏与系统栏**）：
+
+| 平台 | `visibleSize` 来源 |
+|---|---|
+| Windows | `MONITORINFO.rcWork`（`screen_retriever_windows_plugin.cpp`） |
+| Linux | `gdk_monitor_get_workarea`（`screen_retriever_linux_plugin.cc`） |
+| macOS | `NSScreen.visibleFrame`（`ScreenRetrieverMacosPlugin.swift`） |
+
+缺陷纯粹是「**窗口比工作区还高**」——居中公式 `(workH - winH)/2` 在
+`winH > workH` 时自然给负数。任务栏只是让工作区又少了约 40 逻辑像素，
+把本来「刚好贴顶」变成「明确出屏」。
+
+#### 修法：按工作区比例收缩，两端夹紧
+
+`spb_platform` 新增 `MainWindowSize`（纯逻辑，可无头单测）：
+
+```dart
+MainWindowSize.fromDisplay(visibleSize: …, fullSize: …)  // 优先工作区
+  → compute(workWidth, workHeight, minWidth, minHeight)
+      width  = clamp(workW * 0.85, cap: 1180, floor: minWidth)
+      height = clamp(workH * 0.85, cap: 800,  floor: minHeight)
+```
+
+`apps/spb_desktop/lib/bootstrap.dart` 的 `applyWindowSpec` 改为先取显示器
+再算尺寸，取不到（无 DISPLAY / 平台未实现）时退回 spec 的静态值。
+
+| 判据 | 取值 | 为什么 |
+|---|---|---|
+| 占工作区比例 | **0.85** | 四周留一圈桌面可见，用户一眼看出「这是个窗口」而非最大化态；贴满时标题栏正好顶到屏幕上沿，反而不好拖 |
+| 宽度上限 | 1180（= spec 原值） | 大屏上继续变宽只会降低可读性 |
+| 高度上限 | 800（= spec 原值） | 同上 |
+| 下限 | `spec.minWidth/minHeight` | 它们是为**布局**定的（低于它页面溢出）。小屏上宁可让窗口略高于工作区（窗口管理器自己钳制），也不让布局坏掉 |
+| 先 cap 后 floor | `_clampSize` | 顺序反了会让 500 高的工作区得到 800（又出屏） |
+
+#### 为什么判据收在 `spb_platform` 而不是 `bootstrap.dart`
+
+`PlatformDesktopCapabilities` 要 `window_manager`/`tray_manager` 才能构造，
+**测试里造不出来**，那里的逻辑无法在无头 CI 验证（§6.41 的先例：`revealPath`
+的目录/文件分流正是因为这一点才被挪进 `spb_platform`）。故连「工作区优先还是
+整屏优先」这个选择也一起挪过去——bootstrap 只剩一行转发。
+
+#### 测试（25 条）
+
+`packages/spb_platform/test/main_window_size_test.dart`。判据**不是**「等于某个
+数」，而是**结果必须放得进工作区**（除非工作区小到连 min 都放不下）：
+
+| group | 钉住 |
+|---|---|
+| 7 种常见工作区（含 1080p @100/125/**150**/175%、1440p、4K@200%、超宽） | 算出的尺寸都不超出工作区 |
+| 具体取值 | 150% 得 600（不再是 800）、4K 封顶 1180×800、中等屏按比例 |
+| 显示器信息缺失（0 / 负数 / 单边为 0） | 退回规格值，**不算出 0×0** |
+| 小屏（640 / 500 高） | 兜底到 `minHeight` 而非继续缩 |
+| `fromDisplay` 工作区优先 | 有 `visibleSize` 时忽略 `size`；缺失时回退；零尺寸也走降级 |
+| 常量 | `fillRatio ∈ (0,1]`、上限不小于 spec |
+
+#### 反向验证（实测）
+
+| 改坏 | 失败用例数 |
+|---|---|
+| `compute` 改回「直接返回 1180×800」（改前行为） | **7** |
+| `fromDisplay` 改成 `fullSize ?? visibleSize`（整屏优先） | **2** |
+
+#### 已知边界
+
+- **只对主窗口生效**：`applyWindowSpec` 本就只接受 `WindowRole.main`（单窗口
+  模型下对 settings/quickCapture 调用会改变主窗口尺寸，见该方法的注释）。
+  悬浮窗的定位另有 `QuickCapturePlacement`（按鼠标所在显示器）。
+- **多显示器只取主显示器**：`getPrimaryDisplay()`。窗口不在主屏时的二次定位
+  属独立需求（用户拖动后本就会记住位置）。
+- **不改 `WindowSpec.main` 的静态值**：它是「显示器信息拿不到」时的降级值，
+  也是 `MainWindowSize` 的上限来源。改它会让大屏也变小。
+- **需真机验证**：本机无 `DISPLAY`（§9），`xvfb-run` 下渲染不稳定，只能验证
+  纯逻辑。真实缩放下的表现需在有桌面环境的机器上确认。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -5033,6 +5132,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | 窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp） | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
 | ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `upperHistoryUnloaded` 时告知边界 | §6.15 |
 | ~~进入对话后 AppBar 仍显示固定的「对话」（与列表页同名，看不出进了哪个对话）~~ | ✅ 已修（§6.44）：两端 router 的 `ConversationPage(title:)` 改传 `_appBarTitle`（取自 `_group.title`，未就绪/空串时退回「对话」）。`_group` 已由 `_loadGroup` 与 `GroupUpdate.applyTo`（rename 事件）刷新，故改名后标题跟着走。⚠️ 两端各补一条 **router 层**用例（`ConversationPage` 自己的测试自己传 `title`，发现不了「router 写回硬编码」——§6.17/§6.33/§6.43 同一失败模式）；另把 `router_list_test.dart` 里「两个 AppBar 都叫『对话』」的旧注释与区分手段一并修正。反向验证：改回硬编码 → 两端各 1 条失败 | §6.44 |
+| ~~1080p 14 寸笔记本上主窗口比屏幕还高，标题栏出屏 → 不能拖动、不能点最大化~~ | ✅ 已修（§6.45）：根因**不是「没考虑任务栏」**——`window_manager.center()` 用的就是 `visibleSize`（Windows `rcWork` / Linux `gdk_monitor_get_workarea` / macOS `visibleFrame`），三平台都已排除任务栏。缺陷是 `WindowSpec.main` 的 **1180×800 是硬编码逻辑像素**：1080p 在 Windows 上默认 125%~150% 缩放，逻辑工作区只有 824/680 高，800 高的窗口居中后 y 为 **−60**，标题栏（唯一可拖拽区 + 最大化按钮）跑到屏幕外。修法：`spb_platform` 新增 `MainWindowSize`（按工作区 0.85 收缩、上限 1180×800、下限 `spec.min*`、**先 cap 后 floor**），`applyWindowSpec` 先取显示器工作区再算尺寸，取不到时退回 spec 静态值。判据收在 `spb_platform` 而非 `bootstrap.dart`（后者要 `window_manager` 才能构造、测试里造不出来，§6.41 同一取向），故连「工作区优先还是整屏优先」也可测。25 条用例；反向验证：`compute` 改回硬编码 → 7 条失败，`fromDisplay` 改成整屏优先 → 2 条失败 | §6.45 |
 | ~~移动端宽屏（≥720dp）对话内搜索入口不可达~~ | ✅ 已修（issue #33）：宽屏 `enableSearch: true` 摆独立图标，窄屏仍走溢出菜单；两端 router 层各有用例钉住 | issue #33、§6.16 |
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
