@@ -349,6 +349,11 @@ class _ConversationsTab extends ConsumerWidget {
       onOpenWorks: () => context.push(SpbRoutes.works),
       // 习惯：两端都接（端点与页面都是共享的，见 `spb_features` 的 `HabitsPage`）。
       onOpenHabits: () => context.push(SpbRoutes.habits),
+      // 全局设置：移动端**不接**。设置是底部标签栏的第二个 tab（`_AppShell`
+      // 的 `NavigationBar`），在列表 AppBar 再放一个图标就是同一目标的第二个
+      // 入口——而窄屏 AppBar 已有 5 个常驻图标（§6.16 的溢出教训）。
+      // 该差异已登记在 `tools/check_wiring_parity.sh` 的 exempt["desktop"]
+      // （`onOpenSettings` 是桌面端独有的接线）。
       // 对话列表缓存（issue #26 切片 A）。与桌面端同构，理由见桌面端 router 注释：
       // userId 必须走本地优先的 `cachedUserIdProvider`，否则断网时拿不到 userId、
       // 回落失效（而断网正是本功能要覆盖的场景）。

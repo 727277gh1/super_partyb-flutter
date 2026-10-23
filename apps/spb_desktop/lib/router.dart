@@ -354,6 +354,19 @@ class _HomePage extends ConsumerWidget {
       // 的一层，返回应回到对话列表并保留滚动位置。
       onOpenWorks: () => context.push(SpbRoutes.works),
       onOpenHabits: () => context.push(SpbRoutes.habits),
+      // 全局设置页（同步目录 / 范围 / 过滤 / 外观 / 个人偏好 / 诊断导出）。
+      //
+      // ## 为什么必须在这里给入口
+      //
+      // 桌面端此前**没有**任何 UI 入口能到 `/settings`：托盘只有「同步设置…」
+      // （直达 `/settings/sync`），列表 AppBar 没有设置图标。结果是同步目录、
+      // 范围、媒体开关、本地清理、外观、个人偏好、导出诊断日志**在界面上不可达**。
+      // `WindowRole.settings → /settings` 的映射虽然存在，但生产代码里没有
+      // 任何地方调 `showWindow(WindowRole.settings)`（只有测试会）。
+      //
+      // 用 `go` 而非 `push`：`/settings` 是**同级**顶层页面（对话列表 ↔ 设置），
+      // 不是从列表「深入」的一层（`onOpenWorks` / `onOpenHabits` 才是深入）。
+      onOpenSettings: () => context.go(SpbRoutes.settings),
       pendingConfirmationCount: pendingCount,
       // 对话列表缓存（issue #26 切片 A）：断网冷启动时回落展示已缓存的列表，
       // 而不是白屏。

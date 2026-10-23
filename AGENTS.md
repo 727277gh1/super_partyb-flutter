@@ -1032,9 +1032,9 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 两端 `providers.dart` 同构（避免「某个 provider 只在一端存在」成为下次接线的意外），
 当前**无消费方**。
 
-### 6.11 桌面端托盘菜单（6 项）
+### 6.11 桌面端托盘菜单（7 项）
 
-`apps/spb_desktop/lib/desktop_integration.dart` 的 `_installTrayMenu` 推送 6 个可点项：
+`apps/spb_desktop/lib/desktop_integration.dart` 的 `_installTrayMenu` 推送 7 个可点项：
 
 | 项 | 动作 |
 |---|---|
@@ -1042,7 +1042,8 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 快速输入（Alt+Space） | 进悬浮模式（见 §6.5） |
 | 立即同步交付物 | `onSyncNow`（未注入回调时禁用） |
 | 打开同步目录 | `caps.revealPath(同步目录)`（**未配置同步目录时禁用**） |
-| 同步设置… | `SpbRouter.go(SpbRoutes.sync)` |
+| 同步设置… | `_openSyncSettings()` → `/settings/sync` |
+| 设置… | `_openSettings()` → `/settings`（见下「两个设置入口为什么都要有」） |
 | 退出 | `PlatformDesktopQuit.quit` |
 
 **「打开同步目录」为什么在未配置时禁用**：此时 `revealPath` 拿到空串，文件管理器
@@ -1053,8 +1054,34 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 `/settings/sync` 这个**子页面**，不是独立窗口。`showWindow(settings)` 只会落到设置
 页首个 tab，用户还得自己再点一次「同步」，而托盘项的标签承诺的是直达。
 
-**「同步设置…」为什么始终可用**：它正是**配置入口**，禁用会让未配置的用户无法
-完成配置（死锁）。
+**「同步设置…」与「设置…」为什么两个都要有**（2026-10 补的第二个）：
+
+它们是**不同目标**，不是重复项：
+
+| 项 | 目标 | 内容 |
+|---|---|---|
+| 同步设置… | `/settings/sync` | 「立即同步」按钮 + 本轮结果 + 目录 |
+| 设置… | `/settings` | 同步目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理 / 外观 / 个人偏好 / 导出诊断日志 |
+
+⚠️ 在此之前桌面端**没有任何 UI 入口能到 `/settings`**：托盘只有「同步设置…」
+（直达子页），列表 AppBar 也没有设置图标，而 `WindowRole.settings → /settings`
+的映射虽然存在、生产代码里却**无调用方**（只有测试会 `showWindow(settings)`）。
+于是上表右列那些配置在界面上完全不可达，只能靠深链。
+
+**两个「始终可用」**：「同步设置…」与「设置…」都**不**依赖 `isSyncConfigured`
+——它们正是**配置入口**，禁用会让未配置的用户无法完成配置（死锁）。
+
+**「设置…」为什么直接 `_router.go` 而不走 `caps.showWindow(settings)`**：本类已持有
+router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`）。绕一圈回到
+自己的能力层会让「从悬浮窗切到设置要还原窗口」依赖桩实现是否转发 `onShowWindow`
+——测试桩不转发，断言路由的用例就会莫名其妙地红。还原窗口仍必须做（见
+`_openSettings` 里的 `_exitOverlayWindow()`）。
+
+**设置页的另一个入口在对话列表 AppBar**（`GroupListPage.onOpenSettings`，
+`Icons.settings_outlined`）：桌面端各应用都把设置放在主界面标题栏，托盘是辅助
+入口。移动端**不接**这个参数——那里设置是底部标签栏的一级 tab，AppBar 再放一个
+就是同一目标的第二个入口，而窄屏 AppBar 已有 5 个常驻图标（§6.16 的溢出教训）。
+该差异登记在 `tools/check_wiring_parity.sh` 的 `exempt["desktop"]`。
 
 ### 6.12 i18n：**当前不做**（决策记录，issue #23）
 

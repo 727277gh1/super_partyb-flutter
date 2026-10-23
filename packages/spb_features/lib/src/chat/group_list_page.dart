@@ -48,6 +48,7 @@ class GroupListPage extends StatefulWidget {
     this.onOpenWorks,
     this.onOpenHabits,
     this.onOpenQuickCapture,
+    this.onOpenSettings,
     this.onCreateGroup,
     this.pendingConfirmationCount = 0,
     this.onOpenConfirmations,
@@ -138,6 +139,25 @@ class GroupListPage extends StatefulWidget {
   ///
   /// 为 null 时不展示（保持「只读列表」用法，与其余可选入口一致）。
   final VoidCallback? onOpenQuickCapture;
+
+  /// 打开**全局设置页**（同步目录 / 范围 / 过滤 / 外观 / 个人偏好 / 诊断导出）。
+  ///
+  /// ## 为什么要在这里给入口
+  ///
+  /// 桌面端此前**没有任何** UI 入口能到 `/settings`：托盘只有「同步设置…」
+  /// （直达 `/settings/sync`），列表 AppBar 只有新建/待确认/搜索/工作台/习惯。
+  /// 于是同步目录、范围、媒体开关、本地清理、外观、个人偏好、导出诊断日志
+  /// 这些配置**在界面上不可达**——只有深链能进（`WindowRole.settings` 的映射
+  /// 存在，但生产代码里没有调用方）。
+  ///
+  /// ## 为什么挂在列表 AppBar 而不是托盘
+  ///
+  /// 「设置」是用户**主动找**的东西，位置应当符合平台惯例：桌面端各应用都把
+  /// 它放在主界面标题栏（托盘菜单是辅助入口，不是主入口）。故托盘也补了一项
+  /// 作为兜底，但主入口在这里。
+  ///
+  /// 为 null 时不展示（保持「只读列表」用法，与其余可选入口一致）。
+  final VoidCallback? onOpenSettings;
 
   /// 跨 group 的待确认数量（角标）。> 0 时显示角标。
   final int pendingConfirmationCount;
@@ -669,6 +689,15 @@ class _GroupListPageState extends State<GroupListPage> {
               icon: const Icon(Icons.repeat),
               tooltip: '习惯',
               onPressed: widget.onOpenHabits,
+            ),
+          // 全局设置放**最后**：它是低频入口，而前面几项都与「对话」这个
+          // 当前任务直接相关。顺序也贴合平台惯例（设置在最右）。
+          if (widget.onOpenSettings != null)
+            IconButton(
+              key: const ValueKey('group-list-settings'),
+              icon: const Icon(Icons.settings_outlined),
+              tooltip: '设置',
+              onPressed: widget.onOpenSettings,
             ),
         ],
       ),

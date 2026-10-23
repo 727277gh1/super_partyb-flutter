@@ -712,6 +712,14 @@ void main() {
           }),
         );
         adapter.onGet(
+          '/chat/groups/grp_x',
+          (server) => server.reply(200, {
+            'id': 'grp_x',
+            'user_id': 'usr_REAL',
+            'title': '分支恢复用对话',
+          }),
+        );
+        adapter.onGet(
           '/chat/groups/grp_x/timeline',
           (server) => server.reply(200, {
             'items': <Map<String, dynamic>>[],
@@ -731,6 +739,10 @@ void main() {
     h.router.go(SpbRoutes.chat('grp_x'));
     await tester.pumpAndSettle();
 
+    // 对话页 AppBar 显示的是**对话名**，不是固定的「对话」——否则与列表页
+    // 同名，用户看不出自己是否真的进了某个对话（见 `_appBarTitle`）。
+    expect(find.text('分支恢复用对话'), findsOneWidget);
+
     // 切到「设置」。
     h.router.go(SpbRoutes.settings);
     await tester.pumpAndSettle();
@@ -742,8 +754,35 @@ void main() {
     await tester.pumpAndSettle();
 
     // 分支恢复：应回到 chat 路由（ConversationPage），而非列表。
-    // ConversationPage 有 AppBar('对话')，列表页的 AppBar 也是「对话」，
     // 故用「时间线的空提示」区分二者。
     expect(find.text('还没有对话，输入消息开始吧'), findsOneWidget);
+  });
+
+  /// 移动端的全局设置入口是**底部标签栏**，不是列表 AppBar 图标。
+  ///
+  /// ## 本用例防的是什么
+  ///
+  /// `GroupListPage.onOpenSettings` 只在桌面端接线（移动端设置已是一级目的地，
+  /// 见 `check_wiring_parity.sh` 的 exempt）。若将来有人「为了对称」把它也
+  /// 接到移动端，窄屏 AppBar 会多一个图标——而那里已经有 5 个常驻项
+  /// （§6.16 的溢出教训）。故这里同时钉住两件事：标签可达 + AppBar 无重复图标。
+  testWidgets('全局设置入口在底部标签栏（AppBar 不重复放图标）', (tester) async {
+    final h = await pumpApp(tester);
+
+    final shell = tester.widget<NavigationBar>(find.byType(NavigationBar));
+    shell.onDestinationSelected?.call(1);
+    await tester.pumpAndSettle();
+
+    expect(h.router.state.matchedLocation, SpbRoutes.settings);
+    expect(find.byKey(const ValueKey('settings-sync-entry')), findsOneWidget);
+
+    // 回到对话标签，确认列表 AppBar 没有第二个设置入口。
+    shell.onDestinationSelected?.call(0);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('group-list-settings')),
+      findsNothing,
+      reason: '移动端设置是一级 tab，AppBar 再放一个就是同一目标的第二个入口',
+    );
   });
 }

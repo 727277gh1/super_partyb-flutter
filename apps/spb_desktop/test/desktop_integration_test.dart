@@ -221,6 +221,7 @@ void main() {
           TrayActionIds.syncNow,
           TrayActionIds.openSyncDir,
           TrayActionIds.syncSettings,
+          TrayActionIds.settings,
           TrayActionIds.quit,
         ]),
       );
@@ -254,9 +255,9 @@ void main() {
 
       await tester.pump();
       // 回调被覆盖三次仍是同一个（无重复注册的副作用）。
-      // 6 = 显示 / 快速输入 / 立即同步 / 打开同步目录 / 同步设置 / 退出。
+      // 7 = 显示 / 快速输入 / 立即同步 / 打开同步目录 / 同步设置 / 设置 / 退出。
       expect(caps.showCallback, isNotNull);
-      expect(caps.trayActions, hasLength(6));
+      expect(caps.trayActions, hasLength(7));
     });
 
     testWidgets('detach 摘除回调', (tester) async {
@@ -738,6 +739,47 @@ void main() {
 
       expect(countingRouter.state.uri.path, SpbRoutes.sync);
       expect(builds, before, reason: '同路径重复 go 会重建页面并清空表单草稿');
+    });
+
+    testWidgets('触发「设置…」→ 导航到 SpbRoutes.settings（不是 /settings/sync）', (
+      tester,
+    ) async {
+      // 托盘里两项容易混：「同步设置…」直达 `/settings/sync`（跑一轮同步 +
+      // 目录），而「设置…」是 `/settings` 首页（范围 / 过滤 / 外观 / 个人偏好 /
+      // 导出诊断日志）。弄反的话后者那些配置依然不可达。
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.trayActions[TrayActionIds.settings]!();
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(find.text('settings'), findsOneWidget);
+    });
+
+    testWidgets('从悬浮窗点「设置…」→ 先还原窗口再导航', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+      expect(caps.isOverlayModeActive, isTrue);
+
+      caps.trayActions[TrayActionIds.settings]!();
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(
+        caps.isOverlayModeActive,
+        isFalse,
+        reason: '不还原的话，设置页会挤在 720x360 置顶窗里且再也放不大',
+      );
     });
   });
 

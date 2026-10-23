@@ -423,4 +423,30 @@ void main() {
       findsOneWidget,
     );
   });
+
+  /// 桌面端 `/settings` 此前**没有任何 UI 入口**——
+  /// 托盘只有「同步设置…」（直达 `/settings/sync`），列表 AppBar 没有设置
+  /// 图标，而 `WindowRole.settings → /settings` 的映射在生产代码里无调用方。
+  /// 于是同步目录 / 范围 / 过滤 / 外观 / 个人偏好 / 导出诊断日志全不可达。
+  ///
+  /// ## 为什么从 router 层断言
+  ///
+  /// 与上一用例同型：`GroupListPage` 的页面测试自己传 `onOpenSettings`，
+  /// 接不接线它不管。只有真实装配出的列表页上那个图标才能钉住接线。
+  testWidgets('对话列表 AppBar 提供全局设置入口，点击进入 /settings', (tester) async {
+    final h = await pumpApp(tester);
+
+    expect(
+      find.byKey(const ValueKey('group-list-settings')),
+      findsOneWidget,
+      reason: '没有这个入口，设置页在界面上就是不可达的',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('group-list-settings')));
+    await tester.pumpAndSettle();
+
+    expect(h.router.state.matchedLocation, SpbRoutes.settings);
+    // 真进了设置页（而不是只改了路径）。
+    expect(find.byKey(const ValueKey('settings-scope-all')), findsOneWidget);
+  });
 }

@@ -33,6 +33,14 @@ class TrayActionIds {
   /// 跳到同步设置页（选目录 / 范围 / 媒体开关）。
   static const syncSettings = 'tray.syncSettings';
 
+  /// 跳到**全局设置页**（`/settings`：同步目录 / 范围 / 过滤 / 外观 /
+  /// 个人偏好 / 导出诊断日志）。
+  ///
+  /// 与 [syncSettings] 是**两个不同目标**：后者直达 `/settings/sync`
+  /// （高频的「跑一轮同步」），前者是配置入口。桌面端此前只有后者，
+  /// 于是 `/settings` 在界面上不可达（见 AGENTS.md §6.11）。
+  static const settings = 'tray.settings';
+
   static const quit = 'tray.quit';
 }
 
@@ -273,6 +281,12 @@ class DesktopIntegration {
       // 「同步设置…」始终可用：它正是**配置入口**，禁用会让未配置的用户
       // 无法完成配置（死锁）。
       const TrayMenuItem(id: TrayActionIds.syncSettings, label: '同步设置…'),
+      // 全局设置（`/settings`）：与上面那项是**不同目标**，不是重复。
+      // 上面只到 `/settings/sync`（跑一轮同步 + 目录），而同步目录 / 范围 /
+      // 过滤 / 外观 / 个人偏好 / 导出诊断日志都在 `/settings` 首页。
+      //
+      // 同样**始终可用**：理由同上（它是配置入口）。
+      const TrayMenuItem(id: TrayActionIds.settings, label: '设置…'),
       TrayMenuItem.separator(),
       const TrayMenuItem(id: TrayActionIds.quit, label: '退出'),
     ];
@@ -315,6 +329,24 @@ class DesktopIntegration {
       // `showWindow(settings)` 只会落到设置页的首个 tab，用户还得自己再点
       // 一次「同步」——托盘项的标签承诺的是直达。
       unawaited(_openSyncSettings());
+    });
+    tray.registerTrayAction(TrayActionIds.settings, () {
+      // 全局设置页（`/settings`）。
+      //
+      // ## 为什么直接 `_router.go` 而不是 `caps.showWindow(WindowRole.settings)`
+      //
+      // `showWindow` 的语义是「显示窗口」——真实实现会先 `windowManager.show()`
+      // + `focus()`，**并确保窗口已从托盘隐藏态回来**。但托盘菜单本身就是
+      // 在应用可见时点的（窗口被隐藏到托盘时用户看不到菜单），而这里要的只是
+      // 一次导航。
+      //
+      // 更关键的是**本类已持有 router**，且 `WindowRole.settings` 的映射也在本类
+      // 里（`_navigateToRole`）——绕一圈回到自己的能力层只会让「从悬浮窗切到
+      // 设置要还原窗口」这条逻辑依赖桩实现是否转发 `onShowWindow`（测试桩不转发，
+      // 于是断言路由的用例会莫名其妙地红）。
+      //
+      // 还原窗口仍必须做：不还原的话设置页会挤在 720×360 的置顶窗里。
+      unawaited(_openSettings());
     });
     tray.registerTrayAction(TrayActionIds.quit, () {
       // 退出需要先摘监听器、注销快捷键、销毁托盘图标，见
@@ -363,6 +395,23 @@ class DesktopIntegration {
 
     SpbLog.debug('托盘触发导航', {'path': SpbRoutes.sync});
     _router.go(SpbRoutes.sync);
+  }
+
+  /// 托盘「设置…」：回到全局设置页（`/settings`）。
+  ///
+  /// 与 [_openSyncSettings] 是**两个不同目标**：后者直达 `/settings/sync`
+  /// （跑一轮同步 + 目录），本方法回到 `/settings` 首页（范围 / 过滤 / 外观 /
+  /// 个人偏好 / 导出诊断日志）。
+  Future<void> _openSettings() async {
+    await _exitOverlayWindow();
+
+    if (_router.state.uri.path == SpbRoutes.settings) {
+      SpbLog.debug('已在设置页，跳过导航');
+      return;
+    }
+
+    SpbLog.debug('托盘触发导航', {'path': SpbRoutes.settings});
+    _router.go(SpbRoutes.settings);
   }
 
   /// 摘除接线（应用退出时调用）。

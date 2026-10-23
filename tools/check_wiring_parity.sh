@@ -88,7 +88,11 @@ TARGETS = [
             'mobile': 'apps/spb_mobile/lib/router.dart',
         },
         'exempt': {
-            'desktop': set(),
+            # 全局设置入口：桌面端**没有标签栏**，设置只能从 AppBar / 托盘进
+            # （AGENTS.md §6.11）；移动端设置是底部标签栏的一级 tab
+            # （`_AppShell` 的 `NavigationBar`），AppBar 再放一个就是同一目标
+            # 的第二个入口，而窄屏 AppBar 已有 5 个常驻图标（§6.16 的溢出教训）。
+            'desktop': {'onOpenSettings'},
             # 无归属快速输入（带附件）在移动端是 AppBar 入口（AGENTS.md §6.7）；
             # 桌面端走 Alt+Space 悬浮窗（§6.5），列表页不需要这个入口。
             'mobile': {'onOpenQuickCapture'},

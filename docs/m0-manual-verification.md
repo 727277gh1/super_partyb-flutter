@@ -164,12 +164,12 @@ xvfb-run -a timeout 15 ./build/linux/x64/release/bundle/spb_desktop
   - 尺寸漂移 → `enterOverlayMode` 是否在导航**前**完成（否则会先看到全尺寸
     主窗闪一下再缩，见 `_navigateToRole` 的注释）。
 
-### 2.2 托盘菜单（6 项，见 `AGENTS.md` §6.11）
+### 2.2 托盘菜单（7 项，见 `AGENTS.md` §6.11）
 
 - **前置**：Linux 需 `libayatana-appindicator3`（§7 的系统依赖）；桌面环境
   需支持系统托盘/状态栏（GNOME 需 AppIndicator 扩展）。
 - **操作**：点托盘图标展开菜单，逐项点击。
-- **期望**（6 项，顺序见 `_installTrayMenu`）：
+- **期望**（7 项，顺序见 `_installTrayMenu`）：
   - [ ] **显示主窗口** → 主窗口显示并置前。
   - [ ] **快速输入（Alt+Space）** → 与 §2.1 同一路径进悬浮模式。
   - [ ] **立即同步交付物** → 触发一次同步（未注入回调时应**置灰**）。
@@ -178,7 +178,12 @@ xvfb-run -a timeout 15 ./build/linux/x64/release/bundle/spb_desktop
         看起来像「功能坏了」而不是「还没配」）。
   - [ ] **同步设置…** → 直达 `/settings/sync` 页（**不是**设置页首个 tab）。
         该项**始终可用**（它正是配置入口，禁用会让未配置用户死锁）。
+  - [ ] **设置…** → 到 `/settings` 首页（范围 / 过滤 / 外观 / 个人偏好 /
+        导出诊断日志）。与上一项是**不同目标**，不是重复项；同样**始终可用**。
+        从悬浮窗点它时，窗口必须**先还原**（否则设置页挤在 720×360 里）。
   - [ ] **退出** → 应用完整退出（先摘监听器、注销快捷键、销毁托盘图标）。
+- **另需确认**：对话列表标题栏最右侧有**设置图标**（`Icons.settings_outlined`，
+  tooltip「设置」），点击也到 `/settings`。这是桌面端的主入口，托盘是辅助。
 - **失败时排查点**：
   - 菜单不显示 → AppIndicator 依赖是否装上；`caps is TrayActionTarget`
     是否为真（`attach()` 按接口判能力，Noop 实现会跳过接线）。

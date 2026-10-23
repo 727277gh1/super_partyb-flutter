@@ -70,6 +70,7 @@ void main() {
     GroupActionHandler? onGroupAction,
     Stream<GroupUpdate>? groupUpdates,
     VoidCallback? onOpenHabits,
+    VoidCallback? onOpenSettings,
     GroupCacheStore? cache,
     String? userId,
     int pageSize = 30,
@@ -83,6 +84,7 @@ void main() {
           onGroupAction: onGroupAction,
           groupUpdates: groupUpdates,
           onOpenHabits: onOpenHabits,
+          onOpenSettings: onOpenSettings,
           cache: cache,
           userId: userId,
           pageSize: pageSize,
@@ -315,6 +317,28 @@ void main() {
     await pumpPage(tester);
 
     expect(find.byKey(const ValueKey('group-list-habits')), findsNothing);
+  });
+
+  testWidgets('设置入口：注入了才展示，点击调回调', (tester) async {
+    var opened = 0;
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(tester, onOpenSettings: () => opened++);
+
+    await tester.tap(find.byKey(const ValueKey('group-list-settings')));
+    await tester.pump();
+
+    expect(opened, 1);
+  });
+
+  testWidgets('未注入 onOpenSettings 时不展示设置入口（只读装配不炸）', (tester) async {
+    mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+    await pumpPage(tester);
+
+    expect(
+      find.byKey(const ValueKey('group-list-settings')),
+      findsNothing,
+      reason: '入口存在但点了没反应，比没有入口更糟（同 onSearch / onOpenWorks 约定）',
+    );
   });
 
   testWidgets('offset 分页去重：重复返回同一 id 不产生重复项', (tester) async {
