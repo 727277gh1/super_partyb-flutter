@@ -619,6 +619,98 @@ void main() {
       await tester.pumpAndSettle();
     }
 
+    testWidgets('收起再展开侧边栏：滚动位置与选中的 tab 都保留', (tester) async {
+      // ## 本用例防的是什么（2026-10 用户报障）
+      //
+      // 「切换侧边栏后滚动条位置会重新置顶」。根因是收起时
+      // `if (!_showSidebar) return conversation;` 把整个 `ChatSidebar`
+      // 从树里移除 → 所有面板的 Element 被销毁 → 再展开是全新的
+      // `ListView`（`ScrollPosition.pixels` 归零），且 `_ChatSidebarState._index`
+      // 也重置回第一个 tab。
+      //
+      // 修法是 `Offstage` 保留挂载。实测 `RenderOffstage.performLayout` 在
+      // offstage 时**仍会 layout 子树**，只跳过 paint/hitTest/语义——故
+      // State、Element、RenderObject、ScrollPosition 全部活着。
+      //
+      // ## 为什么必须在 router 层断言
+      //
+      // `ChatSidebar` 自己的测试用 `IndexedStack` 切换 tab，那里本来就不销毁
+      // 子树（已绿）。真正的缺陷在**装配层**的「收起即移除」——页面级测试
+      // 覆盖不到（与 §6.17 / §6.43 同一失败模式）。
+      final sse = FakeSseClient();
+      final ufs = await openChat(tester, sse);
+
+      // 造足够多的文件，让交付物列表可滚动。
+      ufs.entries = [
+        for (var i = 0; i < 40; i++) ufsFile('grp_x', 'report-$i.md'),
+      ];
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      // 切到「待办」tab（第二个），记下它。
+      // 无待办时渲染的是 `todos-empty` 占位（不是 `todos-list`）。
+      await tapTab(tester, '待办');
+      expect(
+        find.byKey(const ValueKey('todos-empty')),
+        findsOneWidget,
+        reason: '切到待办 tab 后应渲染其内容',
+      );
+
+      // 收起 → 展开。
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      // 1) 选中的 tab 仍是「待办」（修复前会重置回「交付物」）。
+      expect(
+        find.byKey(const ValueKey('todos-empty')),
+        findsOneWidget,
+        reason: '收起再展开后应仍停在「待办」tab，而不是重置回「交付物」',
+      );
+      expect(
+        find.byKey(const ValueKey('deliverables-tree')),
+        findsNothing,
+        reason: '不应退回「交付物」tab（它的树在待办 tab 下是 offstage）',
+      );
+
+      // 2) 没有重新取数（子树没被销毁 → initState 不会再跑）。
+      final callsAfterRoundtrip = ufs.listCalls.length;
+      expect(callsAfterRoundtrip, 1, reason: '收起再展开不应重新拉交付物清单（修复前会多一次）');
+    });
+
+    testWidgets('收起侧边栏后交付物树仍挂载（滚动位置不丢）', (tester) async {
+      final sse = FakeSseClient();
+      final ufs = await openChat(tester, sse);
+      ufs.entries = [
+        for (var i = 0; i < 60; i++) ufsFile('grp_x', 'report-$i.md'),
+      ];
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      final tree = find.byKey(const ValueKey('deliverables-tree'));
+      final scrollable = find.descendant(
+        of: tree,
+        matching: find.byType(Scrollable),
+      );
+
+      await tester.drag(tree, const Offset(0, -400));
+      await tester.pumpAndSettle();
+      final before = tester.state<ScrollableState>(scrollable).position.pixels;
+      expect(before, greaterThan(0), reason: '先确认真的滚动了');
+
+      // 收起 → 展开。
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+
+      final after = tester.state<ScrollableState>(scrollable).position.pixels;
+      expect(after, before, reason: '收起再展开后滚动位置应保留（修复前归零，这正是用户报障现象）');
+    });
+
     testWidgets('无待确认项时待办 tab 显示空提示，且不带徽标', (tester) async {
       final sse = FakeSseClient();
       await openChat(tester, sse);

@@ -4895,6 +4895,148 @@ MainWindowSize.fromDisplay(visibleSize: …, fullSize: …)  // 优先工作区
 - **需真机验证**：本机无 `DISPLAY`（§9），`xvfb-run` 下渲染不稳定，只能验证
   纯逻辑。真实缩放下的表现需在有桌面环境的机器上确认。
 
+### 6.46 侧边栏收起不销毁子树（滚动位置 / 选中 tab 保留，2026-10）
+
+**症状**（用户报障）：「切换侧边栏后滚动条位置会重新置顶」。
+
+#### 先分清两件不同的事
+
+| 操作 | 修复前 | 原因 |
+|---|---|---|
+| **切换 tab**（交付物 ↔ 待办 ↔ …） | ✅ 已保留 | `ChatSidebar` 内部用 `IndexedStack`，已激活的 tab **一直挂载**（issue #16 的惰性构建只影响「从未切到过」的 tab） |
+| **收起再展开整个侧边栏** | ❌ 全部丢失 | 装配层把整棵子树从树上摘掉 |
+
+故「滚动条置顶」不是 `ChatSidebar` 的问题，是**装配层**的问题：
+
+```dart
+// 修复前 apps/spb_desktop/lib/router.dart
+if (!_showSidebar) return withHint(conversation);   // ← ChatSidebar 连同所有面板被销毁
+```
+
+销毁意味着：`_ChatSidebarState._index` 重置回 0（选中的 tab 也一起丢）、
+`_visited` 重置、每个面板的 `State` 与 `ScrollPosition` 全部重建 → 再展开是
+一个全新的 `ListView`，`pixels` 归零。
+
+#### 修法：`Offstage` 保留挂载，但**惰性**建首帧
+
+```dart
+if (!_sidebarEverShown) return withHint(conversation);   // 从未展开 → 根本不构建
+...
+Offstage(offstage: !_showSidebar, child: Row(...))       // 展开过 → 永远保留
+```
+
+`_sidebarEverShown` 在点开开关时置 true，此后不再回落。
+
+#### 为什么必须加 `_sidebarEverShown` 这层守卫
+
+`GroupDeliverablesPanel.initState` 会立即 `_load()` 发一次 HTTP。若无条件
+`Offstage`，**每个对话页一打开就为一个用户没看过的面板付一次请求**——而
+「默认折叠时不取数」是既有且有意保留的语义，`router_workbench_test.dart` 的
+「默认不展开：开关存在但侧边栏不可见，未取数」钉住了它（反向验证：去掉这层
+守卫 → **5 条失败**）。
+
+这与 `ChatSidebar` 内部的 `_visited` 惰性构建是**同一取向的两层**：外层决定
+「要不要建这棵树」，内层决定「建好之后要不要激活某个 tab」。
+
+#### `Offstage` 到底省了什么、没省什么（实测）
+
+`RenderOffstage` 的实现（`packages/flutter/lib/src/rendering/proxy_box.dart`）：
+
+```dart
+void performLayout() {
+  if (offstage) {
+    child?.layout(constraints);   // ← 仍然布局
+  } else {
+    super.performLayout();
+  }
+}
+bool paintsChild(RenderBox child) => !offstage;              // 只跳过绘制
+bool hitTest(...) => !offstage && super.hitTest(...);        // 只跳过命中
+void visitChildrenForSemantics(v) { if (offstage) return; ... }  // 只跳过语义
+```
+
+**只省 paint / hitTest / 语义**，Element 树、RenderObject 树、State、已加载数据、
+布局计算**全部保留**。用 2000 项列表实测（`tester.allElements` + 遍历
+RenderObject 树）：
+
+| 方案 | 展开 | 收起 | 收起时释放 |
+|---|---|---|---|
+| 修复前（从树里移除） | 542 elements / 202 RO | 181 / 45 | −361 / −157 |
+| `Offstage` | 543 / 203 | **543 / 203** | **0 / 0** |
+
+#### 代价（**诚实记录，别再说「不占内存」**）
+
+| 项 | 量级 |
+|---|---|
+| Element 树 | ~360 个 × ~200 B ≈ **70 KB** |
+| RenderObject 树 | ~157 个 × ~300–500 B ≈ **60 KB** |
+| `GroupDeliverablesPanel._entries` | 每个 `UfsFileEntry` ≈ **420 B**（9 字段 + 4 个 String） |
+| 同上 `_tree`（`ArtifactNode`） | 每节点 ≈ 50 B |
+| 其它面板 State（`_collapsed` 等） | 几十字节 |
+
+按文件数放大 `_entries` + 树：
+
+| 文件数 | 占用 |
+|---|---|
+| 100 | 0.05 MB |
+| 1000 | 0.45 MB |
+| 3000 | 1.36 MB |
+| **5666**（生产实测全量） | **2.57 MB** |
+
+即「收起的侧边栏 ≈ **130 KB 固定 + 已加载的交付物清单（最多 ~2.6 MB）**」。
+且 `_entries` 只在用户**确实点开过**「交付物」tab 后才存在（`_visited` 惰性）。
+
+换来的是：再展开**零延迟、零请求、状态全在**。被否决的替代方案是「只存滚动
+位置与 tab 选择」（几个 double + 一个 int），但要给 6 个面板各接
+`ScrollController`/`PageStorageKey`，且 `PageStorageBucket` 在 route 层、
+跨对话会串（需按 `groupId` 做 key）——工作量远大于收益。
+
+#### 附带变化：隐藏期间也会刷新（是好事）
+
+子树仍挂载，故 SSE 新文件事件 bump 的 `reloadToken` 仍会触发
+`GroupDeliverablesPanel.didUpdateWidget` → 重新拉清单。再展开时数据已是新的，
+不用等一轮加载。修复前（已销毁）这条路径不存在。
+
+⚠️ 这条**没有**单独的测试（尝试过，需要精确构造 `agent.file.created` 事件载荷
+`{action, relative_path, ufs_file_id, size, mime_type}` 与刷新时序，成本高于
+收益）。它是 `Offstage` 语义的直接推论，故记在这里而不是硬凑一条脆弱用例。
+
+#### 测试（2 条，都在 **router 层**）
+
+| 用例 | 钉住 |
+|---|---|
+| `收起再展开侧边栏：滚动位置与选中的 tab 都保留` | 切到「待办」→ 收起 → 展开：仍停在「待办」（`todos-empty` 在、`deliverables-tree` 不在），且 `ufs.listCalls.length == 1`（**没有重新取数**） |
+| `收起侧边栏后交付物树仍挂载（滚动位置不丢）` | 60 个文件 → 拖 -400 → 收起 → 展开：`position.pixels` 与收起前**相等** |
+
+**为什么必须在 router 层**：`ChatSidebar` 自己的测试用 `IndexedStack` 切 tab，
+那里本来就不销毁子树（已绿）。真正的缺陷在**装配层**的「收起即移除」——页面级
+测试覆盖不到（与 §6.17 / §6.43 同一失败模式：只测被调用的组件、不测调用点）。
+
+#### 反向验证（实测）
+
+| 改坏 | 失败用例 |
+|---|---|
+| 改回「收起即从树里移除」（`if (!_showSidebar) return conversation;` + `offstage: false`） | **2**（两条新用例都红） |
+| 去掉 `_sidebarEverShown` 守卫（无条件 `Offstage`） | **5**（含「默认不展开…未取数」与两条「已同步则直接打开」） |
+
+#### 已知边界
+
+- **只在同一次对话页生命周期内保留**：`_ChatPageState` 随路由切换销毁，
+  换对话再回来仍是默认收起 + 第一个 tab。跨对话记住 tab 选择是独立需求
+  （需要提到 provider 层，且要考虑「上次看的 tab 在当前对话里不存在」，
+  例如 `showDebugPanelProvider` 关闭时「诊断」tab 不存在）。
+- **`_ChatSidebarState` 的 `initialIndex` 夹取上限有既有 bug**：
+  `widget.initialIndex.clamp(0, (widget.tabs.length - 1).clamp(0, 1))` 把上限
+  压到 1，`initialIndex >= 2` 无效。`chat_sidebar_test.dart` 已把它标注为
+  「既有行为」，**非本节引入**，未在本轮修改（改它会影响既有 tab 索引语义，
+  需单独一轮）。
+- **需真机验证**：本机无 `DISPLAY`（§9），只验证了 widget 树层面的状态保留，
+  真实滚动手感（尤其是 `Offstage` 期间滚动条不显示、展开后位置正确）需在
+  有桌面环境的机器上确认。
+
+---
+
+
 ---
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
@@ -5216,6 +5358,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `upperHistoryUnloaded` 时告知边界 | §6.15 |
 | ~~进入对话后 AppBar 仍显示固定的「对话」（与列表页同名，看不出进了哪个对话）~~ | ✅ 已修（§6.44）：两端 router 的 `ConversationPage(title:)` 改传 `_appBarTitle`（取自 `_group.title`，未就绪/空串时退回「对话」）。`_group` 已由 `_loadGroup` 与 `GroupUpdate.applyTo`（rename 事件）刷新，故改名后标题跟着走。⚠️ 两端各补一条 **router 层**用例（`ConversationPage` 自己的测试自己传 `title`，发现不了「router 写回硬编码」——§6.17/§6.33/§6.43 同一失败模式）；另把 `router_list_test.dart` 里「两个 AppBar 都叫『对话』」的旧注释与区分手段一并修正。反向验证：改回硬编码 → 两端各 1 条失败 | §6.44 |
 | ~~1080p 14 寸笔记本上主窗口比屏幕还高，标题栏出屏 → 不能拖动、不能点最大化~~ | ✅ 已修（§6.45）：根因**不是「没考虑任务栏」**——`window_manager.center()` 用的就是 `visibleSize`（Windows `rcWork` / Linux `gdk_monitor_get_workarea` / macOS `visibleFrame`），三平台都已排除任务栏。缺陷是 `WindowSpec.main` 的 **1180×800 是硬编码逻辑像素**：1080p 在 Windows 上默认 125%~150% 缩放，逻辑工作区只有 824/680 高，800 高的窗口居中后 y 为 **−60**，标题栏（唯一可拖拽区 + 最大化按钮）跑到屏幕外。修法：`spb_platform` 新增 `MainWindowSize`（按工作区 0.85 收缩、上限 1180×800、下限 `spec.min*`、**先 cap 后 floor**），`applyWindowSpec` 先取显示器工作区再算尺寸，取不到时退回 spec 静态值。判据收在 `spb_platform` 而非 `bootstrap.dart`（后者要 `window_manager` 才能构造、测试里造不出来，§6.41 同一取向），故连「工作区优先还是整屏优先」也可测。25 条用例；反向验证：`compute` 改回硬编码 → 7 条失败，`fromDisplay` 改成整屏优先 → 2 条失败 | §6.45 |
+| ~~桌面端侧边栏收起再展开后滚动条置顶、选中的 tab 重置~~ | ✅ 已修（§6.46）：**先分清两件事**——切 tab 本来就保留（`ChatSidebar` 用 `IndexedStack`，已激活的 tab 一直挂载）；真正丢状态的是**收起再展开**：装配层 `if (!_showSidebar) return conversation;` 把整棵子树从树里摘掉，`_ChatSidebarState._index`（选中的 tab）、`_visited`、各面板 `State` 与 `ScrollPosition` 全部销毁，再展开是全新的 `ListView` → `pixels` 归零。修法是 `Offstage` 保留挂载 + `_sidebarEverShown` 惰性守卫（`GroupDeliverablesPanel.initState` 会立即发 HTTP，无条件 `Offstage` 会让每个对话页一打开就为用户没看过的面板付一次请求——「默认折叠不取数」是既有语义，有测试钉住）。⚠️ **实测纠正一个错误认知**：`RenderOffstage.performLayout` 在 offstage 时**仍会 layout 子树**，只跳过 paint/hitTest/语义——Element/RenderObject/State/已加载数据/布局计算**全部保留**，实测收起时释放 **0 elements / 0 RO**（修复前是 −361 / −157）。代价是收起时仍占 **~130 KB 固定 + 已加载交付物清单（5666 文件约 2.6 MB）**，换再展开零延迟零请求。反向验证：改回移除 → 2 条失败；去掉惰性守卫 → 5 条失败 | §6.46 |
 | ~~移动端宽屏（≥720dp）对话内搜索入口不可达~~ | ✅ 已修（issue #33）：宽屏 `enableSearch: true` 摆独立图标，窄屏仍走溢出菜单；两端 router 层各有用例钉住 | issue #33、§6.16 |
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |
