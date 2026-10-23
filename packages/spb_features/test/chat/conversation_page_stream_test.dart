@@ -82,6 +82,141 @@ void main() {
         reason: '在底部时新项应自动跟随',
       );
     });
+
+    /// 塞入 [count] 条 `user_message` 让列表溢出，并返回控制器的 position。
+    ///
+    /// 用 `user_message`（每条 turnId 不同 → 独立成项）而不是 `message`：
+    /// 后者是权威帧，同 turn 会被 reducer 当成同段落的替换而塌缩成一项。
+    Future<ScrollPosition> seedOverflowing(
+      WidgetTester tester, {
+      int count = 30,
+    }) async {
+      for (var i = 0; i < count; i++) {
+        await pushEvent(
+          tester,
+          EventTypes.userMessage,
+          sseEvent(
+            'user_message',
+            id: 'u$i',
+            turnId: 'turn_$i',
+            payload: {'input': '第 $i 条'},
+            seq: i + 1,
+          ),
+        );
+      }
+      await tester.pumpAndSettle();
+      // 取 ListView 的 controller 而不是 `find.byType(Scrollable).first`：
+      // 页面里还有其它可滚动区域（侧栏/输入区），`.first` 命中的不一定是
+      // 时间线，而 `pointerScroll` 必须打在被测的那个 position 上。
+      final position = tester
+          .widget<ListView>(find.byType(ListView))
+          .controller!
+          .position;
+      expect(
+        position.maxScrollExtent,
+        greaterThan(0),
+        reason: '内容应已溢出，否则本用例无意义',
+      );
+      return position;
+    }
+
+    // 回归：滚轮上翻被「吃掉」（2026-10 实测）。
+    //
+    // Linux 桌面引擎一个滚轮 notch 只有 53 逻辑像素
+    // （`fl_scrolling_manager.cc` 的 `kScrollOffsetMultiplier = 53`），而旧
+    // 实现用 80px 容差判「是否在底部」——于是上滚 1 格（距底 53 < 80）仍被判
+    // 在底部，`_onScroll` 末尾立刻 `_followBottom()` 拉回去，用户感觉「滚轮
+    // 往上滚两下等于没滚」。
+    testWidgets('在底部用滚轮上滚一格即脱离自动跟随', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onLoadOlder: () async => true);
+      final position = await seedOverflowing(tester);
+
+      final bottom = position.maxScrollExtent;
+      expect(position.pixels, closeTo(bottom, 1), reason: '前置条件：新项到达后应已在底部');
+
+      // 一个滚轮 notch = -53（负值 = 向内容开头方向）。
+      position.pointerScroll(-53);
+      await tester.pumpAndSettle();
+
+      expect(
+        position.pixels,
+        closeTo(bottom - 53, 1),
+        reason: '上滚一格必须真的退一格，不能被自动跟随拉回（零容差）',
+      );
+    });
+
+    testWidgets('上滚脱离后，新内容到达也不再被拽回底部', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onLoadOlder: () async => true);
+      final position = await seedOverflowing(tester);
+
+      position.pointerScroll(-53);
+      await tester.pumpAndSettle();
+      final afterWheel = position.pixels;
+      expect(afterWheel, lessThan(position.maxScrollExtent));
+
+      // 脱离跟随之后，流式内容继续到达不应把视口拽走。
+      await pushEvent(
+        tester,
+        EventTypes.userMessage,
+        sseEvent(
+          'user_message',
+          id: 'u-new',
+          turnId: 'turn_new',
+          payload: {'input': '脱离跟随之后的新消息'},
+          seq: 1,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        position.pixels,
+        closeTo(afterWheel, 1),
+        reason: '用户已上滚，新内容不得把视口拽回底部',
+      );
+    });
+
+    testWidgets('上滚后再滚回底部会重新吸附跟随', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester, onLoadOlder: () async => true);
+      final position = await seedOverflowing(tester);
+
+      position.pointerScroll(-53);
+      await tester.pumpAndSettle();
+      expect(position.pixels, lessThan(position.maxScrollExtent));
+
+      // 向下滚回底部附近（方向 reverse → 走距离判定，容差生效）。
+      position.pointerScroll(200);
+      await tester.pumpAndSettle();
+      expect(
+        position.pixels,
+        closeTo(position.maxScrollExtent, 1),
+        reason: '回到底部应重新吸附跟随',
+      );
+
+      // 吸附后新内容应重新自动跟随。
+      await pushEvent(
+        tester,
+        EventTypes.userMessage,
+        sseEvent(
+          'user_message',
+          id: 'u-new',
+          turnId: 'turn_new',
+          payload: {'input': '重新吸附之后的新消息'},
+          seq: 1,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        position.pixels,
+        closeTo(position.maxScrollExtent, 1),
+        reason: '重新吸附后新项应继续自动跟随',
+      );
+    });
   });
 
   group('ConversationPage 加载更早历史', () {

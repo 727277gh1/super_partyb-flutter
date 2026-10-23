@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
@@ -640,6 +641,10 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 不用 0：列表内容高度与视口高度在滚动过程中有细微抖动（图片解码、
   /// 字体加载），严格等于 maxScrollExtent 会导致自动滚动时断时续。
+  ///
+  /// ⚠️ 这个容差**只适用于「位置漂移」**（内容增长 / 惰性估算修正），
+  /// **不适用于用户主动上滚**——后者零容差，判据见 [_onScroll] 里的
+  /// `userScrollDirection`。两者混用会让滚轮上翻被「吃掉」几格。
   static const double _autoScrollThreshold = 80;
 
   StreamSubscription<List<ConversationItem>>? _itemsSub;
@@ -925,6 +930,28 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 程序触发的滚动也会走到这里，但它向底部移动，结果是 `_following`
   /// 保持 true——正是期望的。
+  ///
+  /// ## 用户主动上滚必须**零容差**脱离跟随（否则滚轮前翻被「吃掉」）
+  ///
+  /// 曾只用距离判定（`pixels >= max - 80`）。但 Linux 桌面引擎一个滚轮 notch
+  /// 只有 **53 逻辑像素**（`fl_scrolling_manager.cc` 的 `kScrollOffsetMultiplier
+  /// = 53`，取自 Chromium），于是：
+  ///
+  /// ```
+  /// 在底部 pixels=2465 → 上滚 1 格 2412（距底 53 < 80）→ 仍判「在底部」
+  ///   → 立刻 _followBottom() 动画拉回 2465（150ms，肉眼可见）
+  /// 上滚 2 格 2359（距底 106 > 80）→ 才真正脱离
+  /// ```
+  ///
+  /// 即「滚轮往上滚两下等于没滚」。触摸拖拽一次几百像素，故只有滚轮明显。
+  ///
+  /// 判据改成看**滚动方向**：`ScrollDirection.forward` 就是「向内容开头方向
+  /// 移动」（`pointerScroll` 在 `delta < 0` 时设置、`applyUserOffset` 在拖拽时
+  /// 设置），滚轮与拖拽都覆盖。用户一旦朝上滚，意图就是「我要看更早的」，
+  /// 与「内容增长把位置顶偏了」是两件事，不该共享容差。
+  ///
+  /// ⚠️ 方向为 `idle` 时（没有用户输入）仍走距离判定——那是内容增长 / 惰性
+  /// 估算修正的路径，容差正是为它存在的。
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
@@ -948,6 +975,14 @@ class _ConversationPageState extends State<ConversationPage> {
       _following = true;
       return;
     }
+
+    // 用户主动朝上滚（看更早内容）→ 立即脱离跟随，**不适用**容差。
+    // 理由与实测数据见本方法的文档。
+    if (position.userScrollDirection == ScrollDirection.forward) {
+      _following = false;
+      return;
+    }
+
     _following =
         position.pixels >= position.maxScrollExtent - _autoScrollThreshold;
 
