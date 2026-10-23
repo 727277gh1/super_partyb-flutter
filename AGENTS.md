@@ -1514,6 +1514,19 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 `窄屏（<720dp）…`（两条分别钉住宽屏图标与窄屏菜单，避免「一边补上、另一边
 漏掉」）。
 
+#### 对话页 AppBar 标题用 `group.title`（不是硬编码的「对话」）
+
+两端 router 都传 `title: _appBarTitle`（取自 `_group.title`，未就绪/为空时退回
+「对话」）。**列表页**的 AppBar 也叫「对话」——对话页若同样硬编码，用户点进去后
+看不出自己是否真的进了某个对话、进的是哪一个（从搜索结果 / 待确认列表跳进来
+时尤其明显）。
+
+⚠️ **两端的用例必须在 router 层断言**：`ConversationPage` 自己的测试**自己传
+`title`**，所以「router 又写回硬编码」在页面测试里永远发现不了（与本节开头的
+失败模式同一个）。两条用例分别见
+`apps/spb_desktop/test/router_chat_test.dart` 与 `apps/spb_mobile/test/router_chat_test.dart`
+的 `进入对话后 AppBar 标题是 group.title…`。
+
 ### 6.17 两端接线一致性守卫（issue #33/#39/#42）
 
 **脚本**：`tools/check_wiring_parity.sh` + `tools/check_wiring_parity_selftest.sh`
@@ -4655,6 +4668,53 @@ group 水位 → 判定长期命中 → 每次点进去都同步一轮 → 每�
 
 ---
 
+### 6.44 进入对话后 AppBar 显示对话名（2026-10）
+
+**症状**：进入某个对话后，AppBar 仍显示固定的「对话」——与列表页的 AppBar
+同名。用户看不出自己是否真的进去了，也看不出进的是哪一个（桌面端从搜索结果 /
+待确认列表跳进来时尤其明显）。
+
+#### 修法：两端 router 各自派生 `_appBarTitle`
+
+`ConversationPage` 的 `title` 本来就是参数（页面不持有 `ChatGroup`，权威 group
+由两端 router 的 `_loadGroup()` 拉）。故改的只是**装配层传什么**：
+
+```dart
+String get _appBarTitle {
+  final title = _group?.title.trim() ?? '';
+  return title.isEmpty ? '对话' : title;
+}
+```
+
+两端逐字同构（桌面 `router.dart` / 移动 `router.dart`）。`_group` 已由
+`GET /chat/groups/:id` 异步拉取，且 `GroupUpdate.applyTo`（rename 事件）与
+`_loadGroup`（切换 agent 后重拉）都会刷新它，故标题会跟着改名走，无需额外订阅。
+
+#### 两个判据
+
+| 情况 | 显示 | 为什么 |
+|---|---|---|
+| `_group` 未就绪 | `对话` | 空标题会让 AppBar 只剩图标（看起来像渲染坏了），且标题宽度变化会拖动右侧图标 |
+| `title` 为空串 | `对话` | 服务端对空标题会兜底成「新对话组」，但本地刚建的 group 可能还没回读；空串同样不该渲染 |
+
+#### 为什么两端必须各有一条 router 层用例
+
+`ConversationPage` 自己的测试**自己传 `title`**——「router 又写回硬编码」在
+那里永远发现不了。这是 §6.17 / §6.33 / §6.43 反复出现的同一失败模式：**只测
+被调用的组件、不测调用点**。故两端各有一条从路由出发、断言
+`find.widgetWithText(AppBar, '季度复盘')` 存在且 `'对话'` 不存在的用例。
+
+⚠️ **既有用例的注释也一并改了**：`apps/spb_mobile/test/router_list_test.dart`
+的「StatefulShellRoute：切标签后返回」原本靠「时间线的空提示」区分对话页与列表页，
+理由是「两个 AppBar 都叫『对话』」——现在对话页显示的是对话名，那个理由不再
+成立，故改为直接断言对话名（并补了 `/chat/groups/grp_x` 的 mock）。
+
+#### 反向验证（实测）
+
+把两端 `title: _appBarTitle` 改回 `title: '对话'` → 两端各 1 条失败。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -4972,6 +5032,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~归属反馈卡「点了没反应」~~ | ✅ 已修（§6.28.1）：**两个叠加的缺陷**。① `ChatApi.resolveFeedback` 发 `{'correct': bool}`，而服务端入参只有 `reply`/`index`/`group_id`（`ShouldBindJSON` 静默忽略未知字段 → `Reply` 空 → `400 reply is required`）。实测：`{"correct":true}` → 400，`{"reply":"准确"}` → 200。改发 `{'reply': correct ? '准确' : '不准确'}`。② 即使请求成功，卡片置灰**只**看 `routing_feedback` 事件（旁路事件，SSE 断线时永不到达），而回执是一次性 CAS——用户重试必然 404，越点越坏。故 `onResolveFeedback` 签名 `void` → `Future<void>`，成功才本地置灰（`_submittedFeedback`）、失败提示且保留可点，404 单独提示「已失效」。⚠️ 修复前三处**假绿**：`spb_api` 零条 `resolveFeedback` 用例；两端 router 测试断言的正是**错误键名** `containsPair('correct', …)`，把 bug 固化成了预期；页面用例只看回调被调用不看卡片后续状态。新增 11 条用例（含真实 `HttpServer` 契约），3 项反向验证逐条实测 | §6.28.1 |
 | 窄屏 AppBar / 输入区 RenderFlex 溢出（320–412dp） | ✅ 已修（issue #31）：按频率分档 + 溢出菜单 + `AgentSwitcher.compact`；新增窄屏回归用例（`physicalSize` 压到 320/360/390/412dp） | issue #31、§6.16 |
 | ~~对话内搜索（搜 agent 回复）缺失~~ | ✅ 已实现：本地搜已加载时间线，面板顶部在 `upperHistoryUnloaded` 时告知边界 | §6.15 |
+| ~~进入对话后 AppBar 仍显示固定的「对话」（与列表页同名，看不出进了哪个对话）~~ | ✅ 已修（§6.44）：两端 router 的 `ConversationPage(title:)` 改传 `_appBarTitle`（取自 `_group.title`，未就绪/空串时退回「对话」）。`_group` 已由 `_loadGroup` 与 `GroupUpdate.applyTo`（rename 事件）刷新，故改名后标题跟着走。⚠️ 两端各补一条 **router 层**用例（`ConversationPage` 自己的测试自己传 `title`，发现不了「router 写回硬编码」——§6.17/§6.33/§6.43 同一失败模式）；另把 `router_list_test.dart` 里「两个 AppBar 都叫『对话』」的旧注释与区分手段一并修正。反向验证：改回硬编码 → 两端各 1 条失败 | §6.44 |
 | ~~移动端宽屏（≥720dp）对话内搜索入口不可达~~ | ✅ 已修（issue #33）：宽屏 `enableSearch: true` 摆独立图标，窄屏仍走溢出菜单；两端 router 层各有用例钉住 | issue #33、§6.16 |
 | ~~macOS 交付物同步写用户所选目录需 `user-selected.read-write` entitlement~~ | ✅ 已修复（commit `2f5d778`，两份 entitlements 均已含该键） | §8 |
 | ~~多窗口可行性~~ | ✅ `window_manager` 做不到，改用主窗口临时变身 | §6.5 |

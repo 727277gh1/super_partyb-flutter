@@ -1075,4 +1075,66 @@ void main() {
       reason: '必须打到已连接的那个控制器（family 键应为 userId，不是 groupId）',
     );
   });
+
+  testWidgets('进入对话后 AppBar 标题是 group.title（不是固定的「对话」）', (tester) async {
+    // 与桌面端逐字同构（见 `apps/spb_desktop/test/router_chat_test.dart` 的
+    // 同名用例）。必须在 router 层断言：`ConversationPage` 自己的测试自己传
+    // title，发现不了「router 又写回硬编码」。
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_title'),
+      mockGroups: false,
+      sseClient: FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_title',
+          (server) => server.reply(200, {
+            'id': 'grp_title',
+            'user_id': 'usr_REAL',
+            'title': '季度复盘',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_title/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_title', 'limit': 20},
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(
+      find.widgetWithText(AppBar, '季度复盘'),
+      findsOneWidget,
+      reason: '进入对话后 AppBar 必须显示对话名',
+    );
+    expect(
+      find.widgetWithText(AppBar, '对话'),
+      findsNothing,
+      reason: '硬编码的「对话」与列表页同名，用户看不出自己进了哪个对话',
+    );
+  });
 }

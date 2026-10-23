@@ -139,6 +139,16 @@ class ConversationPage extends StatefulWidget {
   final List<Widget>? actions;
 
   /// AppBar 标题。null 时不显示 AppBar。
+  ///
+  /// ## 为什么标题由调用方给，而不是页面自己拉 group
+  ///
+  /// 页面只拿到 `controller` 与一堆注入回调，**不持有** `ChatGroup`——权威
+  /// group 由两端 router 的 `_loadGroup()` 拉取（它们各自还要用它渲染设置
+  /// 面板 / Agent 标签）。故标题是装配层的事，页面只负责渲染。
+  ///
+  /// ⚠️ 两端装配层都传的是 **group.title**（对话名），而不是固定的「对话」：
+  /// 进入某个对话后 AppBar 必须回答「我在哪个对话里」，而列表页的 AppBar 已经
+  /// 叫「对话」——两处同名会让用户看不出自己是否真的进去了。
   final String? title;
 
   /// 确认卡选项回调。参数为（group id, 卡行 id, 选项文案）。

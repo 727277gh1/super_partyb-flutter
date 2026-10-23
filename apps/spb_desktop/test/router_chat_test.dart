@@ -327,6 +327,76 @@ void main() {
     );
   });
 
+  testWidgets('进入对话后 AppBar 标题是 group.title（不是固定的「对话」）', (tester) async {
+    // ## 本用例防的是什么
+    //
+    // 修复前两端都传 `title: '对话'`（硬编码），而**列表页**的 AppBar 也叫
+    // 「对话」——用户点进去后看不出自己是否真的进了某个对话、进的是哪一个。
+    // 两端 router 都改用 `_appBarTitle`（取自 `_group.title`）。
+    //
+    // ## 为什么必须在 router 层断言
+    //
+    // `ConversationPage` 自己的测试**自己传 title**——它不关心 router 传什么，
+    // 所以「router 又写回硬编码」这种漏接在那里永远发现不了（与 §6.17 接线
+    // 守卫同一个失败模式）。
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_title'),
+      mockGroups: false,
+      sseClient: FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_title',
+          (server) => server.reply(200, {
+            'id': 'grp_title',
+            'user_id': 'usr_REAL',
+            'title': '季度复盘',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_title/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_title', 'limit': 20},
+        );
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(
+      find.widgetWithText(AppBar, '季度复盘'),
+      findsOneWidget,
+      reason: '进入对话后 AppBar 必须显示对话名',
+    );
+    expect(
+      find.widgetWithText(AppBar, '对话'),
+      findsNothing,
+      reason: '硬编码的「对话」与列表页同名，用户看不出自己进了哪个对话',
+    );
+  });
+
   testWidgets('同一 userId 下跨两个 group 只建一次 SSE（切 group 走 switchGroup）', (
     tester,
   ) async {

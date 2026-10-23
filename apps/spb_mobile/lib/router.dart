@@ -1911,6 +1911,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     setState(() => _group = group.withCurrentGoal(snapshot));
   }
 
+  /// AppBar 标题：进入对话后显示**对话名**（[ChatGroup.title]）。
+  ///
+  /// 与桌面端逐字同构（见 `apps/spb_desktop/lib/router.dart` 的同名 getter）。
+  /// 未就绪时退回「对话」：空标题会让 AppBar 只剩图标，且宽度变化会拖动
+  /// 右侧 5 个常驻图标（窄屏本已紧张，见 issue #31）。
+  String get _appBarTitle {
+    final title = _group?.title.trim() ?? '';
+    return title.isEmpty ? '对话' : title;
+  }
+
   @override
   Widget build(BuildContext context) {
     final userId = _userId;
@@ -1927,7 +1937,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
     return ConversationPage(
       controller: controller,
-      title: '对话',
+      title: _appBarTitle,
       // 对话内搜索（搜已加载的时间线，含 agent 回复）。
       //
       // ## 为什么按宽度给（issue #33）

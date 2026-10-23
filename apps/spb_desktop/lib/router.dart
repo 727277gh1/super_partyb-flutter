@@ -1312,6 +1312,24 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     }
   }
 
+  /// AppBar 标题：进入对话后显示**对话名**（[ChatGroup.title]）。
+  ///
+  /// ## 为什么不是固定的「对话」
+  ///
+  /// 列表页的 AppBar 已经叫「对话」。若对话页也叫「对话」，用户点进去后
+  /// 完全看不出自己是否真的进入了某个对话，也看不出进的是哪一个——尤其
+  /// 桌面端从搜索结果 / 待确认列表跳进来时。
+  ///
+  /// ## 为什么未就绪时退回「对话」而不是空串
+  ///
+  /// `_group` 由 `GET /chat/groups/:id` 异步拉取。空标题会让 AppBar 只剩
+  /// 图标，看起来像渲染坏了；而标题宽度变化会拖动右侧图标（与「停止按钮
+  /// 选禁用而非隐藏」同一取舍：AppBar 布局要稳定）。
+  String get _appBarTitle {
+    final title = _group?.title.trim() ?? '';
+    return title.isEmpty ? '对话' : title;
+  }
+
   @override
   Widget build(BuildContext context) {
     final userId = _userId;
@@ -1330,7 +1348,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     // （spb_mobile）不传 actions 也不包 Row，保持原样（见 AGENTS.md §6.4）。
     final conversation = ConversationPage(
       controller: controller,
-      title: '对话',
+      title: _appBarTitle,
       // 侧边栏开关（仅桌面端渲染本页）。
       actions: [
         // Agent 切换：
