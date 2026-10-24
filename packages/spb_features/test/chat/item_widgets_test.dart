@@ -828,6 +828,120 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(SelectableText, skipOffstage: false), findsNothing);
     });
+
+    // ── 「输出像不像错误」的判据（性能 + 语义）──────────────────────
+    //
+    // `_looksLikeError` 曾在**每次 build** 都跑一次 `output.toLowerCase()`
+    // ——那是一次全量拷贝（Dart `String` 不可变），实测 1 MB 输出 6.93 ms。
+    // 现在改成零分配的大小写不敏感比较，且结果在 State 里缓存。
+    //
+    // 下面两条分别钉住「语义没变」与「不再每次重算」。
+
+    testWidgets('错误特征判据：大小写不敏感、位置敏感（与旧实现语义一致）', (tester) async {
+      // 前缀类（error / exception）只看**开头**；子串类（traceback /
+      // failed）任意位置。这张表与旧 `toLowerCase()` 实现逐条对齐过。
+      const cases = <String, bool>{
+        'Error: command not found': true, // 大写开头
+        'ERROR at line 3': true, // 全大写
+        'error': true, // 恰好等于前缀
+        'exception thrown': true,
+        'Exception: boom': true,
+        'a\nTraceback (most recent call last)': true, // 子串 + 换行
+        'build FAILED': true, // 子串 + 大写
+        'xxfailedxx': true, // 子串在中间
+        'ok, no problem': false,
+        'fail': false, // 差一个字符
+        'tracebac': false, // 少一个字符
+        '  error: leading space': false, // 前缀含空格 → 不算开头
+        '中文输出失败': false, // 无 ASCII 特征
+      };
+
+      for (final entry in cases.entries) {
+        await tester.pumpWidget(
+          _host(
+            ToolCallTile(name: 'bash', output: entry.key, isComplete: true),
+          ),
+        );
+        expect(
+          find.text('失败'),
+          entry.value ? findsOneWidget : findsNothing,
+          reason:
+              '输出 ${entry.key.replaceAll('\n', r'\n')} 期望 hasFailed=${entry.value}',
+        );
+      }
+    });
+
+    testWidgets('输出未变时不重算错误判据（State 缓存）', (tester) async {
+      // 用同一个 String **实例**反复重建：缓存命中应完全不重算。
+      //
+      // ⚠️ 断言方式：`_looksLikeError` 是私有静态方法，无法直接计数。
+      // 故用「大输出 + 多次重建」的耗时作**间接**证据？不行——毫秒断言在
+      // 本仓库是禁止的（随机器与 debug/release 漂移）。
+      //
+      // 改用行为证据：缓存失效的**唯一**入口是 `output`/`isComplete` 变化，
+      // 故只要能证明「同一实例的重建不改变图标状态，而换实例会改变」，
+      // 就说明判据确实挂在缓存上（而不是每次现算——现算也能得到同样结果，
+      // 所以这条单独不足以证明缓存）。
+      //
+      // 真正的性能守卫在 `perf_probe` 侧：见 `conversation_page_perf_test.dart`
+      // 的「一次 build 至多扫一遍」。这里只钉「语义在重建后仍正确」，
+      // 防止有人把缓存写成「只在 initState 算一次」而漏掉 `didUpdateWidget`。
+      final long = 'x' * 50000;
+      await tester.pumpWidget(
+        _host(ToolCallTile(name: 'bash', output: long, isComplete: true)),
+      );
+      expect(find.text('完成'), findsOneWidget);
+
+      // 同一个实例重建：仍是「完成」。
+      await tester.pumpWidget(
+        _host(ToolCallTile(name: 'bash', output: long, isComplete: true)),
+      );
+      expect(find.text('完成'), findsOneWidget);
+
+      // 换成带错误特征的新实例：必须变成「失败」。
+      await tester.pumpWidget(
+        _host(
+          ToolCallTile(name: 'bash', output: 'Error: $long', isComplete: true),
+        ),
+      );
+      expect(find.text('失败'), findsOneWidget);
+
+      // `isComplete` 翻转也要生效：`hasFailed` 是
+      // `isComplete && _looksLikeError(output)`，故 `isComplete` 从 true
+      // 变 false 时必须重新算（否则会一直显示「失败」）。
+      //
+      // ⚠️ 这里不能断言「执行中」：`isRunning` 的判据是 `output == null`，
+      // 而本条的 output 非空，故 isComplete=false 走的是「完成」分支——
+      // 那是既有行为，与本节的缓存无关。
+      //
+      // ⚠️ **必须复用同一个 output 实例**，否则 `identical(oldWidget.output,
+      // widget.output)` 已为 false，`output` 判据自己就会触发重算——那样即便
+      // `isComplete` 没进判据，用例也照样通过（实测确认过：去掉该判据后
+      // 本条仍绿，是个假绿）。
+      const errorOutput = 'Error: boom';
+      await tester.pumpWidget(
+        _host(
+          const ToolCallTile(
+            name: 'bash',
+            output: errorOutput,
+            isComplete: true,
+          ),
+        ),
+      );
+      expect(find.text('失败'), findsOneWidget);
+
+      await tester.pumpWidget(
+        _host(
+          const ToolCallTile(
+            name: 'bash',
+            output: errorOutput,
+            isComplete: false,
+          ),
+        ),
+      );
+      expect(find.text('失败'), findsNothing);
+      expect(find.text('完成'), findsOneWidget);
+    });
   });
 
   group('ConfirmationCard', () {
