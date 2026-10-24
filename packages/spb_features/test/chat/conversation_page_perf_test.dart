@@ -445,4 +445,168 @@ void main() {
           '`super.build(context)` 没调）。',
     );
   });
+
+  // ── 流式期间未变气泡不重建 ────────────────────────────────────────
+  //
+  // 动机：`SliverChildBuilderDelegate.shouldRebuild` **恒为 true**
+  // （`scroll_delegate.dart`），故父级每一次 `setState` 都会重建全部已挂载行。
+  // 而本页 `setState` 的来源里，流式增量 / `turn_activity` 心跳 / `ttsStatus`
+  // / `_staleTurnIds` 都与「历史气泡的内容」无关。
+  //
+  // 实测（本机 2026-10，debug）：5 条已完成长气泡 + 1 条流式气泡，推**一条**
+  // 流式增量 → `assistantBubbleBuilds` 增量 **6**（全部重建）；一条
+  // `turn_activity` 心跳同样 **6**。而单个长气泡的**暖**重建实测 16.9–30.3 ms
+  // （冷重建 68–441 ms）——6 个就是一次明显掉帧。
+  //
+  // 修法：`_bubbleCache`（`item.id` → (指纹, widget 实例)）。命中时交回**同一
+  // 实例**，`Element.updateChild` 的 `child.widget == newWidget` 分支命中，
+  // 子树连 `build` 都不跑。
+
+  testWidgets('流式增量只重建变化的那条气泡，其余不动', (tester) async {
+    tester.view.physicalSize = const Size(600, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    await pumpPage(tester);
+
+    // 5 条已完结的长回复（各自独立 turn）。
+    const finished = 5;
+    for (var i = 0; i < finished; i++) {
+      await pushReply(
+        tester,
+        id: 'r$i',
+        text: longMarkdown('回复 $i'),
+        seq: i + 1,
+      );
+    }
+    // 1 条流式段落（尾部，正在接收增量）。
+    await pushEvent(
+      tester,
+      EventTypes.start,
+      sseEvent(
+        EventTypes.start,
+        id: 'start_s',
+        turnId: 'turn_s',
+        payload: const {},
+        seq: 900,
+      ),
+    );
+    await pushStreamingMessage(
+      tester,
+      id: 'e_stream',
+      turnId: 'turn_s',
+      text: '正在生成',
+      seq: 1,
+    );
+    await tester.pumpAndSettle();
+
+    // 前置：6 条都在树上（5 条长回复都超过常驻阈值，故全被 keep-alive）。
+    expect(
+      mountedBubbleCount(tester),
+      finished + 1,
+      reason: '前置：5 条长回复 + 1 条流式',
+    );
+
+    PerfProbe.reset();
+
+    // 推一条流式增量：尾部那条的 `text` 变长，其余 5 条内容不变。
+    await pushStreamingMessage(
+      tester,
+      id: 'e_stream2',
+      turnId: 'turn_s',
+      text: '，继续写一点',
+      seq: 2,
+    );
+    await tester.pumpAndSettle();
+
+    // 这个数字就是验收标准要的「非尾部气泡的 build 次数」——6 条里只有 1 条
+    // 该重建，故修复后为 1；修复前实测为 6。
+    debugPrint(
+      '[perf] 一条流式增量后 assistantBubbleBuilds = '
+      '${PerfProbe.assistantBubbleBuilds}（共 ${finished + 1} 条气泡，'
+      '其中 $finished 条内容未变）',
+    );
+
+    expect(
+      PerfProbe.assistantBubbleBuilds,
+      1,
+      reason:
+          '只有尾部那条的 `text` 变了，其余 5 条指纹相同 → 必须复用 widget '
+          '实例。修复前实测 6（全部重建）。',
+    );
+
+    // 与气泡内容**无关**的状态更新同理：`turn_activity` 心跳只驱动底部的
+    // 活动指示条，不该让任何气泡重建。
+    PerfProbe.reset();
+    await pushEvent(
+      tester,
+      EventTypes.turnActivity,
+      sseEvent(
+        EventTypes.turnActivity,
+        id: 'act1',
+        turnId: 'turn_s',
+        payload: const {'tool': 'bash'},
+        transient: true,
+        seq: 3,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    debugPrint(
+      '[perf] 一条 turn_activity 心跳后 assistantBubbleBuilds = '
+      '${PerfProbe.assistantBubbleBuilds}',
+    );
+
+    expect(
+      PerfProbe.assistantBubbleBuilds,
+      0,
+      reason:
+          '心跳与气泡内容无关（修复前实测 6）。若为 0，说明缓存指纹没有把'
+          '「与气泡无关的状态」误算进去。',
+    );
+  });
+
+  testWidgets('短气泡不常驻：滚出视口即销毁', (tester) async {
+    tester.view.physicalSize = const Size(600, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    await pumpPage(tester);
+
+    // 短回复（远低于 400 字符阈值）。
+    const shortText = '好的，收到';
+    expect(shortText.length, lessThan(400), reason: '前置：必须低于阈值');
+    await pushReply(tester, id: 'short', text: shortText, seq: 1);
+
+    for (var i = 0; i < 30; i++) {
+      await pushEvent(
+        tester,
+        EventTypes.userMessage,
+        sseEvent(
+          'user_message',
+          id: 'u$i',
+          turnId: 'turn_u$i',
+          payload: {'input': '填充问题 $i'},
+          seq: 100 + i,
+        ),
+      );
+    }
+    await tester.pumpAndSettle();
+
+    final position = timelinePosition(tester);
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pumpAndSettle();
+
+    // `skipOffstage: false` 会连 keep-alive 的（不在视口内的）子项一起找
+    // ——若它仍存在，说明被错误地常驻了。
+    expect(
+      mountedBubbleWithText(tester, shortText),
+      isFalse,
+      reason: '短气泡低于 `_keepAliveMinChars`，滚出视口必须被销毁',
+    );
+  });
 }

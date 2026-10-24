@@ -601,6 +601,67 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 读 State。
   Set<String> _keepAliveIds = const {};
 
+  /// 已构建的气泡 widget 缓存：`item.id` → (指纹, widget)。
+  ///
+  /// ## 它解决什么
+  ///
+  /// `SliverChildBuilderDelegate.shouldRebuild` **恒为 true**
+  /// （`scroll_delegate.dart`），故父级每一次 `setState` 都会重建**全部已挂载
+  /// 行**。而本页 `setState` 的来源很多：流式增量（`_onItems`）、
+  /// `turn_activity` 心跳、`ttsStatus`、`_staleTurnIds`、`outbox`、`pending`
+  /// ……其中大部分与「历史气泡的内容」毫无关系。
+  ///
+  /// 实测（本机 2026-10，debug）：页面上 5 条已完成长气泡 + 1 条流式气泡，
+  /// 推**一条**流式增量 → `PerfProbe.assistantBubbleBuilds` 增量 **6**
+  /// （即全部重建）；推一条 `turn_activity` 心跳同样 **6**。而单个长气泡的
+  /// **暖**重建实测 16.9–30.3 ms（冷重建 68–441 ms），6 个就是一次明显掉帧。
+  ///
+  /// ## 为什么复用 widget **实例**就能跳过重建
+  ///
+  /// `Element.updateChild`（`framework.dart`）的第一条分支是：
+  ///
+  /// ```dart
+  /// if (hasSameSuperclass && child.widget == newWidget) {
+  ///   ... newChild = child;   // 完全不 update
+  /// }
+  /// ```
+  ///
+  /// `Widget` 没有覆写 `==`，故 `==` 即 `identical`。同一实例交回去，整个子树
+  /// 连 `build` 都不会被调用。这就是缓存的全部机制。
+  ///
+  /// ## ⚠️ 为什么**只**缓存 `AssistantMessageItem`
+  ///
+  /// 缓存的前提是「渲染输入可穷举成指纹」。气泡的输入只有四个显式字段
+  /// （`text` / `isStreaming` / `keepAlive` / `onLinkTap`），全部进指纹。
+  ///
+  /// 其余 item 的渲染输入**夹带页面状态**——`ConfirmationItem` 读 `_resolving`、
+  /// `FeedbackRequestItem` 读 `_submittedFeedback` 与 `_feedbackTTL`、
+  /// `ErrorItem` 读 `_retryingTurnId`、`FollowUpSuggestionItem` 读两个回调是否
+  /// 注入……逐项列指纹必然漏一处，而漏掉的表现是「状态变了界面不变」这种
+  /// 最难查的 bug。它们的构建成本又远低于 Markdown 解析（实测冷重建的 9–36×
+  /// 差距就来自 `GptMarkdown`），缓存它们收益不抵风险。
+  ///
+  /// ## ⚠️ 失效条件必须包含「本页 State 的输入」
+  ///
+  /// 指纹只有 item 字段是不够的：`_staleTurnIds` 会让 `isStreaming` 从 true
+  /// 变 false（超时兜底停光标），`_keepAliveIds` 随窗口滑动而变。两者都已进
+  /// 指纹（前者参与 `isStreaming` 的计算结果，后者单独一位）。
+  ///
+  /// 主题 / 语言 / 文本缩放的变化**不需要**进指纹：那些走 `InheritedWidget`，
+  /// 复用同一 widget 实例时子树的 `dependOnInheritedWidgetOfExactType` 依赖
+  /// 关系仍在，框架会自己把该子树标记为需要重建。
+  ///
+  /// `onLinkTap` 进指纹（`identical` 比较）：它是 `widget.onOpenLink`，装配层
+  /// 换回调时必须重建成新实例，否则点了走旧逻辑。
+  final Map<String, ({Object fingerprint, Widget widget})> _bubbleCache = {};
+
+  /// [_bubbleCache] 的上限。
+  ///
+  /// 与 [_keepAliveWindow] 同取向：缓存只为「刚看过的那些」服务，无界就会随
+  /// 对话长度线性增长（每个 widget 实例虽小，但会拖住它的 `text` 字符串）。
+  /// 200 条足够覆盖「往下读、往回翻一点」的实际动作。
+  static const int _bubbleCacheLimit = 200;
+
   /// 算出「该常驻」的气泡 id 集合（有界：最多 [_keepAliveWindow] 个）。
   ///
   /// 判据只有两个：
@@ -1034,6 +1095,12 @@ class _ConversationPageState extends State<ConversationPage> {
       // 缩略图记忆按对话隔离：不清空就是按对话无限增长的内存（每张图一份
       // 字节），且上一个对话里同一 `ufsFileId` 的字节未必仍有效。
       _thumbnailMemo.clear();
+      // 气泡缓存同理：`item.id` 是服务端事件 id，跨对话**可能重复**（不同
+      // group 各自从 1 开始的事件 id 不保证唯一）。不清空就可能把一个对话的
+      // 气泡交给另一个对话的同 id 项——那会显示别人的回复。
+      //
+      // 即便 id 不重复，保留它们也只是让上一个对话的正文留在内存里。
+      _bubbleCache.clear();
     }
   }
 
@@ -1957,21 +2024,70 @@ class _ConversationPageState extends State<ConversationPage> {
     );
   }
 
+  /// 构建（或复用）一条助手气泡。
+  ///
+  /// 复用机制与理由见 [_bubbleCache]。这里的指纹是气泡**全部**的渲染输入：
+  ///
+  /// | 字段 | 来源 | 为什么进指纹 |
+  /// |---|---|---|
+  /// | `text` | item | 正文，流式时每帧都变 |
+  /// | `isStreaming` | item × `_staleTurnIds` | 超时兜底会让它从 true 变 false |
+  /// | `keepAlive` | `_keepAliveIds` | 窗口滑动时逐条变化 |
+  /// | `onLinkTap` | `widget.onOpenLink` | 装配层换回调时必须换新实例 |
+  ///
+  /// `createdAt` / `turnId` / `agentId` / `id` **不**进指纹：前三个不参与渲染，
+  /// 而 `id` 就是缓存的键本身（变了就是另一条记录）。
+  Widget _buildAssistantBubble(AssistantMessageItem item) {
+    final text = item.text;
+    final isStreaming =
+        item.isStreaming && !_staleTurnIds.contains(item.turnId);
+    final keepAlive = _keepAliveIds.contains(item.id);
+    final onLinkTap = widget.onOpenLink;
+
+    final cached = _bubbleCache[item.id];
+    if (cached != null &&
+        cached.fingerprint == (text, isStreaming, keepAlive, onLinkTap)) {
+      // 命中：交回**同一实例** → `Element.updateChild` 的
+      // `child.widget == newWidget` 分支命中 → 子树连 build 都不跑。
+      return cached.widget;
+    }
+
+    final bubble = AssistantMessageBubble(
+      // 带 key：缓存命中时同一实例出现在同一位置，key 不是必需的；但被逐出后
+      // 重建、或同一 id 换了内容时，key 能让 Element 复用而不是重挂（保留
+      // `gpt_markdown` 的增量解析状态）。
+      key: ValueKey(item.id),
+      text: text,
+      isStreaming: isStreaming,
+      onLinkTap: onLinkTap,
+      // 滚出视口后不销毁（保留 Markdown 解析缓存）——仅限够长且是最近
+      // 若干个的那几条，见 [_keepAliveMinChars] / [_keepAliveWindow]。
+      keepAlive: keepAlive,
+    );
+
+    if (_bubbleCache.length >= _bubbleCacheLimit) {
+      // 简单逐出：清掉最早插入的那一批（Dart 的 `Map` 保持插入顺序）。
+      // 不做 LRU——维护「最近使用」需要在每次命中时搬动元素，而命中路径正是
+      // 要压到最便宜的那条。
+      final drop = _bubbleCache.keys.take(_bubbleCacheLimit ~/ 2).toList();
+      for (final k in drop) {
+        _bubbleCache.remove(k);
+      }
+    }
+    _bubbleCache[item.id] = (
+      fingerprint: (text, isStreaming, keepAlive, onLinkTap),
+      widget: bubble,
+    );
+    return bubble;
+  }
+
   Widget _buildItem(ConversationItem item) => switch (item) {
     UserMessageItem(:final text) => UserMessageBubble(text: text),
     // `isStreaming` 与超时集合求交：判超时后停掉光标。
     //
     // ⚠️ 只影响光标，**不改归约结果**——若 turn 其实仍在跑、增量帧随后到达，
     // 段落会自然恢复流式态（不会出现重复气泡，因为归约输入未变）。
-    AssistantMessageItem(:final text, :final isStreaming) =>
-      AssistantMessageBubble(
-        text: text,
-        isStreaming: isStreaming && !_staleTurnIds.contains(item.turnId),
-        onLinkTap: widget.onOpenLink,
-        // 滚出视口后不销毁（保留 Markdown 解析缓存）——仅限够长且是最近
-        // 若干个的那几条，见 [_keepAliveMinChars] / [_keepAliveWindow]。
-        keepAlive: _keepAliveIds.contains(item.id),
-      ),
+    AssistantMessageItem() => _buildAssistantBubble(item),
     ThoughtItem(:final text, :final isStreaming) => ThoughtTile(
       text: text,
       isStreaming: isStreaming && !_staleTurnIds.contains(item.turnId),
