@@ -107,6 +107,21 @@ class SpbEnv {
     defaultValue: false,
   );
 
+  /// 是否启用帧耗时观测（`FrameTiming` 汇总进日志）。
+  ///
+  /// ## 默认关闭：观测本身有成本
+  ///
+  /// 开启后引擎**每帧**回传耗时数据并在进程内累积，换来的信息只在排障时
+  /// 需要。故与 [verboseLogging] 同一取向——编译期开关，默认关，关闭时
+  /// 根本不注册回调（零开销，而不是「注册了但不打印」）。
+  ///
+  /// 用途：用户报「界面卡」时，让「导出诊断日志」里带上慢帧统计（见
+  /// `spb_platform` 的 `installFrameTimingReporter`）。
+  static const bool frameTiming = bool.fromEnvironment(
+    'SPB_FRAME_TIMING',
+    defaultValue: false,
+  );
+
   /// 当前是否为发布构建。发布构建禁用调试入口（如 debug 面板）。
   static const bool isRelease = bool.fromEnvironment('dart.vm.product');
 

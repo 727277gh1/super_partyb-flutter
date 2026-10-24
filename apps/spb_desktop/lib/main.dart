@@ -46,6 +46,13 @@ void main() {
       'release': SpbEnv.isRelease,
     });
 
+    // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。
+    //
+    // 放在 `SpbLog.configure` **之后**：上报器在帧回调里写 SpbLog，若在
+    // configure 之前安装，首批日志会落到默认 sink 与默认级别，行为不一致。
+    // 默认关闭时不注册回调，零开销。
+    if (SpbEnv.frameTiming) installFrameTimingReporter();
+
     // 桌面能力初始化必须在 runApp 之前：托盘与窗口需在首帧前就绪，
     // 否则启动瞬间会闪现默认窗口尺寸再跳到配置尺寸。
     //
