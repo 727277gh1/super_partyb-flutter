@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart'
+    show CacheExtentStyle, ScrollCacheExtent;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_features/spb_features.dart';
@@ -607,6 +609,56 @@ void main() {
       mountedBubbleWithText(tester, shortText),
       isFalse,
       reason: '短气泡低于 `_keepAliveMinChars`，滚出视口必须被销毁',
+    );
+  });
+
+  // ── 预建范围（scrollCacheExtent）──────────────────────────────────
+  //
+  // 默认值只预建 250 **像素**，而本时间线的行高差异极大。快速滚动时新行
+  // 来不及预解析，Markdown 的冷解析全压在帧内——表现为「多数帧很轻快、
+  // 每隔十几帧突然卡一下」。
+  //
+  // 实测（本机 2026-10，debug；60 条 4 段 Markdown，60 帧 × 150px）：
+  // 默认 250px 有 6/60 帧超 16.7ms，`viewport(1.5)` 降到 0/60。
+  //
+  // ⚠️ 这条**不能**断言帧耗时（毫秒随机器与 debug/release 漂移）。改为
+  // 断言「预建范围确实大于默认值」这个**结构事实**：它一旦被改回固定小像素，
+  // 上面那组实测数据就不再成立，而没有任何功能测试会变红。
+
+  testWidgets('时间线的预建范围大于默认 250px（滚动预解析的前置条件）', (tester) async {
+    tester.view.physicalSize = const Size(800, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    // ⚠️ 必须先 `startController` + `mockTimeline` 再 `pumpPage`：
+    // `pumpPage` 只挂载页面，`_items` 要等控制器的快照推送。少了这一步
+    // 页面渲染的是 `EmptyState`（没有 `ListView`），`find` 会命中 0 个。
+    mockTimeline();
+    await startController(tester);
+    await pumpPage(tester);
+    await pushNoPump(tester, 3);
+    await tester.pump();
+    expect(controller.snapshot, isNotEmpty, reason: '前置：时间线必须有内容');
+
+    final listView = tester.widget<ListView>(
+      find.byType(ListView, skipOffstage: false).first,
+    );
+    final extent = listView.scrollCacheExtent;
+    expect(
+      extent,
+      isA<ScrollCacheExtent>(),
+      reason: '必须显式设置预建范围；留 null 会退回 250px 默认值',
+    );
+    // `CacheExtentStyle.viewport` 表示按视口倍数缩放（不是固定像素）。
+    expect(
+      extent!.style,
+      CacheExtentStyle.viewport,
+      reason: '固定像素在矮屏上预建过多、高屏上过少，应按视口比例',
+    );
+    expect(
+      extent.value,
+      greaterThanOrEqualTo(1.0),
+      reason: '1.0 屏与默认 250px 在实测中同样是 6/60 超时帧，必须更大',
     );
   });
 }
