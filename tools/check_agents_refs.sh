@@ -81,6 +81,10 @@ EXEMPT = {
     # 就这么命名，与 Dart 私有成员无关。§6.32 用它解释「Linux 窗口图标不会
     # 自动从包内资源取」——Flutter 的 Linux 嵌入层不设这个属性。
     '_NET_WM_ICON': 'X11/GTK 协议常量，非本仓库符号（§6.32）',
+    # Flutter SDK 的渲染层文件名（`packages/flutter/lib/src/rendering/`）。
+    # §6.47 用它解释「keep-alive 的子项不在每帧布局/绘制路径上」——
+    # 那是对 SDK 内部实现的引用，本仓库当然没有这个文件。
+    'sliver_multi_box_adaptor.dart': 'Flutter SDK 文件名，非本仓库符号（§6.47）',
 }
 
 with open(DOC, encoding='utf-8') as fh:

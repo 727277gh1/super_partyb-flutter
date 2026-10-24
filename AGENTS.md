@@ -5105,10 +5105,17 @@ build 扫了多少条 item、展示行缓存是否命中、几个气泡真的重
 | `_keepAliveMinChars` | **400** | 短回复解析 < 1 ms，不值得付常驻成本 |
 | `_keepAliveWindow` | **12** | 取「最近的」而非「最长的」：用户动作是往下读 → 往回翻一点 |
 
-**不能无界**：`AutomaticKeepAliveClientMixin` 让子项留在树上，而
-`RenderSliverMultiBoxAdaptor` **每帧仍要布局**它们（keep-alive 的语义是
-「不回收」不是「不布局」）。2000 条历史全常驻 → 每帧布局成本 O(历史长度)，
-比要解决的问题更贵。
+**不能无界**：`AutomaticKeepAliveClientMixin` 让子项留在树上，代价是
+**Element / State / RenderObject 与 `GptMarkdown` 的解析缓存常驻内存**（后者
+才是重点：增量解析的分段与已定型缓存活在该 State 里，dispose 即全丢）。
+2000 条历史全常驻 = 2000 份解析结果与子树常驻。
+
+⚠️ **不要写成「每帧仍要布局」**（曾这么写过，SDK 核实为否）：SDK 在子项离开
+视口时把它从 childList 移除、放进 keep-alive 桶（`sliver_multi_box_adaptor.dart`），
+而 `RenderSliverList.performLayout` 沿 `firstChild` 链遍历、
+`RenderSliverMultiBoxAdaptor.paint` 也只走 `firstChild`——故**不在每帧的
+布局/绘制路径上**。`visitChildren` 包含该桶，`visitChildrenForSemantics`
+显式跳过。真实代价是「滚回可见时仍需一次 layout」（脱离桶重新入列）+ 常驻内存。
 
 ⚠️ **两个实测踩出来的坑**（都已写进代码注释）：
 
@@ -5173,13 +5180,83 @@ keep-alive 的上界用例抓住。
   release 下估计 50–90 ms，仍超 16.7 ms 预算——但这个换算**没有实测**，故
   §五 的取舍（缓存哪些、窗口多大）应在有桌面环境的机器上用
   `SPB_FRAME_TIMING` 复核一次。
-- **`_looksLikeError` 的 `toLowerCase()` 是全量拷贝**（1 MB → 4.277 ms）：
-  若将来出现超大工具输出，这里是热点。当前不修——它只用于选图标颜色，而
-  工具输出超过 1 MB 时用户真正卡的是 `SelectableText` 的布局，不是这一次拷贝。
+- ~~`_looksLikeError` 的 `toLowerCase()` 是全量拷贝~~ → **已修**，见 §八。
 - **`_thumbnailMemo` 的键只有 `ufsFileId`**：同一路径被新版本覆盖时**不失效**
   （服务端事件不带 mtime），会继续展示旧缩略图直到切对话。
 - **翻页 `loadOlder` 前插不补偿滚动位置**（既有行为）；`maxScrollExtent` 是
   惰性估算，会跨若干帧逐步修正。
+
+#### 八、两处「偶发重帧」的热点（2026-10 补）
+
+第七节曾把 `_looksLikeError` 的 `toLowerCase()` 记为「当前不修」。复核后改判
+——它是**纯函数、输入不变、却每次 build 都重算**，正是「偶发重帧」的形态。
+同批还把时间线的预建范围从默认 250 **像素** 调成 1.5 屏。
+
+##### 1. `_looksLikeError`：零分配 + 结果缓存
+
+`ToolCallTile` 从 `StatelessWidget` 改成 `StatefulWidget`，只为缓存一个派生量
+`_hasFailed`（`isComplete && _looksLikeError(output)`）。
+
+**为什么缓存比「写快一点」更决定**：`output` 在一条工具卡的生命周期里只变一次
+（未返回 → 返回），但 `SliverChildBuilderDelegate.shouldRebuild` 恒 true，
+父级每次 `setState` 都重建它。缓存把成本从「每次 build」降到「每个 output 一次」。
+
+**同时把 `toLowerCase()` 换成零分配比较**（`_startsWithAscii` / `_containsAscii`
+用 `codeUnitAt(i) | 0x20` 做大小写折叠）：
+
+| 输出大小 | 旧（`toLowerCase`） | 新（零分配） |
+|---|---|---|
+| 10 KB | 0.068 ms | 0.025 ms |
+| 100 KB | 0.666 ms | 0.254 ms |
+| 1 MB | 6.930 ms | 2.662 ms |
+
+**语义完全不变**（这是刻意的）：前缀类（`error` / `exception`）只看开头，子串类
+（`traceback` / `failed`）任意位置——与旧实现逐条对齐，含 `  error:`（前导空格
+不算开头）、`tracebac`（少一字符）、中文输出等 14 个样本。
+
+⚠️ **有意不做「只扫前 N KB」**：那会改变语义（1 MB 构建日志末尾的 `BUILD
+FAILED` 就漏了），而判错会影响图标颜色。优化必须保持行为，不能靠缩窗口。
+
+⚠️ **测试的两个坑**（都是实测踩出来的）：
+
+1. **`isComplete` 不进 `didUpdateWidget` 判据是假绿**——用例里若 `output` 也
+   一起变，`identical` 判据自己就触发重算，即使漏掉 `isComplete` 也照样绿。
+   必须**复用同一个 `output` 实例**、只翻 `isComplete`。
+2. **`output != null` 时 `isComplete: false` 走的是「完成」分支**（`isRunning`
+   的判据是 `output == null`），不是「执行中」。那是既有行为，别在缓存用例里
+   误断言。
+
+##### 2. `scrollCacheExtent`：250px → 1.5 屏
+
+`ListView.builder` 的默认预建范围是 **250 像素**，而本时间线的行高差异极大
+（一行短消息 40px，一条长回复上千 px）。快速滚动时新行来不及预解析，Markdown
+冷解析（实测 4 段 / 580 字符 **68.0 ms**）全压在**帧内**——这正是「多数帧很
+轻快、每隔十几帧突然卡一下」的黏连感。
+
+实测（本机 2026-10，debug；60 条 4 段 Markdown 气泡，60 帧 × 150px）：
+
+| `cacheExtent` | 挂载 | 合计 | p90 | 最大 | >16.7ms |
+|---|---|---|---|---|---|
+| 默认 250px | 2 | 326.9 ms | 16.77 | 20.92 | **6/60** |
+| `viewport(1.0)` | 3 | 277.6 ms | 16.75 | 17.91 | **6/60** |
+| **`viewport(1.5)`** | **3** | **240.7 ms** | **13.07** | **15.69** | **0/60** |
+| `viewport(2.0)` | 4 | 226.8 ms | 13.14 | 16.05 | 0/60 |
+
+取 1.5 而非 2.0：两者超时帧都是 0，但 1.5 挂载更少。用 `viewport(n)` 而不是
+固定像素——固定像素在矮屏上预建过多、在高屏上过少。
+
+⚠️ **`cacheExtent` 已 `@Deprecated`**，替代是 `scrollCacheExtent`
+（`ScrollCacheExtent` sealed class，SDK 的 `rendering/viewport.dart`）。它
+**不在 material 库的导出面**里，故要 `import 'package:flutter/rendering.dart'
+show ScrollCacheExtent;`。
+
+⚠️ **这个值只在「单条气泡比视口矮」时有效**：一条气泡就高过视口时，
+`cacheExtent` 无论多大都只能预建到相邻的那一条（实测挂载恒为 1 条，四种取值
+的 p90 差异全在噪声内）。故调参前先确认场景形态。
+
+⚠️ **守卫只能断言结构事实**（`scrollCacheExtent` 非 null、`style == viewport`、
+`value >= 1.0`）：帧耗时毫秒数随机器与 debug/release 漂移，本仓库禁止毫秒断言。
+改回固定小像素时没有任何**功能**测试会红——这正是这条结构守卫存在的理由。
 
 ---
 
