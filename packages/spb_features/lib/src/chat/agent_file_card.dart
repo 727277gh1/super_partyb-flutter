@@ -105,9 +105,26 @@ class _AgentFileCardState extends State<AgentFileCard> {
   @override
   void didUpdateWidget(AgentFileCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 身份变了（同卡被更新到另一个文件）或缩略图回调变了：重置缓存。
+    // 文件身份变了（同卡被更新到另一个文件）：重置缓存并重拉。
+    //
+    // ## 为什么不用「回调 identity 变了」作判据
+    //
+    // 之前的判据是 `oldWidget.onLoadThumbnail != widget.onLoadThumbnail`。
+    // 而调用方（`ConversationPage._buildItem` / `AgentFileBatchCard`）都是
+    // 在 build 里现包一层闭包——**每次 build 都是新实例**。于是这个判据恒
+    // 为真：推一条与文件无关的流式增量（甚至状态条刷新）都会清空缓存并重新
+    // 请求缩略图（实测：1 条图片卡 + 3 条无关增量 → 4 次请求）。
+    //
+    // 回调换了但**文件没换**时无需重拉：新回调与旧回调的契约完全一致
+    // （都是「拉这个文件的缩略图字节」），而缓存里的字节就是结果。
+    //
+    // 三个判据缺一不可：
+    //   - `id` 是归约层的稳定身份（归一化相对路径），换文件时它一定变；
+    //   - `ufsFileId` 是远端文件 id，同一路径被新版本覆盖时它会变；
+    //   - `isDeleted` 翻转需要重新走一遍（删掉后不该继续展示旧缩略图）。
     if (oldWidget.file.id != f.id ||
-        oldWidget.onLoadThumbnail != widget.onLoadThumbnail) {
+        oldWidget.file.ufsFileId != f.ufsFileId ||
+        oldWidget.file.isDeleted != f.isDeleted) {
       _thumbnail = null;
       if (!_loadingThumb) _maybeLoadThumbnail();
     }

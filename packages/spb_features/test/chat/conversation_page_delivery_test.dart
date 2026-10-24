@@ -269,6 +269,116 @@ void main() {
       expect(find.byType(AgentFileCard), findsOneWidget);
       expect(requested, isEmpty);
     });
+
+    testWidgets('与文件无关的流式增量不再重拉缩略图', (tester) async {
+      // 缺陷现场：`AgentFileCard.didUpdateWidget` 曾用「回调 identity 变了」
+      // 作判据，而页面在 `_buildItem` 里现包闭包——**每次 build 都是新实例**，
+      // 于是推一条无关增量（甚至状态条刷新）就会清缓存重拉。
+      // 实测修复前：1 条图片卡 + 3 条无关增量 → 4 次请求。
+      final requested = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onLoadThumbnailAgentFile: (file) async {
+          requested.add(file.ufsFileId ?? '');
+          return null;
+        },
+      );
+      await pushAgentFile(tester);
+      expect(requested, ['ufs_1'], reason: '前置：首次挂载必须拉一次');
+
+      for (var i = 0; i < 3; i++) {
+        await pushStreamingMessage(
+          tester,
+          id: 'e_stream_$i',
+          turnId: 'turn_1',
+          text: '增量 $i',
+          seq: 10 + i,
+        );
+      }
+
+      expect(
+        requested,
+        ['ufs_1'],
+        reason:
+            '文件身份没变（id/ufsFileId/isDeleted 全同）就不该重拉；'
+            '修复前每次 build 都因闭包新实例而重拉，实测 4 次',
+      );
+    });
+
+    testWidgets('滚出视口再滚回不重拉缩略图', (tester) async {
+      // 卡片的 `_thumbnail` 活在该行的 State 里，而 `ListView.builder` 的子项
+      // 一旦滚出 `cacheExtent` 就被 dispose（本页未混入
+      // `AutomaticKeepAliveClientMixin`）——滚回来 `initState` 重跑 → 又拉
+      // 一次。页面层的 `_thumbnailMemo` 就是为此存在。
+      tester.view.physicalSize = const Size(600, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final requested = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onLoadThumbnailAgentFile: (file) async {
+          requested.add(file.ufsFileId ?? '');
+          return null;
+        },
+      );
+      await pushAgentFile(tester);
+      expect(requested, ['ufs_1'], reason: '前置：首次挂载拉一次');
+
+      // 把内容撞到远超一屏 + cacheExtent：图片卡在最顶上，必然被回收。
+      for (var i = 0; i < 40; i++) {
+        await pushEvent(
+          tester,
+          EventTypes.userMessage,
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'u$i',
+            turnId: 'turn_u$i',
+            seq: 100 + i,
+            payload: {'input': '填充消息 $i'},
+          ),
+        );
+      }
+      await tester.pumpAndSettle();
+
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      expect(
+        position.maxScrollExtent,
+        greaterThan(position.viewportDimension * 2),
+        reason: '前置：内容必须真的可滚动，否则图片卡从未离开视口',
+      );
+
+      // 三段跳：顶部（能看到卡）→ 底（卡被回收）→ 顶（卡重建）。
+      position.jumpTo(0);
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentFileCard), findsOneWidget, reason: '前置：顶部能看到图片卡');
+
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(AgentFileCard),
+        findsNothing,
+        reason: '前置：滚到底后图片卡必须已被回收（否则本用例测不到滚出滚回）',
+      );
+
+      position.jumpTo(0);
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentFileCard), findsOneWidget, reason: '滚回后卡片重建');
+
+      expect(
+        requested,
+        ['ufs_1'],
+        reason:
+            '卡片 State 被销毁重建，但页面层的 `_thumbnailMemo` 按 ufsFileId '
+            '记忆化，故不该重拉；修复前这里会是 2 次',
+      );
+    });
   });
 
   group('ConversationPage 批量聚合渲染', () {

@@ -62,6 +62,7 @@ export 'habit_suggestion_card.dart';
 export 'habit_suggestion_editor.dart';
 export 'my_turns_page.dart';
 export 'outbox_bar.dart';
+export 'perf_probe.dart';
 export 'message_composer.dart';
 export 'pending_messages_bar.dart';
 export 'row_locate_registry.dart';

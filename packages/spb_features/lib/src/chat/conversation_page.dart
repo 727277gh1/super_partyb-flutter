@@ -26,6 +26,7 @@ import 'message_composer.dart';
 import 'outbox_bar.dart';
 import 'spec_ui_card.dart';
 import 'pending_messages_bar.dart';
+import 'perf_probe.dart';
 import 'row_locate_registry.dart';
 import 'thought_tile.dart';
 import 'tool_call_tile.dart';
@@ -565,6 +566,67 @@ class ConversationPage extends StatefulWidget {
 class _ConversationPageState extends State<ConversationPage> {
   final _scrollController = ScrollController();
 
+  /// 气泡常驻（keep-alive）的长度阈值：正文短于该值时**不**常驻。
+  ///
+  /// ## 为什么需要阈值
+  ///
+  /// Markdown 解析成本几乎全在「段数 × 每段长度」上。实测（本机 2026-10，
+  /// debug）4 段 580 字符冷重建 68.0 ms，而一条 50 字符的短回复不到 1 ms
+  /// ——为它付「每帧仍要布局」的常驻成本是净亏。
+  ///
+  /// 400 字符大致是「需要滚动才能看全」的分界，也是实测里冷重建开始明显
+  /// （>10 ms）的量级。与 [_keepAliveWindow] 一起构成**有界**策略。
+  static const int _keepAliveMinChars = 400;
+
+  /// 常驻气泡的数量上限（从时间线尾部倒数的最近若干个）。
+  ///
+  /// ## 为什么必须有上限
+  ///
+  /// `AutomaticKeepAliveClientMixin` 让子项留在树上，而
+  /// `RenderSliverMultiBoxAdaptor` 每帧仍要**布局**它们（keep-alive 的语义是
+  /// 「不回收」，不是「不布局」）。2000 条历史全常驻会把每帧布局成本变成
+  /// O(历史长度)——比它要解决的「重解析」还贵。
+  ///
+  /// ## 为什么取「最近的」而不是「最长的」
+  ///
+  /// 用户的实际动作是「往下读 → 往回翻一点」。刚看过的几条最可能马上再被
+  /// 看到；而「最长的几条」可能早就滚到几千行以外，常驻它们只是白付布局
+  /// 成本。
+  static const int _keepAliveWindow = 12;
+
+  /// 本次 build 该常驻的气泡 `item.id` 集合（见 [_computeKeepAliveIds]）。
+  ///
+  /// 存字段而不是作为 [_buildItem] 的参数：后者要改 [_buildItem] 的签名
+  /// 并穿到 [_buildTimeline] 的 `itemBuilder`，而 `itemBuilder` 本来就能
+  /// 读 State。
+  Set<String> _keepAliveIds = const {};
+
+  /// 算出「该常驻」的气泡 id 集合（有界：最多 [_keepAliveWindow] 个）。
+  ///
+  /// 判据只有两个：
+  ///
+  /// 1. 是 [AssistantMessageItem]（只有它含 Markdown 解析缓存）；
+  /// 2. `text.length >= _keepAliveMinChars`（短的解析得快，不值得付常驻成本）。
+  ///
+  /// 从**尾部**倒扫：刚看过的几条最可能马上再被看到。凑满窗口即停。
+  ///
+  /// ## 为什么不看「是否在视口内」
+  ///
+  /// 在视口内的项本来就不会被 dispose（`cacheExtent` 内），不需要 keep-alive。
+  /// 常驻的意义恰在于「滚出去之后不丢」——故这 12 个名额应当给**即将滚出去**
+  /// 的那一段，而尾部倒扫恰好就是它。
+  static Set<String> _computeKeepAliveIds(List<ConversationItem> items) {
+    final ids = <String>{};
+    for (var i = items.length - 1; i >= 0; i--) {
+      if (ids.length >= _keepAliveWindow) break;
+      final item = items[i];
+      if (item is! AssistantMessageItem) continue;
+      if (item.text.length < _keepAliveMinChars) continue;
+      ids.add(item.id);
+    }
+    return ids;
+  }
+
   /// 时间线上每个展示行的 `GlobalKey`，供搜索命中后滚动定位。
   ///
   /// 注册 + 回收的规则见 [RowLocateRegistry]（issue #39：此前只 `putIfAbsent`
@@ -574,6 +636,61 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 共享会让「同一段文件被拆成多行」时多行撞同一个 `GlobalKey`，
   /// 后出现的行渲染为空白（见该类的类文档）。
   final _rowKeys = RowLocateRegistry();
+
+  /// 缩略图字节的按文件记忆（`ufsFileId` → Future）。
+  ///
+  /// ## 为什么页面层还要再记一次（卡片自己已经缓存了）
+  ///
+  /// 卡片的 `_thumbnail` 活在该行的 `State` 里，而 `ListView.builder` 的
+  /// 子项一旦滚出 `cacheExtent` 就被 **dispose**（本页未混入
+  /// `AutomaticKeepAliveClientMixin`）。滚回来时 `initState` 重跑 → 又拉
+  /// 一次。用户上下滚动一个长对话就会重复拉同一张缩略图（每张一次 HTTP +
+  /// 解码）。
+  ///
+  /// ## 为什么缓存 Future 而不是 `List<int>?`
+  ///
+  /// 缓存 Future 能同时去重**并发**请求：两个成员指向同一文件、或快速
+  /// 滚出再滚回（上一次还没回来）时，`putIfAbsent` 让它们共享同一个
+  /// Future。若缓存已完成的值，并发窗口内仍会发两次。
+  ///
+  /// ## 失败也缓存
+  ///
+  /// 失败（404 / 501 / 网络错误）同样写入缓存——否则「无法缩略图」的卡片
+  /// 每滚一次就重试一次，而失败通常是**永久性**的（无缩略图能力 / 已删除），
+  /// 重试只是白跑。代价：服务端恢复后要切对话才能重试（可接受：缩略图是
+  /// 装饰，且重建页面比无限重试更便宜）。
+  ///
+  /// ## 切换对话时必须清空
+  ///
+  /// 键是 `ufsFileId`（全局唯一），但两个对话里出现同一个 id 的语义不同
+  /// （可能已被覆盖 / 删除）。更要紧的是：不清空就是**按对话无限增长**的
+  /// 内存（每张图一份字节）。故在 `didUpdateWidget` 的 groupId 变化处清空
+  /// ——用 [ConversationPage.historyKey] 作信号（它的文档已说明「有效范围
+  /// 是一个对话」），而不是 `widget.controller`（切 group 时那个实例不变）。
+  ///
+  /// ## 已知边界：不随远端删除 / 版本覆盖失效
+  ///
+  /// 键只有 `ufsFileId`，而它**不会**因「同一路径被新版本覆盖」而变——
+  /// 那种情况下本页会继续展示旧缩略图，直到切对话或重建页面。
+  /// （单卡自己的 `didUpdateWidget` 会把 `ufsFileId` 变化当作重拉信号，
+  /// 但走本方法时旧 Future 已经入缓存。）接受这个偏离的理由：
+  /// 文件卡的重建主要发生在**滚动**，而滚动恰恰是我们要去重的那个场景；
+  /// 而「图换了、缩略图没跟着换」是装饰层面的偏差（点开预览仍是新内容）。
+  /// 若要收紧，需把键改成 `ufsFileId` + `mtime`，但那要求事件载荷带 mtime
+  /// —— 服务端目前不发。
+  final Map<String, Future<List<int>?>> _thumbnailMemo = {};
+
+  /// 取缩略图字节（按 `ufsFileId` 记忆化）。
+  ///
+  /// 只在已注入 `onLoadThumbnailAgentFile` 且该文件有 `ufsFileId` 时调用
+  /// （判据与传 `null` 的那条一致，见 [_buildItem]）。
+  Future<List<int>?> _loadThumbnailMemoized(AgentFileItem item) {
+    final id = item.ufsFileId!;
+    return _thumbnailMemo.putIfAbsent(
+      id,
+      () => widget.onLoadThumbnailAgentFile!(item),
+    );
+  }
 
   /// 已提交 resolve 的卡行 id（本地去重，避免重复点击发出两次请求）。
   ///
@@ -722,6 +839,11 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 用标志位：只在**滚动事件**里更新它（用户上滑 → false，回到接近底部 → true）。
   /// 新增内容本身不触发滚动事件，故不会误判。
   bool _following = true;
+
+  /// 是否已排一次 post-frame 跟随（[_scheduleFollowBottom] 的去重标记）。
+  ///
+  /// 见 [_scheduleFollowBottom] 的文档：一帧内多次请求只需执行一次。
+  bool _followScheduled = false;
 
   @override
   void initState() {
@@ -909,6 +1031,9 @@ class _ConversationPageState extends State<ConversationPage> {
     if (oldWidget.historyKey != widget.historyKey ||
         oldWidget.controller != widget.controller) {
       _reachedOldest = false;
+      // 缩略图记忆按对话隔离：不清空就是按对话无限增长的内存（每张图一份
+      // 字节），且上一个对话里同一 `ufsFileId` 的字节未必仍有效。
+      _thumbnailMemo.clear();
     }
   }
 
@@ -932,8 +1057,34 @@ class _ConversationPageState extends State<ConversationPage> {
 
     if (_following) {
       // 等一帧：新项尚未布局完成，此时 maxScrollExtent 还是旧值。
-      WidgetsBinding.instance.addPostFrameCallback((_) => _followBottom());
+      _scheduleFollowBottom();
     }
+  }
+
+  /// 排一次「下一帧滚到底」（同一帧内重复请求只执行一次）。
+  ///
+  /// ## 为什么需要去重
+  ///
+  /// 一次推送会同时触发两条调度：
+  ///
+  /// 1. [_onItems] 直接排一个（新内容到达）；
+  /// 2. 新内容使 `maxScrollExtent` 变大 → 布局完成时派发滚动通知 →
+  ///    [_onScroll] 发现「跟随中但未到底」→ 再排一个。
+  ///
+  /// 两个回调都在同一帧的 post-frame 阶段执行，于是同一个目标被滚两次。
+  /// 更糟的是：第一次用 `animateTo`（150ms）后，第二次看到「距底已很小」
+  /// 而再起一个动画——新动画会**取消**上一个并从当前位置重来，视觉上反而
+  /// 抖一下。
+  ///
+  /// 用一个标记把「本帧已排」吞掉：两者语义相同（都是「滚到当前底部」），
+  /// 且回调里读的是**执行时**的 `maxScrollExtent`，故合并不会漏掉新高度。
+  void _scheduleFollowBottom() {
+    if (_followScheduled) return;
+    _followScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followScheduled = false;
+      _followBottom();
+    });
   }
 
   /// 根据滚动位置更新 [_following]。
@@ -1004,7 +1155,7 @@ class _ConversationPageState extends State<ConversationPage> {
     // 若只在新增项时滚一次，滚动会停在中间（实测停 321/1041，约 1/3 处）。
     // 这里借「滚动会触发通知」这一点自我修正，直到真正到底。
     if (_following) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _followBottom());
+      _scheduleFollowBottom();
     }
   }
 
@@ -1044,6 +1195,7 @@ class _ConversationPageState extends State<ConversationPage> {
 
   /// 滚到底（仅在 [_following] 时由调用方触发）。
   void _followBottom() {
+    PerfProbe.followBottomCalls++;
     if (!mounted || !_following || !_scrollController.hasClients) return;
     final position = _scrollController.position;
     final target = position.maxScrollExtent;
@@ -1245,9 +1397,23 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 只认 [AssistantMessageItem] 会漏掉「agent 正在思考、还没吐第一个字」这段
   /// ——而那恰恰是最需要能停的时候（实测长 turn 的思考段可达数十秒）。两者都由
   /// 归约层在同一套 `isStreaming` 语义下维护：增量帧置 true，`done`/权威帧置 false。
-  ConversationItem? get _streamingItem {
-    for (var i = _items.length - 1; i >= 0; i--) {
-      final item = _items[i];
+  ConversationItem? get _streamingItem => _findStreamingItem(_items);
+
+  /// 从 [items] 尾向找出当前仍在生成的项；null 表示没有进行中的生成。
+  ///
+  /// ## 为什么抽成静态纯函数
+  ///
+  /// 修复前 `_streamingItem` 是个 getter，而一次 `build` 里它被
+  /// `_staleTurnItem` / `_canCancelTurn` / `_visibleActivity` 各调一次
+  /// ——3 次 O(n) 尾向扫描，叠上 AppBar 与 body 各自求值实测达 5 次。
+  /// 抽成「接受 items 的纯函数」后，`build` 开头算一次、把结果往下传。
+  ///
+  /// 用**静态**函数而不是实例方法：它不读任何 State 字段，测试也能直接调
+  /// （不需要先挂载页面）。
+  static ConversationItem? _findStreamingItem(List<ConversationItem> items) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      PerfProbe.visitedItems++;
+      final item = items[i];
       final streaming = switch (item) {
         AssistantMessageItem(:final isStreaming) => isStreaming,
         ThoughtItem(:final isStreaming) => isStreaming,
@@ -1263,8 +1429,7 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 「长时间无进展」与「流式」是两个不同的概念：stale 只说明客户端没再收到
   /// 进展，turn 可能仍在后台跑。故它**不**改变 [ConversationItem]（不改文本、
   /// 不改 `isComplete`），只让 UI 停掉光标并给出提示。
-  ConversationItem? get _staleTurnItem {
-    final streaming = _streamingItem;
+  ConversationItem? _staleTurnItemFor(ConversationItem? streaming) {
     if (streaming == null) return null;
     return _staleTurnIds.contains(streaming.turnId) ? streaming : null;
   }
@@ -1401,10 +1566,13 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 后者不可省：`turnId` 为空说明事件未携带该字段（历史数据或异常载荷），
   /// 此时发不出正确的取消请求（见 [_handleCancelTurn]）。
   /// 提交中（[_cancelling]）同样禁用，避免连点。
-  bool get _canCancelTurn {
+  ///
+  /// 接受 [streaming]（由 `build` 算一次后传入）而不是自己再扫一遍：
+  /// 修复前这个 getter 与 `_staleTurnItem` / `_visibleActivity` 各自调用
+  /// `_streamingItem`，一次 build 就是 3 次 O(n) 尾向扫描。
+  bool _canCancelTurnFor(ConversationItem? streaming) {
     if (_cancelling) return false;
-    final item = _streamingItem;
-    return item != null && item.turnId.isNotEmpty;
+    return streaming != null && streaming.turnId.isNotEmpty;
   }
 
   /// 当前应展示的执行中活动快照；null 表示不该展示。
@@ -1414,7 +1582,7 @@ class _ConversationPageState extends State<ConversationPage> {
   /// | webapp 条件 | 本页等价物 |
   /// |---|---|
   /// | `turn.activity` 存在 | [_activities] 里有该 turnId 的快照 |
-  /// | `isStreaming` | 该 turn 是 [_streamingItem] 的 turn |
+  /// | `isStreaming` | 该 turn 是 [streaming]（即 `_findStreamingItem` 的结果）的 turn |
   /// | `!hasAgentContent` | 该 turn 还没有非空正文的 [AssistantMessageItem] |
   /// | `!turn.status`（无终态） | 有流式项即意味着 `done` 尚未到达（`_sealStreaming` 会闭合全部流式段） |
   /// | `!turn.queueReason` | 客户端**未跟踪**排队原因（无对应领域字段），恒真 |
@@ -1429,8 +1597,19 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 反过来，这两个条件都不能用来「省掉 `isStreaming`」：`isStreaming` 才是
   /// 「turn 在跑」的直接证据，而「无正文」也可能是「早就跑完且本来就没回复」。
-  TurnActivitySnapshot? get _visibleActivity {
-    final streaming = _streamingItem;
+  ///
+  /// ## 「已有正文」为何从尾部倒扫
+  ///
+  /// 修复前是 `for (final item in _items)` 正向全表扫。改成倒扫 + 遇到**别的
+  /// turn** 立即 break：同一 turn 的项在时间线上是连续的（归约器按事件顺序
+  /// 追加），故只要看到 turnId 不同就说明已经扫完了这个 turn 的全部项，再往
+  /// 前都是更早的 turn——而较早的 turn 不可能是 [streaming] 的正文。
+  ///
+  /// ⚠️ 早退条件只能是 `turnId != streaming.turnId`，**不能**是
+  /// `is AssistantMessageItem`：同一 turn 中间可能夹着 `ToolCallItem` /
+  /// `ThoughtItem`，用类型早退会漏掉工具轮之后的正文（那个 turn 就永远
+  /// 挂着「执行中」）。
+  TurnActivitySnapshot? _visibleActivityFor(ConversationItem? streaming) {
     if (streaming == null || streaming.turnId.isEmpty) return null;
 
     // 已判超时 → 让位给 [_StaleTurnNotice]。
@@ -1443,12 +1622,11 @@ class _ConversationPageState extends State<ConversationPage> {
     if (activity == null) return null;
 
     // 已有正文 → 让位给真实内容。
-    for (final item in _items) {
-      if (item is AssistantMessageItem &&
-          item.turnId == streaming.turnId &&
-          item.text.isNotEmpty) {
-        return null;
-      }
+    for (var i = _items.length - 1; i >= 0; i--) {
+      PerfProbe.visitedItems++;
+      final item = _items[i];
+      if (item.turnId != streaming.turnId) break;
+      if (item is AssistantMessageItem && item.text.isNotEmpty) return null;
     }
     return activity;
   }
@@ -1456,6 +1634,23 @@ class _ConversationPageState extends State<ConversationPage> {
   @override
   Widget build(BuildContext context) {
     final title = widget.title;
+
+    // ## 本次 build 的全部派生查询都在这里算一次
+    //
+    // 修复前 `_streamingItem` 是个 getter，被 AppBar 的 `_canCancelTurn`、
+    // body 的 `_staleTurnItem` / `_visibleActivity` 各自调用——一次 build 就是
+    // 3 次 O(n) 尾向扫描（叠上 AppBar 与 body 各走一遍的求值，实测达 5 次）。
+    // 现在算一次，三个派生量全部从它派生。
+    //
+    // ⚠️ 计数器 [PerfProbe.visitedItems] 就挂在下面这两处扫描里，测试用
+    // 「一次 build 扫了多少条」钉住这个上界。
+    //
+    // ⚠️ `_visibleActivity` 仍会扫一次 `_items`（找「本 turn 是否已有正文」），
+    // 但那是**带早退**的尾向扫描（遇到别的 turn 就 break），而不是全表。
+    final streaming = _findStreamingItem(_items);
+    final staleTurnItem = _staleTurnItemFor(streaming);
+    final canCancelTurn = _canCancelTurnFor(streaming);
+    final visibleActivity = _visibleActivityFor(streaming);
 
     return Scaffold(
       appBar: title == null
@@ -1473,7 +1668,7 @@ class _ConversationPageState extends State<ConversationPage> {
                     key: const ValueKey('conversation-cancel-turn'),
                     icon: const Icon(Icons.stop_circle_outlined),
                     tooltip: '停止生成',
-                    onPressed: _canCancelTurn ? _handleCancelTurn : null,
+                    onPressed: canCancelTurn ? _handleCancelTurn : null,
                   ),
                   const SizedBox(width: SpbSpacing.xs),
                 ],
@@ -1554,12 +1749,12 @@ class _ConversationPageState extends State<ConversationPage> {
           // 活动指示是「已在跑但没正文」。若同时存在（例如旧的排队事件尚未被
           // 起跑事件清掉，而心跳已先到），显示「在等」比显示「在跑」更保守也
           // 更准（对齐 webapp `turn.activity && !turn.queueReason`）。
-          if (_staleTurnItem != null)
+          if (staleTurnItem != null)
             const _StaleTurnNotice()
           else if (_executionStatus != null)
             _ExecutionStatusBar(status: _executionStatus!)
-          else if (_visibleActivity != null)
-            _TurnActivityIndicator(activity: _visibleActivity!),
+          else if (visibleActivity != null)
+            _TurnActivityIndicator(activity: visibleActivity),
           // 离线队列（issue #30）：紧贴待处理栏**上方**。
           //
           // ## 为什么两条并存而不是合并
@@ -1621,22 +1816,65 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 会多次调用 `itemBuilder`（滚动/重建）。在 builder 里算会把 O(n) 的分组
   /// 变成 O(n·可见项) 次重复计算，且每次得到新对象会让 `ValueKey` 失效。
   ///
-  /// 放在 `_buildTimeline` 里（每次 build 算一次）而不缓存进 State：分组是
-  /// 纯函数且很快（一次线性扫描），而缓存需要在 `_onItems` 里同步维护——
-  /// 多一处可忘的地方。
-  List<TimelineDisplayRow> _displayRows() => groupFileEventsForDisplay(_items);
+  /// 放在 `_buildTimeline` 里（而不是 `itemBuilder` 里）：每次 build 至多算
+  /// 一次，且 `itemBuilder` 拿到的是**同一批对象**，`ValueKey` 不会失效。
+  ///
+  /// ## 按 `identical` 缓存（为什么需要）
+  ///
+  /// 「一次推送只 build 一次」这个前提并不成立：
+  ///
+  /// - `setState` 之后紧跟的布局修正、滚动通知触发的重建、父层传入新参数
+  ///   ……都会再 build 一次，而 `_items` 没变；
+  /// - 流式期间状态条（activity / executionStatus / ttsStatus）每几秒更新
+  ///   一次，每次都是一次完整 build。
+  ///
+  /// 每次重算全量分组是纯浪费（实测 2000 项约 0.26 ms/次，本机 2026-10）。
+  ///
+  /// 用 `identical(_items, _lastRowsItems)` 作判据而不是在 `_onItems` 里置脏：
+  ///
+  /// - [ConversationItem] **没有** `==`（也不该有：它的字段含文本与工具输出，
+  ///   逐字段比较比分组本身还贵），故不能用「内容相等」判。
+  /// - `_items` 只在三处被赋值，全部是**控制器新建的 List**（`snapshot` 或
+  ///   推送的列表），故 identity 变化即代表内容可能变——**不会**出现「同一个
+  ///   List 被就地修改」的情况。
+  /// - 置脏标记需要每个改 `_items` 的地方都记得置；identity 判据不需要任何
+  ///   配合，少一处可忘的地方。
+  List<TimelineDisplayRow> _displayRows() {
+    final cached = _lastRows;
+    if (cached != null && identical(_items, _lastRowsItems)) return cached;
+
+    PerfProbe.displayRowsComputations++;
+    final rows = groupFileEventsForDisplay(_items);
+    _lastRows = rows;
+    _lastRowsItems = _items;
+    _lastLocateIds = locateIdsOfAll(rows);
+    // 与 rows 同步重算（它同样只取决于 `_items`）。放在这里而不是每次 build
+    // 都扫一遍：重建时 `_items` 没变，结果必然相同。
+    _keepAliveIds = _computeKeepAliveIds(_items);
+    return rows;
+  }
+
+  /// [_displayRows] 的缓存（与 [_lastRowsItems] 成对，`identical` 作判据）。
+  List<TimelineDisplayRow>? _lastRows;
+  List<ConversationItem>? _lastRowsItems;
+
+  /// 与 [_lastRows] 同步算好的「当前行集合」（供 [_recycleRowKeys] 复用）。
+  ///
+  /// 与 rows 一起缓存而不是在回收时重算：`locateIdsOfAll` 也是 O(n)（实测
+  /// 2000 项约 0.18 ms），且它与分组看的是同一份 `rows`——分两次算会多一次
+  /// 全量扫描，还多一个「两份不一致」的可能。
+  Set<String> _lastLocateIds = const {};
 
   /// 丢弃已不在时间线上的行所对应的 `GlobalKey`（issue #39）。
   ///
   /// 规则与理由见 [RowLocateRegistry.recycle]。在 [_buildTimeline] 里调用
   /// （而不是 `_onItems`）：`rows` 已经算好了，零额外开销，且「当前行集合」
   /// 就是渲染的事实来源。
-  void _recycleRowKeys(List<TimelineDisplayRow> rows) =>
-      _rowKeys.recycle(locateIdsOfAll(rows));
+  void _recycleRowKeys() => _rowKeys.recycle(_lastLocateIds);
 
   Widget _buildTimeline() {
     final rows = _displayRows();
-    _recycleRowKeys(rows);
+    _recycleRowKeys();
 
     return ScrollConfiguration(
       // 桌面端：Flutter 默认的 dragDevices **不含鼠标**，不加这个
@@ -1699,7 +1937,14 @@ class _ConversationPageState extends State<ConversationPage> {
                 AgentFileBatchRow() => AgentFileBatchCard(
                   batch: row,
                   onDownload: widget.onDownloadAgentFile,
-                  onLoadThumbnail: widget.onLoadThumbnailAgentFile,
+                  // 传**记忆化**的那个（而不是 `widget.onLoadThumbnailAgentFile`）：
+                  // 批量卡的每个成员同样会在滚出 `cacheExtent` 后被 dispose，
+                  // 滚回来重新 `initState`。走方法 tear-off 还额外得到稳定的
+                  // 回调 identity（虽然子卡已不靠它判重拉）。
+                  // 空 `ufsFileId` 的成员由批量卡自己拦（它判 `isEmpty` 后传 null）。
+                  onLoadThumbnail: widget.onLoadThumbnailAgentFile == null
+                      ? null
+                      : _loadThumbnailMemoized,
                   onOpen: widget.onOpenAgentFile,
                   onReveal: widget.onRevealAgentFile,
                   onPreview: widget.onPreviewAgentFile,
@@ -1723,6 +1968,9 @@ class _ConversationPageState extends State<ConversationPage> {
         text: text,
         isStreaming: isStreaming && !_staleTurnIds.contains(item.turnId),
         onLinkTap: widget.onOpenLink,
+        // 滚出视口后不销毁（保留 Markdown 解析缓存）——仅限够长且是最近
+        // 若干个的那几条，见 [_keepAliveMinChars] / [_keepAliveWindow]。
+        keepAlive: _keepAliveIds.contains(item.id),
       ),
     ThoughtItem(:final text, :final isStreaming) => ThoughtTile(
       text: text,
@@ -1862,13 +2110,18 @@ class _ConversationPageState extends State<ConversationPage> {
       // 不判「有没有可拉的 id」。不在此拦住就会发出
       // `GET /api/files//thumbnails/256`（一个 404），对每张无 id 的卡白跑一趟。
       //
-      // ⚠️ 该闭包每次 build 都是新实例，`AgentFileCard.didUpdateWidget` 据此
-      // 重置缩略图缓存——这是必要的：同一张卡被更新到另一个文件时必须重拉。
+      // ⚠️ 该闭包每次 build 都是新实例——故卡片的 `didUpdateWidget` **不能**
+      // 拿回调 identity 判「要不要重拉」（那会让每次 build 都重拉）。它改按
+      // 文件身份判，详见 `AgentFileCard.didUpdateWidget` 的文档。
+      //
+      // 另走 [_loadThumbnailMemoized] 而不是直接调 widget 回调：卡片滚出
+      // `cacheExtent` 会被 dispose，滚回来重跑 `initState`——不记忆化就会
+      // 反复拉同一张图。
       onLoadThumbnail:
           widget.onLoadThumbnailAgentFile == null ||
               (item.ufsFileId ?? '').isEmpty
           ? null
-          : () => widget.onLoadThumbnailAgentFile!(item),
+          : () => _loadThumbnailMemoized(item),
       // 直接透传（不包闭包）：卡片侧这两个回调本来就收 file 入参。
       // 未注入时传 null，卡片据此不渲染对应菜单项。
       onOpen: widget.onOpenAgentFile,

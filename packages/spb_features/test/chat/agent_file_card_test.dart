@@ -484,4 +484,67 @@ void main() {
       expect(find.byKey(const ValueKey('agent-file-preview')), findsOneWidget);
     });
   });
+
+  group('缩略图重拉判据', () {
+    /// 同一个 State 内重建（不换 key、不换文件），只换闭包实例。
+    ///
+    /// 这正是缺陷现场：页面每次 build 都现包一层 `onLoadThumbnail` 闭包，
+    /// 旧判据（回调 identity）因此恒为真 → 每次 build 都重拉。
+    Widget buildCard({
+      String? ufsFileId = 'ufs_001',
+      required Future<List<int>?> Function() loader,
+    }) => MaterialApp(
+      home: Scaffold(
+        body: AgentFileCard(
+          file: _file(
+            mimeType: 'image/png',
+            fileName: 'p.png',
+            ufsFileId: ufsFileId,
+          ),
+          onDownload: (_) async {},
+          onLoadThumbnail: () => loader(),
+        ),
+      ),
+    );
+
+    testWidgets('回调换新实例但文件没换 → 不重拉（不靠回调 identity 判）', (t) async {
+      var calls = 0;
+      Future<List<int>?> loader() async {
+        calls++;
+        return null;
+      }
+
+      await t.pumpWidget(buildCard(loader: loader));
+      await t.pumpAndSettle();
+      expect(calls, 1, reason: '前置：首次挂载拉一次');
+
+      // 同 key（无 key）、同文件、新闭包实例 → 走 didUpdateWidget。
+      await t.pumpWidget(buildCard(loader: loader));
+      await t.pumpAndSettle();
+      expect(calls, 1, reason: '文件身份未变，不该因为回调换实例而重拉');
+
+      // 再来两次，确认不是「第一次恰好被 _loadingThumb 挡住」。
+      await t.pumpWidget(buildCard(loader: loader));
+      await t.pumpAndSettle();
+      await t.pumpWidget(buildCard(loader: loader));
+      await t.pumpAndSettle();
+      expect(calls, 1);
+    });
+
+    testWidgets('ufsFileId 变了 → 重拉（同一路径被新版本覆盖）', (t) async {
+      var calls = 0;
+      Future<List<int>?> loader() async {
+        calls++;
+        return null;
+      }
+
+      await t.pumpWidget(buildCard(ufsFileId: 'ufs_a', loader: loader));
+      await t.pumpAndSettle();
+      expect(calls, 1);
+
+      await t.pumpWidget(buildCard(ufsFileId: 'ufs_b', loader: loader));
+      await t.pumpAndSettle();
+      expect(calls, 2, reason: '远端文件 id 变了，缓存必须失效');
+    });
+  });
 }
