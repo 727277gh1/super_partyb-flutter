@@ -319,7 +319,10 @@ class SseClient {
   ///
   /// 这也是不用 `transform(utf8.decoder).transform(LineSplitter())` 的原因：
   /// 那样虽然能切行，但会丢掉「跨帧边界的事件」所需的空行语义与注释行识别。
-  final _lineBuffer = StringBuffer();
+  /// 跨分片携带的**不完整行**（无 `\n` 结尾的那一段）。
+  ///
+  /// 只在末尾写入一次（一次切片），不是每行都重切——见 [_onText] 的复杂度说明。
+  String _lineBuf = '';
   final _pendingData = StringBuffer();
   String? _pendingEvent;
   String? _pendingId;
@@ -329,26 +332,45 @@ class SseClient {
   ByteConversionSink? _utf8Sink;
 
   /// 接收解码后的文本，按行切分。
+  ///
+  /// ## 为什么用偏移游标而不是反复 `substring`
+  ///
+  /// 曾经的写法是 `content = content.substring(idx + 1)` 每处理一行就重切一次
+  /// 剩余串。那是一个含 k 行的分片会产生 **O(k·L)** 的字符拷贝（每行都把
+  /// 剩下的大半串再拷一遍）。而 SSE 的一次网络分片里出现几十上百行是常态
+  /// （回放窗口一次回 500 条时更明显），于是这层成了「推流时越跑越慢」的
+  /// 隐性成本。
+  ///
+  /// 现在只用一个 `start` 游标往后走：
+  ///
+  /// - 每行 `content.substring(start, idx)`——每行一次、长度等于该行；
+  /// - 循环结束后 `content.substring(start)`——**一次**切出剩余半行。
+  ///
+  /// 于是单个分片的拷贝总量与分片长度成**线性**（与行数无关）。
+  ///
+  /// ⚠️ 代价是一个无法避免的拷贝：Dart 的 `String` 不可变，所以「上次的半行 +
+  /// 本次分片」必然要拼一次。但那是**每分片一次**，不是每行一次。
   void _onText(String text) {
-    _lineBuffer.write(text);
+    // 常见路径（半行恰好为空）不拼，直接看本次分片。
+    final content = _lineBuf.isEmpty ? text : _lineBuf + text;
 
-    var content = _lineBuffer.toString();
+    var start = 0;
     var idx = content.indexOf('\n');
     while (idx >= 0) {
-      var line = content.substring(0, idx);
+      var line = content.substring(start, idx);
       // 兼容 CRLF（HTTP 中间件可能改写行尾）。
       if (line.endsWith('\r')) {
         line = line.substring(0, line.length - 1);
       }
       _handleLine(line);
-      content = content.substring(idx + 1);
-      idx = content.indexOf('\n');
+      start = idx + 1;
+      // 必须带 `start` 作起点：不带的话每次都从 0 找，退化回 O(k·L)。
+      idx = content.indexOf('\n', start);
     }
 
-    // 剩余不完整行留到下次分片。
-    _lineBuffer
-      ..clear()
-      ..write(content);
+    // 剩余不完整行留到下次分片（`start == 0` 说明整段都没换行，原样留下，
+    // 连这一次切片也省了）。
+    _lineBuf = start == 0 ? content : content.substring(start);
   }
 
   void _handleLine(String line) {
@@ -467,7 +489,8 @@ class SseClient {
       _cancelToken!.cancel('SSE 连接重建');
     }
     _cancelToken = null;
-    _lineBuffer.clear();
+    // 新连接不得携带上一个连接的不完整行（否则两段无关字节会被拼成一行）。
+    _lineBuf = '';
     _pendingData.clear();
     _pendingEvent = null;
     _pendingId = null;

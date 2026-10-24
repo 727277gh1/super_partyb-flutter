@@ -109,6 +109,63 @@ void main() {
       expect(frames, hasLength(1));
       expect(frames.single.data, '{"a":1}');
     });
+
+    test('单个分片内含 500 行：解析结果与逐行投递一致', () async {
+      // 行缓冲曾用 `content = content.substring(idx + 1)` 每行重切剩余串
+      // ——含 k 行的分片是 O(k·L)。改成偏移游标后拷贝量与分片长度成线性。
+      // 这里不比时间（那会随机器漂移），而是钉「大量行不会错位 / 不会丢行」
+      // 这个被拷贝逻辑直接决定的结果。
+      const count = 500;
+      final wire = StringBuffer();
+      for (var i = 0; i < count; i++) {
+        wire.write('event: message\ndata: {"i":$i}\n\n');
+      }
+      final bytes = utf8.encode(wire.toString());
+
+      // ① 整个流一次投递（单分片 500 帧）。
+      final oneShot = await _collectFrames([bytes]);
+      // ② 同一份字节逐行投递（每帧一行一个分片）——作为参照实现。
+      final lineByLine = await _collectFrames([
+        for (final line in const LineSplitter().convert(wire.toString()))
+          utf8.encode('$line\n'),
+      ]);
+
+      expect(oneShot, hasLength(count));
+      expect(lineByLine, hasLength(count));
+      expect(oneShot.map((f) => f.data).toList(), [
+        for (var i = 0; i < count; i++) '{"i":$i}',
+      ], reason: '单分片内 500 行必须逐行就位、顺序不乱、不丢行');
+      expect(
+        oneShot.map((f) => f.data).toList(),
+        lineByLine.map((f) => f.data).toList(),
+        reason: '分片方式不同但解析结果必须逐字节相同',
+      );
+    });
+
+    test('一次 add 含 3 个完整帧 + 1 个半行：半行留到下一次', () async {
+      final frames = await _collectFrames([
+        utf8.encode(
+          'data: one\n\n'
+          'data: two\n\n'
+          'data: three\n\n'
+          'data: par',
+        ),
+        utf8.encode('t4\n\n'),
+      ]);
+
+      expect(frames, hasLength(4));
+      expect(frames.map((f) => f.data).toList(), [
+        'one',
+        'two',
+        'three',
+        'part4',
+      ]);
+      expect(
+        frames.map((f) => f.data).toList(),
+        isNot(contains('par')),
+        reason: '半行不得作为独立帧发出（那是被截断的内容）',
+      );
+    });
   });
 
   group('字段解析', () {
