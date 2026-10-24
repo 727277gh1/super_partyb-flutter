@@ -5034,6 +5034,153 @@ RenderObject 树）：
   真实滚动手感（尤其是 `Offstage` 期间滚动条不显示、展开后位置正确）需在
   有桌面环境的机器上确认。
 
+### 6.47 流式对话性能：观测手段与已确认的成本项（2026-10）
+
+一次「滚动不顺 / 流式期间卡顿」的排查收口。本节记**怎么观测**、**哪些成本是
+实测确认的**、**哪些已经修掉以及判据是什么**，以及**哪些看着像问题但有意不动**。
+
+> ⚠️ **所有数字都是 build/layout 成本测量，不是真机帧率**。本机无 `DISPLAY`、
+> 无真机（§9），跑不出 vsync 对齐的真实帧时间。数字来自「强制重建一次 /
+> 执行一次纯函数，用 `Stopwatch` 取 10 次中位数，再减去 `Text('x')` 控制组
+> 基线」。它们足以比较**相对量级**（谁比谁贵 10 倍），不足以判断「这一帧
+> 会不会掉」——那个只能真机 profiling。
+
+#### 一、怎么观测
+
+| 手段 | 位置 | 何时用 |
+|---|---|---|
+| `SPB_FRAME_TIMING` dart-define | `SpbEnv.frameTiming`（`spb_core/lib/src/env.dart`）→ 两端 `main.dart` 的 `installFrameTimingReporter()` | 真机/有桌面环境时看真实帧耗时 |
+| `PerfProbe` 计数器 | `spb_features/lib/src/chat/perf_probe.dart` | 测试里断言**结构事实**（重建了几次、扫了几遍） |
+
+**帧耗时默认关闭**（`bool.fromEnvironment('SPB_FRAME_TIMING', defaultValue: false)`）。
+`SchedulerBinding.addTimingsCallback` 每帧回传数据并累积 `List<FrameTiming>`
+——不是免费操作，只在排障时需要。与 `SpbEnv.verboseLogging` 同取向。
+
+上报策略（`frame_timing.dart`）：满 `batchSize`（120 帧）或 `flushInterval`
+（5s）**先到者**触发一次汇总。按批次而非每帧——60fps 下每帧一条 = 每秒 60 条，
+8 秒冲干净 500 条环形缓冲（§6.20），而诊断报告要的是**出事前后**的上下文。
+慢帧阈值默认 **32 ms** 而非 16.7 ms：后者会把「偶尔掉一帧」也算进来，32 ms
+≈ 明显掉到 30fps 以下，是用户真能感知的卡顿。
+
+**测试侧一律用 `PerfProbe` 计数器，不写毫秒断言**：毫秒随机器、debug/release、
+并发负载漂移，写进断言就是 flaky。计数器给的是与机器无关的结构事实（一次
+build 扫了多少条 item、展示行缓存是否命中、几个气泡真的重建了）。
+
+#### 二、实测成本表（2026-10，本机，debug）
+
+| 项 | 数字 | 说明 |
+|---|---|---|
+| `GptMarkdown` **冷重建** | 4 段/580 字符 **68.0 ms**；20 段/2940 **202.5 ms**；60 段/8900 **441.6 ms** | 强制换 key（Element 全销毁） |
+| `GptMarkdown` **暖重建** | 20 段 **16.9 ms**；60 段 **30.3 ms** | Element 复用（`didUpdateWidget` 短路） |
+| 2000 items 的展示行分组 | **0.26 ms/次**（`groupFileEventsForDisplay`） | 纯函数 |
+| 2000 items 的定位 id 收集 | **0.18 ms/次**（`locateIdsOfAll`） | 纯函数 |
+| `_looksLikeError` | 10 KB **0.195 ms**；108 KB **0.407 ms**；1 MB **4.277 ms** | 内部 `toLowerCase()` 是全量拷贝 |
+| `JsonEncoder.withIndent('  ').convert` | **4.7 µs/次** | 可忽略（但见下方「有意不做」第 3 条） |
+| 缩略图请求（修复前） | 1 张卡 + 3 条**无关**流式增量 → **1 → 4 次** | 每次 build 重拉 |
+
+**冷/暖差 4–15×** 是「滚动不顺」的主因：`ListView.builder` 的子项滚出
+`cacheExtent` 即 dispose，`gpt_markdown` 的增量解析缓存（`_settled` 前缀）
+随之全丢，滚回来要重解析。
+
+#### 三、已修项与判据
+
+| 修了什么 | 判据（回归用例钉住的事实） |
+|---|---|
+| **build 期线性扫描收敛** | 修复前 `_streamingItem` 被 `_staleTurnItem` / `_canCancelTurn` / `_visibleActivity` 各调一次（每次全量扫）→ 一次 build 扫 3 遍。现在 `build` 里算一次，尾向扫描遇 `turnId != streaming.turnId` 立即 `break`。用例断言 `PerfProbe.visitedItems <= 2 * n`（修复前实测 1200 > 400） |
+| **`_displayRows()` 缓存** | 按 `identical(_items, _lastRowsItems)` 缓存 `groupFileEventsForDisplay` + `locateIdsOfAll`（两者看同一份 `rows`，分两次算会多一次全量扫描 + 多一个「两份不一致」的可能）。用例断言 `displayRowsComputations == 1` |
+| **`_followBottom` 调度去重** | 一帧内多次推送只排一次 post-frame 回调（修复前每次 `_onItems` 各排一个，后一个动画会取消前一个）。用例断言 `followBottomCalls == 1`（修复前 5） |
+| **缩略图请求去重（两层）** | ① 卡片 `didUpdateWidget` 判据从「回调 identity」改为 `file.id` / `ufsFileId` / `isDeleted`——调用方每次 build 现包闭包，identity 判据**恒真**；② 页面层 `_thumbnailMemo` 按 `ufsFileId` 记忆化 `Future<List<int>?>`（缓存 Future 而非已完成值，才能同时去重**并发**请求）。失败也缓存：404/501 通常是永久性的。⚠️ **两层各有独立用例**——只回退卡片判据时页面用例仍绿（memo 兜住） |
+| **SSE 行缓冲线性化** | 旧写法 `content = content.substring(idx + 1)` 在含 k 行的分片上是 **O(k·L)**（每行把剩下大半串再拷一遍）。现在偏移游标 + `indexOf('\n', start)`，每行一次定长切片 + 末尾一次半行切片。⚠️ `indexOf` **必须带 `start`**，不带就退化回 O(k·L) |
+| **Markdown 气泡常驻有界化** | 见下节 |
+| **未变气泡不重建** | 见下节 |
+
+#### 四、keep-alive：为什么必须**有界**
+
+`AssistantMessageBubble` 改成 `StatefulWidget` + `AutomaticKeepAliveClientMixin`，
+由页面按「**尾部窗口 12 条 × 正文 ≥ 400 字符**」有界常驻
+（`_keepAliveMinChars` / `_keepAliveWindow`）。
+
+| 参数 | 值 | 为什么 |
+|---|---|---|
+| `_keepAliveMinChars` | **400** | 短回复解析 < 1 ms，不值得付常驻成本 |
+| `_keepAliveWindow` | **12** | 取「最近的」而非「最长的」：用户动作是往下读 → 往回翻一点 |
+
+**不能无界**：`AutomaticKeepAliveClientMixin` 让子项留在树上，而
+`RenderSliverMultiBoxAdaptor` **每帧仍要布局**它们（keep-alive 的语义是
+「不回收」不是「不布局」）。2000 条历史全常驻 → 每帧布局成本 O(历史长度)，
+比要解决的问题更贵。
+
+⚠️ **两个实测踩出来的坑**（都已写进代码注释）：
+
+1. **mixin 的 `build` 只申请、永不释放**（只有 `updateKeepAlive()` /
+   `deactivate()` 释放，而 keep-alive 生效后不会被移出树）→ 曾进过窗口的气泡
+   **永久常驻**（实测 20 条长回复滚到顶部时 `mounted=20`）。故
+   `didUpdateWidget` 里必须 `if (oldWidget.keepAlive != widget.keepAlive) updateKeepAlive();`。
+2. **`find.textContaining` 测不出 Markdown 气泡**：`GptMarkdown` 把一段
+   Markdown 渲染成**多个** `RichText`，跨段字符串拼不回来。测试改用
+   `tester.widgetList<AssistantMessageBubble>()` 看 `text` 字段。
+
+#### 五、流式期间未变气泡不重建：**先测后改**的决策记录
+
+`SliverChildBuilderDelegate.shouldRebuild` **恒为 true**，故父级每一次
+`setState` 都会重建**全部已挂载行**。而本页 `setState` 的来源里，流式增量 /
+`turn_activity` 心跳 / `ttsStatus` / `_staleTurnIds` / outbox / pending 中
+**大部分与「历史气泡的内容」无关**。
+
+**先测**（用例「流式增量只重建变化的那条气泡，其余不动」，5 条已完结长气泡 +
+1 条流式气泡，推一条增量）：
+
+```
+[perf] 一条流式增量后 assistantBubbleBuilds = 6（共 6 条气泡，其中 5 条内容未变）
+[perf] 一条 turn_activity 心跳后 assistantBubbleBuilds = 6
+```
+
+增量 6 ≫ 1 → **实施**（任务书允许「以数据结论收口」，这里数据支持改动）。
+
+**做法**：`_bubbleCache`（`item.id` → (指纹, widget 实例)），命中时交回**同一
+实例**——`Element.updateChild` 的 `child.widget == newWidget` 分支命中
+（`Widget` 未覆写 `==`，故即 `identical`），子树连 `build` 都不跑。
+
+| 决定 | 理由 |
+|---|---|
+| **只缓存 `AssistantMessageItem`** | 它的渲染输入只有 4 个显式字段（`text` / `isStreaming` / `keepAlive` / `onLinkTap`），指纹可穷举。其余 item 夹带页面状态（`ConfirmationItem` 读 `_resolving`、`FeedbackRequestItem` 读 `_submittedFeedback` 与 `_feedbackTTL`、`ErrorItem` 读 `_retryingTurnId`），逐项列必然漏一处，而漏掉的表现是「状态变了界面不变」 |
+| 指纹含 `isStreaming` | 它是 item 字段 **× `_staleTurnIds`**（超时兜底会让 true 变 false），不是 item 自带值 |
+| 指纹含 `keepAlive` | 它是 `_keepAliveIds`（窗口滑动时逐条变） |
+| 指纹含 `onLinkTap` | 装配层换回调时不换新实例就会走旧逻辑 |
+| **主题/语言/文本缩放不进指纹** | 它们走 `InheritedWidget`；复用同一实例时子树的 `dependOnInheritedWidgetOfExactType` 依赖关系仍在，框架会自己标记重建 |
+| `_bubbleCacheLimit = 200`，简单逐出（非 LRU） | 缓存只为「刚看过的那些」服务；维护「最近使用」要在命中路径上搬动元素，而命中路径正是要压到最便宜的那条 |
+| 切对话时 `_bubbleCache.clear()` | `item.id` 是服务端事件 id，跨对话**不保证唯一**；不清可能把 A 对话的气泡交给 B 对话的同 id 项 |
+
+**修复后**：流式增量 `1`、activity 心跳 `0`。**三个变异都被用例捕获**：绕过缓存
+→ 6；指纹漏掉 `text` → 0（连该变的都不重建）；指纹漏掉 `keepAlive` → 被
+keep-alive 的上界用例抓住。
+
+#### 六、有意不做
+
+| 项 | 为什么不做 |
+|---|---|
+| **隐藏 / 收起工具调用** | 折叠态**已经**近乎零成本：`Expansible` 的 `shouldRemoveBody = closed && !widget.maintainState` → `child: shouldRemoveBody ? null : result`，折叠时 `children` 完全不构造（`ExpansionTile.maintainState` 默认 false）。而隐藏会丢信息，且**对话内搜索依赖工具名 + 参数 + 输出**（§6.15）。该行为已由守卫用例钉住（`item_widgets_test.dart` 的「折叠态不构造参数与结果」） |
+| **`itemExtent` / `prototypeItem`** | 行高由 Markdown 内容决定，是**变高列表**，给不出固定 extent |
+| **改 Go API 契约** | 客户端适配服务端，不是反过来（仓库硬约束）。任何「为了客户端方便而改 Go API」的提案要先证明无法在客户端解决 |
+| **把 `JsonEncoder.convert` 提到 `build()` 顶部** | 看着能「早点拿到字符串」，实际会让折叠态也付转换成本（4.7 µs/次 × 条数）。`children` 是**急切求值**的列表字面量，放进 `ExpansionTile` 的 `children` 里才会随 `shouldRemoveBody` 一起被跳过 |
+| **给时间线加 `RepaintBoundary`** | 子项默认已带（`SliverChildBuilderDelegate.addRepaintBoundaries = true`） |
+
+#### 七、已知边界
+
+- **本机无 `DISPLAY`、无真机**：所有数字是 build/layout 成本测量，不是真机
+  帧率。`xvfb-run` 下渲染不稳定，**不能**把「窗口出现了」当作渲染正确的证据。
+- **release AOT 通常比 debug JIT 快 5–10×**：60 段 Markdown 的 441.6 ms 在
+  release 下估计 50–90 ms，仍超 16.7 ms 预算——但这个换算**没有实测**，故
+  §五 的取舍（缓存哪些、窗口多大）应在有桌面环境的机器上用
+  `SPB_FRAME_TIMING` 复核一次。
+- **`_looksLikeError` 的 `toLowerCase()` 是全量拷贝**（1 MB → 4.277 ms）：
+  若将来出现超大工具输出，这里是热点。当前不修——它只用于选图标颜色，而
+  工具输出超过 1 MB 时用户真正卡的是 `SelectableText` 的布局，不是这一次拷贝。
+- **`_thumbnailMemo` 的键只有 `ufsFileId`**：同一路径被新版本覆盖时**不失效**
+  （服务端事件不带 mtime），会继续展示旧缩略图直到切对话。
+- **翻页 `loadOlder` 前插不补偿滚动位置**（既有行为）；`maxScrollExtent` 是
+  惰性估算，会跨若干帧逐步修正。
+
 ---
 
 
