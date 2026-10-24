@@ -726,6 +726,108 @@ void main() {
 
       expect(find.text('失败'), findsOneWidget);
     });
+
+    // ── 折叠态不构造子内容（守卫，防性能回退）────────────────────────
+    //
+    // ## 为什么这条值得单独守
+    //
+    // 工具调用是时间线上**数量最多**的行（一轮对话几十上百条），而参数与
+    // 结果可能极长（构建日志、文件内容）。它们之所以不是性能问题，全靠
+    // `ExpansionTile` 的一个内部行为：
+    //
+    //   `flutter/lib/src/widgets/expansible.dart`
+    //     `shouldRemoveBody = closed && !widget.maintainState`
+    //     `child: shouldRemoveBody ? null : result`
+    //
+    // 即折叠时 `children` **完全不构造**（连 `JsonEncoder.convert` 与
+    // `SelectableText` 都不会跑）。而 `ExpansionTile.maintainState` 默认
+    // false，本组件也没有传——这个默认值是唯一的屏障。
+    //
+    // ## 会怎么被破坏（都不是明显的错）
+    //
+    // 1. 有人为了「展开时也别闪一下」给 `ExpansionTile` 传 `maintainState: true`
+    //    ——折叠态的每条工具卡就常驻一棵子树，几百条历史时每帧都要布局；
+    // 2. 有人为了「早点拿到 JSON 字符串」把 `JsonEncoder...convert(args)` 提到
+    //    `build()` 顶部算好再传给 children——那样即使 children 不构造，转换
+    //    也已经跑过（大输出上实测 4.7 µs/次，乘上条数不再可忽略）；
+    // 3. 有人把 `children` 改成 `ListView` / `Column` 放在 ExpansionTile 外面
+    //    自己控制可见性——`Visibility(maintainState: true)` 之类同样常驻。
+    //
+    // 三条都不会让任何功能测试变红，只会让滚动慢慢变卡。
+    //
+    // ## ⚠️ 必须用 `skipOffstage: false`，否则这条守卫是假绿
+    //
+    // 第一版写的是 `find.byType(SelectableText)`（默认 `skipOffstage: true`），
+    // 把 `maintainState: true` 传进 `ExpansionTile` 后**仍然通过**——实测确认。
+    //
+    // 原因：`ExpansionTile.maintainState = true` 时子内容**照样会被构造**，只是
+    // 被包进 `Offstage`（`expansible.dart` 的 `result = Offstage(...)`，仅
+    // `shouldRemoveBody` 为真时才换成 `null`）。而 `find.*` 的默认
+    // `skipOffstage: true` 会把 `Offstage` 子树整个过滤掉——于是「构造了但被
+    // 隐藏」与「根本没构造」在断言层面**完全同形**。
+    //
+    // 这与本仓库反复出现的那类「绿不代表对」同型：断言的是「看不见」而不是
+    // 「没构造」，而性能成本恰恰由后者决定（`Offstage` 仍会 layout 子树）。
+    // 故这里一律带 `skipOffstage: false`。
+    testWidgets('折叠态不构造参数与结果（性能守卫）', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          ToolCallTile(
+            name: 'bash',
+            args: const {'cmd': 'ls'},
+            output: 'x' * 1000,
+            isComplete: true,
+          ),
+        ),
+      );
+
+      // 折叠态：两个小节标题都不存在（含 offstage 子树里也不存在）。
+      expect(find.text('参数', skipOffstage: false), findsNothing);
+      expect(find.text('结果', skipOffstage: false), findsNothing);
+      // 核心断言：`SelectableText` 一个都没被**构造**。
+      //
+      // 只看「屏幕上看不见」是不够的：`maintainState: true` 会把它们构造出来
+      // 再藏进 `Offstage`，视觉一样，但每帧都要布局。
+      expect(find.byType(SelectableText, skipOffstage: false), findsNothing);
+      // 但标题本身必须在（否则上面几条在「组件根本没渲染」时也会通过）。
+      expect(find.text('bash'), findsOneWidget);
+
+      // ⚠️ 反向验证：给 `ToolCallTile` 的 `ExpansionTile` 加上
+      // `maintainState: true`，本条用例应失败（`SelectableText` 变成 2 个）。
+      // 实测确认过——第一版不带 `skipOffstage: false` 时它**不会**失败。
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('展开后才构造参数与结果', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          ToolCallTile(
+            name: 'bash',
+            args: const {'cmd': 'ls'},
+            output: 'x' * 1000,
+            isComplete: true,
+          ),
+        ),
+      );
+
+      expect(find.byType(SelectableText, skipOffstage: false), findsNothing);
+
+      await tester.tap(find.text('bash'));
+      await tester.pumpAndSettle();
+
+      // 参数 + 结果各一个 `SelectableText`。
+      expect(find.text('参数'), findsOneWidget);
+      expect(find.text('结果'), findsOneWidget);
+      expect(find.byType(SelectableText), findsNWidgets(2));
+      // 参数以缩进 JSON 呈现（`{\n  "cmd": "ls"\n}`）。
+      expect(find.textContaining('"cmd": "ls"'), findsOneWidget);
+      expect(find.text('x' * 1000), findsOneWidget);
+
+      // 再折回去：子内容重新消失（证明不是「展开过就一直常驻」）。
+      await tester.tap(find.text('bash'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SelectableText, skipOffstage: false), findsNothing);
+    });
   });
 
   group('ConfirmationCard', () {
