@@ -43,7 +43,7 @@ dependencies:
   tray_manager: ^0.5.0        # 系统托盘
   hotkey_manager: ^0.2.3      # 全局快捷键（Alt+Space 悬浮输入窗）
   screen_retriever: ^0.2.0    # 多显示器定位
-  launch_at_startup: ^0.4.0   # 开机自启
+  launch_at_startup: ^0.5.1   # 开机自启
   file_selector: ^1.0.3       # 本地目录选择（交付物同步）
   path_provider: ^2.1.4
   path: ^1.9.0
