@@ -45,6 +45,49 @@ final class DeleteGroup extends GroupAction {
   const DeleteGroup();
 }
 
+/// 下载归档结项快照的正文（markdown / html）。
+///
+/// ## 为什么是 [GroupAction] 而不是独立回调
+///
+/// 它和归档/改名一样是「针对这个 group 的一次用户动作」，走同一条
+/// [GroupActionHandler] 通道即可复用忙碌态、错误提示与列表刷新逻辑。
+/// 单独开一条回调链会让页面多一个透传参数，且装配层要重复一遍
+/// 「忙碌中禁用」的编排。
+///
+/// ## 执行结果的特殊性
+///
+/// 下载**不改服务端状态**，故 [GroupManagementUseCase] 不返回新的 group。
+/// 字节通过 [SnapshotDownloadResult] 单独承载——把它塞进
+/// [GroupActionApplied.group] 会让「权威状态」与「文件内容」混在一起。
+final class DownloadSnapshot extends GroupAction {
+  const DownloadSnapshot(this.snapshotId, this.format);
+
+  final String snapshotId;
+
+  /// `markdown` / `html`。与 Go 路由段一致（`.../:snapshot_id/markdown`）。
+  final String format;
+}
+
+/// 重新部署快照站点（UFS 重启后恢复、改了站点源想重编译）。
+///
+/// ⚠️ 结果可能是 `pending` / `none`——那是 202 语义（动作已接受、稍后可见），
+/// 不是失败。见 [SnapshotSiteActionResult]。
+final class RedeploySnapshotSite extends GroupAction {
+  const RedeploySnapshotSite(this.snapshotId);
+
+  final String snapshotId;
+}
+
+/// 公开快照站点（staging → production）。
+///
+/// ⚠️ **不可逆的对外动作**：发布后任何人拿到 URL 就能读，而快照含对话摘要与
+/// 工作区结构。UI 必须二次确认。
+final class PublishSnapshotSite extends GroupAction {
+  const PublishSnapshotSite(this.snapshotId);
+
+  final String snapshotId;
+}
+
 /// 动作执行结果。
 ///
 /// ## 为什么成功也要有返回对象（而不是「不抛异常 = 成功」）
@@ -90,6 +133,41 @@ final class GroupActionRejected extends GroupActionResult {
 
   /// 可直接展示给用户的原因（已整理成人话）。
   final String message;
+}
+
+/// 快照下载成功：字节 + 建议文件名。
+///
+/// ## 为什么带文件名
+///
+/// 服务端在 `Content-Disposition` 里给了 `archive-{短id}-v{n}.md`，但
+/// dio 拿字节时没解析该头（见 `ChatApi._downloadSnapshot`）。客户端若要落盘
+/// 需要一个名字，用「group 标题 + 版本 + 格式」拼即可——服务端文件名里的
+/// 短 id 对用户毫无意义。
+///
+/// 文件名由**调用方**（装配层）决定最终落盘路径，本对象只给建议。
+final class SnapshotDownloaded extends GroupActionResult {
+  const SnapshotDownloaded({
+    required this.bytes,
+    required this.format,
+    required this.suggestedFileName,
+  });
+
+  final List<int> bytes;
+
+  /// `markdown` / `html`。
+  final String format;
+
+  final String suggestedFileName;
+}
+
+/// 站点动作成功（redeploy / publish）。
+///
+/// 注意 [action] 可能是 `ready` / `pending` / `none`——后两者是 202 语义，
+/// 调用方应刷新列表等待推进，而不是报错。
+final class SnapshotSiteActionApplied extends GroupActionResult {
+  const SnapshotSiteActionApplied(this.result);
+
+  final ArchiveSnapshotSiteAction result;
 }
 
 /// 管理动作的执行入口签名（供页面注入）。
@@ -143,6 +221,27 @@ class GroupManagementUseCase {
           await _api.deleteGroup(group.id);
           // 删除成功：group 为 null 表示「本地条目应被移除」。
           return const GroupActionApplied();
+
+        case DownloadSnapshot(:final snapshotId, :final format):
+          // 不改服务端状态，故不 reload——下载后列表无需刷新。
+          final bytes = format == 'html'
+              ? await _api.downloadSnapshotHtml(group.id, snapshotId)
+              : await _api.downloadSnapshotMarkdown(group.id, snapshotId);
+          return SnapshotDownloaded(
+            bytes: bytes,
+            format: format,
+            suggestedFileName: _snapshotFileName(group, format),
+          );
+
+        case RedeploySnapshotSite(:final snapshotId):
+          return SnapshotSiteActionApplied(
+            await _api.redeploySnapshotSite(group.id, snapshotId),
+          );
+
+        case PublishSnapshotSite(:final snapshotId):
+          return SnapshotSiteActionApplied(
+            await _api.publishSnapshotSite(group.id, snapshotId),
+          );
       }
     } on SpbError catch (e) {
       // 只有「资源已不存在」才降级为业务拒绝——此时目标状态**已经达成**
@@ -186,4 +285,18 @@ class GroupManagementUseCase {
   ///
   /// 多一次往返的代价可接受：这是用户主动触发的低频动作（不是每帧路径）。
   Future<ChatGroup> _reload(ChatGroup group) => _api.getGroup(group.id);
+
+  /// 建议的下载文件名。
+  ///
+  /// 不用服务端的 `archive-{短id}-v{n}.md`：短 id 是 group id 前 8 位，对用户
+  /// 没有意义。用 group 标题 + 版本号更好认，同时去掉文件系统不接受的字符。
+  static String _snapshotFileName(ChatGroup group, String format) {
+    final ext = format == 'html' ? 'html' : 'md';
+    final title = group.title.trim();
+    // 空标题（服务端兜底失败）时退化成 id，避免产出 ".md" 这种无名文件。
+    final base = title.isEmpty ? group.id : title;
+    final safe = base.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_');
+    final version = group.archiveSnapshot?.version ?? 1;
+    return 'archive-$safe-v$version.$ext';
+  }
 }

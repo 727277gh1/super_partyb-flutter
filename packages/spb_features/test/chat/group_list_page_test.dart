@@ -73,6 +73,8 @@ void main() {
     VoidCallback? onOpenSettings,
     GroupCacheStore? cache,
     String? userId,
+    Future<bool> Function(ArchiveSnapshot)? onOpenSnapshotSite,
+    Future<void> Function(String, List<int>)? onSaveSnapshot,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -87,6 +89,8 @@ void main() {
           onOpenSettings: onOpenSettings,
           cache: cache,
           userId: userId,
+          onOpenSnapshotSite: onOpenSnapshotSite,
+          onSaveSnapshot: onSaveSnapshot,
           pageSize: pageSize,
         ),
       ),
@@ -940,6 +944,222 @@ void main() {
       await settleIo(tester);
 
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  // ==================== 归档结项快照入口 ====================
+
+  group('归档结项快照入口', () {
+    /// 带快照的归档 group（Go `groupRowToDict` + `archive_snapshot`）。
+    Map<String, dynamic> archivedWithSnapshot({
+      String snapshotStatus = 'ready',
+      bool downloadAvailable = true,
+      String siteStatus = 'ready',
+      String? accessUrl = '/_staging/ufs_sites/g-g1/',
+      bool withMarkdown = true,
+      bool withHtml = true,
+    }) => {
+      ...groupJson(id: 'g1', title: '写小说', status: 'archived'),
+      'archive_snapshot': {
+        'id': 'snap_1',
+        'version': 2,
+        'status': snapshotStatus,
+        'archive_reason': 'explicit',
+        'summary': '做完了前三章',
+        'created_at': '2024-03-05T08:09:00Z',
+        'download_available': downloadAvailable,
+        'site': {
+          'status': siteStatus,
+          'slug': accessUrl == null ? null : 'g-g1',
+          'access_url': accessUrl,
+        },
+        if (withMarkdown || withHtml)
+          'links': {
+            if (withMarkdown)
+              'markdown': '/chat/groups/g1/archive-snapshots/snap_1/markdown',
+            if (withHtml)
+              'html': '/chat/groups/g1/archive-snapshots/snap_1/html',
+          },
+      },
+    };
+
+    testWidgets('已归档 + 快照 ready：显示「结项记录」徽标', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot()]);
+      await pumpPage(tester);
+
+      expect(find.text('结项记录'), findsOneWidget);
+      expect(find.text('已归档'), findsOneWidget);
+    });
+
+    testWidgets('快照 pending：显示「生成中」而不是「没有结项记录」', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          archivedWithSnapshot(
+            snapshotStatus: 'pending',
+            downloadAvailable: false,
+            siteStatus: 'none',
+            accessUrl: null,
+            withMarkdown: false,
+            withHtml: false,
+          ),
+        ],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('结项记录生成中'), findsOneWidget);
+      expect(find.text('结项记录'), findsNothing);
+    });
+
+    testWidgets('快照 failed：显示「生成失败」', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          archivedWithSnapshot(
+            snapshotStatus: 'failed',
+            downloadAvailable: false,
+            siteStatus: 'none',
+            accessUrl: null,
+            withMarkdown: false,
+            withHtml: false,
+          ),
+        ],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('结项记录生成失败'), findsOneWidget);
+    });
+
+    testWidgets('未归档的 group 即使带快照也不显示徽标', (tester) async {
+      // 服务端对非归档 group 不给 archive_snapshot，但客户端不该依赖这一点：
+      // 取消归档后快照行还在（历史保留），此时不应显示结项入口。
+      mockPage(
+        offset: 0,
+        items: [
+          {...archivedWithSnapshot(), 'status': 'active'},
+        ],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('结项记录'), findsNothing);
+      expect(find.text('结项记录生成中'), findsNothing);
+    });
+
+    testWidgets('站点可打开时徽标可点（常显，不依赖 hover）', (tester) async {
+      ArchiveSnapshot? opened;
+      mockPage(offset: 0, items: [archivedWithSnapshot()]);
+      await pumpPage(
+        tester,
+        onOpenSnapshotSite: (snapshot) async {
+          opened = snapshot;
+          return true;
+        },
+      );
+
+      // 触屏没有 hover：入口必须常显可见。
+      expect(find.byIcon(Icons.open_in_new), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.open_in_new));
+      await tester.pump();
+
+      expect(opened?.id, 'snap_1');
+      expect(opened?.site.accessUrl, '/_staging/ufs_sites/g-g1/');
+    });
+
+    testWidgets('站点不可用时徽标是纯展示（没有 open_in_new）', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot(siteStatus: 'pending')]);
+      await pumpPage(tester, onOpenSnapshotSite: (snapshot) async => true);
+
+      expect(find.text('结项记录'), findsOneWidget);
+      expect(find.byIcon(Icons.open_in_new), findsNothing);
+    });
+
+    testWidgets('未注入 onOpenSnapshotSite 时不渲染入口', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot()]);
+      await pumpPage(tester);
+
+      expect(find.byIcon(Icons.open_in_new), findsNothing);
+    });
+
+    testWidgets('长按菜单里有下载 / 重部署项', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot()]);
+      await pumpPage(
+        tester,
+        onGroupAction: (group, action) async => const GroupActionApplied(),
+      );
+
+      await tester.longPress(find.text('写小说'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('下载结项记录（Markdown）'), findsOneWidget);
+      expect(find.text('下载结项记录（HTML）'), findsOneWidget);
+      expect(find.text('重新部署站点'), findsOneWidget);
+    });
+
+    testWidgets('只有 markdown 时菜单里没有 HTML 项', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot(withHtml: false)]);
+      await pumpPage(
+        tester,
+        onGroupAction: (group, action) async => const GroupActionApplied(),
+      );
+
+      await tester.longPress(find.text('写小说'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('下载结项记录（Markdown）'), findsOneWidget);
+      expect(find.text('下载结项记录（HTML）'), findsNothing);
+    });
+
+    testWidgets('staging 站点显示「公开发布」；production 不显示', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot()]);
+      await pumpPage(
+        tester,
+        onGroupAction: (group, action) async => const GroupActionApplied(),
+      );
+      await tester.longPress(find.text('写小说'));
+      await tester.pumpAndSettle();
+      expect(find.text('公开发布站点'), findsOneWidget);
+
+      // 换成 production URL：`/ufs_sites/` 不带 `/_staging/` 前缀。
+      await tester.pumpWidget(const SizedBox());
+      mockPage(
+        offset: 0,
+        items: [archivedWithSnapshot(accessUrl: '/ufs_sites/g-g1/')],
+      );
+      await pumpPage(
+        tester,
+        onGroupAction: (group, action) async => const GroupActionApplied(),
+      );
+      await tester.longPress(find.text('写小说'));
+      await tester.pumpAndSettle();
+      expect(find.text('公开发布站点'), findsNothing);
+      // 但重部署仍在（改了源想重编译是合法需求）。
+      expect(find.text('重新部署站点'), findsOneWidget);
+    });
+
+    testWidgets('pending 快照没有下载项（download_available=false）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          archivedWithSnapshot(
+            snapshotStatus: 'pending',
+            downloadAvailable: false,
+            siteStatus: 'none',
+            accessUrl: null,
+            withMarkdown: false,
+            withHtml: false,
+          ),
+        ],
+      );
+      await pumpPage(
+        tester,
+        onGroupAction: (group, action) async => const GroupActionApplied(),
+      );
+      await tester.longPress(find.text('写小说'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('下载结项记录（Markdown）'), findsNothing);
+      // 重部署仍可用（pending 卡住时正是它的用武之地）。
+      expect(find.text('重新部署站点'), findsOneWidget);
     });
   });
 }

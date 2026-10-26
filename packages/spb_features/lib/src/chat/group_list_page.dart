@@ -55,6 +55,8 @@ class GroupListPage extends StatefulWidget {
     this.groupUpdates,
     this.cache,
     this.userId,
+    this.onSaveSnapshot,
+    this.onOpenSnapshotSite,
     this.pageSize = 30,
   });
 
@@ -184,6 +186,32 @@ class GroupListPage extends StatefulWidget {
 
   /// 当前用户 id（缓存的行归属）。见 [cache]。
   final String? userId;
+
+  /// 在系统浏览器中打开快照站点（staging / production）。
+  ///
+  /// ## 为什么是回调而不是页面拼 URL
+  ///
+  /// URL 拼接留在装配层：页面不掌握「服务部署在哪」这个知识（同
+  /// `AgentFilePreviewCallbacks.openExternal` 的取向）。且 `access_url` 可能
+  /// 是**相对路径**（后端未配置 `ARCHIVE_SNAPSHOT_SITE_BASE_URL` 时），
+  /// 需要按当前 origin 补全——那是 app 层的端点知识。
+  ///
+  /// 返回 false = 未能发起（浏览器打不开、无 URL），页面据此给反馈。
+  final Future<bool> Function(ArchiveSnapshot snapshot)? onOpenSnapshotSite;
+
+  /// 保存快照下载的字节（文件名 + 内容）。
+  ///
+  /// ## 为什么是回调而不是页面自己写文件
+  ///
+  /// 落盘方式按平台不同（桌面端 `File.writeAsBytes`、移动端走分享面板或
+  /// 系统文件选择器），且页面（`spb_features`）不依赖 `dart:io`——与
+  /// `AgentFilePreviewCallbacks` 同一取向：IO 能力由装配层注入。
+  ///
+  /// ## 未注入时的降级
+  ///
+  /// 提示「已下载但未配置保存入口」，**不静默丢弃**——否则用户会以为点击
+  /// 没生效，反复点。
+  final Future<void> Function(String fileName, List<int> bytes)? onSaveSnapshot;
 
   final int pageSize;
 
@@ -625,9 +653,51 @@ class _GroupListPageState extends State<GroupListPage> {
         });
         // 把变更镜像进缓存（issue #28）：改名/删除后断网重启必须看到新状态。
         unawaited(_saveCache());
+      case SnapshotDownloaded(:final bytes, :final suggestedFileName):
+        // 落盘是装配层的事（桌面端写文件系统、移动端走分享/保存），
+        // 页面只把「拿到了这些字节」交出去。未注入时降级为提示——
+        // 不静默丢弃，否则用户会以为点击没生效。
+        final save = widget.onSaveSnapshot;
+        if (save == null) {
+          _showMessage('已下载 ${bytes.length} 字节，但未配置保存入口');
+        } else {
+          try {
+            await save(suggestedFileName, bytes);
+            _showMessage('已保存 $suggestedFileName');
+          } on Object catch (e) {
+            _showMessage('保存失败：$e', isError: true);
+          }
+        }
+      case SnapshotSiteActionApplied(:final result):
+        // pending / none 是 202 语义（动作已接受、结果稍后可见），不是失败。
+        // 只有 ready 才说「成功」；其余提示「已提交，稍后刷新」。
+        if (result.isReady) {
+          _showMessage('站点已就绪');
+        } else if (result.isPending) {
+          _showMessage('站点正在渲染，稍后刷新查看');
+        } else {
+          _showMessage('站点已重置，稍后会自动重建');
+        }
+        // 站点状态由服务端异步推进，本地不猜转换——直接刷新列表。
+        unawaited(_refreshAfterSiteAction());
       case GroupActionRejected(:final message):
         _showMessage(message, isError: true);
     }
+  }
+
+  /// 站点动作后刷新列表（状态从 pending → ready 是异步的）。
+  ///
+  /// 不在这里直接调 `api.listGroups`：页面已有 [_refresh] 承担「清空去重集合
+  /// 并重拉首页」的职责，重复实现会让两处的缓存/分页逻辑漂移。
+  ///
+  /// ## 为什么用 [_refresh] 而不是只替换单个条目
+  ///
+  /// 站点状态是服务端 worker 异步推进的，`redeploy` 返回 pending 时列表里的
+  /// `site.status` 仍是旧值；本地拼一个 pending 会在下一轮 worker 失败时
+  /// 永远显示「渲染中」。重拉首页拿到的是服务端权威值。
+  Future<void> _refreshAfterSiteAction() async {
+    if (!mounted) return;
+    await _refresh();
   }
 
   void _showMessage(String message, {bool isError = false}) {
@@ -785,6 +855,7 @@ class _GroupListPageState extends State<GroupListPage> {
             onAction: widget.onGroupAction == null || _busyGroupId != null
                 ? null
                 : (action) => _handleAction(group, action),
+            onOpenSnapshotSite: widget.onOpenSnapshotSite,
           );
         },
       ),
@@ -917,13 +988,33 @@ class _CacheNotice extends StatelessWidget {
 /// 两者都打开同一个菜单。**不用**滑动（`Dismissible`）直接删：删除不可恢复，
 /// 滑动太容易误触，且无法承载「改名/归档」这类同级动作。
 class _GroupTile extends StatelessWidget {
-  const _GroupTile({super.key, required this.group, this.onTap, this.onAction});
+  const _GroupTile({
+    super.key,
+    required this.group,
+    this.onTap,
+    this.onAction,
+    this.onOpenSnapshotSite,
+  });
 
   final ChatGroup group;
   final VoidCallback? onTap;
 
   /// 为 null 表示不提供管理入口（只读用法）。
   final void Function(GroupAction action)? onAction;
+
+  /// 打开快照站点（浏览器）。为 null 时不渲染该入口。
+  ///
+  /// ## 为什么不用 GroupAction 通道
+  ///
+  /// 打开站点是**纯客户端动作**（拼 URL + 交给浏览器），不调服务端、不改状态。
+  /// 塞进 `GroupAction` 会让 domain 层（`group_management.dart`）出现一个
+  /// 打不通端点的分支，且 `GroupManagementUseCase.execute` 的 switch 必须为它
+  /// 写一个「什么都不做」的 case——那是把装配层职责漏进领域层。
+  final void Function(ArchiveSnapshot snapshot)? onOpenSnapshotSite;
+
+  /// 当前 group 的快照（仅归档行有值，见 [ChatGroup.archiveSnapshot]）。
+  ArchiveSnapshot? get _snapshot =>
+      group.isArchived ? group.archiveSnapshot : null;
 
   /// 打开菜单并把用户选择交给 [onAction]。
   Future<void> _openMenu(BuildContext context, Offset position) async {
@@ -966,6 +1057,71 @@ class _GroupTile extends StatelessWidget {
               title: Text('归档'),
             ),
           ),
+        // 结项快照动作：只在「已归档且快照可用」时出现。
+        //
+        // ## 为什么拆成下载 / 重部署 / 发布三项而不是一个「结项记录」子菜单
+        //
+        // 三项的触发条件与风险都不同：下载要求 ready；重部署在 pending/failed
+        // 时才有意义；发布是不可逆对外动作。子菜单会多一层点击，而这三项本身
+        // 频率很低——直接列出更清楚。
+        if (_snapshot != null) ...[
+          const PopupMenuDivider(),
+          if (_snapshot!.isReady && _snapshot!.downloadAvailable) ...[
+            if (_snapshot!.links?.markdown != null)
+              PopupMenuItem(
+                key: const ValueKey('group-action-download-md'),
+                value: DownloadSnapshot(_snapshot!.id, 'markdown'),
+                child: const ListTile(
+                  dense: true,
+                  leading: Icon(Icons.description_outlined),
+                  title: Text('下载结项记录（Markdown）'),
+                ),
+              ),
+            if (_snapshot!.links?.html != null)
+              PopupMenuItem(
+                key: const ValueKey('group-action-download-html'),
+                value: DownloadSnapshot(_snapshot!.id, 'html'),
+                child: const ListTile(
+                  dense: true,
+                  leading: Icon(Icons.html_outlined),
+                  title: Text('下载结项记录（HTML）'),
+                ),
+              ),
+          ],
+          // 重部署：pending 卡住 / failed / 站点被 UFS 重启重置时可用。
+          // 不限制条件——ready 时重部署也是合法操作（改了站点源想重编译）。
+          PopupMenuItem(
+            key: const ValueKey('group-action-redeploy-site'),
+            value: RedeploySnapshotSite(_snapshot!.id),
+            child: const ListTile(
+              dense: true,
+              leading: Icon(Icons.refresh),
+              title: Text('重新部署站点'),
+            ),
+          ),
+          // 发布：只在 **staging** 且 ready 时出现。
+          //
+          // ## 判定依据：URL 里有没有 `/_staging/`
+          //
+          // group DTO 的 `site` 子对象**不含 environment**（Go
+          // `archive_snapshot_dto.go` 只给 status/slug/access_url），故只能从
+          // access_url 推断：staging 是 `{base}/_staging/ufs_sites/{slug}/`，
+          // production 是 `{base}/ufs_sites/{slug}/`（见设计文档 §13）。
+          //
+          // 不用「不含 /ufs_sites/」判断——两者都含。也不要靠 `environment`
+          // 字段：它不存在，读出来永远是 null，会让发布项永远显示。
+          if (_snapshot!.site.isReady &&
+              (_snapshot!.site.accessUrl?.contains('/_staging/') ?? false))
+            PopupMenuItem(
+              key: const ValueKey('group-action-publish-site'),
+              value: PublishSnapshotSite(_snapshot!.id),
+              child: const ListTile(
+                dense: true,
+                leading: Icon(Icons.publish_outlined),
+                title: Text('公开发布站点'),
+              ),
+            ),
+        ],
         const PopupMenuDivider(),
         const PopupMenuItem(
           key: ValueKey('group-action-delete'),
@@ -1065,6 +1221,29 @@ class _GroupTile extends StatelessWidget {
               color: scheme.onSurfaceVariant,
             ),
           ),
+          // 结项快照状态徽标：只在归档行且有快照时出现。
+          //
+          // ## 为什么在 subtitle 而不是 trailing
+          //
+          // trailing 已被 chevron 占用，塞第二个图标会让整行显得拥挤；而
+          // 「有没有结项记录」属于元信息，与「多久没动过」同一层级。
+          //
+          // ## 为什么 pending/failed 也要显示
+          //
+          // 用户点了归档后最想知道的是「结项记录好了没」。只显示 ready 会让
+          // 生成中的状态看起来像「没做」。
+          if (_snapshot != null) ...[
+            const SizedBox(width: SpbSpacing.sm),
+            _SnapshotBadge(
+              snapshot: _snapshot!,
+              // 站点可打开时徽标变成可点入口（常显，不依赖 hover——
+              // 触屏没有 hover）。站点不可用时保持纯展示。
+              onOpenSite:
+                  _snapshot!.site.isOpenable && onOpenSnapshotSite != null
+                  ? () => onOpenSnapshotSite!(_snapshot!)
+                  : null,
+            ),
+          ],
         ],
       ),
       trailing: const Icon(Icons.chevron_right),
@@ -1117,6 +1296,111 @@ class _GroupTile extends StatelessWidget {
     if (diff.inHours < 24) return '${diff.inHours} 小时前';
     if (diff.inDays < 30) return '${diff.inDays} 天前';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+}
+
+/// 结项快照的状态徽标（只读，不可点）。
+///
+/// ## 为什么是徽标而不是按钮
+///
+/// 列表行已经有一个点击目标（打开对话）和一个菜单入口（长按/右键）。再塞
+/// 一个可点元素会让「点哪里发生什么」变得难以预测——尤其桌面端行高有限。
+/// 动作统一收进菜单（见 `_GroupTile._openMenu`），徽标只表达状态。
+///
+/// ## 六种状态的映射
+///
+/// | 快照 | 站点 | 徽标 |
+/// |------|------|------|
+/// | pending | — | 结项记录生成中 |
+/// | failed | — | 结项记录生成失败 |
+/// | ready | ready | 结项记录 |
+/// | ready | pending | 结项记录（站点渲染中） |
+/// | ready | failed/none | 结项记录（站点不可用） |
+///
+/// 与 webapp 的 `ArchiveSnapshotEntry` 同一套判定，但那边是**按钮**（有
+/// 下载/重部署动作），这边只显示状态——动作在菜单里。
+class _SnapshotBadge extends StatelessWidget {
+  const _SnapshotBadge({required this.snapshot, this.onOpenSite});
+
+  final ArchiveSnapshot snapshot;
+
+  /// 打开站点。null = 站点不可用或未注入，此时徽标是纯展示。
+  ///
+  /// ## 为什么入口挂在徽标上而不是 trailing 的图标按钮
+  ///
+  /// trailing 的 chevron 语义是「进入对话」。再放一个图标按钮会与它并列，
+  /// 用户无法从图标区分「哪个是进对话、哪个是开站点」。徽标本身写的是
+  /// 「结项记录」，点它开结项站点是自然的映射。
+  ///
+  /// ## 为什么不用 hover 才显示的按钮
+  ///
+  /// 触屏没有 hover，那样移动端永远看不到入口。
+  final VoidCallback? onOpenSite;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    final (icon, label, color) = switch (snapshot) {
+      ArchiveSnapshot(isPending: true) => (
+        Icons.hourglass_empty,
+        '结项记录生成中',
+        scheme.onSurfaceVariant,
+      ),
+      ArchiveSnapshot(isFailed: true) => (
+        Icons.error_outline,
+        '结项记录生成失败',
+        scheme.error,
+      ),
+      // ready：站点状态只影响「能不能在线看」，不影响「有没有结项记录」。
+      // 站点 ready 用强调色，其余用中性色——避免「站点失败」被误读成
+      // 「结项失败」。
+      ArchiveSnapshot(isReady: true) when snapshot.site.isReady => (
+        Icons.menu_book_outlined,
+        '结项记录',
+        scheme.primary,
+      ),
+      ArchiveSnapshot(isReady: true) => (
+        Icons.menu_book_outlined,
+        '结项记录',
+        scheme.onSurfaceVariant,
+      ),
+      // 兜底：服务端将来新增 status 时不让徽标消失（静默丢信息比显示
+      // 一个笼统标签更糟）。
+      _ => (Icons.help_outline, '结项记录', scheme.onSurfaceVariant),
+    };
+
+    final row = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: SpbSpacing.md, color: color),
+        const SizedBox(width: SpbSpacing.xs),
+        Text(label, style: textTheme.labelSmall?.copyWith(color: color)),
+        if (onOpenSite != null) ...[
+          const SizedBox(width: SpbSpacing.xs),
+          // 用 `open_in_new` 而不是 chevron：明确「会跳出去」。
+          Icon(Icons.open_in_new, size: SpbSpacing.md, color: color),
+        ],
+      ],
+    );
+
+    if (onOpenSite == null) return row;
+
+    // 可点时有最小触摸区域（`InkWell` 默认只在内容范围内响应，徽标本身
+    // 只有十几像素高，直接点很难命中）。
+    return Semantics(
+      button: true,
+      label: '打开结项站点',
+      child: InkWell(
+        onTap: onOpenSite,
+        borderRadius: BorderRadius.circular(SpbSpacing.xs),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: row,
+        ),
+      ),
+    );
   }
 }
 

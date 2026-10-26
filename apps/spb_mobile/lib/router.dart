@@ -342,6 +342,9 @@ class _ConversationsTab extends ConsumerWidget {
       groupUpdates: ref.watch(groupUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
+      // 结项快照的两个客户端能力（与桌面端同构，实现差异在下面的方法里）。
+      onOpenSnapshotSite: _openSnapshotSite,
+      onSaveSnapshot: _saveSnapshotFile,
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       pendingConfirmationCount: pendingCount,
@@ -2380,4 +2383,52 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
       },
     );
   }
+}
+
+/// 在系统浏览器中打开归档结项站点。
+///
+/// 与桌面端 `_openSnapshotSite` 同一套 URL 补全规则（相对路径按 origin 拼），
+/// 差异只在跳转方式：移动端用 `url_launcher`（`spb_platform` 的
+/// `openInBrowser` 只实现桌面三平台，与 `_openAgentFileExternal` 同理）。
+Future<bool> _openSnapshotSite(ArchiveSnapshot snapshot) async {
+  final raw = snapshot.site.accessUrl;
+  if (raw == null || raw.isEmpty) return false;
+  final url = Uri.parse(_snapshotAbsoluteUrl(raw));
+  try {
+    return await launchUrl(url, mode: LaunchMode.externalApplication);
+  } on Object catch (e) {
+    SpbLog.warn('打开结项站点失败', {'error': '$e'});
+    return false;
+  }
+}
+
+/// 保存快照下载的字节到本地。
+///
+/// 移动端没有「另存为」对话框（`file_selector` 的 `getSaveLocation` 在
+/// Android/iOS 未实现），故与 `_downloadAgentFile` 同一做法：落到应用支持
+/// 目录，用户通过系统文件管理器或分享面板取用。
+///
+/// 布局 `downloads/archive/<文件名>`：与 `downloads/agent/` 分开（前者是
+/// 历史存档，后者是工作产物）。
+Future<void> _saveSnapshotFile(String fileName, List<int> bytes) async {
+  // 只取 basename，杜绝 `../` 穿越（即便上游已清洗）。
+  final safe = p.basename(fileName);
+  if (safe.isEmpty || safe == '.' || safe == '..') {
+    throw ArgumentError('非法的文件名：$fileName');
+  }
+  final dir = await getApplicationSupportDirectory();
+  final root = Directory(p.join(dir.path, 'downloads', 'archive'));
+  if (!await root.exists()) await root.create(recursive: true);
+  await File(p.join(root.path, safe)).writeAsBytes(bytes, flush: true);
+}
+
+/// 把可能是相对的 `access_url` 补成绝对 URL。
+///
+/// 同桌面端：已是绝对 URL 时原样返回；否则用 UFS 基地址的 origin 拼
+/// （不用 API 基地址——它带 `/pba` 前缀，路径会全错）。
+String _snapshotAbsoluteUrl(String raw) {
+  final parsed = Uri.tryParse(raw);
+  if (parsed != null && parsed.hasScheme) return raw;
+  final origin = Uri.parse(SpbEndpoints.current.ufsBaseUrl).origin;
+  return '$origin${raw.startsWith('/') ? '' : '/'}$raw';
 }

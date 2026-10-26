@@ -345,6 +345,14 @@ class _HomePage extends ConsumerWidget {
       groupUpdates: ref.watch(groupUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
+      // 结项快照的两个客户端能力：打开站点（浏览器）、保存下载字节。
+      //
+      // ## 为什么都在这里拼而不是页面里
+      //
+      // 页面（`spb_features`）不掌握「服务部署在哪」与「落盘到哪」——同
+      // `AgentFilePreviewCallbacks` 的取向：IO 与 URL 拼装留装配层。
+      onOpenSnapshotSite: _openSnapshotSite,
+      onSaveSnapshot: _saveSnapshotFile,
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       // 工作台（小程序 BFF 投影层）。
@@ -2765,4 +2773,64 @@ class _WorkDetailPage extends ConsumerWidget {
       onUploadFile: ref.watch(uploadMiniappFileProvider(workId)),
     );
   }
+}
+
+/// 在系统浏览器中打开归档结项站点（`GroupListPage.onOpenSnapshotSite` 的装配）。
+///
+/// ## 相对 URL 必须按当前 origin 补全
+///
+/// 后端未配置 `ARCHIVE_SNAPSHOT_SITE_BASE_URL` 时 `access_url` 是
+/// `/_staging/ufs_sites/{slug}/` 这样的**相对路径**（见 Go
+/// `archive_snapshot_dto.go`）。直接交给浏览器会得到 `file:///_staging/...`。
+///
+/// 补全基准用 [SpbEndpoints.current.ufsBaseUrl] 的 **origin**（scheme+host）：
+/// 站点挂在网关域名下，与 UFS 基地址同源（生产都是 `tbcc.atjog.com`）。
+/// 不用 API 基地址（带 `/pba` 前缀，拼出来是 `https://host/pba/_staging/...`）。
+///
+/// ## 为什么是顶层函数而不是 State 方法
+///
+/// 它不依赖 `ref`、`widget`、`context` 任何一样——只是「补 URL + 交给浏览器」。
+/// 挂在 State 里会让调用方（`_HomePage.build`，一个 ConsumerWidget）够不到它，
+/// 只能绕一圈拿 ref。
+Future<bool> _openSnapshotSite(ArchiveSnapshot snapshot) async {
+  final raw = snapshot.site.accessUrl;
+  if (raw == null || raw.isEmpty) return false;
+  final url = _snapshotAbsoluteUrl(raw);
+  try {
+    await openInBrowser(url);
+    return true;
+  } on Object catch (e) {
+    SpbLog.warn('打开结项站点失败', {'error': '$e'});
+    return false;
+  }
+}
+
+/// 把可能是相对的 `access_url` 补成绝对 URL。
+///
+/// 已是绝对 URL（含 scheme）时原样返回——生产配置了
+/// `ARCHIVE_SNAPSHOT_SITE_BASE_URL` 就是这个形态。
+String _snapshotAbsoluteUrl(String raw) {
+  final parsed = Uri.tryParse(raw);
+  if (parsed != null && parsed.hasScheme) return raw;
+  final origin = Uri.parse(SpbEndpoints.current.ufsBaseUrl).origin;
+  return '$origin${raw.startsWith('/') ? '' : '/'}$raw';
+}
+
+/// 保存快照下载的字节（`GroupListPage.onSaveSnapshot` 的装配）。
+///
+/// 落地布局 `downloads/archive/<文件名>`：与 `downloads/agent/` 分开，
+/// 避免结项记录与交付物混在一起（前者是历史存档，后者是工作产物）。
+///
+/// 文件名来自 `SnapshotDownloaded.suggestedFileName`（已清洗过非法字符），
+/// 但仍做一次段级校验：防御层不该依赖上游「已经清洗过」。
+Future<void> _saveSnapshotFile(String fileName, List<int> bytes) async {
+  // 只取 basename，杜绝 `../` 穿越（即便上游已清洗）。
+  final safe = p.basename(fileName);
+  if (safe.isEmpty || safe == '.' || safe == '..') {
+    throw ArgumentError('非法的文件名：$fileName');
+  }
+  final dir = await getApplicationSupportDirectory();
+  final root = Directory(p.join(dir.path, 'downloads', 'archive'));
+  if (!await root.exists()) await root.create(recursive: true);
+  await File(p.join(root.path, safe)).writeAsBytes(bytes, flush: true);
 }

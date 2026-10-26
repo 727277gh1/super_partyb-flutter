@@ -237,6 +237,220 @@ void main() {
     });
   });
 
+  group('归档结项快照', () {
+    /// 带快照的 group JSON（Go `groupRowToDict` + `archive_snapshot`）。
+    Map<String, dynamic> archivedGroupJson({
+      String snapshotStatus = 'ready',
+      bool downloadAvailable = true,
+    }) => {
+      ...groupJson(status: 'archived'),
+      'archive_snapshot': {
+        'id': 'snap_1',
+        'version': 2,
+        'status': snapshotStatus,
+        'archive_reason': 'explicit',
+        'summary': '做完了',
+        'created_at': '2024-03-05T08:09:00Z',
+        'download_available': downloadAvailable,
+        'site': {
+          'status': 'ready',
+          'slug': 'g-grp_1',
+          'access_url': '/ufs_sites/g-grp_1/',
+        },
+        'links': {
+          'markdown': '/chat/groups/grp_1/archive-snapshots/snap_1/markdown',
+          'html': '/chat/groups/grp_1/archive-snapshots/snap_1/html',
+        },
+      },
+    };
+
+    ChatGroup archivedGroup() => ChatGroup.fromJson(archivedGroupJson());
+
+    test('下载 markdown：走 bytes 端点，文件名用标题+版本而不是短 id', () async {
+      // ⚠️ 这个测试**不能**断言字节的精确内容。
+      //
+      // `http_mock_adapter` 会把响应体统一按 JSON 编码：给 `List<int>` 得到
+      // `[35,32,...]` 这段文本的字节（首字节 91 = '['），给 `String` 得到带
+      // 引号的 `"# title"`。两种都不是服务端 `c.Data(200, ..., []byte)` 的
+      // 真实行为。故这里只断言「拿到了非空字节 + 走对了端点 + 文件名正确」，
+      // 字节保真度由 `ResponseType.bytes` 这个选项本身保证（见
+      // `ChatApi._downloadSnapshot` 的注释与 `downloadArtifact` 的同类实现）。
+      adapter.onGet(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/markdown',
+        (server) => server.reply(200, '# title'),
+      );
+
+      final result = await useCase.execute(
+        archivedGroup(),
+        const DownloadSnapshot('snap_1', 'markdown'),
+      );
+
+      expect(result, isA<SnapshotDownloaded>());
+      final d = result as SnapshotDownloaded;
+      expect(d.bytes, isNotEmpty);
+      expect(d.format, 'markdown');
+      // 文件名含标题与版本，不含 group id 前 8 位那种对用户无意义的短 id。
+      expect(d.suggestedFileName, 'archive-原对话-v2.md');
+    });
+
+    test('下载 html：扩展名是 html，走 html 端点', () async {
+      adapter.onGet(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/html',
+        (server) => server.reply(200, '<html>'),
+      );
+
+      final result = await useCase.execute(
+        archivedGroup(),
+        const DownloadSnapshot('snap_1', 'html'),
+      );
+
+      expect(result, isA<SnapshotDownloaded>());
+      expect(
+        (result as SnapshotDownloaded).suggestedFileName,
+        endsWith('.html'),
+      );
+      expect((result).bytes, isNotEmpty);
+    });
+
+    test('下载不 reload 列表：成功结果不是 GroupActionApplied', () async {
+      // 这条守着「下载顺手刷新列表」的误实现——那会多一次 GET，
+      // 且让调用方以为服务端状态变了。
+      adapter.onGet(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/markdown',
+        (server) => server.reply(200, 'A'),
+      );
+      final result = await useCase.execute(
+        archivedGroup(),
+        const DownloadSnapshot('snap_1', 'markdown'),
+      );
+      expect(result, isNot(isA<GroupActionApplied>()));
+    });
+
+    test('快照未 ready 时下载 → 409 转成 HttpError（不是业务拒绝）', () async {
+      adapter.onGet(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/markdown',
+        (server) => server.reply(409, {'error': 'snapshot not ready'}),
+      );
+
+      expect(
+        () => useCase.execute(
+          archivedGroup(),
+          const DownloadSnapshot('snap_1', 'markdown'),
+        ),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 409),
+        ),
+      );
+    });
+
+    test('UFS 侧文件已删 → 410 也是 HttpError', () async {
+      adapter.onGet(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/html',
+        (server) => server.reply(410, {'error': 'gone'}),
+      );
+      expect(
+        () => useCase.execute(
+          archivedGroup(),
+          const DownloadSnapshot('snap_1', 'html'),
+        ),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 410),
+        ),
+      );
+    });
+
+    test('重部署返回 pending → 是成功结果且标记为 pending（不是失败）', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/site/redeploy',
+        (server) =>
+            server.reply(200, {'site_id': 'site_1', 'site_status': 'pending'}),
+        data: null,
+      );
+
+      final result = await useCase.execute(
+        archivedGroup(),
+        const RedeploySnapshotSite('snap_1'),
+      );
+
+      expect(result, isA<SnapshotSiteActionApplied>());
+      final r = (result as SnapshotSiteActionApplied).result;
+      expect(r.isPending, isTrue);
+      expect(r.isReady, isFalse);
+    });
+
+    test('重部署把站点打回 none（UFS 侧丢了）→ 同样是成功结果', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/site/redeploy',
+        (server) => server.reply(200, {'site_status': 'none'}),
+        data: null,
+      );
+      final result = await useCase.execute(
+        archivedGroup(),
+        const RedeploySnapshotSite('snap_1'),
+      );
+      expect((result as SnapshotSiteActionApplied).result.isReset, isTrue);
+    });
+
+    test('发布返回 ready + production', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/site/publish',
+        (server) => server.reply(200, {
+          'site_id': 'site_1',
+          'site_status': 'ready',
+          'environment': 'production',
+          'access_url': 'https://tbcc.atjog.com/ufs_sites/g-grp_1/',
+        }),
+        data: null,
+      );
+
+      final result = await useCase.execute(
+        archivedGroup(),
+        const PublishSnapshotSite('snap_1'),
+      );
+
+      final r = (result as SnapshotSiteActionApplied).result;
+      expect(r.isReady, isTrue);
+      expect(r.environment, 'production');
+      expect(r.accessUrl, contains('ufs_sites'));
+    });
+
+    test('站点动作 409（快照未 ready）→ HttpError，不当成功', () async {
+      adapter.onPost(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/site/publish',
+        (server) => server.reply(409, {'error': 'snapshot not ready'}),
+        data: null,
+      );
+      expect(
+        () => useCase.execute(
+          archivedGroup(),
+          const PublishSnapshotSite('snap_1'),
+        ),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 409),
+        ),
+      );
+    });
+
+    test('标题含路径分隔符时文件名被清洗', () async {
+      adapter.onGet(
+        '/chat/groups/grp_1/archive-snapshots/snap_1/markdown',
+        (server) => server.reply(200, 'A'),
+      );
+      final group = ChatGroup.fromJson({
+        ...archivedGroupJson(),
+        'title': 'a/b:c*d',
+      });
+      final result = await useCase.execute(
+        group,
+        const DownloadSnapshot('snap_1', 'markdown'),
+      );
+      final name = (result as SnapshotDownloaded).suggestedFileName;
+      expect(name, isNot(contains('/')));
+      expect(name, isNot(contains(':')));
+      expect(name, endsWith('.md'));
+    });
+  });
+
   group('GroupAction 是穷举的 sealed 家族', () {
     test('每个动作都能被 switch 覆盖（编译期保证，此处运行时确认类型）', () {
       const actions = <GroupAction>[
@@ -244,6 +458,9 @@ void main() {
         ArchiveGroup(),
         UnarchiveGroup(),
         DeleteGroup(),
+        DownloadSnapshot('snap_1', 'markdown'),
+        RedeploySnapshotSite('snap_1'),
+        PublishSnapshotSite('snap_1'),
       ];
       // 穷举 switch：新增动作时这里会编译失败。
       for (final a in actions) {
@@ -252,6 +469,9 @@ void main() {
           ArchiveGroup() => 'archive',
           UnarchiveGroup() => 'unarchive',
           DeleteGroup() => 'delete',
+          DownloadSnapshot() => 'download',
+          RedeploySnapshotSite() => 'redeploy',
+          PublishSnapshotSite() => 'publish',
         };
         expect(label, isNotEmpty);
       }
