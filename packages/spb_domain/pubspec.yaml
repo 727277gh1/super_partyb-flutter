@@ -1,0 +1,32 @@
+name: spb_domain
+description: 领域逻辑：用例、状态机、仓储接口（纯 Dart，禁止依赖 Flutter）
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dependencies:
+  spb_core:
+  spb_models:
+  spb_api:
+  # 曾声明 collection，但源码从未 import——已删（issue #36）。
+  meta: ^1.16.0
+  uuid: ^4.5.1
+  # 脏检测基准：下载时对实际落盘字节算 SHA256（UFS etag 与内容无关，
+  # 见 docs/deliverable-upload-and-conflict.md §2.1①）。
+  crypto: ^3.0.7
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0
+  # 测试用：验证超时兜底看门狗（需在假时区里 elapse 到到期时刻，
+  # 而不读真实墙钟）。必须显式声明，否则 analyzer 报
+  # depend_on_referenced_packages。
+  fake_async: ^1.3.3
+  # 测试用：构造真实 ChatApi（依赖 dio 类型）并 mock HTTP 响应。
+  # 声明为 dev_dependencies 而非依赖传递，避免 analyzer 报 depend_on_referenced_packages。
+  dio: ^5.7.0
+  http_mock_adapter: ^0.6.1

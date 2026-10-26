@@ -1,0 +1,511 @@
+# CI 流水线
+#
+# ## 平台矩阵的成本约束（私有仓库 Free 计划 2,000 Linux 分钟/月）
+#
+# | 平台 | 配额倍数 | 单次约 | 占比（月 20 次） |
+# |---|---|---|---|
+# | linux | 1× | ~7 min | 7% |
+# | android | 1× | ~15 min | 15% |
+# | windows | 2× | ~12 min | 25% |
+#
+# 三端全在免费额度内（约 47%）。macOS 是 10×（会超额），不出包——
+# 需要时再单独加（带 `workflow_dispatch` 手动触发）。
+#
+# ## 为什么 Windows 固定 windows-2022
+#
+# `windows-latest` 正迁往 VS 2026。Flutter 3.47.5 虽已适配，但要**可复现**
+# 就得锁 runner 版本（VS 版本、SDK 版本都会随 latest 漂移）。
+#
+# ## 为什么 Linux job 要装 GTK 开发库
+#
+# `flutter build linux` 需要 clang/cmake/ninja + libgtk-3-dev 编译 C++ runner。
+# 只跑 analyze/test 的 job 不需要（dart/flutter test 不编译原生侧），
+# 故拆成两个 job：quality（快，全部包）+ build-linux（真出包，验证可构建）。
+#
+# ## ⚠️ 构建产物**也会被人下载运行**（2026-10 的真实缺陷）
+#
+# 这三个 build-* job 原本只传 `--release`、**一个 define 都没传**，于是产物用
+# `SpbEnv` 的编译期默认值 `http://127.0.0.1:8000`。用户下载 CI 的 Windows 包，
+# 运行后提示「远程计算机拒绝网络连接」——包能启动、界面正常、所有请求都失败。
+# 而 analyze / 3400+ 用例 / Windows 构建**全是绿的**：默认值不是错误，只是连
+# 的是用户自己机器。
+#
+# 两者的意图不同（CI 是验证、release 是交付），产物却是同一种，且都挂到
+# Actions 页供人下载。故现在与 release.yml 共用同一套参数解析：
+# dispatch 输入（ci 没有）> 仓库 Variables > 内置默认值。
+#
+# `tools/check_build_defines.sh` 守这件事：静态断言每个 release 构建 job 传了
+# `--dart-define=SPB_API_BASE_URL`，并在本地产物存在时直接 grep AOT 快照
+# 里有没有残留 `127.0.0.1:8000`（传了 define 后默认值会被 tree-shake 掉，
+# 实测确认过，故这条是可靠证据而非启发式）。
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.5'
+
+jobs:
+  # ── 解析构建参数（build-* job 共用）─────────────────────────────
+  #
+  # 与 release.yml 的 config job 同源同义：地址是**部署方**的属性，不是代码的
+  # 属性。CI 没有 workflow_dispatch 输入，故只有 Variables → 内置默认值两级。
+  #
+  # ⚠️ 公开仓库里 `vars` 全局可见（与 secrets 不同）。这里只读、不写。
+  config:
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    outputs:
+      api: ${{ steps.defines.outputs.api }}
+      ufs: ${{ steps.defines.outputs.ufs }}
+      iss: ${{ steps.defines.outputs.iss }}
+      cid: ${{ steps.defines.outputs.cid }}
+      host_pref: ${{ steps.defines.outputs.host_pref }}
+    steps:
+      - name: Resolve build defines
+        id: defines
+        env:
+          VAR_API: ${{ vars.SPB_API_BASE_URL }}
+          VAR_UFS: ${{ vars.SPB_UFS_BASE_URL }}
+          VAR_ISS: ${{ vars.SPB_OIDC_ISSUER }}
+          VAR_CID: ${{ vars.SPB_OIDC_CLIENT_ID }}
+          VAR_HPREF: ${{ vars.SPB_PREFERRED_HOSTS }}
+        run: |
+          set -euo pipefail
+          write_out() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\r\n')" >> "$GITHUB_OUTPUT"; }
+          write_out api "$VAR_API"
+          write_out ufs "$VAR_UFS"
+          write_out iss "$VAR_ISS"
+          write_out cid "$VAR_CID"
+          write_out host_pref "$VAR_HPREF"
+
+          # 只报「配没配」，不打印值本身（日志长期留档）。
+          echo "API base : $([ -n "$VAR_API" ] && echo set || echo 'unset → 产物会连 127.0.0.1:8000') "
+          echo "UFS base : $([ -n "$VAR_UFS" ] && echo set || echo unset)"
+          echo "OIDC     : $([ -n "$VAR_ISS" ] && echo set || echo unset)"
+
+  # ── 质量门禁：全包 analyze / format / layering / test ──────────────
+  quality:
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # Pub Workspaces：根目录一次 pub get 即解析全部成员（单一 lockfile）。
+      #
+      # `--enforce-lockfile`：lockfile 与 pubspec.yaml 不一致时显式失败，而不是
+      # 默默重解析。提交 `pubspec.lock` 只保证「有一份」，不保证「CI 用的是它」
+      # ——少了这个标志，新增依赖却忘了更新 lockfile 时 CI 仍会绿（见 issue #35）。
+      - name: Resolve dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Format check
+        run: bash tools/check_format.sh
+
+      - name: Layering check
+        run: bash tools/check_layering.sh
+
+      # 跨包**逐字节相同**的测试辅助文件必须真的相同（见脚本头部的「为什么会有
+      # 重复文件」）。本机与 CI 装载不同字体会让 golden 基线必然有一边失败，
+      # 而报错只说「像素不匹配」，指不到根因。
+      - name: Test support sync check
+        run: bash tools/check_test_support_sync.sh
+
+      # workflow 的 step 不能被注释吞掉：中文注释行尾误接 step 标记（issue #32
+      # 就是这样漏掉 release 的 download-artifact，YAML 仍合法，打 tag 时才炸）。
+      - name: Workflow step structure check
+        run: bash tools/check_workflow_steps.sh
+
+      # 上面那条守卫的假绿/假红风险（注释形态漏检、合法 checkout with 误报、
+      # 别的 step 的 with 错挂、缺 download-artifact、残缺 step）各有断言。
+      - name: Workflow step guard self-test
+        run: bash tools/check_workflow_steps_selftest.sh
+
+      # 门禁本身有没有接上：Dart analyzer 不向上继承父目录配置，成员包漏引根
+      # `analysis_options.yaml` 时 CI 仍「全绿」而严格规则一条没跑（issue #34）。
+      # 这条检查必须在 Analyze 之前——它决定 Analyze 的结果是否可信。
+      - name: Analysis options wiring check
+        run: bash tools/check_analysis_options.sh
+
+      # 两端装配层对同一共享组件的接线必须一致：`ConversationPage` 有 40+ 个
+      # 具名参数，漏接一端**不会让任何测试失败**（页面测试自己传参，两端
+      # router 测试各管一端），只会让用户界面上某个入口静默消失——移动端
+      # 宽屏搜索入口就是这么丢的（issue #33/#39）。
+      - name: Wiring parity check
+        run: bash tools/check_wiring_parity.sh
+
+      # 守卫自己的测试：上面那条检查的**解析器**曾假绿（裸子串匹配命中了
+      # `_SyncPage(` 私有包装，零参数被当成「两端一致」），于是它报「✅」
+      # 而实际有差异（issue #42）。会假绿的守卫比没有守卫更危险——它给出
+      # 「已覆盖」的错觉。故用合成输入钉住解析器的行为。
+      - name: Wiring parity self-test
+        run: bash tools/check_wiring_parity_selftest.sh
+
+      # 提交进 git 的生成物（`packages/spb_data/lib/src/database.g.dart`，
+      # 3900+ 行）必须与源文件同步。改了 drift 表却忘了重跑 build_runner 时，
+      # analyze / test / 其余守卫**全部绿**——因为 `.g.dart` 是 `part of`，
+      # 编译器只看得到旧版本里已有的成员（issue #43，同类：issue #34）。
+      #
+      # ⚠️ 必须在 CI 里跑：本机可以先 `melos run gen` 再提交，而 CI 从干净
+      # checkout 开始，没有增量资产图可依赖。
+      - name: Generated code up to date
+        run: bash tools/check_codegen.sh
+
+      # 上面那条守卫的四个坑（根目录空转 / 生成物未格式化 / 增量资产图非幂等 /
+      # `diff | head` 在 pipefail 下 SIGPIPE）各有一条断言，见脚本头。
+      - name: Codegen guard self-test
+        run: bash tools/check_codegen_selftest.sh
+
+      # 声明了却从未 import 的依赖会**误导**读者（以为模型用 freezed 生成、
+      # 以为 spb_platform 封装了窗口/托盘），且桌面插件会经它传递进移动端
+      # 构建（issue #36）。
+      - name: Unused dependencies check
+        run: bash tools/check_unused_deps.sh
+
+      # AGENTS.md 是本仓库主要协作接口；它引用的函数/字段若不存在（重命名后
+      # 忘了回头改文档），会让读者去找一个不存在的东西（issue #37）。
+      - name: AGENTS.md identifier references
+        run: bash tools/check_agents_refs.sh
+
+      # 上面那条守卫的假绿/假红风险（两个相反方向的判定：文档引用必须存在、
+      # 脚本必须被文档提到；以及 `_selftest.sh` 的豁免规则）各有断言。
+      - name: AGENTS.md refs guard self-test
+        run: bash tools/check_agents_refs_selftest.sh
+
+      # 同上的**数字**版本：§6.12 的「重新评估条件 2」是「spb_features 硬编码
+      # 字符串 > 1500」——文档里的当前值若不准，会基于错误基线做决策
+      # （issue #46）。容差 5%（小漂移放行、大漂移拦住）。
+      - name: AGENTS.md number references
+        run: bash tools/check_agents_numbers.sh
+
+      # 上面那条守卫的假绿/假红风险（无标记空转、大漂移漏检、小漂移误报、
+      # 文档展示的命令与脚本不一致）各有断言。
+      - name: AGENTS.md number guard self-test
+        run: bash tools/check_agents_numbers_selftest.sh
+
+      # `catch (_) {}` 让异常完全消失。issue #40 建好了「导出诊断日志」通道，
+      # 但它的输入只有显式走 SpbLog 的日志——静默 catch 里的异常永远不会出现
+      # 在用户导出的报告里（issue #45）。
+      - name: Silent catch check
+        run: bash tools/check_silent_catches.sh
+
+      # 上面那条守卫的假绿/假红风险（空体漏检、正常 rethrow 被误报、嵌套花括号
+      # 配对错位）各有一条断言。
+      - name: Silent catch guard self-test
+        run: bash tools/check_silent_catches_selftest.sh
+
+      # 构建参数守卫：每个 release 构建 job 必须传 --dart-define=SPB_API_BASE_URL。
+      # 不传则产物用 SpbEnv 默认值 http://127.0.0.1:8000，用户运行时报
+      # 「远程计算机拒绝网络连接」——而 analyze/test/构建全部是绿的（2026-10
+      # 真实缺陷，见 ci.yml 头注与 AGENTS.md §6.33）。
+      # 本机无 release 产物时只做静态检查，二进制断言在 build-* job 之后另跑。
+      - name: Build defines check
+        run: bash tools/check_build_defines.sh
+
+      - name: Build defines guard self-test
+        run: bash tools/check_build_defines_selftest.sh
+
+      - name: Analyze
+        run: dart analyze --fatal-infos .
+
+      # 纯 Dart 包（spb_core/models/api/domain）用 dart test（无 Flutter 引擎，
+      # 秒级启动）；含 UI 的包必须 flutter test。逐包跑而不是根目录一把梭：
+      # 根目录的 `dart test` 不会进 Flutter 包，`flutter test` 又要求逐包执行。
+      #
+      # 跳过没有 test/ 的包：直接对空目录跑 `dart test` 会挂住等输入
+      # （不是干净的非零退出），会把整个 job 拖到超时。将来往这些包里加测试
+      # 无需回来改本文件（下两个循环同样用 `-d` 守卫）。
+      - name: Test pure Dart packages
+        run: |
+          for pkg in spb_core spb_models spb_api spb_domain; do
+            [ -d "packages/$pkg/test" ] || continue
+            echo "=== $pkg ==="
+            (cd "packages/$pkg" && dart test)
+          done
+
+      - name: Test Flutter packages
+        run: |
+          for pkg in spb_data spb_design spb_ui spb_platform spb_features; do
+            [ -d "packages/$pkg/test" ] || continue
+            echo "=== $pkg ==="
+            (cd "packages/$pkg" && flutter test)
+          done
+
+      - name: Test apps
+        run: |
+          for app in spb_desktop spb_mobile; do
+            [ -d "apps/$app/test" ] || continue
+            echo "=== $app ==="
+            (cd "apps/$app" && flutter test)
+          done
+
+      # ── 覆盖率采集（issue #25）───────────────────────────────────────
+      #
+      # 为什么单独一步而不是把 `--coverage` 加到上面的测试循环：
+      #
+      # 1. **纯 Dart 包与 Flutter 包的产物格式不同**。`dart test --coverage`
+      #    产出 `coverage/test/*.json`（需再跑 `coverage:format_coverage`），
+      #    而 `flutter test --coverage` 直接产出 `coverage/lcov.info`。
+      #    `tools/coverage.sh` 封装了这个差异（含逐包汇总表）。
+      # 2. **测试循环要快、要失败即停**；覆盖率是**观测**，不该让它的开销
+      #    （重跑一遍全部测试）影响门禁的反馈速度。
+      #
+      # 注意：这一步会**再跑一遍全部测试**（约 +3 min）。可以接受——
+      # 与 build-* job 并行，不增加关键路径长度。
+      - name: Collect coverage
+        run: bash tools/coverage.sh
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 30
+
+      # 覆盖率**摘要写进 job summary**：不必下载 artifact 就能在 Actions
+      # 页面看到逐包数字（issue #25 的验收项之一）。
+      #
+      # ⚠️ 不用 codecov：它需要仓库 token（私有仓要付费/配置），而本 issue
+      # 只要求「报告可见」，artifact + summary 已满足。将来要趋势图再加。
+      - name: Coverage summary
+        run: |
+          {
+            echo '## 覆盖率（逐包行覆盖率）'
+            echo ''
+            echo '```'
+            bash tools/coverage.sh --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Linux 桌面端出包（验证可构建 + 自包含）────────────────────────
+  build-linux:
+    needs: config
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    steps:
+      - uses: actions/checkout@v5
+
+      # 编译 C++ runner 的最低需求 + **插件的编译期依赖**（AGENTS.md §7）。
+      #
+      # ⚠️ 后三个不是可选的：插件的 CMakeLists 里是 FATAL_ERROR / REQUIRED，
+      # 缺任一个直接编译失败（不是「功能降级」）：
+      #   libkeybinder-3.0-dev          → hotkey_manager_linux
+      #   libayatana-appindicator3-dev  → tray_manager
+      #   libsecret-1-dev               → flutter_secure_storage_linux（REQUIRED）
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa-dev \
+            libkeybinder-3.0-dev libayatana-appindicator3-dev libsecret-1-dev patchelf
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build Linux release
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          set -euo pipefail
+          cd apps/spb_desktop
+          # 只传非空 define：空串会覆盖掉 SpbEnv 的 defaultValue，让「没配」
+          # 变成「配成了空」（理由详 release.yml 同名 step）。
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build linux --release "${args[@]}"
+
+      # 自包含验证（AGENTS.md §7）：ldd 不得缺库，RUNPATH 不得指向 /home。
+      #
+      # ⚠️ 必须先跑 `bundle_linux_deps.sh`（同 release.yml）。Flutter 构建出来的
+      # 插件 `.so` 在 `bundle/lib/` 下，它们的 RUNPATH 默认指向 **Flutter SDK 路径**
+      # （CI 上是 `/home/runner/...`）——不修正就会在这条检查上失败。
+      # 2026-10 实测：漏了这一步，CI 报 `❌ RUNPATH 仍指向 /home`。
+      - name: Bundle Linux deps (RUNPATH fixup)
+        run: bash tools/bundle_linux_deps.sh
+
+      - name: Verify bundle is self-contained
+        run: |
+          cd apps/spb_desktop/build/linux/x64/release/bundle
+          if ldd spb_desktop | grep 'not found'; then
+            echo '❌ 缺动态库'; exit 1
+          fi
+          # 修正后 lib/ 里插件 .so 的 rpath 应为 $ORIGIN（见 bundle_linux_deps.sh）。
+          #
+          # ⚠️ 不要写成 `if find ... -exec sh -c '... | grep -q /home/' \;; then`：
+          # `find` 只要成功遍历就返回 0，**不看 -exec 的退出码**，于是那个 if 恒为真
+          # → 恒报错（假红）。必须先收集命中项再判空。
+          bad=$(find lib -name '*.so*' -exec sh -c \
+            'patchelf --print-rpath "$1" | grep -q /home/ && echo "$1"' _ {} \;)
+          if [ -n "$bad" ]; then
+            echo "❌ 以下库的 RUNPATH 仍指向 /home："
+            echo "$bad"
+            exit 1
+          fi
+          echo '✅ bundle 自包含'
+
+      # 产物**会被人下载运行**：必须确认构建参数真的进了二进制。
+      # 传了 --dart-define 后 SpbEnv 的默认值会被 tree-shake 掉（实测），
+      # 故 AOT 快照里不应再有 127.0.0.1:8000。守卫的静态部分已在上游 quality
+      # job 跑过；这里跑同一条命令是为了让它的二进制断言拿到刚构建的产物。
+      - name: Verify build defines reached the binary
+        run: bash tools/check_build_defines.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-release
+          path: apps/spb_desktop/build/linux/x64/release/bundle/
+          retention-days: 7
+
+  # ── Android APK ───────────────────────────────────────────────────
+  build-android:
+    needs: config
+    runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build APK (release)
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          set -euo pipefail
+          cd apps/spb_mobile
+          args=()
+          [ -n "$DEF_API" ] && args+=("--dart-define=SPB_API_BASE_URL=$DEF_API")
+          [ -n "$DEF_UFS" ] && args+=("--dart-define=SPB_UFS_BASE_URL=$DEF_UFS")
+          [ -n "$DEF_ISS" ] && args+=("--dart-define=SPB_OIDC_ISSUER=$DEF_ISS")
+          [ -n "$DEF_CID" ] && args+=("--dart-define=SPB_OIDC_CLIENT_ID=$DEF_CID")
+          [ -n "$DEF_HOST" ] && args+=("--dart-define=SPB_PREFERRED_HOSTS=$DEF_HOST")
+          args+=("--dart-define=SPB_ENV=prod")
+          flutter build apk --release "${args[@]}"
+
+      # APK 里的 AOT 快照是 lib/arm64-v8a/libapp.so（等）。同样断言默认地址
+      # 已被替换——APK 是最容易被随手发给别人安装的产物。
+      - name: Verify build defines reached the APK
+        run: |
+          set -euo pipefail
+          apk=apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
+          [ -f "$apk" ] || { echo "❌ 未找到 $apk"; exit 1; }
+          tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+          unzip -o -q "$apk" 'lib/*/libapp.so' -d "$tmp"
+          shopt -s nullglob
+          snaps=("$tmp"/lib/*/libapp.so)
+          [ "${#snaps[@]}" -gt 0 ] || { echo "❌ APK 里没有 libapp.so"; exit 1; }
+          for snap in "${snaps[@]}"; do
+            n=$(strings -a "$snap" | grep -c '127\.0\.0\.1:8000' || true)
+            if [ "$n" -gt 0 ]; then
+              echo "❌ $(basename "$(dirname "$snap")")/libapp.so 残留默认地址（$n 处）"
+              exit 1
+            fi
+            echo "✅ $(basename "$(dirname "$snap")")/libapp.so 未残留默认地址"
+          done
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: android-apk
+          path: apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+
+  # ── Windows 桌面端（public 仓库标准 runner 免费，PR 也验证）─────────
+  # 曾带 `if: github.event_name == 'push'`，为省私有仓库 2× 配额；仓库转
+  # public 后该前提已不成立，而 Windows 是本机唯一无法构建的平台，
+  # PR 阶段必须验证（否则 Windows 特有编译错误只在合并后才暴露）。
+  build-windows:
+    needs: config
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build Windows release
+        shell: pwsh
+        working-directory: apps/spb_desktop
+        # 走 env 而非把值插进脚本：`${{ }}` 插值发生在 shell 解析之前，
+        # 地址里含引号/空格会把命令拼坏。
+        env:
+          DEF_API: ${{ needs.config.outputs.api }}
+          DEF_UFS: ${{ needs.config.outputs.ufs }}
+          DEF_ISS: ${{ needs.config.outputs.iss }}
+          DEF_CID: ${{ needs.config.outputs.cid }}
+          DEF_HOST: ${{ needs.config.outputs.host_pref }}
+        run: |
+          $defines = @()
+          if ($env:DEF_API) { $defines += "--dart-define=SPB_API_BASE_URL=$env:DEF_API" }
+          if ($env:DEF_UFS) { $defines += "--dart-define=SPB_UFS_BASE_URL=$env:DEF_UFS" }
+          if ($env:DEF_ISS) { $defines += "--dart-define=SPB_OIDC_ISSUER=$env:DEF_ISS" }
+          if ($env:DEF_CID) { $defines += "--dart-define=SPB_OIDC_CLIENT_ID=$env:DEF_CID" }
+          if ($env:DEF_HOST) { $defines += "--dart-define=SPB_PREFERRED_HOSTS=$env:DEF_HOST" }
+          $defines += '--dart-define=SPB_ENV=prod'
+
+          Write-Host "flutter build windows --release $($defines -join ' ')"
+          flutter build windows --release @defines
+
+      # VC++ 运行库不在构建产物里：目标机没装 VC++ Redistributable 会直接
+      # 闪退且报错不友好（AGENTS.md §8 坑 1）。必须手动拷进产物目录。
+      - name: Bundle VC++ runtime
+        shell: pwsh
+        working-directory: apps/spb_desktop
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          Copy-Item "$($crt.FullName)\*.dll" build\windows\x64\runner\Release\
+          Get-ChildItem build\windows\x64\runner\Release\*.dll | Select-Object -ExpandProperty Name
+
+      # 注意路径必须从**仓库根**写起：upload-artifact 的 path 相对 GITHUB_WORKSPACE，
+      # 不继承上面 step 的 working-directory。写成 `build/...` 会静默传一个空目录
+      # （v4 默认 warn 而非 fail），产物看似上传成功实则没有 exe。
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-release
+          path: apps/spb_desktop/build/windows/x64/runner/Release/
+          retention-days: 7
