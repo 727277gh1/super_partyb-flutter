@@ -727,6 +727,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   ///
   /// 点击建议时设置，发送时经 [ConversationPage.onSend] 透传给控制器。
   /// null 表示未标注（服务端 routingMode=auto 照常走分类链）。
+  ///
+  /// ## ⚠️ 它必须被**清掉**，不能一直留着
+  ///
+  /// 这个值**在界面上不可见**：AppBar 的 [AgentSwitcher] 显示的是
+  /// `_group.activeSession.agentId`（服务端权威绑定），不是它。于是「点过一次
+  /// 建议卡」之后，后续每条消息都带着这个陈旧的 `agent_id` 发出，而用户看不到
+  /// 任何提示。
+  ///
+  /// 更糟的是它不只是「用旧 agent 回答」：服务端 `resolveGroupAgent` 的优先级
+  /// 第 1 条是请求里显式的 `agent_id`，而 `agentExplicit` 会走到
+  /// `ensureGroupAgentBinding(replace: true)`——即**归档当前绑定并重新绑到这个
+  /// 陈旧 agent**。用户刚在 AppBar 切到 B，发一条消息就被**静默改回** A，而
+  /// 切换时那句「已切换 Agent」的提示还在屏幕上。
+  ///
+  /// 故三个清除点（缺任一个都会留下这条通路）：
+  /// - 切换成功后（[_switchAgent]：用户的显式选择优先于旧标注）；
+  /// - 换对话时（[didUpdateWidget]：State 会被 Flutter 复用，不清就泄漏到
+  ///   下一个对话）；
+  /// - 发送成功后（[build] 里的 `onSend`：标注的语义是「**下一条**消息由谁
+  ///   回答」，一次性。只在成功时清——失败那条没发出去，用户重试应当仍由
+  ///   同一个 agent 回答）。
   String? _selectedAgentId;
 
   /// 是否正在解析 userId（防重复请求）。
@@ -779,6 +800,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   /// 已发过 group 拉取（防重复请求）。
   bool _loadingGroup = false;
+
+  /// 「拉取期间又被请求了一次」的标志（见 [_loadGroup]）。
+  ///
+  /// 与 [_resolveAgain] 同一取向：在途时**不能**直接丢弃后来的请求。
+  bool _groupReloadAgain = false;
 
   /// 最近一次归约出的执行中活动快照（按 turnId 索引）。
   ///
@@ -926,6 +952,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 先置空再拉：State 被 Flutter 复用，不置空会让新对话的设置弹层
       // 短暂显示上一个对话的目标与开关。
       _group = null;
+      // 建议卡的 agent 标注同理：它是**上一个对话**里某条建议的标注，带进
+      // 新对话会让第一条消息发给一个用户没在这个对话里选过的 agent
+      // （且服务端会据此改写新对话的绑定，见 [_selectedAgentId] 的说明）。
+      _selectedAgentId = null;
       _resolveUserAndFocus();
       _loadGroup();
     }
@@ -933,13 +963,20 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
   /// 把本对话切到另一个 agent（含「同 Agent 开新会话」）。
   ///
-  /// ## 为什么切换后要重拉 group **并**刷新时间线
+  /// ## 切换后做什么
   ///
-  /// - 重拉 group：`activeSession.agentId` 变了，AppBar 的标签要跟着变；
-  /// - 刷新时间线：服务端会归档旧 binding，新 binding 的 `session_id` 是
-  ///   lazy 的（下一轮 turn 才回填）。虽然历史消息仍属于这个 group（时间线
-  ///   不会少内容），但重拉能保证「下一轮回复来自新 agent」这一事实有最新
-  ///   的服务端状态兜底，而不是靠本地推断。
+  /// 1. **重拉 group**：`activeSession.agentId` 变了，AppBar 的标签要跟着变
+  ///    （它读的是 `_group.activeSession`，不是本地推断）；
+  /// 2. **清掉建议卡的 agent 标注**（[_selectedAgentId]）：用户的显式切换必须
+  ///    压过之前某条建议卡留下的标注，否则下一条消息会带着旧 `agent_id` 发出，
+  ///    而服务端会据此把绑定**改回**旧 agent（详见该字段的文档）；
+  /// 3. 弹一句「已切换 Agent / 已开始新会话」。
+  ///
+  /// ## 有意**不**刷新时间线
+  ///
+  /// 历史消息属于这个 group，切换不改变它们（服务端只归档 binding，不动
+  /// `chat_events`）；SSE 是 user 级订阅，也不因切换而重连。故重拉时间线只会
+  /// 让列表闪一下、把用户正在读的位置打乱，没有任何新信息。
   ///
   /// 失败弹 SnackBar：切换是用户主动发起且带确认的动作，失败必须告知——
   /// 静默失败会让用户以为切好了，接着发消息却发现回复还来自旧 agent。
@@ -960,6 +997,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             forceNewSession: forceNewSession,
           );
       if (!mounted) return result;
+      // 先清标注再重拉：两者都在同一个同步段里完成，避免「已重拉但标注还在」
+      // 的中间态被用户的下一次发送撞上。
+      setState(() => _selectedAgentId = null);
       await _loadGroup();
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -1003,15 +1043,31 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     return e.message;
   }
 
-  /// 拉取当前 group 的权威状态（设置弹层的初始值）。
+  /// 拉取当前 group 的权威状态（设置弹层的初始值 + AppBar 的 agent 标签）。
   ///
   /// 失败只记日志、不阻断对话页：设置入口仍可点开，显示的是「未配置」形态。
+  ///
+  /// ## 为什么是 `do/while` 重跑而不是「在途时直接 return」
+  ///
+  /// 本方法被 `initState`、`didUpdateWidget`、切换 agent 多处调用。若在途时
+  /// 直接丢弃后来的请求，「切换 agent 后重拉」会在页面刚挂载（首拉还在途）
+  /// 时被**静默跳过**——AppBar 的标签停在旧 agent，没有错误、没有日志，用户
+  /// 只看到「切了但没变」。与 [_resolveUserAndFocus] 同一取向。
   Future<void> _loadGroup() async {
-    if (!mounted || _loadingGroup) return;
+    if (!mounted) return;
+    if (_loadingGroup) {
+      _groupReloadAgain = true;
+      return;
+    }
     _loadingGroup = true;
     try {
-      final group = await ref.read(chatApiProvider).getGroup(widget.groupId);
-      if (mounted) setState(() => _group = group);
+      do {
+        _groupReloadAgain = false;
+        if (!mounted) return;
+        final group = await ref.read(chatApiProvider).getGroup(widget.groupId);
+        if (!mounted) return;
+        setState(() => _group = group);
+      } while (_groupReloadAgain && mounted);
     } on SpbError catch (e) {
       SpbLog.warn('读取对话设置失败', {
         'groupId': widget.groupId,
@@ -2193,7 +2249,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           }),
       // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
       // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
-      onSend: (text) => controller.send(input: text, agentId: _selectedAgentId),
+      //
+      // 发完就清（见 [_selectedAgentId] 的文档）：标注的语义是「**下一条**消息
+      // 由谁回答」，留着会让后面每条消息都带着它。只在成功时清——失败那条没发
+      // 出去，用户重试应当仍由同一个 agent 回答；且只在值没被改过时清，否则会
+      // 把在途期间用户新点的另一条建议的标注也抹掉。
+      onSend: (text) {
+        final agentId = _selectedAgentId;
+        return controller.send(input: text, agentId: agentId).then<void>((_) {
+          if (mounted && _selectedAgentId == agentId) {
+            setState(() => _selectedAgentId = null);
+          }
+        });
+      },
       // 失败 turn 的重发：锁定原 group + 原 agent，`manual` 路由跳过归属判定。
       // 不传 requestId → 服务端新建 turn（沿用旧 id 会幂等命中那个已失败的 turn）。
       onRetryTurn: (text, agentId) => controller
@@ -2220,6 +2288,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           );
         }
       },
+      // 建议卡标注了 agent_id：记住它，下一条消息（含回填后用户改过再发的）
+      // 由这个 agent 回答。注意它是**一次性**的（发送成功后即清，
+      // 见 [_selectedAgentId]）。
       onSelectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
     );
   }

@@ -257,7 +257,21 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    await widget.switchAgent(agentId, forceNewSession: forceNewSession);
+    // 吞掉异常只记日志：装配层（两端 router 的 `_switchAgent`）**已经**弹过
+    // SnackBar 并 rethrow 了。不接住就会变成未捕获的异步异常，落到全局处理器
+    // （§6.24 的三道防线）——用户界面上看不到新信息，日志里多一条与已知失败
+    // 重复的堆栈。
+    //
+    // 不能在此弹提示：`AgentSwitcher` 不知道失败原因该怎么描述（那是装配层
+    // 的 `_describeSwitchError`），也不应该知道。
+    try {
+      await widget.switchAgent(agentId, forceNewSession: forceNewSession);
+    } on Object catch (e) {
+      SpbLog.debug('切换 Agent 失败（装配层已提示）', {
+        'agentId': agentId,
+        'error': e.toString(),
+      });
+    }
   }
 
   String _labelFor(String agentId) {
