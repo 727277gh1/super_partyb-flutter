@@ -92,6 +92,117 @@ class ChatApi {
   Future<void> unarchiveGroup(String groupId) =>
       _post('/chat/groups/$groupId/unarchive');
 
+  // ==================== 归档结项快照 ====================
+  //
+  // 端点见 Go `internal/server/archive_site.go` 与 `archive_snapshot_download.go`。
+  //
+  // ## 为什么列表摘要走 group DTO，而这里只做「动作 + 下载」
+  //
+  // 快照摘要已嵌在 `GET /chat/groups` 的每个 group 里（`archive_snapshot`），
+  // 列表页不需要逐个请求（N+1）。这里只提供：
+  //   - 下载正文（markdown / html）
+  //   - 站点重新部署 / 公开（两个异步动作）
+  //
+  // ## 为什么不提供「查询快照列表」方法
+  //
+  // `GET .../archive-snapshots` 返回该 group 的**全部历史版本**，而客户端
+  // 目前只展示最新版（已嵌在 group 里）。没有调用方的方法不提前写——
+  // 写了就要跟着服务端演进维护，且容易被人误用成列表数据源（N+1）。
+
+  /// `GET .../archive-snapshots/:snapshot_id/markdown`
+  ///
+  /// 下载快照全文 markdown（权威正文，含诊断字段与完整对话摘要）。
+  ///
+  /// ## 为什么返回字节而不是 String
+  ///
+  /// 服务端流式转发 UFS 内容并带 `Content-Disposition: attachment`。返回
+  /// `String` 会强制客户端按 UTF-8 解码——markdown 确实是 UTF-8，但保持字节
+  /// 让调用方自己决定（写文件、解码展示、或原样转存）。与
+  /// [MiniappApi.downloadArtifact] 的取舍一致。
+  ///
+  /// ## 状态码语义
+  ///
+  /// - 409：快照正文未就绪（`status != ready`），或该快照没有 markdown 形态
+  /// - 410：UFS 侧文件已删（快照行还在，正文没了）
+  /// - 502：UFS 不可达
+  ///
+  /// 这些都经 [_unwrap] 转成 [HttpError]，调用方按 `statusCode` 区分。
+  Future<List<int>> downloadSnapshotMarkdown(
+    String groupId,
+    String snapshotId,
+  ) => _downloadSnapshot(groupId, snapshotId, 'markdown');
+
+  /// `GET .../archive-snapshots/:snapshot_id/html`
+  ///
+  /// 下载自包含 HTML（单文件、内联样式，离线可读）。语义同
+  /// [downloadSnapshotMarkdown]。
+  Future<List<int>> downloadSnapshotHtml(String groupId, String snapshotId) =>
+      _downloadSnapshot(groupId, snapshotId, 'html');
+
+  Future<List<int>> _downloadSnapshot(
+    String groupId,
+    String snapshotId,
+    String format,
+  ) async {
+    final path = '/chat/groups/$groupId/archive-snapshots/$snapshotId/$format';
+    try {
+      final res = await _dio.get<List<int>>(
+        path,
+        // 必须显式指定 bytes：默认 ResponseType.json 会拿 markdown/html 去按
+        // JSON 解析（二进制直接失败；文本被解析后再序列化会破坏内容）。
+        options: Options(responseType: ResponseType.bytes),
+      );
+      final status = res.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        throw HttpError(status, 'HTTP $status', body: _bodyPreview(res.data));
+      }
+      return res.data ?? const <int>[];
+    } on DioException catch (e) {
+      throw _toSpbError(e);
+    }
+  }
+
+  /// `POST .../archive-snapshots/:snapshot_id/site/redeploy`
+  ///
+  /// 重新触发站点渲染。用于：
+  /// - UFS 重启后站点被重置为 failed，需要一次显式 redeploy 才能恢复；
+  /// - 改了站点源想重新编译；
+  /// - 首次发布超时（`render_status` 长期 pending）。
+  ///
+  /// ## 返回值的两种「非错误」状态
+  ///
+  /// 服务端可能返回 `site_status` 为 `pending`（渲染仍在进行）或 `none`
+  /// （站点从未建成、已重置待 worker 重建）——都是 **202 语义**，不是失败。
+  /// 调用方应据此刷新列表而不是报错。
+  Future<ArchiveSnapshotSiteAction> redeploySnapshotSite(
+    String groupId,
+    String snapshotId,
+  ) => _siteAction(groupId, snapshotId, 'redeploy');
+
+  /// `POST .../archive-snapshots/:snapshot_id/site/publish`
+  ///
+  /// 把站点从 staging 切到 production（**公开可见**）。
+  ///
+  /// ## ⚠️ UI 必须二次确认
+  ///
+  /// 发布后任何人拿到 URL 就能读，而快照含对话摘要与工作区结构。这是不可逆的
+  /// 对外动作（撤回只能重新 deploy 回 staging，URL 已可能被转发出去）。
+  Future<ArchiveSnapshotSiteAction> publishSnapshotSite(
+    String groupId,
+    String snapshotId,
+  ) => _siteAction(groupId, snapshotId, 'publish');
+
+  Future<ArchiveSnapshotSiteAction> _siteAction(
+    String groupId,
+    String snapshotId,
+    String action,
+  ) async {
+    final res = await _post(
+      '/chat/groups/$groupId/archive-snapshots/$snapshotId/site/$action',
+    );
+    return ArchiveSnapshotSiteAction.fromJson(_asMap(res));
+  }
+
   // ==================== 群级开关与目标 ====================
   //
   // 这一组全部是服务端注册的 **PUT 专用端点**（`chat_ext.go:83-89`），

@@ -8,6 +8,8 @@ library;
 //   ChatEvent / EventTypes          —— 聊天事件与事件类型常量
 //   ContextUsage / ContextCost      —— 上下文用量与费用（context_update 归一）
 //   ChatGroup / ActiveSession       —— 对话分组与 agent 绑定会话
+//   ArchiveSnapshot / ArchiveSnapshotSite / ArchiveSnapshotLinks
+//                                —— 归档结项快照摘要（嵌在 ChatGroup.archiveSnapshot）
 //   ChatInboxMessage                —— 收件箱消息（pending 接口的真实返回）
 //   ChatTurn                        —— 对话轮次
 //   ChatTurnSchedule                —— 自动续跑排程（camelCase；policyJson 取 group 归属）
@@ -26,6 +28,7 @@ library;
 //   GoalStatus / GoalTasksSource / GoalTaskStatus / GoalTaskOrigin
 //                                —— 结构化目标与任务（迁移 0022 的 chat_goals / chat_goal_tasks）
 export 'src/agent.dart';
+export 'src/archive_snapshot.dart';
 export 'src/chat_confirmation.dart';
 export 'src/chat_event.dart';
 export 'src/chat_group.dart';

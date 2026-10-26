@@ -299,6 +299,32 @@ void main() {
       expect(b.activeSession?.agentSessionId, a.activeSession?.agentSessionId);
       expect(b.activeSession?.role, a.activeSession?.role);
       expect(b.activeSession?.joinedAt, a.activeSession?.joinedAt);
+      // 归档快照：字段漏在 toJson 里会表现为「缓存读回后归档行丢了结项入口」，
+      // 且**不报错**（fromJson 对缺失键给 null）。
+      expect(b.archiveSnapshot?.id, a.archiveSnapshot?.id);
+      expect(b.archiveSnapshot?.version, a.archiveSnapshot?.version);
+      expect(b.archiveSnapshot?.status, a.archiveSnapshot?.status);
+      expect(
+        b.archiveSnapshot?.archiveReason,
+        a.archiveSnapshot?.archiveReason,
+      );
+      expect(b.archiveSnapshot?.summary, a.archiveSnapshot?.summary);
+      expect(b.archiveSnapshot?.createdAt, a.archiveSnapshot?.createdAt);
+      expect(
+        b.archiveSnapshot?.downloadAvailable,
+        a.archiveSnapshot?.downloadAvailable,
+      );
+      expect(b.archiveSnapshot?.site.status, a.archiveSnapshot?.site.status);
+      expect(b.archiveSnapshot?.site.slug, a.archiveSnapshot?.site.slug);
+      expect(
+        b.archiveSnapshot?.site.accessUrl,
+        a.archiveSnapshot?.site.accessUrl,
+      );
+      expect(
+        b.archiveSnapshot?.links?.markdown,
+        a.archiveSnapshot?.links?.markdown,
+      );
+      expect(b.archiveSnapshot?.links?.html, a.archiveSnapshot?.links?.html);
     }
 
     test('全字段 round-trip：fromJson(toJson()) 关键字段全等', () {
@@ -320,6 +346,24 @@ void main() {
           'joined_at': '2024-03-05T08:01:00Z',
         },
         'current_goal': snapshot('结构化目标'),
+        'archive_snapshot': {
+          'id': 'snap_1',
+          'version': 2,
+          'status': 'ready',
+          'archive_reason': 'explicit',
+          'summary': '做完了前三章',
+          'created_at': '2024-03-05T08:09:00Z',
+          'download_available': true,
+          'site': {
+            'status': 'ready',
+            'slug': 'g-grp_1',
+            'access_url': '/_staging/ufs_sites/g-grp_1/',
+          },
+          'links': {
+            'markdown': '/chat/groups/grp_1/archive-snapshots/snap_1/markdown',
+            'html': '/chat/groups/grp_1/archive-snapshots/snap_1/html',
+          },
+        },
         'created_at': '2024-03-05T08:00:00Z',
         'updated_at': '2024-03-05T08:09:10Z',
       });

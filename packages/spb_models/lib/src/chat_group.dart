@@ -1,3 +1,5 @@
+import 'archive_snapshot.dart';
+
 /// 对话分组（ChatGroup）。
 ///
 /// 对应 Go 侧 `groupRowToDict`（`internal/server/chat.go`）的响应结构。
@@ -15,6 +17,7 @@ class ChatGroup {
     this.metadata,
     this.activeSession,
     this.currentGoal,
+    this.archiveSnapshot,
   });
 
   final String id;
@@ -43,6 +46,18 @@ class ChatGroup {
   /// 当前 goal 快照（`GET /goals/current` 同结构）。
   final Map<String, dynamic>? currentGoal;
 
+  /// 归档结项快照摘要（设计文档 §8.4）。
+  ///
+  /// ## 语义：null 与「没加载」是两件事
+  ///
+  /// 服务端对**无快照**的 group 显式写 `archive_snapshot: null`（不省略键），
+  /// 所以 null 的意思是「这个 group 确实没有快照」。这与 `active_session`
+  /// 相反——后者无值时省略键。
+  ///
+  /// 客户端只需一个 null 判定：非归档 group 永远没有快照，归档 group 在
+  /// 快照生成前也没有。区分「没有」与「没加载」在本字段上没有实际用途。
+  final ArchiveSnapshot? archiveSnapshot;
+
   /// 返回一个只替换 [metadata] 的副本。
   ///
   /// ## 为什么是整体替换（而不是深合并）
@@ -66,6 +81,7 @@ class ChatGroup {
     metadata: next,
     activeSession: activeSession,
     currentGoal: currentGoal,
+    archiveSnapshot: archiveSnapshot,
   );
 
   /// 返回一个只替换 [currentGoal] 的副本。
@@ -91,6 +107,7 @@ class ChatGroup {
     metadata: metadata,
     activeSession: activeSession,
     currentGoal: next,
+    archiveSnapshot: archiveSnapshot,
   );
 
   bool get isArchived => status == 'archived';
@@ -199,6 +216,7 @@ class ChatGroup {
     metadata: _asMap(json['metadata']),
     activeSession: ActiveSession.maybeFromJson(json['active_session']),
     currentGoal: _asMap(json['current_goal']),
+    archiveSnapshot: _snapshot(json['archive_snapshot']),
     createdAt: _date(json['created_at']),
     updatedAt: _date(json['updated_at']),
   );
@@ -234,9 +252,21 @@ class ChatGroup {
     if (metadata != null) 'metadata': metadata,
     if (activeSession != null) 'active_session': activeSession!.toJson(),
     if (currentGoal != null) 'current_goal': currentGoal,
+    if (archiveSnapshot != null) 'archive_snapshot': archiveSnapshot!.toJson(),
     'created_at': createdAt.toIso8601String(),
     'updated_at': updatedAt.toIso8601String(),
   };
+
+  /// 解析 `archive_snapshot` 子对象。
+  ///
+  /// 服务端对无快照的 group 显式写 `null`（不省略键），故 null / 非 Map 都
+  /// 归一成 null。与 `_asMap` 分开：后者返回空 Map 表示「字段存在但为空」，
+  /// 而这里 null 表示「确实没有快照」，两者语义不同。
+  static ArchiveSnapshot? _snapshot(Object? v) {
+    if (v is Map<String, dynamic>) return ArchiveSnapshot.fromJson(v);
+    if (v is Map) return ArchiveSnapshot.fromJson(Map<String, dynamic>.from(v));
+    return null;
+  }
 
   static Map<String, dynamic>? _asMap(Object? v) {
     if (v is Map<String, dynamic>) return v;
