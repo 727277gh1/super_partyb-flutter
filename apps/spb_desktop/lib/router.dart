@@ -679,6 +679,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 是否正在解析 userId（防重复请求：`initState` 与 `didUpdateWidget` 都可能触发）。
   bool _resolvingUser = false;
 
+  /// 「解析/聚焦期间又被请求了一次」的标志（见 [_resolveUserAndFocus]）。
+  bool _resolveAgain = false;
+
   /// 已聚焦的 `userId:groupId`，避免重复 start。
   ///
   /// ## 为什么去重键要含 userId 而非只用 groupId
@@ -1165,19 +1168,49 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   }
 
   /// 先解析 userId，再聚焦到当前 group。
+  ///
+  /// ## 为什么是 `do/while` 重跑而不是「在途时直接 return」
+  ///
+  /// 本方法被 `initState` 与 `didUpdateWidget` 都调，而它 await 了整条链
+  /// （`currentUserIdProvider.future` → `_focus` → `_checkGroupSync`）。
+  /// 若在途时直接 return，那么「用户在聚焦还没跑完时就切到了另一个对话」会让
+  /// **新的 groupId 既不被聚焦、也不被探测**，且没有任何重试点——页面看起来
+  /// 停在加载态（或显示上一个对话的时间线）。
+  ///
+  /// 故用一个「重跑」标志：在途期间又有人请求时只置标志，当前这一轮结束后
+  /// 再跑一轮（最多多一轮，不会无限递归——每轮开头清标志）。
   Future<void> _resolveUserAndFocus() async {
-    if (!mounted || _resolvingUser) return;
+    if (!mounted) return;
+    if (_resolvingUser) {
+      _resolveAgain = true;
+      return;
+    }
     _resolvingUser = true;
     try {
-      // 必须先 await 到真实 id：`currentUserIdProvider` 首次读取必然 pending，
-      // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
-      final userId = await ref.read(currentUserIdProvider.future);
-      if (!mounted) return;
-      setState(() => _userId = userId);
-      await _focus(userId);
-      // 探测放在聚焦之后：先让时间线连上（用户立刻看到内容），再在后台问
-      // 「有没有交付物没同步」。反过来会让打开对话多等一次 HTTP 往返。
-      await _checkGroupSync(userId);
+      do {
+        _resolveAgain = false;
+        if (!mounted) return;
+        // 必须先 await 到真实 id：`currentUserIdProvider` 首次读取必然 pending，
+        // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
+        final userId = await ref.read(currentUserIdProvider.future);
+        if (!mounted) return;
+        setState(() => _userId = userId);
+        // `_focus` 失败不得阻断后面的探测：前者是「让时间线连上」，后者是
+        // 「问一句有没有未同步的交付物」。两件事互不依赖，合并在一个 try 里
+        // 会让一次聚焦异常把一个无关的探测也取消掉。
+        try {
+          await _focus(userId);
+        } on SpbError catch (e) {
+          SpbLog.warn('聚焦当前对话失败', {
+            'group': widget.groupId,
+            'error': e.toString(),
+          });
+        }
+        // 探测放在聚焦之后：先让时间线连上（用户立刻看到内容），再在后台问
+        // 「有没有交付物没同步」。反过来会让打开对话多等一次 HTTP 往返。
+        // `_checkGroupSync` 自带 try/catch，不会抛。
+        await _checkGroupSync();
+      } while (_resolveAgain && mounted);
     } on SpbError catch (e) {
       // 取身份失败（未登录 / 网络不可达）：保持加载态并记录。
       // 不构造空 userId 的控制器——那只会发出畸形请求。
@@ -1207,18 +1240,36 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   ///
   /// 判定命中只意味着「有东西没同步」。直接开始拉会让用户在毫无预告的情况下
   /// 看到下载。故先显示提示条，由用户点「立即同步」。
-  Future<void> _checkGroupSync(String userId) async {
+  Future<void> _checkGroupSync() async {
     if (!mounted || _checkingSync) return;
     _checkingSync = true;
     final groupId = widget.groupId;
     try {
       final settings = await ref.read(loadSyncSettingsProvider)();
       if (!mounted) return;
-      if (!settings.auto.onGroupOpen || !settings.canSync) return;
+      // 门控早退必须留痕。
+      //
+      // ## 为什么是 `info` 而不是 `debug`
+      //
+      // `SpbLog._minLevel` 默认就是 `info`，**debug 在生产被过滤**——而
+      // 「用户说开了功能但提示条从不出现」最难排查的一类恰恰是这里：所有
+      // 证据都只在他本机的 debug 日志里。诊断报告（AGENTS.md §6.20）只收
+      // 运行时可见的日志，故必须是 info 级。
+      if (!settings.auto.onGroupOpen || !settings.canSync) {
+        SpbLog.info('进入对话的同步探测被门控跳过', {
+          'group': groupId,
+          'on_group_open': settings.auto.onGroupOpen,
+          'can_sync': settings.canSync,
+          'has_local_root': settings.hasLocalRoot,
+          'is_single_group': settings.scope.isSingleGroup,
+          'selected_groups': settings.scope.groupIds.length,
+        });
+        return;
+      }
 
       final throttle = ref.read(groupSyncThrottleProvider);
       if (!throttle.allows(groupId)) {
-        SpbLog.debug('进入对话触发同步仍在冷却期，跳过', {'group': groupId});
+        SpbLog.info('进入对话触发同步仍在冷却期，跳过', {'group': groupId});
         return;
       }
 
@@ -1228,17 +1279,26 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 否则会把上一个对话的提示条画在新对话上。
       if (widget.groupId != groupId) return;
       if (!result.isStale) {
+        SpbLog.info('进入对话的同步判定：无需同步', {
+          'group': groupId,
+          'need': result.need.name,
+        });
         setState(() => _syncCheck = null);
         return;
       }
       // 只在**即将展示**时记冷却：判定为 upToDate 不该消耗掉冷却期，
       // 否则用户下次进来时真的有新文件了却不提示。
       throttle.markTriggered(groupId);
+      SpbLog.info('进入对话的同步判定：有未同步交付物', {
+        'group': groupId,
+        'pending': result.pendingCount,
+      });
       setState(() => _syncCheck = result);
     } on SpbError catch (e) {
       // 探测失败不影响对话：静默降级（提示条不出现），只记日志。
       // 用户仍可手动同步——那条路径的失败有明确反馈。
-      SpbLog.debug('进入对话时探测同步需求失败', {'error': e.toString()});
+      // 用 info：debug 在生产被过滤，探测失败就变成完全不可见（见上）。
+      SpbLog.info('进入对话时探测同步需求失败', {'group': groupId, 'error': e.toString()});
     } finally {
       _checkingSync = false;
     }
@@ -1256,6 +1316,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     try {
       final report = await ref.read(runGroupSyncActionProvider)(groupId);
       if (!mounted) return;
+      // 同步刚往同步目录写了文件，而「打开 / 定位」的可用性来自
+      // [deliverableLocalIndexProvider]（一个 FutureProvider，读完就缓存）。
+      // 不 invalidate 的话：提示条消失了，但侧边栏里那些文件仍然显示为
+      // 「未同步」——用户点了「已同步 N 个」，却找不到能打开的那几个。
+      //
+      // 只 invalidate 本地索引、**不** bump `_deliverablesReloadToken`：远端
+      // 清单没有变（同步只写本地），bump 只会多一次无意义的 HTTP。
+      ref.invalidate(deliverableLocalIndexProvider(groupId));
       setState(() => _syncCheck = null);
       _showSettingsError(
         report.failed.isEmpty

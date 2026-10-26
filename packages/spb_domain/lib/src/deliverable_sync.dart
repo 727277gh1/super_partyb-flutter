@@ -98,7 +98,26 @@ Future<bool> applyLocalRootChange({
 /// 机器生成产物在 group 内的相对前缀（对齐 webapp 的 `TTS_WORK_REL_PREFIX`）。
 ///
 /// 生产单个 group 可达 67 个语音分段，不剔除会把真正的交付物挤出本地目录。
+///
+/// ⚠️ 前缀**锚定在开头**，且这是三端契约（后端 `groupsync.turnIDFromPath`、
+/// 后端 `agentfilerender.ttsStreamKind`、webapp `parseTTSAudioPath`）。详见
+/// `tts_audio_path.dart` 的类文档——**不要**把它改成「任意位置匹配」。
 const String ttsRelPrefix = 'reports/tts/';
+
+/// 任意层级出现即视为机器产物的路径段（**按段相等**，不做子串匹配）。
+///
+/// | 段 | 产出者 | 为什么不能同步 |
+/// |---|---|---|
+/// | `.archive` | super_partyb `archivesnapshot` worker：`workspace/groups/{gid}/.archive/v{N}/` 下的 `manifest.json` / `snapshot.md` / `snapshot.html` | 结项快照的服务端内部产物，客户端只通过「快照入口」读取（另一条端点），不是交付物 |
+/// | `_attachments` | go-api 的附件暂存区（`CleanupOrphanAttachments(root, "_attachments", …)`，目录本身**不可删**——含活跃 turn） | 同步到本地会让用户看到一堆无法对应的临时附件，且回传时路径也对不上 |
+///
+/// ## 为什么是「任意层级」而不是前缀
+///
+/// `.archive` 出现在 group 根下（`{gid}/.archive/v1/x.md`），而
+/// `_attachments` 按 turn 分目录。它们的位置不是固定的，服务端也没有给出
+/// 稳定的相对前缀。UFS 的 `exclude_prefix` 只能按前缀排除、无法表达「任意
+/// 层级」，故这一层过滤**必须在客户端**做。
+const Set<String> machineGeneratedSegments = {'.archive', '_attachments'};
 
 /// 默认单文件体积上限（10 MB）。
 ///
@@ -163,10 +182,35 @@ bool isMediaMime(String? mime) {
       base.startsWith('video/');
 }
 
-/// group 内相对路径是否命中机器产物前缀。
+/// group 内相对路径是否属于机器生成产物。
 ///
-/// 前缀**锚定在开头**：`x/reports/tts/a.mp3` 不是机器产物目录，不应误伤。
-bool isMachineGenerated(String relPath) => relPath.startsWith(ttsRelPrefix);
+/// 两类判据（命中任一即为机器产物）：
+///
+/// 1. TTS 语音：[ttsRelPrefix] **锚定在开头**——`x/reports/tts/a.mp3` 不是
+///    机器产物目录，不应误伤（三端契约，见该常量的文档）；
+/// 2. 系统产物：[machineGeneratedSegments] 中的任一段出现在**任意层级**
+///    （按段相等，故 `a/.archivex/b.md` 不会误伤）。
+///
+/// ## 入参必须是 **group 内**相对路径
+///
+/// 不是「落盘相对路径」。workspace 布局下后者带 `{gid}/` 前缀，会让第 1 类
+/// 判据永远不命中——下载侧曾因此把 TTS 语音拖到本地（见
+/// [groupScopedRelativePath] 的说明）。调用方见 [shouldSync]。
+bool isMachineGenerated(String relPath) {
+  if (relPath.startsWith(ttsRelPrefix)) return true;
+  // 按段相等：`a/.archive/b` 命中，`a/.archivex/b` 不命中。
+  var start = 0;
+  while (start <= relPath.length) {
+    var end = relPath.indexOf('/', start);
+    if (end < 0) end = relPath.length;
+    if (machineGeneratedSegments.contains(relPath.substring(start, end))) {
+      return true;
+    }
+    if (end == relPath.length) break;
+    start = end + 1;
+  }
+  return false;
+}
 
 /// 决策：null 表示应同步；非 null 表示跳过及原因。
 ///
@@ -185,7 +229,15 @@ SyncSkipReason? shouldSync(
   if (file.isDirectory) return SyncSkipReason.directory;
   if (relPath.isEmpty) return SyncSkipReason.invalidPath;
   if (file.isDeleted) return SyncSkipReason.deleted;
-  if (isMachineGenerated(relPath)) return SyncSkipReason.machineGenerated;
+  // 机器产物判据用**从 UFS 路径派生的 group 内路径**，而不是落盘相对路径。
+  //
+  // 落盘相对路径在 workspace 布局下带 `{gid}/` 段，会让 `reports/tts/` 这个
+  // 「锚定开头」的前缀永远命中不了——同一份 TTS 语音在 `SyncGroupScope` 下被
+  // 跳过、在定向/全范围同步下却被拖下来。见 [groupScopedRelativePath]。
+  //
+  // 派生不出来（路径不在 workspace 下）时退回 relPath：那时它本身已足够。
+  final groupRel = groupScopedRelativePath(file.path) ?? relPath;
+  if (isMachineGenerated(groupRel)) return SyncSkipReason.machineGenerated;
   if (!cfg.includeMedia && isMediaMime(file.mimeType)) {
     return SyncSkipReason.mediaExcluded;
   }

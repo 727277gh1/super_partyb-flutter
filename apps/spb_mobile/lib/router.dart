@@ -732,6 +732,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 是否正在解析 userId（防重复请求）。
   bool _resolvingUser = false;
 
+  /// 「解析/聚焦期间又被请求了一次」的标志（见 [_resolveUserAndFocus]）。
+  bool _resolveAgain = false;
+
   /// 已聚焦的 `userId:groupId`。去重键必须含 userId：只用 groupId 时，
   /// userId 从「未就绪」变为「已就绪」不会改变键，于是新 userId 的控制器
   /// 永不被 start（issue #2 的时序）。
@@ -1668,16 +1671,34 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   }
 
   /// 先解析 userId，再聚焦到当前 group。
+  ///
+  /// ## 为什么是 `do/while` 重跑而不是「在途时直接 return」
+  ///
+  /// 本方法被 `initState` 与 `didUpdateWidget` 都调，而它 await 了
+  /// `currentUserIdProvider.future` 与 `_focus`（后者内部会回填 timeline）。
+  /// 若在途时直接 return，那么「用户在聚焦还没跑完时就切到了另一个对话」会让
+  /// **新的 groupId 永不被聚焦**（`_focused` 仍记着旧的 key），页面停在加载态。
+  ///
+  /// 故用一个「重跑」标志：在途期间又有人请求时只置标志，当前这一轮结束后
+  /// 再跑一轮（最多多一轮，不会无限递归——每轮开头清标志）。与桌面端同构。
   Future<void> _resolveUserAndFocus() async {
-    if (!mounted || _resolvingUser) return;
+    if (!mounted) return;
+    if (_resolvingUser) {
+      _resolveAgain = true;
+      return;
+    }
     _resolvingUser = true;
     try {
-      // 必须先 await 到真实 id：`currentUserIdProvider` 首次读取必然 pending，
-      // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
-      final userId = await ref.read(currentUserIdProvider.future);
-      if (!mounted) return;
-      setState(() => _userId = userId);
-      await _focus(userId);
+      do {
+        _resolveAgain = false;
+        if (!mounted) return;
+        // 必须先 await 到真实 id：`currentUserIdProvider` 首次读取必然 pending，
+        // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
+        final userId = await ref.read(currentUserIdProvider.future);
+        if (!mounted) return;
+        setState(() => _userId = userId);
+        await _focus(userId);
+      } while (_resolveAgain && mounted);
     } on SpbError catch (e) {
       SpbLog.warn('解析当前用户失败，对话页停留在加载态', {'error': e.toString()});
     } finally {

@@ -1547,26 +1547,56 @@ final checkGroupSyncNeedProvider =
         // 带上它之后服务端切到 `updated_at DESC`，第一条即最晚；同时把早已
         // 同步过的旧文件挡在结果外，统计也更准。
         //
-        // 无水位（首次同步这个 group）时不传：那时本地什么都没有，判据不看
-        // 具体时刻（见 `groupSyncNeed` 的 `local.isEmpty` 分支），全量清单只
-        // 需要回答「有没有非目录条目」。
+        // 时间下限：**与同步侧同一口径**。
+        //
+        // 同步侧（`DeliverableSyncUseCase.run`）把「已保存游标 / 本 group 水位」
+        // 与用户配的 `sinceDays` 取更晚者（`effectiveCursor`）。探测侧若不看
+        // `sinceDays`，两边就会对「哪些算未同步」得出不同结论：用户设了
+        // 「只拉最近 30 天」而该 group 的文档全在 60 天前 → 探测按全量数得
+        // stale，同步按 30 天下限列出 0 条 → 提示条报 N 个、同步报「已同步 0 个」、
+        // 水位不前进 → **每次进对话永久重复提示**。
+        final lower = effectiveCursor(
+          saved: mine,
+          sinceDays: settings.sinceDays,
+          nowUnix: nowUnix(),
+        );
+
         final ufs = ref.read(ufsApiProvider);
         final prefix = '$workspaceGroupsPrefix$groupId';
-        // 首次同步（无水位）时拉一页而不是一条：服务端此时按 `created_at DESC`
-        // 排序，而列表里**包含目录**（group 根、`reports/` 等）。`page_size=1`
-        // 恰好取到一个目录时，过滤后会得到 `unknown`——即使下面明明有文件。
-        // 有水位时按 `updated_at DESC` 且已过 `updated_since`，一条即结论。
-        final probeSize = mine == null ? 100 : 1;
-        final page = await ufs.listFiles(
+        // 页大小按 **`lower`**（而不是 `mine`）分档：决定服务端排序模式的
+        // 就是「有没有传 `updated_since`」，而 `lower` 才是那个判据。
+        //
+        // - 有 `lower` → 服务端按 `updated_at DESC` 且已过下限，一条即结论；
+        // - 无 `lower`（首次全量）→ 服务端按 `created_at DESC`，而列表**包含
+        //   目录**，`page_size=1` 恰好取到一个目录时过滤后会得到 `unknown`
+        //   ——即使下面明明有文件。故拉一页（100 条）。
+        final probeSize = lower == null ? 100 : 1;
+        var page = await ufs.listFiles(
           pathPrefix: prefix,
-          updatedSince: mine,
+          updatedSince: lower,
           // 软删除同样会刷新 `updated_at`，故删除也是一种「变化」。不带它
           // 的话，「远端删了、本地还留着」永远判 upToDate，本地副本清不掉。
-          // 首次同步（无水位）不需要：那时本地没有可删的副本。
-          includeDeleted: mine != null,
+          // 首次同步（无水位、且无 sinceDays 下限）不需要：那时本地没有可删的副本。
+          includeDeleted: lower != null,
           page: 1,
           pageSize: probeSize,
         );
+        // 有水位时只拉一条，若那一条恰是**非交付物**（目录 / 机器产物），
+        // 会被 `_isDeliverableEntry` 过滤成 `unknown`——即使后面明明有新文件。
+        // 首次同步的 100 条只修了「无水位」那一半，这一半同样会静默失效。
+        // 故仅在「本页还有更多」时才扩页重探（`total == 1` 说明真的只有它，
+        // 不浪费一次请求）。
+        if (probeSize == 1 &&
+            !page.items.any(_isDeliverableEntry) &&
+            page.hasMore(page: 1, pageSize: probeSize)) {
+          page = await ufs.listFiles(
+            pathPrefix: prefix,
+            updatedSince: lower,
+            includeDeleted: lower != null,
+            page: 1,
+            pageSize: 100,
+          );
+        }
         final latest = latestUpdatedAtOf(
           page.items.where(_isDeliverableEntry).map((e) => e.updatedAtRaw),
         );
@@ -1592,8 +1622,8 @@ final checkGroupSyncNeedProvider =
         while (count < GroupSyncCheckResult.countCap) {
           final res = await ufs.listFiles(
             pathPrefix: prefix,
-            updatedSince: mine,
-            includeDeleted: mine != null,
+            updatedSince: lower,
+            includeDeleted: lower != null,
             page: pageNo,
             pageSize: pageSize,
           );
@@ -1601,8 +1631,8 @@ final checkGroupSyncNeedProvider =
             if (!_isDeliverableEntry(entry)) continue;
             final at = entry.updatedAtRaw?.trim();
             if (at == null || at.isEmpty) continue;
-            // 与判定同一口径：晚于本 group 水位才算「未同步」。
-            if (mine == null || at.compareTo(mine) > 0) count++;
+            // 与判定同一口径：晚于时间下限才算「未同步」。
+            if (lower == null || at.compareTo(lower) > 0) count++;
           }
           if (!res.hasMore(page: pageNo, pageSize: pageSize)) break;
           pageNo++;
@@ -1617,15 +1647,29 @@ final checkGroupSyncNeedProvider =
       };
     });
 
-/// 探测用的「算不算一份待同步交付物」判据：**排除目录条目**。
+/// 探测用的「算不算一份待同步交付物」判据：**排除目录条目与机器产物**。
 ///
-/// ## 为什么必须排除
+/// ## 为什么必须排除目录
 ///
 /// UFS 列表里包含目录（group 根、`reports/`、`assets/` 等）。而目录**永远
 /// 同步不了**——`shouldSync` 的第一条就是跳过目录，故它不会被 `markSynced`、
 /// 也就不会抬水位。把它算进「最晚时间」会让一个「只多了几个空目录」的 group
 /// 被判 stale 且**永远追不上**：每次进对话都提示一遍，每轮同步什么都不做。
-bool _isDeliverableEntry(UfsFileEntry entry) => !entry.isDirectory;
+///
+/// ## 为什么必须排除机器产物（同一条理由，但更隐蔽）
+///
+/// `shouldSync` 对 `reports/tts/**`、`.archive/**`、`_attachments/**` 同样
+/// 「跳过且不记录」，它们**也不会**抬水位。生产实测有 312 个 TTS 语音文件，
+/// 故任何「最新变动是 TTS」的 group 都会永久 stale：提示条一直在，点同步
+/// 却什么都不同步。
+///
+/// 判据用 `groupScopedRelativePath`（从 UFS 路径派生），与 `shouldSync`
+/// 同一口径——不能用 `entry.path` 直接判，它带 `/workspace/groups/{gid}/` 前缀。
+bool _isDeliverableEntry(UfsFileEntry entry) {
+  if (entry.isDirectory) return false;
+  final groupRel = groupScopedRelativePath(entry.path) ?? entry.path;
+  return !isMachineGenerated(groupRel);
+}
 
 /// 一轮同步的实际执行（不含在途状态管理）。
 Future<SyncReport> _runSync(Ref ref) async {

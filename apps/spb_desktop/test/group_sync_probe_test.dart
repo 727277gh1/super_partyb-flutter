@@ -73,6 +73,14 @@ void main() {
         // `dioProvider`——后者是 PartyB API（`/pba`），打不到 UFS。
         ufsApiProvider.overrideWithValue(UfsApi(dio)),
         syncStateStoreProvider.overrideWithValue(store),
+        // **必须**覆盖：`preferencesStoreProvider` 若不覆盖会去开**真实**的
+        // `~/.local/share/super_partyb/sync.db`。而下面的 `configure` / 偏好
+        // 写入会**永久污染开发机上的真实偏好**（实测：写入 `sync.since_days=1`
+        // 后，后续所有用例因多了 `updated_since` 而报「无匹配路由」）。
+        //
+        // 覆盖成同一个内存库也顺带消除了 drift 的「同一进程建了两个
+        // AppDatabase」告警。
+        appDatabaseProvider.overrideWithValue(db),
       ],
     );
   });
@@ -353,6 +361,165 @@ void main() {
       final result = await check();
       expect(result.need, GroupSyncNeed.unknown);
       expect(result.pendingCount, 0);
+    });
+
+    test('探测页只有目录但下面还有文件 → 仍判 stale（扩页重探）', () async {
+      // ## 为什么这条必须存在
+      //
+      // 有水位时只拉一条（`page_size=1`）。若那一条恰是目录，过滤后就得到
+      // `unknown`——即使后面明明有新文件。而目录的 `updated_at` **只在创建
+      // 时设置**（UFS 不因写子文件而抬升它），故「水位之后新建的目录」正好
+      // 会排在最前；`updated_at DESC` 在秒级同秒时排序不确定，目录与同秒
+      // 新文件会争第一位——属真实 flakiness，不是理论边界。
+      //
+      // 首次同步的 100 条只修了「无水位」那一半。
+      await configure(localRoot: '/tmp/sync');
+      await seedWatermark('2026-10-21T08:00:00Z');
+
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [dir('$root$groupId/newdir/', '2026-10-21T09:30:00Z')],
+          'total': 2,
+        }),
+        queryParameters: watermarkQuery('2026-10-21T08:00:00Z', pageSize: 1),
+      );
+      // 扩页重探（同样带 updated_since，只是页大小 100）。
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [
+            dir('$root$groupId/newdir/', '2026-10-21T09:30:00Z'),
+            file('$root$groupId/reports/a.md', '2026-10-21T09:00:00Z'),
+          ],
+          'total': 2,
+        }),
+        queryParameters: watermarkQuery('2026-10-21T08:00:00Z', pageSize: 100),
+      );
+
+      final result = await check();
+      expect(
+        result.need,
+        GroupSyncNeed.stale,
+        reason: '第一条是目录不该得出 unknown——下面还有新文件',
+      );
+      expect(result.pendingCount, 1);
+    });
+
+    test('探测页只有一条目录且 total=1 → 不扩页（不浪费一次请求）', () async {
+      // 与上一条互补：`total == 1` 说明真的只有它，扩页也只会拿到同一条。
+      // 没注册 page_size=100 的 mock：真发出去会抛「无匹配路由」。
+      await configure(localRoot: '/tmp/sync');
+      await seedWatermark('2026-10-21T08:00:00Z');
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [dir('$root$groupId/reports/', '2026-10-21T09:00:00Z')],
+          'total': 1,
+        }),
+        queryParameters: watermarkQuery('2026-10-21T08:00:00Z', pageSize: 1),
+      );
+
+      final result = await check();
+      expect(result.need, GroupSyncNeed.unknown);
+    });
+
+    test('探测页只有机器产物 → unknown（机器产物同样永远同步不了）', () async {
+      // 与目录同一条理由：`shouldSync` 对 `reports/tts/**`、`.archive/**`
+      // 也是「跳过且不记录」——它们不会 `markSynced`、不会抬水位。生产实测
+      // 312 个 TTS 文件，故任何「最新变动是 TTS」的 group 都会永久 stale：
+      // 提示条一直在，点同步却什么都不同步。
+      await configure(localRoot: '/tmp/sync');
+      await seedWatermark('2026-10-21T08:00:00Z');
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [
+            file(
+              '$root$groupId/reports/tts/turn1/a.mp3',
+              '2026-10-21T09:00:00Z',
+            ),
+          ],
+          'total': 1,
+        }),
+        queryParameters: watermarkQuery('2026-10-21T08:00:00Z', pageSize: 1),
+      );
+
+      final result = await check();
+      expect(result.need, GroupSyncNeed.unknown);
+      expect(result.pendingCount, 0);
+    });
+
+    test('统计不把机器产物算进去', () async {
+      await configure(localRoot: '/tmp/sync');
+      await seedWatermark('2026-10-21T08:00:00Z');
+
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [file('$root$groupId/new.md', '2026-10-21T09:00:00Z')],
+          'total': 3,
+        }),
+        queryParameters: watermarkQuery('2026-10-21T08:00:00Z', pageSize: 1),
+      );
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [
+            file('$root$groupId/new.md', '2026-10-21T09:00:00Z'),
+            file(
+              '$root$groupId/reports/tts/turn1/a.mp3',
+              '2026-10-21T09:10:00Z',
+            ),
+            file(
+              '$root$groupId/.archive/v1/snapshot.md',
+              '2026-10-21T09:20:00Z',
+            ),
+          ],
+          'total': 3,
+        }),
+        queryParameters: watermarkQuery('2026-10-21T08:00:00Z', pageSize: 100),
+      );
+
+      final result = await check();
+      expect(result.pendingCount, 1, reason: 'TTS 与 .archive 同步不了，不能报给用户');
+    });
+
+    test('sinceDays 与同步侧同口径：下限外的文件不算未同步', () async {
+      // ## 为什么这条必须存在
+      //
+      // 同步侧把「已保存游标 / 本 group 水位」与 `sinceDays` 取更晚者
+      // （`effectiveCursor`）。探测侧若只看水位不看 `sinceDays`，两边就会
+      // 对「哪些算未同步」得出不同结论：用户设了「只拉最近 30 天」而该 group
+      // 的文档全在 60 天前 → 探测按全量数得 stale，同步按 30 天下限列出 0 条
+      // → 提示条报 N 个、同步报「已同步 0 个」、水位不前进 → **每次进对话
+      // 永久重复提示**。
+      //
+      // 这里给一个很宽泛的下限（1 天），使 `lower = now - 1d` 远晚于远端
+      // 那条文档 → 服务端按 `updated_since` 返回 0 条 → unknown。
+      await configure(localRoot: '/tmp/sync');
+      final prefs = container.read(preferencesStoreProvider);
+      await prefs.setInt(sinceDaysPrefKey, value: 1);
+
+      // 无水位（首次同步）+ sinceDays=1 → 仍应带 updated_since。
+      // 用 `updated_since` 存在的查询参数匹配：若实现没传，这条用例会因
+      // 「无匹配路由」而失败——比数字断言更直接。
+      adapter.onGet(
+        '/api/files',
+        (server) =>
+            server.reply(200, {'items': <Map<String, dynamic>>[], 'total': 0}),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': '$root$groupId',
+          'include_deleted': 'true',
+          'page': 1,
+          'page_size': 1,
+          'updated_since': Matchers.any,
+        },
+      );
+
+      final result = await check();
+      expect(result.need, GroupSyncNeed.unknown);
     });
   });
 

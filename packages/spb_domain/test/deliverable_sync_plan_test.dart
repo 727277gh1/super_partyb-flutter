@@ -284,6 +284,56 @@ void main() {
       expect(isMachineGenerated('reports/a.md'), isFalse);
     });
 
+    test('workspace 布局下 TTS 同样被跳过（不靠落盘路径判）', () {
+      // ## 为什么这条必须存在
+      //
+      // 曾经 `shouldSync` 拿的是**落盘相对路径**（`{gid}/reports/tts/a.mp3`），
+      // 而 `isMachineGenerated` 的前缀锚定在开头 → 永远命中不了。于是同一份
+      // TTS 语音在 `SyncGroupScope` 下被跳过、在定向/全范围同步下却被拖下来
+      // （生产实测 312 个 TTS 文件）。
+      //
+      // 现在判据改从 `file.path` 派生 group 内路径，两种布局结论一致。
+      final plan = buildSyncPlan(
+        remote: [
+          remoteFixture('reports/tts/turn1/speech_1.mp3', mime: 'audio/mpeg'),
+          remoteFixture('reports/ok.md'),
+        ],
+        state: SyncState.empty,
+        scope: const SyncWorkspaceScope(),
+        filter: permissiveFixture,
+      );
+      expect(plan.downloadCount, 1, reason: '只有 reports/ok.md 该下载');
+      expect(plan.skipped[SyncSkipReason.machineGenerated], 1);
+      expect(
+        plan.actions.whereType<SyncDownload>().map((a) => a.relPath),
+        contains('g1/reports/ok.md'),
+      );
+    });
+
+    test('.archive / _attachments 按**任意层级段**跳过', () {
+      // 按段相等而非子串：`.archivex` / `_attachments_bak` 不该误伤。
+      expect(isMachineGenerated('.archive/v1/manifest.json'), isTrue);
+      expect(isMachineGenerated('reports/.archive/v1/x.md'), isTrue);
+      expect(isMachineGenerated('_attachments/turn1/a.png'), isTrue);
+      expect(isMachineGenerated('sub/_attachments/a.png'), isTrue);
+      expect(isMachineGenerated('.archivex/a.md'), isFalse);
+      expect(isMachineGenerated('_attachments_bak/a.png'), isFalse);
+      expect(isMachineGenerated('reports/a.md'), isFalse);
+
+      final plan = buildSyncPlan(
+        remote: [
+          remoteFixture('.archive/v1/snapshot.md'),
+          remoteFixture('.archive/v1/manifest.json'),
+          remoteFixture('reports/ok.md'),
+        ],
+        state: SyncState.empty,
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+      expect(plan.downloadCount, 1, reason: '只同步 reports/ok.md');
+      expect(plan.skipped[SyncSkipReason.machineGenerated], 2);
+    });
+
     test('媒体默认不同步，开启后放行', () {
       final strict = buildSyncPlan(
         remote: [remoteFixture('pic.png', mime: 'image/png')],

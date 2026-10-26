@@ -4594,12 +4594,22 @@ if filter.UpdatedSince != nil { orderClause = "ORDER BY updated_at DESC" }
 故判定与统计都**先取水位、再把它当 `updated_since` 传**。水位为空（首次同步
 这个 group）时两者都不传——带任何值都会漏掉一部分历史交付物。
 
-#### 目录条目要过滤（它永远同步不了）
+#### 非交付物条目要过滤（目录与机器产物都永远同步不了）
 
-UFS 列表含目录（group 根、`reports/` 等）。`shouldSync` 第一条就跳过目录，
-故目录**不会** `markSynced`、也不会抬水位。把它算进「最晚时间」/「未同步数」
-会让「只多了几个空目录」的 group 永久 stale 且每轮同步什么都不做——与冷却闸
-那条（被过滤的文件同样不 `markSynced`）是同一个模型限制的两个面。
+UFS 列表含两类「永远同步不了」的条目，`shouldSync` 对它们都是「跳过且**不
+记录**」（不 `markSynced`、不抬水位）：
+
+| 类别 | 例子 | 为什么同步不了 |
+|---|---|---|
+| 目录 | group 根、`reports/`、`assets/` | `shouldSync` 第一条就是 `if (file.isDirectory)` |
+| 机器产物 | `reports/tts/**`、`.archive/**`、`_attachments/**` | `SyncSkipReason.machineGenerated` |
+
+把它算进「最晚时间」/「未同步数」会让 group 永久 stale 且每轮同步什么都不做
+——与冷却闸那条（被过滤的文件同样不 `markSynced`）是同一个模型限制的两个面。
+
+⚠️ **机器产物这一类比目录隐蔽得多**：生产实测 **312 个 `/reports/tts/` 非目录
+文件**。任何「最新变动是 TTS」的 group 都会永久 stale——提示条一直在，点同步
+却什么都不同步。故探测侧的 `_isDeliverableEntry` **必须**同时排除两类。
 
 > 生产数字的复现口径（2026-10-22，bcc `/opt/unified-file-service/data/files.db`；
 > 库会随部署变化，以实测为准）：
@@ -4623,9 +4633,30 @@ UFS 列表含目录（group 根、`reports/` 等）。`shouldSync` 第一条就�
 ⚠️ **过滤目录带来一个连带约束：首次同步（无水位）时探测页大小不能是 1**。
 那时服务端按 `created_at DESC`（没传 `updated_since`），而**新建的目录往往排在
 最前**；`page_size=1` 恰好取到一个目录、过滤后得到 `unknown`，即使下面明明有
-文件。故探测页大小按有无水位分档：有水位 `1`（`updated_at DESC` + 已过
-`updated_since`，一条即结论），无水位 `100`（一次多花一页元数据，只发生在该
-group 首次同步）。
+文件。故探测页大小按**有没有 `lower`**分档：有 `lower` 时 `1`（`updated_at DESC`
++ 已过 `updated_since`，一条即结论），无 `lower` 时 `100`（一次多花一页元数据，
+只发生在该 group 首次同步）。
+
+⚠️ **分档基准是 `lower` 而不是水位 `mine`**：决定服务端排序模式的就是「有没有
+传 `updated_since`」，而 `sinceDays` 单独也能让 `lower != null` 而 `mine == null`
+（见下节）。
+
+#### 有 `lower` 时同样可能撞上非交付物（`page_size=1` 的另一半）
+
+上一条只修了「无水位」那一半。有 `lower` 时页大小是 `1`，若那一条恰是**目录或
+机器产物**，过滤后 `latest == null` → `unknown` → 提示条不出现，即使后面明明有
+新文件。
+
+这不是理论边界：目录的 `updated_at` **只在创建时设置**（UFS 不因写子文件而抬升
+它），故「水位之后新建的目录」正好排在最前；而 `updated_at` 是秒级，同秒内
+目录与新文件的相对顺序不确定——属真实 flakiness。
+
+修法**保留快路径**：仅当「页大小本来就是 1」且「本页没有任何交付物」且
+「`page.hasMore(...)`」时用 `pageSize: 100` 重探一次。`total == 1`（真的只有那
+一条）不重探，不浪费一次请求。
+
+否决「恒定 `pageSize: 100`」：那要改掉全部 `page_size: 1` 的查询断言与成篇
+文档，而收益只是一次请求的差别。
 
 #### 定向同步的时间下限用**本 group 水位**，不是共享游标
 
@@ -4639,6 +4670,98 @@ group 首次同步）。
 
 故 `DeliverableSyncUseCase.run` 里 `saved` 按范围分派：`SyncSingleGroupScope`
 用 `groupSyncWatermark(...).latestUpdatedAt`，其余用 `state.cursor`。
+
+#### 时间下限：探测与同步必须**同一口径**（`sinceDays` 也要参与）
+
+同步侧把「已保存游标 / 本 group 水位」与用户配的 `sinceDays` 取更晚者
+（`effectiveCursor`）。探测侧若只看水位不看 `sinceDays`，两边就对「哪些算未同步」
+得出不同结论：
+
+```
+用户设「只拉最近 30 天」，该 group 的文档全在 60 天前
+  → 探测按全量数 → stale、报 N 个
+  → 同步按 30 天下限列出 0 条 → 「已同步 0 个」→ 水位不前进
+  → 每次进对话永久重复提示
+```
+
+故探测侧的 `lower = effectiveCursor(saved: mine, sinceDays:, nowUnix:)`，并把它
+同时用作 `updatedSince`、`includeDeleted`、计数基准与页大小分档的判据。
+
+#### 机器产物判据必须按「**group 内**路径」判（TTS 在下载侧曾漏网）
+
+`ttsRelPrefix = 'reports/tts/'` 是**锚定开头**的（三端契约，见
+`tts_audio_path.dart` 的类文档）。而 `shouldSync` 收到的 `relPath` 是**落盘**
+相对路径，workspace 布局下形如 `{gid}/reports/tts/a.mp3` ——
+`startsWith('reports/tts/')` 为 false。
+
+于是**同一份文件在不同同步范围下结论相反**：
+
+| 范围 | `relPath` | 命中 `reports/tts/`？ |
+|---|---|---|
+| `SyncGroupScope` | `reports/tts/a.mp3` | ✅ 跳过 |
+| `SyncSingleGroupScope` / `SyncWorkspaceScope` | `{gid}/reports/tts/a.mp3` | ❌ **下载下来** |
+
+修法：新增自由函数 `groupScopedRelativePath(ufsPath)`（只从 UFS 路径派生，与落盘
+布局无关），`shouldSync` 内 `final groupRel = groupScopedRelativePath(file.path) ??
+relPath;` 再判。**不改 `shouldSync` 签名**。
+
+曾考虑 `SyncScope.groupRelativePathOf` 方法（需 `hasGroupSegment` 标志 + 四个子类
+各覆写），已否决：自由函数的 API 面更小，且「过滤判据不该依赖调用方用的是哪种
+范围」这条本身就要求它独立于 scope。
+
+#### `.archive` / `_attachments` 必须按「任意层级段」排除
+
+两个服务端机器目录：
+
+| 段 | 产出者 |
+|---|---|
+| `.archive` | super_partyb `archivesnapshot` worker 直写 `workspace/groups/{gid}/.archive/v{N}/`（`manifest.json` / `snapshot.md` / `snapshot.html`），**绕过** groupsync 的排除 globs |
+| `_attachments` | go-api 的附件暂存区（`CleanupOrphanAttachments(root, "_attachments", …)`，目录本身**不可删**——含活跃 turn） |
+
+`machineGeneratedSegments = {'.archive', '_attachments'}`，**按段相等**判（不是
+子串），故 `a/.archivex/b.md` 不会误伤。
+
+⚠️ **必须客户端过滤**：UFS 的 `exclude_prefix` 只能按前缀匹配，无法表达「任意
+层级」。
+
+⚠️ 上传侧（`shouldUploadLocalFile`）**自动继承**这个排除——它本就收 group 内
+路径。
+
+#### 切换对话时在途的解析/聚焦会丢掉新一轮（`_resolveAgain`）
+
+`_resolveUserAndFocus` 被 `initState` 与 `didUpdateWidget` 都调，而它 await 了整条
+链（`currentUserIdProvider.future` → `_focus` → `_checkGroupSync`）。原先在途时
+`if (_resolvingUser) return;` 直接丢弃——于是「用户在聚焦还没跑完时切到另一个
+对话」会让**新的 groupId 既不被聚焦、也不被探测**，且没有任何重试点。
+
+修法是 `do { _resolveAgain = false; … } while (_resolveAgain && mounted)`：在途
+期间又有人请求时只置标志，当前这一轮结束后再跑一轮（最多多一轮，不会无限
+递归）。桌面与移动端同构。
+
+⚠️ **这一条与 `_focus` 的异常处理是一对**：`_focus` 曾与探测合在同一个
+`try` 里，一次聚焦异常会把一个**无关的**探测也取消掉。现 `_focus` 单独
+`try/catch` + `SpbLog.warn`，`_checkGroupSync()` 移出（并去掉无用的 `userId`
+形参）。
+
+#### 门控与判定的日志必须是 `info` 级
+
+`SpbLog._minLevel` 默认就是 `info`，**debug 在生产被过滤**。而「用户说开了功能
+但提示条从不出现」最难排查的一类恰恰在这里——所有证据都只在他本机的 debug 日志
+里，而诊断报告（§6.20）只收运行时可见的日志。
+
+故门控早退（含 `on_group_open` / `can_sync` / `has_local_root` / `is_single_group` /
+`selected_groups` 五个字段）、冷却期跳过、判定结论（`无需同步` / `有未同步交付物`）
+与探测失败全部用 `SpbLog.info`。
+
+#### 「立即同步」成功后要 `invalidate` 本地索引
+
+同步刚往同步目录写了文件，而「打开 / 定位」的可用性来自
+`deliverableLocalIndexProvider`（`FutureProvider`，读完就缓存）。不 invalidate
+的话：提示条消失了，但侧边栏里那些文件**仍然显示为未同步**——用户点了「已同步
+N 个」，却找不到能打开的那几个。
+
+⚠️ **只 invalidate 本地索引、不 bump `_deliverablesReloadToken`**：远端清单没有
+变（同步只写本地），bump 只会多一次无意义的 HTTP。
 
 #### 三重门控 + 冷却闸（任一不满足就零开销）
 
@@ -4694,12 +4817,14 @@ group 水位 → 判定长期命中 → 每次点进去都同步一轮 → 每�
 
 - **被过滤掉的文件会让判定长期命中**：靠冷却闸 + 仅提示（不自动下载）压低
   代价。这不是缺陷而是模型限制（不 `markSynced` = 引擎认为「还没同步」）。
+  目录与机器产物已在探测侧排除（见上节），但**用户配的过滤条件**（关掉媒体、
+  单文件体积上限）仍属于这个模型限制：一个 20 MB 的 PDF 会让该 group 长期 stale。
 - **本地被手动删除的文件探测不到**：判定看的是「远端有比水位新的吗」，
   而本地删除不改变远端 `updated_at`。这类情况靠同步引擎每轮的
   `presentLocally` 探测兜住（它会对 `state.files` 里每个路径 `stat` 一次）。
 - **移动端不参与**：见上表。
 
-#### 反向验证（18 项逐条实测）
+#### 反向验证（39 项逐条实测）
 
 | 改坏 | 失败用例数 |
 |---|---|
@@ -4733,6 +4858,14 @@ group 水位 → 判定长期命中 → 每次点进去都同步一轮 → 每�
 | 统计不传 `updated_since` | 6 |
 | 目录条目计入「最晚时间」/「未同步数」 | 3 |
 | 无水位时探测页大小仍为 1（恰好取到目录 → 误判 unknown） | 3 |
+| 有水位时探测页撞上非交付物不扩页（`page_size=1` 的另一半） | 1 |
+| 探测页大小基准回 `mine`（忽略 `sinceDays` 带来的 `lower`） | 1 |
+| `sinceDays` 不参与 `lower` | 1 |
+| 探测侧 `_isDeliverableEntry` 不排除机器产物 | 2 |
+| `shouldSync` 用落盘 relPath 判机器产物（TTS 在 workspace 布局漏网） | 1 |
+| `machineGeneratedSegments` 去掉 `.archive` / `_attachments` | 1 |
+| `_resolveAgain` 循环去掉（在途时直接 return） | 1 |
+| 「立即同步」成功后不 `invalidate` 本地索引 | 1 |
 | `DeliverableSyncUseCase` 用共享游标作定向同步的时间下限 | 2 |
 
 ⚠️ 「路由层不检查冷却」这条**最初是假绿**：我的断言查的是节流器自己的状态
@@ -5597,6 +5730,8 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~「在文件管理器中定位」全平台失效（Windows 用户报「总是定位不到已下载的文档」）~~ | ✅ 已修（§6.41）：**三个独立缺陷叠加**，且都不报错。① `revealPath` 文档写的是「打开本地**目录**」，实现按此用 `Directory(path).exists()` 校验——而**两个真实调用点传的都是文件路径**，实测 `Directory('/tmp/a.txt').exists() == false` 恒成立，于是在 spawn **之前**就返回了（与平台无关，Linux/macOS 同样失效）。② 即使放行，Windows 上 spawn 的是 `explorer <path>` = **用默认程序打开**，不是选中；正确命令是 `explorer /select,<path>`（且必须是**一个**参数，拆成 `['/select,', path]` 会被 explorer 当成要打开的路径）。macOS 对应 `open -R`，Linux 退化为 `xdg-open <父目录>`（无选中概念）。③ **下载平铺**：两条手动链路都写到 `downloads/{agent,deliverables}/<文件名>`，不同 group 的同名文件互相覆盖、目录结构被压平、磁盘上分不清归属。修法：`spb_platform` 新增 `spawnSystemReveal` + `revealSystemEntry`（按 `FileSystemEntityType` 分流，可注入 probe 以便无头测试）；`spb_domain` 新增纯函数 `deliverableDownloadRelPath` / `agentFileDownloadRelPath`（`{groupId}/<相对路径>`，逐段过 `isValidPathSegment`，非法时退化为单文件名而非报错），**四条下载链路（桌面 2 + 移动 2）共用同一口径**。共 36 条用例（领域 16 + 平台 19 + 装配 1），5 项反向验证逐条实测 | §6.41 |
 | ~~交付物同步只能手动点（用户问「PC 端能不能自动下载 / 同步」）~~ | ✅ 已实现（§6.42）：新增 `AutoSyncConfig`（`onLaunch` + `intervalMinutes`，档位 关闭/15/30/60/180）与 `AutoSyncScheduler`（**纯 Dart + `fake_async` 可测**，放 `spb_domain`）。两条入口**相互独立**（「只在启动时同步一次」是合法组合）。**默认全关**——生产实测首次全量 5666 条 / 4.7 GB，静默替用户拉这么多不可接受。排程用**自续排的一次性 `Timer`** 而非 `periodic`：`periodic` 会在上一轮未跑完时叠加触发，而游标并发推进不安全；代价是长轮次期间 `isScheduled == false`（正确状态）。三条易写错的判据：① `pause()` 必须清空已应用配置，否则重新登录后 `apply(同一配置)` 被幂等吞掉 → 自动同步永久失效；② `apply` 以配置相等做幂等键，否则三个信号源反复喂同一份配置会把周期无限重置；③ `_tick` 必须 `_cancelTimer()` 而不是 `_timer = null`（`apply` 是「先排周期再跑启动轮」，启动轮进 `_tick` 时计时器是活的 → 僵尸 Timer → 一轮变两轮，被用例抓到过）。`runSyncActionProvider` 加**单飞**（语义选「复用同一 Future」而非「静默跳过」，否则手动触发点了没反应）。移动端**不装配排程器**（后台定时器在 Android/iOS 不可靠）→ `showAutoSync: false` 整段不渲染（不渲染禁用态），但**仍读写 `sync.auto`**——同一份 `SyncSettings` 两端流转，不写回会静默清掉桌面端配置。共 48 条用例（领域 39 + 设置页 8 + 装配 7 + 移动端持久化 4 …），**14 项反向验证逐条实测** | §6.42 |
 | ~~定时自动同步解决不了「用户此刻正看着这个对话」~~ | ✅ 已实现（§6.43）：新增第三条入口「进入对话时按需同步」（`AutoSyncConfig.onGroupOpen`，**默认关**）。判定只需**一次** `page_size=1` 查询，且命中的是**本 group 已同步水位**（`groupSyncWatermark` = 该 group 文件记录里最晚的 `updated_at`），**不是** `__workspace__` 游标——定向同步不推进游标，拿它比会永远判 stale（每进一次对话提示一遍却什么也不做）。**判定命中只提示、不静默下载**。点击「立即同步」跑 `SyncSingleGroupScope`：列举前缀收窄到 `{gid}` 子树、本地保留 `{gid}/` 布局、状态键共用 `workspaceStateKey`（先定向再全范围时靠 etag 命中不重下），**但不推进共享游标**（否则会越过其它 group 未同步的文件 → `updated_since` 永久过滤 → 漏下载而报告成功）。`advancesCursor` 是 `SyncScope` 的 getter 而非 `run()` 参数——做成参数就允许「窄列举 + 推游标」这个致命组合。三重门控（`onGroupOpen` / `canSync` / 冷却闸）+ `GroupSyncThrottle`（默认 10 分钟，内存态）：被过滤的文件不 `markSynced` → 判定长期命中。计数上限 500（命中后才分页统计、按同一水位过滤、超过显示「500+」）。提示条包在 `ConversationPage` **外面**（`withHint` 闭包）——避免给 46 参数的页面再加一条要写进 `check_wiring_parity.sh` 豁免的参数。共 58 条用例（领域 32 + 装配 10 + 提示条 16），**26 项反向验证逐条实测**（其中「路由层不检查冷却」与「点提示条跑的是定向还是全范围」最初都是**假绿**：前者只查了节流器状态、后者只看「同步跑了一次」而两者都返回 `SyncReport`） | §6.43 |
+| ~~进入从未同步过的 group 时提示条不出现 / 同步不下来（用户报障）~~ | ✅ 已修（§6.43 的六个叠加缺陷）：① **`sinceDays` 未参与探测**——同步侧用 `effectiveCursor(水位, sinceDays)` 作时间下限，探测侧只看水位 → 设了「只拉最近 30 天」时探测按全量数得 stale、同步列出 0 条 → 每次进对话永久重复提示。现 `lower = effectiveCursor(...)` 同时用于 `updatedSince` / `includeDeleted` / 计数 / 页大小分档。② **`page_size=1` 撞上非交付物**——有水位时只拉一条，若那一条恰是目录或机器产物则过滤成 `unknown`，提示条不出现（目录 `updated_at` 只在创建时设置，故「水位之后新建的目录」正好排最前，且秒级同秒排序不确定 → 真实 flakiness）。现仅当「页大小本来就是 1」且「本页无交付物」且 `hasMore` 时用 `pageSize: 100` 重探一次。③ **探测侧不排除机器产物**——`reports/tts/**`（生产实测 **312 个**）、`.archive/**`、`_attachments/**` 都是「跳过且不 `markSynced`」，算进最晚时间会让该 group 永久 stale。`_isDeliverableEntry` 现按 `groupScopedRelativePath` 判。④ **TTS 排除在下载侧漏网**——`ttsRelPrefix` 锚定开头（三端契约），而 `SyncSingleGroupScope` / `SyncWorkspaceScope` 的 relPath 是 `{gid}/reports/tts/a.mp3` → `startsWith` 为 false → 语音被拖到本地。现 `shouldSync` 内先经新增的 `groupScopedRelativePath(file.path)` 剥掉 `{gid}` 段再判（**不改签名**；否决 `SyncScope.groupRelativePathOf` 方案——过滤判据不该依赖调用方用的是哪种范围）。⑤ **`.archive` / `_attachments` 未排除**——`archivesnapshot` worker 直写 UFS、绕过 groupsync 的 globs；UFS 的 `exclude_prefix` 只能按前缀，故必须客户端按「任意层级段」过滤（`machineGeneratedSegments`，按段相等不误伤 `.archivex`）。⑥ **切对话时在途的解析/聚焦丢掉新一轮**——`if (_resolvingUser) return;` 让「聚焦没跑完就切走」的新 groupId 既不被聚焦也不被探测，无重试点。现 `do/while + _resolveAgain`（最多多一轮，两端同构），并把 `_focus` 从探测的 `try` 里拆出（一次聚焦异常不该取消一个无关的探测）。另：门控/判定/探测失败日志从 `debug` 升 **`info`**（`SpbLog._minLevel` 默认 info，debug 生产被过滤 → 「开了功能但没反应」完全不可见）；「立即同步」成功后 `invalidate(deliverableLocalIndexProvider)`（否则提示条消失了但侧边栏仍显示未同步，用户找不到刚同步下来的文件）。共 10 条新用例（领域 3 + 探测 5 + 接线 2），**8 项反向验证逐条实测**。⚠️ 排障中另修掉一个**测试污染真库**的缺陷：`group_sync_probe_test` 的容器原先不 override `appDatabaseProvider`，`preferencesStoreProvider` 会打开真实的 `~/.local/share/super_partyb/sync.db` 并永久写入 `sync.since_days=1`，导致后续用例连锁失败 | §6.43 |
+
 | ~~会话失效后**不会**回登录页（用户卡在当前页面，只能手动进设置页点「退出登录」）~~ | ✅ 已修（§6.34）：根因是链路的**中段**断了——`AuthInterceptor` 只把 401 归一化成 `AuthError` 抛给调用方（注释写着「由上层统一监听并跳登录页」），而那个「上层监听」**根本不存在**（`markUnauthenticated` 生产路径零调用）；各页面拿到 `AuthError` 只翻成一句 SnackBar 文案。新增 `AuthInterceptor.onSessionExpired`，装配层在**两端各 2 处**（`dioProvider` + `ufsDioProvider`，共 4 处）接到 `markUnauthenticated`，由路由守卫做唯一一次重定向到 `/login?from=…`。**403 绝不触发**（无权限不是会话失效）、**只在刷新也失败后触发**、重放路径带 `_retriedKey` 守卫防通知两次、**不清凭证**（保住 refresh_token）。共 9 条用例（拦截器 5 + 两端各 2），3 项反向验证逐条实测 | §6.34 |
 | ~~IdP 是否支持 PKCE + 自定义 scheme~~ | ✅ 已改为 loopback 方案；IdP 支持 PKCE，loopback 端口通配由 fosite 原生支持 | `docs/rfc8252-loopback-signin.md` |
 | ~~IdP 生产未注册桌面 public client~~ | ✅ **已解决（2026-10）**：生产 IdP 注册了 `flutter-client`（`tokenEndpointAuthMethod='none'` + `redirectUris=["http://127.0.0.1/callback"]`，PKCE 强制）。活体验证：随机端口的 loopback 回调得 302，`localhost`/外部域名得 400。⚠️ 注册值必须用**字面** `127.0.0.1`（fosite `isMatchingAsLoopback` 对 hostname 做字面比较）且**不带端口**（端口被跳过比对） | `docs/rfc8252-loopback-signin.md` §7、§6.31 |

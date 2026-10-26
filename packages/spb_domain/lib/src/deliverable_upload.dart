@@ -250,13 +250,12 @@ class LocalDirtyScanResult {
 /// 媒体，原因会显示成「媒体（未开启）」而不是「机器生成产物」，用户会以为
 /// 「打开媒体同步就能回传语音」，但它永远不该回传。
 ///
-/// ## 与 [shouldSync] 的一处差异（方向是安全的一侧）
+/// ## 与 [shouldSync] 的口径已经一致（两边都按 group 内路径判）
 ///
-/// [shouldSync] 拿到的也是完整 relPath，故它在 workspace 布局下同样漏掉 TTS
-/// 过滤。本函数按组内路径判，因而**更严**：漏掉的机器产物最多是「用户多看到
-/// 几个文件」（还能自己不选），漏回传一次语音产物却会 emit `agent.file.*`
-/// 事件、可能触发 IM 推送（见 `docs/deliverable-upload-and-conflict.md` §4.1）。
-/// 下载侧那处不一致属既有行为，不在本次范围内。
+/// 本函数直接收组内路径；[shouldSync] 收的是落盘相对路径，但它内部会先经
+/// `groupScopedRelativePath(file.path)` 剥掉 workspace 布局的 `{gid}/` 段
+/// 再判。故两端对**同一份文件**得出同样的结论（曾经不一致——下载侧把 TTS
+/// 语音拖到本地，回传侧却拒绝回传）。
 ///
 /// ## 唯一的信息损失：MIME
 ///

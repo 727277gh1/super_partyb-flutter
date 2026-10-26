@@ -182,8 +182,10 @@ void main() {
 
     test('reports/tts/ 下的改动不进脏列表（机器产物）', () async {
       // 单 group 布局：relPath 就是组内路径，前缀锚定在开头 → 命中。
-      // （workspace 布局下 relPath 是 `{gid}/reports/tts/...`，同步侧
-      //  `shouldSync` 同样命中不了——两边行为一致，镜像关系成立。）
+      //
+      // ⚠️ 曾经这里写的是「workspace 布局下 `shouldSync` 同样命中不了——两边
+      // 行为一致」。那句话现已不成立：下载侧改成从 `file.path` 派生 group 内
+      // 路径再判（见 `groupScopedRelativePath`），两种布局结论一致。
       const rel = 'reports/tts/a.mp3';
       final result = await scanLocalDirtyFiles(
         reader: _Reader({
@@ -365,7 +367,7 @@ void main() {
       expect(
         result.filtered[SyncSkipReason.machineGenerated],
         1,
-        reason: 'workspace 布局下 tts 前缀命中不了（与下载侧 shouldSync 行为一致）',
+        reason: '回传侧按组内路径判（workspace 布局下同样命中）',
       );
       expect(result.failed, hasLength(1));
       expect(result.scanned, 5);

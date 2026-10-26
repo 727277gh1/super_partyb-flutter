@@ -22,6 +22,28 @@ void main() {
       );
     });
 
+    test('groupScopedRelativePath 剥掉 groupId 段（与落盘布局无关）', () {
+      // 它是过滤判据（`isMachineGenerated`）的输入，而过滤判据表达的是
+      // 「这份文件在 group 里处于什么位置」——与它落到本地哪个路径无关。
+      expect(
+        groupScopedRelativePath('/workspace/groups/g1/reports/a.md/'),
+        'reports/a.md',
+      );
+      // UFS 物化路径对**文件**也带尾斜杠（`buildMaterializedPath` 无条件拼
+      // `name + '/'`），不剥就会得到 `reports/a.md/`，与 `reports/a.md`
+      // 不同——两份路径在过滤判据里应当等价。
+      expect(
+        groupScopedRelativePath('/workspace/groups/g1/reports/a.md/'),
+        groupScopedRelativePath('/workspace/groups/g1/reports/a.md'),
+      );
+      // group 根目录自身 / 只有 groupId 一段 → null（没有「group 内路径」可言）。
+      expect(groupScopedRelativePath('/workspace/groups/g1/'), isNull);
+      expect(groupScopedRelativePath('/workspace/groups/g1'), isNull);
+      // 不在 workspace 下 → null（与 workspaceRelativePath 一致）。
+      expect(groupScopedRelativePath('/other/place/a.md'), isNull);
+      expect(groupScopedRelativePath(''), isNull);
+    });
+
     test('workspace 下不同 group 的同名文件落到不同路径（不互相覆盖）', () {
       final plan = buildSyncPlan(
         remote: [

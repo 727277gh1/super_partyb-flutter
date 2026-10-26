@@ -85,6 +85,35 @@ String? workspaceRelativePath(String ufsPath) {
   return rest;
 }
 
+/// 从 UFS 绝对路径提取**group 内**的相对路径（剥掉 `{gid}/` 那一段）。
+///
+/// `/workspace/groups/{gid}/reports/a.md/` → `reports/a.md`。
+///
+/// ## 为什么需要它（与落盘布局**无关**）
+///
+/// 过滤判据（`isMachineGenerated`）表达的是「这份文件在 group 里处于什么位置」，
+/// 而 [workspaceRelativePath] 返回的是「它落到本地哪个相对路径」——两者在
+/// workspace 布局下相差一个 `{gid}/` 段。
+///
+/// 拿后者去判前者会让**同一份文件**在不同同步范围下得出不同结论：
+/// `SyncGroupScope` 的 relPath 是 `reports/tts/a.mp3`（命中），而
+/// `SyncSingleGroupScope` / `SyncWorkspaceScope` 的 relPath 是
+/// `{gid}/reports/tts/a.mp3`（不命中）——于是 TTS 语音只在单 group 模式下被
+/// 跳过，定向/全范围同步照样把它拖下来（生产实测 312 个 TTS 文件）。
+///
+/// 故本函数**只从 `ufsPath` 派生**，与调用方用的是哪种范围、怎么落盘都无关。
+///
+/// 返回 null 的情形与 [workspaceRelativePath] 一致，另加：
+/// - 只有 groupId 一段（group 根目录自身）。
+String? groupScopedRelativePath(String ufsPath) {
+  final rel = workspaceRelativePath(ufsPath);
+  if (rel == null) return null;
+  final slash = rel.indexOf('/');
+  if (slash <= 0) return null;
+  final rest = rel.substring(slash + 1);
+  return rest.isEmpty ? null : rest;
+}
+
 String _stripTrailingSlashes(String s) {
   var end = s.length;
   while (end > 0 && s.codeUnitAt(end - 1) == 0x2F) {
