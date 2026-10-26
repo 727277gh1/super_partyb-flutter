@@ -206,13 +206,20 @@ void main() {
       // 端到端规模验证：缓冲区满时单次归约约 1.8 ms，300 条即约 640 ms。
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
       await c.start();
+      // ⚠️ 填充事件必须用**各不相同的 turnId**。
+      //
+      // 本用例的前置条件是「缓冲区已满 2000 条」，而 `_coalesceIntoTail` 会把
+      // 紧邻的同 turn 同类型增量合并成一个槽位——若这里全用 `turn_hist`，2000 条
+      // 会合并成 **1** 条，前置条件不成立（实测：断言 `bufferedEventCount == 2000`
+      // 失败，实际为 1）。用 2000 个不同的 turnId 才对应「2000 条互不相干的
+      // 历史事件」，也正是上限真正要限制的对象。
       for (var i = 0; i < 2000; i++) {
         sse.push(
           EventTypes.message,
           sseEvent(
             EventTypes.message,
             id: 'hist_$i',
-            turnId: 'turn_hist',
+            turnId: 'turn_hist_$i',
             payload: {'text': 'x'},
             transient: true,
             seq: i,
@@ -241,6 +248,13 @@ void main() {
       }
       await settle();
       expect(emits, 1, reason: '300 条增量合并成 1 次归约（修复前是 300 次）');
+      // 顺带钉住合并的**规模效果**：300 条增量只占 1 个缓冲槽位，故缓冲区
+      // 仍停在上限（多出 1 条 → 按轮裁掉最旧的那 1 条单事件 turn）。
+      expect(
+        c.bufferedEventCount,
+        ChatStreamController.maxBufferEvents,
+        reason: '300 条增量只占 1 个槽位（合并前会溢出到 2300 条）',
+      );
 
       await sub.cancel();
       await c.dispose();

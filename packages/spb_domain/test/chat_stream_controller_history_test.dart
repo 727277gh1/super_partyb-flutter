@@ -549,6 +549,15 @@ void main() {
     /// **事件**层，与控制事件同样适用。
     ///
     /// eventId 编码序号，便于断言「丢的是最旧的、留的是最新的」。
+    ///
+    /// ## 为什么每条用**不同** turnId
+    ///
+    /// 裁剪现在是**按轮**的（见 [_turnBoundaryAtOrAfter]）：全用同一个 turnId
+    /// 会让整个缓冲区属于一轮、无边界可切，于是退回逐条丢头部并**每条都记一次
+    /// warn**（实测本组用例会刷上百行，掩盖真正的异常）。
+    /// 本组要验的是「上限生效 + 丢最旧的」，用「2000 个互不相干的事件」才
+    /// 对应上限真正要限制的对象；单轮降级路径由下面「流式增量合并 + 按轮裁剪」
+    /// 组的最后一条用例专门覆盖。
     void pushMany(int from, int count) {
       for (var i = 0; i < count; i++) {
         final n = from + i;
@@ -557,6 +566,7 @@ void main() {
           sseEvent(
             EventTypes.heartbeat,
             id: 'e$n',
+            turnId: 't$n',
             payload: {'n': n},
             globalSeq: n,
           ),
@@ -648,6 +658,359 @@ void main() {
       await c.loadOlder();
 
       expect(seen, ['100'], reason: '游标必须是「曾加载到过的最早」（100），不是裁剪后的缓冲区最小值');
+
+      await c.dispose();
+    });
+  });
+
+  group('流式增量合并 + 按轮裁剪（「多轮之后大块正文消失」修复）', () {
+    // ## 这组用例防的是什么（一次真实用户报障）
+    //
+    // 「进行多轮对话后，后面查看大块正文时向下滚动会出现内容丢失」。
+    //
+    // 根因链：服务端每个 token 发一条 `transient: true` 的增量事件 → 一个长回复
+    // 就上千条 → 几轮之后 2000 条上限被撞破 → `_trimBuffer` 从头部丢事件 →
+    // 而 `EventReducer.reduce` 是**全量重算**，丢头部等于把归约输入掐掉一截：
+    // 整轮对话从时间线上消失，或某条回复的开头被截掉。
+    //
+    // 修法两道：
+    //   1. 紧邻的同类增量在入缓冲前合并（一个回复只占 1 个槽位）；
+    //   2. 裁剪改为**按轮整段丢弃**，绝不切在一轮中间。
+
+    /// 推一条流式增量（`transient: true`，payload 只有一个文本键）。
+    void pushIncrement(
+      int i, {
+      String turnId = 'turn_1',
+      String key = 'text',
+      String text = 'x',
+      String type = EventTypes.message,
+    }) {
+      sse.push(
+        type,
+        sseEvent(
+          type,
+          id: 'inc_$i',
+          turnId: turnId,
+          payload: {key: text},
+          transient: true,
+          seq: i,
+        ),
+      );
+    }
+
+    test('2100 条增量只占 1 个缓冲槽位，且正文完整、item id 恒定', () async {
+      // 2100 > maxBufferEvents（2000）——修复前这个 turn 会被裁剪掐掉头部
+      // （实测：`len=13600 head="第600段。"`，前 600 段永久丢失）。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      for (var i = 0; i < 2100; i++) {
+        pushIncrement(i, text: '段$i。');
+      }
+      await pumpEventQueue();
+
+      expect(
+        c.bufferedEventCount,
+        1,
+        reason: '同一 turn 的紧邻增量应合并成 1 条（修复前是 2100 条，必然触发裁剪）',
+      );
+
+      final item = c.snapshot.single as AssistantMessageItem;
+      expect(
+        item.id,
+        'inc_0',
+        reason: 'item id 必须是**首条**增量的 eventId，否则流式期间 ValueKey 逐条变化',
+      );
+      expect(item.text.startsWith('段0。'), isTrue, reason: '开头不得被截掉');
+      expect(item.text.endsWith('段2099。'), isTrue, reason: '结尾不得丢失');
+      expect(
+        item.text.length,
+        [for (var i = 0; i < 2100; i++) '段$i。'].join().length,
+        reason: '总长度必须等于全部增量拼接的结果',
+      );
+
+      await c.dispose();
+    });
+
+    test('合并后的归约结果与「逐条独立事件」逐字相同', () async {
+      // 合并是**纯优化**：它不能改变归约输出。用 `EventReducer.reduce`
+      // 直接吃一份「不合并」的事件列表作基准。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      const parts = ['第一段。', '第二段。', '第三段。'];
+      for (var i = 0; i < parts.length; i++) {
+        pushIncrement(i, text: parts[i]);
+      }
+      await pumpEventQueue();
+
+      final separate = EventReducer.reduce([
+        for (var i = 0; i < parts.length; i++)
+          ChatEvent(
+            eventId: 'inc_$i',
+            userId: 'usr_1',
+            groupId: 'grp_1',
+            turnId: 'turn_1',
+            eventType: EventTypes.message,
+            seq: i,
+            source: 'test',
+            createdAt: DateTime.utc(2024, 3, 5, 8, 9, 10),
+            payload: {'text': parts[i]},
+            transient: true,
+          ),
+      ]);
+
+      expect(c.bufferedEventCount, 1, reason: '前提：已合并');
+      expect(
+        (c.snapshot.single as AssistantMessageItem).text,
+        (separate.items.single as AssistantMessageItem).text,
+        reason: '合并不得改变正文',
+      );
+      expect(
+        (c.snapshot.single as AssistantMessageItem).isStreaming,
+        (separate.items.single as AssistantMessageItem).isStreaming,
+      );
+
+      await c.dispose();
+    });
+
+    test('不同 turn / 不同事件类型 / 中间夹其他事件时不合并', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      // 每一对都只推**两条**、中间不夹其他事件，以便断言「这一对必须分开」。
+      // 若把全部场景串在一起推，相邻对之间可能意外合并，计数就说不清是
+      // 哪一条条件失效了。
+
+      // 1) 不同 turnId
+      pushIncrement(0, turnId: 'turn_a');
+      pushIncrement(1, turnId: 'turn_b');
+      // 2) 不同事件类型
+      pushIncrement(2, turnId: 'turn_b', type: EventTypes.thought);
+      pushIncrement(3, turnId: 'turn_b', type: EventTypes.message);
+      // 3) 中间夹一条非增量事件
+      pushIncrement(4, turnId: 'turn_b');
+      sse.push(
+        EventTypes.heartbeat,
+        sseEvent(
+          EventTypes.heartbeat,
+          id: 'hb',
+          turnId: 'turn_b',
+          payload: {'content': '…'},
+        ),
+      );
+      pushIncrement(5, turnId: 'turn_b');
+      // 4) 文本键名不同
+      pushIncrement(6, turnId: 'turn_d', key: 'text');
+      pushIncrement(7, turnId: 'turn_d', key: 'content');
+      // 5) payload 不止一个键（未来可能加 index/role 等）
+      sse.push(
+        EventTypes.message,
+        sseEvent(
+          EventTypes.message,
+          id: 'multi_1',
+          turnId: 'turn_c',
+          payload: {'text': 'a', 'index': 0},
+          transient: true,
+        ),
+      );
+      sse.push(
+        EventTypes.message,
+        sseEvent(
+          EventTypes.message,
+          id: 'multi_2',
+          turnId: 'turn_c',
+          payload: {'text': 'b', 'index': 1},
+          transient: true,
+        ),
+      );
+      await pumpEventQueue();
+
+      // 逐对断言「真的没合并」——用事件 id 列表比总数更不容易算错。
+      //
+      // ⚠️ `inc_4` **不在**列表里：它与 `inc_3` 同 turn 同类型同键，是被合并掉的
+      // 那一条（合并保留首条 id）。其余每一条都因为某个条件不满足而独立成条。
+      expect(c.bufferedEventIds, [
+        'inc_0', // turn_a
+        'inc_1', // turn_b（不同 turn，分开）
+        'inc_2', // thought（不同事件类型，分开）
+        'inc_3', // message；inc_4 合并进它
+        'hb', // 非增量（隔断了 inc_4 → inc_5）
+        'inc_5', // message（心跳隔断，不合并）
+        'inc_6', // text
+        'inc_7', // content（键名不同，分开）
+        'multi_1', // payload 两键
+        'multi_2', // payload 两键
+      ], reason: '任一条件不满足都必须退回独立入缓冲（合并错了会篡改正文）');
+
+      await c.dispose();
+    });
+
+    test('按轮裁剪：整轮丢弃，绝不切在一轮中间', () async {
+      // ## 为什么每轮是 137 条（而不是整齐的 100）
+      //
+      // 这是本用例的**关键设计**：若每轮 100 条、总共 2500 条，那么「逐条丢
+      // 头部」与「按轮丢」得到的 `ids.first` **恰好相同**（都是 e500）——
+      // 用例会在两种实现上都绿，等于没测（反向验证时实测踩到：把
+      // `_turnBoundaryAtOrAfter` 改成 `null` 仍然全绿）。
+      //
+      // 取 137（与 2000 上限不对齐）后两种实现必然分道：
+      //   按轮丢：每次丢 137 条整轮 → 丢 6 次（822 条）→ 剩 1918 条，
+      //           `ids.first == 'e822'`（= turn_6 的第一条）；
+      //   逐条丢：每次丢 1 条 → 剩 2000 条，`ids.first == 'e740'`。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      const turns = 20;
+      const perTurn = 137;
+      var n = 0;
+      for (var t = 0; t < turns; t++) {
+        for (var i = 0; i < perTurn; i++) {
+          sse.push(
+            EventTypes.heartbeat,
+            sseEvent(
+              EventTypes.heartbeat,
+              id: 'e${n++}',
+              turnId: 'turn_$t',
+              payload: {'n': n},
+            ),
+          );
+        }
+      }
+      await pumpEventQueue();
+
+      // 20 × 137 = 2740 条；按轮丢 6 次 = 822 条 → 剩 1918 条。
+      expect(c.bufferedEventCount, 2740 - 6 * perTurn);
+      expect(
+        c.bufferedEventIds.first,
+        'e${6 * perTurn}',
+        reason: '裁剪点必须落在 turn_6 的第一条（822 = 6 × 137），不是「丢够 740 条」',
+      );
+
+      // 每一轮必须**完整**保留：缓冲区里的每个 turnId 都恰好 137 条。
+      final byTurn = <String, int>{};
+      for (final id in c.bufferedEventIds) {
+        final idx = int.parse(id.substring(1));
+        final turn = 'turn_${idx ~/ perTurn}';
+        byTurn[turn] = (byTurn[turn] ?? 0) + 1;
+      }
+      // 注意：不能直接对 `turn_10` / `turn_5` 做字符串排序（'1' < '5'）。
+      expect(byTurn.keys.toList(), [for (var t = 6; t < turns; t++) 'turn_$t']);
+      for (final entry in byTurn.entries) {
+        expect(entry.value, perTurn, reason: '${entry.key} 被切断了（应整轮保留或整轮丢弃）');
+      }
+
+      await c.dispose();
+    });
+
+    test('整个缓冲区属于同一轮时退回逐条丢头部（有意的降级）', () async {
+      // 首屏回填了一轮超长对话、或翻页翻进同一轮时，没有轮次边界可切。
+      // 按轮丢就等于「全丢」，比逐条丢更糟——故退回逐条，并记 warn。
+      // （上一条 group 的「超过上限时丢弃最旧事件」也走这条路径。）
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      for (var i = 0; i < ChatStreamController.maxBufferEvents + 10; i++) {
+        sse.push(
+          EventTypes.heartbeat,
+          sseEvent(
+            EventTypes.heartbeat,
+            id: 'e$i',
+            turnId: 'turn_only',
+            payload: {'n': i},
+          ),
+        );
+      }
+      await pumpEventQueue();
+
+      expect(c.bufferedEventCount, ChatStreamController.maxBufferEvents);
+      expect(c.bufferedEventIds.first, 'e10', reason: '单轮时逐条丢头部（丢 10 条）');
+
+      await c.dispose();
+    });
+
+    test('真实事件序列：14 轮对话全部保留（修复前只剩最后 10 轮）', () async {
+      // 服务端真实形态（`chatexec/pigo_core.go` + `chat/enqueue.go`）：
+      //   user_message（落库）→ start（落库）→ N 条 transient 增量
+      //   → 权威 message（落库，段级完整文本）→ done（落库）
+      //
+      // 14 轮 × 200 条增量 = 2800 条，修复前必然超出 2000：实测只剩
+      // `turn_4..turn_13`，前 4 轮整轮消失（用户看到的就是「多轮之后前面没了」）。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+
+      const turns = 14;
+      const deltas = 200;
+      for (var t = 0; t < turns; t++) {
+        final turnId = 'turn_$t';
+        sse.push(
+          EventTypes.userMessage,
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'u_$t',
+            turnId: turnId,
+            payload: {'input': '问题$t'},
+          ),
+        );
+        sse.push(
+          EventTypes.start,
+          sseEvent(EventTypes.start, id: 's_$t', turnId: turnId),
+        );
+        for (var i = 0; i < deltas; i++) {
+          sse.push(
+            EventTypes.message,
+            sseEvent(
+              EventTypes.message,
+              id: 'd_${t}_$i',
+              turnId: turnId,
+              payload: {'content': 'T$t-$i。'},
+              transient: true,
+              seq: i,
+            ),
+          );
+        }
+        sse.push(
+          EventTypes.message,
+          sseEvent(
+            EventTypes.message,
+            id: 'a_$t',
+            turnId: turnId,
+            payload: {
+              'content': [for (var i = 0; i < deltas; i++) 'T$t-$i。'].join(),
+            },
+          ),
+        );
+        sse.push(
+          EventTypes.done,
+          sseEvent(
+            EventTypes.done,
+            id: 'dn_$t',
+            turnId: turnId,
+            payload: {'status': 'completed'},
+          ),
+        );
+      }
+      await pumpEventQueue();
+
+      final assistants = c.snapshot.whereType<AssistantMessageItem>().toList();
+      expect(
+        assistants.length,
+        turns,
+        reason: '14 轮都必须还在（修复前只有 10 轮：前 4 轮整轮被裁掉）',
+      );
+      expect(assistants.first.turnId, 'turn_0', reason: '最早的一轮不得消失');
+      expect(
+        assistants.first.text,
+        [for (var i = 0; i < deltas; i++) 'T0-$i。'].join(),
+        reason: '最早一轮的正文必须完整（修复前开头会被截掉）',
+      );
+      expect(assistants.first.isStreaming, isFalse, reason: '权威帧已接管，不应停在流式态');
 
       await c.dispose();
     });

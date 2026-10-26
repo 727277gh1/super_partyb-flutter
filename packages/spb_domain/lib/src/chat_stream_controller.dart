@@ -121,6 +121,12 @@ class ChatStreamController {
   ///
   /// 首屏 [_backfill] 拉 200 条、[loadOlder] 每次 50 条，2000 条相当于「连续往上
   /// 翻 36 页」——远超实际使用深度；同时把单次归约的输入规模固定在 2000 条以内。
+  ///
+  /// ## 上限作用于「合并后」的条数
+  ///
+  /// 流式增量在入缓冲前会先与尾部合并（见 [_coalesceIntoTail]）：一个回复无论
+  /// 流了多少 token，都只占 1 个槽位。故 2000 条现在真正对应「2000 个事件」
+  /// 而非「2000 个 token」——修复前一个长回复就能吃掉全部配额。
   static const int maxBufferEvents = 2000;
 
   final List<ChatEvent> _buffer = [];
@@ -1003,6 +1009,109 @@ class ChatStreamController {
     return min;
   }
 
+  /// 把事件追加到缓冲区尾部（**流式增量先与尾部合并**）。
+  ///
+  /// 所有「往尾部追加」的路径都必须经这里，而不是直接 `_buffer.add`——否则
+  /// 增量合并会在某些入口失效，表现为「同一段回复有时能超过上限、有时不能」。
+  /// 目前只有 [_onFrame] 走这条路径；[_backfill] / [loadOlder] 灌的是**落库**
+  /// 事件（`transient == false`），不参与合并。
+  void _appendEvent(ChatEvent event) {
+    if (_coalesceIntoTail(event)) return;
+    _buffer.add(event);
+  }
+
+  /// 若 [event] 可以并入 `_buffer.last` 就并入并返回 true。
+  ///
+  /// ## 为什么合并流式增量（一次真实缺陷）
+  ///
+  /// 服务端每产出一个 token 就发一条 `transient: true` 的增量事件
+  /// （`chatexec/pigo_core.go` 的 `handleUpdate` → `flushEventTransient`）。
+  /// 一个长回复能产出上千条，而 [maxBufferEvents] 是 2000——于是**几轮正常对话
+  /// 就能把缓冲区灌满**，[_trimBuffer] 随即从头部丢事件。
+  ///
+  /// 而 [_reduction] 是 `EventReducer.reduce(_buffer)` 的**全量重算**：丢头部
+  /// 等于把归约的输入掐掉一截，后果不是「少一条事件」而是**整轮对话从时间线上
+  /// 消失**、或某条回复的**开头被截掉**。用户看到的正是「多轮之后往下滚，
+  /// 前面的正文没了」。
+  ///
+  /// 合并后一个回复只占 **1** 个缓冲槽位（归约器本来就是把同 turn 的增量逐条
+  /// 追加到同一个段落，故**归约结果逐字不变**），2000 的上限不再被流式增量
+  /// 撑爆。
+  ///
+  /// ## 为什么必须保留**第一条**的 eventId
+  ///
+  /// 归约器用「首个增量帧的 `eventId`」当 [AssistantMessageItem.id]，而页面用
+  /// `ValueKey(item.id)` 复用 Element。若合并时改用最后一条的 id，流式期间 id
+  /// 会逐条变化 → Element 反复重建 → `gpt_markdown` 的增量解析缓存（`_engine`）
+  /// 每次重置 → 气泡**塌成一行再重新打字**（实测：一次 `pump` 内渲染字符数
+  /// `12912 → 36`）。保留首条的 id 则 id 从段落诞生到被权威帧接管都恒定。
+  ///
+  /// ## 合并条件为什么这么严
+  ///
+  /// 只在「紧邻、同 turn、同类型、同 session/agent、且两边都恰好只有一个
+  /// 文本键、键名相同、值为字符串」时合并。任一不满足就退回独立入缓冲——
+  /// 合并错了会**篡改正文**（比不合并严重得多），故宁可不合。
+  bool _coalesceIntoTail(ChatEvent event) {
+    if (!event.isIncremental || _buffer.isEmpty) return false;
+    final last = _buffer.last;
+    if (!last.isIncremental) return false;
+    if (last.turnId != event.turnId) return false;
+    if (last.eventType != event.eventType) return false;
+    // sessionId / agentId 理论上随 turn 固定，但归约器会读它们（如
+    // `AssistantMessageItem.agentId`）；不一致时合并会把后者覆盖掉，故直接不合并。
+    if (last.sessionId != event.sessionId) return false;
+    if (last.agentId != event.agentId) return false;
+
+    final prevKey = _singleTextKeyOf(last);
+    final nextKey = _singleTextKeyOf(event);
+    if (prevKey == null || nextKey != prevKey) return false;
+
+    final prevText = last.payload![prevKey] as String;
+    final nextText = event.payload![nextKey] as String;
+
+    _buffer[_buffer.length - 1] = ChatEvent(
+      // 首条的标识（见方法文档：id 必须稳定）。
+      eventId: last.eventId,
+      userId: last.userId,
+      groupId: last.groupId,
+      turnId: last.turnId,
+      sessionId: last.sessionId,
+      agentId: last.agentId,
+      eventType: last.eventType,
+      seq: last.seq,
+      // transient 事件不落库、globalSeq 恒为 null；保留首条的值以保持
+      // 「合并前后对 [_minGlobalSeqOf] / 缓存过滤的可见性完全一致」。
+      globalSeq: last.globalSeq,
+      source: last.source,
+      createdAt: last.createdAt,
+      payload: {...last.payload!, prevKey: prevText + nextText},
+      transient: last.transient,
+      diagnostic: last.diagnostic,
+    );
+    return true;
+  }
+
+  /// 若 [event] 的 payload 恰好**只有一个**键且该键属于文本键集合、值为
+  /// `String`，返回该键名；否则返回 null。
+  ///
+  /// ## 为什么要求「只有一个键」
+  ///
+  /// 服务端的增量帧目前只有 `{content: "..."}`（pigo / llm / responses 三个
+  /// 执行器都是）。但只要带了任何附加键（未来的 `index` / `role` / 完成标记…），
+  /// 合并就会**丢掉那条附加信息**。要求「唯一键」把这类演进挡在外面——多键时
+  /// 不合并，行为退回到修复前（只是慢一点，不会错）。
+  static String? _singleTextKeyOf(ChatEvent event) {
+    final payload = event.payload;
+    if (payload == null || payload.length != 1) return null;
+    final entry = payload.entries.first;
+    if (!_textPayloadKeys.contains(entry.key)) return null;
+    if (entry.value is! String) return null;
+    return entry.key;
+  }
+
+  /// 服务端可能用来承载流式文本的键（对齐 [ChatEvent.text] 的读取顺序）。
+  static const Set<String> _textPayloadKeys = {'text', 'content', 'message'};
+
   /// 丢弃缓冲区里最旧的事件，使其不超过 [maxBufferEvents]。
   ///
   /// ## 为什么从头部丢
@@ -1011,19 +1120,89 @@ class ChatStreamController {
   /// 最旧。时间线以「最新」为焦点（打开即滚到底部、新事件从尾部追加），故丢
   /// 头部对用户可感知的影响最小。
   ///
+  /// ## 为什么以**整轮**为粒度（一次真实缺陷）
+  ///
+  /// 原先直接 `removeRange(0, excess)`，边界落在哪条事件上完全看运气。而
+  /// [_reduction] 是 `EventReducer.reduce(_buffer)` 的全量重算：切在一轮对话
+  /// 中间就等于**把那轮的头部删掉**——用户看到回复少了一段开头；切在两轮之间
+  /// 的某条落库事件上，则整轮的用户消息可能先被丢掉，只剩一条「无主的 agent
+  /// 回复」。
+  ///
+  /// 故改为「以 turnId 的连续段为粒度」：裁剪点只会落在一轮的**起点**上，
+  /// 前面若干轮整段丢弃——宁可多丢一两轮，也不留半轮。
+  ///
+  /// ## 为什么有单轮兜底
+  ///
+  /// 缓冲区里**只有一个 turn** 时（首屏回填了一轮超长对话、或翻页翻进了同一轮），
+  /// 按整轮丢就等于「全丢」，比原来的「丢一半」更糟。那时退回逐条丢头部，并
+  /// 记一条 warn——这是有意的降级，不是遗漏。
+  ///
   /// ## 为什么不抬高翻页游标
   ///
   /// 只丢事件、**不动** [_oldestLoadedGlobalSeq]——否则被裁掉的事件会被再次
   /// 拉回来。见 [_oldestLoadedGlobalSeq] 的说明。
+  ///
+  /// ## 已知边界：[loadOlder] 在触顶时的翻页会「白拉」
+  ///
+  /// 缓冲区触顶时，[loadOlder] 先往头部 `insertAll` 再调本方法，而本方法仍从
+  /// 头部丢——刚插进去的那页会被原样丢掉，用户看到「翻页转了一圈什么都没变」。
+  /// 这是**修复前就存在**的独立缺陷（不是本次引入），且修它要改翻页语义
+  /// （是「前插时临时提高上限」还是「翻页时暂停裁剪」需要产品决定），故本次
+  /// 不动，只在此记录。
   void _trimBuffer() {
     final excess = _buffer.length - maxBufferEvents;
     if (excess <= 0) return;
-    _buffer.removeRange(0, excess);
-    SpbLog.debug('事件缓冲区超出上限，丢弃最旧事件', {
-      'dropped': excess,
+
+    final cut = _turnBoundaryAtOrAfter(excess);
+    if (cut == null) {
+      // 整个缓冲区都在同一个 turn 里，没有边界可切——退回逐条丢头部。
+      _buffer.removeRange(0, excess);
+      // 只在本降级时段的第一条记 warn（见 `_singleTurnTrimWarned`）。
+      if (!_singleTurnTrimWarned) {
+        _singleTurnTrimWarned = true;
+        SpbLog.warn('事件缓冲区超限但无法按轮裁剪（整个缓冲区属于同一轮），退回逐条丢弃', {
+          'dropped': excess,
+          'kept': _buffer.length,
+          'limit': maxBufferEvents,
+          'turnId': _buffer.isEmpty ? '' : _buffer.first.turnId,
+        });
+      }
+      return;
+    }
+    if (cut <= 0) return;
+
+    _singleTurnTrimWarned = false;
+    _buffer.removeRange(0, cut);
+    SpbLog.debug('事件缓冲区超出上限，按轮丢弃最旧事件', {
+      'dropped': cut,
       'kept': _buffer.length,
       'limit': maxBufferEvents,
+      'excess': excess,
     });
+  }
+
+  /// 单轮降级裁剪是否已记过 warn（防日志洪水）。
+  ///
+  /// 单轮超限时每条新事件都会触发一次裁剪，若每次都 warn，一秒就能把 500 条的
+  /// 诊断环形缓冲（AGENTS.md §6.20）刷满，把真正的异常扫掉。故按「降级时段」
+  /// 只记一次：一旦重新出现轮次边界（可正常按轮裁剪），标记复位。
+  bool _singleTurnTrimWarned = false;
+
+  /// 找到「至少丢掉 [minDrop] 条、且落在轮次边界上」的裁剪点；无边界返回 null。
+  ///
+  /// 从 `minDrop` 往后找第一个 turnId 与它的**前一条**不同的位置——那里是
+  /// 一轮的起点，从它开始丢就完整丢掉了前面若干轮。
+  ///
+  /// ## 为什么是「向后找」而不是「就近取整」
+  ///
+  /// 向后找只会**多丢**、不会少丢：缓冲区一定回到上限以下（上限的硬保证）。
+  /// 就近取整则可能丢得不够，于是下一批事件到达时又要再裁一次——而那时新的一轮
+  /// 可能已经开始了，反而更容易切错。
+  int? _turnBoundaryAtOrAfter(int minDrop) {
+    for (var i = minDrop; i < _buffer.length; i++) {
+      if (_buffer[i].turnId != _buffer[i - 1].turnId) return i;
+    }
+    return null;
   }
 
   void _onFrame(SseFrame frame) {
@@ -1156,7 +1335,7 @@ class ChatStreamController {
       _pushStaleTurnIds();
     }
 
-    _buffer.add(event);
+    _appendEvent(event);
     _trimBuffer();
 
     // cursor 只在落库事件上推进（Transient 事件无有效 ID）。

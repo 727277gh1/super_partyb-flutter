@@ -29,6 +29,18 @@ import '../support/conversation_page_harness.dart';
 /// 页面若把 `keyFor` 的结果复制一份再分发，纯逻辑测试仍全绿。这与 AGENTS.md
 /// §6.21 / §6.26 / §6.33 / §6.36 同一类「绿不代表对」。
 ///
+/// ## 为什么现在仍能构造出「批量卡被拆散」（2026-10 更新）
+///
+/// `ChatStreamController._trimBuffer` 已改为**按轮裁剪**（整轮丢弃，见
+/// `_turnBoundaryAtOrAfter`）：边界落在两轮之间，故「切进批量卡中间」不再
+/// 可能发生——它会把整张批量卡（同一轮）一次丢完。
+///
+/// 但拆散**仍能发生**，走的是另一条路径：缓冲区里**只有一个 turn** 时没有边界
+/// 可切，`_trimBuffer` 退回逐条丢头部（并记 warn）。本用例因此把填充事件的
+/// turnId 也改成 `turn_batch`，让整个缓冲区成为「一轮超长对话」，于是裁剪落回
+/// 逐条路径，批量卡被切散——**这与「首屏回填了一轮超长对话」的真实场景一致**
+/// （那种情况下也会发生）。
+///
 /// ## 为什么断言「4 张卡都渲染」而不是「没有异常」
 ///
 /// `Multiple widgets used the same GlobalKey` 由
@@ -54,6 +66,12 @@ void main() {
     //   7 个同秒同 turn 的文件 → 一张 7 成员的批量卡
     //   + 1996 条 `executor_started` 填充 → 缓冲 2003 条 → 裁剪 3 条
     //     = 前 3 个文件被丢 → 剩 4 个，不足阈值 5 → 退回 4 个 `SingleItemRow`
+    //
+    // ⚠️ 填充事件必须与批量卡**同一个 turnId**（`turn_batch`）。按轮裁剪后
+    // 有边界时不会切进任何一轮；只有当整个缓冲区属于同一轮、无边界可切时才
+    // 退回逐条丢头部——那正是本用例要覆盖的降级路径。若给填充事件各不相同的
+    // turnId，边界会落在批量卡之后，整张卡被一次丢完（实测：`AgentFileCard`
+    // 数量为 0，本用例的前提断言先红）。
     //
     // 填充事件用 `executor_started` 而不是消息：它是**诊断事件**
     // （`EventTypes.diagnostic`），进缓冲区但既不产生对话项、也不产出
@@ -92,7 +110,8 @@ void main() {
           sseEvent(
             'executor_started',
             id: 'x$i',
-            turnId: 'turn_x$i',
+            // 与批量卡同 turn（见文件头「为什么现在仍能构造出批量卡被拆散」）。
+            turnId: 'turn_batch',
             seq: ++seq,
           ),
         ),
