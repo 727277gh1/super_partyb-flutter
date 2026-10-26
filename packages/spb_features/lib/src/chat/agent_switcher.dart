@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
+
+import 'agent_picker.dart';
 
 /// 读取可选的 agent 列表（装配层注入 `AgentsApi.listAgents`）。
 typedef LoadAgents = Future<List<Agent>> Function();
@@ -36,6 +39,28 @@ typedef SwitchGroupAgent = Future<GroupAgentSwitchResult> Function(
 /// 代价是：一次瞬时网络抖动会让入口在本页存活期间一直不出现。这是刻意的
 /// ——重试逻辑会引入「加载中」状态，而 AppBar 上不该出现第二个转圈（停止
 /// 按钮已占一个位置）。
+///
+/// ## 为什么小列表用 PopupMenu、大列表换成搜索弹层
+///
+/// 生产实测（2026-10，bcc）：**32 个 active agent / 5 个分组**
+/// （助手 14 / 营销 7 / 1.助手 6 / 多媒体 4 / 文学 1）。
+/// `PopupMenuButton` 的 `itemBuilder` 返回 `List<PopupMenuEntry>`，**塞不进
+/// 输入框**——只能滚动着找。32 项 × 48dp ≈ 1650dp，用户要划好几屏，且没有
+/// 任何分组结构。
+///
+/// 故按 [searchThreshold] 分档：
+///
+/// | 数量 | 载体 | 理由 |
+/// |---|---|---|
+/// | ≤ 8（一屏可见） | `PopupMenuButton` | 点两下就选中，搜索框反而是负担 |
+/// | > 8 | 搜索弹层（[AgentPickerDialog]） | 打两个字收窄到 1 项 |
+///
+/// 弹层里**仍然分节展示**（按 `Agent.groupName`）：搜索是「找不到时」的手段，
+/// 分组是「浏览时」的结构，两者不互相替代。分组/过滤的判据在 `spb_domain`
+/// 的 `groupAgents` / `filterAgentGroups`（纯逻辑，可无头单测）。
+///
+/// 载体由本组件自己判断（`SpbEnv.isDesktop` 选 dialog / bottom sheet），
+/// 故两端 router **一行都不用改**。
 class AgentSwitcher extends StatefulWidget {
   const AgentSwitcher({
     super.key,
@@ -59,8 +84,7 @@ class AgentSwitcher extends StatefulWidget {
   /// 切换是否在途（装配层传入）。为真时禁用入口，防并发切换把绑定打乱。
   final bool busy;
 
-  /// 紧凑模式：只显示图标，不显示 agent 名字。
-  ///
+  /// 紧凑模式：只显示图标，不显示 agent 名字。  ///
   /// ## 为什么需要它（issue #31）
   ///
   /// 标签最多占 140dp（名字长时），加图标与箭头后整个控件可达 190dp。窄屏
@@ -76,6 +100,13 @@ class AgentSwitcher extends StatefulWidget {
   /// 代价：用户要多点一下才知道当前 agent。这是窄屏下的合理取舍——320dp
   /// 的设备（如 iPhone SE 一代）本就无法同时容纳全部信息。
   final bool compact;
+
+  /// 超过这个数量就换成搜索弹层（见类文档的表格）。
+  ///
+  /// 取 8 的依据：一屏 `PopupMenu` 在常见手机高度下能完整显示 6–8 项（含
+  /// 菜单头与「开新会话」），超过它就要滚动，而滚动的列表里「找一项」与
+  /// 「搜一项」的成本差距随长度线性放大。
+  static const int searchThreshold = 8;
 
   @override
   State<AgentSwitcher> createState() => _AgentSwitcherState();
@@ -152,74 +183,147 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
     // 未加载完 / 加载失败 / 没有可选项 → 不渲染（见类文档）。
     if (agents == null || agents.isEmpty) return const SizedBox.shrink();
 
-    final theme = Theme.of(context);
-    return PopupMenuButton<_SwitcherAction>(
+    final trigger = _buildTrigger(context);
+
+    // 小列表：保持原来的 PopupMenu（点两下就选中）。
+    if (agents.length <= AgentSwitcher.searchThreshold) {
+      return PopupMenuButton<_SwitcherAction>(
+        key: const ValueKey('agent-switcher'),
+        enabled: !widget.busy,
+        tooltip: '切换 Agent',
+        onSelected: _onSelected,
+        itemBuilder: (context) => _menuItems(context, groupAgents(agents)),
+        child: trigger,
+      );
+    }
+
+    // 大列表：换成搜索弹层（`itemBuilder` 塞不进输入框）。
+    return InkWell(
       key: const ValueKey('agent-switcher'),
-      enabled: !widget.busy,
-      tooltip: '切换 Agent',
-      onSelected: _onSelected,
-      itemBuilder: (context) => [
-        // 菜单头：说明切换的代价。放在菜单里而非只在对话框里，是因为用户
-        // 打开菜单时就要知道「这不是无损操作」。
-        const PopupMenuItem<_SwitcherAction>(
-          enabled: false,
-          height: 36,
-          child: Text('切换 Agent 会断开当前对话的上下文', style: TextStyle(fontSize: 12)),
-        ),
-        const PopupMenuDivider(),
-        for (final a in agents)
+      borderRadius: SpbRadius.cardAll,
+      onTap: widget.busy ? null : _openPicker,
+      child: Opacity(opacity: widget.busy ? 0.5 : 1, child: trigger),
+    );
+  }
+
+  Widget _buildTrigger(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: SpbSpacing.sm,
+        vertical: SpbSpacing.xs,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
+          const SizedBox(width: SpbSpacing.xs),
+          if (!widget.compact)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 140),
+              child: Text(
+                _currentLabel,
+                key: const ValueKey('agent-switcher-label'),
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelLarge,
+              ),
+            ),
+          // 当前 agent 已不在可选列表里（归档/删除）：给出标记，否则用户会
+          // 疑惑「为什么这个 agent 在菜单里找不到」。
+          if (_currentMissing)
+            Tooltip(
+              message: '当前 Agent 已不可用',
+              child: Icon(
+                Icons.warning_amber_outlined,
+                size: SpbSpacing.lg,
+                color: theme.colorScheme.error,
+              ),
+            ),
+          const Icon(Icons.arrow_drop_down, size: SpbSpacing.lg),
+        ],
+      ),
+    );
+  }
+
+  /// PopupMenu 的条目（按 [groupAgents] 分节）。
+  List<PopupMenuEntry<_SwitcherAction>> _menuItems(
+    BuildContext context,
+    List<AgentGroup> groups,
+  ) {
+    final theme = Theme.of(context);
+    return [
+      // 菜单头：说明切换的代价。放在菜单里而非只在对话框里，是因为用户
+      // 打开菜单时就要知道「这不是无损操作」。
+      const PopupMenuItem<_SwitcherAction>(
+        enabled: false,
+        height: 36,
+        child: Text('切换 Agent 会断开当前对话的上下文', style: TextStyle(fontSize: 12)),
+      ),
+      const PopupMenuDivider(),
+      for (final g in groups) ...[
+        // 组头：只在真的分组时出现。全是未分组时它只是噪音。
+        if (g.name != ungroupedAgentLabel || groups.length > 1)
+          PopupMenuItem<_SwitcherAction>(
+            key: ValueKey('agent-group-${g.name}'),
+            enabled: false,
+            height: 32,
+            child: Text(
+              g.name,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        for (final a in g.agents)
           CheckedPopupMenuItem<_SwitcherAction>(
             key: ValueKey('agent-option-${a.id}'),
             value: _SwitchTo(a.id),
             checked: a.id == widget.currentAgentId,
+            // 当前 agent **不可选**：服务端 `switchAgent` 会先归档该 group 的
+            // 全部旧绑定再写新的，故「切到同一个 agent」= 无声地丢掉上下文，
+            // 而界面上没有任何变化（用户会以为点了没反应）。webapp 的
+            // `AgentSelector.tsx` 用 `disabled={isCurrent}` 做了同一件事。
+            enabled: a.id != widget.currentAgentId,
             child: Text(a.label, overflow: TextOverflow.ellipsis),
           ),
-        // 同 agent 开新会话：单独一条，语义是「清空上下文但保留这个 agent」。
-        if ((widget.currentAgentId ?? '').isNotEmpty) ...[
-          const PopupMenuDivider(),
-          const PopupMenuItem<_SwitcherAction>(
-            key: ValueKey('agent-new-session'),
-            value: _NewSession(),
-            child: Text('同 Agent 开新会话'),
-          ),
-        ],
       ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.sm,
-          vertical: SpbSpacing.xs,
+      // 同 agent 开新会话：单独一条，语义是「清空上下文但保留这个 agent」。
+      if ((widget.currentAgentId ?? '').isNotEmpty) ...[
+        const PopupMenuDivider(),
+        const PopupMenuItem<_SwitcherAction>(
+          key: ValueKey('agent-new-session'),
+          value: _NewSession(),
+          child: Text('同 Agent 开新会话'),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
-            const SizedBox(width: SpbSpacing.xs),
-            if (!widget.compact)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 140),
-                child: Text(
-                  _currentLabel,
-                  key: const ValueKey('agent-switcher-label'),
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelLarge,
-                ),
-              ),
-            // 当前 agent 已不在可选列表里（归档/删除）：给出标记，否则用户会
-            // 疑惑「为什么这个 agent 在菜单里找不到」。
-            if (_currentMissing)
-              Tooltip(
-                message: '当前 Agent 已不可用',
-                child: Icon(
-                  Icons.warning_amber_outlined,
-                  size: SpbSpacing.lg,
-                  color: theme.colorScheme.error,
-                ),
-              ),
-            const Icon(Icons.arrow_drop_down, size: SpbSpacing.lg),
-          ],
-        ),
-      ),
+      ],
+    ];
+  }
+
+  /// 打开搜索弹层（大列表）。
+  ///
+  /// 桌面用 `showDialog`：鼠标操作不该从屏幕底部升起一个 sheet（那是移动端
+  /// 的隐喻）。移动端用 `showModalBottomSheet`：与两端其余弹层载体一致
+  /// （AGENTS.md §6.10）。
+  Future<void> _openPicker() async {
+    final agents = _agents;
+    if (agents == null || agents.isEmpty) return;
+
+    final picker = AgentPickerDialog(
+      groups: groupAgents(agents),
+      currentAgentId: widget.currentAgentId,
     );
+    final agentId = SpbEnv.isDesktop
+        ? await showDialog<String>(
+            context: context,
+            builder: (dialogContext) => picker,
+          )
+        : await showModalBottomSheet<String>(
+            context: context,
+            isScrollControlled: true,
+            builder: (sheetContext) => SafeArea(child: picker),
+          );
+    if (agentId == null || !mounted) return;
+    await _onSelected(_SwitchTo(agentId));
   }
 
   Future<void> _onSelected(_SwitcherAction action) async {

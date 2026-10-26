@@ -34,6 +34,7 @@ library;
 export 'agent_file_batch_card.dart';
 export 'agent_file_card.dart';
 export 'agent_file_preview.dart';
+export 'agent_picker.dart';
 export 'agent_switcher.dart';
 export 'assistant_message_bubble.dart';
 export 'auto_schedules.dart';

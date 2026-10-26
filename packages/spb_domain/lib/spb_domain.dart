@@ -45,6 +45,7 @@ library;
 //   SyncScopeConfig               —— 同步范围**持久化形态**（允许空列表）→ toScope()
 //   SyncSettings / LocalSyncStats —— 设置页的表单聚合形态与本地统计
 //   buildPrunePlan / isGroupId    —— 本地目录清理计划（纯逻辑，可预览）
+//   groupAgents / filterAgentGroups —— Agent 列表按 group_name 分组 + 搜索过滤（纯逻辑）
 //   buildArtifactTree / ArtifactNode —— 交付物清单 → 树（隐式目录、聚合、排序，纯逻辑）
 //   GateDecision / GateDecisionKind / GateSourceKind —— Gate 决策（adaptive_decision / goal_gate_decision 归约输出，独立于时间线）
 //   collectGateDecisions / gateDecisionFrom —— 事件流 → Gate 决策列表（纯函数）
@@ -74,6 +75,7 @@ export 'src/conversation_search.dart';
 export 'src/deliverable_sync.dart';
 export 'src/deliverable_sync_usecase.dart';
 export 'src/deliverable_upload.dart';
+export 'src/agent_groups.dart';
 export 'src/deliverable_upload_adapters.dart';
 export 'src/deliverable_upload_usecase.dart';
 export 'src/event_reducer.dart';

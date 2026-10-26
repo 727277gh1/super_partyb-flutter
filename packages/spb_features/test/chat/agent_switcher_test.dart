@@ -387,5 +387,262 @@ void main() {
       );
       expect(button.enabled, isFalse);
     });
+
+    testWidgets('当前 agent 的菜单项不可选（否则静默丢掉上下文）', (tester) async {
+      // 服务端 `switchAgent` 先归档该 group 的全部旧绑定再写新的，所以
+      // 「切到同一个 agent」= 无声地丢上下文，而界面上没有任何变化。
+      // webapp 的 AgentSelector.tsx 用 `disabled={isCurrent}` 做了同一件事。
+      await pumpSwitcher(
+        tester,
+        agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
+        currentAgentId: 'a1',
+      );
+
+      await openMenu(tester);
+
+      final current = tester.widget<CheckedPopupMenuItem<Object?>>(
+        find.byKey(const ValueKey('agent-option-a1')),
+      );
+      expect(current.enabled, isFalse, reason: '当前 agent 不应可点');
+
+      final other = tester.widget<CheckedPopupMenuItem<Object?>>(
+        find.byKey(const ValueKey('agent-option-a2')),
+      );
+      expect(other.enabled, isTrue, reason: '其他 agent 必须可点');
+    });
+
+    testWidgets('按 group_name 分节展示（组头 + 组内顺序）', (tester) async {
+      // Agent.groupName 的文档写着「用于下拉里分节展示」（agent.dart），
+      // 服务端 agentDTO 也真的返回了它（agents.go 的 group_name）——
+      // 此前 Flutter 侧完全没用，导致 32 个 agent 平铺成一个长列表。
+      await pumpSwitcher(
+        tester,
+        agents: const [
+          Agent(id: 'a1', name: '法务合规助手', groupName: '助手'),
+          Agent(id: 'a2', name: '营销策略长', groupName: '营销'),
+          Agent(id: 'a3', name: '财务记账助手', groupName: '助手'),
+        ],
+        currentAgentId: 'a1',
+      );
+
+      await openMenu(tester);
+
+      expect(find.byKey(const ValueKey('agent-group-助手')), findsOneWidget);
+      expect(find.byKey(const ValueKey('agent-group-营销')), findsOneWidget);
+
+      // 组间按组名 code-unit 升序：「助手」(U+4F50) 在「营销」(U+8425) 之前。
+      final helperY = tester
+          .getTopLeft(find.byKey(const ValueKey('agent-group-助手')))
+          .dy;
+      final marketingY = tester
+          .getTopLeft(find.byKey(const ValueKey('agent-group-营销')))
+          .dy;
+      expect(helperY, lessThan(marketingY));
+
+      // 组内保持服务端顺序（a1 在 a3 之前），且 a3 在「助手」组头之后、
+      // 「营销」组头之前。
+      final a1Y = tester
+          .getTopLeft(find.byKey(const ValueKey('agent-option-a1')))
+          .dy;
+      final a3Y = tester
+          .getTopLeft(find.byKey(const ValueKey('agent-option-a3')))
+          .dy;
+      expect(a1Y, greaterThan(helperY));
+      expect(a3Y, greaterThan(a1Y));
+      expect(a3Y, lessThan(marketingY));
+    });
+
+    testWidgets('全未分组时不显示「未分组」组头（那只是噪音）', (tester) async {
+      await pumpSwitcher(
+        tester,
+        agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
+        currentAgentId: 'a1',
+      );
+
+      await openMenu(tester);
+
+      expect(find.byKey(const ValueKey('agent-group-未分组')), findsNothing);
+    });
+  });
+
+  group('大列表：搜索弹层（issue: 32 个 agent 平铺不可用）', () {
+    /// 生产实测形状：5 个分组、超过 searchThreshold 的数量。
+    List<Agent> manyAgents() => const [
+      Agent(id: 'a1', name: '研究助手', groupName: '助手'),
+      Agent(id: 'a2', name: '编程助手', groupName: '助手'),
+      Agent(
+        id: 'a3',
+        name: '法务合规助手',
+        groupName: '助手',
+        description: '合同审查与风险提示',
+      ),
+      Agent(id: 'a4', name: '营销策略长', groupName: '营销'),
+      Agent(id: 'a5', name: '增长与留任运营', groupName: '营销'),
+      Agent(id: 'a6', name: '金融助手', groupName: '1.助手'),
+      Agent(id: 'a7', name: '图片创作', groupName: '多媒体'),
+      Agent(id: 'a8', name: '音乐创作', groupName: '多媒体'),
+      Agent(id: 'a9', name: '小说创作', groupName: '文学'),
+    ];
+
+    testWidgets('超过阈值时不再用 PopupMenu（itemBuilder 塞不进输入框）', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      // ⚠️ 不能用 `find.byType(PopupMenuButton<Object?>)`：`byType` 比较的是
+      // `widget.runtimeType == T`，而实际运行时类型是
+      // `PopupMenuButton<_SwitcherAction>`（私有泛型），两者不相等。
+      expect(find.byWidgetPredicate((w) => w is PopupMenuButton), findsNothing);
+      // 标签仍在（compact=false 时的既有行为）。
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+            .data,
+        '研究助手',
+      );
+    });
+
+    testWidgets('未超阈值时仍是 PopupMenu（小列表不引入搜索负担）', (tester) async {
+      await pumpSwitcher(
+        tester,
+        agents: [
+          for (var i = 0; i < AgentSwitcher.searchThreshold; i++)
+            agent('a$i', '助手$i'),
+        ],
+        currentAgentId: 'a0',
+      );
+
+      expect(
+        find.byWidgetPredicate((w) => w is PopupMenuButton),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('点开弹层：搜索框自动聚焦、分组分节、数量正确', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('agent-picker')), findsOneWidget);
+      expect(find.byKey(const ValueKey('agent-picker-search')), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('agent-picker-count')))
+            .data,
+        '9',
+      );
+
+      // 弹层是固定高度的 ListView（惰性建元素），后面的分组一开始不在树上
+      // ——那正是用户真实看到的情形（需要滚动）。组间按 code-unit 序：
+      // `1.助手 < 助手 < 多媒体 < 文学 < 营销`，故「营销」在最后。
+      expect(
+        find.byKey(const ValueKey('agent-picker-group-1.助手')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-picker-group-助手')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-picker-group-营销')),
+        findsNothing,
+        reason: '最后一个分组初始在视口外（惰性构建），需滚动才可见',
+      );
+
+      await tester.dragUntilVisible(
+        find.byKey(const ValueKey('agent-picker-group-营销')),
+        find.byType(ListView),
+        const Offset(0, -80),
+      );
+      await tester.pumpAndSettle();
+
+      for (final g in ['多媒体', '文学', '营销']) {
+        expect(
+          find.byKey(ValueKey('agent-picker-group-$g')),
+          findsOneWidget,
+          reason: '滚动后应能看到分组「$g」的组头',
+        );
+      }
+    });
+
+    testWidgets('输入即过滤，无命中显示空状态', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const ValueKey('agent-picker-search')),
+        '法务',
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('agent-option-a3')), findsOneWidget);
+      expect(find.byKey(const ValueKey('agent-option-a1')), findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('agent-picker-count')))
+            .data,
+        '1',
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('agent-picker-search')),
+        '不存在的词',
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('agent-picker-empty')), findsOneWidget);
+    });
+
+    testWidgets('可搜描述（用户记得的是能力而不是名字）', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('agent-picker-search')),
+        '合同',
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('agent-option-a3')), findsOneWidget);
+    });
+
+    testWidgets('当前 agent 在弹层里置灰且不可点', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+      await tester.pumpAndSettle();
+
+      final current = tester.widget<ListTile>(
+        find.byKey(const ValueKey('agent-option-a1')),
+      );
+      expect(current.enabled, isFalse);
+      expect(current.onTap, isNull);
+      expect(find.text('当前'), findsOneWidget);
+    });
+
+    testWidgets('点选其他 agent 后仍走确认框，确认后调用 switchAgent', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
+      await tester.pumpAndSettle();
+
+      // 弹层已关闭，确认框出现（不能因为换了载体就跳过确认）。
+      expect(find.byKey(const ValueKey('agent-picker')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('agent-switch-confirm')),
+        findsOneWidget,
+      );
+      expect(lastSwitch, isNull, reason: '确认前不应调用');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switch-confirm-ok')));
+      await tester.pumpAndSettle();
+
+      expect(lastSwitch?.agentId, 'a2');
+      expect(lastSwitch?.forceNewSession, isFalse);
+    });
   });
 }
