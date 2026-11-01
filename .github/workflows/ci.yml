@@ -268,7 +268,7 @@ jobs:
         run: bash tools/coverage.sh
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: coverage/lcov.info
@@ -375,7 +375,7 @@ jobs:
       - name: Verify build defines reached the binary
         run: bash tools/check_build_defines.sh
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-release
           path: apps/spb_desktop/build/linux/x64/release/bundle/
@@ -443,7 +443,7 @@ jobs:
             echo "✅ $(basename "$(dirname "$snap")")/libapp.so 未残留默认地址"
           done
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apk
           path: apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
@@ -504,7 +504,7 @@ jobs:
       # 注意路径必须从**仓库根**写起：upload-artifact 的 path 相对 GITHUB_WORKSPACE，
       # 不继承上面 step 的 working-directory。写成 `build/...` 会静默传一个空目录
       # （v4 默认 warn 而非 fail），产物看似上传成功实则没有 exe。
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-release
           path: apps/spb_desktop/build/windows/x64/runner/Release/
