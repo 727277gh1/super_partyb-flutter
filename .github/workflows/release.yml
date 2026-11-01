@@ -145,7 +145,7 @@ jobs:
     needs: config
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -240,7 +240,7 @@ jobs:
     needs: config
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # 编译 C++ runner 的最低需求（AGENTS.md §7）。
       - name: Install build dependencies
@@ -328,7 +328,7 @@ jobs:
     needs: config
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-java@v6
         with:
@@ -448,7 +448,7 @@ jobs:
     needs: config
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -530,7 +530,7 @@ jobs:
       # `git log <上一个 tag>..HEAD` 生成。默认 depth=1 且不带 tag，
       # 命令会退化成「列不出任何提交」或「找不到上一个 tag」——而那是
       # 静默的（release notes 少一段，没人会注意）。
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true

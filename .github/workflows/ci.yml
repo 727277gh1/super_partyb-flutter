@@ -95,7 +95,7 @@ jobs:
   quality:
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -294,7 +294,7 @@ jobs:
     needs: config
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # 编译 C++ runner 的最低需求 + **插件的编译期依赖**（AGENTS.md §7）。
       #
@@ -386,7 +386,7 @@ jobs:
     needs: config
     runs-on: ubuntu-24.04   # 而非 ubuntu-latest：见 AGENTS.md §6.30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-java@v6
         with:
@@ -457,7 +457,7 @@ jobs:
     needs: config
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
