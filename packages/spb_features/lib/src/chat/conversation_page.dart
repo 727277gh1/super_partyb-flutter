@@ -1958,6 +1958,12 @@ class _ConversationPageState extends State<ConversationPage> {
       child: ListView.builder(
         controller: _scrollController,
         padding: SpbSpacing.pagePadding,
+        // 正文可能高达几十屏，避免把整条回复录成一个可复用的绘制层。
+        // 用户反馈正文在中途滚动时整块消失、从顶部重滚才恢复；本机无头环境
+        // 尚未复现设备 GPU 的空白，先移除整行缓存这条可疑路径。
+        // 正文随视口重绘，其他卡片单独加回边界；Markdown 解析缓存与
+        // keep-alive 不受影响。目标设备上仍需复核显示与滚动性能。
+        addRepaintBoundaries: false,
         // 预建范围从默认的 250 **像素** 改成 1.5 屏。
         //
         // ## 为什么
@@ -2016,36 +2022,40 @@ class _ConversationPageState extends State<ConversationPage> {
           final locateKeys = locateIdsOf(row);
           final locateKey = _rowKeys.keyFor(locateKeys);
 
+          final child = Padding(
+            // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
+            // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
+            // 避免流式更新时整列重建。
+            key: ValueKey(switch (row) {
+              SingleItemRow(:final item) => item.id,
+              AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
+            }),
+            padding: const EdgeInsets.only(bottom: SpbSpacing.md),
+            child: switch (row) {
+              SingleItemRow(:final item) => _buildItem(item),
+              AgentFileBatchRow() => AgentFileBatchCard(
+                batch: row,
+                onDownload: widget.onDownloadAgentFile,
+                // 传**记忆化**的那个（而不是 `widget.onLoadThumbnailAgentFile`）：
+                // 批量卡的每个成员同样会在滚出 `cacheExtent` 后被 dispose，
+                // 滚回来重新 `initState`。走方法 tear-off 还额外得到稳定的
+                // 回调 identity（虽然子卡已不靠它判重拉）。
+                // 空 `ufsFileId` 的成员由批量卡自己拦（它判 `isEmpty` 后传 null）。
+                onLoadThumbnail: widget.onLoadThumbnailAgentFile == null
+                    ? null
+                    : _loadThumbnailMemoized,
+                onOpen: widget.onOpenAgentFile,
+                onReveal: widget.onRevealAgentFile,
+                onPreview: widget.onPreviewAgentFile,
+              ),
+            },
+          );
           return KeyedSubtree(
             key: locateKey,
-            child: Padding(
-              // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
-              // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
-              // 避免流式更新时整列重建。
-              key: ValueKey(switch (row) {
-                SingleItemRow(:final item) => item.id,
-                AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
-              }),
-              padding: const EdgeInsets.only(bottom: SpbSpacing.md),
-              child: switch (row) {
-                SingleItemRow(:final item) => _buildItem(item),
-                AgentFileBatchRow() => AgentFileBatchCard(
-                  batch: row,
-                  onDownload: widget.onDownloadAgentFile,
-                  // 传**记忆化**的那个（而不是 `widget.onLoadThumbnailAgentFile`）：
-                  // 批量卡的每个成员同样会在滚出 `cacheExtent` 后被 dispose，
-                  // 滚回来重新 `initState`。走方法 tear-off 还额外得到稳定的
-                  // 回调 identity（虽然子卡已不靠它判重拉）。
-                  // 空 `ufsFileId` 的成员由批量卡自己拦（它判 `isEmpty` 后传 null）。
-                  onLoadThumbnail: widget.onLoadThumbnailAgentFile == null
-                      ? null
-                      : _loadThumbnailMemoized,
-                  onOpen: widget.onOpenAgentFile,
-                  onReveal: widget.onRevealAgentFile,
-                  onPreview: widget.onPreviewAgentFile,
-                ),
-              },
-            ),
+            child: switch (row) {
+              SingleItemRow(item: AssistantMessageItem()) => child,
+              _ => RepaintBoundary(child: child),
+            },
           );
         },
       ),
