@@ -148,6 +148,30 @@ void main() {
       expect((r.items.single as UserMessageItem).agentId, 'agt_server');
     });
 
+    test('pending 键只认字面 true（issue #52）', () {
+      UserMessageItem reduceWith(Object? pending) =>
+          EventReducer.reduce([
+                ev(
+                  EventTypes.userMessage,
+                  turnId: 'turn_7',
+                  payload: {
+                    'input': '你好',
+                    if (pending != null) 'pending': pending,
+                  },
+                  transient: true,
+                ),
+              ]).items.single
+              as UserMessageItem;
+
+      expect(reduceWith(true).pending, isTrue);
+      expect(reduceWith(null).pending, isFalse, reason: '服务端权威帧不带这个键');
+      expect(reduceWith(false).pending, isFalse);
+      // 这是**客户端**独有的键，但 payload 是 JSON 透传：若将来有人把布尔
+      // 序列化成字符串，`== true` 让「发送中」永不误弹（宁可不显示，也不要
+      // 一条已落地的消息永远转圈）。
+      expect(reduceWith('true').pending, isFalse);
+    });
+
     test('两边都没有 agent_id 时为 null（不编造）', () {
       final r = EventReducer.reduce([
         ev(EventTypes.userMessage, turnId: 'turn_7', payload: {'input': '你好'}),

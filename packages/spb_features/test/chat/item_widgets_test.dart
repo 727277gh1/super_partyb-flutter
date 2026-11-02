@@ -542,6 +542,56 @@ void main() {
       // pending，flutter_test 直接报「A Timer is still pending...」。
       await tester.pump(SpbDuration.copyFeedback);
     });
+
+    testWidgets('pending：显示「发送中」且不提供复制入口（issue #52）', (tester) async {
+      await tester.pumpWidget(
+        _host(const UserMessageBubble(text: '还在飞的消息', pending: true)),
+      );
+
+      expect(find.text('还在飞的消息'), findsOneWidget);
+      expect(find.text('发送中…'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      // pending 期间内容可能被 outbox 改写或失败移除，复制只对已定稿内容
+      // 有意义。
+      expect(
+        find.byType(CopyIconButton),
+        findsNothing,
+        reason: '未落地就去复制，用户复制到的可能是随后消失的一条',
+      );
+    });
+
+    testWidgets('非 pending：没有「发送中」且复制入口恢复', (tester) async {
+      await tester.pumpWidget(_host(const UserMessageBubble(text: '已落地的消息')));
+
+      expect(find.text('发送中…'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.byType(CopyIconButton), findsOneWidget);
+    });
+
+    testWidgets('pending 只降正文透明度，不改写文本（issue #52）', (tester) async {
+      // 「发送中」是**叠加**的状态，不得改写正文——否则用户看不到自己发的
+      // 是什么，也无法在失败后重发（而 retry 按文本匹配原输入）。
+      double? alphaOf(bool flag) {
+        final text = tester.widget<SelectableText>(find.byType(SelectableText));
+        expect(text.data, '同一段话', reason: 'pending 不得改写正文');
+        return text.style?.color?.a;
+      }
+
+      await tester.pumpWidget(
+        _host(const UserMessageBubble(text: '同一段话', pending: true)),
+      );
+      final pendingAlpha = alphaOf(true);
+
+      await tester.pumpWidget(_host(const UserMessageBubble(text: '同一段话')));
+      final settledAlpha = alphaOf(false);
+
+      expect(
+        pendingAlpha!,
+        closeTo(0.6, 1e-6),
+        reason: '发送中降为半透明（与助手气泡流式态同一取向）',
+      );
+      expect(settledAlpha!, closeTo(1.0, 1e-6));
+    });
   });
 
   group('AssistantMessageBubble', () {

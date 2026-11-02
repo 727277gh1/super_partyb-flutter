@@ -38,6 +38,7 @@ final class UserMessageItem extends ConversationItem {
     required this.text,
     super.turnId,
     this.agentId,
+    this.pending = false,
   });
 
   final String text;
@@ -45,6 +46,14 @@ final class UserMessageItem extends ConversationItem {
   /// 发出时选中的 agent（本地乐观回显才有；服务端 `user_message` 事件不带该
   /// 字段，故权威帧合并后会丢失）。用途是「重发」时带上同一个 agent。
   final String? agentId;
+
+  /// 尚未拿到服务端确认（请求在飞，issue #52）。
+  ///
+  /// UI 据此显示「发送中」的加载提示；`ChatStreamController.send` 拿到响应后
+  /// 把本地回显原位转正（turnId 落上、pending 置 false），权威 `user_message`
+  /// 帧到达时也会把它关掉。**归约层只在本地事件上置 true，恒不为权威帧置 true**
+  /// ——服务端落库的消息没有「还没发出去」这个状态。
+  final bool pending;
 }
 
 /// Agent 的回复段落。

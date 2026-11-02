@@ -5,6 +5,7 @@ import 'package:http_mock_adapter/http_mock_adapter.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 import '../support/conversation_page_harness.dart';
 
@@ -68,6 +69,44 @@ void main() {
       // `pushEvent` 不同——后者包在 `runAsync` 里，创建的是真实 Timer，不被
       // 测试绑定追踪），故会被 `flutter_test` 的 `!timersPending` 不变式检出
       // （它在 `tearDown` 之前执行）。在 `runAsync` 里释放控制器即可取消它。
+      await tester.runAsync(() => controller.dispose());
+    });
+
+    testWidgets('pending 与已落地消息并存：只有 pending 的那条显示「发送中」', (tester) async {
+      // ⚠️ 这是**接线**用例：`ConversationPage` 必须把 `item.pending` 逐条
+      // 传给气泡。若在页面里写死 `pending: false`（或反过来无条件传 true），
+      // 气泡自身的用例仍全绿——它们自己传入参（§6.17 同一失败模式）。
+      //
+      // 不用真实 send 的时序：那要同时协调 FakeAsync 与真实时区的计时器，
+      // 而「在飞 → 转正 → 权威帧合并」已由 spb_domain 的
+      // `chat_stream_controller_send_pending_test.dart` 逐条钉住。
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      await tester.runAsync(() async {
+        controller.injectLocalUserMessage(
+          input: '还在飞的一条',
+          groupId: 'grp_1',
+          pending: true,
+        );
+        controller.injectLocalUserMessage(input: '已落地的一条', groupId: 'grp_1');
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+      });
+      await tester.pump();
+
+      expect(find.text('还在飞的一条'), findsOneWidget);
+      expect(find.text('已落地的一条'), findsOneWidget);
+      expect(find.text('发送中…'), findsOneWidget, reason: '只有 pending 的那条该有发送指示');
+      expect(
+        find.byType(CopyIconButton),
+        findsOneWidget,
+        reason: '复制入口只给已落地的那条',
+      );
+
+      // pending 回显可能武装看门狗计时器（FakeAsync 时区），显式释放以免
+      // `!timersPending` 不变式报错。
       await tester.runAsync(() => controller.dispose());
     });
 

@@ -5577,6 +5577,116 @@ show ScrollCacheExtent;`。
 
 ---
 
+### 6.50 发送的乐观回显与 pending（「发送中」）生命周期（2026-11，issue #52）
+
+**症状**：点「发送」后到服务端响应落地之间，时间线上**什么都没有**。网络慢时
+用户看到的就是「点了没反应」，于是重复点、或以为丢了又重打一遍。
+
+`.send()` 原本是 `await _api.sendMessage(...)` 之后才注入回显——即「乐观」二字
+只覆盖了「不等 SSE」，并没有覆盖「不等 HTTP 响应」。本轮把回显提前到**请求发出
+之前**，并给它一个显式的 `pending` 状态。
+
+#### 三段生命周期（`ChatStreamController.send`）
+
+| 阶段 | 动作 | UI |
+|---|---|---|
+| 请求在飞 | `injectLocalUserMessage(pending: true)`，**同步**注入 | 正文半透明 + 「发送中…」+ 无复制入口 |
+| 响应成功 | `_settleLocalEcho(echoId, …)` **原位转正**（关 pending、落真 turnId） | 正常气泡 + 复制入口 |
+| 响应失败 / 入队 | `_removeLocalEcho(echoId)` | 气泡消失（入队时「待发送」条是另一个 UI，issue #30） |
+| 权威 `user_message` 帧 | 归约层按 **turnId** 原位合并（id 换成服务端 eventId） | 不变（不产生第二个气泡） |
+
+事件仍是 `transient: true` 且不调 `recordEventId`——**乐观回显绝不能推进 SSE
+游标**，否则重连以它为 cursor 请求回放会跳过其后的权威帧（§5.4）。
+
+#### 六个不得违反的点
+
+**1. turnId 为空也必须转正（原缺陷）。** `SendMessageResult.turnId` 可为空：
+反馈回执（`feedback_recorded`）**不建 turn**，此后不会再有权威帧。若
+`_settleLocalEcho` 在 `turnId.isEmpty` 时提前 return，那条气泡会**永久**显示
+「发送中」。故转正分两档：turnId 非空则换上真 turnId（可被权威帧去重）；为空则
+**只关 pending**、保持无 turnId（此时无权威帧可去重，宁可不合并也不要永久转圈）。
+
+**2. `echoId` 是精确定位键，必须唯一。** 它此前只是「本地项」的标记，现在被
+`_settleLocalEcho` / `_removeLocalEcho` 用作 `indexWhere(eventId == …)` 的
+定位条件。`'local-<microseconds>'` 在同一微秒内两次注入会**撞车**（outbox 批量
+投递路径真实会发生），于是转正命中错误的回显。故加 `_echoSeq` 单调计数。
+
+**3. 找不到回显时**不重新注入**。`_settleLocalEcho` 里 `idx < 0` 意味着缓冲
+已不含它（切 group 清空）。此时重新注入会把旧对话的消息塞进**当前**（另一个）
+对话的时间线；服务端权威帧自会把它渲染回来。
+
+**4. pending 期间隐藏复制入口。** 内容此时可能被 outbox 改写或被失败移除，
+复制只对已定稿内容有意义。同理透明度只降 alpha（0.6）、**不改写文本**——
+「重发」是按文本找原输入的（§6.14）。
+
+**5. 失败与入队都要移除回显。** 入队不是「成功」，它有自己的「待发送」条；
+两边都留着就是同一条消息出现两次。
+
+**6. 只有 `send()` 用 pending。** 两处**有意**不带：
+
+| 路径 | 为什么不带 |
+|---|---|
+| `QuickCaptureUseCase.submit(echoInto:)` | 无归属入口在拿到归属 `group_id` **之前**不知道该注入哪个控制器，注入天然发生在响应之后 |
+| outbox 投递成功回调 `_injectEcho` | 消息早已落库（turnId 是真的），没有「在飞」窗口 |
+
+回填/离线缓存路径同理不会误显示：`pending` 只在客户端注入时写入，服务端事件
+不带该键，归约按 `ev.payload?['pending'] == true` 解析（**只认字面 true**，
+字符串 `'true'` 落回 false——宁可不显示，也不要一条已落地的消息永远转圈）。
+
+#### 测试
+
+| 层 | 文件 | 钉住 |
+|---|---|---|
+| `spb_domain` | `chat_stream_controller_send_pending_test.dart`（10 条） | 在飞渲染 / 原位转正不新增第二条 / 权威帧合并后 id 换成服务端 / turnId 为空也关 pending / 失败移除（可重试则同时入队并抛 `MessageQueuedError`）/ 不推游标 / 同微秒 id 不撞 / 在飞期间切 group 不串场 / dispose 后响应到达不抛 |
+| `spb_domain` | `event_reducer_test.dart` 的 `pending 键只认字面 true` | 四种 payload 形态的解析 |
+| `spb_features` | `item_widgets_test.dart`（3 条） | 「发送中」+ 无复制入口 / 常态反之 / alpha 0.6↔1.0 且文本不改写 |
+| `spb_features` | `conversation_page_send_test.dart`（1 条） | **页面逐条把 `item.pending` 传给气泡**（pending 与已落地并存时各只显示一次） |
+
+测试夹具 `_HangAdapter`（同文件内）挂起 POST、由测试手动放行。两个必须知道
+的细节：
+
+- **`waitForRequest()` 必须轮询而不是只等一个轮次**：dio 的拦截器链要走
+  **三个**事件循环任务才调到 `fetch`（实测第 1、2 轮 `calls == 0`）。等一次就
+  `resolve` 会作用在空队列上（`removeLast` 抛 `RangeError`），看起来像控制器
+  有 bug，实为测试时序写错。
+- **`sse.push` 之后必须转一个轮次再 `flushEmit()`**：broadcast 流的投递是异步
+  的，同步归约看到的是**旧缓冲**（表现为「权威帧没合并」的假缺陷）。
+
+#### 反向验证（8 项逐条实测）
+
+| 改坏 | 失败用例数 |
+|---|---|
+| `_settleLocalEcho` 在 `turnId.isEmpty` 时提前 return | 1 |
+| `echoId` 去掉 `_echoSeq` 后缀 | 1 |
+| 失败分支不调 `_removeLocalEcho` | 2 |
+| `_removeLocalEcho` 的 `removeWhere` 条件永假 | 2 |
+| `send()` 注入时不带 `pending: true` | 3 |
+| 归约层 `== true` 改成 `!= null` | 1 |
+| 页面把 `pending` 写死 `false` | 1 |
+| 气泡无条件渲染复制按钮 | 1 |
+
+⚠️ **最后一轮反向验证抓到了用例自己的假绿**：「同微秒」那条在重构时把最直接的
+`expect(id1, isNot(id2))` 删掉了，只留下间接断言（「send 的转正不影响先注入的两
+条」）——而 id 碰撞时间接断言**照样绿**（send 自己的回显 id 不受影响，转正命中的
+是第一条而非第三条，「两条 pending 都还在」仍然成立）。补回直接断言后破坏才变红。
+这是 §6.17 / §6.33 / §6.43 / §6.48 同一类教训：**优化用例时删掉的直接断言，往往
+正是唯一有效的那条**。
+
+#### 有意不做
+
+- **不给 quick capture 加 pending**：见上表，那条路径拿不到归属就无处注入。
+- **pending 不做超时提示**：§5.8 的看门狗计的是「turn 起跑后无进展」，而 pending
+  窗口在拿到响应的那一刻结束——给它单独一条计时器会把「服务端慢但正在处理」也
+  判成异常。真断线时表现是「发送中」一直转，与 §5.8 的 stale 提示是两条独立信号。
+- **失败后不把文本回填输入框**：composer 的 `_submit` 先 `clear()` 是既有语义
+  （见 `message_composer.dart`），本轮只保证「幽灵气泡不留」。
+- **不在 pending 气泡上放「取消发送」**：取消一个在飞的 HTTP 请求需要 cancel
+  token 贯通到 `ChatApi`，且服务端可能已经收下——那会产生「UI 说取消了、turn
+  却建出来了」的更坏状态。
+- **不持久化 pending 项**：它是「这一刻的在飞状态」，重启后既没有对应的请求在
+  跑，也无从判断服务端是否已收到（与 §6.43「不持久化探测结果」同一取向）。
+  真正需要跨重启不丢的是**离线队列**（issue #30），那是另一条路径。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -5825,6 +5935,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 §6.22）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 §6.14）
+- [x] 发送的乐观回显（请求在飞时「发送中」，issue #52，见 §6.50）
 - [x] 对话内搜索（搜已加载时间线，见 §6.15）+ 窄屏 AppBar 溢出修复（issue #31，见 §6.16）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 自动同步（启动后一次 / 周期 N 分钟，默认关闭；仅桌面端装配，见 §6.42）
@@ -5886,6 +5997,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~点「发送」后到响应落地之间时间线什么都不显示（网络慢时像「点了没反应」）~~ | ✅ 已修（§6.50，issue #52）：`send()` 原本 `await` 完 HTTP 才注入回显——「乐观」只覆盖了「不等 SSE」，没覆盖「不等响应」。现回显**提前到请求发出之前**并带 `pending`：在飞时正文半透明 + 「发送中…」+ 隐藏复制入口；成功后 `_settleLocalEcho` **原位转正**（关 pending、落真 turnId，权威帧再按 turnId 原位合并，不出第二个气泡）；失败/入队则 `_removeLocalEcho` 移除（入队有自己的「待发送」条）。三个易写错处：① `turnId` 为空**也要**转正——反馈回执 `feedback_recorded` 不建 turn，此后没有权威帧，提前 return 会让气泡永久转圈；② `echoId` 从「本地标记」升级为**精确定位键**，`local-<微秒>` 同微秒会撞车（outbox 批量投递真实会）→ 加 `_echoSeq`；③ `idx < 0` 时**不得**重新注入（缓冲可能已属另一个对话）。归约按 `payload['pending'] == true` 解析（只认字面 true），故回填/缓存路径不会误显示。domain 10 + reducer 1 + 气泡 3 + 页面接线 1 条用例；8 项反向验证逐条实测——其中「同微秒」那条**曾经假绿**（重构时删掉了直接的 `id1 != id2` 断言，间接断言在碰撞时照样绿） | §6.50 |
 | ~~多轮对话之后，查看大块正文时向下滚动会丢内容~~ | ✅ 已修（§6.48）：**不是渲染问题，是数据被裁掉了**。服务端每个 token 发一条 `transient: true` 的增量事件（`pigo_core.go` 的 `flushEventTransient`），一个长回复上千条 → 几轮正常对话就撞破 `maxBufferEvents = 2000` → `_trimBuffer` 从**头部逐条**丢 → 而 `EventReducer.reduce` 是**全量重算**，丢头部等于把归约输入掐掉一截。三个用户可见后果：① 整轮对话消失（丢的那段含 `user_message` / `start`）；② 回复开头被截掉；③ 流式期间 item 的 `id` 取自「首条幸存增量」的 eventId → `ValueKey(item.id)` 逐条变化 → `AssistantMessageBubble` Element 反复重建 → `gpt_markdown` 的增量解析状态全丢 → 气泡塌成十几像素再重新打字（实测 `12912 → 36` 字符）。修法两道：① **紧邻同类增量入缓冲前合并**（同 turn / 同类型 / 同 session+agent / 两边都恰好一个文本键 → 拼进尾部，**保留首条 id**，归约输出逐字不变）——2600 条增量的回复只占 1 个槽位；② **裁剪改为按整轮丢**（`_turnBoundaryAtOrAfter` 从 excess 往后找轮次边界），绝不切在一轮中间；单轮超限时退回逐条丢 + `warn`（**只记一次**，否则一秒刷满 500 条诊断缓冲）。⚠️ 反向验证踩到的坑：「每轮 100 条」会让按轮裁剪的用例**假绿**（逐条丢 500 条与按轮丢 5 轮结果相同）——改成每轮 **137** 条（与 2000 不对齐）后两种实现才分道。domain 6 条 + page 2 条用例 | §6.48 |
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |
 | macOS 包未签名/未公证，首次打开需绕过 Gatekeeper | 已知限制（免签名分发） | §8 |

@@ -252,6 +252,12 @@ class EventReducer {
                 (existing != null && items[existing] is UserMessageItem
                     ? (items[existing] as UserMessageItem).agentId
                     : null),
+            // issue #52：`pending: true` 是乐观回显独有的键（[ChatStreamController.send]
+            // 在请求在飞时注入；服务端权威帧不带它，`?? false` 落回常态）。
+            // 转正（`_settleLocalEcho`）与权威帧到达都会原位替换成 false，
+            // 故「发送中」是短暂状态；SSE 断线期间看到的 pending 只说明
+            // 响应未落地——与 [isStreaming] 的清除路径同一取向（§5.8）。
+            pending: ev.payload?['pending'] == true,
           );
           if (existing != null) {
             // 原位替换：保持它排在 assistant 流式段落之前。

@@ -2110,7 +2110,10 @@ class _ConversationPageState extends State<ConversationPage> {
   }
 
   Widget _buildItem(ConversationItem item) => switch (item) {
-    UserMessageItem(:final text) => UserMessageBubble(text: text),
+    UserMessageItem(:final text, :final pending) => UserMessageBubble(
+      text: text,
+      pending: pending,
+    ),
     // `isStreaming` 与超时集合求交：判超时后停掉光标。
     //
     // ⚠️ 只影响光标，**不改归约结果**——若 turn 其实仍在跑、增量帧随后到达，

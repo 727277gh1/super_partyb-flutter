@@ -131,6 +131,9 @@ class ChatStreamController {
 
   final List<ChatEvent> _buffer = [];
 
+  /// 乐观回显 eventId 的单调计数（见 [injectLocalUserMessage] 里的碰撞说明）。
+  int _echoSeq = 0;
+
   /// 「曾经加载到过的最早落库事件」的 globalSeq（跨裁剪保持，不因丢头部而抬高）。
   ///
   /// ## 为什么不能用「当前缓冲区的最小 globalSeq」当翻页游标
@@ -756,17 +759,30 @@ class ChatStreamController {
   /// （`enqueue.go` 把它放进 broadcasts，确实经 SSE 推送），两者用同一 turnId
   /// 时归约器会原位合并，不会渲染出两个气泡。**turnId 为空则不去重**——
   /// 那时会短暂出现两个气泡（见 [QuickCaptureUseCase] 的说明，这是刻意取舍）。
-  void injectLocalUserMessage({
+  ///
+  /// ## 返回值与 pending（issue #52）
+  ///
+  /// 返回本地事件的 eventId，供调用方在「响应到达后」原位转正/移除这条回显
+  /// （[_settleLocalEcho] / [_removeLocalEcho]）。
+  /// `pending: true` 时归约层给 [UserMessageItem.pending] 置 true（UI 显示
+  /// 「发送中」）——仅用于「请求在飞、尚未拿到服务端 turnId」的窗口。
+  String injectLocalUserMessage({
     required String input,
     required String groupId,
     String? turnId,
     String? agentId,
     DateTime? createdAt,
+    bool pending = false,
   }) {
     final now = createdAt ?? DateTime.now().toUtc();
+    // ⚠️ 同微秒碰撞防御：这个 ID 现在被 [_settleLocalEcho] / [_removeLocalEcho]
+    // 用作**精确定位**（不再只是去重标记）。两次注入若拿到同一微秒，会拿到
+    // 同一个 eventId，转正/移除就会命中错误的回显。outbox 批量投递等路径
+    // 有可能在同一微秒内连续注入，故补一个单调计数。
+    final echoId = 'local-${now.microsecondsSinceEpoch}-${_echoSeq++}';
     _buffer.add(
       ChatEvent(
-        eventId: 'local-${now.microsecondsSinceEpoch}',
+        eventId: echoId,
         userId: userId,
         groupId: groupId,
         turnId: turnId ?? '',
@@ -774,11 +790,11 @@ class ChatStreamController {
         seq: 0,
         source: 'client',
         createdAt: now,
-        // `agent_id` 是本地回显**额外**带的键（服务端 `user_message` 事件没有它）。
-        // 归约器读它填进 [UserMessageItem.agentId]，供「重发」带上同一个 agent。
-        // 权威帧到达后原位替换，该字段随之丢失——重发仍能工作，因为页面在
-        // agentId 为空时退化为「不指定 agent」（由服务端按 active session 决定）。
-        payload: {'input': input, if (agentId != null) 'agent_id': agentId},
+        payload: {
+          'input': input,
+          if (agentId != null) 'agent_id': agentId,
+          if (pending) 'pending': true,
+        },
         // 见方法文档：绝不能推进游标。
         transient: true,
       ),
@@ -787,6 +803,7 @@ class ChatStreamController {
     // 「所有 _buffer 变更点都裁剪」这一不变式。
     _trimBuffer();
     _emit();
+    return echoId;
   }
 
   /// 用 timeline API 拉取历史事件。
@@ -1425,10 +1442,12 @@ class ChatStreamController {
   /// 照旧上抛：重试无用，入队只会让用户在「待发送」里看到一条永远发不出去的
   /// 消息。
   ///
-  /// ⚠️ **入队时不注入乐观回显**（设计文档 §7bis.6）：入队的条目还没有
-  /// `turnId`，而归约器**按 turnId 去重**——无 turnId 的本地项在服务端
-  /// `user_message` 到达后会渲染成两个气泡。故离线消息进「待发送」条，不进
-  /// 时间线；投递成功后才用**服务端返回的 turnId** 注入回显。
+  /// ## 为什么 pending 的注入与移除都在这里集中
+  ///
+  /// 请求在飞时回显带 `pending: true`（UI 显示「发送中」）；成功后
+  /// [_settleLocalEcho] 原位转正（关 pending、落 turnId）；失败（含**入队**
+  /// ——待发送条有自己的 UI，issue #30）由 [_removeLocalEcho] 移除，不留
+  /// 幽灵气泡。
   Future<SendMessageResult> send({
     required String input,
     String? groupId,
@@ -1437,6 +1456,14 @@ class ChatStreamController {
     String? requestId,
   }) async {
     final resolvedGroupId = groupId ?? _groupId;
+    // 乐观回显：请求在飞时立即渲染（issue #52）。pending 让 UI 显示「发送中」；
+    // 拿到响应后原位转正（成功）或移除（失败/入队）。
+    final echoId = injectLocalUserMessage(
+      input: input,
+      groupId: resolvedGroupId ?? '',
+      agentId: agentId,
+      pending: true, // 请求在飞：UI 显示「发送中」，转正/权威帧都会落回 false
+    );
     try {
       final result = await _api.sendMessage(
         userId,
@@ -1446,9 +1473,10 @@ class ChatStreamController {
         routingMode: routingMode,
         requestId: requestId,
       );
-      _injectEcho(result, input, agentId: agentId);
+      _settleLocalEcho(echoId, result.groupId, result.turnId, input, agentId);
       return result;
     } on SpbError catch (e) {
+      _removeLocalEcho(echoId);
       final outbox = _outbox;
       if (outbox == null || !OutboxRetryPolicy.isRetryable(e)) rethrow;
 
@@ -1473,6 +1501,61 @@ class ChatStreamController {
           throw error;
       }
     }
+  }
+
+  /// 发送成功后把 [injectLocalUserMessage] 注入的乐观回显**原位转正**：
+  /// 换成带服务端 turnId、`pending: false` 的版本。后续权威 `user_message` 帧
+  /// 到达时按 turnId 原位合并，不产生第二个气泡。
+  ///
+  /// ## turnId 为空也要转正（不能提前 return）
+  ///
+  /// [SendMessageResult.turnId] 可为空：反馈类响应（`feedback_recorded`）
+  /// **不建 turn**——此后不会再有权威帧到达。若 turnId 为空时直接 return，
+  /// 回显会带着 `pending: true` **永久**显示「发送中」。故转正分两档：
+  ///
+  /// - turnId 非空：换上真 turnId，后续权威帧按 turnId 去重合并；
+  /// - turnId 为空：只关 pending（保持无 turnId）。不会再来权威帧可去重，
+  ///   这是 [injectLocalUserMessage] 文档里「无 turnId 不去重」的既有取舍；
+  ///   防御性解析失败（turn 对象缺失但 turn 存在）时可能短暂双气泡，
+  ///   仍优于永久转圈。
+  void _settleLocalEcho(
+    String echoId,
+    String? groupId,
+    String turnId,
+    String input,
+    String? agentId,
+  ) {
+    final idx = _buffer.indexWhere((e) => e.eventId == echoId);
+    if (idx < 0) {
+      // 回显已不在缓冲（切 group 清空 / 入队前移除）。**不重新注入**：
+      // 此时缓冲可能已属于另一个对话，往里塞旧对话的消息会串场；
+      // 且服务端权威帧自会把它渲染出来。
+      return;
+    }
+    _buffer[idx] = ChatEvent(
+      eventId: echoId,
+      userId: _buffer[idx].userId,
+      groupId: groupId ?? _buffer[idx].groupId,
+      turnId: turnId,
+      eventType: EventTypes.userMessage,
+      seq: 0,
+      source: 'client',
+      createdAt: _buffer[idx].createdAt,
+      payload: {'input': input, if (agentId != null) 'agent_id': agentId},
+      transient: true,
+    );
+    _trimBuffer();
+    _emit();
+  }
+
+  /// 发送失败时把乐观回显移除（避免永久停留的幽灵消息）。
+  /// **不可重试错误与入队成功**都走这里（入队那条有自己的「待发送」UI，issue #30）。
+  void _removeLocalEcho(String echoId) {
+    final before = _buffer.length;
+    _buffer.removeWhere((e) => e.eventId == echoId);
+    if (_buffer.length == before) return;
+    _trimBuffer();
+    _emit();
   }
 
   /// 注入乐观回显（构造细节集中在 [injectLocalUserMessage]，那里解释了
