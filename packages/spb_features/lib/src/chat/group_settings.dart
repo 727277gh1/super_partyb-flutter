@@ -2,7 +2,7 @@ import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
-/// 群设置（目标 + 三个 CAS 开关）的写用例。
+/// 群设置（目标 + goal gate / tts 两个 CAS 配置）的写用例。
 ///
 /// ## 为什么需要这一层（而不是让两个 app 各写一遍）
 ///
@@ -46,17 +46,11 @@ class GroupSettingsUseCase {
         groupId,
       );
 
-  /// 开关「后续提问建议」。
-  Future<ChatGroup> toggleFollowUpSuggest(String groupId, bool enabled) =>
-      _write(() => _api.setGroupFollowUpSuggest(groupId, enabled), groupId);
-
-  /// 开关「习惯建议」。
-  ///
-  /// 走专用 CAS 端点（`PUT /chat/groups/:id/habit-suggest`），与
-  /// [toggleFollowUpSuggest] 同构。**不能**走 PATCH metadata：后者是整包替换，
-  /// 会连带清掉 `metadata.tts` / `follow_up_suggest` 等其它子系统的键。
-  Future<ChatGroup> toggleHabitSuggest(String groupId, bool enabled) =>
-      _write(() => _api.setGroupHabitSuggest(groupId, enabled), groupId);
+  /// 群级「后续提问建议」/「习惯建议」的开关方法已移除（2026-11）：服务端已下线
+  /// 群级 `PUT /chat/groups/:id/follow-up-suggest` 与 `.../habit-suggest`
+  /// （Go `452cc432` / `47e9950e`）。两个 reminder 的准入迁到
+  /// `/me/preferences` 的个人运行时开关（[UserPreferencesCard] 的
+  /// 「对话提醒开关」区块），不再是对话级设置。
 
   /// 保存语音回复配置（**只发显式传入的键**）。
   ///

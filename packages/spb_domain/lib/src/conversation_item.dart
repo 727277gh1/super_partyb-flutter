@@ -439,10 +439,13 @@ final class GoalGateStoppedItem extends ConversationItem {
 
   /// 停止原因（`payload.reason`）。
   ///
-  /// 值域与 Go `chatgate/goal_gate.go` 的三处 emit 对齐：
-  /// `goal_completed`（:435 目标达成）、`max_auto_turns_reached`
-  /// （:549 熔断暂停）、以及 :416 的 `stopReason`（`no_tasks` /
-  /// `task_blocked` / `task_error_stopped`）。
+  /// 值域与 Go `chatgate/goal_gate.go` 的三处 emit 对齐（2026-10 滚动规划改造后）：
+  /// `goal_completed`（:540 目标达成，唯一判据 goal.status=completed）、
+  /// `max_auto_turns_reached`（:340 熔断）、`planning_stalled`（:454 连续规划轮
+  /// 无产出）、`goal_not_active`（:393 目标 paused/archived）、以及 :521
+  /// `stopReason`（`task_blocked` / `task_error_stopped` / `waiting_on_dependency`）。
+  /// 历史值 `no_tasks`（滚动规划改造前「空表即停机」）已不再产生，映射保留以兼容
+  /// 历史事件。
   ///
   /// **保持 String 而非 enum**：服务端可能新增原因，归入 [unknown] 枚举会让
   /// 新原因静默走 default（表现为「停止原因不显示」），而本项的价值恰在文案。
@@ -463,6 +466,10 @@ final class GoalGateStoppedItem extends ConversationItem {
   /// payload 必须给出同一句话，否则「同一个目标达成」在手机上和在桌面上
   /// 显示不同结论，排障时会互相矛盾。
   ///
+  /// 新增 reason 时同步改三处：本 switch、miniapp `timeline/normalize.ts`、
+  /// webapp 时间线。漏映射不会报错——只会退化成下面的兜底文案，用户看不出
+  /// 「规划推不动」与「目标已暂停」的区别（miniapp `7a952437` 修的正是这个）。
+  ///
   /// 兜底文案（未识别 reason）**不吞掉原因本身**：保留「自动推进已停止」
   /// 作为结论，让用户至少知道当前状态，而不是什么都不显示。
   String get message {
@@ -471,6 +478,10 @@ final class GoalGateStoppedItem extends ConversationItem {
         return '目标已实现，自动推进已停用';
       case 'max_auto_turns_reached':
         return '已达自动推进轮次上限，发送新消息后可继续';
+      case 'planning_stalled':
+        return '连续规划未产出任务，自动推进已暂停，需人工介入';
+      case 'goal_not_active':
+        return '目标已暂停或归档，自动推进已停用';
       case 'no_tasks':
         return '目标尚无任务列表，请先拆解任务后再启用自动推进';
       case 'task_blocked':

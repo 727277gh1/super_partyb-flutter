@@ -1436,6 +1436,8 @@ void _userPreferencesTests() {
           String? defaultAgentId,
           bool? followUpSuggest,
           bool? habitSuggest,
+          bool? agentRecommend,
+          bool? goalJudge,
           String? habitNotifyChannels,
         }) async => prefs(),
       );
@@ -1463,6 +1465,8 @@ void _userPreferencesTests() {
           String? defaultAgentId,
           bool? followUpSuggest,
           bool? habitSuggest,
+          bool? agentRecommend,
+          bool? goalJudge,
           String? habitNotifyChannels,
         }) async => prefs(),
         fallbackDisplayName: 'u1@example.com',
@@ -1488,6 +1492,8 @@ void _userPreferencesTests() {
         String? defaultAgentId,
         bool? followUpSuggest,
         bool? habitSuggest,
+        bool? agentRecommend,
+        bool? goalJudge,
         String? habitNotifyChannels,
       }) async => prefs();
 
@@ -1540,6 +1546,8 @@ void _userPreferencesTests() {
           String? defaultAgentId,
           bool? followUpSuggest,
           bool? habitSuggest,
+          bool? agentRecommend,
+          bool? goalJudge,
           String? habitNotifyChannels,
         }) async => prefs(),
         agentOptions: const [PreferenceAgentOption(id: 'a1', name: '写作助手')],

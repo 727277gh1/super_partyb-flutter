@@ -159,27 +159,10 @@ void main() {
     });
   });
 
-  group('followUpSuggestEnabled', () {
-    test('键缺失 = 关闭（服务端关闭时删键）', () {
-      expect(mkGroup().followUpSuggestEnabled, isFalse);
-    });
-
-    test('enabled: true 时为开启', () {
-      final g = mkGroup(
-        metadata: {
-          'follow_up_suggest': {'enabled': true},
-        },
-      );
-      expect(g.followUpSuggestEnabled, isTrue);
-    });
-
-    test('子对象结构不对时不抛异常', () {
-      expect(
-        mkGroup(metadata: {'follow_up_suggest': true}).followUpSuggestEnabled,
-        isFalse,
-      );
-    });
-  });
+  // ⚠️ 群级 followUpSuggestEnabled / habitSuggestEnabled 的 getter 已随服务端
+  // 重构移除（2026-11）：两个 reminder 的准入迁到 /me/preferences 个人运行时
+  // 开关，群级 metadata 键成为死键（无消费者、无害）。容错测试改用仍存的
+  // goal gate getter 验证 metadata 异常路径。
 
   group('TTS：键缺失 = 关闭，子开关随总开关归零', () {
     test('metadata 无 tts 时全部关闭', () {
@@ -257,7 +240,6 @@ void main() {
   group('容错：metadata 整体异常', () {
     test('metadata 为 null 时所有 getter 走「未配置」路径', () {
       final g = mkGroup(metadata: null);
-      expect(g.followUpSuggestEnabled, isFalse);
       expect(g.goalGateEnabled, isFalse);
       expect(g.goalGateMaxAutoTurns, 20);
       expect(g.ttsEnabled, isFalse);

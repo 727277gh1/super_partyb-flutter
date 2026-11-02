@@ -249,45 +249,12 @@ class ChatApi {
     );
   }
 
-  /// `PUT /chat/groups/:group_id/follow-up-suggest` —— 「后续提问建议」开关。
-  ///
-  /// ⚠️ 这是**双层开关**：本端点只写 group 级 `metadata.follow_up_suggest`，
-  /// 全局 `FOLLOW_UP_SUGGEST_ENABLED` 为 false 时即使开启也不会生效。
-  ///
-  /// 关闭时服务端**删键而非写 false**（「键缺失 = 关闭」），读取方
-  /// [ChatGroup.followUpSuggestEnabled] 对缺失键返回 false，语义一致。
-  Future<void> setGroupFollowUpSuggest(String groupId, bool enabled) async {
-    await _put(
-      '/chat/groups/$groupId/follow-up-suggest',
-      body: {'enabled': enabled},
-    );
-  }
-
-  /// `PUT /chat/groups/:group_id/habit-suggest` —— 「习惯建议」开关。
-  ///
-  /// ## 与 [setGroupFollowUpSuggest] 逐行同构
-  ///
-  /// 服务端 handler（`chat_ext.go` 的 `setHabitSuggest`）是 `setFollowUpSuggest`
-  /// 的复制：同一套 CAS 读-改-写、关闭时 `delete(meta, 'habit_suggest')`
-  /// （「键缺失 = 关闭」），故这里也照抄同一形状。
-  ///
-  /// ## 为什么必须走专用端点而非 PATCH metadata
-  ///
-  /// `PATCH /chat/groups/:id` 是 metadata **整包替换**：只提交 `{habit_suggest}`
-  /// 会连带清掉 `metadata.tts` / `metadata.follow_up_suggest` / `goal_gate`
-  /// 等其它子系统写入的键（webapp 的历史 bug）。
-  ///
-  /// ## 与 goal gate 无依赖（与历史行为不同）
-  ///
-  /// 习惯引导曾经嵌在 goal 约定尾部，未开 goal gate 的群组永远拿不到。拆出后
-  /// 只要本开关 + 全局总闸 `HABIT_SUGGEST_ENABLED` 均为真即注入——故这是**双层
-  /// 开关**，面板文案不得承诺「已生效」。
-  Future<void> setGroupHabitSuggest(String groupId, bool enabled) async {
-    await _put(
-      '/chat/groups/$groupId/habit-suggest',
-      body: {'enabled': enabled},
-    );
-  }
+  // ⚠️ 群级 `PUT /chat/groups/:id/follow-up-suggest` 与
+  // `PUT /chat/groups/:id/habit-suggest` 已随服务端重构移除（2026-11，
+  // Go `452cc432` / `47e9950e`）：follow_up_suggest / habit_suggest 的准入
+  // 迁到 `/me/preferences` 的个人运行时开关，group 级 metadata 键与建组播种
+  // 一并下线。客户端的对应方法已删除——它们现在必然 404。个人开关见
+  // [ChatApi.updatePreferences] 的 `followUpSuggest` / `habitSuggest`。
 
   /// `PUT /chat/groups/:group_id/tts` —— 语音回复及其子开关。
   ///
@@ -862,12 +829,16 @@ class ChatApi {
   /// - `defaultAgentId: ''` → 恢复「跟随系统默认」（服务端删记录）；
   /// - `replyLanguage: 'auto'` → 同上（删记录），**不是**空串。
   ///
-  /// ## 两个 bool 的语义
+  /// ## 四个 reminder 开关的语义（2026-11 起）
   ///
-  /// [followUpSuggest] / [habitSuggest] 是**新建 group 的默认播种值**，仅影响
-  /// 之后新建的 group，不回溯修改既有 group（服务端 `user_preferences.go` 的
-  /// `FollowUpSuggest` / `HabitSuggest` 字段注释）。两者与群级同名开关是不同
-  /// 层次的东西：本处是「以后新建的默认」，群级那个是「这个对话现在开不开」。
+  /// [followUpSuggest] / [habitSuggest] / [agentRecommend] / [goalJudge] 都是
+  /// **运行时开关**：改完下一轮生效、对该用户全部会话生效。它们**不再**是
+  /// 「新建 group 的默认播种值」——群级 metadata 键与专用端点已随服务端
+  /// 重构移除（Go `452cc432` / `47e9950e` / `1bdbc38c` / `7a814ed6`）。
+  ///
+  /// 缺省方向**各不相同**，勿照抄：`follow_up_suggest` / `habit_suggest` /
+  /// `goal_judge` 缺省关（判定/注入有真实成本，不该由平台默认替用户按下），
+  /// `agent_recommend` 缺省**开**（未表态时服务端下发 true）。
   ///
   /// 同样只在非 null 时写入：传 `false` 是**有意义的显式关闭**，与「不传」
   /// （保持原值）必须区分——若写成 `if (x == true)` 就会永远无法关闭。
@@ -894,6 +865,8 @@ class ChatApi {
     String? habitNotifyChannels,
     bool? followUpSuggest,
     bool? habitSuggest,
+    bool? agentRecommend,
+    bool? goalJudge,
   }) async {
     final body = <String, dynamic>{
       if (displayName != null) 'display_name': displayName,
@@ -904,6 +877,8 @@ class ChatApi {
         'habit_notify_channels': habitNotifyChannels,
       if (followUpSuggest != null) 'follow_up_suggest': followUpSuggest,
       if (habitSuggest != null) 'habit_suggest': habitSuggest,
+      if (agentRecommend != null) 'agent_recommend': agentRecommend,
+      if (goalJudge != null) 'goal_judge': goalJudge,
     };
     final res = await _put('/me/preferences', body: body);
     return UserPreferences.fromJson(_asMap(res));

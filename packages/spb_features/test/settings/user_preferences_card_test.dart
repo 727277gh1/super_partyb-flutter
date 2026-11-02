@@ -31,6 +31,12 @@ void main() {
     bool customized = true,
     bool followUpSuggest = false,
     bool habitSuggest = false,
+    bool agentRecommend = true,
+    bool goalJudge = false,
+    bool followUpSuggestAvailable = true,
+    bool habitSuggestAvailable = true,
+    bool agentRecommendAvailable = true,
+    bool goalJudgeAvailable = true,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
@@ -49,6 +55,12 @@ void main() {
     customized: customized,
     followUpSuggest: followUpSuggest,
     habitSuggest: habitSuggest,
+    agentRecommend: agentRecommend,
+    goalJudge: goalJudge,
+    followUpSuggestAvailable: followUpSuggestAvailable,
+    habitSuggestAvailable: habitSuggestAvailable,
+    agentRecommendAvailable: agentRecommendAvailable,
+    goalJudgeAvailable: goalJudgeAvailable,
     defaultAgentId: defaultAgentId,
     displayName: displayName,
     avatarUrl: avatarUrl,
@@ -65,6 +77,8 @@ void main() {
     String? defaultAgentId,
     bool? followUpSuggest,
     bool? habitSuggest,
+    bool? agentRecommend,
+    bool? goalJudge,
     String? habitNotifyChannels,
   })?
   lastSave;
@@ -113,6 +127,8 @@ void main() {
                     String? defaultAgentId,
                     bool? followUpSuggest,
                     bool? habitSuggest,
+                    bool? agentRecommend,
+                    bool? goalJudge,
                     String? habitNotifyChannels,
                   }) async {
                     saveCalls++;
@@ -123,6 +139,8 @@ void main() {
                       defaultAgentId: defaultAgentId,
                       followUpSuggest: followUpSuggest,
                       habitSuggest: habitSuggest,
+                      agentRecommend: agentRecommend,
+                      goalJudge: goalJudge,
                       habitNotifyChannels: habitNotifyChannels,
                     );
                     if (saveError != null) throw saveError;
@@ -643,7 +661,7 @@ void main() {
     });
   });
 
-  group('新建对话默认开关（两个 bool 各自只提交自己的键）', () {
+  group('对话提醒开关（四个 reminder 运行时开关，各自只提交自己的键）', () {
     testWidgets('初值来自权威值', (tester) async {
       await pumpCard(
         tester,
@@ -717,6 +735,106 @@ void main() {
 
       expect(find.byKey(const ValueKey('settings-prefs-save')), findsNothing);
       expect(saveCalls, 0);
+    });
+
+    testWidgets('agent_recommend 初值来自权威值（缺省开）', (tester) async {
+      // agent_recommend 缺省**开**：未表态时服务端下发 true，开关应显示开。
+      // 这与另外三个（缺省关）方向相反，勿照抄。
+      await pumpCard(tester, loaded: prefs());
+
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('pref-agent-recommend')),
+            )
+            .value,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('pref-goal-judge')),
+            )
+            .value,
+        isFalse,
+      );
+    });
+
+    testWidgets('只动 agentRecommend 时 body 只含 agent_recommend', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      await tester.tap(find.byKey(const ValueKey('pref-agent-recommend')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.agentRecommend, isFalse);
+      expect(lastSave!.followUpSuggest, isNull, reason: '没碰的字段必须为 null');
+      expect(lastSave!.habitSuggest, isNull);
+      expect(lastSave!.goalJudge, isNull);
+    });
+
+    testWidgets('只动 goalJudge 时 body 只含 goal_judge', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      await tester.tap(find.byKey(const ValueKey('pref-goal-judge')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.goalJudge, isTrue);
+      expect(lastSave!.agentRecommend, isNull, reason: '没碰的字段必须为 null');
+    });
+
+    testWidgets('未改动时不误报四个开关的改动', (tester) async {
+      // _pendingChanges 逐字段比对：漏比对新键会让保存按钮在没真改时亮起。
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          followUpSuggest: true,
+          habitSuggest: true,
+          agentRecommend: false,
+          goalJudge: true,
+        ),
+      );
+
+      expect(find.byKey(const ValueKey('settings-prefs-save')), findsNothing);
+      expect(saveCalls, 0);
+    });
+
+    testWidgets('急停置灰：available=false 的开关不可拨且说明原因', (tester) async {
+      // 运维急停（*_DISABLED env）只影响 available，不改写开关本身。
+      // 置灰而不隐藏：用户能看到有哪些能力，也知道为什么拨不动。
+      await pumpCard(
+        tester,
+        loaded: prefs(
+          agentRecommend: true,
+          agentRecommendAvailable: false,
+          goalJudge: true,
+          goalJudgeAvailable: false,
+        ),
+      );
+
+      final agent = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('pref-agent-recommend')),
+      );
+      final goal = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('pref-goal-judge')),
+      );
+      expect(agent.onChanged, isNull, reason: '急停中开关必须置灰');
+      expect(agent.value, isTrue, reason: '急停不改写开关值（解除后原设置自动生效）');
+      expect(goal.onChanged, isNull);
+      // 可用的开关不受影响。
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('pref-follow-up-suggest')),
+            )
+            .onChanged,
+        isNotNull,
+      );
+      // 原因说明对用户可见：一个永远不会有结果的开关会让用户反复排查自己的设置。
+      expect(find.text('该能力已被服务端停用，恢复后自动按原设置生效'), findsNWidgets(2));
     });
   });
 

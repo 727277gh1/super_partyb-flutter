@@ -66,7 +66,14 @@ class UserPreferences {
     this.languageLabels = const {},
     this.customized = false,
     this.followUpSuggest = false,
+    this.followUpSuggestAvailable = true,
     this.habitSuggest = false,
+    this.habitSuggestAvailable = true,
+    this.agentRecommend = true,
+    this.agentRecommendSet = false,
+    this.agentRecommendAvailable = true,
+    this.goalJudge = false,
+    this.goalJudgeAvailable = true,
     this.defaultAgentId = '',
     this.displayName = '',
     this.avatarUrl = '',
@@ -90,20 +97,80 @@ class UserPreferences {
   /// 是否被用户显式设置过回复语言（用于展示「已自定义 / 恢复默认」）。
   final bool customized;
 
-  /// 新建 group 是否默认开启「后续提问建议」。
+  /// 是否给执行 agent 注入「后续提问建议约定」（follow_up_suggest reminder：
+  /// agent 在实质回复后附 3~5 条可点击追问）。
   ///
-  /// 仅影响**之后新建**的 group（建组时播种），不回溯修改既有 group。
+  /// ⚠️ 语义已变更（2026-11，随 Go `452cc432`）：这是**运行时开关**——对所有
+  /// 会话生效，改完下一轮生效。不再是「新建 group 的默认播种值」：group 级
+  /// `metadata.follow_up_suggest`、专用端点 `PUT /chat/groups/:id/follow-up-suggest`
+  /// 与建组播种均已移除。缺省关（未表态 / 读失败）。
+  ///
+  /// 实际可用性还受运维急停 `FOLLOW_UP_SUGGEST_DISABLED` 约束（急停中开关能拨
+  /// 但不会有建议），见 [followUpSuggestAvailable]。
   final bool followUpSuggest;
 
-  /// 新建 group 是否默认开启「习惯建议」（`habit_suggest`）。
+  /// 「后续提问建议」能力当前是否可用（运维急停 `FOLLOW_UP_SUGGEST_DISABLED`
+  /// 时为 false）。
   ///
-  /// 与 [followUpSuggest] 完全同构：仅影响之后新建的 group（建组时播种到
-  /// `metadata.habit_suggest`），不回溯修改既有 group。实际生效还受 env
-  /// `HABIT_SUGGEST_ENABLED` 全局闸约束（能力总闸，本项只表达用户意愿）。
+  /// 与 [UserPreferences.habitNotifyChannelsSet] 同一取向：开关能拨但服务端已
+  /// 停用时，若不下发这个字段，用户会以为是自己没配好而反复排查——真因只有
+  /// 运维知道。面板据此置灰并说明原因。缺省 true（响应缺失时按可用处理，
+  /// 把加载中也显示成「已停用」会让每次打开面板都闪一次误导性提示）。
+  final bool followUpSuggestAvailable;
+
+  /// 是否给执行 agent 注入「习惯建议约定」（habit_suggest reminder）。
   ///
-  /// ⚠️ 与群级同名开关（[ChatGroup.habitSuggestEnabled]）是**不同层次**：本处是
-  /// 「以后新建对话的默认值」，那个是「这个对话现在开不开」。
+  /// ⚠️ 语义已变更（2026-11，随 Go `47e9950e`）：这是**运行时开关**（对所有
+  /// 会话生效），不再是「新建 group 的默认播种值」：group 级
+  /// `metadata.habit_suggest`、专用端点 `PUT /chat/groups/:id/habit-suggest`
+  /// 与建组播种均已移除。缺省关（未表态 / 读失败），与 [agentRecommend] 的
+  /// 缺省开相反。
+  ///
+  /// 开关为开**不等于**每轮都注入：服务端注入前还有意图判定链（先 Jev，无效
+  /// 时降级 LLM 单字符判断），确认本轮输入含周期性意图才注入。面板文案必须
+  /// 说清，否则用户会把「没收到建议」当成开关失效。
   final bool habitSuggest;
+
+  /// 「习惯建议」能力当前是否可用（运维急停 `HABIT_SUGGEST_DISABLED` 时为
+  /// false）。语义同 [followUpSuggestAvailable]。
+  final bool habitSuggestAvailable;
+
+  /// 是否接收「本轮可能更适合别的 Agent」提示（agent_recommend reminder）。
+  ///
+  /// **准入就是本项**（2026-11，随 Go `1bdbc38c`）：不再有 env 准入总闸
+  /// （原 `AGENT_RECOMMEND_ENABLED` 已废），用户勾上即真正生效。唯一的非用户
+  /// 控制是运维急停 `AGENT_RECOMMEND_DISABLED`，其效果由 [agentRecommendAvailable]
+  /// 下发（**不改写**本项——急停不该把所有人的开关抹成关）。
+  ///
+  /// 缺省**开**：未表态时服务端下发 true（与执行侧解析同源）。与
+  /// [followUpSuggest] / [habitSuggest] 的缺省关方向相反，勿照抄。
+  final bool agentRecommend;
+
+  /// 区分「未表态（默认开）」与「用户显式设置过」。
+  ///
+  /// 必须单独下发：本项缺省为**开**，只看 [agentRecommend] 的值无法区分
+  /// 「我从未表态（默认开）」与「我明确打开了」——前者应展示「默认开启」，
+  /// 后者应展示「你已开启」。与 [habitNotifyChannelsSet] 同因。
+  final bool agentRecommendSet;
+
+  /// 「Agent 建议」能力当前是否可用（运维急停 `AGENT_RECOMMEND_DISABLED` 时
+  /// 为 false）。语义同 [followUpSuggestAvailable]。
+  final bool agentRecommendAvailable;
+
+  /// 是否对「目标约定」做相关性判定（goal_judge）。
+  ///
+  /// 运行时开关（2026-11，随 Go `7a814ed6`，与 habit_suggest 同构）：开启后，
+  /// 用户手动消息会先问一次 Jev「这句是否与当前目标的推进相关」，高置信无关
+  /// 才不注入约定。只对已开 goal gate 的群有可感效果（没开 gate 就没有目标
+  /// 约定可注入）。
+  ///
+  /// 缺省关：判定在首 token 前付一次 Jev（p50≈1.2s），不该由平台默认替用户
+  /// 按下。goal gate 续跑 / 规划轮恒注入，不受本项影响。
+  final bool goalJudge;
+
+  /// 「目标判定」能力当前是否可用（运维急停 `GOAL_JUDGE_DISABLED` 时为
+  /// false）。语义同 [followUpSuggestAvailable]。
+  final bool goalJudgeAvailable;
 
   /// 用户默认 agent（chat_router 兜底值）。空串 = 跟随系统默认。
   final String defaultAgentId;
@@ -191,7 +258,14 @@ class UserPreferences {
         languageLabels: _stringMap(json['language_labels']),
         customized: json['customized'] == true,
         followUpSuggest: json['follow_up_suggest'] == true,
+        followUpSuggestAvailable: json['follow_up_suggest_available'] != false,
         habitSuggest: json['habit_suggest'] == true,
+        habitSuggestAvailable: json['habit_suggest_available'] != false,
+        agentRecommend: json['agent_recommend'] != false,
+        agentRecommendSet: json['agent_recommend_set'] == true,
+        agentRecommendAvailable: json['agent_recommend_available'] != false,
+        goalJudge: json['goal_judge'] == true,
+        goalJudgeAvailable: json['goal_judge_available'] != false,
         defaultAgentId: (json['default_agent_id'] ?? '').toString(),
         displayName: (json['display_name'] ?? '').toString(),
         avatarUrl: (json['avatar_url'] ?? '').toString(),
@@ -230,5 +304,7 @@ class UserPreferences {
   @override
   String toString() =>
       'UserPreferences(replyLanguage=$replyLanguage, customized=$customized, '
-      'defaultAgentId=$defaultAgentId)';
+      'defaultAgentId=$defaultAgentId, followUp=$followUpSuggest, '
+      'habit=$habitSuggest, agentRecommend=$agentRecommend, '
+      'goalJudge=$goalJudge)';
 }

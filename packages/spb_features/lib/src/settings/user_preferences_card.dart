@@ -22,12 +22,14 @@ typedef LoadUserPreferences = Future<UserPreferences> Function();
 /// - `defaultAgentId: ''` 恢复「跟随系统默认」；
 /// - `replyLanguage` 用 `'auto'`（不是空串）表达「跟随输入」。
 ///
-/// ## 两个 bool 的语义
+/// ## 四个 reminder 开关的语义（2026-11 起）
 ///
-/// [followUpSuggest] / [habitSuggest] 是**新建对话的默认播种值**，仅影响之后
-/// 新建的 group，不回溯修改既有 group（服务端 `user_preferences.go`）。与群级
-/// 同名开关是不同层次：本处是「以后新建的默认」，群级那个是「这个对话现在
-/// 开不开」。
+/// [followUpSuggest] / [habitSuggest] / [agentRecommend] / [goalJudge] 都是
+/// **运行时开关**：改完下一轮生效、对该用户全部会话生效。它们**不再**是
+/// 「新建 group 的默认播种值」——群级 metadata 键与专用端点已随服务端重构
+/// 移除。缺省方向各不相同：`followUpSuggest` / `habitSuggest` / `goalJudge`
+/// 缺省关（判定/注入有真实成本），`agentRecommend` 缺省**开**（未表态时
+/// 服务端下发 true）。
 ///
 /// 它们同样遵循「非 null 即提交」：传 `false` 是**有意义的显式关闭**，与
 /// 「不传」（保持原值）必须区分——若写成 `if (x == true)` 就永远关不掉。
@@ -47,6 +49,8 @@ typedef SaveUserPreferences = Future<UserPreferences> Function({
   String? defaultAgentId,
   bool? followUpSuggest,
   bool? habitSuggest,
+  bool? agentRecommend,
+  bool? goalJudge,
   String? habitNotifyChannels,
 });
 
@@ -99,7 +103,7 @@ String? sanitizeAvatarUrl(String raw) {
   return value;
 }
 
-/// 用户偏好区块（昵称 / 头像 / 回复语言 / 默认 Agent / 两个新建默认开关 /
+/// 用户偏好区块（昵称 / 头像 / 回复语言 / 默认 Agent / 四个 reminder 运行时开关 /
 /// 习惯推送渠道）。
 ///
 /// ## 为什么自管状态，不并进设置页的 draft
@@ -172,11 +176,15 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
   String? _replyLanguage;
   String? _defaultAgentId;
 
-  /// 草稿里的两个「新建对话默认值」开关。
+  /// 草稿里的四个 reminder 运行时开关。
   ///
-  /// 与 [_replyLanguage] 同形：初值来自权威值，`_pendingChanges` 逐字段比对。
+  /// 语义已变更（2026-11）：不再是「新建对话的默认值」，而是**运行时开关**——
+  /// 改完下一轮生效、对该用户全部会话生效。与 [_replyLanguage] 同形：初值来自
+  /// 权威值，`_pendingChanges` 逐字段比对。
   bool? _followUpSuggest;
   bool? _habitSuggest;
+  bool? _agentRecommend;
+  bool? _goalJudge;
 
   /// 草稿里的习惯推送渠道（勾选集合 + 显式关闭标志）。
   ///
@@ -234,6 +242,8 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     _defaultAgentId = prefs.defaultAgentId;
     _followUpSuggest = prefs.followUpSuggest;
     _habitSuggest = prefs.habitSuggest;
+    _agentRecommend = prefs.agentRecommend;
+    _goalJudge = prefs.goalJudge;
     _habitChannels = prefs.selectedHabitChannels.toSet();
     // `habitNotifyDisabled` 同时覆盖「存了 off」与「set=true 但值为空」
     // （两者服务端语义相同：不推送），与 webapp 的 `isOff` 同口径。
@@ -283,6 +293,8 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     String? defaultAgentId,
     bool? followUpSuggest,
     bool? habitSuggest,
+    bool? agentRecommend,
+    bool? goalJudge,
     String? habitNotifyChannels,
   })
   get _pendingChanges {
@@ -295,6 +307,8 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         defaultAgentId: null,
         followUpSuggest: null,
         habitSuggest: null,
+        agentRecommend: null,
+        goalJudge: null,
         habitNotifyChannels: null,
       );
     }
@@ -324,6 +338,10 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
           ? null
           : _followUpSuggest,
       habitSuggest: _habitSuggest == saved.habitSuggest ? null : _habitSuggest,
+      agentRecommend: _agentRecommend == saved.agentRecommend
+          ? null
+          : _agentRecommend,
+      goalJudge: _goalJudge == saved.goalJudge ? null : _goalJudge,
       habitNotifyChannels: channels == savedChannels ? null : channels,
     );
   }
@@ -336,6 +354,8 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         p.defaultAgentId != null ||
         p.followUpSuggest != null ||
         p.habitSuggest != null ||
+        p.agentRecommend != null ||
+        p.goalJudge != null ||
         p.habitNotifyChannels != null;
   }
 
@@ -357,6 +377,8 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         defaultAgentId: p.defaultAgentId,
         followUpSuggest: p.followUpSuggest,
         habitSuggest: p.habitSuggest,
+        agentRecommend: p.agentRecommend,
+        goalJudge: p.goalJudge,
         habitNotifyChannels: p.habitNotifyChannels,
       );
       if (!mounted) return;
@@ -472,7 +494,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
               const SizedBox(height: SpbSpacing.md),
               _buildDefaultAgent(context),
               const SizedBox(height: SpbSpacing.md),
-              _buildNewGroupDefaults(context),
+              _buildReminderSwitches(context),
               const SizedBox(height: SpbSpacing.md),
               _buildHabitNotifyChannels(context),
             ],
@@ -631,43 +653,102 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     );
   }
 
-  /// 两个「新建对话默认值」开关。
+  /// 四个 reminder 的**运行时开关**（follow_up_suggest / habit_suggest /
+  /// agent_recommend / goal_judge）。
   ///
-  /// ## 与群级同名开关的关系
+  /// ## 语义已变更（2026-11）：不再是「新建对话默认值」
   ///
-  /// 这里只影响**之后新建**的对话（服务端建组时播种到 metadata）。既有对话
-  /// 不受影响——文案必须说清，否则用户改完默认值去老对话里找不到变化，会以为
-  /// 设置没生效。
-  Widget _buildNewGroupDefaults(BuildContext context) {
+  /// 群级 metadata 开关与专用端点已随服务端重构移除；本区块的四个开关直接
+  /// 决定「每一轮要不要注入」，改完下一轮生效、对该用户**全部会话**生效。
+  /// 旧文案「仅影响之后新建的对话」已不再成立——照抄会让用户改完去老对话里
+  /// 验证、发现没变化、误以为设置坏了。
+  ///
+  /// ## 缺省方向逐个说明（勿照抄同一句）
+  ///
+  /// - `agent_recommend` 缺省**开**（未表态即收提示，且没有判定成本，只有命中
+  ///   才注入）；显式关闭（关掉后展示「已关闭」）是它最常见的操作；
+  /// - 另外三个缺省**关**（判定/注入有真实成本，不该由平台默认替用户按下）。
+  ///
+  /// ## 急停置灰（`*_available`）
+  ///
+  /// 服务端下发 `*_available`（运维 `*_DISABLED` env）。false 时开关置灰并
+  /// 说明原因——一个永远不会有结果的开关会让用户反复排查自己的设置，而真因
+  /// 只有运维知道。置灰**不改写草稿**：解除后用户原本的开/关状态自动恢复。
+  Widget _buildReminderSwitches(BuildContext context) {
     final theme = Theme.of(context);
     final saved = _saved!;
     // 草稿优先，未初始化时用权威值（`_applyAuthoritative` 已赋，此处仅是保险）。
     final followUp = _followUpSuggest ?? saved.followUpSuggest;
     final habit = _habitSuggest ?? saved.habitSuggest;
+    final agentRecommend = _agentRecommend ?? saved.agentRecommend;
+    final goalJudge = _goalJudge ?? saved.goalJudge;
+
+    // 急停态：置灰 + 副标题换成原因说明。开关值保持原样（不解草稿）。
+    Widget switchRow(
+      ValueKey<String> key,
+      String title,
+      String subtitle,
+      bool value,
+      bool available,
+      ValueChanged<bool>? onChanged,
+    ) => SwitchListTile(
+      key: key,
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      value: value,
+      onChanged: _saving ? null : (available ? onChanged : null),
+      title: Text(title),
+      subtitle: Text(available ? subtitle : '该能力已被服务端停用，恢复后自动按原设置生效'),
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('新建对话的默认开关', style: theme.textTheme.labelLarge),
-        SwitchListTile(
-          key: const ValueKey('pref-follow-up-suggest'),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value: followUp,
-          onChanged: _saving
-              ? null
-              : (v) => setState(() => _followUpSuggest = v),
-          title: const Text('默认开启「后续提问建议」'),
-          subtitle: const Text('仅影响之后新建的对话，不回溯修改既有对话'),
+        Text('对话提醒开关', style: theme.textTheme.labelLarge),
+        // 运行时语义必须说清：改完下一轮、全部会话——用户去老对话里能验证到。
+        Padding(
+          padding: const EdgeInsets.only(
+            top: SpbSpacing.xxs,
+            bottom: SpbSpacing.xs,
+          ),
+          child: Text(
+            '运行时开关：保存后下一轮对话生效，作用于你的全部会话',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
         ),
-        SwitchListTile(
-          key: const ValueKey('pref-habit-suggest'),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value: habit,
-          onChanged: _saving ? null : (v) => setState(() => _habitSuggest = v),
-          title: const Text('默认开启「习惯建议」'),
-          subtitle: const Text('仅影响之后新建的对话，不回溯修改既有对话'),
+        switchRow(
+          const ValueKey('pref-follow-up-suggest'),
+          '后续提问建议',
+          'Agent 回复后附上几条可点击的追问建议',
+          followUp,
+          saved.followUpSuggestAvailable,
+          (v) => setState(() => _followUpSuggest = v),
+        ),
+        switchRow(
+          const ValueKey('pref-habit-suggest'),
+          '习惯建议',
+          '检测到周期性行为时主动建议固化成习惯（每条消息先做一次意图判定）',
+          habit,
+          saved.habitSuggestAvailable,
+          (v) => setState(() => _habitSuggest = v),
+        ),
+        switchRow(
+          const ValueKey('pref-agent-recommend'),
+          'Agent 建议',
+          '当前 Agent 确有更契合的人选时提示你，不会自动切换',
+          agentRecommend,
+          saved.agentRecommendAvailable,
+          (v) => setState(() => _agentRecommend = v),
+        ),
+        switchRow(
+          const ValueKey('pref-goal-judge'),
+          '目标判定',
+          '已开「自动实现目标」的会话先判定消息相关性，明显无关才不带目标约定',
+          goalJudge,
+          saved.goalJudgeAvailable,
+          (v) => setState(() => _goalJudge = v),
         ),
       ],
     );

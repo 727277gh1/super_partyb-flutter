@@ -112,25 +112,10 @@ class ChatGroup {
 
   bool get isArchived => status == 'archived';
 
-  /// 后续提问建议是否对本 group 启用。
-  ///
-  /// 注意这是**双层开关**：group 级 metadata 之外还有全局 `FOLLOW_UP_SUGGEST_ENABLED`。
-  /// 客户端只反映 group 级状态，全局关闭时即使此处为 true 也不会收到事件。
-  bool get followUpSuggestEnabled =>
-      _subMap(metadata?['follow_up_suggest'])?['enabled'] == true;
-
-  /// 习惯建议是否对本 group 启用（`metadata.habit_suggest.enabled`）。
-  ///
-  /// 与 [followUpSuggestEnabled] 同构：键缺失 = 关闭（服务端关闭时
-  /// `delete(meta, 'habit_suggest')` 而非写 false）。
-  ///
-  /// 同样是**双层开关**：group 级 metadata 之外还有全局 `HABIT_SUGGEST_ENABLED`
-  /// （见 `chatexec.HabitSuggestReminderEnabled`）。客户端只反映 group 级状态。
-  ///
-  /// ⚠️ 与 goal gate **无依赖**：历史上习惯引导嵌在 goal 约定尾部，未开 goal gate
-  /// 的群组永远拿不到；拆出后本开关独立生效。故面板不得因 goal gate 关闭而禁用它。
-  bool get habitSuggestEnabled =>
-      _subMap(metadata?['habit_suggest'])?['enabled'] == true;
+  // ⚠️ 群级 `follow_up_suggest` / `habit_suggest` 的 metadata getter 已移除
+  // （2026-11）：服务端已下线这两个键的写入与读取（Go `452cc432` / `47e9950e`），
+  // 准入迁到 `/me/preferences` 个人运行时开关。存量 metadata 里残留的这两个键
+  // 是死键（无消费者、无害，服务端不清理），不要再为其增加解析。
 
   /// 当前目标文本（**结构化 goal 优先**，旧列兜底）。
   ///

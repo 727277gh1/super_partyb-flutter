@@ -115,22 +115,9 @@ void main() {
       expect(calls.map((c) => c.method), ['PUT', 'GET']);
     });
 
-    test('toggleFollowUpSuggest：PUT follow-up-suggest → GET group', () async {
-      adapter.onPut(
-        '/chat/groups/grp_1/follow-up-suggest',
-        (server) => server.reply(200, {'enabled': false}),
-        data: Matchers.any,
-      );
-      mockGroupGet();
-
-      await useCase.toggleFollowUpSuggest('grp_1', false);
-
-      expect(calls.map((c) => '${c.method} ${c.path}'), [
-        'PUT /chat/groups/grp_1/follow-up-suggest',
-        'GET /chat/groups/grp_1',
-      ]);
-      expect(calls.first.body, {'enabled': false});
-    });
+    // 群级 toggleFollowUpSuggest / toggleHabitSuggest 已随服务端移除
+    // （2026-11）：两个 reminder 的准入迁到 /me/preferences 个人运行时开关，
+    // 本用例类不再覆盖群级端点（它们必然 404）。
 
     test('saveTts：只发传入的键（不整包提交）', () async {
       // webapp 提交的是合并后的完整配置；本用例刻意只发意图字段——整包提交在

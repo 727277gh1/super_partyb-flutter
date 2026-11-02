@@ -56,6 +56,9 @@ void main() {
     bool customized = true,
     bool followUpSuggest = false,
     bool habitSuggest = false,
+    bool agentRecommend = true,
+    bool agentRecommendSet = false,
+    bool goalJudge = false,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
@@ -72,7 +75,14 @@ void main() {
     },
     'customized': customized,
     'follow_up_suggest': followUpSuggest,
+    'follow_up_suggest_available': true,
     'habit_suggest': habitSuggest,
+    'habit_suggest_available': true,
+    'agent_recommend': agentRecommend,
+    'agent_recommend_set': agentRecommendSet,
+    'agent_recommend_available': true,
+    'goal_judge': goalJudge,
+    'goal_judge_available': true,
     'default_agent_id': defaultAgentId,
     'display_name': displayName,
     'avatar_url': avatarUrl,
@@ -159,6 +169,11 @@ void main() {
       expect(p.customized, isTrue);
       expect(p.followUpSuggest, isTrue);
       expect(p.habitSuggest, isTrue);
+      // 本 fixture 未覆盖 available 开关（恒 true）：急停语义见下方专门组。
+      expect(p.followUpSuggestAvailable, isTrue);
+      expect(p.agentRecommend, isTrue);
+      expect(p.agentRecommendSet, isFalse);
+      expect(p.goalJudge, isFalse);
       expect(p.defaultAgentId, 'agent_1');
       expect(p.displayName, '张三');
       expect(p.avatarUrl, 'https://cdn.example.com/a.png');
@@ -335,24 +350,60 @@ void main() {
       expect(calls.single.body!.keys, hasLength(1));
     });
 
-    test('两个 bool 的 false 会真的发出去（不是「不传」）', () async {
-      // 若写成 `if (x == true)` 就永远无法关闭这两个开关——
+    test('只传 agentRecommend → body 恰好只有 agent_recommend 一个键', () async {
+      // agent_recommend 缺省**开**：显式关闭（false）是最常见的写路径，
+      // 必须真的发出去。
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson(agentRecommend: false)),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(agentRecommend: false);
+
+      expect(calls.single.body, {'agent_recommend': false});
+      expect(calls.single.body!.keys, hasLength(1));
+    });
+
+    test('只传 goalJudge → body 恰好只有 goal_judge 一个键', () async {
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson(goalJudge: true)),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(goalJudge: true);
+
+      expect(calls.single.body, {'goal_judge': true});
+      expect(calls.single.body!.keys, hasLength(1));
+    });
+
+    test('四个 bool 的 false 会真的发出去（不是「不传」）', () async {
+      // 若写成 `if (x == true)` 就永远无法关闭这四个开关——
       // false 是**有意义的显式关闭**，与「不传」（保持原值）必须区分。
+      // agent_recommend 缺省开，把它关掉正是本开关最主要的用途。
       adapter.onPut(
         '/me/preferences',
         (server) => server.reply(200, prefsJson()),
         data: Matchers.any,
       );
 
-      await api.updatePreferences(followUpSuggest: false, habitSuggest: false);
+      await api.updatePreferences(
+        followUpSuggest: false,
+        habitSuggest: false,
+        agentRecommend: false,
+        goalJudge: false,
+      );
 
       expect(calls.single.body, {
         'follow_up_suggest': false,
         'habit_suggest': false,
+        'agent_recommend': false,
+        'goal_judge': false,
       });
     });
 
-    test('两个 bool 不传时 body 不得出现对应键', () async {
+    test('四个 bool 不传时 body 不得出现对应键', () async {
       adapter.onPut(
         '/me/preferences',
         (server) => server.reply(200, prefsJson(displayName: '张三')),
@@ -363,6 +414,78 @@ void main() {
 
       expect(calls.single.body!.containsKey('follow_up_suggest'), isFalse);
       expect(calls.single.body!.containsKey('habit_suggest'), isFalse);
+      expect(calls.single.body!.containsKey('agent_recommend'), isFalse);
+      expect(calls.single.body!.containsKey('goal_judge'), isFalse);
+    });
+
+    group('四个 reminder 开关的 available 急停下发', () {
+      // 运维急停（*_DISABLED env）只影响 available，**不改写**开关本身。
+      // 客户端把「未下发」当可用处理（缺省 true），避免加载中闪一次误导性的
+      // 「已停用」提示。
+      test('available=false 时如实解析为不可用', () async {
+        adapter.onGet(
+          '/me/preferences',
+          (server) => server.reply(
+            200,
+            prefsJson()
+              ..['follow_up_suggest_available'] = false
+              ..['habit_suggest_available'] = false
+              ..['agent_recommend_available'] = false
+              ..['goal_judge_available'] = false,
+          ),
+        );
+
+        final p = await api.getPreferences();
+
+        expect(p.followUpSuggestAvailable, isFalse);
+        expect(p.habitSuggestAvailable, isFalse);
+        expect(p.agentRecommendAvailable, isFalse);
+        expect(p.goalJudgeAvailable, isFalse);
+        // 急停不改写开关本身：解除后用户的原设置自动恢复生效。
+        expect(p.agentRecommend, isTrue);
+      });
+
+      test('available 缺失（旧响应）按可用处理', () async {
+        adapter.onGet(
+          '/me/preferences',
+          (server) => server.reply(200, <String, dynamic>{}),
+        );
+
+        final p = await api.getPreferences();
+
+        expect(p.followUpSuggestAvailable, isTrue);
+        expect(p.habitSuggestAvailable, isTrue);
+        expect(p.agentRecommendAvailable, isTrue);
+        expect(p.goalJudgeAvailable, isTrue);
+      });
+
+      test('agent_recommend 缺省开：未表态（键缺失）时解析为 true', () async {
+        adapter.onGet(
+          '/me/preferences',
+          (server) => server.reply(200, <String, dynamic>{}),
+        );
+
+        final p = await api.getPreferences();
+
+        expect(p.agentRecommend, isTrue);
+        expect(p.agentRecommendSet, isFalse);
+        // 对照：follow_up / habit / goal_judge 缺省关。
+        expect(p.followUpSuggest, isFalse);
+        expect(p.habitSuggest, isFalse);
+        expect(p.goalJudge, isFalse);
+      });
+
+      test('agent_recommend_set=true 区分「显式开启」与「默认开」', () async {
+        adapter.onGet(
+          '/me/preferences',
+          (server) => server.reply(200, prefsJson(agentRecommendSet: true)),
+        );
+
+        final p = await api.getPreferences();
+
+        expect(p.agentRecommend, isTrue);
+        expect(p.agentRecommendSet, isTrue);
+      });
     });
 
     test('非法 reply_language → 400 抛 HttpError（不静默回落 auto）', () async {

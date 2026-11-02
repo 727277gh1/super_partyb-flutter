@@ -783,7 +783,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// controller.contextUsage 的订阅（与 activities 平行，见领域层说明）。
   StreamSubscription<ContextUsage?>? _contextUsageSub;
 
-  /// 当前对话的权威 ChatGroup（设置弹层的目标文本与三个开关的真源）。
+  /// 当前对话的权威 ChatGroup（设置弹层的目标文本与开关的真源）。
   ///
   /// 移动端没有侧边栏，故设置入口是 AppBar 的一个按钮 → 底部弹层。真源与桌面端
   /// 一致：`GET /chat/groups/:id`，写操作成功后用其响应覆盖。
@@ -1250,18 +1250,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           .saveMaxAutoTurns(widget.groupId, turns),
                       onChanged: setSheetState,
                     ),
-                    onToggleFollowUpSuggest: (enabled) => _runSetting(
-                      () => ref
-                          .read(groupSettingsUseCaseProvider)
-                          .toggleFollowUpSuggest(widget.groupId, enabled),
-                      onChanged: setSheetState,
-                    ),
-                    onToggleHabitSuggest: (enabled) => _runSetting(
-                      () => ref
-                          .read(groupSettingsUseCaseProvider)
-                          .toggleHabitSuggest(widget.groupId, enabled),
-                      onChanged: setSheetState,
-                    ),
+                    // 群级 follow-up-suggest / habit-suggest 开关已随服务端移除
+                    // （2026-11）：准入迁到 /me/preferences 个人运行时开关。
                     onSaveTts:
                         ({
                           enabled,
@@ -2029,7 +2019,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // `null` —— 两个入口同时消失，搜索在 ≥720dp（平板/折叠屏展开/横屏手机）
       // **彻底不可达**。宽屏 AppBar 有 720dp 余量，多一个 48dp 图标不会溢出。
       enableSearch: !SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width),
-      // 对话设置入口（目标 + 三个 CAS 开关）。
+      // 对话设置入口（目标 + goal gate / tts 开关）。
       //
       // 移动端没有侧边栏，故走 AppBar 按钮 → 底部弹层；桌面端同一份
       // [GroupSettingsPanel] 挂在侧边栏「设置」tab 上（见 desktop router）。

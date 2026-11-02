@@ -1898,23 +1898,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                                       .read(groupSettingsUseCaseProvider)
                                       .saveMaxAutoTurns(widget.groupId, turns),
                                 ),
-                                onToggleFollowUpSuggest: (enabled) =>
-                                    _runSetting(
-                                      () => ref
-                                          .read(groupSettingsUseCaseProvider)
-                                          .toggleFollowUpSuggest(
-                                            widget.groupId,
-                                            enabled,
-                                          ),
-                                    ),
-                                onToggleHabitSuggest: (enabled) => _runSetting(
-                                  () => ref
-                                      .read(groupSettingsUseCaseProvider)
-                                      .toggleHabitSuggest(
-                                        widget.groupId,
-                                        enabled,
-                                      ),
-                                ),
+                                // 群级 follow-up-suggest / habit-suggest 开关已随
+                                // 服务端移除（2026-11）：准入迁到 /me/preferences
+                                // 个人运行时开关（设置页个人偏好卡）。
                                 onSaveTts:
                                     ({
                                       enabled,

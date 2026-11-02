@@ -5516,6 +5516,67 @@ show ScrollCacheExtent;`。
 
 ---
 
+### 6.49 同步 partyb 的 reminder 准入重构：群级开关 → 个人运行时开关（2026-11）
+
+上游 `super_partyb` 把四个 turn reminder 的准入全部收敛到 `/me/preferences`
+个人运行时开关（Go `452cc432` / `47e9950e` / `1bdbc38c` / `7a814ed6`）：
+
+| reminder | 旧形态 | 新形态 |
+|---|---|---|
+| follow_up_suggest | group 级 `metadata.follow_up_suggest` + 专用端点 + 建组播种 + 个人「新建默认值」 | 个人运行时开关，**缺省关** |
+| habit_suggest | group 级 `metadata.habit_suggest` + 专用端点 + 建组播种 + 个人「新建默认值」 | 个人运行时开关（准入 = 开关 × 意图判定），**缺省关** |
+| agent_recommend | env 准入闸 + 个人否决权 | **准入就是个人开关**，缺省**开**；env 退为单向急停 |
+| goal_judge | group 级 `metadata.goal_gate.smart_injection` | 个人运行时开关，**缺省关** |
+
+四个开关的可用性都由 `*_available` 下发（运维 `*_DISABLED` env，单向急停——
+只能关不能开，且**不改写**用户开关本身）。
+
+#### 客户端的同步内容
+
+| 改动 | 文件 | 说明 |
+|---|---|---|
+| 删除群级端点方法 | `spb_api/chat_api.dart` | `setGroupFollowUpSuggest` / `setGroupHabitSuggest`——服务端已删端点，调用即 404 |
+| 删除群级 metadata getter | `spb_models/chat_group.dart` | `followUpSuggestEnabled` / `habitSuggestEnabled`——键已成死键（存量无害，不清理） |
+| 删除群设置面板区块 | `spb_features/group_settings_panel.dart` | 两个开关区块 + 参数 + typedef；两端 router 接线一并删除 |
+| 偏好模型扩四个开关 | `spb_models/user_preferences.dart` | `followUpSuggest` / `habitSuggest` / `agentRecommend` / `goalJudge` + 各自 `available`；`agentRecommendSet` 区分「默认开」与「显式开启」 |
+| 偏好卡新增开关区块 | `spb_features/user_preferences_card.dart` | 「对话提醒开关」四开关 + 急停置灰；删「新建对话的默认开关」旧文案（语义已不成立） |
+| PUT 补两个新键 | `spb_api/chat_api.dart` `updatePreferences` | `agent_recommend` / `goal_judge`（非 null 即提交） |
+| goal_gate_stopped 补两个 reason | `spb_domain/conversation_item.dart` | `planning_stalled`（连续规划无产出）/ `goal_not_active`（目标 paused/archived），文案与 miniapp 逐条一致；`no_tasks` 保留兼容历史事件 |
+
+#### 易写错的四个点
+
+1. **缺省方向逐个不同，勿照抄同一句**：`follow_up_suggest` / `habit_suggest` /
+   `goal_judge` 缺省**关**（判定/注入有真实成本，不该由平台默认替用户按下），
+   `agent_recommend` 缺省**开**（未表态即收提示）。解析侧用
+   `json['agent_recommend'] != false`（缺省开）vs `== true`（缺省关）——写反了
+   会让所有用户在不知情时开关翻转。
+2. **`*_available` 缺失按可用处理**（`!= false`），不是 `== true`：把「旧响应 /
+   加载中」显示成「已停用」会让每次打开设置页都闪一次误导性红条（webapp
+   FollowUpSuggestPanel 的同款取舍）。
+3. **急停置灰不改写草稿**：开关值保持原样，只禁用 `onChanged` 并换副标题为
+   原因说明。改写值会让「解除急停后恢复原设置」变成谎话。
+4. **「新建对话默认值」的旧文案必须删**，不能只改行为：用户读到「仅影响之后
+   新建的对话」会去老对话里验证、发现没变化、误以为设置坏了。
+
+#### 测试
+
+| 层 | 用例 |
+|---|---|
+| `spb_api` | `updatePreferences` 四开关各一个键 / 四 false 全发出 / 不传不发键；`available=false` 解析为不可用；缺失按可用；`agent_recommend` 缺省开；`agent_recommend_set` 区分默认与显式 |
+| `spb_models` | 同上字段的解析与容错 |
+| `spb_features` | 偏好卡四开关初值 / 单键提交 / 未改不误报 / 急停置灰不改值且说明原因；面板与用例的群级开关测试随之删除 |
+| `spb_domain` | `goal_gate_stopped` 七种 reason 文案与 miniapp 逐条一致 |
+
+#### 反向验证要点
+
+- `agent_recommend` 解析改回 `== true` → 缺省开用例失败；
+- 急停置灰改回「不改值也允许拨动」→ 置灰用例失败；
+- `_pendingChanges` 漏比对新键 → 「未改不误报」用例失败；
+- `planning_stalled` / `goal_not_active` 缺映射 → 退化为兜底文案（「自动推进已停止」）
+  ，正是 miniapp `7a952437` 修的那个症状。
+
+---
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 

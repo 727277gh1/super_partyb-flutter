@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -395,23 +394,6 @@ void main() {
       );
     });
 
-    test(
-      'setGroupFollowUpSuggest：PUT .../follow-up-suggest，body {enabled}',
-      () async {
-        adapter.onPut(
-          '/chat/groups/grp_1/follow-up-suggest',
-          (server) => server.reply(200, {'enabled': false}),
-          data: Matchers.any,
-        );
-
-        await api.setGroupFollowUpSuggest('grp_1', false);
-
-        expect(calls.single.method, 'PUT');
-        expect(calls.single.path, '/chat/groups/grp_1/follow-up-suggest');
-        expect(calls.single.body, {'enabled': false});
-      },
-    );
-
     test('setGroupTts：只传子开关时 body 不得出现 enabled', () async {
       // 服务端：`enabled == nil` 时不动总开关。若客户端默认补个 enabled:true，
       // 「只改思考播报」会意外把语音回复整个打开。
@@ -716,64 +698,10 @@ void main() {
     });
   });
 
-  /// `setGroupHabitSuggest` 的**真实路径与 body**（走本地 HTTP server）。
-  ///
-  /// ## 为什么不用 `DioAdapter` 而真起一个 server
-  ///
-  /// 本端点与 `/chat/groups/:id/habit-suggestions`（**复数、且是建议列表**）
-  /// 只差一个 `s`，而后者确实存在（`misc_extra.go` 的
-  /// `GET /api/chat/habit-suggestions`）。路径拼错**不会报错**：服务端会
-  /// 404 或命中另一个端点，客户端只看到一句「请求失败」。
-  ///
-  /// mock 适配器按注册的路径匹配，写错路径的测试也能「通过」——因为断言的是
-  /// 同一个错值。真起 server 才能确认：请求真的到了 `/chat/groups/:id/habit-suggest`。
-  group('setGroupHabitSuggest 真实请求', () {
-    late HttpServer server;
-    late ChatApi realApi;
-    late List<String> receivedPaths;
-    late List<String> receivedMethods;
-    late List<String> receivedBodies;
-
-    setUp(() async {
-      receivedPaths = [];
-      receivedMethods = [];
-      receivedBodies = [];
-      // 端口 0 = 由内核分配空闲端口（避免 CI 上的固定端口冲突）。
-      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      realApi = ChatApi(createDio(baseUrl: 'http://127.0.0.1:${server.port}'));
-      server.listen((req) async {
-        receivedPaths.add(req.uri.path);
-        receivedMethods.add(req.method);
-        receivedBodies.add(await utf8.decodeStream(req));
-        req.response
-          ..statusCode = 200
-          ..headers.contentType = ContentType.json
-          ..write('{"enabled":true}');
-        await req.response.close();
-      });
-    });
-
-    tearDown(() async => server.close(force: true));
-
-    test('PUT /chat/groups/:id/habit-suggest，body {"enabled":true}', () async {
-      await realApi.setGroupHabitSuggest('grp_1', true);
-
-      expect(receivedMethods, ['PUT']);
-      expect(receivedPaths, ['/chat/groups/grp_1/habit-suggest']);
-      expect(jsonDecode(receivedBodies.single), {'enabled': true});
-    });
-
-    test('enabled=false 原样下发（服务端据此删键）', () async {
-      await realApi.setGroupHabitSuggest('grp_1', false);
-
-      expect(jsonDecode(receivedBodies.single), {'enabled': false});
-    });
-
-    test('路径不含 habit-suggestions（与建议列表端点区分）', () async {
-      await realApi.setGroupHabitSuggest('grp_1', true);
-
-      // 防的是「顺手写成复数」：那个端点存在但语义完全不同（读建议列表）。
-      expect(receivedPaths.single, isNot(contains('habit-suggestions')));
-    });
-  });
+  /// 群级 `setGroupHabitSuggest` / `setGroupFollowUpSuggest` 的真实请求测试已随
+  /// 方法删除（2026-11）：服务端已移除 `PUT /chat/groups/:id/habit-suggest` 与
+  /// 同名 follow-up-suggest 端点（Go `452cc432` / `47e9950e`），两个开关迁到
+  /// `/me/preferences` 个人运行时开关。个人开关的契约测试见下方
+  /// 「updatePreferences」组；「真起 server 才能验路径」的方法论保留在本注释，
+  /// 供后续新增端点参考。
 }

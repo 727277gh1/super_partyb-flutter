@@ -56,16 +56,12 @@ void main() {
   late List<String> savedGoals;
   late List<bool> goalGateToggles;
   late List<int> savedMaxTurns;
-  late List<bool> followUpToggles;
-  late List<bool> habitToggles;
   late List<Map<String, dynamic>> ttsSaves;
 
   setUp(() {
     savedGoals = [];
     goalGateToggles = [];
     savedMaxTurns = [];
-    followUpToggles = [];
-    habitToggles = [];
     ttsSaves = [];
   });
 
@@ -74,8 +70,6 @@ void main() {
     required ChatGroup group,
     bool busy = false,
     bool withGoalGate = true,
-    bool withFollowUp = true,
-    bool withHabitSuggest = true,
     bool withTts = true,
   }) async {
     await tester.pumpWidget(
@@ -91,12 +85,8 @@ void main() {
             onSaveMaxAutoTurns: withGoalGate
                 ? (v) async => savedMaxTurns.add(v)
                 : null,
-            onToggleFollowUpSuggest: withFollowUp
-                ? (v) async => followUpToggles.add(v)
-                : null,
-            onToggleHabitSuggest: withHabitSuggest
-                ? (v) async => habitToggles.add(v)
-                : null,
+            // 群级 follow-up-suggest / habit-suggest 开关已随服务端移除
+            // （2026-11）：准入迁到 /me/preferences 个人运行时开关。
             onSaveTts: withTts
                 ? ({
                     enabled,
@@ -425,95 +415,9 @@ void main() {
     });
   });
 
-  group('后续提问建议', () {
-    testWidgets('键缺失 = 关闭，点击回调带意图值', (tester) async {
-      await pumpPanel(tester, group: ChatGroup.fromJson(groupJson()));
-
-      expect(switchValue(tester, 'group-follow-up-switch'), isFalse);
-      await tapVisible(
-        tester,
-        find.byKey(const ValueKey('group-follow-up-switch')),
-      );
-      expect(followUpToggles, [true]);
-    });
-
-    testWidgets('metadata 标记已开启时显示已开启', (tester) async {
-      await pumpPanel(
-        tester,
-        group: ChatGroup.fromJson(
-          groupJson(
-            metadata: {
-              'follow_up_suggest': {'enabled': true},
-            },
-          ),
-        ),
-      );
-
-      expect(switchValue(tester, 'group-follow-up-switch'), isTrue);
-    });
-
-    testWidgets('如实说明是双层开关（不承诺已生效）', (tester) async {
-      await pumpPanel(tester, group: ChatGroup.fromJson(groupJson()));
-
-      expect(find.text('这是对话级开关，还需服务端已启用该能力才会生效'), findsOneWidget);
-    });
-  });
-
-  group('习惯建议', () {
-    testWidgets('键缺失 = 关闭，点击回调带意图值', (tester) async {
-      await pumpPanel(tester, group: ChatGroup.fromJson(groupJson()));
-
-      expect(switchValue(tester, 'group-habit-suggest-switch'), isFalse);
-      await tapVisible(
-        tester,
-        find.byKey(const ValueKey('group-habit-suggest-switch')),
-      );
-      expect(habitToggles, [true]);
-    });
-
-    testWidgets('metadata 标记已开启时显示已开启', (tester) async {
-      await pumpPanel(
-        tester,
-        group: ChatGroup.fromJson(
-          groupJson(
-            metadata: {
-              'habit_suggest': {'enabled': true},
-            },
-          ),
-        ),
-      );
-
-      expect(switchValue(tester, 'group-habit-suggest-switch'), isTrue);
-    });
-
-    testWidgets('与 goal gate 无关：无目标时仍可操作', (tester) async {
-      // 历史上习惯引导嵌在 goal 约定尾部，未开 goal gate 的群组永远拿不到。
-      // 拆出后本开关独立生效，面板不得因无目标而禁用它。
-      await pumpPanel(tester, group: ChatGroup.fromJson(groupJson()));
-
-      expect(switchEnabled(tester, 'group-habit-suggest-switch'), isTrue);
-      expect(switchEnabled(tester, 'group-goal-gate-switch'), isFalse);
-    });
-
-    testWidgets('如实说明是双层开关且与目标无关', (tester) async {
-      await pumpPanel(tester, group: ChatGroup.fromJson(groupJson()));
-
-      expect(find.text('这是对话级开关，还需服务端已启用该能力才会生效，与「自动实现目标」无关'), findsOneWidget);
-    });
-
-    testWidgets('未注入 onToggleHabitSuggest 时该 section 不渲染', (tester) async {
-      await pumpPanel(
-        tester,
-        group: ChatGroup.fromJson(groupJson()),
-        withHabitSuggest: false,
-      );
-
-      expect(
-        find.byKey(const ValueKey('group-habit-suggest-switch')),
-        findsNothing,
-      );
-    });
-  });
+  // ⚠️ 「后续提问建议」与「习惯建议」两个 group 已随群级开关端点移除
+  // （2026-11）：准入迁到 /me/preferences 个人运行时开关，面板不再渲染。
+  // 个人偏好卡的运行时开关测试见 settings/user_preferences_card_test.dart。
 
   group('语音回复', () {
     testWidgets('总开关关闭时三个子开关全部禁用', (tester) async {
@@ -702,7 +606,6 @@ void main() {
       );
 
       expect(switchEnabled(tester, 'group-goal-gate-switch'), isFalse);
-      expect(switchEnabled(tester, 'group-follow-up-switch'), isFalse);
       expect(switchEnabled(tester, 'group-tts-switch'), isFalse);
       expect(switchEnabled(tester, 'group-tts-narrate-switch'), isFalse);
       final save = tester.widget<FilledButton>(
@@ -716,8 +619,6 @@ void main() {
         tester,
         group: ChatGroup.fromJson(groupJson()),
         withGoalGate: false,
-        withFollowUp: false,
-        withHabitSuggest: false,
         withTts: false,
       );
 

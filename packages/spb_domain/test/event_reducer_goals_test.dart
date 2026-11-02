@@ -435,12 +435,16 @@ void main() {
       expect(s.turnCountLabel, '已自动推进 3 轮');
     });
 
-    test('五种 reason 的文案与 miniapp 逐条一致', () {
-      // 取值来源：Go chatgate/goal_gate.go 的三处 emit（:416 停止态、:435 目标
-      // 达成、:549 熔断）与 miniapp normalize.ts:146 的映射表。
+    test('七种 reason 的文案与 miniapp 逐条一致', () {
+      // 取值来源：Go chatgate/goal_gate.go 的三处 emit（:521 停止态、:540 目标
+      // 达成、:667 熔断 pause）与 miniapp normalize.ts 的映射表。
+      // planning_stalled / goal_not_active 是滚动规划改造（2026-10）新增的
+      // 停止原因；no_tasks 已不再产生，保留映射兼容历史事件。
       const expected = {
         'goal_completed': '目标已实现，自动推进已停用',
         'max_auto_turns_reached': '已达自动推进轮次上限，发送新消息后可继续',
+        'planning_stalled': '连续规划未产出任务，自动推进已暂停，需人工介入',
+        'goal_not_active': '目标已暂停或归档，自动推进已停用',
         'no_tasks': '目标尚无任务列表，请先拆解任务后再启用自动推进',
         'task_blocked': '存在受阻任务，自动推进已暂停，需人工介入',
         'task_error_stopped': '存在出错停止的任务，自动推进已暂停，需人工介入',
