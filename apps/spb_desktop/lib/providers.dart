@@ -1251,15 +1251,34 @@ const String sinceDaysPrefKey = 'sync.since_days';
 /// `intervalMinutes` 是一个意图的两个维度，分开存会留下「写了一半」的中间态。
 const String autoSyncPrefKey = 'sync.auto';
 
-/// 触发一轮同步的动作（供同步页注入）。
-///
-/// ## 为什么每次读最新的目录与配置
-///
-/// 用户可能刚在同步页选了新目录就点同步。若闭包里捕获了构造时的旧目录，
-/// 同步会写到**上一个**目录，而 UI 显示的是新目录——用户会以为同步没生效。
-///
-/// 同理，落盘器按**当前**目录新建（`LocalFileSink(root)`），而不是复用一个
-/// 绑定旧目录的实例。
+/// 所有下行同步共用一条队列：全量与不同 group 必须顺序读写共享状态。
+/// 排队期间也保持 busy；上一轮失败不会阻断下一轮。
+/// 任务开始执行时再读取设置，使用当前目录与范围。
+final _syncTaskRunnerProvider =
+    Provider<Future<SyncReport> Function(Future<SyncReport> Function())>((ref) {
+      var tail = Future<void>.value();
+      var pending = 0;
+      return (task) async {
+        final previous = tail;
+        final done = Completer<void>();
+        tail = done.future;
+        pending++;
+        ref.read(syncInFlightProvider.notifier).set(true);
+        try {
+          await previous;
+          return await task();
+        } finally {
+          done.complete();
+          pending--;
+          if (ref.mounted) {
+            ref.read(syncInFlightProvider.notifier).set(pending != 0);
+          }
+        }
+      };
+    });
+
+/// 全量同步入口：托盘、同步页和定时器在途时复用同一轮结果，
+/// 与定向同步通过共享队列串行执行。
 final runSyncActionProvider = Provider<RunSyncAction>((ref) {
   // 单飞（single-flight）：同一时刻只允许一轮同步。
   //
@@ -1289,20 +1308,9 @@ final runSyncActionProvider = Provider<RunSyncAction>((ref) {
       return existing;
     }
     final future = () async {
-      // 标记「同步在途」，供托盘提示显示「同步中…」。
-      //
-      // ## 为什么状态放在 Provider 里而不是页面的 State 里
-      //
-      // 托盘提示是**应用级**的，它看不到同步页的 State；而同步可能由设置页、
-      // 同步页或将来其他入口发起。把「在途」放在一处，所有入口自动生效。
-      //
-      // `finally` 保证异常路径也会复位：否则一次失败会让托盘永远显示
-      // 「同步中…」，用户会以为同步卡死。
-      ref.read(syncInFlightProvider.notifier).set(true);
       try {
-        return await _runSync(ref);
+        return await ref.read(_syncTaskRunnerProvider)(() => _runSync(ref));
       } finally {
-        ref.read(syncInFlightProvider.notifier).set(false);
         inFlight = null;
       }
     }();
@@ -1437,17 +1445,12 @@ class GroupSyncCheckResult {
   final String groupId;
   final GroupSyncNeed need;
 
-  /// 该 group 在远端有、但本地还没有（或版本更旧）的文件数（用于提示文案）。
-  ///
-  /// 判定用 `page_size=1` 只拉一条就够**触发**，但要给用户一句可读的话
-  /// （「有 12 个交付物未同步」）就得知道规模。故判定命中后再花一次分页
-  /// 统计——只在**命中时**付这个成本，绝大多数打开是未命中。
-  ///
-  /// 超过 [GroupSyncCheckResult.countCap] 时被截断（只显示「至少 N 个」），
-  /// 避免为一个提示条拉几百页。
+  /// 本 group 待下载或待删除的条目数，按同步计划统计。
+  /// 已同步版本、用户过滤掉的文件和未曾下载的远端删除记录不计入。
+  /// 达到 [GroupSyncCheckResult.countCap] 后停止扫描并显示上限提示。
   final int pendingCount;
 
-  /// 计数上限：5 页 × 100 条。
+  /// 待处理条目计数上限（不含目录、未变化版本和被过滤的文件）。
   ///
   /// 500 以上对用户已是「很多」，精确值没有意义，而拉更多页只为凑数字
   /// 不值得（首次同步可能 5666 条）。
@@ -1462,32 +1465,12 @@ class GroupSyncCheckResult {
 /// 列表端点，而绝大多数对话页用例关心的是别的东西。
 typedef GroupSyncCheck = Future<GroupSyncCheckResult> Function(String groupId);
 
-/// 进入对话时判定该 group 是否需要同步（**只判定，不触发**）。
+/// 进入对话时检查本 group 的同步计划（只检查，不下载）。
 ///
-/// ## 为什么判定与触发分开
-///
-/// 判定要发一次 HTTP（可能再发几次统计）。若判定完就直接同步，用户会看到
-/// 「点进对话 → 突然开始下载」而没有任何解释，且无法拒绝。分成两步后，
-/// 页面可以先问用户（提示条 + 「立即同步」按钮），也可以按配置直接触发
-/// ——那是**调用方的**决定，不是判定的。
-///
-/// ## 为什么用 `page_size=1` 判定
-///
-/// 带上 `updated_since` 后服务端按 `updated_at DESC` 排序，第一条即最晚的那
-/// 份。取它的 `updated_at` 与本 group 的已同步水位比较即可（判据见
-/// `groupSyncNeed`）。拉一页 100 条只为读一个字段是浪费。
-///
-/// ⚠️ **不带 `updated_since` 时排序不是 `updated_at`**（服务端改按
-/// `created_at DESC`），那时 `page_size=1` 会取到「最晚创建」而非「最晚更新」
-/// ——覆盖写既有文件后判不出变化。详见下面的内联说明。
-///
-/// ## 命中的是「这个 group」而不是全范围
-///
-/// 定向同步（[SyncSingleGroupScope]）只列该 group 子树、且**不推进**共享
-/// 游标，故不会让游标越过其它 group 里未同步的文件。
-///
-/// ⚠️ 水位必须从**本 group 的文件记录**里取（[groupSyncWatermark]），
-/// 不能拿 workspace 游标比：定向同步不动游标，拿它比会永远判 stale。
+/// 分页读取该 group 在用户 sinceDays 范围内的清单，按路径和 etag 与
+/// workspace 状态比对。最大成功更新时间不能代表完整进度，故不用水位
+/// 裁剪；扫描不依赖服务端排序。与定向下载共用 buildSyncPlan 的过滤和
+/// 删除判据，避免提示「有未同步文件」但实际同步没有任何动作。
 final checkGroupSyncNeedProvider =
     Provider<Future<GroupSyncCheckResult> Function(String)>((ref) {
       return (String groupId) async {
@@ -1519,157 +1502,58 @@ final checkGroupSyncNeedProvider =
           );
         }
 
-        // 状态键固定用 [workspaceStateKey]——因为提示条上的「立即同步」跑的是
-        // [SyncSingleGroupScope]，它按 workspace 布局落盘（`{gid}/` 前缀）
-        // 且写这个键。读另一个键会比不到东西，于是永远判 stale。
+        // 与定向同步一致，只应用用户的时间范围。最大成功文件时间无法
+        // 证明更旧文件已同步，不能作为列表下限。
         const stateKey = workspaceStateKey;
         final state = await ref.read(syncStateStoreProvider).load(stateKey);
-        final watermark = groupSyncWatermark(
-          state: state,
-          stateKey: stateKey,
-          groupId: groupId,
-        );
-        final mine = watermark.latestUpdatedAt;
-
-        // ## 为什么必须把水位当 `updated_since` 传下去（这不是优化，是正确性）
-        //
-        // UFS 的列表端点**只在带了 `updated_since` 时**才按 `updated_at DESC`
-        // 排序，否则按 `created_at DESC`
-        // （`unified-file-service/internal/store/file.go` 的 `orderClause`）。
-        // 而 agent 覆盖写既有交付物走的是「上传新版本」：`created_at` 不变，
-        // 只有 `updated_at` 刷新（生产 6948 个 group 文件里 4974 个如此）。
-        //
-        // 故不带 `updated_since` 的 `page_size=1` 拿到的是「最晚**创建**的那
-        // 份」，而不是「最晚**更新**的那份」。生产实测 187 个 group 里有 56
-        // 个的后者的时刻更晚——那些 group 只改既有文件时，判定会得出
-        // upToDate，提示条永不出现（这正是「开了自动同步却什么都不下载」）。
-        //
-        // 带上它之后服务端切到 `updated_at DESC`，第一条即最晚；同时把早已
-        // 同步过的旧文件挡在结果外，统计也更准。
-        //
-        // 时间下限：**与同步侧同一口径**。
-        //
-        // 同步侧（`DeliverableSyncUseCase.run`）把「已保存游标 / 本 group 水位」
-        // 与用户配的 `sinceDays` 取更晚者（`effectiveCursor`）。探测侧若不看
-        // `sinceDays`，两边就会对「哪些算未同步」得出不同结论：用户设了
-        // 「只拉最近 30 天」而该 group 的文档全在 60 天前 → 探测按全量数得
-        // stale，同步按 30 天下限列出 0 条 → 提示条报 N 个、同步报「已同步 0 个」、
-        // 水位不前进 → **每次进对话永久重复提示**。
         final lower = effectiveCursor(
-          saved: mine,
+          saved: null,
           sinceDays: settings.sinceDays,
           nowUnix: nowUnix(),
         );
 
         final ufs = ref.read(ufsApiProvider);
-        final prefix = '$workspaceGroupsPrefix$groupId';
-        // 页大小按 **`lower`**（而不是 `mine`）分档：决定服务端排序模式的
-        // 就是「有没有传 `updated_since`」，而 `lower` 才是那个判据。
-        //
-        // - 有 `lower` → 服务端按 `updated_at DESC` 且已过下限，一条即结论；
-        // - 无 `lower`（首次全量）→ 服务端按 `created_at DESC`，而列表**包含
-        //   目录**，`page_size=1` 恰好取到一个目录时过滤后会得到 `unknown`
-        //   ——即使下面明明有文件。故拉一页（100 条）。
-        final probeSize = lower == null ? 100 : 1;
-        var page = await ufs.listFiles(
-          pathPrefix: prefix,
-          updatedSince: lower,
-          // 软删除同样会刷新 `updated_at`，故删除也是一种「变化」。不带它
-          // 的话，「远端删了、本地还留着」永远判 upToDate，本地副本清不掉。
-          // 首次同步（无水位、且无 sinceDays 下限）不需要：那时本地没有可删的副本。
-          includeDeleted: lower != null,
-          page: 1,
-          pageSize: probeSize,
-        );
-        // 有水位时只拉一条，若那一条恰是**非交付物**（目录 / 机器产物），
-        // 会被 `_isDeliverableEntry` 过滤成 `unknown`——即使后面明明有新文件。
-        // 首次同步的 100 条只修了「无水位」那一半，这一半同样会静默失效。
-        // 故仅在「本页还有更多」时才扩页重探（`total == 1` 说明真的只有它，
-        // 不浪费一次请求）。
-        if (probeSize == 1 &&
-            !page.items.any(_isDeliverableEntry) &&
-            page.hasMore(page: 1, pageSize: probeSize)) {
-          page = await ufs.listFiles(
-            pathPrefix: prefix,
-            updatedSince: lower,
-            includeDeleted: lower != null,
-            page: 1,
-            pageSize: 100,
-          );
-        }
-        final latest = latestUpdatedAtOf(
-          page.items.where(_isDeliverableEntry).map((e) => e.updatedAtRaw),
-        );
-        if (latest == null) {
-          return GroupSyncCheckResult(
-            groupId: groupId,
-            need: GroupSyncNeed.unknown,
-          );
-        }
-
-        final need = groupSyncNeed(
-          remoteLatestUpdatedAt: latest,
-          local: watermark,
-        );
-        if (need != GroupSyncNeed.stale) {
-          return GroupSyncCheckResult(groupId: groupId, need: need);
-        }
-
-        // 命中后才统计规模（只在命中路径付这个成本）。
+        final scopeForGroup = SyncSingleGroupScope(groupId);
         var count = 0;
-        var pageNo = 1;
         const pageSize = 100;
-        while (count < GroupSyncCheckResult.countCap) {
-          final res = await ufs.listFiles(
-            pathPrefix: prefix,
+        for (var pageNo = 1; pageNo <= 200; pageNo++) {
+          final page = await ufs.listFiles(
+            pathPrefix: '$workspaceGroupsPrefix$groupId',
             updatedSince: lower,
-            includeDeleted: lower != null,
+            includeDeleted: true,
             page: pageNo,
             pageSize: pageSize,
           );
-          for (final entry in res.items) {
-            if (!_isDeliverableEntry(entry)) continue;
-            final at = entry.updatedAtRaw?.trim();
-            if (at == null || at.isEmpty) continue;
-            // 与判定同一口径：晚于时间下限才算「未同步」。
-            if (lower == null || at.compareTo(lower) > 0) count++;
+          // 复用下载侧计划判据：同秒 etag 变化、旧失败项、删除、媒体和
+          // 体积过滤都与实际同步一致。目录/机器产物占满一页也继续翻页。
+          final plan = buildSyncPlan(
+            remote: page.items,
+            state: state,
+            scope: scopeForGroup,
+            filter: settings.filter,
+          );
+          count += plan.actions.length;
+          if (count >= GroupSyncCheckResult.countCap) {
+            return GroupSyncCheckResult(
+              groupId: groupId,
+              need: GroupSyncNeed.stale,
+              pendingCount: GroupSyncCheckResult.countCap,
+            );
           }
-          if (!res.hasMore(page: pageNo, pageSize: pageSize)) break;
-          pageNo++;
-          if (pageNo > 100) break;
+          if (!page.hasMore(page: pageNo, pageSize: pageSize)) {
+            return GroupSyncCheckResult(
+              groupId: groupId,
+              need: count > 0 ? GroupSyncNeed.stale : GroupSyncNeed.upToDate,
+              pendingCount: count,
+            );
+          }
+          if (page.items.isEmpty) {
+            throw const ParseError('交付物探测返回空页，但仍声明有后续数据');
+          }
         }
-
-        return GroupSyncCheckResult(
-          groupId: groupId,
-          need: need,
-          pendingCount: count,
-        );
+        throw const ParseError('交付物探测分页超过 200 页，已中止');
       };
     });
-
-/// 探测用的「算不算一份待同步交付物」判据：**排除目录条目与机器产物**。
-///
-/// ## 为什么必须排除目录
-///
-/// UFS 列表里包含目录（group 根、`reports/`、`assets/` 等）。而目录**永远
-/// 同步不了**——`shouldSync` 的第一条就是跳过目录，故它不会被 `markSynced`、
-/// 也就不会抬水位。把它算进「最晚时间」会让一个「只多了几个空目录」的 group
-/// 被判 stale 且**永远追不上**：每次进对话都提示一遍，每轮同步什么都不做。
-///
-/// ## 为什么必须排除机器产物（同一条理由，但更隐蔽）
-///
-/// `shouldSync` 对 `reports/tts/**`、`.archive/**`、`_attachments/**` 同样
-/// 「跳过且不记录」，它们**也不会**抬水位。生产实测有 312 个 TTS 语音文件，
-/// 故任何「最新变动是 TTS」的 group 都会永久 stale：提示条一直在，点同步
-/// 却什么都不同步。
-///
-/// 判据用 `groupScopedRelativePath`（从 UFS 路径派生），与 `shouldSync`
-/// 同一口径——不能用 `entry.path` 直接判，它带 `/workspace/groups/{gid}/` 前缀。
-bool _isDeliverableEntry(UfsFileEntry entry) {
-  if (entry.isDirectory) return false;
-  final groupRel = groupScopedRelativePath(entry.path) ?? entry.path;
-  return !isMachineGenerated(groupRel);
-}
 
 /// 一轮同步的实际执行（不含在途状态管理）。
 Future<SyncReport> _runSync(Ref ref) async {
@@ -1752,7 +1636,19 @@ Future<SyncReport> _runSyncSingleGroup(Ref ref, String groupId) async {
 typedef GroupSyncRun = Future<SyncReport> Function(String groupId);
 
 final runGroupSyncActionProvider = Provider<GroupSyncRun>((ref) {
-  return (String groupId) => _runSyncSingleGroup(ref, groupId);
+  final inFlight = <String, Future<SyncReport>>{};
+  return (String groupId) {
+    return inFlight.putIfAbsent(groupId, () async {
+      try {
+        return await ref.read(_syncTaskRunnerProvider)(
+          () => _runSyncSingleGroup(ref, groupId),
+        );
+      } finally {
+        // Future 由调用方等待；这里只移除已结束任务的索引。
+        unawaited(inFlight.remove(groupId));
+      }
+    });
+  };
 });
 
 /// 保存同步目录（换目录时**在同一事务里**清空同步状态）。

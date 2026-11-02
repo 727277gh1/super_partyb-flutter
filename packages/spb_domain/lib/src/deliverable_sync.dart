@@ -934,6 +934,9 @@ class SyncEngine {
     required Map<SyncSkipReason, int> skipped,
     required bool advanceCursor,
   }) {
+    // 任一动作失败时保留原游标。只排除失败项自身仍不够：较新的成功项
+    // 会把游标推过较旧的失败项，下一轮清单将永远不再返回它。
+    final canAdvance = advanceCursor && !results.any((r) => r is _Failed);
     var next = state;
     final failed = <SyncFailure>[];
     var downloaded = 0;
@@ -963,7 +966,7 @@ class SyncEngine {
             updatedAt: updatedAt,
             contentHash: next.files[relPath]?.contentHash,
           );
-          if (advanceCursor) next = next.advanceCursor(updatedAt);
+          if (canAdvance) next = next.advanceCursor(updatedAt);
           notModified++;
 
         case _Downloaded(
@@ -980,7 +983,7 @@ class SyncEngine {
             updatedAt: updatedAt,
             contentHash: contentHash,
           );
-          if (advanceCursor) next = next.advanceCursor(updatedAt);
+          if (canAdvance) next = next.advanceCursor(updatedAt);
           downloaded++;
 
         case _Failed(:final relPath, :final reason):

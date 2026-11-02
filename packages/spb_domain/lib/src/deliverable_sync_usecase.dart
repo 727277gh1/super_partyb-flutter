@@ -3,7 +3,6 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
 import 'deliverable_sync.dart';
-import 'group_sync_probe.dart';
 import 'sync_cursor.dart';
 import 'sync_path.dart';
 import 'sync_state.dart';
@@ -76,31 +75,10 @@ class DeliverableSyncUseCase {
     final stateKey = syncStateKeyFor(scope);
     final state = await stateStore.load(stateKey);
 
-    // 时间下限：取「已保存游标」与「since_days 推出的下限」中**更晚**的一个。
-    // 见 sync_cursor.dart 的 effectiveCursor（纯函数，已有单测）。
-    //
-    // [nowUnixOverride] 仅供测试注入固定时刻，生产不传。
-    //
-    // ## 定向同步的「已保存游标」是**本 group 的水位**，不是共享游标
-    //
-    // 共享游标是「整个 workspace 已同步到哪」。它可能远晚于本 group 的进度
-    // （用户刚把本 group 勾进范围、或上一轮全范围同步时本 group 被过滤），
-    // 拿它当下限会**把本 group 真正缺失的旧文件过滤掉**。
-    //
-    // 那不是理论风险：判定（`checkGroupSyncNeedProvider`）用的下限是本 group
-    // 水位，同步用的若是共享游标，两者就不一致——提示条说「有 3 个未同步」，
-    // 用户点下去却下载 0 个，且报告显示成功。
-    //
-    // 用本 group 水位当下限同时是**更宽**的（水位 ≤ 共享游标），故不会多漏
-    // 任何文件；重复列出的那些靠 etag 命中跳过，代价只是一页元数据。
-    final saved = switch (scope) {
-      SyncSingleGroupScope(:final groupId) => groupSyncWatermark(
-        state: state,
-        stateKey: stateKey,
-        groupId: groupId,
-      ).latestUpdatedAt,
-      _ => state.cursor,
-    };
+    // 定向同步必须检查整个 group（仍遵守用户的 sinceDays）。最大成功文件
+    // 时间不是完整进度：较旧文件可能失败、被过滤，或写于同一秒。按它裁剪
+    // 会永久漏掉这些文件。重复元数据由引擎按路径 + etag 去重，不重复下载。
+    final saved = scope is SyncSingleGroupScope ? null : state.cursor;
     final cursor = effectiveCursor(
       saved: saved,
       sinceDays: sinceDays,

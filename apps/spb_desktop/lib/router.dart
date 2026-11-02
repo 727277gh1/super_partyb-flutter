@@ -1344,9 +1344,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         setState(() => _syncCheck = null);
         return;
       }
-      // 只在**即将展示**时记冷却：判定为 upToDate 不该消耗掉冷却期，
-      // 否则用户下次进来时真的有新文件了却不提示。
-      throttle.markTriggered(groupId);
+      // 展示提示不是同步尝试：用户只是切走时，下次进入仍应看到提示。
+      // 冷却只在同步成功或用户明确忽略时记录。
       SpbLog.info('进入对话的同步判定：有未同步交付物', {
         'group': groupId,
         'pending': result.pendingCount,
@@ -1382,14 +1381,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 只 invalidate 本地索引、**不** bump `_deliverablesReloadToken`：远端
       // 清单没有变（同步只写本地），bump 只会多一次无意义的 HTTP。
       ref.invalidate(deliverableLocalIndexProvider(groupId));
-      setState(() => _syncCheck = null);
+      if (!report.hasFailures) {
+        ref.read(groupSyncThrottleProvider).markTriggered(groupId);
+      }
+      // 在途时可能切换对话：旧任务不能清掉新 group 的提示或显示错归属的结果。
+      if (widget.groupId != groupId) return;
+      setState(() {
+        _syncCheck = report.hasFailures
+            ? GroupSyncCheckResult(
+                groupId: groupId,
+                need: GroupSyncNeed.stale,
+                pendingCount: report.failed.length,
+              )
+            : null;
+      });
       _showSettingsError(
         report.failed.isEmpty
             ? '已同步 ${report.downloaded} 个交付物'
             : '已同步 ${report.downloaded} 个，${report.failed.length} 个失败',
       );
     } on SpbError catch (e) {
-      if (!mounted) return;
+      if (!mounted || widget.groupId != groupId) return;
       _showSettingsError(e.message);
     } finally {
       if (mounted) setState(() => _syncingFromHint = false);
@@ -1774,7 +1786,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                 onSync: _syncingFromHint ? null : () => _syncFromHint(),
                 onDismiss: _syncingFromHint
                     ? null
-                    : () => setState(() => _syncCheck = null),
+                    : () {
+                        ref
+                            .read(groupSyncThrottleProvider)
+                            .markTriggered(widget.groupId);
+                        setState(() => _syncCheck = null);
+                      },
               ),
             ),
           ),

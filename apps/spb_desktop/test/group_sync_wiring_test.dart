@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
@@ -206,9 +207,7 @@ void main() {
       expect(find.byKey(const ValueKey('group-sync-hint')), findsNothing);
     });
 
-    testWidgets('判定命中后记录冷却（同一容器内该 group 被挡住）', (tester) async {
-      // 与上一条互补：上一条钉「冷却生效时不再探」，这一条钉「命中后确实记了」。
-      // 缺任一条都会让「冷却」这个机制可以静默失效（只记不查 / 只查不记）。
+    testWidgets('仅展示提示不消耗冷却，切走后仍可再次检查', (tester) async {
       final harness = await openChat(
         tester,
         check: (String gid) async => GroupSyncCheckResult(
@@ -223,7 +222,8 @@ void main() {
       );
 
       final throttle = harness.container.read(groupSyncThrottleProvider);
-      expect(throttle.allows(groupId), isFalse);
+      expect(throttle.allows(groupId), isTrue);
+      expect(find.byKey(const ValueKey('group-sync-hint')), findsOneWidget);
     });
 
     testWidgets('判定为 upToDate 时不消耗冷却期', (tester) async {
@@ -249,7 +249,7 @@ void main() {
   group('提示条上的动作', () {
     testWidgets('点「立即同步」跑一轮同步，成功后提示条消失', (tester) async {
       var syncRuns = 0;
-      await openChat(
+      final harness = await openChat(
         tester,
         check: (String groupId) async => GroupSyncCheckResult(
           groupId: groupId,
@@ -271,6 +271,50 @@ void main() {
 
       expect(syncRuns, 1);
       expect(find.byKey(const ValueKey('group-sync-hint')), findsNothing);
+      expect(
+        harness.container.read(groupSyncThrottleProvider).allows(groupId),
+        isFalse,
+      );
+    });
+
+    testWidgets('部分失败保留提示与重试入口，成功后才进入冷却', (tester) async {
+      var calls = 0;
+      final harness = await openChat(
+        tester,
+        check: (gid) async => GroupSyncCheckResult(
+          groupId: gid,
+          need: GroupSyncNeed.stale,
+          pendingCount: 3,
+        ),
+        loadSyncSettings: () async => const SyncSettings(
+          localRoot: '/tmp/spb-sync',
+          auto: AutoSyncConfig(onGroupOpen: true),
+        ),
+        runSync: (gid) async {
+          calls++;
+          return calls == 1
+              ? SyncReport(
+                  downloaded: 2,
+                  failed: [const SyncFailure('a.md', 'offline')],
+                )
+              : SyncReport(downloaded: 1);
+        },
+      );
+      await tester.tap(find.byKey(const ValueKey('group-sync-hint-sync')));
+      await tester.pumpAndSettle();
+      expect(find.text('本对话有 1 个交付物未同步到本地'), findsOneWidget);
+      expect(
+        harness.container.read(groupSyncThrottleProvider).allows(groupId),
+        isTrue,
+      );
+      await tester.tap(find.byKey(const ValueKey('group-sync-hint-sync')));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
+      expect(find.byKey(const ValueKey('group-sync-hint')), findsNothing);
+      expect(
+        harness.container.read(groupSyncThrottleProvider).allows(groupId),
+        isFalse,
+      );
     });
 
     testWidgets('点「立即同步」走的是**定向**同步，不是全范围同步', (tester) async {
@@ -431,6 +475,78 @@ void main() {
   });
 
   group('解析/聚焦在途时切对话', () {
+    testWidgets('旧 group 的同步结束不能清掉新 group 的提示', (tester) async {
+      final completion = Completer<SyncReport>();
+      final harness = await pumpApp(
+        tester,
+        initialLocation: '/chat/grp_1',
+        mockGroups: false,
+        checkGroupSyncNeed: (gid) async => GroupSyncCheckResult(
+          groupId: gid,
+          need: GroupSyncNeed.stale,
+          pendingCount: gid == 'grp_1' ? 3 : 7,
+        ),
+        runGroupSync: (_) => completion.future,
+        loadSyncSettings: () async => const SyncSettings(
+          localRoot: '/tmp/spb-sync',
+          auto: AutoSyncConfig(onGroupOpen: true),
+        ),
+        beforePump: (adapter) {
+          mockChat(adapter, 'grp_1');
+          mockChat(adapter, 'grp_2');
+        },
+      );
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 60)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-sync-hint-sync')));
+      await tester.pump();
+      harness.router.go('/chat/grp_2');
+      await tester.pumpAndSettle();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 60)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('本对话有 7 个交付物未同步到本地'), findsOneWidget);
+      completion.complete(SyncReport(downloaded: 3));
+      await tester.pumpAndSettle();
+      expect(find.text('本对话有 7 个交付物未同步到本地'), findsOneWidget);
+      expect(find.text('已同步 3 个交付物'), findsNothing);
+    });
+
+    testWidgets('同步抛异常时保留提示，不进入冷却，允许重试', (tester) async {
+      var runs = 0;
+      final harness = await openChat(
+        tester,
+        check: (gid) async => GroupSyncCheckResult(
+          groupId: gid,
+          need: GroupSyncNeed.stale,
+          pendingCount: 1,
+        ),
+        loadSyncSettings: () async => const SyncSettings(
+          localRoot: '/tmp/spb-sync',
+          auto: AutoSyncConfig(onGroupOpen: true),
+        ),
+        runSync: (_) async {
+          runs++;
+          if (runs == 1) throw const NetworkError('网络不可用');
+          return SyncReport(downloaded: 1);
+        },
+      );
+      await tester.tap(find.byKey(const ValueKey('group-sync-hint-sync')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('group-sync-hint')), findsOneWidget);
+      expect(find.text('网络不可用'), findsOneWidget);
+      expect(
+        harness.container.read(groupSyncThrottleProvider).allows(groupId),
+        isTrue,
+      );
+      await tester.tap(find.byKey(const ValueKey('group-sync-hint-sync')));
+      await tester.pumpAndSettle();
+      expect(runs, 2);
+      expect(find.byKey(const ValueKey('group-sync-hint')), findsNothing);
+    });
     testWidgets('新 group 的探测不会被丢掉（重跑一轮）', (tester) async {
       // ## 这条防的是什么
       //

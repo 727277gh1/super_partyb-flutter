@@ -67,14 +67,13 @@ void main() {
             'size': 5,
             'updated_at': '2026-05-01T00:00:00Z',
           }),
-          // 失败项的 updated_at 更晚：若用计划里最大时间推进游标，
-          // 就会越过它，下轮再也拉不到这个文件。
+          // 失败项比成功项更旧：只排除失败项本身仍会让成功项越过它。
           UfsFileEntry.fromJson({
             'id': 'bad',
             'path': '/workspace/groups/$gidFixture/bad.md/',
             'name': 'bad.md',
             'size': 5,
-            'updated_at': '2026-05-09T00:00:00Z',
+            'updated_at': '2026-04-01T00:00:00Z',
           }),
         ],
         state: SyncState.empty,
@@ -83,11 +82,7 @@ void main() {
       );
 
       expect(result.report.failed, hasLength(1));
-      expect(
-        result.state.cursor,
-        '2026-05-01T00:00:00Z',
-        reason: '游标只能由成功项推进，否则失败文件会被增量过滤掉',
-      );
+      expect(result.state.cursor, isNull, reason: '本轮有失败时保留原游标，较新成功项也不能推进');
     });
 
     test('写入失败同样不写状态、不推进游标', () async {
@@ -481,8 +476,7 @@ void main() {
     });
 
     test('失败项不推进游标（并发下同样成立）', () async {
-      // 失败项的 updated_at **最晚**：若游标由「计划里的最大时间」推进（而不是
-      // 由成功项推进），就会越过它，下轮再也拉不到这个文件。
+      // 即使失败项时间最晚，也统一保留原游标；与串行重试语义一致。
       final downloader = ConcurrencyProbeDownloader()
         ..errors['id-late.md'] = '网络超时';
       final engine = SyncEngine(
@@ -501,7 +495,7 @@ void main() {
         filter: permissiveFixture,
       );
 
-      expect(result.state.cursor, '2026-01-01T00:00:00Z');
+      expect(result.state.cursor, isNull);
     });
 
     test('条件请求判据用本轮开始前的状态（并发下 If-None-Match 照常带上）', () async {

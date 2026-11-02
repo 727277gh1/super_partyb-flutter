@@ -333,8 +333,7 @@ void main() {
       // 游标就会越过其它 group 里从未同步过的文件——它们此后再也不出现在
       // 增量清单里（`updated_since` 过滤），**永久漏下载而报告显示成功**。
       //
-      // 本 group 无文件记录 → 水位为空 → 不带 `updated_since`（全量列本 group
-      // 子树，代价仅一页元数据，且靠 etag 命中跳过已有文件）。
+      // 定向同步不使用成功文件时间裁剪，始终列本 group 的用户时间范围。
       await store.save(
         workspaceStateKey,
         const SyncState(cursor: '2026-04-01T00:00:00Z'),
@@ -374,17 +373,8 @@ void main() {
       );
     });
 
-    test('时间下限用**本 group 水位**，不用共享游标', () async {
-      // ## 为什么这不能是共享游标
-      //
-      // 共享游标是「整个 workspace 已同步到哪」，可能远晚于本 group 的进度
-      // （用户刚把本 group 勾进范围、或上一轮全范围同步时它被过滤）。拿它
-      // 当下限会把本 group 真正缺失的旧文件**过滤掉**——而判定
-      // （`checkGroupSyncNeedProvider`）用的是本 group 水位，于是会出现
-      // 「提示条说有 3 个未同步，点下去下载 0 个且报告成功」。
-      //
-      // 用本 group 水位是**更宽**的下限（水位 ≤ 共享游标），不会多漏文件；
-      // 重复列出的靠 etag 命中跳过。
+    test('定向清单不按本 group 最大成功时间或共享游标裁剪', () async {
+      // 最大成功时间之前仍可能有失败文件。没有 sinceDays 时必须完整列举。
       await store.save(
         workspaceStateKey,
         const SyncState(
@@ -401,8 +391,7 @@ void main() {
           'owner_type': 'user',
           'path_prefix': groupPrefix,
           'include_deleted': 'true',
-          // 共享游标是 05-01，这里必须是本 group 水位的 04-01。
-          'updated_since': '2026-04-01T00:00:00Z',
+          // 两种水位都不能作为完整进度。
           'page': 1,
           'page_size': 2,
         },
@@ -437,7 +426,6 @@ void main() {
           'owner_type': 'user',
           'path_prefix': groupPrefix,
           'include_deleted': 'true',
-          'updated_since': '2026-04-01T00:00:00Z',
           'page': 1,
           'page_size': 2,
         },
