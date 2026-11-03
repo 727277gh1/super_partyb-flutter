@@ -59,6 +59,9 @@ void main() {
     bool agentRecommend = true,
     bool agentRecommendSet = false,
     bool goalJudge = false,
+    // ⚠️ 服务端 GET 当前**不下发** goal_discovery 两个键（上游 issue #95），
+    // 解析侧按「缺省关 / 缺省可用」兑底；服务端修复后此处应同步补键。
+    bool goalDiscovery = false,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
@@ -83,6 +86,8 @@ void main() {
     'agent_recommend_available': true,
     'goal_judge': goalJudge,
     'goal_judge_available': true,
+    'goal_discovery': goalDiscovery,
+    'goal_discovery_available': true,
     'default_agent_id': defaultAgentId,
     'display_name': displayName,
     'avatar_url': avatarUrl,
@@ -174,6 +179,8 @@ void main() {
       expect(p.agentRecommend, isTrue);
       expect(p.agentRecommendSet, isFalse);
       expect(p.goalJudge, isFalse);
+      expect(p.goalDiscovery, isFalse);
+      expect(p.goalDiscoveryAvailable, isTrue);
       expect(p.defaultAgentId, 'agent_1');
       expect(p.displayName, '张三');
       expect(p.avatarUrl, 'https://cdn.example.com/a.png');
@@ -378,8 +385,21 @@ void main() {
       expect(calls.single.body!.keys, hasLength(1));
     });
 
-    test('四个 bool 的 false 会真的发出去（不是「不传」）', () async {
-      // 若写成 `if (x == true)` 就永远无法关闭这四个开关——
+    test('只传 goalDiscovery → body 恰好只有 goal_discovery 一个键', () async {
+      adapter.onPut(
+        '/me/preferences',
+        (server) => server.reply(200, prefsJson(goalDiscovery: true)),
+        data: Matchers.any,
+      );
+
+      await api.updatePreferences(goalDiscovery: true);
+
+      expect(calls.single.body, {'goal_discovery': true});
+      expect(calls.single.body!.keys, hasLength(1));
+    });
+
+    test('五个 bool 的 false 会真的发出去（不是「不传」）', () async {
+      // 若写成 `if (x == true)` 就永远无法关闭这五个开关——
       // false 是**有意义的显式关闭**，与「不传」（保持原值）必须区分。
       // agent_recommend 缺省开，把它关掉正是本开关最主要的用途。
       adapter.onPut(
@@ -393,6 +413,7 @@ void main() {
         habitSuggest: false,
         agentRecommend: false,
         goalJudge: false,
+        goalDiscovery: false,
       );
 
       expect(calls.single.body, {
@@ -400,10 +421,11 @@ void main() {
         'habit_suggest': false,
         'agent_recommend': false,
         'goal_judge': false,
+        'goal_discovery': false,
       });
     });
 
-    test('四个 bool 不传时 body 不得出现对应键', () async {
+    test('五个 bool 不传时 body 不得出现对应键', () async {
       adapter.onPut(
         '/me/preferences',
         (server) => server.reply(200, prefsJson(displayName: '张三')),
@@ -416,9 +438,10 @@ void main() {
       expect(calls.single.body!.containsKey('habit_suggest'), isFalse);
       expect(calls.single.body!.containsKey('agent_recommend'), isFalse);
       expect(calls.single.body!.containsKey('goal_judge'), isFalse);
+      expect(calls.single.body!.containsKey('goal_discovery'), isFalse);
     });
 
-    group('四个 reminder 开关的 available 急停下发', () {
+    group('五个 reminder 开关的 available 急停下发', () {
       // 运维急停（*_DISABLED env）只影响 available，**不改写**开关本身。
       // 客户端把「未下发」当可用处理（缺省 true），避免加载中闪一次误导性的
       // 「已停用」提示。
@@ -431,7 +454,8 @@ void main() {
               ..['follow_up_suggest_available'] = false
               ..['habit_suggest_available'] = false
               ..['agent_recommend_available'] = false
-              ..['goal_judge_available'] = false,
+              ..['goal_judge_available'] = false
+              ..['goal_discovery_available'] = false,
           ),
         );
 
@@ -441,6 +465,7 @@ void main() {
         expect(p.habitSuggestAvailable, isFalse);
         expect(p.agentRecommendAvailable, isFalse);
         expect(p.goalJudgeAvailable, isFalse);
+        expect(p.goalDiscoveryAvailable, isFalse);
         // 急停不改写开关本身：解除后用户的原设置自动恢复生效。
         expect(p.agentRecommend, isTrue);
       });
@@ -457,6 +482,7 @@ void main() {
         expect(p.habitSuggestAvailable, isTrue);
         expect(p.agentRecommendAvailable, isTrue);
         expect(p.goalJudgeAvailable, isTrue);
+        expect(p.goalDiscoveryAvailable, isTrue);
       });
 
       test('agent_recommend 缺省开：未表态（键缺失）时解析为 true', () async {

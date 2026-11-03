@@ -1590,6 +1590,7 @@ void _userPreferencesTests() {
           bool? habitSuggest,
           bool? agentRecommend,
           bool? goalJudge,
+          bool? goalDiscovery,
           String? habitNotifyChannels,
         }) async => prefs(),
       );
@@ -1619,6 +1620,7 @@ void _userPreferencesTests() {
           bool? habitSuggest,
           bool? agentRecommend,
           bool? goalJudge,
+          bool? goalDiscovery,
           String? habitNotifyChannels,
         }) async => prefs(),
         fallbackDisplayName: 'u1@example.com',
@@ -1646,6 +1648,7 @@ void _userPreferencesTests() {
         bool? habitSuggest,
         bool? agentRecommend,
         bool? goalJudge,
+        bool? goalDiscovery,
         String? habitNotifyChannels,
       }) async => prefs();
 
@@ -1700,6 +1703,7 @@ void _userPreferencesTests() {
           bool? habitSuggest,
           bool? agentRecommend,
           bool? goalJudge,
+          bool? goalDiscovery,
           String? habitNotifyChannels,
         }) async => prefs(),
         agentOptions: const [PreferenceAgentOption(id: 'a1', name: '写作助手')],

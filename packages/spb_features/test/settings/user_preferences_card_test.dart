@@ -33,10 +33,12 @@ void main() {
     bool habitSuggest = false,
     bool agentRecommend = true,
     bool goalJudge = false,
+    bool goalDiscovery = false,
     bool followUpSuggestAvailable = true,
     bool habitSuggestAvailable = true,
     bool agentRecommendAvailable = true,
     bool goalJudgeAvailable = true,
+    bool goalDiscoveryAvailable = true,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
@@ -57,10 +59,12 @@ void main() {
     habitSuggest: habitSuggest,
     agentRecommend: agentRecommend,
     goalJudge: goalJudge,
+    goalDiscovery: goalDiscovery,
     followUpSuggestAvailable: followUpSuggestAvailable,
     habitSuggestAvailable: habitSuggestAvailable,
     agentRecommendAvailable: agentRecommendAvailable,
     goalJudgeAvailable: goalJudgeAvailable,
+    goalDiscoveryAvailable: goalDiscoveryAvailable,
     defaultAgentId: defaultAgentId,
     displayName: displayName,
     avatarUrl: avatarUrl,
@@ -79,6 +83,7 @@ void main() {
     bool? habitSuggest,
     bool? agentRecommend,
     bool? goalJudge,
+    bool? goalDiscovery,
     String? habitNotifyChannels,
   })?
   lastSave;
@@ -129,6 +134,7 @@ void main() {
                     bool? habitSuggest,
                     bool? agentRecommend,
                     bool? goalJudge,
+                    bool? goalDiscovery,
                     String? habitNotifyChannels,
                   }) async {
                     saveCalls++;
@@ -141,6 +147,7 @@ void main() {
                       habitSuggest: habitSuggest,
                       agentRecommend: agentRecommend,
                       goalJudge: goalJudge,
+                      goalDiscovery: goalDiscovery,
                       habitNotifyChannels: habitNotifyChannels,
                     );
                     if (saveError != null) throw saveError;
@@ -661,7 +668,7 @@ void main() {
     });
   });
 
-  group('对话提醒开关（四个 reminder 运行时开关，各自只提交自己的键）', () {
+  group('对话提醒开关（五个 reminder 运行时开关，各自只提交自己的键）', () {
     testWidgets('初值来自权威值', (tester) async {
       await pumpCard(
         tester,
@@ -772,6 +779,7 @@ void main() {
       expect(lastSave!.followUpSuggest, isNull, reason: '没碰的字段必须为 null');
       expect(lastSave!.habitSuggest, isNull);
       expect(lastSave!.goalJudge, isNull);
+      expect(lastSave!.goalDiscovery, isNull);
     });
 
     testWidgets('只动 goalJudge 时 body 只含 goal_judge', (tester) async {
@@ -786,7 +794,19 @@ void main() {
       expect(lastSave!.agentRecommend, isNull, reason: '没碰的字段必须为 null');
     });
 
-    testWidgets('未改动时不误报四个开关的改动', (tester) async {
+    testWidgets('只动 goalDiscovery 时 body 只含 goal_discovery', (tester) async {
+      await pumpCard(tester, loaded: prefs());
+
+      await tester.tap(find.byKey(const ValueKey('pref-goal-discovery')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastSave!.goalDiscovery, isTrue);
+      expect(lastSave!.goalJudge, isNull, reason: '没碰的字段必须为 null');
+    });
+
+    testWidgets('未改动时不误报五个开关的改动', (tester) async {
       // _pendingChanges 逐字段比对：漏比对新键会让保存按钮在没真改时亮起。
       await pumpCard(
         tester,
@@ -795,6 +815,7 @@ void main() {
           habitSuggest: true,
           agentRecommend: false,
           goalJudge: true,
+          goalDiscovery: true,
         ),
       );
 
@@ -812,6 +833,8 @@ void main() {
           agentRecommendAvailable: false,
           goalJudge: true,
           goalJudgeAvailable: false,
+          goalDiscovery: true,
+          goalDiscoveryAvailable: false,
         ),
       );
 
@@ -824,6 +847,11 @@ void main() {
       expect(agent.onChanged, isNull, reason: '急停中开关必须置灰');
       expect(agent.value, isTrue, reason: '急停不改写开关值（解除后原设置自动生效）');
       expect(goal.onChanged, isNull);
+      final discovery = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('pref-goal-discovery')),
+      );
+      expect(discovery.onChanged, isNull);
+      expect(discovery.value, isTrue, reason: '急停不改写开关值');
       // 可用的开关不受影响。
       expect(
         tester
@@ -834,7 +862,8 @@ void main() {
         isNotNull,
       );
       // 原因说明对用户可见：一个永远不会有结果的开关会让用户反复排查自己的设置。
-      expect(find.text('该能力已被服务端停用，恢复后自动按原设置生效'), findsNWidgets(2));
+      // （2026-11 起是五个开关：agentRecommend / goalJudge / goalDiscovery 三个置灰。）
+      expect(find.text('该能力已被服务端停用，恢复后自动按原设置生效'), findsNWidgets(3));
     });
   });
 

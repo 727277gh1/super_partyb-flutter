@@ -831,14 +831,16 @@ class ChatApi {
   ///
   /// ## 四个 reminder 开关的语义（2026-11 起）
   ///
-  /// [followUpSuggest] / [habitSuggest] / [agentRecommend] / [goalJudge] 都是
-  /// **运行时开关**：改完下一轮生效、对该用户全部会话生效。它们**不再**是
-  /// 「新建 group 的默认播种值」——群级 metadata 键与专用端点已随服务端
-  /// 重构移除（Go `452cc432` / `47e9950e` / `1bdbc38c` / `7a814ed6`）。
+  /// [followUpSuggest] / [habitSuggest] / [agentRecommend] / [goalJudge] /
+  /// [goalDiscovery] 都是**运行时开关**：改完下一轮生效、对该用户全部会话
+  /// 生效。它们**不再**是「新建 group 的默认播种值」——群级 metadata 键与
+  /// 专用端点已随服务端重构移除（Go `452cc432` / `47e9950e` / `1bdbc38c` /
+  /// `7a814ed6` / `040855fe`）。
   ///
   /// 缺省方向**各不相同**，勿照抄：`follow_up_suggest` / `habit_suggest` /
-  /// `goal_judge` 缺省关（判定/注入有真实成本，不该由平台默认替用户按下），
-  /// `agent_recommend` 缺省**开**（未表态时服务端下发 true）。
+  /// `goal_judge` / `goal_discovery` 缺省关（判定/注入/误发现有真实成本，
+  /// 不该由平台默认替用户按下），`agent_recommend` 缺省**开**（未表态时
+  /// 服务端下发 true）。
   ///
   /// 同样只在非 null 时写入：传 `false` 是**有意义的显式关闭**，与「不传」
   /// （保持原值）必须区分——若写成 `if (x == true)` 就会永远无法关闭。
@@ -867,6 +869,7 @@ class ChatApi {
     bool? habitSuggest,
     bool? agentRecommend,
     bool? goalJudge,
+    bool? goalDiscovery,
   }) async {
     final body = <String, dynamic>{
       if (displayName != null) 'display_name': displayName,
@@ -879,6 +882,7 @@ class ChatApi {
       if (habitSuggest != null) 'habit_suggest': habitSuggest,
       if (agentRecommend != null) 'agent_recommend': agentRecommend,
       if (goalJudge != null) 'goal_judge': goalJudge,
+      if (goalDiscovery != null) 'goal_discovery': goalDiscovery,
     };
     final res = await _put('/me/preferences', body: body);
     return UserPreferences.fromJson(_asMap(res));

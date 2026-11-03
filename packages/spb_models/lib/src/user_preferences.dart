@@ -74,6 +74,8 @@ class UserPreferences {
     this.agentRecommendAvailable = true,
     this.goalJudge = false,
     this.goalJudgeAvailable = true,
+    this.goalDiscovery = false,
+    this.goalDiscoveryAvailable = true,
     this.defaultAgentId = '',
     this.displayName = '',
     this.avatarUrl = '',
@@ -172,6 +174,29 @@ class UserPreferences {
   /// false）。语义同 [followUpSuggestAvailable]。
   final bool goalJudgeAvailable;
 
+  /// 是否允许执行 agent 在对话中发现候选目标并提议建立（goal_discovery）。
+  ///
+  /// 运行时开关（2026-11，随 Go `040855fe`，与 goal_judge 同构）：开启后，
+  /// 对话尚无生效目标时，执行 agent 会收到一段「目标发现约定」——输入确实
+  /// 表达了值得跨轮推进的目标时，**先向用户提议**（建 goal + 开自动推进），
+  /// 用户确认后才动手。本开关是准入不是授权：自动实现仍由 group 级
+  /// goal_gate.enabled 控制。
+  ///
+  /// 缺省关（未设置 / 读失败 / 脏值一律 false）：误发现的代价是 agent 建错
+  /// goal 并可能在确认链意外放行时开始自动推进（烧掉数轮 token）——宁可漏
+  /// 发现不可误发现，方向与 [habitSuggest] 同向、与 [agentRecommend] 相反。
+  ///
+  /// ⚠️ 上游缺口（2026-11-04，Gitea issue super_partyb#95）：服务端 PUT 已接受
+  /// 本键，但 GET 响应尚**未下发** `goal_discovery` / `goal_discovery_available`。
+  /// 在上游补齐之前，本字段解析恒为缺省值（false / true）——保存成功但
+  /// 回读显示关，与 webapp 面板的现状一致，不是本包的解析缺陷。
+  final bool goalDiscovery;
+
+  /// 「目标发现」能力当前是否可用（运维急停 `GOAL_DISCOVERY_DISABLED` 时为
+  /// false）。语义同 [followUpSuggestAvailable]。同样受上游 #95 影响
+  /// （GET 未下发前恒为 true）。
+  final bool goalDiscoveryAvailable;
+
   /// 用户默认 agent（chat_router 兜底值）。空串 = 跟随系统默认。
   final String defaultAgentId;
 
@@ -266,6 +291,9 @@ class UserPreferences {
         agentRecommendAvailable: json['agent_recommend_available'] != false,
         goalJudge: json['goal_judge'] == true,
         goalJudgeAvailable: json['goal_judge_available'] != false,
+        // 缺省关（与 goal_judge 同向）。⚠️ 上游 #95：GET 未下发前恒为缺省。
+        goalDiscovery: json['goal_discovery'] == true,
+        goalDiscoveryAvailable: json['goal_discovery_available'] != false,
         defaultAgentId: (json['default_agent_id'] ?? '').toString(),
         displayName: (json['display_name'] ?? '').toString(),
         avatarUrl: (json['avatar_url'] ?? '').toString(),
@@ -306,5 +334,5 @@ class UserPreferences {
       'UserPreferences(replyLanguage=$replyLanguage, customized=$customized, '
       'defaultAgentId=$defaultAgentId, followUp=$followUpSuggest, '
       'habit=$habitSuggest, agentRecommend=$agentRecommend, '
-      'goalJudge=$goalJudge)';
+      'goalJudge=$goalJudge, goalDiscovery=$goalDiscovery)';
 }
