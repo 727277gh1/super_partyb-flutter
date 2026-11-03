@@ -132,6 +132,46 @@ void main() {
     });
   });
 
+  group('HttpError.errorCode（服务端业务错误码提取）', () {
+    test('原始 JSON 串形态（body 未被解析时）', () {
+      const e = HttpError(
+        409,
+        'HTTP 409',
+        body: '{"error":"目标对话已失效","code":"group_unavailable"}',
+      );
+      expect(e.errorCode, 'group_unavailable');
+    });
+
+    test('Map.toString() 形态（Dio 已把响应体解析成 Map）', () {
+      // ChatApi._bodyPreview 用 data.toString()，故实际是 Dart Map 字面量——
+      // 键与值都不带引号。两种形态都必须能提。
+      const e = HttpError(
+        409,
+        'HTTP 409',
+        body: '{error: 反馈请求无效、已过期或已处理, code: feedback_not_applied}',
+      );
+      expect(e.errorCode, 'feedback_not_applied');
+    });
+
+    test('无 code 键 / 空 body / body 为 null → null', () {
+      expect(
+        const HttpError(409, 'x', body: '{error: 仅 error 无 code}').errorCode,
+        isNull,
+      );
+      expect(const HttpError(409, 'x', body: '').errorCode, isNull);
+      expect(const HttpError(409, 'x').errorCode, isNull);
+    });
+
+    test('code 出现在嵌套 Map 里也能提（flatMap 展平的 toString）', () {
+      const e = HttpError(
+        409,
+        'HTTP 409',
+        body: '{error: x, detail: {code: feedback_not_applied}}',
+      );
+      expect(e.errorCode, 'feedback_not_applied');
+    });
+  });
+
   group('AuthError 语义', () {
     test('401 / 403 各自命中，且 statusCode 被保留', () {
       expect(const AuthError('会话已失效', statusCode: 401).isUnauthorized, isTrue);

@@ -40,6 +40,32 @@ final class HttpError extends SpbError {
   final int statusCode;
   final String? body;
 
+  /// 从响应体里提取服务端业务错误码（如 `feedback_not_applied` /
+  /// `group_unavailable`）。
+  ///
+  /// ## 为什么不解析成结构化字段
+  ///
+  /// [body] 是 `data.toString()` 的结果——Dio 已把响应体解析成 Map，故它实际是
+  /// **Dart Map 字面量**（键与字符串值都不带引号），不是 JSON（见
+  /// `ChatApi._bodyPreview` 的说明）。这里用宽松正则从两种形态里提取：
+  ///
+  /// ```dart
+  /// {error: xxx, code: group_unavailable}   ← Map.toString() 形态
+  /// {"error":"xxx","code":"group_unavailable"} ← 原始 JSON 串形态
+  /// ```
+  ///
+  /// 只提 `code` 键、不猜：服务端哪些错误带 code 由服务端决定，客户端按需
+  /// 特判（409 语义分支），其余错误保持原样透出。
+  String? get errorCode {
+    final b = body;
+    if (b == null || b.isEmpty) return null;
+    final json = RegExp('["\']code["\']\\s*:\\s*["\']([a-z0-9_]+)["\']')
+        .firstMatch(b);
+    if (json != null) return json.group(1);
+    final bare = RegExp('(?:^|[{,\\s])code:\\s*([a-z0-9_]+)').firstMatch(b);
+    return bare?.group(1);
+  }
+
   /// 401：凭证失效，需重新走 OIDC 登录。
   bool get isUnauthorized => statusCode == 401;
 

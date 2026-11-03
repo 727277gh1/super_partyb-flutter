@@ -520,6 +520,49 @@ void main() {
       expect(find.text('这条反馈已失效，无法再作答'), findsOneWidget);
     });
 
+    testWidgets('409 feedback_not_applied 同样提示「已失效」（Go a18a017e 回放路径）', (
+      tester,
+    ) async {
+      // 服务端回放/重放保护失败时不再 404 而是
+      // `409 {error: …, code: feedback_not_applied}`——语义与 404 相同：
+      // 这个回执永远不会再被接受。必须按 code 特判，否则落到
+      // 「反馈提交失败：HTTP 409」会让用户重试。
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) async => throw const HttpError(
+          409,
+          'HTTP 409',
+          body: '{error: 反馈请求无效、已过期或已处理, code: feedback_not_applied}',
+        ),
+      );
+      await pushFeedback(tester);
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('这条反馈已失效，无法再作答'), findsOneWidget);
+      expect(find.textContaining('提交失败'), findsNothing);
+    });
+
+    testWidgets('无 code 的 409 仍是普通失败（不扩大「已失效」的判定面）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onResolveFeedback: (token, correct) async =>
+            throw const HttpError(409, 'HTTP 409'),
+      );
+      await pushFeedback(tester);
+
+      await tester.tap(find.byKey(const ValueKey('feedback-option-准确')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('反馈提交失败'), findsOneWidget);
+      expect(find.text('这条反馈已失效，无法再作答'), findsNothing);
+    });
+
     testWidgets('token 缺失时按钮禁用（提交必然失败，不退化用事件 id）', (tester) async {
       final calls = <(String, bool)>[];
       mockTimeline();

@@ -1314,6 +1314,17 @@ class _ConversationPageState extends State<ConversationPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('网络不可用，已加入待发送：${e.message}')));
+    } on HttpError catch (e) {
+      // 409 group_unavailable（Go `ceff2f81` 起）：目标对话已失效（如另一端
+      // 已归档/不可用），服务端要求重新选对话。默认的「HTTP 409」对用户
+      // 毫无意义，而这里的措辞要与服务端错误文案同义——不重新选对话，
+      // 重试永远失败。
+      if (!mounted) return;
+      final detail = e.errorCode == 'group_unavailable'
+          ? '目标对话已失效，请返回列表重新选择对话后发送'
+          : '发送失败：${e.message}';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(detail)));
     } on SpbError catch (e) {
       // 发送失败：提示但不回滚输入（用户可能想重试同一段文字，
       // 清空反而让他重打一遍）。
@@ -1583,13 +1594,16 @@ class _ConversationPageState extends State<ConversationPage> {
       await callback(token, correct);
       if (mounted) setState(() => _submittedFeedback.add(token));
     } on HttpError catch (e) {
-      // 404 在这里有确定含义：token 已过期 / 已被消费 / 不是本人的请求
-      // （服务端三者统一 404，避免存在性探针）。文案不能只说「提交失败」
+      // 404 / 409 feedback_not_applied 在这里有确定含义：token 已过期 /
+      // 已被消费 / 不是本人的请求（服务端把三者统一 404 避免存在性探针；
+      // Go `a18a017e` 起回放路径另发 409 code=feedback_not_applied，语义
+      // 相同——「这个回执永远不会再被接受」）。文案不能只说「提交失败」
       // ——那会让用户反复重试一个永远不会成功的请求。
+      final notAppliable =
+          e.statusCode == 404 ||
+          (e.statusCode == 409 && e.errorCode == 'feedback_not_applied');
       if (mounted) {
-        _showMessage(
-          e.statusCode == 404 ? '这条反馈已失效，无法再作答' : '反馈提交失败：${e.message}',
-        );
+        _showMessage(notAppliable ? '这条反馈已失效，无法再作答' : '反馈提交失败：${e.message}');
       }
     } on SpbError catch (e) {
       if (mounted) _showMessage('反馈提交失败：${e.message}');

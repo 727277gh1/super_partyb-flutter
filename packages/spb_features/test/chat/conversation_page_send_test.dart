@@ -131,6 +131,52 @@ void main() {
       // 断言的重点是「有提示」而非「保留文本」——保留由 composer 的 clear
       // 语义决定，见 message_composer.dart 的说明。
     });
+
+    testWidgets('409 group_unavailable 提示重新选对话（不是「发送失败：HTTP 409」）', (
+      tester,
+    ) async {
+      // Go `ceff2f81` 起：目标对话失效时 POST 返回
+      // `409 {error: …, code: group_unavailable}`。默认文案
+      // 「发送失败：HTTP 409」对用户毫无意义，且不重新选对话重试永远失败。
+      mockTimeline();
+      await startController(tester);
+      adapter.onPost(
+        '/users/usr_1/chat/messages',
+        (server) => server.reply(409, {
+          'error': '目标对话已失效，请重新选择对话后发送',
+          'code': 'group_unavailable',
+        }),
+        data: Matchers.any,
+      );
+      await pumpPage(tester);
+
+      await tester.enterText(find.byType(TextField), '发给已失效对话');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('目标对话已失效，请返回列表重新选择对话后发送'), findsOneWidget);
+      expect(find.textContaining('HTTP 409'), findsNothing);
+    });
+
+    testWidgets('无 code 的 409 仍是普通失败（不扩大特判面）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      adapter.onPost(
+        '/users/usr_1/chat/messages',
+        (server) => server.reply(409, {'error': 'conflict without code'}),
+        data: Matchers.any,
+      );
+      await pumpPage(tester);
+
+      await tester.enterText(find.byType(TextField), '普通冲突');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('发送失败'), findsOneWidget);
+      expect(find.textContaining('重新选择对话'), findsNothing);
+    });
   });
 
   group('ConversationPage 停止生成', () {
