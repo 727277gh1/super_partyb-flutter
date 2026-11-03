@@ -10,28 +10,18 @@ import 'package:spb_models/spb_models.dart';
 /// **完全没有**这个端点的调用方——排程只写不读，用户看不到「它过一会儿还要
 /// 自己接着跑几轮」，也没法取消。本用例把这条链路补完。
 ///
-/// ## ⚠️ 为什么必须传 `agentId` 并**本地按 group 过滤**
+/// ## 历史注：server 端点已修复，两步 workaround 已撤销（2026-11，Go `b2a54b5a`）
 ///
-/// 列出端点的 handler（Go `admin.go` 的 `listByAgent`）**忽略路径里的
-/// `:group_id`**：
+/// 服务端 handler 曾（`admin.go` 的 `listByAgent`）**忽略路径里的 `:group_id`**，
+/// 只按 `agent_id` 查——故本用例此前要先取 group 拿 agentId、再本地按
+/// [ChatTurnSchedule.groupId] 过滤，否则同 agent 下别的对话的排程会串进当前
+/// 面板。Go `b2a54b5a` 重写为 `ListOwnedGroupSchedules`（按路径 `:group_id` +
+/// 当前用户过滤，**忽略** `agent_id` 查询参数），现在**单次请求**即得当前
+/// group 的排程，两步 workaround 已删除。
 ///
-/// ```go
-/// rg.GET("/:group_id/auto-schedules", h.listByAgent)   // :group_id 从未被读
-/// items, _ := h.q.ListChatTurnSchedules(ctx, ...{
-///     AgentID: c.Query("agent_id"), ...                // 只按 agent 查
-/// })
-/// ```
-///
-/// 而 `chat_turn_schedules` **没有 group 列**——group 只存在于
-/// `policy_json.meta.group_id`。于是：
-///
-/// - 不传 `agentId` → `WHERE agent_id = ''` → **恒空**（看起来像「没有排程」）；
-/// - 传了 `agentId` → 得到「**该 agent 的全部**排程」，可能横跨多个 group。
-///
-/// 故本用例做两件事：传 `agentId`（取自 [ChatGroup.activeSession]，那是服务端
-/// 已判定的当前 agent），再按 [ChatTurnSchedule.groupId] 本地过滤。
-/// **不补这两步，同 agent 下别的对话的排程会串进当前面板**——用户会看到并停掉
-/// 不属于本对话的续跑。
+/// 仍保留一道 `groupId` 断言（见 [load]）——它从 workaround 升级成了**校验**：
+/// 停用端点的 SQL 仍按 `policy.meta.group_id = ?` 过滤，解析不出该键的行
+/// 停用端点碰不到，显示出来只会制造「点了没反应」。
 ///
 /// ## 为什么 `stopAll` 之后**回读列表**而不是回读 group
 ///
@@ -51,25 +41,17 @@ class AutoSchedulesUseCase {
 
   /// 列出当前 group 的排程。
   ///
-  /// 取数两步：`GET /chat/groups/:id` 拿 `activeSession.agentId`，再
-  /// `GET /api/chat/groups/:id/auto-schedules?agent_id=…`，最后本地过滤。
+  /// 服务端（Go `b2a54b5a` 起）按路径 `:group_id` + 当前用户过滤，
+  /// **忽略** `agent_id` 查询参数——单次请求即得结果，无需再取 group 拿
+  /// agentId（那段 workaround 已随服务端修复撤销，见类文档）。
   ///
-  /// 为什么每次都重新取 group 而不让调用方把 `agentId` 传进来：调用方（面板）
-  /// 手上的 `ChatGroup` 可能是旧快照，而 agent 切换后旧 agentId 会查出**别的
-  /// agent 的排程**（虽然会被 group 过滤挡住，但会白跑一次请求）。多一次
-  /// `GET /chat/groups/:id` 换「不会拿错 agent」是划算的，且该端点本来就在
-  /// 对话页的常规刷新路径上（有 HTTP 缓存语义之外的意义：它是最权威的快照）。
+  /// 仍保留一道 [ChatTurnSchedule.groupId] 断言：解析不出归属的行**不放行**。
+  /// 停用端点的 SQL 按 `policy.meta.group_id = ?` 过滤，碰不到这些行；若显示
+  /// 出来，「停用全部」会在它们身上永远无效——比「少显示一行」糟得多。
   Future<List<ChatTurnSchedule>> load(String groupId) async {
     try {
-      final group = await _api.getGroup(groupId);
-      final agentId = group.activeSession?.agentId;
-      final all = await _api.listAutoSchedules(groupId, agentId: agentId);
-      // 本地补回 handler 丢掉的 group 维度（见类文档）。
-      //
-      // ⚠️ 严格等值过滤，**不**把「取不到 groupId」的行放行。理由：停用端点的
-      // SQL 是按 `policy_json.meta.group_id = ?` 过滤的，它**碰不到**这些行。
-      // 若放行，一个 groupId 为 null 的 pending 行会在停用后仍留在列表里，
-      // 于是「停用全部」按钮永远可点——看起来像点了没反应。宁可不显示。
+      final all = await _api.listAutoSchedules(groupId);
+      // 校验服务端真的按 group 过滤了（见上）。严格等值，不放宽。
       return all.where((s) => s.groupId == groupId).toList(growable: false);
     } on SpbError catch (e) {
       throw AutoSchedulesFailure(describeAutoSchedulesError(e), cause: e);

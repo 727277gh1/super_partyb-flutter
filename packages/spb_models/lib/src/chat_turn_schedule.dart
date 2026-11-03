@@ -1,85 +1,34 @@
-/// 自动续跑排程（`chat_turn_schedules` 行，camelCase 契约）。
+/// 自动续跑排程（`chat_turn_schedules` 行，snake_case 契约）。
 ///
-/// 对应 Go 侧 `db/queries/models.go` 的 `ChatTurnSchedule`（sqlc 生成，
-/// `json_tags_case_style: camel`）。两个端点的契约：
+/// 对应 Go 侧 `internal/server/schedules.go` 的 `scheduleToDTO`（2026-11，
+/// Go `b2a54b5a` 重写该端点时从「直接返回 sqlc 行（camelCase）」改为**统一
+/// DTO（snake_case）**，与 webapp 的 `ChatTurnScheduleDebugItem` 对齐）。
 ///
-/// | 用途 | 端点 |
-/// |---|---|
-/// | 列出 | `GET /api/chat/groups/:group_id/auto-schedules` |
-/// | 停用 | `POST /chat/groups/:group_id/auto-schedule/stop` |
+/// ## ⚠️ 契约曾断裂过一次（不要回退）
 ///
-/// ## ⚠️ 字段名是 **camelCase**，不是 snake_case
+/// 客户端首版模型按旧端点的 sqlc 行写（camelCase：`agentId` / `runCount` /
+/// `policyJson` 字符串）。Go `b2a54b5a` 换成 `scheduleToDTO` 后形状全变：
+/// 字段名 snake_case、`policyJson` 字符串变成 `policy` **对象**、新增
+/// `schedule_state`。按旧契约解析**不报错**，只是全部字段落空（`fromJson`
+/// 的 `?? ''` / `?? 0` 兜底把缺失吞掉）——面板看起来像「没有排程」。这正
+/// 是 AGENTS.md §6.28 反复出现的「静默不兼容」形态，故这里逐字段镜像新
+/// DTO 并有契约测试钉住。
 ///
-/// webapp 的 TS 类型 `ChatTurnScheduleDebugItem`（`lib/api/group-chat.ts`）是
-/// snake_case **且多出 Go 侧根本不发的三个字段**（`schedule_state` / `policy` /
-/// `last_error`）。照抄它会让 `enabled` / `runCount` 等一片 `undefined`
-/// ——解析不报错，只是全部落空。故本模型严格照抄 Go 的 json tag。
+/// ## 字段形态对照
 ///
-/// ## ⚠️ `sql.NullString` / `sql.NullTime` 是**嵌套对象**
-///
-/// Go 的 `database/sql` 未给这两个类型提供 `MarshalJSON`，仓库内也无自定义，
-/// 故序列化为 `{"String":"…","Valid":true}` / `{"Time":"…","Valid":true}`。
-/// 直接 `json['triggerStatus'] as String?` 会拿到一个 `Map`（类型转换抛错或
-/// 静默落空）。见 [chatScheduleNullString] / [chatScheduleNullTime]。
-///
-/// ## 为什么放在 spb_models 而不是 spb_domain
-///
-/// 它只做**字段镜像 + 形态归一**，不含业务规则（与 `chat_event.dart` 的分工
-/// 说明一致）。「哪些排程该显示、停用按钮何时可点」是领域规则，归 spb_domain。
+/// | Go DTO | 形态 | 本模型 |
+/// |---|---|---|
+/// | `policy` | **对象**（`parseJSON` 解析过） | `policy`（Map）→ [groupId] |
+/// | `trigger_status` | `nullStr`：串或 null | `triggerStatus` |
+/// | `last_error` | `parseJSON`：对象或 null | `lastError`（保留原文形态） |
+/// | `schedule_state` | `pending`/`triggered`/`disabled`/`failed` | `scheduleState` |
+/// | `next_run_at` 等 | RFC3339 串或 null（`timeOrNil`） | `DateTime?` |
+/// | `created_at` 等 | RFC3339（`iso`，零值是**空串**） | `DateTime?` |
 library;
 
 import 'dart:convert';
 
-/// 归一 `sql.NullString` 的 JSON 形态（`{"String":..,"Valid":..}` / 裸串 / null）。
-///
-/// 与 `habit.dart` 的 `habitNullString` 同语义。此处独立实现而非复用，是为了
-/// 让本模型自包含（该函数名带 `habit` 前缀，在排程语境下会误导读者）。
-String? chatScheduleNullString(Object? v) {
-  if (v is String) return v.isEmpty ? null : v;
-  if (v is Map) {
-    final valid = v['Valid'] ?? v['valid'];
-    if (valid == false) return null;
-    final s = v['String'] ?? v['string'];
-    if (s is String && s.isNotEmpty) return s;
-  }
-  return null;
-}
-
-/// 归一 `sql.NullTime` 的 JSON 形态（嵌套对象 / 裸 RFC3339 串 / null）。
-///
-/// ## 为什么不能直接 `DateTime.tryParse`
-///
-/// 该字段是 Go `sql.NullTime`，JSON 形态是
-/// `{"Time":"2026-10-04T09:00:00Z","Valid":true}`。传 Map 给 `tryParse` 只会
-/// 得到 null。
-///
-/// ## 为什么 `Valid:false` 与零值都要返回 null
-///
-/// `Valid:false` 时 `Time` 是 Go 零值 `0001-01-01T00:00:00Z`。若不管它，UI
-/// 会显示「下次触发：公元 1 年」而不是「无下次触发」。故 [valid] 为假、
-/// 或解析出的年份 ≤ 1，都视为**无值**。
-DateTime? chatScheduleNullTime(Object? v) {
-  if (v == null) return null;
-  if (v is String) {
-    if (v.isEmpty) return null;
-    final parsed = DateTime.tryParse(v);
-    if (parsed == null || parsed.year <= 1) return null;
-    return parsed.toLocal();
-  }
-  if (v is Map) {
-    final valid = v['Valid'] ?? v['valid'];
-    if (valid == false) return null;
-    final raw = v['Time'] ?? v['time'];
-    if (raw is String && raw.isNotEmpty) {
-      final parsed = DateTime.tryParse(raw);
-      if (parsed == null || parsed.year <= 1) return null;
-      return parsed.toLocal();
-    }
-  }
-  return null;
-}
-
-/// 从 `policyJson` 里取 `meta.group_id`（容错返回 null）。
+/// 从 `policy` 对象里取 `meta.group_id`（容错返回 null）。
 ///
 /// ## 为什么需要它（客户端侧的 group 归属判定）
 ///
@@ -87,29 +36,31 @@ DateTime? chatScheduleNullTime(Object? v) {
 /// `policy_json.meta.group_id`（服务端停用端点的 SQL 也是靠
 /// `json_extract(policy_json, '$.meta.group_id')` 过滤）。
 ///
-/// 而列出端点（`admin.go` 的 `listByAgent`）**忽略路径里的 `:group_id`**，
-/// 只按 `agent_id` 查。故客户端拿到的是「同一 agent 的全部排程」，必须再按
-/// 本字段本地过滤出属于当前 group 的那些——否则会把别的对话的排程显示出来。
+/// 新 DTO（Go `b2a54b5a` 起）把 `policy` 解析成**对象**下发，故直接下探两层
+/// 取值；历史形态（`policyJson` 字符串）不再支持——服务端只有一个列表端点，
+/// 双形状共存只会制造「哪边是真」的漂移。
 ///
-/// `policyJson` 是**字符串**（不是对象），要解两层：外层 policy → `meta` →
-/// `group_id`。任何一层形状不对都返回 null，不抛异常（形状漂移不该炸掉面板）。
-String? chatScheduleGroupIdFromPolicy(String? policyJson) {
-  if (policyJson == null || policyJson.isEmpty) return null;
-  Object? decoded;
-  try {
-    decoded = jsonDecode(policyJson);
-  } on FormatException {
-    return null;
+/// 任何一层形状不对都返回 null，不抛异常（形状漂移不该炸掉面板）。
+String? chatScheduleGroupIdFromPolicy(Object? policy) {
+  if (policy is String && policy.isNotEmpty) {
+    // 防御：万一上游把原文串透传，仍按字符串解析一次（与旧逻辑同语义）。
+    Object? decoded;
+    try {
+      decoded = jsonDecode(policy);
+    } on FormatException {
+      return null;
+    }
+    return chatScheduleGroupIdFromPolicy(decoded);
   }
-  if (decoded is! Map) return null;
-  final meta = decoded['meta'];
+  if (policy is! Map) return null;
+  final meta = policy['meta'];
   if (meta is! Map) return null;
   final groupId = meta['group_id'] ?? meta['groupId'];
   if (groupId is String && groupId.isNotEmpty) return groupId;
   return null;
 }
 
-/// `chat_turn_schedules` 行。
+/// `chat_turn_schedules` 行（新 DTO，snake_case）。
 class ChatTurnSchedule {
   const ChatTurnSchedule({
     required this.id,
@@ -118,7 +69,7 @@ class ChatTurnSchedule {
     required this.agentType,
     required this.triggerReason,
     required this.message,
-    required this.policyJson,
+    required this.policy,
     required this.dedupeKey,
     required this.enabled,
     required this.runCount,
@@ -128,7 +79,8 @@ class ChatTurnSchedule {
     this.triggerStatus,
     this.nextRunAt,
     this.lastRunAt,
-    this.lastErrorJson,
+    this.lastError,
+    this.scheduleState,
   });
 
   final String id;
@@ -139,15 +91,15 @@ class ChatTurnSchedule {
   /// 为什么排了这一条（如 `goal_gate` 续跑）。
   final String triggerReason;
 
-  /// `sql.NullString` → 可空。
+  /// 触发时的子状态（`nullStr`：串或 null，如 `pending`）。
   final String? triggerStatus;
 
   /// 排程触发时要发的内容。
   final String message;
 
-  /// 策略 JSON **原文**（字符串）。group 归属在 `meta.group_id`，见
-  /// [chatScheduleGroupIdFromPolicy]。
-  final String policyJson;
+  /// 策略对象（服务端已把 JSON 文本解析成对象）。group 归属在
+  /// `meta.group_id`，见 [chatScheduleGroupIdFromPolicy]。
+  final Object? policy;
 
   /// 去重键。goal_gate 续跑的以 `goal_gate:` 开头（服务端停用端点据此
   /// 限定范围，不误伤 retry / fastpath）。
@@ -157,18 +109,26 @@ class ChatTurnSchedule {
   final int runCount;
   final int maxRuns;
 
-  /// `sql.NullTime` → 可空（`Valid:false` / 零值均为 null）。
+  /// 服务端派生的展示态（`pending` / `triggered` / `disabled` / `failed`）。
+  ///
+  /// 派生规则（`scheduleToDTO`）：有 last_error → `failed`；enabled 且有
+  /// next_run_at → `pending`；跑过 → `triggered`；否则 `disabled`。
+  /// 客户端**不重新派生**：展示直接用它（与服务端、webapp 三方同词），
+  /// 只有业务判据（是否可停用）才用 [isPending]。
+  final String? scheduleState;
+
+  /// 下次触发时间（`timeOrNil`：null = 无）。
   final DateTime? nextRunAt;
   final DateTime? lastRunAt;
 
-  /// `sql.NullString` → 可空（最后一次失败的错误 JSON 原文）。
-  final String? lastErrorJson;
+  /// 最后一次失败的错误对象原文（`parseJSON`：对象或 null）。
+  final Object? lastError;
 
-  final DateTime createdAt;
-  final DateTime updatedAt;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
 
-  /// 所属 group（从 [policyJson] 解析）；解析不出时 null。
-  String? get groupId => chatScheduleGroupIdFromPolicy(policyJson);
+  /// 所属 group（从 [policy] 解析）；解析不出时 null。
+  String? get groupId => chatScheduleGroupIdFromPolicy(policy);
 
   /// 是否仍在等待触发（未停用且未用完次数）。
   ///
@@ -180,23 +140,30 @@ class ChatTurnSchedule {
   factory ChatTurnSchedule.fromJson(Map<String, dynamic> json) =>
       ChatTurnSchedule(
         id: (json['id'] as String?) ?? '',
-        agentId: (json['agentId'] as String?) ?? '',
-        sessionId: (json['sessionId'] as String?) ?? '',
-        agentType: (json['agentType'] as String?) ?? '',
-        triggerReason: (json['triggerReason'] as String?) ?? '',
-        triggerStatus: chatScheduleNullString(json['triggerStatus']),
+        agentId: (json['agent_id'] as String?) ?? '',
+        sessionId: (json['session_id'] as String?) ?? '',
+        agentType: (json['agent_type'] as String?) ?? '',
+        triggerReason: (json['trigger_reason'] as String?) ?? '',
+        triggerStatus: _stringOrNull(json['trigger_status']),
         message: (json['message'] as String?) ?? '',
-        policyJson: (json['policyJson'] as String?) ?? '',
-        dedupeKey: (json['dedupeKey'] as String?) ?? '',
+        policy: json['policy'],
+        dedupeKey: (json['dedupe_key'] as String?) ?? '',
         enabled: json['enabled'] == true,
-        runCount: _int(json['runCount']),
-        maxRuns: _int(json['maxRuns']),
-        nextRunAt: chatScheduleNullTime(json['nextRunAt']),
-        lastRunAt: chatScheduleNullTime(json['lastRunAt']),
-        lastErrorJson: chatScheduleNullString(json['lastErrorJson']),
-        createdAt: _date(json['createdAt']) ?? DateTime.now(),
-        updatedAt: _date(json['updatedAt']) ?? DateTime.now(),
+        runCount: _int(json['run_count']),
+        maxRuns: _int(json['max_runs']),
+        scheduleState: _stringOrNull(json['schedule_state']),
+        nextRunAt: _dateOrNull(json['next_run_at']),
+        lastRunAt: _dateOrNull(json['last_run_at']),
+        lastError: json['last_error'],
+        createdAt: _date(json['created_at']),
+        updatedAt: _date(json['updated_at']),
       );
+
+  /// `nullStr` 形态：串或 null；空串归 null（与旧语义一致——空串当无值）。
+  static String? _stringOrNull(Object? v) {
+    if (v is String && v.isNotEmpty) return v;
+    return null;
+  }
 
   /// 取整数；非 num / 字符串数字均可解析，其余归 0（与 `ChatTurn._int` 同取向）。
   static int _int(Object? v) {
@@ -206,6 +173,10 @@ class ChatTurnSchedule {
     return 0;
   }
 
+  /// `timeOrNil` 形态：RFC3339 串或 null。**required 字段**用 [_date]。
+  static DateTime? _dateOrNull(Object? v) => _date(v);
+
+  /// `iso()` 形态：RFC3339 串；**零值是空串**（不是 null），空串同样归 null。
   static DateTime? _date(Object? v) {
     if (v is! String || v.isEmpty) return null;
     return DateTime.tryParse(v)?.toLocal();

@@ -6,15 +6,17 @@ import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 
-/// [AutoSchedulesUseCase] 的契约测试（issue #13）。
+/// [AutoSchedulesUseCase] 的契约测试。
 ///
 /// ## 这个测试防的是什么
 ///
-/// 1. **不传 `agent_id`**：服务端 handler 忽略 `:group_id`，只按
-///    `c.Query("agent_id")` 查。不传就是 `WHERE agent_id = ''` → **恒空**，
-///    看起来像「没有排程」。
-/// 2. **不本地按 group 过滤**：会得到「该 agent 的全部排程」，把同 agent 下
-///    别的对话的续跑显示成当前对话的，用户会停掉不属于本对话的排程。
+/// 1. **本地按 group 过滤的校验仍在**：服务端（Go `b2a54b5a` 起）按路径
+///    `:group_id` 过滤，但「解析不出 `policy.meta.group_id`」的行停用端点
+///    碰不到——放行它们会让「停用全部」按钮看起来点了没反应。此前这层
+///    过滤还兼「服务端忽略 :group_id」的 workaround；server 修复后它降级为
+///    廉价校验，但**不能删**。
+/// 2. **单次请求**：server 修复后不再需要先 GET group 拿 agentId——若有人
+///    把两步 workaround 加回来，请求序列断言会变红（多一次无谓往返）。
 /// 3. **停用后不回读列表**：面板停在旧的「待触发」，用户以为没生效而反复点。
 /// 4. **路径前缀写错**：列出是 `/api/chat/…/auto-schedules`（复数、带 `/api`），
 ///    停用是 `/chat/…/auto-schedule/stop`（单数、无 `/api`）——写错即 404。
@@ -53,105 +55,74 @@ void main() {
     );
   });
 
-  Map<String, dynamic> groupJson({String? agentId = 'agt_1'}) => {
-    'id': 'grp_1',
-    'user_id': 'usr_1',
-    'title': '某个对话',
-    'status': 'active',
-    if (agentId != null)
-      'active_session': {'agent_id': agentId, 'session_id': 'sess_1'},
-    'created_at': '2026-10-04T08:00:00Z',
-    'updated_at': '2026-10-04T08:30:00Z',
-  };
-
+  /// Go `scheduleToDTO`（snake_case）的形状。
   Map<String, dynamic> scheduleJson({
     String id = 'sch_1',
     String groupId = 'grp_1',
     bool enabled = true,
   }) => {
     'id': id,
-    'agentId': 'agt_1',
-    'sessionId': 'sess_1',
-    'agentType': 'pigo',
-    'triggerReason': 'goal_gate',
-    'triggerStatus': const {'String': 'pending', 'Valid': true},
+    'agent_id': 'agt_1',
+    'session_id': 'sess_1',
+    'agent_type': 'pigo',
+    'trigger_reason': 'goal_gate',
+    'trigger_status': 'pending',
     'message': '继续推进目标',
-    'policyJson': '{"meta":{"group_id":"$groupId"}}',
-    'dedupeKey': 'goal_gate:$groupId:t_1',
+    'policy': {
+      'meta': {'group_id': groupId},
+      'max_auto_turns': 5,
+    },
+    'dedupe_key': 'goal_gate:$groupId:t_1',
     'enabled': enabled,
-    'runCount': 0,
-    'maxRuns': 5,
-    'nextRunAt': const {'Time': '2026-10-04T09:00:00Z', 'Valid': true},
-    'lastRunAt': const {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
-    'lastErrorJson': null,
-    'createdAt': '2026-10-04T08:00:00Z',
-    'updatedAt': '2026-10-04T08:30:00Z',
+    'run_count': 0,
+    'max_runs': 5,
+    'next_run_at': '2026-10-04T09:00:00Z',
+    'last_run_at': null,
+    'last_error': null,
+    'schedule_state': 'pending',
+    'created_at': '2026-10-04T08:00:00Z',
+    'updated_at': '2026-10-04T08:30:00Z',
   };
 
-  void mockGroupGet([Map<String, dynamic>? json]) {
+  void mockList([List<Map<String, dynamic>>? items]) {
     adapter.onGet(
-      '/chat/groups/grp_1',
-      (server) => server.reply(200, json ?? groupJson()),
+      '/api/chat/groups/grp_1/auto-schedules',
+      (server) => server.reply(200, {
+        'items': items ?? [scheduleJson()],
+      }),
     );
   }
 
-  group('load：取 agentId 并本地按 group 过滤', () {
-    test('先 GET group 拿 agentId，再带 agent_id 列出', () async {
-      mockGroupGet();
-      adapter.onGet(
-        '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {
-          'items': [scheduleJson()],
-        }),
-        queryParameters: {'agent_id': 'agt_1', 'limit': 50},
-      );
+  group('load：单次请求 + group 归属校验', () {
+    test('单次 GET 列出（不带 agent_id 两步 workaround）', () async {
+      mockList();
 
       final items = await useCase.load('grp_1');
 
       expect(calls.map((c) => '${c.method} ${c.path}'), [
-        'GET /chat/groups/grp_1',
         'GET /api/chat/groups/grp_1/auto-schedules',
-      ]);
-      expect(
-        calls.last.query!['agent_id'],
-        'agt_1',
-        reason: '不传 agent_id 则服务端 WHERE agent_id = "" → 恒空',
-      );
+      ], reason: '服务端已按 :group_id 过滤（b2a54b5a），先取 group 是多余的往返');
       expect(items, hasLength(1));
+      expect(items.single.agentId, 'agt_1');
+      expect(items.single.scheduleState, 'pending');
     });
 
-    test('⚠️ 同 agent 下别的 group 的排程被本地过滤掉', () async {
-      mockGroupGet();
-      adapter.onGet(
-        '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {
-          'items': [
-            scheduleJson(id: 'sch_mine', groupId: 'grp_1'),
-            scheduleJson(id: 'sch_other', groupId: 'grp_2'),
-          ],
-        }),
-        queryParameters: {'agent_id': 'agt_1', 'limit': 50},
-      );
+    test('⚠️ 不属于本 group 的行被过滤（防服务端回归 / 脏数据）', () async {
+      mockList([
+        scheduleJson(id: 'sch_mine', groupId: 'grp_1'),
+        scheduleJson(id: 'sch_other', groupId: 'grp_2'),
+      ]);
 
       final items = await useCase.load('grp_1');
 
-      expect(items.map((s) => s.id), [
-        'sch_mine',
-      ], reason: 'handler 忽略 :group_id，同 agent 跨 group 的行会串进来');
+      expect(items.map((s) => s.id), ['sch_mine']);
     });
 
     test('⚠️ 取不到 groupId 的行被排除（停用谓词碰不到它）', () async {
-      mockGroupGet();
-      adapter.onGet(
-        '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {
-          'items': [
-            scheduleJson(id: 'sch_mine', groupId: 'grp_1'),
-            {...scheduleJson(id: 'sch_nogroup'), 'policyJson': 'not json'},
-          ],
-        }),
-        queryParameters: {'agent_id': 'agt_1', 'limit': 50},
-      );
+      mockList([
+        scheduleJson(id: 'sch_mine', groupId: 'grp_1'),
+        {...scheduleJson(id: 'sch_nogroup'), 'policy': null},
+      ]);
 
       final items = await useCase.load('grp_1');
 
@@ -163,44 +134,22 @@ void main() {
             '放行会让按钮永远可点',
       );
     });
-
-    test('activeSession 缺失时不带 agent_id（服务端会返空，但不崩）', () async {
-      mockGroupGet(groupJson(agentId: null));
-      adapter.onGet(
-        '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {'items': <dynamic>[]}),
-        queryParameters: {'limit': 50},
-      );
-
-      final items = await useCase.load('grp_1');
-
-      expect(items, isEmpty);
-      expect(calls.last.query!.containsKey('agent_id'), isFalse);
-    });
   });
 
   group('stopAll：写 + 回读列表', () {
-    test('POST 停用 → GET group → GET 列表（顺序与路径都对）', () async {
+    test('POST 停用 → GET 列表（顺序与路径都对）', () async {
       adapter.onPost(
         '/chat/groups/grp_1/auto-schedule/stop',
         data: null,
         (server) =>
             server.reply(200, {'group_id': 'grp_1', 'disabled_count': 2}),
       );
-      mockGroupGet();
-      adapter.onGet(
-        '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {
-          'items': [scheduleJson(enabled: false)],
-        }),
-        queryParameters: {'agent_id': 'agt_1', 'limit': 50},
-      );
+      mockList([scheduleJson(enabled: false)]);
 
       final result = await useCase.stopAll('grp_1');
 
       expect(calls.map((c) => '${c.method} ${c.path}'), [
         'POST /chat/groups/grp_1/auto-schedule/stop',
-        'GET /chat/groups/grp_1',
         'GET /api/chat/groups/grp_1/auto-schedules',
       ]);
       expect(result.disabledCount, 2);
@@ -217,12 +166,7 @@ void main() {
         data: null,
         (server) => server.reply(200, {'disabled_count': 0}),
       );
-      mockGroupGet();
-      adapter.onGet(
-        '/api/chat/groups/grp_1/auto-schedules',
-        (server) => server.reply(200, {'items': <dynamic>[]}),
-        queryParameters: {'agent_id': 'agt_1', 'limit': 50},
-      );
+      mockList(const []);
 
       await useCase.stopAll('grp_1');
 
@@ -233,7 +177,7 @@ void main() {
   group('错误翻译', () {
     test('401 → 「登录已过期」', () async {
       adapter.onGet(
-        '/chat/groups/grp_1',
+        '/api/chat/groups/grp_1/auto-schedules',
         (server) => server.reply(401, {'error': 'unauthorized'}),
       );
 
@@ -251,7 +195,7 @@ void main() {
 
     test('500 → 「服务端暂时不可用」', () async {
       adapter.onGet(
-        '/chat/groups/grp_1',
+        '/api/chat/groups/grp_1/auto-schedules',
         (server) => server.reply(500, {'error': 'boom'}),
       );
 
@@ -269,7 +213,7 @@ void main() {
 
     test('404 → 「这个对话已不存在」', () async {
       adapter.onGet(
-        '/chat/groups/grp_1',
+        '/api/chat/groups/grp_1/auto-schedules',
         (server) => server.reply(404, {'error': 'not found'}),
       );
 
@@ -281,7 +225,7 @@ void main() {
 
     test('失败时保留原始 cause（供日志/诊断，不展示）', () async {
       adapter.onGet(
-        '/chat/groups/grp_1',
+        '/api/chat/groups/grp_1/auto-schedules',
         (server) => server.reply(500, {'error': 'boom'}),
       );
 
@@ -314,7 +258,7 @@ void main() {
       );
       // 回读列表失败。
       adapter.onGet(
-        '/chat/groups/grp_1',
+        '/api/chat/groups/grp_1/auto-schedules',
         (server) => server.reply(500, {'error': 'boom'}),
       );
 

@@ -372,11 +372,13 @@ class _AutoScheduleRow extends StatelessWidget {
               ],
             ),
             // 上次失败原因：有就显示（否则用户只看到「它停在那」，不知道是
-            // 因为报错还是因为轮次用尽）。原文可能很长，截断到一行。
-            if ((schedule.lastErrorJson ?? '').isNotEmpty) ...[
+            // 因为报错还是因为轮次用尽）。新 DTO（Go `b2a54b5a`）的
+            // `last_error` 是 parseJSON 解析过的**对象**（原 JSON 文本已不可得），
+            // 故压缩成单行文本展示；可能是任意形状，不能假设有 `error` 键。
+            if (schedule.lastError != null) ...[
               const SizedBox(height: SpbSpacing.xs),
               Text(
-                schedule.lastErrorJson!,
+                _describeScheduleError(schedule.lastError!),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: textTheme.labelSmall?.copyWith(color: scheme.error),
@@ -396,6 +398,19 @@ class _AutoScheduleRow extends StatelessWidget {
     String p2(int v) => v.toString().padLeft(2, '0');
     return '${t.year}-${p2(t.month)}-${p2(t.day)} '
         '${p2(t.hour)}:${p2(t.minute)}';
+  }
+
+  /// 把 `last_error` 对象压成单行文本（新 DTO 是 parseJSON 解析过的任意 JSON
+  /// 值，形状不可假设）。Map 优先取常见键，其余形态直接 toString。
+  static String _describeScheduleError(Object error) {
+    if (error is Map) {
+      for (final key in const ['error', 'message', 'reason']) {
+        final v = error[key];
+        if (v is String && v.isNotEmpty) return v;
+      }
+    }
+    final s = error.toString();
+    return s;
   }
 }
 

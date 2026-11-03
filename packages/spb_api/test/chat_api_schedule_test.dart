@@ -95,29 +95,33 @@ void main() {
 
   /// `listAutoSchedules` 的契约与请求形状。
   group('listAutoSchedules', () {
-    test('解析 items 为 ChatTurnSchedule（camelCase）', () async {
+    test('解析 items 为 ChatTurnSchedule（snake_case DTO，Go b2a54b5a）', () async {
       adapter.onGet(
         '/api/chat/groups/grp_1/auto-schedules',
         (server) => server.reply(200, {
           'items': [
             {
               'id': 'sch_1',
-              'agentId': 'agt_1',
-              'sessionId': 'sess_1',
-              'agentType': 'pigo',
-              'triggerReason': 'goal_gate',
-              'triggerStatus': {'String': 'pending', 'Valid': true},
+              'agent_id': 'agt_1',
+              'session_id': 'sess_1',
+              'agent_type': 'pigo',
+              'trigger_reason': 'goal_gate',
+              'trigger_status': 'pending',
               'message': '继续',
-              'policyJson': '{"meta":{"group_id":"grp_1"}}',
-              'dedupeKey': 'goal_gate:grp_1:t_1',
+              'policy': {
+                'meta': {'group_id': 'grp_1'},
+                'max_auto_turns': 5,
+              },
+              'dedupe_key': 'goal_gate:grp_1:t_1',
               'enabled': true,
-              'runCount': 1,
-              'maxRuns': 5,
-              'nextRunAt': {'Time': '2026-10-04T09:00:00Z', 'Valid': true},
-              'lastRunAt': {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
-              'lastErrorJson': null,
-              'createdAt': '2026-10-04T08:00:00Z',
-              'updatedAt': '2026-10-04T08:30:00Z',
+              'run_count': 1,
+              'max_runs': 5,
+              'next_run_at': '2026-10-04T09:00:00Z',
+              'last_run_at': null,
+              'last_error': null,
+              'schedule_state': 'pending',
+              'created_at': '2026-10-04T08:00:00Z',
+              'updated_at': '2026-10-04T08:30:00Z',
             },
           ],
         }),
@@ -133,6 +137,7 @@ void main() {
       expect(s.runCount, 1);
       expect(s.groupId, 'grp_1');
       expect(s.isPending, isTrue);
+      expect(s.scheduleState, 'pending');
       expect(s.nextRunAt?.toUtc(), DateTime.utc(2026, 10, 4, 9));
       expect(s.lastRunAt, isNull);
     });

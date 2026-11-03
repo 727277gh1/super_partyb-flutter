@@ -12,7 +12,7 @@ library;
 //                                —— 归档结项快照摘要（嵌在 ChatGroup.archiveSnapshot）
 //   ChatInboxMessage                —— 收件箱消息（pending 接口的真实返回）
 //   ChatTurn                        —— 对话轮次
-//   ChatTurnSchedule                —— 自动续跑排程（camelCase；policyJson 取 group 归属）
+//   ChatTurnSchedule                —— 自动续跑排程（snake_case DTO；policy 对象取 group 归属）
 //   ListResponse / CursorPage / StreamCursor —— 分页与 SSE 续接游标
 //   ChatSearchHit                —— 搜索命中项（turn 摘要，**不是** ChatEvent）
 //   TurnRuntime                  —— turn 运行时参数（超时兜底阈值，只读）

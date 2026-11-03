@@ -1,58 +1,67 @@
 import 'package:spb_models/spb_models.dart';
 import 'package:test/test.dart';
 
-/// [ChatTurnSchedule] 的解析测试（issue #13）。
+/// [ChatTurnSchedule] 的解析测试。
 ///
 /// ## 这个测试防的是什么
 ///
-/// 契约与客户端**默认直觉不一致**，且三种不一致都**不会报错**，只会静默
-/// 解析成空值：
+/// 该端点的 DTO 在 Go `b2a54b5a`（2026-11）从「直接返回 sqlc 行（camelCase）」
+/// 换成了统一 `scheduleToDTO`（**snake_case**，与 webapp 的
+/// `ChatTurnScheduleDebugItem` 对齐）。客户端首版按旧契约写——按新 DTO 解析
+/// **不报错**，只是全部字段落空（`?? ''` 兜底吞掉缺失），面板看起来像
+/// 「没有排程」。故本测试以**真实新 DTO 形状**构造夹具，并专门钉住三个
+/// 形态陷阱：
 ///
-/// 1. 字段名是 **camelCase**（`runCount`），而 webapp 的 TS 类型是 snake_case
-///    ——照抄 webapp 会得到 `runCount == 0`；
-/// 2. `triggerStatus` / `lastErrorJson` 是 Go `sql.NullString`，JSON 形态是
-///    `{"String":…,"Valid":…}` 嵌套对象——直接当 String 读会落空；
-/// 3. `nextRunAt` / `lastRunAt` 是 Go `sql.NullTime`，JSON 形态是
-///    `{"Time":…,"Valid":…}`——`DateTime.tryParse` 拿不到值，且 `Valid:false`
-///    时 `Time` 是零值 `0001-01-01`，不管它 UI 会显示「公元 1 年」。
-///
-/// 故这里显式断言「用 snake_case 键解析会得到 0」与「嵌套 NullTime 被正确
-/// 归一」，把两个陷阱钉成可执行的回归。
+/// 1. 字段名是 snake_case；`policy` 是**对象**（`parseJSON` 已解析），
+///    不是字符串；
+/// 2. `trigger_status` / `last_error` 是 `nullStr` / `parseJSON`：串 / 对象 /
+///    null 三态，**不再是** `{"String":..,"Valid":..}` 嵌套对象；
+/// 3. `next_run_at` 等是 `timeOrNil`：RFC3339 串或 null；`created_at` 是
+///    `iso()`：零值是**空串**（不是 null）——不归一会显示异常时间。
 void main() {
-  /// Go `ChatTurnSchedule` 的真实 JSON 形状（sqlc camelCase tag）。
+  /// Go `scheduleToDTO`（`internal/server/schedules.go`）的真实 JSON 形状。
   Map<String, dynamic> shape({
     String id = 'sch_01HZ',
     String agentId = 'agt_1',
-    String policyJson = '{"meta":{"user_id":"usr_1","group_id":"grp_1","parent_turn_id":"t_1"}}',
+    Object? policy = const {
+      'meta': {
+        'user_id': 'usr_1',
+        'group_id': 'grp_1',
+        'parent_turn_id': 't_1',
+      },
+      'max_auto_turns': 5,
+    },
     bool enabled = true,
     int runCount = 0,
     int maxRuns = 5,
-    Object? triggerStatus = const {'String': 'pending', 'Valid': true},
-    Object? nextRunAt = const {'Time': '2026-10-04T09:00:00Z', 'Valid': true},
-    Object? lastRunAt = const {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
-    Object? lastErrorJson,
+    Object? triggerStatus = 'pending',
+    Object? nextRunAt = '2026-10-04T09:00:00Z',
+    Object? lastRunAt,
+    Object? lastError,
+    String scheduleState = 'pending',
   }) => {
     'id': id,
-    'agentId': agentId,
-    'sessionId': 'sess_1',
-    'agentType': 'pigo',
-    'triggerReason': 'goal_gate',
-    'triggerStatus': triggerStatus,
+    'agent_id': agentId,
+    'session_id': 'sess_1',
+    'agent_type': 'pigo',
+    'trigger_reason': 'goal_gate',
+    'trigger_status': triggerStatus,
     'message': '继续推进目标',
-    'policyJson': policyJson,
-    'dedupeKey': 'goal_gate:grp_1:t_1',
+    'policy': policy,
+    'dedupe_key': 'goal_gate:grp_1:t_1',
     'enabled': enabled,
-    'runCount': runCount,
-    'maxRuns': maxRuns,
-    'nextRunAt': nextRunAt,
-    'lastRunAt': lastRunAt,
-    'lastErrorJson': lastErrorJson,
-    'createdAt': '2026-10-04T08:00:00Z',
-    'updatedAt': '2026-10-04T08:30:00Z',
+    'run_count': runCount,
+    'max_runs': maxRuns,
+    'next_run_at': nextRunAt,
+    'last_run_at': lastRunAt,
+    'last_error': lastError,
+    'schedule_state': scheduleState,
+    'created_at': '2026-10-04T08:00:00Z',
+    'updated_at': '2026-10-04T08:30:00Z',
   };
 
-  group('ChatTurnSchedule.fromJson：camelCase 契约', () {
-    test('全部字段按 camelCase 键名解析', () {
+  group('ChatTurnSchedule.fromJson：snake_case DTO（Go b2a54b5a）', () {
+    test('全部字段按 snake_case 键名解析', () {
       final s = ChatTurnSchedule.fromJson(shape());
 
       expect(s.id, 'sch_01HZ');
@@ -65,104 +74,120 @@ void main() {
       expect(s.enabled, isTrue);
       expect(s.runCount, 0);
       expect(s.maxRuns, 5);
-      expect(s.createdAt.toUtc(), DateTime.utc(2026, 10, 4, 8));
-      expect(s.updatedAt.toUtc(), DateTime.utc(2026, 10, 4, 8, 30));
+      expect(s.scheduleState, 'pending');
+      expect(s.createdAt?.toUtc(), DateTime.utc(2026, 10, 4, 8));
+      expect(s.updatedAt?.toUtc(), DateTime.utc(2026, 10, 4, 8, 30));
     });
 
-    test('⚠️ snake_case 键（照抄 webapp TS 类型）会静默落空', () {
+    test('⚠️ 旧 sqlc camelCase 键（b2a54b5a 之前的契约）会静默落空', () {
       final s = ChatTurnSchedule.fromJson({
         'id': 'sch_1',
-        'agent_id': 'agt_1',
-        'run_count': 3,
-        'max_runs': 5,
+        'agentId': 'agt_1',
+        'runCount': 3,
+        'maxRuns': 5,
         'enabled': true,
       });
 
-      // 这正是照抄 webapp 类型的后果：不报错，只是全空。
+      // 保留这条负例：若有回归把键名改回 camelCase，它会立刻变红——
+      // 而不是像首版缺陷那样静默解析成空值。
       expect(s.agentId, '');
       expect(s.runCount, 0);
       expect(s.maxRuns, 0);
     });
   });
 
-  group('sql.NullString 归一（triggerStatus / lastErrorJson）', () {
-    test('{"String":..,"Valid":true} → 取到字符串', () {
+  group('nullStr / parseJSON 归一（trigger_status / last_error）', () {
+    test('trigger_status 串 → 取到字符串', () {
       final s = ChatTurnSchedule.fromJson(shape());
 
       expect(s.triggerStatus, 'pending');
     });
 
-    test('Valid:false → null（不是空串，也不是那个 Map）', () {
-      final s = ChatTurnSchedule.fromJson(
-        shape(triggerStatus: const {'String': 'pending', 'Valid': false}),
-      );
-
-      expect(s.triggerStatus, isNull);
-    });
-
-    test('裸串形态也接受（服务端若改用自定义 MarshalJSON 仍可解析）', () {
-      final s = ChatTurnSchedule.fromJson(shape(triggerStatus: 'triggered'));
-
-      expect(s.triggerStatus, 'triggered');
-    });
-
-    test('null → null', () {
+    test('trigger_status null → null', () {
       final s = ChatTurnSchedule.fromJson(shape(triggerStatus: null));
 
       expect(s.triggerStatus, isNull);
     });
 
-    test('lastErrorJson 同样是 NullString', () {
+    test('trigger_status 空串归 null（nullStr 恒不回空串，防御历史数据）', () {
+      final s = ChatTurnSchedule.fromJson(shape(triggerStatus: ''));
+
+      expect(s.triggerStatus, isNull);
+    });
+
+    test('last_error 是 parseJSON 的对象（不是 NullString 嵌套）', () {
       final s = ChatTurnSchedule.fromJson(
-        shape(
-          lastErrorJson: const {'String': '{"error":"boom"}', 'Valid': true},
-        ),
+        shape(lastError: const {'error': 'boom'}, scheduleState: 'failed'),
       );
 
-      expect(s.lastErrorJson, '{"error":"boom"}');
+      expect(s.lastError, isA<Map<String, Object>>());
+      expect((s.lastError as Map)['error'], 'boom');
+    });
+
+    test('last_error null → null', () {
+      final s = ChatTurnSchedule.fromJson(shape(lastError: null));
+
+      expect(s.lastError, isNull);
     });
   });
 
-  group('sql.NullTime 归一（nextRunAt / lastRunAt）', () {
-    test('{"Time":..,"Valid":true} → 解析出 DateTime', () {
+  group('schedule_state：服务端派生的展示态', () {
+    test('直接透传（pending / triggered / disabled / failed 四态）', () {
+      for (final state in const [
+        'pending',
+        'triggered',
+        'disabled',
+        'failed',
+      ]) {
+        expect(
+          ChatTurnSchedule.fromJson(shape(scheduleState: state)).scheduleState,
+          state,
+        );
+      }
+    });
+
+    test('缺失 → null（不派生，展示层自己兜底）', () {
+      final s = ChatTurnSchedule.fromJson(shape()..remove('schedule_state'));
+
+      expect(s.scheduleState, isNull);
+    });
+  });
+
+  group('时间字段归一（timeOrNil / iso）', () {
+    test('next_run_at RFC3339 串 → DateTime', () {
       final s = ChatTurnSchedule.fromJson(shape());
 
       expect(s.nextRunAt?.toUtc(), DateTime.utc(2026, 10, 4, 9));
     });
 
-    test('⚠️ Valid:false 的零值 → null（不能显示「公元 1 年」）', () {
+    test(
+      'null → null',
+      () => expect(
+        ChatTurnSchedule.fromJson(shape(nextRunAt: null, lastRunAt: null)),
+        isA<ChatTurnSchedule>(),
+      ),
+    );
+
+    test('last_run_at 缺省（null）→ null', () {
       final s = ChatTurnSchedule.fromJson(shape());
 
       expect(s.lastRunAt, isNull);
     });
 
-    test('Valid:true 但 Time 是零值 → 也视为 null', () {
-      final s = ChatTurnSchedule.fromJson(
-        shape(nextRunAt: const {'Time': '0001-01-01T00:00:00Z', 'Valid': true}),
-      );
+    test('created_at 空串（iso 的零值形态）→ null，不显示异常时间', () {
+      final s = ChatTurnSchedule.fromJson(shape()..['created_at'] = '');
 
-      expect(s.nextRunAt, isNull);
+      expect(s.createdAt, isNull);
     });
 
-    test('裸 RFC3339 串也接受', () {
-      final s = ChatTurnSchedule.fromJson(
-        shape(nextRunAt: '2026-10-04T09:00:00Z'),
-      );
+    test('created_at 正常串 → DateTime', () {
+      final s = ChatTurnSchedule.fromJson(shape());
 
-      expect(s.nextRunAt?.toUtc(), DateTime.utc(2026, 10, 4, 9));
-    });
-
-    test('null → null', () {
-      final s = ChatTurnSchedule.fromJson(
-        shape(nextRunAt: null, lastRunAt: null),
-      );
-
-      expect(s.nextRunAt, isNull);
-      expect(s.lastRunAt, isNull);
+      expect(s.createdAt?.toUtc(), DateTime.utc(2026, 10, 4, 8));
     });
   });
 
-  group('groupId：从 policyJson.meta.group_id 解析', () {
+  group('groupId：从 policy.meta.group_id 解析', () {
     test('标准形状取到 group_id', () {
       final s = ChatTurnSchedule.fromJson(shape());
 
@@ -171,37 +196,48 @@ void main() {
 
     test('camelCase 变体 groupId 也接受', () {
       final s = ChatTurnSchedule.fromJson(
-        shape(policyJson: '{"meta":{"groupId":"grp_2"}}'),
+        shape(
+          policy: const {
+            'meta': {'groupId': 'grp_2'},
+          },
+        ),
       );
 
       expect(s.groupId, 'grp_2');
     });
 
-    test('非法 JSON → null（不抛异常）', () {
-      final s = ChatTurnSchedule.fromJson(shape(policyJson: 'not json'));
+    test('字符串形态（防御：原文透传）也能解析', () {
+      final s = ChatTurnSchedule.fromJson(
+        shape(policy: '{"meta":{"group_id":"grp_3"}}'),
+      );
 
-      expect(s.groupId, isNull);
+      expect(s.groupId, 'grp_3');
     });
 
-    test('缺 meta / 缺 group_id → null', () {
+    test('缺 meta / 缺 group_id / 非 Map → null（不抛异常）', () {
       expect(
-        ChatTurnSchedule.fromJson(shape(policyJson: '{"other":1}')).groupId,
+        ChatTurnSchedule.fromJson(shape(policy: const {'other': 1})).groupId,
         isNull,
       );
       expect(
-        ChatTurnSchedule.fromJson(shape(policyJson: '{"meta":{}}')).groupId,
+        ChatTurnSchedule.fromJson(
+          shape(policy: const <String, Object>{'meta': <String, Object>{}}),
+        ).groupId,
         isNull,
       );
+      expect(ChatTurnSchedule.fromJson(shape(policy: null)).groupId, isNull);
+      expect(ChatTurnSchedule.fromJson(shape(policy: 42)).groupId, isNull);
     });
 
-    test('policyJson 为空串 → null', () {
-      expect(ChatTurnSchedule.fromJson(shape(policyJson: '')).groupId, isNull);
-    });
-
-    test('chatScheduleGroupIdFromPolicy 直接调用（字符串输入）', () {
-      expect(chatScheduleGroupIdFromPolicy('{"meta":{"group_id":"g"}}'), 'g');
+    test('chatScheduleGroupIdFromPolicy 直接调用', () {
+      expect(
+        chatScheduleGroupIdFromPolicy(const {
+          'meta': {'group_id': 'g'},
+        }),
+        'g',
+      );
       expect(chatScheduleGroupIdFromPolicy(null), isNull);
-      expect(chatScheduleGroupIdFromPolicy('[]'), isNull);
+      expect(chatScheduleGroupIdFromPolicy(42), isNull);
     });
   });
 
@@ -241,10 +277,11 @@ void main() {
       expect(s.maxRuns, 0);
       expect(s.enabled, isFalse);
       expect(s.nextRunAt, isNull);
+      expect(s.createdAt, isNull);
     });
 
-    test('runCount 是 double / 字符串数字也能解析', () {
-      final s = ChatTurnSchedule.fromJson({'runCount': 3.0, 'maxRuns': '7'});
+    test('run_count 是 double / 字符串数字也能解析', () {
+      final s = ChatTurnSchedule.fromJson({'run_count': 3.0, 'max_runs': '7'});
 
       expect(s.runCount, 3);
       expect(s.maxRuns, 7);

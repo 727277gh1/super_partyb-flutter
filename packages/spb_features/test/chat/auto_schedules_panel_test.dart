@@ -20,7 +20,7 @@ import 'package:spb_models/spb_models.dart';
 /// 5. **切换对话时残留上一个 group 的排程**：那些行的 `meta.group_id` 指向
 ///    别的对话，会让用户以为在停本对话的续跑。
 void main() {
-  /// Go `ChatTurnSchedule` 的真实 JSON 形状（sqlc camelCase tag）。
+  /// Go `scheduleToDTO`（snake_case，Go `b2a54b5a`）的真实形状。
   Map<String, dynamic> scheduleJson({
     String id = 'sch_1',
     String groupId = 'grp_1',
@@ -29,26 +29,30 @@ void main() {
     bool enabled = true,
     int runCount = 0,
     int maxRuns = 5,
-    Object? nextRunAt = const {'Time': '2026-10-04T09:00:00Z', 'Valid': true},
-    Object? lastErrorJson,
+    Object? nextRunAt = '2026-10-04T09:00:00Z',
+    Object? lastError,
   }) => {
     'id': id,
-    'agentId': 'agt_1',
-    'sessionId': 'sess_1',
-    'agentType': 'pigo',
-    'triggerReason': triggerReason,
-    'triggerStatus': const {'String': 'pending', 'Valid': true},
+    'agent_id': 'agt_1',
+    'session_id': 'sess_1',
+    'agent_type': 'pigo',
+    'trigger_reason': triggerReason,
+    'trigger_status': 'pending',
     'message': message,
-    'policyJson': '{"meta":{"group_id":"$groupId"}}',
-    'dedupeKey': 'goal_gate:$groupId:t_1',
+    'policy': {
+      'meta': {'group_id': groupId},
+      'max_auto_turns': maxRuns,
+    },
+    'dedupe_key': 'goal_gate:$groupId:t_1',
     'enabled': enabled,
-    'runCount': runCount,
-    'maxRuns': maxRuns,
-    'nextRunAt': nextRunAt,
-    'lastRunAt': const {'Time': '0001-01-01T00:00:00Z', 'Valid': false},
-    'lastErrorJson': lastErrorJson,
-    'createdAt': '2026-10-04T08:00:00Z',
-    'updatedAt': '2026-10-04T08:30:00Z',
+    'run_count': runCount,
+    'max_runs': maxRuns,
+    'next_run_at': nextRunAt,
+    'last_run_at': null,
+    'last_error': lastError,
+    'schedule_state': enabled ? 'pending' : 'disabled',
+    'created_at': '2026-10-04T08:00:00Z',
+    'updated_at': '2026-10-04T08:30:00Z',
   };
 
   late List<ChatTurnSchedule> items;
@@ -132,17 +136,30 @@ void main() {
       expect(find.text('已用尽'), findsOneWidget);
     });
 
-    testWidgets('有 lastErrorJson 时展示（否则用户不知为何停住）', (tester) async {
+    testWidgets('有 last_error 时展示（否则用户不知为何停住）', (tester) async {
       useStubs(
         initial: [
           ChatTurnSchedule.fromJson(
-            scheduleJson(lastErrorJson: '{"error":"boom"}'),
+            scheduleJson(lastError: const {'error': 'boom'}),
           ),
         ],
       );
       await pumpPanel(tester);
 
-      expect(find.text('{"error":"boom"}'), findsOneWidget);
+      expect(find.text('boom'), findsOneWidget);
+    });
+
+    testWidgets('last_error 无常见键时回退原文（形状不可假设）', (tester) async {
+      useStubs(
+        initial: [
+          ChatTurnSchedule.fromJson(
+            scheduleJson(lastError: const {'detail': '超时'}),
+          ),
+        ],
+      );
+      await pumpPanel(tester);
+
+      expect(find.text('{detail: 超时}'), findsOneWidget);
     });
 
     testWidgets('空列表显示空提示', (tester) async {
