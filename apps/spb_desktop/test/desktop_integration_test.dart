@@ -51,6 +51,9 @@ class _WiringCapabilities
   @override
   void setHideOnClose(bool value) => hideOnClose = value;
 
+  // ---- 托盘右键弹出（2026-11 Windows 卡死菜单修复的接线验证） ----
+  int popupCalls = 0;
+
   // ---- OverlayWindowController ----
   final enteredSpecs = <WindowSpec>[];
   int exitCalls = 0;
@@ -100,6 +103,10 @@ class _WiringCapabilities
   Future<void> setLaunchAtStartup(bool enabled) async {}
   @override
   Future<void> setTrayTooltip(String tooltip) async {}
+
+  @override
+  Future<void> popUpTrayContextMenu() async => popupCalls++;
+
   @override
   Future<String?> pickDirectory({String? title}) async => null;
 
@@ -553,6 +560,22 @@ void main() {
 
       caps.trayActions[TrayActionIds.show]!();
       expect(caps.shown, [WindowRole.main]);
+    });
+
+    testWidgets('popUpTrayContextMenu 可从能力层到达（右键弹菜单的接线）', (tester) async {
+      // 2026-11 Windows 修复的回归防线：托盘右键 → `popUpTrayContextMenu`
+      // 是新抽出的接口方法（bringAppToFront 判据在能力层内部）。若接线
+      // 断裂（实现类不再实现该方法、或右键处理不再调它），托盘菜单在
+      // Windows 上不会弹出——而本测试所在的桩层无法感知。
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+      await tester.pump();
+
+      expect(caps.popupCalls, 0);
+      await caps.popUpTrayContextMenu();
+      expect(caps.popupCalls, 1);
     });
   });
 

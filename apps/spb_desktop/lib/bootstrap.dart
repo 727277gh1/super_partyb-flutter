@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/services.dart' show KeyboardKey, PhysicalKeyboardKey;
+import 'package:flutter/services.dart'
+    show KeyboardKey, MissingPluginException, PhysicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
@@ -90,11 +92,32 @@ class PlatformDesktopCapabilities
         OverlayWindowController {
   PlatformDesktopCapabilities({
     this.trayIconAsset = 'assets/tray_icon.png',
+    this.trayIconAssetWindows = 'assets/tray_icon.ico',
     this.windowIconAsset = 'assets/app_icon.png',
   });
 
   /// 托盘图标资源路径（相对 `flutter_assets`）。
+  ///
+  /// 仅 Linux/macOS 使用。Windows 走 [trayIconAssetWindows]——见那里的说明
+  /// （`LoadImage` 不支持 PNG，2026-11 真实缺陷）。
   final String trayIconAsset;
+
+  /// 托盘图标资源路径（**Windows 专用**）。
+  ///
+  /// ## 为什么 Windows 必须用 `.ico` 而不是 `.png`
+  ///
+  /// `tray_manager` 的 Windows 端 `SetIcon` 用
+  /// `LoadImage(LR_LOADFROMFILE)` 从 `data/flutter_assets/` 读图标文件，
+  /// 而 `LoadImage` **只认 BMP 系资源**（`.bmp` / DIB 帧的 `.ico` / `.cur`）
+  /// ——给它 PNG 返回 NULL，`Shell_NotifyIcon` 挂着空 HICON，托盘上
+  /// **没有任何图标**。更糟的是插件 `setIcon` **恒返回 true 不报错**，
+  /// 于是 `_trayAvailable` 照样置位、「关窗即隐藏」照样生效——用户看到的
+  /// 就是「图标没了但进程还活着，窗口关了就找不回应用」（2026-11 真实
+  /// 报障）。
+  ///
+  /// `.ico` 由 `tools/gen_brand_assets.py` 与其它图标一并生成
+  /// （bitmap_format='bmp'，PNG 帧的 `.ico` 同样不被 `LoadImage` 认）。
+  final String trayIconAssetWindows;
 
   /// 窗口 / 任务栏图标资源路径（相对 `flutter_assets`）。
   ///
@@ -174,6 +197,16 @@ class PlatformDesktopCapabilities
   /// macOS 不需要：dock 图标来自 `.app` 包里的 `AppIcon.appiconset`。
   Future<void> _initWindowIcon() async {
     if (Platform.isMacOS) return;
+    // Windows 跳过：`window_manager` 的 `setIcon` 在 Windows 上同样走
+    // `LoadImage`（见 [trayIconAssetWindows] 的说明），PNG 读不出来是
+    // NULL HICON——而 `WM_SETICON(NULL)` 会**移除** exe 资源图标
+    // （`Runner.rc` 的 `IDI_APP_ICON`，win32_window.cpp 注册窗口类时
+    // 加载）。也就是说，本机不跳过比跳过更糟：任务栏图标从「品牌图标」
+    // 退回默认 Flutter 占位。
+    //
+    // Windows 的窗口图标已由 exe 资源静态覆盖；若将来要动态换，需先把
+    // `app_icon.ico` 也打进 assets 并按平台分流（与托盘同一手法）。
+    if (Platform.isWindows) return;
     try {
       await windowManager.setIcon(windowIconAsset);
     } catch (e) {
@@ -215,7 +248,12 @@ class PlatformDesktopCapabilities
 
   Future<void> _initTray() async {
     try {
-      await trayManager.setIcon(trayIconAsset);
+      // Windows 必须给 `.ico`（`LoadImage` 不认 PNG，见
+      // [trayIconAssetWindows] 的说明）；Linux/macOS 用同一张 PNG。
+      final icon = HostPlatform.current() == HostPlatform.windows
+          ? trayIconAssetWindows
+          : trayIconAsset;
+      await trayManager.setIcon(icon);
       trayManager.addListener(this);
       await trayManager.setToolTip('Super PartyB');
       _trayAvailable = true;
@@ -226,6 +264,12 @@ class PlatformDesktopCapabilities
       // 容器里（本仓库开发环境就是）必然失败，但**应用本身仍可用**。
       // 若这里抛出，bootstrapDesktop 会整体降级成 Noop，连窗口尺寸设置都丢失
       // ——那是把「托盘不可用」放大成了「桌面能力全不可用」。
+      //
+      // ⚠️ 已知边界：Windows 上 `tray_manager` 的 `setIcon` 恒返回 true
+      // （见 [trayIconAssetWindows]），故**传错资源形态**不会被本 catch 捕获，
+      // `_trayAvailable` 会误置 true。防御手段是资源本身（`.ico` 已由
+      // 生成脚本落盘）而非运行时检测——运行时拿不到「图标真的显示了吗」
+      // 的信号（`Shell_NotifyIcon` 的 NIM_ADD 失败在插件内部被吞）。
       SpbLog.warn('托盘初始化失败（应用继续运行，但无托盘图标）', {'error': '$e'});
     }
   }
@@ -571,6 +615,38 @@ class PlatformDesktopCapabilities
     }
   }
 
+  /// 弹出托盘右键菜单。
+  ///
+  /// ## 为什么 Windows 必须带 `bringAppToFront: true`
+  ///
+  /// Win32 的 `TrackPopupMenu` 要求调用窗口处于前台，否则菜单弹出后点外面
+  /// 收不回去——用户看到的就是一个「卡住的列表」（tray_manager 的
+  /// `PopUpContextMenu` 只在 `bringAppToFront` 为 true 时才调
+  /// `SetForegroundWindow`）。2026-11 Windows 用户报障的原因。
+  ///
+  /// Linux 是空操作：`tray_manager` 的 Linux 端未实现 `popUpContextMenu`
+  /// （调用会抛 `MissingPluginException`），且 appindicator 由桌面环境
+  /// 自行展示菜单——这里 catch 住并记 debug，不向上抛（与 `_initTray`
+  /// 同一取向：托盘异常不阻塞应用）。
+  @override
+  Future<void> popUpTrayContextMenu() async {
+    final bringToFront = trayMenuNeedsBringToFront(HostPlatform.current());
+    try {
+      // `bringAppToFront` 标注了 deprecated（"only supported on Windows and
+      // will be removed"）——但 Windows 上它恰恰是**必需**的（见方法文档）。
+      // 若将来该参数被移除，需要自写 SetForegroundWindow（经插件 PR 或
+      // 换库）；目前 tray_manager 0.5.3 仍实现它，显式忽略弃用标记。
+      // ignore: deprecated_member_use
+      await trayManager.popUpContextMenu(bringAppToFront: bringToFront);
+    } on MissingPluginException {
+      // Linux：该方法不存在，菜单由 DE 处理。这是**预期内**路径，
+      // 只记 debug（SpbLog._minLevel 默认 info，不会刷生产日志）。
+      SpbLog.debug('当前平台无 popUpContextMenu，菜单由桌面环境处理');
+    } catch (e) {
+      SpbLog.warn('弹出托盘菜单失败', {'error': '$e'});
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // TrayListener
   // ---------------------------------------------------------------------------
@@ -589,9 +665,14 @@ class PlatformDesktopCapabilities
 
   @override
   void onTrayIconRightMouseDown() {
-    // 右键：弹出菜单。Linux 下部分实现由 DE 自行处理，这里显式调用以兼容
-    // 需要主动弹出的平台（Windows/macOS）。
-    trayManager.popUpContextMenu();
+    // 右键：弹出菜单。
+    //
+    // ## 为什么经 [popUpTrayContextMenu]（而不是这里直接 trayManager）
+    //
+    // 「是否需要 bringAppToFront」是平台策略，判据收在
+    // `trayMenuNeedsBringToFront`（可无头单测）；本类只负责接线。见
+    // `popUpTrayContextMenu` 的文档。
+    unawaited(popUpTrayContextMenu());
   }
 
   // ---------------------------------------------------------------------------

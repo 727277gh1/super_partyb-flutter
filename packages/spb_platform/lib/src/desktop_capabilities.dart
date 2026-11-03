@@ -341,6 +341,20 @@ abstract interface class TrayActionTarget {
   /// 契约文件引入 Flutter 依赖——让「能力接口」保持与 UI 框架无关。
   void registerTrayAction(String id, void Function() action);
 
+  /// 右键点击托盘图标时弹出上下文菜单。
+  ///
+  /// ## 为什么由调用方触发（而不是实现在右键事件里自己弹）
+  ///
+  /// 与 [registerTrayAction] 同一取向：本接口只收「事件发生」与「动作执行」
+  /// 的接线点，弹不弹、何时弹属于**调用方**的平台策略。见
+  /// `trayMenuNeedsBringToFront`——Windows 必须带 `bringAppToFront`，
+  /// Linux 根本没有这个方法（appindicator 由桌面环境自行展示菜单）。
+  ///
+  /// 实现方（`PlatformDesktopCapabilities`）在 Linux 上是空操作（
+  /// `tray_manager` 的 Linux 端未实现 `popUpContextMenu`，直接调会抛
+  /// `MissingPluginException`）。
+  Future<void> popUpTrayContextMenu();
+
   /// 托盘是否**确认可用**（图标已成功创建）。
   ///
   /// 用于决定「关闭主窗口是隐藏到托盘还是退出」——见 `DesktopIntegration`。

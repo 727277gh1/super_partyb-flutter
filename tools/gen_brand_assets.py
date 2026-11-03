@@ -251,6 +251,8 @@ class Generator:
         return out.crop(out.getbbox())
 
     def windows(self) -> None:
+        # exe 资源图标（`Runner.rc` 的 IDI_APP_ICON）：PNG 帧的 .ico 资源管理器
+        # 认，保持原样。
         rel = 'apps/spb_desktop/windows/runner/resources/app_icon.ico'
         full = os.path.join(ROOT, rel)
         sizes = [16, 32, 48, 256]
@@ -258,8 +260,30 @@ class Generator:
             full, format='ICO', sizes=[(s, s) for s in sizes])
         self.written.append(rel)
 
+    def windows_runtime(self) -> None:
+        """Windows 托盘图标：DIB（BMP）帧的 .ico。
+
+        ## 为什么不能复用 exe 资源那个 .ico
+
+        托盘走 `LoadImage(LR_LOADFROMFILE)`（见
+        `apps/spb_desktop/lib/bootstrap.dart` 的 [trayIconAssetWindows] 说明），
+        而 `LoadImage` **只认 BMP 系帧**——PIL 的 ICO 默认输出是 **PNG 帧**
+        （Pillow ≥ 9.1，实测 `bitmap_format` 缺省即 PNG），读出来是 NULL，
+        托盘上没有任何图标。故这里显式 `bitmap_format='bmp'`。
+
+        尺寸只取 16/32：托盘展示尺寸就是这两个（任务栏 16/24、
+        通知区 16，DPI 缩放向下取），256 对托盘是浪费。BMP 帧无压缩，
+        256×256 单帧就要 256 KB，而 .ico 会整体打进二进制。
+        """
+        rel = 'apps/spb_desktop/assets/tray_icon.ico'
+        full = os.path.join(ROOT, rel)
+        self.resize(32).save(
+            full, format='ICO', bitmap_format='bmp',
+            sizes=[(16, 16), (32, 32)])
+        self.written.append(rel)
+
     def desktop_runtime(self) -> None:
-        """托盘 64 / 窗口 256。"""
+        """托盘 64 / 窗口 256（Linux/macOS 运行时用）。"""
         self.save(self.resize(64), 'apps/spb_desktop/assets/tray_icon.png')
         self.save(self.resize(256), 'apps/spb_desktop/assets/app_icon.png')
 
@@ -272,6 +296,7 @@ class Generator:
         self.ios()
         self.android()
         self.windows()
+        self.windows_runtime()
         self.desktop_runtime()
         self.in_app()
 

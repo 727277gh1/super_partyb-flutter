@@ -78,5 +78,8 @@ flutter:
   # 尺寸不同：托盘 64px（被系统缩小展示），窗口 256px（Alt+Tab / 任务栏
   # 会放大，用 64 会糊）。
   assets:
+    # Linux/macOS 托盘用 PNG；Windows 托盘必须用 BMP 帧的 .ico
+    # （LoadImage 不认 PNG，见 bootstrap.dart 的 trayIconAssetWindows 说明）。
     - assets/tray_icon.png
+    - assets/tray_icon.ico
     - assets/app_icon.png
