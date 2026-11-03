@@ -76,6 +76,8 @@ bash tools/check_silent_catches_selftest.sh
 cd apps/spb_desktop && flutter test   # 桌面端
 cd apps/spb_mobile  && flutter test   # 移动端
 dart test                             # 纯 Dart 包（spb_core/models/api/domain）
+# ⚠️ `spb_data` 虽然也是纯 Dart 语义，但依赖链含 Flutter（secure storage）→
+# 必须 `cd packages/spb_data && flutter test`，`dart test` 会报 dart:ui 不可用。
 
 # 覆盖率（issue #25）——逐包采集并汇总，产物 coverage/lcov.info
 # 默认剔除生成代码（*.g.dart / *.freezed.dart / *.gr.dart，见 §6.13）
@@ -821,7 +823,7 @@ feedback）、`/me/preferences`、`/users/:user_id/chat/*` 虽是 CRUD，但直�
 | `tool-agents` 族的 `listToolsets` | ❌ 不接 | 仅 `dashboard/agents/create` 与 `agents/[id]/edit` 使用——确属**管理面** |
 | `tool-agents` 族的 `invoke` / `invoke/stream` | ❌ 不接 | **全仓零调用者**（webapp 自己也没接）——服务端为将来留的接口 |
 | `tool-agents` 族的 `listToolAgents` | ⚠️ **不是**「只在 dashboard」 | 它喂给 `ChatInputArea`（`chat/[groupId]/page.tsx:638`），选中后经 `setToolAgentForGroup` + `startNewConversation` 以 `agent_type=tool_agent` 发起会话。**这是聊天面行为**，只是客户端已有 `AgentSwitcher`（`/api/agents` + `sessions/switch`）覆盖了「换 agent」这一诉求，且 `switchGroupAgent` / `sendMessage` 都不发 `agent_type`——补齐需两端都动，故本轮不接 |
-| `inbox-messages` | ❌ 不接 | webapp 唯一消费者是 `workbench/[groupId]/debug/page.tsx`（排障），与 §6.10「移动端不接诊断面板」同取向。客户端已有**用户级** `PendingMessagesBar`（`/users/:uid/chat/messages/pending`），覆盖了「我的消息还卡着吗」这个真实诉求 |
+| `inbox-messages` | ❌ 不接 | webapp 唯一消费者是 `workbench/[groupId]/debug/page.tsx`（排障），属**逐条消息排障**而非「这一轮在干什么」（后者已由 §6.54 的「动态」面板回答）。客户端已有**用户级** `PendingMessagesBar`（`/users/:uid/chat/messages/pending`），覆盖了「我的消息还卡着吗」这个真实诉求 |
 | `workspace-sync` 其余 6 个 | ❌ 不接 | 5 个只出现在 debug 页；`files/content` 服务 webapp 的**本地 workspace 文件预览**（`file-preview.ts` 的 `!file.fileId && file.filePath` 分支）——客户端时间线的 `AgentFileItem` 本就带 `ufsFileId`，没有「无 id 的本地 workspace 文件」这个概念；`ufs-download` 只在 `group-chat.ts:1308` 内部编排。**客户端的交付物同步走 `UfsApi.listFiles` + `download`（另一条路径），这一族不是「同步缺失」** |
 | `auto-schedules` | ✅ **该接（另开 issue）** | issue #11 称「无 UI 调用者」——**与实测不符**。`listGroupAutoSchedules` → `WorkbenchGroupDetailDialog.tsx:160`，`stopGroupAutoSchedule` → 同文件 `:221`，而该 Dialog 由 `chat/[groupId]/page.tsx:588` 的按钮打开，即**聊天页**。语义是「看 pending 排程 + 一键停用」。客户端**已**渲染 `ScheduleCreatedItem`（「将在 30 秒后自动继续」）却**无法查看与停用**——用户看得见它在跑，却没有刹车。⚠️ 分两部分：**停用**（`POST /chat/groups/:id/auto-schedule/stop`，`chat_ext.go:100`）实现完整（按 `policy_json.meta.group_id` 过滤 + `requireOwnedGroup`，返回 `{group_id, disabled_count}`）；**列表**（`admin.go:103`）**静态读码存疑**——handler 取 `c.Query("agent_id")` 而 webapp 只传 `limit`，SQL 又是 `WHERE agent_id = ?`，即实际是 `WHERE agent_id = ''`，可能恒返空（handler 注释自称「Python 通过 group_id 查 agent 再查 schedules」，Go 移植似丢了那一步）。客户端只依赖**停用**即可；列表需服务端先修 |
 | `sessions/managed` | ❌ 不接（死端点） | `createManagedChatGroupSession` 在 `group-chat.ts:1365` 是**非 export** 的函数，全仓零调用者。issue #11 此处的判断正确 |
@@ -1005,7 +1007,7 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 设置（`GroupSettingsPanel`） | 侧边栏 tab | 底部弹层 |
 | 任务清单 / 目标历史 | 侧边栏 tab | 底部弹层（窄屏从**溢出菜单**进，见 §6.16） |
 | 对话内搜索 | AppBar 图标（`enableSearch: true`） | **溢出菜单**（窄屏无余量，见 §6.15 / §6.16） |
-| **诊断（`GroupDebugPanel`：工具调用 + gate 决策）** | 侧边栏 tab | **无** |
+| 动态（`GroupActivityPanel`：当前轮次状态 + 工具调用 + gate 决策） | 侧边栏 tab（**始终可见**） | AppBar 图标（宽屏）/ 溢出菜单（窄屏）→ 底部弹层，**不含 gate 决策**（见 §6.54） |
 
 桌面端有侧边栏这个载体（宽屏常驻），移动端没有——小屏放不下常驻侧栏，故移动端
 一律走「AppBar 按钮 + 底部弹层」。
@@ -1025,12 +1027,16 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 为 null 时不渲染对应菜单项）。`resolveLocalPath` 查的是**同步目录**索引，而弹层
 回答的是「这个对话产出了什么」（远端），两者用途不同。
 
-**仍不对称：诊断面板**（`GroupDebugPanel`：工具调用 + gate 决策）**目前仅桌面端，
-属有意保留**。它是内部排障视图（含工具入参与 gate 决策明细），发布包下由
-`showDebugPanelProvider` 关闭；移动端的小屏不适合承载这类高密度内部视图。
-`apps/spb_mobile/lib/providers.dart` 里仍定义了同名 `showDebugPanelProvider`，只为
-两端 `providers.dart` 同构（避免「某个 provider 只在一端存在」成为下次接线的意外），
-当前**无消费方**。
+**「动态」面板两端都有**（此前那个只在非发布构建出现的「诊断」tab 已被它取代，
+`GroupDebugPanel` 连同 `showDebugPanelProvider` 一并删除，见 §6.54）。仍不对称的是
+**gate 决策那一栏**：移动端不订阅 `controller.gateDecisions`（既有行为），故传
+`decisions: null` → 整块不渲染、工具列表占满高度。**不能传空列表**——那会渲染一个
+「还没有 gate 决策」的空态，而真相是「本端没接这条数据」，两者视觉上无法区分。
+
+弹层与页面**共用同一份 State**，但 `showModalBottomSheet` 是**独立 route**：页面的
+`setState` 不会让它重建。故 router 用 `_activityTick`（`ValueNotifier<int>`）当刷新
+哨兵，四个状态回调各 bump 一次——少了它，弹层打开后就冻在第一眼看到的样子，
+而「实时的当前状态」正是这个面板存在的唯一理由。
 
 ### 6.11 桌面端托盘菜单（7 项）
 
@@ -1115,23 +1121,24 @@ router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：901
+# 当前（HEAD）量：947
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=901 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=947 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1630
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1699
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1630 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1699 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 901、`spb_domain` 176、
-`spb_desktop` 157、`spb_models` 97、`spb_mobile` 92、`spb_platform` 76、
+量级分布（HEAD，字符串字面量数）：`spb_features` 947、`spb_domain` 180、
+`spb_desktop` 170、`spb_models` 97、`spb_mobile` 95、`spb_platform` 79、
 `spb_api` 71、`spb_data` 39、`spb_core` 13、`spb_ui` 5、`spb_design` 3。
+（§6.54 的工具批卡与「动态」面板贡献了 `spb_features` 增量的大部分。）
 
 ⚠️ **`spb_core` 从 0 涨到 8 是 issue #40/#45 引入的**（诊断报告文案、错误分类
 文案）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
@@ -1167,7 +1174,7 @@ grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 | # | 条件 | 为什么是它 |
 |---|---|---|
 | 1 | 产品**进入非中文市场**，且有明确目标语言与验收人 | 无目标语言时引入 i18n 只会产出无人验证的翻译 |
-| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 878，见上方命令） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
+| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 947，见上方命令） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
 | 3 | 出现「**同一文案在 ≥3 处需按语境改写**」的实际需求 | 说明缺的是 message key 机制而非翻译；此时直译方案已不够用 |
 
 #### 若将来要做（供重开时参考，**不要现在就动手**）
@@ -1256,10 +1263,21 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 | `spb_models` | 88.0% | `spb_ui` | 73.7% |
 | `spb_design` | 86.0% | **总计** | **85.7%**（≈16291/19004） |
 
-全仓用例 **3765 条**（`testDone` 且非 hidden 计数；issue #48 拆分后，拆分本身
-0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
+全仓用例 **4054 条**（各包 `+N` 相加，即 `testDone` 且非 hidden；issue #48 拆分
+本身 0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
 §6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线，+38 是 §6.41 的
-定位与下载布局，+66 是 §6.42 的自动同步，+50 是 §6.43 的进对话按需同步）。
+定位与下载布局，+66 是 §6.42 的自动同步，+50 是 §6.43 的进对话按需同步，+89 是
+§6.54 的工具调用折叠 / 「动态」面板 / 流式进度条）。
+
+分包含量（2026-11 实测，会漂移）：`spb_models` 450、`spb_api` 487、`spb_domain`
+1071、`spb_features` 1246、`spb_data` 130、`spb_platform` 158、`spb_core` 112、
+`spb_ui` 43、`spb_design` 34、`spb_desktop` 207、`spb_mobile` 116。
+
+⚠️ **`spb_data` 的测试要用 `flutter test`，不能用 `dart test`**：它虽然也是纯
+Dart 语义（drift + sqlite3），但依赖链里含 Flutter（`secure_pending_auth_store`
+走 `flutter_secure_storage`），`dart test` 会报 `Dart library 'dart:ui' is not
+available on this platform`。§2 里那句「`dart test` 用于纯 Dart 包」只覆盖
+`spb_core` / `spb_models` / `spb_api` / `spb_domain` 这四个。
 
 ⚠️ **数用例时别用 `grep -c '"type":"testStart"'`**：它把 skipped 与
 `setUp`/`tearDown` 产生的条目也算进去（实测差 100+ 条）。用
@@ -1451,7 +1469,8 @@ webapp 在 `errorType === 'session_expired'` 时先逐个 `restoreChatSession` �
 #### 有意不做
 
 - **不搜交付物文件名 / 工具调用参数**：前者是 UFS 数据面（另一条路径，面板已
-  有），后者是诊断面（AGENTS.md §6.9 有意不做 `GroupDebugPanel` 于移动端）。
+  有），后者是工具入参与输出（服务端事件里的 `tool_args` / `output`）——它们是过程
+  信息，看的地方是「动态」面板（§6.54），不是对话内搜索。
 - **不做「高亮全部 + 上/下跳转」**（浏览器 `Ctrl+F` 那种）：需要维护「当前第几个
   命中」的游标与循环跳转，属独立交互；当前只做「列出命中 + 点一条滚过去」。
 - **不做正则 / 模糊 / 拼音**：与全局搜索页的 `LIKE` 语义保持一致（AGENTS.md §6.2
@@ -2307,7 +2326,7 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（§6.20）——本
 | **容差（选用）** | 小漂移放行（不打扰正常开发），大漂移拦住（防文档烂到误导决策） |
 
 默认容差 **5%**（标记可 `tolerance=` 覆盖）。依据：§6.12 的阈值是 `> 1500` 而
-当前 878——5% 的漂移（约 44 条）远不足以改变「离阈值还有多远」的判断。
+当前 947——5% 的漂移（约 47 条）远不足以改变「离阈值还有多远」的判断。
 
 **命令定义在脚本里，不在文档的标记里**：两条复现命令**自身含单引号**
 （`grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'"`），塞进标记属性就得转义、属性解析会先崩。
@@ -5185,8 +5204,9 @@ RenderObject 树）：
 
 - **只在同一次对话页生命周期内保留**：`_ChatPageState` 随路由切换销毁，
   换对话再回来仍是默认收起 + 第一个 tab。跨对话记住 tab 选择是独立需求
-  （需要提到 provider 层，且要考虑「上次看的 tab 在当前对话里不存在」，
-  例如 `showDebugPanelProvider` 关闭时「诊断」tab 不存在）。
+  （需要提到 provider 层，且要考虑「上次看的 tab 在当前对话里不存在」——
+  侧边栏 tab 集合是**动态**的：交付物 / 待办 / 动态 / 目标历史 / 任务清单里
+  只有前三个始终存在，后两个按对话是否用得到才加）。
 - **`_ChatSidebarState` 的 `initialIndex` 夹取上限有既有 bug**：
   `widget.initialIndex.clamp(0, (widget.tabs.length - 1).clamp(0, 1))` 把上限
   压到 1，`initialIndex >= 2` 无效。`chat_sidebar_test.dart` 已把它标注为
@@ -5328,7 +5348,7 @@ keep-alive 的上界用例抓住。
 
 | 项 | 为什么不做 |
 |---|---|
-| **隐藏 / 收起工具调用** | 折叠态**已经**近乎零成本：`Expansible` 的 `shouldRemoveBody = closed && !widget.maintainState` → `child: shouldRemoveBody ? null : result`，折叠时 `children` 完全不构造（`ExpansionTile.maintainState` 默认 false）。而隐藏会丢信息，且**对话内搜索依赖工具名 + 参数 + 输出**（§6.15）。该行为已由守卫用例钉住（`item_widgets_test.dart` 的「折叠态不构造参数与结果」） |
+| ~~**隐藏 / 收起工具调用**~~ | ✅ **已由 §6.54 取代**（折叠而非隐藏）：连续 ≥5 条工具调用在**展示层**折成一张批卡（`ToolCallBatchRow`），批内含在飞工具时默认展开、跑完自动收起；数据层一条不少，对话内搜索照样命中批内任一成员。本条原结论「折叠态已经零成本、故无需再折」只回答了**单卡内部的**折叠，没回答**时间线上几十张卡**的噪声——那正是用户报障的点 |
 | **`itemExtent` / `prototypeItem`** | 行高由 Markdown 内容决定，是**变高列表**，给不出固定 extent |
 | **改 Go API 契约** | 客户端适配服务端，不是反过来（仓库硬约束）。任何「为了客户端方便而改 Go API」的提案要先证明无法在客户端解决 |
 | **把 `JsonEncoder.convert` 提到 `build()` 顶部** | 看着能「早点拿到字符串」，实际会让折叠态也付转换成本（4.7 µs/次 × 条数）。`children` 是**急切求值**的列表字面量，放进 `ExpansionTile` 的 `children` 里才会随 `shouldRemoveBody` 一起被跳过 |
@@ -5879,6 +5899,157 @@ show ScrollCacheExtent;`。
 | 同步标签改回「不在该标签时从树上摘掉」 | 「切标签不销毁草稿」 |
 | 把「重复触发不导航」当需求写进用例 | —（**已删**：go_router 对相同 location 不重建，断言恒绿） |
 
+### 6.54 时间线工具调用折叠 + 「动态」面板 + 流式进度条（2026-11）
+
+用户报障：一轮 agent 工作会产出**几十张**工具卡，正文被挤出视野。三件事一起做，
+因为它们是同一个诉求的三个面，缺任一条都只能解决一半：
+
+| 面 | 做法 | 章节 |
+|---|---|---|
+| **A** 时间线太吵 | 连续 ≥5 条工具调用在**展示层**折成一张批卡 | 本节一 |
+| **B** 「它到底在干什么」 | 「诊断」改名「动态」、去掉发布构建门控、两端都有 | 本节二 |
+| **C** 流式期间看不出进展 | 底部条报「已调用 N 个工具 · 最近 X」 | 本节三 |
+
+#### 一、A：展示层折叠（**不动归约结果**）
+
+`_displayRows()` 里 `groupFileEventsForDisplay(_items)` → `groupTimelineForDisplay(_items)`
+（= 先按交付物分批，再按工具调用分批）。
+
+| 判据 | 值 | 为什么 |
+|---|---|---|
+| 阈值 | `TOOL_CALL_BATCH_MIN_COUNT = 5` | 与交付物批同一阈值（`FILE_BATCH_MIN_COUNT`）。3 条也折会让「就调了两三次」的轮次看不出发生过什么 |
+| 分组键 | **同 `turnId`**（且非空） | 跨轮合并会把「上一轮的结果」和「这一轮的开始」塞进一张卡，用户点开后分不清谁先谁后 |
+| 打断条件 | 任何**非** `SingleItemRow`（交付物批卡、正文、思考、确认卡…） | 顺序是信息本身。`[5 工具][5 文件][5 工具]` 必须是 **3 行**，不是 1 行 |
+| 不足阈值 | **原样返回**那 N 个 `SingleItemRow` | 不重建对象 → `identical` 缓存（`_lastRowsItems`）与既有 key 全不受影响 |
+| `turnId` 为空 | 永不合并 | 空 turnId 多见于回填出来的历史项，合并后无法判断「这些是不是同一轮」 |
+
+**为什么在展示层、不在归约层**：`ToolCallItem` 是**数据**，对话内搜索
+（`searchConversationItems`）要工具名/入参/输出（§6.15），`locateIdsOf` 要能给批内
+任一成员定位（§6.18）。一旦在归约里合成一个「批 item」，这两件事都得重新实现一遍，
+而且任何按 item 计数的功能（`agentFileCount`、`toolCount`…）都会静默变少。
+
+`ToolCallBatchRow` 放在 `agent_file_batch.dart` 而不是新文件里，因为
+`TimelineDisplayRow` 是 `sealed`——它必须在同一个库里才能被穷尽匹配。
+
+#### 折叠卡（`ToolCallBatchCard`）的三条硬约束
+
+1. **批里有在飞的调用（`output == null` 且 `isComplete == false`）→ 默认展开**。
+   那是用户唯一能看到的「它在干活」的证据，藏起来比折叠前更糟。
+2. **跑完自动收起**（`hasRunning` true→false）。用的是 `ExpansibleController`，
+   不是 `initiallyExpanded`：后者**只在 `initState` 读一次**（SDK 的
+   `_ExpansionTileState.didUpdateWidget` 不同步它），写错了表现为「一轮跑完，
+   那张卡永远摊在那里」——正是本功能要消除的噪声。
+3. **用户点过之后以用户为准**（`_expanded != null` 就早退）。用户展开了正在看的
+   清单，不能因为「这批刚好跑完」被自动收走。
+
+⚠️ 程序化 `expand()/collapse()` 也会回调 `onExpansionChanged`，故必须用
+`_syncingExpansion` 把「程序同步」与「用户点击」分开。少了它，一次自动收起会把
+`_expanded` 写成 `false`，组件从此认为「用户自己收的」，**同一批里第 7 个工具跑起来
+时不会再自动展开**（真实场景：同一轮 agent 接着调下一个工具，批的 key 取首条 id，
+故组件实例不变、`hasRunning` 由 false 翻回 true）。
+
+#### 二、B：「动态」面板（`GroupActivityPanel`）
+
+原来的 `GroupDebugPanel` 只在 `!SpbEnv.isRelease` 时作为侧边栏 tab 出现，理由
+是「工具入参与 gate 决策是内部视图」。但发布版的用户恰好最需要回答「它卡在哪一步 /
+为什么自己又跑了一轮」——而这正是这个面板回答的问题。故：
+
+| 变更 | 内容 |
+|---|---|
+| 改名 | 侧边栏 tab / 弹层标题「诊断」→ **动态**（它是常驻视图，不是排障工具）。⚠️ 「诊断」一词在**别处**仍在用，且含义不同，勿一并改掉：设置页的「导出诊断日志」（§6.20）、搜索面板里 `DiagnosticNoticeItem` 的类型标签（`conversation_search_sheet.dart`） |
+| 门控 | `showDebugPanelProvider` 删除（两端 `providers.dart`），tab 始终可见 |
+| 内容 | 顶部固定一行**当前轮次状态** + 工具调用列表（倒序）+ gate 决策列表（桌面） |
+| 载体 | 桌面：侧边栏 tab；移动：AppBar 图标（宽屏）/ 溢出菜单（窄屏）→ 底部弹层 |
+
+**入参是原始状态，不是预计算值**：`items` / `activities` / `staleTurnIds` /
+`executionStatus` / `decisions` 直接由 router 传。若让两端各自算「哪些是工具调用」
+「现在是什么状态」，就会出现「页面说还在跑、面板说已结束」——与 §6.17 同一失败模式，
+只是发生在数据侧。状态派生因此收敛到 `turn_status.dart` 的 `deriveTurnStatusFor`，
+**页面底部条与面板共用它**（§6.17 的接线守卫查不到函数内部实现）。
+
+**`decisions == null` 的语义是「本端不看这块」，不是「没有决策」**：移动端不订阅
+`controller.gateDecisions`（既有行为），传 `null` → 整块不渲染、工具列表占满高度。
+传空列表会渲染「还没有 gate 决策」的空态，把「没接数据」说成「没有决策」。
+
+**移动端弹层必须自己刷新**：`showModalBottomSheet` 是**独立 route**，页面的
+`setState` 不会让它重建。故 router 用 `_activityTick`（`ValueNotifier<int>`）当哨兵，
+`_bumpActivitySheet()` 从 items / activities / executionStatus / staleTurnIds 四个回调
+各调一次，弹层包在 `ValueListenableBuilder` 里。关掉时把 `_activityTick` 置 null 并
+`dispose`（否则事件会持续写一个已无人监听、甚至已 dispose 的 notifier）。
+
+#### 三、C：流式进度（`TurnStatusStrip`）
+
+此前调了 8 个工具的长回复，底部**什么都没有**（正文一出现，活动指示就按既有规则
+让位），用户看不出「还在干活」还是「已经停了」。
+
+底部槽位的顺序（`conversation_page.dart`，**顺序本身就是判据**）：
+
+```
+stale 提示 → 排队/重试状态 → 「已调用 N 个工具 · 最近 X」 → 活动指示（已运行 Xs）
+```
+
+- 排队/重试优先于「在跑」：**还没起跑**比**在跑**更该被看见（用户要等的是前者）；
+- 工具数优先于活动指示：它包含同样的信息加上「调了什么」，是严格更强的信号；
+- stale 最优先：那时客户端已经很久没收到进展，继续报「已调用 8 个工具」就是在撒谎。
+
+**状态派生只扫一遍尾部**：`scanTurnProgress(items, ...)` 从尾往前扫、遇到
+`item.turnId != turnId` 立即 `break`（**不能**在遇到 `AssistantMessageItem` 时停——
+段级权威帧会夹在工具之间）。页面与面板都调它，`PerfProbe.visitedItems` 的预算
+（`<= 2n`，§6.47）因此不受影响。
+
+#### 测试（7 个文件，共 89 条新增）
+
+| 文件 | 条数 | 钉住 |
+|---|---|---|
+| `packages/spb_domain/test/tool_call_batch_test.dart` | 16 | 阈值 4 vs 5/6、正文打断、跨轮不合并、空 turnId、`[5][5 文件][5]` → 3 行、成员顺序与 id、`locateIdsOf` |
+| `packages/spb_features/test/chat/turn_status_test.dart` | 35 | 状态派生六态 + 单次尾部扫描 + `formatTurnElapsed` |
+| `packages/spb_features/test/chat/group_activity_panel_test.dart` | 12 | 状态行、倒序工具列表、`decisions: null` vs `[]`、stale 不显示 spinner |
+| `packages/spb_features/test/chat/tool_call_batch_card_test.dart` | 11 | 默认展开/收起、摘要文案、展开后逐条还原、用户意图、自动收起后再次自动展开 |
+| `packages/spb_features/test/chat/conversation_page_tool_batch_test.dart` | 9 | 页面真的接了 `groupTimelineForDisplay`、搜索能命中批内成员、底部槽位优先级、`OutboxBar` 不被挤掉 |
+| `apps/spb_desktop/test/router_workbench_test.dart` | +2 | 「动态」tab 始终可见、内容渲染 |
+| `apps/spb_mobile/test/router_activity_test.dart` | 4 | 宽/窄屏入口、`decisions: null` 不渲染 gate 区、弹层随 SSE 更新 |
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 失败用例 |
+|---|---|
+| 页面退回 `groupFileEventsForDisplay`（不折工具批） | 3（批卡 / 展开 / 搜索定位） |
+| `else if (progress.toolCount > 0)` 改成 `false` | 3（含离线队列条共存） |
+| 删掉排队状态槽位 | 1（「还没起跑比在跑更该看」） |
+| 删掉 `didUpdateWidget` 的展开同步 | 1（「跑完的那一批会自己收回去」） |
+| 删掉 `_syncingExpansion` 守卫 | 1（「自动收起之后同一批又出现执行中 → 必须再次自动展开」） |
+| 删掉「用户点过就早退」判据 | 1（⭐「用户手动展开后不得被收回去」——**加固前是假绿**，见下） |
+| 四条 `_bumpActivitySheet()` 全删 | 1（移动端「弹层打开后仍随 SSE 事件更新」） |
+
+#### ⚠️ 本轮自己写出来的两处假绿（诚实记录）
+
+1. **⭐「用户手动展开后，后续推送不得把它收回去」原版是假绿**：它只推了两次
+   **内容完全相同**的批（`hasRunning` 没有翻转），于是把「用户点过就早退」那条判据
+   删掉它照样通过。真正的区分点是**展开→收起的翻转**：用户展开一批已完成的卡 →
+   同批又跑起一个工具 → 再跑完，这一次 `true→false` 才会因为缺判据而把用户正在看
+   的清单关掉。现版本已补上这三步。
+2. **移动端弹层的刷新哨兵「摘掉一条也测不出来」**：控制器每次 `_emit` 都会**重新
+   推送** items / activities / executionStatus 三条流（见 `chat_stream_controller.dart`
+   的 `_emit`），所以四个回调里三个同时触发。实测单独摘掉任一条都仍绿，只有四条
+   全删才红。故那条用例守的是「弹层不会冻住」，**不是**某一条具体 bump——想守到
+   具体某一条，得用只产生 items、不重推 activities 的路径驱动，而那在真实控制器里
+   不存在，不要写那种断言。
+
+#### 有意不做
+
+- **不在归约层合并工具调用**：见上（搜索 / 定位 / 计数都要逐条 item）。
+- **不隐藏工具调用**：折叠 ≠ 删除。展开后逐条还原，工具名、入参、输出全在
+  （§6.47 「隐藏工具调用」那一行已改为「由本节取代」）。
+- **不按「连续同类工具名」分组**（如 5 次 `read_file` 一组）：批的语义是「这一轮
+  连续做了这些事」，按名字分组会把一次构建拆成多张卡，也会让「最近」失去意义。
+- **不给批卡加「全部展开/收起」**：批内每张单卡已有自己的折叠态，再套一层是两套
+  状态互相覆盖。
+- **不在移动端订阅 gate 决策**：那需要新增一条流 + 一块新 UI，而移动端用小屏看
+  gate 明细的诉求没被提出过。`null` 的语义已明确，将来要接只需传值。
+- **不做「动态」新路由**：弹层与页面共享 State（`_items` / `_activities` /
+  `_executionStatus` / `_staleTurnIds`），另起路由会得到另一份并立刻漂移（§6.10
+  同一取向）。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -6134,6 +6305,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 进对话时按需同步（默认关闭；判定命中只提示、不静默下载，见 §6.43）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
+- [x] 工具调用折叠 + 「动态」面板 + 流式进度条（§6.54：展示层批卡、诊断→动态并两端可见、底部状态条报工具进度）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 §6.24）
 - [x] 工程卫生批量（issue #47：`.gitattributes` / Dependabot / action pin / 三项严格模式 / release notes 由 `git log` 生成 / `tools/` 清单守卫，见 §6.26）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
@@ -6192,6 +6364,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~一轮 agent 工作产出几十张工具卡，正文被挤出时间线；同时「它现在跑到哪一步」无处可看~~ | ✅ 已做（§6.54，三件一起）：**A** 连续 ≥5 条工具调用在**展示层**折成一张批卡（`ToolCallBatchRow` + `ToolCallBatchCard`）——归约结果一条不动，故对话内搜索仍能命中批内成员、`locateIdsOf` 仍能定位、计数不变；批内含在飞工具时默认展开、跑完自动收起（`ExpansibleController`，`initiallyExpanded` 只在 `initState` 读一次，写错就是「永远摊着」）、用户点过后以用户为准（`_syncingExpansion` 必须把程序同步与用户点击分开，否则一次自动收起会把卡永久锁成「用户收的」）。**B** 「诊断」改名「动态」（`GroupActivityPanel`）并**去掉发布构建门控**，内容扩为「当前轮次状态 + 工具调用 + gate 决策」，移动端也接（AppBar 图标 / 溢出菜单 → 底部弹层）；入参是**原始状态**（`items`/`activities`/`staleTurnIds`/`executionStatus`/`decisions`）故两端不会在「哪一轮在跑」上漂移，移动端 `decisions: null` 表示「本端不看这块」而非「没有决策」；`showModalBottomSheet` 是独立 route，靠 `_activityTick` 哨兵刷新。**C** 底部状态条在流式期间报「已调用 N 个工具 · 最近 X」，槽位优先级 stale → 排队/重试 → 工具进度 → 活动指示；状态派生只做**一次尾部扫描**（`scanTurnProgress`，`break` 只在 turnId 变化时），`PerfProbe` 预算不受影响。89 条新用例（domain 16 / status 35 / panel 12 / card 11 / page 9 / desktop +2 / mobile 4）。⚠️ **两处自己写出来的假绿**：① ⭐「用户展开后不得被收回去」原版只推两次**内容相同**的批（`hasRunning` 没翻转），删掉判据照样绿——已改成「展开 → 同批又跑起一个工具 → 再跑完」；② 移动端哨兵单独摘掉任一条 `_bumpActivitySheet()` 都仍绿（`_emit` 会重推 items/activities/executionStatus 三条流），只有四条全删才红，故事实用例守的是「弹层不冻住」而不是某一条 bump | §6.54 |
 | ~~独立的「同步页」（`SyncPage` / `/settings/sync`）与设置页大量重复（目录 / 范围 / 媒体开关 / 单文件上限 / 清理各画一份，且选目录行为不一致）~~ | ✅ 已整合（§6.53）：合并为设置页的**两个标签**（通用 / 交付物同步），入口统一`/settings?tab=sync`，旧路径重定向。用「一个 ListView + 两个 `Offstage` 区块」而非 `TabBarView`（切标签不销毁草稿与扫描结果）；同步执行区块的 `localRoot` 取 draft 而三个动作在 `hasUnsavedChanges` 时禁用（执行侧永远读**已保存**设置）；错误与「已保存」提示放在所有 Offstage 外面。桌面 `pickDirectory` 改回走 `pickDirectoryProvider`（就地闭包会让 harness override 失效）。⚠️ 记一次**自己写的假绿**：「重复触发不导航」那条用例在守卫被删后仍通过（go_router 对相同 location 不重建页面），已删除并在 §6.53 记录。 | §6.53 |
 | ~~点「发送」后到响应落地之间时间线什么都不显示（网络慢时像「点了没反应」）~~ | ✅ 已修（§6.50，issue #52）：`send()` 原本 `await` 完 HTTP 才注入回显——「乐观」只覆盖了「不等 SSE」，没覆盖「不等响应」。现回显**提前到请求发出之前**并带 `pending`：在飞时正文半透明 + 「发送中…」+ 隐藏复制入口；成功后 `_settleLocalEcho` **原位转正**（关 pending、落真 turnId，权威帧再按 turnId 原位合并，不出第二个气泡）；失败/入队则 `_removeLocalEcho` 移除（入队有自己的「待发送」条）。三个易写错处：① `turnId` 为空**也要**转正——反馈回执 `feedback_recorded` 不建 turn，此后没有权威帧，提前 return 会让气泡永久转圈；② `echoId` 从「本地标记」升级为**精确定位键**，`local-<微秒>` 同微秒会撞车（outbox 批量投递真实会）→ 加 `_echoSeq`；③ `idx < 0` 时**不得**重新注入（缓冲可能已属另一个对话）。归约按 `payload['pending'] == true` 解析（只认字面 true），故回填/缓存路径不会误显示。domain 10 + reducer 1 + 气泡 3 + 页面接线 1 条用例；8 项反向验证逐条实测——其中「同微秒」那条**曾经假绿**（重构时删掉了直接的 `id1 != id2` 断言，间接断言在碰撞时照样绿） | §6.50 |
 | ~~多轮对话之后，查看大块正文时向下滚动会丢内容~~ | ✅ 已修（§6.48）：**不是渲染问题，是数据被裁掉了**。服务端每个 token 发一条 `transient: true` 的增量事件（`pigo_core.go` 的 `flushEventTransient`），一个长回复上千条 → 几轮正常对话就撞破 `maxBufferEvents = 2000` → `_trimBuffer` 从**头部逐条**丢 → 而 `EventReducer.reduce` 是**全量重算**，丢头部等于把归约输入掐掉一截。三个用户可见后果：① 整轮对话消失（丢的那段含 `user_message` / `start`）；② 回复开头被截掉；③ 流式期间 item 的 `id` 取自「首条幸存增量」的 eventId → `ValueKey(item.id)` 逐条变化 → `AssistantMessageBubble` Element 反复重建 → `gpt_markdown` 的增量解析状态全丢 → 气泡塌成十几像素再重新打字（实测 `12912 → 36` 字符）。修法两道：① **紧邻同类增量入缓冲前合并**（同 turn / 同类型 / 同 session+agent / 两边都恰好一个文本键 → 拼进尾部，**保留首条 id**，归约输出逐字不变）——2600 条增量的回复只占 1 个槽位；② **裁剪改为按整轮丢**（`_turnBoundaryAtOrAfter` 从 excess 往后找轮次边界），绝不切在一轮中间；单轮超限时退回逐条丢 + `warn`（**只记一次**，否则一秒刷满 500 条诊断缓冲）。⚠️ 反向验证踩到的坑：「每轮 100 条」会让按轮裁剪的用例**假绿**（逐条丢 500 条与按轮丢 5 轮结果相同）——改成每轮 **137** 条（与 2000 不对齐）后两种实现才分道。domain 6 条 + page 2 条用例 | §6.48 |
