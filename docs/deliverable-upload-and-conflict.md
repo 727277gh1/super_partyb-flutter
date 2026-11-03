@@ -49,7 +49,7 @@
 本地目录（用户编辑）
    │ ①脏检测：本地内容 SHA256 vs SyncState 记录的 contentHash
    ▼
-SyncPage「回传」入口（列出脏文件，用户逐个或批量确认）
+设置页「交付物同步」标签的「回传改动」（列出脏文件，用户逐个或批量确认）
    │ ②etag 预检：listFiles 取远端当前 etag vs SyncState 下载时 etag
    │    一致 → 直接上传
    │    不一致 → 冲突分支（见 §3）
@@ -236,7 +236,7 @@ agent 在下一 turn 读到 workspace 新内容 → 后续产出照常经 groups
 | 3 | `ChatApi` 增加 `uploadWorkspaceFile`（multipart → ufs-upload 端点） | `spb_api` | Dio mock |
 | 4 | 冲突物化用例：下载 agent 版本 → 双写（目标路径 + `_conflict/`） | `spb_domain` | 用例单测 |
 | 5 | 回传编排：脏列表 → 预检 → 上传/冲突 → 通知消息 | `spb_domain` | 用例单测 |
-| 6 | SyncPage 增加「回传改动」入口 + 进度/冲突 UI | `spb_features` | widget test |
+| 6 | 设置页「交付物同步」标签增加「回传改动」入口 + 进度/冲突 UI（`SyncRunSection`） | `spb_features` | widget test |
 | 7 | 冲突裁决消息模板 + confirmation 接入 | `spb_features`（chat） | widget test |
 
 里程碑：先 1–3（打通「改动能上去」），再 4–7（打通「冲突有裁决」）。

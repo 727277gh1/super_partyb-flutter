@@ -5,9 +5,6 @@ import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_ui/spb_ui.dart';
 
-/// 选择同步目录。返回 null 表示**用户取消**（不是错误）。
-typedef PickSyncDirectory = Future<String?> Function();
-
 /// 触发一轮同步。
 ///
 /// 返回 [SyncReport]（含逐文件失败项）；**整轮**无法进行时抛 [SpbError]
@@ -43,91 +40,89 @@ typedef ScanDirtyFilesAction = Future<LocalDirtyScanResult> Function();
 /// 无法表达「我不管哪些文件，全传」这个意图。
 typedef UploadChangesAction = Future<UploadReport> Function(Set<String> only);
 
-/// 交付物同步页。
+/// 「立即同步 + 本轮结果 + 回传改动」区块。
 ///
-/// ## 页面职责边界
+/// ## 为什么它是「区块」而不是一个独立页面
 ///
-/// - **只负责**渲染与回调：目录展示、进度、结果摘要、失败项、错误；
-/// - **不负责**网络、磁盘、配置持久化——全部由 [pickDirectory] / [runSync]
-///   注入。这样本页可以在无文件系统、无网络、无平台插件的 widget test 里
-///   完整验证，也避免 `spb_features` 为一个页面引入平台依赖。
+/// 它曾经是一个独立的「交付物同步」页（`SyncPage`），与「设置」页分开。那个
+/// 划分带来两个真实问题（用户报障的原点）：
 ///
-/// 这一分工与 [LoginPage] 一致（见 `src/auth/login_page.dart` 的说明）。
+/// 1. **配置与执行分居两处**：目录 / 范围 / 过滤 / 自动同步在设置页，跑同步与
+///    看结果在同步页。用户想「让它自动下载」必须跨两个页面拼出完整因果，
+///    托盘里「同步设置…」与「设置…」两项更是让人分不清去哪。
+/// 2. **同一个目录卡片被画两遍**（两边都能选目录），于是一边改的目录要到
+///    另一边才生效，出现「在同步页选了目录，自动同步却没武装」的缝隙。
+///
+/// 现在它是设置页「交付物同步」标签里的一个区块，与目录 / 范围 / 过滤 /
+/// 自动同步同屏。本组件**不含**目录选择——目录只由设置页那一处负责
+/// （见 [localRoot]）。
+///
+/// ## 分层职责（与 [LoginPage] 一致）
+///
+/// 只负责渲染与交互；网络、磁盘、配置持久化全部由注入的回调承担，因此本组件
+/// 可以在无文件系统、无网络、无平台插件的 widget test 里完整验证。
 ///
 /// ## 同步是「单向」的，回传是「显式」的
 ///
-/// **自动同步**（[runSync]）永远是 UFS → 本地单向，不会上传本地改动——反向
-/// 自动同步会触发服务端 groupsync 的写入回路（emit `agent.file.*` → 可能引发
-/// 渲染推送/重跑，见 `docs/deliverable-upload-and-conflict.md` §4.1）。
+/// **下行同步**（[runSync]，以及自动同步的四条通道）永远是 UFS → 本地单向，
+/// 不会上传本地改动——反向自动同步会触发服务端 groupsync 的写入回路（emit
+/// `agent.file.*` → 可能引发渲染推送/重跑，见
+/// `docs/deliverable-upload-and-conflict.md` §4.1）。
 ///
-/// 但用户确实可能改本地交付物（改完让 agent 接着做），所以本页另提供一条
-/// **显式**的回传通道（[scanDirtyFiles] + [uploadChanges]）：先扫描出本地
-/// 改动，用户**逐文件**勾选后才上传。两者不矛盾——一个是自动且只读，一个是
-/// 手动且逐文件确认。
+/// 但用户确实可能改本地交付物（改完让 agent 接着做），所以这里另提供一条
+/// **显式**的回传通道（[scanDirtyFiles] + [uploadChanges]）：先扫描出本地改动，
+/// 用户**逐文件**勾选后才上传。两者不矛盾——一个是自动且只读，一个是手动且
+/// 逐文件确认。
 ///
 /// ⚠️ 回传成功后文案只说「**已回传**」，不说「已同步」：上传响应不含 etag，
 /// 本地无法 `markSynced`，收口要等下一轮同步把新内容拉回来覆盖本地（见设计
 /// 文档 §2.1③）。说「已同步」会让用户以为本地状态已对齐，而它还没。
-class SyncPage extends StatefulWidget {
-  const SyncPage({
+class SyncRunSection extends StatefulWidget {
+  const SyncRunSection({
     super.key,
-    required this.pickDirectory,
     required this.runSync,
+    required this.localRoot,
+    this.hasUnsavedChanges = false,
     this.scanDirtyFiles,
     this.uploadChanges,
-    this.initialLocalRoot,
-    this.onLocalRootChanged,
-    this.onOpenDirectory,
-    this.title = '交付物同步',
   });
-
-  /// 弹出目录选择器。返回 null = 用户取消。
-  final PickSyncDirectory pickDirectory;
 
   /// 执行一轮同步。
   final RunSyncAction runSync;
 
+  /// 当前**生效**的同步目录（用于「未配目录」的前置拦截与提示）。
+  ///
+  /// 由调用方（设置页）传入——目录卡片也在那里，两处必须是同一个值。
+  /// 真正发起同步时装配层自己从配置读根路径，本组件不碰存储。
+  final String? localRoot;
+
+  /// 设置页存在**未保存**的改动。
+  ///
+  /// ## 为什么要为它专门禁用「立即同步」
+  ///
+  /// 目录 / 范围 / 过滤都是草稿：用户改了目录还没点「保存」时，同步实际会用
+  /// **旧**目录跑。让按钮在这种情况下可用，等于让用户做一次他以为配好了、
+  /// 其实没配好的同步。禁用 + 说明比「让他踩坑」诚实。
+  final bool hasUnsavedChanges;
+
   /// 扫描本地改动。null = 不展示「回传改动」入口。
   ///
-  /// 与 [onOpenDirectory] 同一约定：**装配层没接就不显示**，而不是显示一个
+  /// 与其余可选注入同一约定：**装配层没接就不显示**，而不是显示一个
   /// 点了没反应的按钮。
   final ScanDirtyFilesAction? scanDirtyFiles;
 
   /// 回传选中的本地改动。null = 不展示回传入口。
   ///
-  /// 两个回调必须**成对**提供（只给一个的话页面会在扫描后无处可去，或在
-  /// 上传时无列表可选），故 [_SyncPageState] 以 [scanDirtyFiles] 是否为 null
-  /// 作为整个入口的开关。
+  /// 两个回调必须**成对**提供（只给一个的话区块会在扫描后无处可去，或在
+  /// 上传时无列表可选），故 [_SyncRunSectionState] 以 [scanDirtyFiles] 是否为
+  /// null 作为整个入口的开关。
   final UploadChangesAction? uploadChanges;
 
-  /// 初始同步目录（从配置读入）。null = 尚未选过。
-  final String? initialLocalRoot;
-
-  /// 目录变更回调（供上层持久化）。
-  ///
-  /// ## 为什么变更要回调出去而不是页面自己存
-  ///
-  /// 「换目录必须重置同步状态」是一条**必须与目录写入同事务**的规则
-  /// （否则会出现「目录已改、状态没清」→ 新目录同步显示成功却是空的）。
-  /// 页面不持有存储，故只能把变更交出去，由装配层在同一事务里完成。
-  final ValueChanged<String?>? onLocalRootChanged;
-
-  /// 在文件管理器中打开当前同步目录（桌面端）。null = 不展示该入口
-  /// （移动端无目录概念）。
-  final Future<bool> Function(String path)? onOpenDirectory;
-
-  final String title;
-
   @override
-  State<SyncPage> createState() => _SyncPageState();
+  State<SyncRunSection> createState() => _SyncRunSectionState();
 }
 
-class _SyncPageState extends State<SyncPage> {
-  late String? _localRoot = widget.initialLocalRoot;
-
-  /// 是否正在选择目录（防重复弹窗）。
-  bool _picking = false;
-
+class _SyncRunSectionState extends State<SyncRunSection> {
   /// 是否正在同步。
   bool _syncing = false;
 
@@ -152,78 +147,26 @@ class _SyncPageState extends State<SyncPage> {
   /// 上一轮回传的结果。null = 尚未回传过。
   UploadReport? _uploadReport;
 
-  bool get _busy => _picking || _syncing;
+  bool get _busy => _syncing;
 
-  /// 回传入口是否可用（两个回调必须成对提供，见 [SyncPage.uploadChanges]）。
+  /// 回传入口是否可用（两个回调必须成对提供，见 [SyncRunSection.uploadChanges]）。
   bool get _uploadEnabled =>
       widget.scanDirtyFiles != null && widget.uploadChanges != null;
 
   @override
-  void didUpdateWidget(SyncPage oldWidget) {
+  void didUpdateWidget(SyncRunSection oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 外部改了初始目录（如设置页保存后回读）→ 跟随，但不动本轮结果。
-    if (oldWidget.initialLocalRoot != widget.initialLocalRoot) {
-      _localRoot = widget.initialLocalRoot;
-    }
-  }
-
-  Future<void> _handlePick() async {
-    if (_busy) return;
-    setState(() {
-      _picking = true;
-      _error = null;
-    });
-
-    String? picked;
-    try {
-      picked = await widget.pickDirectory();
-    } catch (e) {
-      SpbLog.warn('选择同步目录时异常', {'error': e.toString()});
-      if (mounted) {
-        setState(() {
-          _picking = false;
-          _error = '无法打开目录选择器：$e';
-        });
-      }
-      return;
-    }
-
-    if (!mounted) return;
-    // null = 用户取消：**不改变现有目录**，也不报错。
-    // 若把取消当成「清空目录」，用户点一下取消就丢了配置。
-    if (picked == null) {
-      setState(() => _picking = false);
-      return;
-    }
-
-    setState(() {
-      _picking = false;
-      _localRoot = picked;
-      // 换目录后旧结果不再有意义（它描述的是旧目录）。
+    // 目录变了（保存了新目录）→ 上一轮结果描述的是旧目录，不再有意义。
+    if (oldWidget.localRoot != widget.localRoot) {
       _report = null;
-    });
-    widget.onLocalRootChanged?.call(picked);
-  }
-
-  /// 在系统文件管理器中打开当前同步目录。失败时用 SnackBar 提示
-  /// （不静默失败——用户点了没反应会以为应用卡住）。
-  Future<void> _handleOpenDirectory() async {
-    final path = _localRoot;
-    final cb = widget.onOpenDirectory;
-    if (path == null || path.isEmpty || cb == null) return;
-    final ok = await cb(path);
-    if (!mounted) return;
-    if (!ok) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('无法打开目录，请检查路径是否存在')));
     }
   }
 
   /// 扫描本地改动（回传入口第一步）。
   ///
-  /// ## 为什么扫描不需要选目录也能发起
+  /// ## 为什么扫描不需要目录也能发起
   ///
-  /// 目录只是本地根路径的展示/配置，扫描回调闭包里已持有真实根（装配层从
+  /// 目录只是本地根路径的展示/配置，扫描回调的闭包里已持有真实根（装配层从
   /// 配置读）。这里只在**未配回调**时拦（按钮本就不会出现）。
   Future<void> _handleScanDirty() async {
     if (_busy || _scanning || _uploading) return;
@@ -304,9 +247,10 @@ class _SyncPageState extends State<SyncPage> {
   }
 
   Future<void> _handleSync() async {
-    if (_busy) return;
+    if (_busy || widget.hasUnsavedChanges) return;
 
-    if (_localRoot == null || _localRoot!.isEmpty) {
+    final root = widget.localRoot;
+    if (root == null || root.trim().isEmpty) {
       // 在发起前拦住：否则会拿到一个「未指定目录」的底层错误，
       // 而用户需要知道的是「先去选目录」。
       setState(() => _error = '请先选择同步目录');
@@ -343,142 +287,64 @@ class _SyncPageState extends State<SyncPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
-      body: ListView(
-        padding: SpbSpacing.pagePadding,
-        children: [
-          _DirectoryCard(
-            localRoot: _localRoot,
-            busy: _busy,
-            picking: _picking,
-            onPick: _handlePick,
-          ),
-          if (widget.onOpenDirectory != null &&
-              _localRoot != null &&
-              _localRoot!.isNotEmpty) ...[
-            const SizedBox(height: SpbSpacing.sm),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                key: const ValueKey('sync-open-directory'),
-                onPressed: _handleOpenDirectory,
-                icon: const Icon(Icons.folder_open_outlined),
-                label: const Text('打开目录'),
-              ),
-            ),
-          ],
-          const SizedBox(height: SpbSpacing.lg),
-          FilledButton.icon(
-            key: const ValueKey('sync-start-button'),
-            onPressed: _busy ? null : _handleSync,
-            icon: _syncing
-                ? const SizedBox(
-                    width: SpbSpacing.lg,
-                    height: SpbSpacing.lg,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.cloud_download_outlined),
-            label: Text(_syncing ? '同步中…' : '立即同步'),
-          ),
-          const SizedBox(height: SpbSpacing.sm),
-          Text(
-            // 两句话把两条通道说清：自动同步不回传（防「我改的怎么没了」），
-            // 回传是显式动作（防用户以为必须手动同步才能让 agent 感知）。
-            '自动同步不会上传本地改动；可用「回传改动」把选中的修改显式交给 agent。',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: SpbSpacing.lg),
-            ErrorBanner(key: const ValueKey('sync-error'), message: _error!),
-          ],
-          if (_report != null) ...[
-            const SizedBox(height: SpbSpacing.lg),
-            _ReportCard(report: _report!),
-          ],
-          if (_uploadEnabled) ...[
-            const SizedBox(height: SpbSpacing.lg),
-            _UploadSection(
-              scan: _dirtyScan,
-              scanning: _scanning,
-              uploading: _uploading,
-              selected: _selected,
-              report: _uploadReport,
-              onScan: _handleScanDirty,
-              onUpload: _handleUpload,
-              onToggle: _toggleSelected,
-              disabled: _busy,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-/// 同步目录卡片。
-class _DirectoryCard extends StatelessWidget {
-  const _DirectoryCard({
-    required this.localRoot,
-    required this.busy,
-    required this.picking,
-    required this.onPick,
-  });
-
-  final String? localRoot;
-  final bool busy;
-  final bool picking;
-  final VoidCallback onPick;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final hasRoot = localRoot != null && localRoot!.isNotEmpty;
+    final scheme = Theme.of(context).colorScheme;
 
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: SpbSpacing.cardPadding,
-        child: Row(
-          children: [
-            Icon(
-              hasRoot ? Icons.folder_outlined : Icons.folder_off_outlined,
-              color: hasRoot ? scheme.primary : scheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: SpbSpacing.md),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('同步目录', style: textTheme.labelMedium),
-                  const SizedBox(height: SpbSpacing.xxs),
-                  Text(
-                    // 未选目录时给出**行动指引**而非「未知」：
-                    // 「未知」会让用户以为出错了，实际只是还没配。
-                    hasRoot ? localRoot! : '尚未选择（点右侧按钮选择）',
-                    key: const ValueKey('sync-local-root'),
-                    style: textTheme.bodyMedium?.copyWith(
-                      color: hasRoot ? null : scheme.onSurfaceVariant,
-                    ),
-                    // 路径可能很长（嵌套很深），必须省略而不是溢出。
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 2,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            TextButton(
-              key: const ValueKey('sync-pick-directory'),
-              onPressed: busy ? null : onPick,
-              child: Text(picking ? '选择中…' : '选择目录'),
-            ),
-          ],
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        FilledButton.icon(
+          key: const ValueKey('sync-start-button'),
+          // 有未保存改动时也禁用：见 [SyncRunSection.hasUnsavedChanges]。
+          onPressed: (_busy || widget.hasUnsavedChanges) ? null : _handleSync,
+          icon: _syncing
+              ? const SizedBox(
+                  width: SpbSpacing.lg,
+                  height: SpbSpacing.lg,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.cloud_download_outlined),
+          label: Text(_syncing ? '同步中…' : '立即同步'),
         ),
-      ),
+        const SizedBox(height: SpbSpacing.xs),
+        Text(
+          // 两句话把两条通道说清：自动同步不回传（防「我改的怎么没了」），
+          // 回传是显式动作（防用户以为必须手动同步才能让 agent 感知）。
+          '手动与自动的同步都只从云端拉取到本地；本地改动要用「回传改动」显式交给 agent。',
+          style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        if (widget.hasUnsavedChanges) ...[
+          const SizedBox(height: SpbSpacing.xs),
+          Text(
+            // 与按钮禁用配对：不说明原因，用户只会看到「按钮是灰的」。
+            '上方设置有未保存的改动，先点右上角「保存」再同步（否则本轮仍用旧配置）。',
+            key: const ValueKey('sync-unsaved-hint'),
+            style: textTheme.bodySmall?.copyWith(color: scheme.error),
+          ),
+        ],
+        if (_error != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          ErrorBanner(key: const ValueKey('sync-error'), message: _error!),
+        ],
+        if (_report != null) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          _ReportCard(report: _report!),
+        ],
+        if (_uploadEnabled) ...[
+          const SizedBox(height: SpbSpacing.lg),
+          _UploadSection(
+            scan: _dirtyScan,
+            scanning: _scanning,
+            uploading: _uploading,
+            selected: _selected,
+            report: _uploadReport,
+            onScan: _handleScanDirty,
+            onUpload: _handleUpload,
+            onToggle: _toggleSelected,
+            disabled: _busy,
+          ),
+        ],
+      ],
     );
   }
 }
@@ -619,15 +485,13 @@ class _Stat extends StatelessWidget {
   }
 }
 
-/// 错误提示条。
-
 /// 回传改动区块：扫描入口 + 脏文件勾选列表 + 提交按钮 + 结果卡片。
 ///
 /// ## 为什么是一个「区块」而不是散在页面里
 ///
 /// 回传有**两步**（扫描 → 勾选 → 提交），每步有自己的进行中状态；散写的话
 /// 「扫描中按钮禁不禁用」「报告该不该显示」会散成六个条件分支。收进一个
-/// widget 后，[SyncPage] 的 build 只多一个 `if (_uploadEnabled)`。
+/// widget 后，[SyncRunSection] 的 build 只多一个 `if (_uploadEnabled)`。
 class _UploadSection extends StatelessWidget {
   const _UploadSection({
     required this.scan,
@@ -650,7 +514,7 @@ class _UploadSection extends StatelessWidget {
   final VoidCallback onUpload;
   final void Function(String relPath, bool value) onToggle;
 
-  /// 下行同步/选目录进行中时也禁用回传（同一个本地目录，避免并发读写混淆）。
+  /// 下行同步进行中时也禁用回传（同一个本地目录，避免并发读写混淆）。
   final bool disabled;
 
   @override

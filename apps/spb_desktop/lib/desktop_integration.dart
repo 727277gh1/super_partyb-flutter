@@ -30,15 +30,14 @@ class TrayActionIds {
   /// 在文件管理器里打开当前同步目录。
   static const openSyncDir = 'tray.openSyncDir';
 
-  /// 跳到同步设置页（选目录 / 范围 / 媒体开关）。
+  /// 跳到设置页的「交付物同步」标签（`/settings?tab=sync`）。
   static const syncSettings = 'tray.syncSettings';
 
-  /// 跳到**全局设置页**（`/settings`：同步目录 / 范围 / 过滤 / 外观 /
-  /// 个人偏好 / 导出诊断日志）。
+  /// 跳到**设置页首个标签**（`/settings`：外观 / 通知 / 个人偏好 /
+  /// 桌面集成 / 账号；「交付物同步」配置与执行已并入同一页的第二个标签）。
   ///
-  /// 与 [syncSettings] 是**两个不同目标**：后者直达 `/settings/sync`
-  /// （高频的「跑一轮同步」），前者是配置入口。桌面端此前只有后者，
-  /// 于是 `/settings` 在界面上不可达（见 AGENTS.md §6.11）。
+  /// 与 [syncSettings] 是**两个不同目标**：后者直达同步标签，前者是通用
+  /// 配置入口（AGENTS.md §6.11）。
   static const settings = 'tray.settings';
 
   static const quit = 'tray.quit';
@@ -278,12 +277,13 @@ class DesktopIntegration {
         // 会落到用户主目录——看起来像「功能坏了」，而不是「还没配」。
         enabled: onOpenSyncDirectory != null && syncReady,
       ),
-      // 「同步设置…」始终可用：它正是**配置入口**，禁用会让未配置的用户
-      // 无法完成配置（死锁）。
-      const TrayMenuItem(id: TrayActionIds.syncSettings, label: '同步设置…'),
-      // 全局设置（`/settings`）：与上面那项是**不同目标**，不是重复。
-      // 上面只到 `/settings/sync`（跑一轮同步 + 目录），而同步目录 / 范围 /
-      // 过滤 / 外观 / 个人偏好 / 导出诊断日志都在 `/settings` 首页。
+      // 「交付物同步…」与「设置…」都始终可用：它们正是**配置入口**，
+      // 禁用会让未配置的用户无法完成配置（死锁）。
+      const TrayMenuItem(id: TrayActionIds.syncSettings, label: '交付物同步…'),
+      // 通用设置（`/settings` 首个标签）：与上面那项是**不同目标**，不是重复。
+      // 上面直达同步标签（立即同步 + 回传），而外观 / 通知 / 个人偏好 /
+      // 桌面集成 / 账号在首个标签；同步的配置（目录 / 范围 / 过滤 / 自动）
+      // 也是同一页里的第二个标签，从任一侧都能切过去。
       //
       // 同样**始终可用**：理由同上（它是配置入口）。
       const TrayMenuItem(id: TrayActionIds.settings, label: '设置…'),
@@ -325,9 +325,9 @@ class DesktopIntegration {
       // ## 为什么不走 `showWindow(WindowRole.settings)`
       //
       // `WindowRole` 只有 main / settings / quickCapture，没有 sync 这个角色
-      // （同步设置是 `/settings/sync` 这个**子页面**，不是独立窗口）。用
+      // （同步标签是设置页里的一个 tab，不是独立窗口）。用
       // `showWindow(settings)` 只会落到设置页的首个 tab，用户还得自己再点
-      // 一次「同步」——托盘项的标签承诺的是直达。
+      // 一次「交付物同步」——托盘项的标签承诺的是直达。
       unawaited(_openSyncSettings());
     });
     tray.registerTrayAction(TrayActionIds.settings, () {
@@ -375,7 +375,7 @@ class DesktopIntegration {
     tray.setHideOnClose(tray.trayAvailable);
   }
 
-  /// 跳到同步设置页。
+  /// 跳到设置页的「交付物同步」标签。
   ///
   /// ## 为什么必须先 `leaveOverlay()`
   ///
@@ -386,27 +386,38 @@ class DesktopIntegration {
   Future<void> _openSyncSettings() async {
     await _exitOverlayWindow();
 
-    // 已在同步设置页时不重复导航：`go` 到同一路径会重建页面，清掉用户正在
-    // 编辑的表单草稿（与 [_navigateToRole] 的守卫同一理由）。
-    if (_router.state.uri.path == SpbRoutes.sync) {
-      SpbLog.debug('已在同步设置页，跳过导航');
+    // 已在同步标签时不再 `go`：目标 location 与当前相同，多余的导航通告对
+    // 用户没有任何可见收益。⚠️ **不要**把理由写成「否则会清掉草稿」——实测
+    // `go()` 到 **相同** location 时 go_router 本身就不重建页面（同一
+    // location 再 go 一次 build 次数不变，query 变了才 +1）。真正的重点是
+    // 判定**必须看 query**：`/settings`（通用标签）是另一个目标，
+    // 把它当成「已经在同步标签」会让托盘项变成死按钮。
+    final uri = _router.state.uri;
+    if (uri.path == SpbRoutes.settings &&
+        uri.queryParameters['tab'] == 'sync') {
+      SpbLog.debug('已在同步标签，跳过导航');
       return;
     }
 
-    SpbLog.debug('托盘触发导航', {'path': SpbRoutes.sync});
-    _router.go(SpbRoutes.sync);
+    SpbLog.debug('托盘触发导航', {'path': SpbRoutes.settingsSyncTab});
+    _router.go(SpbRoutes.settingsSyncTab);
   }
 
   /// 托盘「设置…」：回到全局设置页（`/settings`）。
   ///
-  /// 与 [_openSyncSettings] 是**两个不同目标**：后者直达 `/settings/sync`
-  /// （跑一轮同步 + 目录），本方法回到 `/settings` 首页（范围 / 过滤 / 外观 /
-  /// 个人偏好 / 导出诊断日志）。
+  /// 与 [_openSyncSettings] 是**两个不同目标**：后者直达
+  /// `/settings?tab=sync`（同步配置 + 跑一轮同步 + 回传），本方法回到
+  /// `/settings` 首个标签（外观 / 通知 / 个人偏好 / 桌面集成 / 导出诊断日志）。
   Future<void> _openSettings() async {
     await _exitOverlayWindow();
 
-    if (_router.state.uri.path == SpbRoutes.settings) {
-      SpbLog.debug('已在设置页，跳过导航');
+    // 与 [_openSyncSettings] 同理：**不能只比 path**。两个标签共用 `/settings`，
+    // 只比 path 会把「已在同步标签」当成「已在设置页」，静默地吞掉一次
+    // 应该发生的「同步标签 → 通用标签」切换。
+    final uri = _router.state.uri;
+    if (uri.path == SpbRoutes.settings &&
+        uri.queryParameters['tab'] != 'sync') {
+      SpbLog.debug('已在设置页首个标签，跳过导航');
       return;
     }
 

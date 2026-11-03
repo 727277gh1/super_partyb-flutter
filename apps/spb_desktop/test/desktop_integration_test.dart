@@ -167,8 +167,9 @@ GoRouter _testRouter({String initialLocation = SpbRoutes.home}) {
     initialLocation: initialLocation,
     routes: [
       GoRoute(path: SpbRoutes.home, builder: (_, _) => stub('home')),
+      // 同步标签与通用标签**是同一个路由**（`/settings?tab=sync`），故只需
+      // 一条 stub；导航是否落到同步标签靠断言 query 参数。
       GoRoute(path: SpbRoutes.settings, builder: (_, _) => stub('settings')),
-      GoRoute(path: SpbRoutes.sync, builder: (_, _) => stub('sync')),
       GoRoute(path: SpbRoutes.overlay, builder: (_, _) => stub('overlay')),
     ],
   );
@@ -255,7 +256,7 @@ void main() {
 
       await tester.pump();
       // 回调被覆盖三次仍是同一个（无重复注册的副作用）。
-      // 7 = 显示 / 快速输入 / 立即同步 / 打开同步目录 / 同步设置 / 设置 / 退出。
+      // 7 = 显示 / 快速输入 / 立即同步 / 打开同步目录 / 交付物同步 / 设置 / 退出。
       expect(caps.showCallback, isNotNull);
       expect(caps.trayActions, hasLength(7));
     });
@@ -588,7 +589,7 @@ void main() {
 
       expect(item(TrayActionIds.syncNow).enabled, isFalse);
       expect(item(TrayActionIds.openSyncDir).enabled, isFalse);
-      // 「同步设置」是配置入口，禁用会让未配置的用户无法完成配置（死锁）。
+      // 「交付物同步」是配置入口，禁用会让未配置的用户无法完成配置（死锁）。
       expect(
         item(TrayActionIds.syncSettings).enabled,
         isTrue,
@@ -670,7 +671,7 @@ void main() {
       expect(calls, 1);
     });
 
-    testWidgets('触发「同步设置…」→ 导航到 SpbRoutes.sync', (tester) async {
+    testWidgets('触发「交付物同步…」→ 导航到设置页的同步标签', (tester) async {
       final caps = _WiringCapabilities();
       final router = _testRouter();
       addTearDown(router.dispose);
@@ -680,11 +681,14 @@ void main() {
       caps.trayActions[TrayActionIds.syncSettings]!();
       await tester.pumpAndSettle();
 
-      expect(router.state.uri.path, SpbRoutes.sync);
-      expect(find.text('sync'), findsOneWidget);
+      // 落点是**设置页的同步标签**（path 仍是 /settings，靠 query 区分）。
+      // 只看 path 会把这与「设置…」当成同一个目标。
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(router.state.uri.queryParameters['tab'], 'sync');
+      expect(find.text('settings'), findsOneWidget);
     });
 
-    testWidgets('从悬浮窗点「同步设置…」→ 先还原窗口再导航', (tester) async {
+    testWidgets('从悬浮窗点「交付物同步…」→ 先还原窗口再导航', (tester) async {
       final caps = _WiringCapabilities();
       final router = _testRouter();
       addTearDown(router.dispose);
@@ -698,7 +702,8 @@ void main() {
       caps.trayActions[TrayActionIds.syncSettings]!();
       await tester.pumpAndSettle();
 
-      expect(router.state.uri.path, SpbRoutes.sync);
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(router.state.uri.queryParameters['tab'], 'sync');
       expect(
         caps.isOverlayModeActive,
         isFalse,
@@ -706,47 +711,59 @@ void main() {
       );
     });
 
-    testWidgets('已在同步设置页时重复触发 → 不重复导航（避免清掉草稿）', (tester) async {
+    testWidgets('已在通用标签时触发「交付物同步…」→ 必须真的切过去', (tester) async {
+      // 这条钉的是**守卫不能过宽**：`_openSyncSettings` 若只比 path（不查
+      // query），「已在设置页」就会把「通用标签 → 同步标签」也当成「已经在
+      // 那儿」，托盘项成了死按钮。
+      //
+      // 反面（已在同步标签时重复触发）**不写成用例**：`go()` 到 **相同**
+      // location 时 go_router 本身就不重建页面（实测：同一 location 再 go
+      // 一次，页面 build 次数不变；query 变化才 +1）。故那里加一条
+      // 「不重复导航」的断言会是**假绿**——把守卫删掉它也照样通过。
+      final router = _testRouter(initialLocation: SpbRoutes.settings);
+      addTearDown(router.dispose);
       final caps = _WiringCapabilities();
-      final router = _testRouter(initialLocation: SpbRoutes.sync);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(router.state.uri.queryParameters['tab'], isNull);
+
+      caps.trayActions[TrayActionIds.syncSettings]!();
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(router.state.uri.queryParameters['tab'], 'sync');
+    });
+
+    testWidgets('已在同步标签时点「设置…」→ 切回首个标签（不能被吞掉）', (tester) async {
+      // 与上一条对称的坑：两个标签共用 `/settings`，守卫只比 path 的话，
+      // 「设置…」在同步标签里就成了死按钮——外观 / 个人偏好依然不可达。
+      final caps = _WiringCapabilities();
+      final router = _testRouter(initialLocation: SpbRoutes.settingsSyncTab);
       addTearDown(router.dispose);
       DesktopIntegration(capabilities: caps, router: router).attach();
 
-      var builds = 0;
-      final countingRouter = GoRouter(
-        initialLocation: SpbRoutes.sync,
-        routes: [
-          GoRoute(
-            path: SpbRoutes.sync,
-            builder: (_, _) => _CountingPage(onBuild: () => builds++),
-          ),
-        ],
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      expect(router.state.uri.queryParameters['tab'], 'sync');
+
+      caps.trayActions[TrayActionIds.settings]!();
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, SpbRoutes.settings);
+      expect(
+        router.state.uri.queryParameters.containsKey('tab'),
+        isFalse,
+        reason: '必须真的导航到首个标签',
       );
-      addTearDown(countingRouter.dispose);
-
-      final countingCaps = _WiringCapabilities();
-      DesktopIntegration(
-        capabilities: countingCaps,
-        router: countingRouter,
-      ).attach();
-
-      await tester.pumpWidget(MaterialApp.router(routerConfig: countingRouter));
-      await tester.pumpAndSettle();
-      final before = builds;
-
-      countingCaps.trayActions[TrayActionIds.syncSettings]!();
-      await tester.pumpAndSettle();
-
-      expect(countingRouter.state.uri.path, SpbRoutes.sync);
-      expect(builds, before, reason: '同路径重复 go 会重建页面并清空表单草稿');
     });
 
-    testWidgets('触发「设置…」→ 导航到 SpbRoutes.settings（不是 /settings/sync）', (
-      tester,
-    ) async {
-      // 托盘里两项容易混：「同步设置…」直达 `/settings/sync`（跑一轮同步 +
-      // 目录），而「设置…」是 `/settings` 首页（范围 / 过滤 / 外观 / 个人偏好 /
-      // 导出诊断日志）。弄反的话后者那些配置依然不可达。
+    testWidgets('触发「设置…」→ 导航到 /settings 首个标签（不带 tab 参数）', (tester) async {
+      // 托盘里两项容易混：「交付物同步…」到 `/settings?tab=sync`（同步配置 +
+      // 立即同步 + 回传），而「设置…」是 `/settings` 首个标签（外观 / 通知 /
+      // 个人偏好 / 桌面集成 / 账号）。弄反的话后者那些配置依然不可达。
       final caps = _WiringCapabilities();
       final router = _testRouter();
       addTearDown(router.dispose);
@@ -757,6 +774,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(router.state.uri.path, SpbRoutes.settings);
+      expect(
+        router.state.uri.queryParameters.containsKey('tab'),
+        isFalse,
+        reason: '「设置…」应落在首个标签，不能带 tab=sync',
+      );
       expect(find.text('settings'), findsOneWidget);
     });
 

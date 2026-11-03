@@ -1093,9 +1093,9 @@ final syncLocalRootProvider = FutureProvider<String?>((ref) async {
 
 /// 目录选择器：移动端**没有**该能力，恒返回 null（用户取消）。
 ///
-/// 返回 null 而非抛异常：同步页把 null 当「用户取消」处理，于是按钮点了
+/// 返回 null 而非抛异常：设置页把 null 当「用户取消」处理，于是按钮点了
 /// 没有副作用——比抛异常后弹一个用户无法解决的错误要好。
-final pickDirectoryProvider = Provider<PickSyncDirectory>((ref) {
+final pickDirectoryProvider = Provider<PickSettingsDirectory>((ref) {
   return ({String? title}) async => null;
 });
 
@@ -1158,17 +1158,6 @@ final runSyncActionProvider = Provider<RunSyncAction>((ref) {
       sinceDays: settings.sinceDays,
     );
   };
-});
-
-/// 保存同步目录。
-///
-/// 移动端目录是系统分配的，用户改不了，故这是**空操作**（返回 false =
-/// 未发生重置）。保留同名 Provider 是为了让同步页的 `onLocalRootChanged`
-/// 回调在两端都能无条件接线，不必在页面里判平台。
-final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
-  ref,
-) {
-  return (String? root) async => false;
 });
 
 // ==================== 交付物浏览 ====================

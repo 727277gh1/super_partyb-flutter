@@ -21,10 +21,10 @@ import 'support/desktop_harness.dart';
 /// ⚠️ 本文件由 `widget_test.dart` 按顶层用例边界拆出（issue #48）——
 /// 纯移动，未改动任何断言。共享夹具见 `support/desktop_harness.dart`。
 void main() {
-  testWidgets('/settings 渲染完整设置页（含同步入口与各配置项）', (tester) async {
+  testWidgets('/settings 渲染首个标签，并能切到「交付物同步」标签', (tester) async {
     // 设置页是 ListView，**惰性构建**：屏幕外的条目在树里根本不存在。
-    // 新增「外观」区块后页面变高，默认 800×600 下底部的清理入口已落到屏幕外
-    // → find 不到（与同文件其它设置页用例同一处理）。
+    // 默认 800×600 下底部的条目已落到屏幕外 → find 不到（与同文件其它用例
+    // 同一处理）。
     tester.view.physicalSize = const Size(1000, 2400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(() {
@@ -38,12 +38,28 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('设置'), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-tabs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-tab-sync')), findsOneWidget);
+
+    // 首个标签：外观 / 桌面集成 / 账号。
+    expect(find.byKey(const ValueKey('settings-appearance')), findsOneWidget);
+    // 同步配置在**另一个标签**里：默认 finder 会跳过 offstage，故此处找不到
+    // ——这条断言反过来钉住「两个标签的内容确实分开了」。
     expect(
-      find.byKey(const ValueKey('settings-sync-entry')),
-      findsOneWidget,
-      reason: '桌面端的核心差异价值是交付物同步，必须有入口',
+      find.byKey(const ValueKey('settings-pick-directory')),
+      findsNothing,
+      reason: '同步配置属于同步标签，不该在通用标签里同时出现',
     );
-    // 占位页时代只有「待接入」文案；现在是可操作的配置项。
+
+    await tester.tap(find.byKey(const ValueKey('settings-tab-sync')));
+    await tester.pumpAndSettle();
+
+    // 同步标签：通道说明 + 目录 / 范围 / 过滤 / 自动同步 + 立即同步 + 回传。
+    expect(
+      find.byKey(const ValueKey('settings-sync-channels')),
+      findsOneWidget,
+      reason: '桌面端的核心差异价值是交付物同步，必须能在这里配置与执行',
+    );
     expect(
       find.byKey(const ValueKey('settings-pick-directory')),
       findsOneWidget,
@@ -59,18 +75,28 @@ void main() {
     );
     expect(find.byKey(const ValueKey('settings-since-days')), findsOneWidget);
     expect(find.byKey(const ValueKey('settings-prune')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync-start-button')), findsOneWidget);
   });
 
-  testWidgets('设置页展示从注入读到的目录', (tester) async {
+  testWidgets('同步标签展示从注入读到的目录', (tester) async {
     final h = await pumpApp(tester, syncLocalRoot: '/home/u/out');
 
-    h.router.go(SpbRoutes.settings);
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
 
     expect(find.text('/home/u/out'), findsOneWidget);
   });
 
   testWidgets('设置页保存走注入的 saveSyncSettings（整份提交）', (tester) async {
+    // 同步标签内容较多，媒体开关在默认 800×600 下落在屏幕外（tap 会
+    // 静默未命中 → 草稿未变 → 连「保存」按钮都不出现）。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
     SyncSettings? saved;
     final h = await pumpApp(
       tester,
@@ -78,7 +104,8 @@ void main() {
       saveSyncSettings: (s) async => saved = s,
     );
 
-    h.router.go(SpbRoutes.settings);
+    // 媒体开关住在「交付物同步」标签里（不在通用标签）。
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('settings-include-media')));
@@ -226,30 +253,34 @@ void main() {
     expect(find.text('代码助手'), findsWidgets);
   });
 
-  testWidgets('从设置页进入 /settings/sync 并渲染同步页', (tester) async {
+  testWidgets('旧 /settings/sync 重定向到同步标签（不炸历史入口）', (tester) async {
+    // 跑同步的区块已并入设置页的「交付物同步」标签，旧路径保留为兼容重定向
+    // ——旧快捷方式 / 旧文档里的链接不该 404 或落到通用标签。
     final h = await pumpApp(tester);
 
-    h.router.go(SpbRoutes.settings);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('settings-sync-entry')));
+    h.router.go(SpbRoutes.sync);
     await tester.pumpAndSettle();
 
-    expect(h.router.state.matchedLocation, SpbRoutes.sync);
+    expect(h.router.state.uri.path, SpbRoutes.settings);
+    expect(h.router.state.uri.queryParameters['tab'], 'sync');
     expect(find.text('交付物同步'), findsWidgets);
-    expect(find.byKey(const ValueKey('sync-pick-directory')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-pick-directory')),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('sync-start-button')), findsOneWidget);
   });
 
-  testWidgets('同步页展示注入的初始目录（从数据库绑定读入）', (tester) async {
+  testWidgets('同步标签展示注入的初始目录（从数据库绑定读入）', (tester) async {
     final h = await pumpApp(tester, syncLocalRoot: '/home/u/deliverables');
 
-    h.router.go(SpbRoutes.sync);
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
 
     expect(find.text('/home/u/deliverables'), findsOneWidget);
   });
 
-  testWidgets('同步页点「立即同步」调用注入的 runSync 并展示结果', (tester) async {
+  testWidgets('同步标签点「立即同步」调用注入的 runSync 并展示结果', (tester) async {
     var calls = 0;
     final h = await pumpApp(
       tester,
@@ -264,9 +295,14 @@ void main() {
       },
     );
 
-    h.router.go(SpbRoutes.sync);
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('sync-start-button')));
+
+    // 同步区块在设置页列表的末尾，需先滚入视口（否则 tap 静默未命中）。
+    final start = find.byKey(const ValueKey('sync-start-button'));
+    await tester.ensureVisible(start);
+    await tester.pumpAndSettle();
+    await tester.tap(start);
     await tester.pumpAndSettle();
 
     expect(calls, 1);
@@ -275,21 +311,67 @@ void main() {
     expect(find.textContaining('a.md'), findsOneWidget);
   });
 
-  testWidgets('同步页选择目录后写入数据库绑定（换目录清状态）', (tester) async {
-    // 端到端验证「目录变更 → bindLocalRoot 落库」这条链路，
-    // 而不只是「页面上显示了新路径」。
+  testWidgets('换目录后未保存时禁用「立即同步」（同步用已保存目录）', (tester) async {
+    // 关键 UX 陷阱：同步读的是**已保存**配置。草稿未保存时让按钮可点，用户
+    // 会以为自己在同步新目录，其实同步的是旧目录（或没有目录）。
     final h = await pumpApp(
       tester,
+      syncLocalRoot: '/home/u/old-root',
       pickDirectory: ({String? title}) async => '/home/u/new-root',
     );
 
-    h.router.go(SpbRoutes.sync);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('sync-pick-directory')));
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
 
-    final store = h.container.read(syncStateStoreProvider);
-    expect(await store.boundLocalRoot(), '/home/u/new-root');
+    final start = find.byKey(const ValueKey('sync-start-button'));
+    await tester.ensureVisible(start);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<FilledButton>(start).onPressed,
+      isNotNull,
+      reason: '未改动时按钮应可点',
+    );
+
+    final pick = find.byKey(const ValueKey('settings-pick-directory'));
+    await tester.ensureVisible(pick);
+    await tester.pumpAndSettle();
+    await tester.tap(pick);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<FilledButton>(start).onPressed,
+      isNull,
+      reason: '换了目录但没保存时不能同步（会用旧目录）',
+    );
+    expect(find.byKey(const ValueKey('sync-unsaved-hint')), findsOneWidget);
+  });
+
+  testWidgets('选择目录后保存，注入的 saveSyncSettings 收到新目录', (tester) async {
+    // 端到端验证「目录变更 → 保存提交」这条链路（目录的唯一写入路径是设置页
+    // 保存：`saveSyncSettingsProvider` 内部 bindLocalRoot + 清状态）。
+    SyncSettings? saved;
+    final h = await pumpApp(
+      tester,
+      syncLocalRoot: '/home/u/old-root',
+      pickDirectory: ({String? title}) async => '/home/u/new-root',
+      saveSyncSettings: (s) async => saved = s,
+    );
+
+    h.router.go(SpbRoutes.settingsSyncTab);
+    await tester.pumpAndSettle();
+
+    final pick = find.byKey(const ValueKey('settings-pick-directory'));
+    await tester.ensureVisible(pick);
+    await tester.pumpAndSettle();
+    await tester.tap(pick);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(saved?.localRoot, '/home/u/new-root');
+    // 保存后草稿消除 → 同步按钮恢复可点。
+    expect(find.byKey(const ValueKey('sync-unsaved-hint')), findsNothing);
   });
 
   testWidgets('注入的 desktopCapabilitiesProvider 生效（空实现）', (tester) async {
@@ -568,8 +650,8 @@ void main() {
   });
 
   group('自动同步（桌面端）', () {
-    /// 设置页是惰性 `ListView`，「自动同步」区块在「过滤与范围」之后，
-    /// 默认 800×600 下落在屏幕外。
+    /// 设置页是惰性 `ListView`，「自动同步」区块在「交付物同步」标签的
+    /// 「过滤与范围」之后，默认 800×600 下落在屏幕外。
     void useTallWindow(WidgetTester tester) {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1.0;
@@ -583,7 +665,7 @@ void main() {
       useTallWindow(tester);
       final h = await pumpApp(tester, syncLocalRoot: '/home/u/out');
 
-      h.router.go(SpbRoutes.settings);
+      h.router.go(SpbRoutes.settingsSyncTab);
       await tester.pumpAndSettle();
 
       expect(
@@ -607,7 +689,7 @@ void main() {
         ),
       );
 
-      h.router.go(SpbRoutes.settings);
+      h.router.go(SpbRoutes.settingsSyncTab);
       await tester.pumpAndSettle();
 
       final tile = tester.widget<SwitchListTile>(
@@ -626,7 +708,7 @@ void main() {
         saveSyncSettings: (s) async => saved = s,
       );
 
-      h.router.go(SpbRoutes.settings);
+      h.router.go(SpbRoutes.settingsSyncTab);
       await tester.pumpAndSettle();
 
       await tester.tap(
@@ -659,7 +741,7 @@ void main() {
         loadSyncSettings: () async => stored,
       );
 
-      h.router.go(SpbRoutes.settings);
+      h.router.go(SpbRoutes.settingsSyncTab);
       await tester.pumpAndSettle();
 
       // 打开周期同步（默认「关闭」），再保存。

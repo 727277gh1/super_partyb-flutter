@@ -136,7 +136,12 @@ void main() {
     });
 
     test('合法站内路径原样返回', () {
-      for (final path in ['/settings', '/chat/grp_1', '/settings/sync']) {
+      for (final path in [
+        '/settings',
+        '/chat/grp_1',
+        '/settings/sync',
+        '/settings?tab=sync',
+      ]) {
         expect(
           resolve(authenticated: true, matched: SpbRoutes.login, from: path),
           path,

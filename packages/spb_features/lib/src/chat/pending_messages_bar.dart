@@ -37,7 +37,7 @@ typedef UndoPendingMessage = Future<void> Function(String messageId);
 ///
 /// ## 为什么页面不自己调 API
 ///
-/// 与 `SearchPage` / `SyncPage` 同构：渲染与交互在本包，网络实现由 app 注入。
+/// 与 `SearchPage` / `SyncRunSection` 同构：渲染与交互在本包，网络实现由 app 注入。
 /// 这样本组件可以在 widget test 里完整验证（含 409 分支），不需要 HTTP mock。
 class PendingMessagesBar extends StatefulWidget {
   const PendingMessagesBar({

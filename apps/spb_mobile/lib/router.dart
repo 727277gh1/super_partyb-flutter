@@ -48,8 +48,15 @@ class SpbRoutes {
   /// 与对话共用同一个 id 空间。
   static String work(String workId) => '/miniapp/works/$workId';
 
-  /// 交付物同步页（移动端同步到应用沙箱目录）。
+  /// 交付物同步配置（旧「同步页」路径，现为设置页同步标签的重定向目标）。
+  ///
+  /// 跑同步的区块现在住在「设置」标签的「交付物同步」子标签里（见
+  /// [SettingsTab]）。本路径保留只为不炸掉历史入口，路由层会把它重定向
+  /// 到 [settingsSyncTab]。**新代码一律用 [settingsSyncTab]**。
   static const sync = '/settings/sync';
+
+  /// 设置页的「交付物同步」标签（与桌面端逐字一致）。
+  static const settingsSyncTab = '/settings?tab=sync';
 
   /// 登录页。
   ///
@@ -230,11 +237,13 @@ List<RouteBase> buildMobileRoutes() {
           routes: [
             GoRoute(
               path: SpbRoutes.settings,
-              builder: (context, state) => const _SettingsTab(),
+              builder: (context, state) =>
+                  _SettingsTab(initialTab: _settingsTabFromQuery(state)),
               routes: [
+                // 旧「交付物同步页」的兼容重定向（见桌面端同名注释）。
                 GoRoute(
                   path: 'sync',
-                  builder: (context, state) => const _SyncPage(),
+                  redirect: (context, state) => SpbRoutes.settingsSyncTab,
                 ),
               ],
             ),
@@ -617,17 +626,25 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
 /// 目录也不可选（应用沙箱由系统分配），但**仍展示**：用户需要知道文件落在
 /// 哪里才能去文件管理器里找。
 class _SettingsTab extends ConsumerWidget {
-  const _SettingsTab();
+  const _SettingsTab({this.initialTab = SettingsTab.general});
+
+  /// 首次展示哪个标签（来自路由 `?tab=`）。
+  final SettingsTab initialTab;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
+      initialTab: initialTab,
       loadSettings: ref.watch(loadSyncSettingsProvider),
       saveSettings: ref.watch(saveSyncSettingsProvider),
       loadGroups: ref.watch(loadSyncGroupsProvider),
       scanGroups: ref.watch(scanLocalGroupsProvider),
       executePrune: ref.watch(executePruneProvider),
       pickDirectory: ref.watch(pickDirectoryProvider),
+      // 同步执行区块：移动端也有（手动同步可用，只是没有后台排程）。
+      runSync: ref.watch(runSyncActionProvider),
+      scanDirtyFiles: ref.watch(scanDirtyFilesActionProvider),
+      uploadChanges: ref.watch(uploadChangesActionProvider),
       // 移动端没有托盘/全局快捷键（触屏），恒不展示「桌面集成」区块——
       // 直接传常量，无需为这一个布尔去读平台能力接口。
       desktopInfo: DesktopIntegrationInfo.hidden,
@@ -654,7 +671,6 @@ class _SettingsTab extends ConsumerWidget {
           ref.watch(preferenceAgentOptionsProvider).value ?? const [],
       preferenceFallbackDisplayName:
           ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
-      onOpenSync: () => context.go(SpbRoutes.sync),
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 退出登录：清凭证 → 回登录页。
       //
@@ -670,37 +686,13 @@ class _SettingsTab extends ConsumerWidget {
   }
 }
 
-/// 交付物同步页（接线到同步用例）。
+/// 解析设置页路由的 `?tab=` 参数（与桌面端同一语义）。
 ///
-/// ## 与桌面端的差异：没有目录选择器
-///
-/// 移动端目录由系统分配（应用沙箱），用户不选路径。`pickDirectoryProvider`
-/// 恒返回 null（「用户取消」），故点「选择目录」不会有任何副作用——
-/// 这比隐藏按钮更简单，也让两端共用同一个页面组件。
-class _SyncPage extends ConsumerWidget {
-  const _SyncPage();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final localRoot = ref.watch(syncLocalRootProvider).value;
-
-    return SyncPage(
-      initialLocalRoot: localRoot,
-      pickDirectory: ref.watch(pickDirectoryProvider),
-      runSync: ref.watch(runSyncActionProvider),
-      // 回传是显式逐文件动作（自动同步仍单向，见 SyncPage 文档）。
-      scanDirtyFiles: ref.watch(scanDirtyFilesActionProvider),
-      uploadChanges: ref.watch(uploadChangesActionProvider),
-      onLocalRootChanged: (root) {
-        // 移动端目录不可改，保存是空操作（见 provider 说明）。
-        ref.read(saveLocalRootActionProvider)(root).catchError((Object e) {
-          SpbLog.warn('保存同步目录失败', {'error': e.toString()});
-          return false;
-        });
-      },
-    );
-  }
-}
+/// 只有 `tab=sync` 有意义；未知值一律回「通用」。
+SettingsTab _settingsTabFromQuery(GoRouterState state) =>
+    state.uri.queryParameters['tab'] == 'sync'
+    ? SettingsTab.sync
+    : SettingsTab.general;
 
 /// 对话时间线。
 class _ChatPage extends ConsumerStatefulWidget {

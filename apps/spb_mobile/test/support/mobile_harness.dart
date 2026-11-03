@@ -156,9 +156,9 @@ Future<TestHarness> pumpApp(
   void Function(DioAdapter adapter)? beforePump,
 
   /// 目录选择器（移动端恒为「取消」，用例可覆盖以验证注入生效）。
-  PickSyncDirectory? pickDirectory,
+  PickSettingsDirectory? pickDirectory,
 
-  /// 同步动作。
+  /// 同步动作（设置页同步标签用）。
   RunSyncAction? runSync,
 
   /// 设置页注入点：读取设置。默认「固定目录 + 全部范围」。

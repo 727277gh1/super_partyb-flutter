@@ -10,6 +10,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 import 'package:spb_ui/spb_ui.dart';
 
+import '../sync/sync_run_section.dart';
 import 'notification_subscriptions_card.dart';
 import 'user_preferences_card.dart';
 
@@ -93,15 +94,46 @@ class DesktopIntegrationInfo {
 /// 选中状态只有一处真源，不会出现「天数与全部同时选中」的矛盾态。
 const int _pruneAllSentinel = -1;
 
+/// 设置页的标签。
+///
+/// ## 为什么是两个标签而不是「一页到底」
+///
+/// 交付物同步的配置链很长（目录 → 范围 → 过滤 → 自动同步 → 本地数据 →
+/// 立刻跑一轮），与外观/账号这类「几乎只改一次」的项混在一页时，用户
+/// 想「让它自动下载」要滚过十几个无关区块。两个标签把这件事拆干净：
+/// **通用**（外观 / 通知 / 偏好 / 桌面集成 / 账号）与**交付物同步**（整条
+/// 配置链 + 立即同步 + 回传）。
+///
+/// ## 为什么不再是两个页面
+///
+/// 曾经是设置页（配置）+ 独立的同步页（跑同步 + 看结果）。那个划分让
+/// 「配置在哪」变成要记住的知识，反而使托盘里「同步设置…」与「设置…」
+/// 两项都像入口、又都不完整。现在只有一处入口、两个标签，标签间可直跳
+/// （`/settings?tab=sync`）。
+enum SettingsTab {
+  /// 通用设置。
+  general,
+
+  /// 交付物同步（配置 + 立即同步 + 回传）。
+  sync,
+}
+
 /// 设置页。
 ///
 /// ## 页面职责边界
 ///
-/// - **只负责**渲染与表单交互：目录、范围、过滤、清理、本地统计；
+/// - **只负责**渲染与表单交互：目录、范围、过滤、清理、本地统计、跑一轮同步；
 /// - **不负责**持久化、网络、磁盘——全部由注入的回调完成。
 ///
-/// 这一分工与 [LoginPage] / [SyncPage] 一致：页面因此可以在无数据库、无网络、
+/// 这一分工与 [LoginPage] 一致：页面因此可以在无数据库、无网络、
 /// 无平台插件的 widget test 里完整验证。
+///
+/// ## 「跑同步」为什么也在本页（而不是另开一页）
+///
+/// 同步的执行与它的配置是同一条因果链：目录/范围/过滤决定「拉什么」，
+/// 按钮决定「什么时候拉」，自动同步决定「不用我点也拉」。把它们拆到两个
+/// 页面后，用户看到「开了自动同步却没数据」时无法在同一屏里核对配置。
+/// 故执行区块 [SyncRunSection] 与本页的配置项同屏（见 [SettingsTab.sync]）。
 ///
 /// ## 表单语义：改动先留在内存，保存才落盘
 ///
@@ -129,7 +161,10 @@ class SettingsPage extends StatefulWidget {
     required this.executePrune,
     required this.pickDirectory,
     this.desktopInfo = DesktopIntegrationInfo.hidden,
-    this.onOpenSync,
+    this.runSync,
+    this.scanDirtyFiles,
+    this.uploadChanges,
+    this.initialTab = SettingsTab.general,
     this.onSignOut,
     this.onOpenDirectory,
     this.onOpenMyTurns,
@@ -172,12 +207,32 @@ class SettingsPage extends StatefulWidget {
   /// 不展示比展示一个点了没反应的区块更安全）。
   final DesktopIntegrationInfo desktopInfo;
 
-  /// 打开「交付物同步」页。
+  /// 打开「交付物同步」标签。
   ///
-  /// 本页只做**配置**，真正跑同步的是独立的同步页（它有进度与结果展示，
-  /// 而配置是低频动作、同步是高频动作，合在一页会让用户每次同步都要滚过
-  /// 一堆表单）。null 表示不提供入口（该页面此时只能配置）。
-  final VoidCallback? onOpenSync;
+  /// ## 为什么跑同步的区块直接住在标签里（而不是另开一页）
+  ///
+  /// 它与目录/范围/过滤/自动同步是同一条因果链——拆开后用户无法在同一屏
+  /// 核对「为什么没自动下载」。历史与理由见 [SettingsTab] 与
+  /// [SyncRunSection] 的文档。
+  ///
+  /// 为 null 时不展示该区块（本页此时只能配置）。
+  final RunSyncAction? runSync;
+
+  /// 扫描本地改动（回传入口第一步）。null = 不展示回传入口。
+  ///
+  /// 必须与 [uploadChanges] **成对**提供（与 [SyncRunSection] 的约定一致）。
+  final ScanDirtyFilesAction? scanDirtyFiles;
+
+  /// 回传选中的本地改动。null = 不展示回传入口。
+  final UploadChangesAction? uploadChanges;
+
+  /// 首次展示哪个标签。
+  ///
+  /// 装配层按路由的 `?tab=` 传入：托盘「交付物同步…」直达同步标签。
+  /// 页面只在 [initState] 用它（之后由用户点击决定），但 `didUpdateWidget`
+  /// 也会跟随——从 `/settings` 再到 `/settings?tab=sync` 时路由复用同一个
+  /// State，不跟随的话托盘点了没反应。
+  final SettingsTab initialTab;
 
   /// 退出登录。
   ///
@@ -189,7 +244,7 @@ class SettingsPage extends StatefulWidget {
   ///
   /// ## 为什么导航不在这里做
   ///
-  /// 本页不持有路由（与 [onOpenSync] 一致）。且登出后的去向属应用级决策：
+  /// 本页不持有路由（与 [onSignOut] 一致）。且登出后的去向属应用级决策：
   /// 路由守卫会在 `authState` 变为未登录时自动重定向，注入方也可以显式
   /// `go(login)`——两种做法都在页面之外。
   ///
@@ -285,7 +340,23 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends State<SettingsPage>
+    with SingleTickerProviderStateMixin {
+  /// 当前标签（与 AppBar 里的 [TabBar] 同步）。
+  ///
+  /// 用 [TabController] 而不是自维护 index：交给它后，指示器动画与点击
+  /// 选中都是现成的；[_onTabChanged] 只负责把 index 同步进 build。
+  late final TabController _tabs = TabController(
+    length: SettingsTab.values.length,
+    initialIndex: widget.initialTab.index,
+    vsync: this,
+  );
+
+  SettingsTab get _tab => SettingsTab.values[_tabs.index];
+
+  bool get _onGeneral => _tab == SettingsTab.general;
+  bool get _onSync => _tab == SettingsTab.sync;
+
   /// 表单草稿（编辑中，未落盘）。
   SyncSettings? _draft;
 
@@ -349,11 +420,31 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    _tabs.addListener(_onTabChanged);
     _load();
   }
 
   @override
+  void didUpdateWidget(SettingsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 路由从 `/settings` 到 `/settings?tab=sync`（反之亦然）时 go_router
+    // 复用同一个 State（同一条路由、不同 query），必须主动跟随，否则托盘
+    // 的「交付物同步…」对已打开的设置页没反应。
+    if (widget.initialTab != oldWidget.initialTab) {
+      _tabs.index = widget.initialTab.index;
+      // 直接赋 index 不触发 listener，手动同步一次。
+      _onTabChanged();
+    }
+  }
+
+  void _onTabChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void dispose() {
+    _tabs.removeListener(_onTabChanged);
+    _tabs.dispose();
     _maxSizeController.dispose();
     super.dispose();
   }
@@ -581,7 +672,7 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
     if (!mounted) return;
-    // null = 用户取消：保持原目录不变（同 SyncPage 的语义）。
+    // null = 用户取消：保持原目录不变（与同步执行区块的取消语义一致）。
     if (picked == null) return;
 
     setState(() {
@@ -924,6 +1015,17 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
+        // 标签导航。用显式 controller 而不是 DefaultTabController：本页的
+        // 内容不是 TabBarView（见 _buildBody 的说明），只需 TabController
+        // 提供指示器与选中态。
+        bottom: TabBar(
+          key: const ValueKey('settings-tabs'),
+          controller: _tabs,
+          tabs: const [
+            Tab(key: ValueKey('settings-tab-general'), text: '通用'),
+            Tab(key: ValueKey('settings-tab-sync'), text: '交付物同步'),
+          ],
+        ),
         actions: [
           if (_dirty)
             TextButton(
@@ -960,292 +1062,350 @@ class _SettingsPageState extends State<SettingsPage> {
     return ListView(
       padding: SpbSpacing.pagePadding,
       children: [
-        if (widget.onOpenSync != null) ...[
-          Card(
-            margin: EdgeInsets.zero,
-            child: ListTile(
-              key: const ValueKey('settings-sync-entry'),
-              leading: const Icon(Icons.cloud_download_outlined),
-              title: const Text('立即同步交付物'),
-              subtitle: const Text('查看本轮下载结果'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: widget.onOpenSync,
-            ),
-          ),
-          const SizedBox(height: SpbSpacing.lg),
-        ],
-        // 外观：与其余设置项不同，**选中即保存**（不走 draft）。见
-        // [SaveThemeMode] 的说明——主题需要即时反馈。
-        if (widget.loadThemeMode != null && widget.saveThemeMode != null) ...[
-          const SectionTitle('外观', highlight: true),
-          Card(
-            key: const ValueKey('settings-appearance'),
-            margin: EdgeInsets.zero,
-            child: RadioGroup<ThemeMode>(
-              groupValue: _themeMode,
-              onChanged: (v) {
-                if (v != null) _setThemeMode(v);
-              },
-              child: Column(
-                children: [
-                  for (final mode in SpbThemeMode.all)
-                    RadioListTile<ThemeMode>(
-                      key: ValueKey('settings-theme-${mode.name}'),
-                      value: mode,
-                      title: Text(SpbThemeMode.label(mode)),
-                      // 未读到当前值时禁用：宁可让用户等一帧，也不显示一个
-                      // 可能错的选中项。
-                      enabled: _themeMode != null,
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: SpbSpacing.lg),
-        ],
-
-        const SectionTitle('同步目录', highlight: true),
-        _DirectoryCard(
-          localRoot: draft.localRoot,
-          onPick: _pickDirectory,
-          onOpenDirectory:
-              widget.onOpenDirectory == null ||
-                  draft.localRoot == null ||
-                  draft.localRoot!.isEmpty
-              ? null
-              : () async {
-                  final ok = await widget.onOpenDirectory!(draft.localRoot!);
-                  if (!mounted) return;
-                  if (!ok) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('无法打开目录，请检查路径是否存在')),
-                    );
-                  }
-                },
-        ),
-        const SizedBox(height: SpbSpacing.lg),
-
-        const SectionTitle('同步范围', highlight: true),
-        Card(
-          margin: EdgeInsets.zero,
+        // ## 为什么是「一个 ListView + 两个 Offstage 区块」而不是 TabBarView
+        //
+        // 两个标签的内容在源码里仍按原来的顺序摆在本列表里（通用项在上半段
+        // 与下半段各有一块，同步项在中间），只是各自被 Offstage 包住：
+        //
+        // 1. **状态必须跨标签保留**。`SyncRunSection` 里有刚扫出来的待回传
+        //    清单与上一轮同步结果，`UserPreferencesCard` 里有用户填了一半的
+        //    草稿。换标签就销毁重建（丢数据）比多留一棵子树贵得多。
+        //    `Offstage` 只跳过绘制与命中测试，Element / State / 数据全留
+        //    （与 §6.46 侧边栏同一手法）。
+        // 2. **不会让 find 到隐藏内容**。`RenderOffstage` 会被测试框架识别，
+        //    `find.*` 默认 `skipOffstage: true`，因此隐藏标签里的同名 key
+        //    不会让 `findsOneWidget` 变 `findsNWidget`。
+        // 3. **不重复画目录卡片**。目录只在本页画一处（曾经同步页也画一份，
+        //    两边选目录的行为还不一致）。
+        Offstage(
+          offstage: !_onGeneral,
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SwitchListTile(
-                key: const ValueKey('settings-scope-all'),
-                value: draft.scope.allGroups,
-                onChanged: _setScopeAll,
-                title: const Text('全部对话'),
-                subtitle: const Text('同步该账号下所有对话的交付物'),
-              ),
-              if (!draft.scope.allGroups) _buildGroupPicker(draft),
-            ],
-          ),
-        ),
-        const SizedBox(height: SpbSpacing.lg),
-
-        const SectionTitle('过滤与范围', highlight: true),
-        Card(
-          margin: EdgeInsets.zero,
-          child: Column(
-            children: [
-              SwitchListTile(
-                key: const ValueKey('settings-include-media'),
-                value: draft.filter.includeMedia,
-                onChanged: _setIncludeMedia,
-                title: const Text('同步图片与音视频'),
-                subtitle: const Text('默认关闭：生产环境中媒体占交付物体积的绝大多数'),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                title: const Text('单文件上限'),
-                subtitle: const Text('超过此大小的文件跳过；0 表示不限'),
-                trailing: SizedBox(
-                  width: 96,
-                  child: TextField(
-                    key: const ValueKey('settings-max-file-size'),
-                    controller: _maxSizeController,
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    textAlign: TextAlign.end,
-                    onChanged: _setMaxSizeFromField,
-                    decoration: const InputDecoration(
-                      suffixText: 'MB',
-                      isDense: true,
-                    ),
-                  ),
-                ),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                title: const Text('拉取范围'),
-                subtitle: const Text('只同步最近变动过的交付物；「不限」会拉全部历史'),
-                trailing: DropdownButton<int?>(
-                  key: const ValueKey('settings-since-days'),
-                  value: draft.sinceDays,
-                  onChanged: _setSinceDays,
-                  items: const [
-                    DropdownMenuItem(value: null, child: Text('不限')),
-                    DropdownMenuItem(value: 7, child: Text('近 7 天')),
-                    DropdownMenuItem(value: 30, child: Text('近 30 天')),
-                    DropdownMenuItem(value: 90, child: Text('近 90 天')),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: SpbSpacing.lg),
-
-        // 自动同步：仅桌面端渲染（见 [SettingsPage.showAutoSync] 的说明）。
-        if (widget.showAutoSync) ...[
-          const SectionTitle('自动同步', highlight: true),
-          Card(
-            margin: EdgeInsets.zero,
-            child: Column(
-              children: [
-                SwitchListTile(
-                  key: const ValueKey('settings-auto-sync-on-group-open'),
-                  value: draft.auto.onGroupOpen,
-                  onChanged: _setAutoGroupOpen,
-                  title: const Text('进入对话时按需同步'),
-                  // 说清「按需」的含义：不是每次进都拉，而是先判定有没有新的。
-                  subtitle: const Text('打开对话时先检查该对话有没有新交付物，有才拉取'),
-                ),
-                const Divider(height: 1),
-                SwitchListTile(
-                  key: const ValueKey('settings-auto-sync-on-launch'),
-                  value: draft.auto.onLaunch,
-                  onChanged: _setAutoOnLaunch,
-                  title: const Text('启动后自动同步一次'),
-                  subtitle: const Text('打开应用并完成登录后拉取一轮'),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  title: const Text('周期同步'),
-                  subtitle: const Text('应用运行期间每隔一段时间自动拉取一轮'),
-                  trailing: DropdownButton<int>(
-                    key: const ValueKey('settings-auto-sync-interval'),
-                    value: draft.auto.intervalMinutes,
-                    onChanged: _setAutoInterval,
-                    items: const [
-                      DropdownMenuItem(value: 0, child: Text('关闭')),
-                      DropdownMenuItem(value: 15, child: Text('每 15 分钟')),
-                      DropdownMenuItem(value: 30, child: Text('每 30 分钟')),
-                      DropdownMenuItem(value: 60, child: Text('每小时')),
-                      DropdownMenuItem(value: 180, child: Text('每 3 小时')),
-                    ],
-                  ),
-                ),
-                if (draft.auto.isEnabled) ...[
-                  const Divider(height: 1),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+              // 外观：与其余设置项不同，**选中即保存**（不走 draft）。见
+              // [SaveThemeMode] 的说明——主题需要即时反馈。
+              if (widget.loadThemeMode != null &&
+                  widget.saveThemeMode != null) ...[
+                const SectionTitle('外观', highlight: true),
+                Card(
+                  key: const ValueKey('settings-appearance'),
+                  margin: EdgeInsets.zero,
+                  child: RadioGroup<ThemeMode>(
+                    groupValue: _themeMode,
+                    onChanged: (v) {
+                      if (v != null) _setThemeMode(v);
+                    },
+                    child: Column(
                       children: [
-                        const Icon(Icons.info_outline, size: 16),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            // 首次全量同步可能很大（生产实测 5666 条 / 4.7 GB）。
-                            // 不说清楚会让用户以为「开了自动同步却卡住」——
-                            // 那其实是正在下第一批。
-                            '自动同步只从云端拉取到本地（不会上传本地改动）。'
-                            '首次同步会拉取全部历史交付物，可能较慢且占用较多流量，'
-                            '可用上方「拉取范围」限制。',
-                            style: Theme.of(context).textTheme.bodySmall,
+                        for (final mode in SpbThemeMode.all)
+                          RadioListTile<ThemeMode>(
+                            key: ValueKey('settings-theme-${mode.name}'),
+                            value: mode,
+                            title: Text(SpbThemeMode.label(mode)),
+                            // 未读到当前值时禁用：宁可让用户等一帧，也不显示一个
+                            // 可能错的选中项。
+                            enabled: _themeMode != null,
                           ),
-                        ),
                       ],
                     ),
                   ),
-                ],
+                ),
+                const SizedBox(height: SpbSpacing.lg),
               ],
-            ),
+            ],
           ),
-          const SizedBox(height: SpbSpacing.lg),
-        ],
-
-        const SectionTitle('本地数据', highlight: true),
-        _StatsCard(
-          stats: _stats,
-          loading: _loadingStats,
-          pruning: _pruning,
-          canPrune: draft.hasLocalRoot,
-          onPrune: _prune,
         ),
 
-        // 通知订阅：仅在两端都注入了读写入口时展示（成对判断，避免出现
-        // 有读无写的半截区块）。
-        if (widget.loadNotifications != null &&
-            widget.saveNotifications != null) ...[
-          const SizedBox(height: SpbSpacing.lg),
-          NotificationSubscriptionsCard(
-            load: widget.loadNotifications!,
-            save: widget.saveNotifications!,
-          ),
-        ],
+        // ---- 交付物同步标签 ----
+        Offstage(
+          offstage: !_onSync,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 四条通道说明：先给地图再看开关。没有它，下面四个开关与一个按钮
+              // 的关系只能靠用户自己猜（这正是本次整合要消除的歧义）。
+              _SyncChannelsCard(schedulesEnabled: widget.showAutoSync),
+              const SizedBox(height: SpbSpacing.lg),
 
-        // 个人偏好：同样成对判断（有读无写的半截区块会让用户以为改不了）。
-        if (widget.loadPreferences != null &&
-            widget.savePreferences != null) ...[
-          const SizedBox(height: SpbSpacing.lg),
-          UserPreferencesCard(
-            load: widget.loadPreferences!,
-            save: widget.savePreferences!,
-            agentOptions: widget.preferenceAgentOptions,
-            fallbackDisplayName: widget.preferenceFallbackDisplayName,
-          ),
-        ],
+              const SectionTitle('同步目录', highlight: true),
+              _DirectoryCard(
+                localRoot: draft.localRoot,
+                onPick: _pickDirectory,
+                onOpenDirectory:
+                    widget.onOpenDirectory == null ||
+                        draft.localRoot == null ||
+                        draft.localRoot!.isEmpty
+                    ? null
+                    : () async {
+                        final ok = await widget.onOpenDirectory!(
+                          draft.localRoot!,
+                        );
+                        if (!mounted) return;
+                        if (!ok) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('无法打开目录，请检查路径是否存在')),
+                          );
+                        }
+                      },
+              ),
+              const SizedBox(height: SpbSpacing.lg),
 
-        // 桌面能力项：移动端（visible == false）整段不展示。
-        if (widget.desktopInfo.visible) ...[
-          const SizedBox(height: SpbSpacing.lg),
-          const SectionTitle('桌面集成', highlight: true),
-          Card(
-            key: const ValueKey('settings-capabilities'),
-            margin: EdgeInsets.zero,
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.keyboard_outlined),
-                  title: const Text('悬浮输入窗快捷键'),
-                  subtitle: Text(widget.desktopInfo.hotkeyLabel),
+              const SectionTitle('同步范围', highlight: true),
+              Card(
+                margin: EdgeInsets.zero,
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      key: const ValueKey('settings-scope-all'),
+                      value: draft.scope.allGroups,
+                      onChanged: _setScopeAll,
+                      title: const Text('全部对话'),
+                      subtitle: const Text('同步该账号下所有对话的交付物'),
+                    ),
+                    if (!draft.scope.allGroups) _buildGroupPicker(draft),
+                  ],
                 ),
-                const Divider(height: 1),
-                // 托盘**已接线**（`desktop_integration.dart` 的
-                // `_installTrayMenu` 推送菜单、注册显示/快速输入/退出回调），
-                // 但「托盘图标是否真的出现在用户的桌面环境里」取决于
-                // appindicator 支持——那只能真机验证。故文案区分这两件事：
-                // 说「已接入菜单与回调」，而不是含糊的「未完成」（后者是
-                // 事实错误，会让用户以为托盘根本没做）。
-                const ListTile(
-                  leading: Icon(Icons.notifications_none_outlined),
-                  title: Text('系统托盘'),
-                  subtitle: Text('已接入菜单与回调（图标是否显示取决于桌面环境）'),
-                  enabled: false,
+              ),
+              const SizedBox(height: SpbSpacing.lg),
+
+              const SectionTitle('过滤与范围', highlight: true),
+              Card(
+                margin: EdgeInsets.zero,
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      key: const ValueKey('settings-include-media'),
+                      value: draft.filter.includeMedia,
+                      onChanged: _setIncludeMedia,
+                      title: const Text('同步图片与音视频'),
+                      subtitle: const Text('默认关闭：生产环境中媒体占交付物体积的绝大多数'),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      title: const Text('单文件上限'),
+                      subtitle: const Text('超过此大小的文件跳过；0 表示不限'),
+                      trailing: SizedBox(
+                        width: 96,
+                        child: TextField(
+                          key: const ValueKey('settings-max-file-size'),
+                          controller: _maxSizeController,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                          ],
+                          textAlign: TextAlign.end,
+                          onChanged: _setMaxSizeFromField,
+                          decoration: const InputDecoration(
+                            suffixText: 'MB',
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      title: const Text('拉取范围'),
+                      subtitle: const Text('只同步最近变动过的交付物；「不限」会拉全部历史'),
+                      trailing: DropdownButton<int?>(
+                        key: const ValueKey('settings-since-days'),
+                        value: draft.sinceDays,
+                        onChanged: _setSinceDays,
+                        items: const [
+                          DropdownMenuItem(value: null, child: Text('不限')),
+                          DropdownMenuItem(value: 7, child: Text('近 7 天')),
+                          DropdownMenuItem(value: 30, child: Text('近 30 天')),
+                          DropdownMenuItem(value: 90, child: Text('近 90 天')),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                if (widget.loadLaunchAtStartup != null) ...[
-                  const Divider(height: 1),
-                  SwitchListTile(
-                    key: const ValueKey('settings-launch-at-startup'),
-                    // SwitchListTile 的左侧图标参数叫 secondary（不是 leading）。
-                    secondary: const Icon(Icons.power_settings_new_outlined),
-                    title: const Text('开机自启'),
-                    subtitle: const Text('登录系统后自动在托盘启动'),
-                    // 读不到状态（null）时禁用：宁可显示「未知」也不显示
-                    // 一个可能是假的「已关闭」。
-                    value: _launchAtStartup ?? false,
-                    onChanged: (_launchAtStartup == null || _togglingLaunch)
-                        ? null
-                        : _toggleLaunchAtStartup,
+              ),
+              const SizedBox(height: SpbSpacing.lg),
+
+              // 自动同步：仅桌面端渲染（见 [SettingsPage.showAutoSync] 的说明）。
+              if (widget.showAutoSync) ...[
+                const SectionTitle('自动同步', highlight: true),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      SwitchListTile(
+                        key: const ValueKey('settings-auto-sync-on-group-open'),
+                        value: draft.auto.onGroupOpen,
+                        onChanged: _setAutoGroupOpen,
+                        title: const Text('进入对话时按需同步'),
+                        // 说清「按需」的含义：不是每次进都拉，而是先判定有没有新的。
+                        subtitle: const Text('打开对话时先检查该对话有没有新交付物，有才拉取'),
+                      ),
+                      const Divider(height: 1),
+                      SwitchListTile(
+                        key: const ValueKey('settings-auto-sync-on-launch'),
+                        value: draft.auto.onLaunch,
+                        onChanged: _setAutoOnLaunch,
+                        title: const Text('启动后自动同步一次'),
+                        subtitle: const Text('打开应用并完成登录后拉取一轮'),
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        title: const Text('周期同步'),
+                        subtitle: const Text('应用运行期间每隔一段时间自动拉取一轮'),
+                        trailing: DropdownButton<int>(
+                          key: const ValueKey('settings-auto-sync-interval'),
+                          value: draft.auto.intervalMinutes,
+                          onChanged: _setAutoInterval,
+                          items: const [
+                            DropdownMenuItem(value: 0, child: Text('关闭')),
+                            DropdownMenuItem(value: 15, child: Text('每 15 分钟')),
+                            DropdownMenuItem(value: 30, child: Text('每 30 分钟')),
+                            DropdownMenuItem(value: 60, child: Text('每小时')),
+                            DropdownMenuItem(value: 180, child: Text('每 3 小时')),
+                          ],
+                        ),
+                      ),
+                      if (draft.auto.isEnabled) ...[
+                        const Divider(height: 1),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.info_outline, size: 16),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  // 首次全量同步可能很大（生产实测 5666 条 / 4.7 GB）。
+                                  // 不说清楚会让用户以为「开了自动同步却卡住」——
+                                  // 那其实是正在下第一批。
+                                  '自动同步只从云端拉取到本地（不会上传本地改动）。'
+                                  '首次同步会拉取全部历史交付物，可能较慢且占用较多流量，'
+                                  '可用上方「拉取范围」限制。',
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                ],
+                ),
+                const SizedBox(height: SpbSpacing.lg),
               ],
-            ),
-          ),
-        ],
 
+              const SectionTitle('本地数据', highlight: true),
+              _StatsCard(
+                stats: _stats,
+                loading: _loadingStats,
+                pruning: _pruning,
+                canPrune: draft.hasLocalRoot,
+                onPrune: _prune,
+              ),
+
+              const SizedBox(height: SpbSpacing.lg),
+
+              // 立即同步 + 本轮结果 + 回传改动。放在同步标签的末尾：上面的配置
+              if (widget.runSync != null)
+                SyncRunSection(
+                  runSync: widget.runSync!,
+                  // 目录取 draft：用户刚选的目录在点「保存」前不能用于同步（由
+                  // hasUnsavedChanges 禁用按钮保证），但提示「尚未选目录」必须
+                  // 看 draft，否则刚配好目录却仍被告知没配。
+                  localRoot: draft.localRoot,
+                  hasUnsavedChanges: _dirty,
+                  scanDirtyFiles: widget.scanDirtyFiles,
+                  uploadChanges: widget.uploadChanges,
+                ),
+            ],
+          ),
+        ),
+
+        // ---- 通用标签（下半段）----
+        Offstage(
+          offstage: !_onGeneral,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 通知订阅：仅在两端都注入了读写入口时展示（成对判断，避免出现
+              // 有读无写的半截区块）。
+              if (widget.loadNotifications != null &&
+                  widget.saveNotifications != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                NotificationSubscriptionsCard(
+                  load: widget.loadNotifications!,
+                  save: widget.saveNotifications!,
+                ),
+              ],
+
+              // 个人偏好：同样成对判断（有读无写的半截区块会让用户以为改不了）。
+              if (widget.loadPreferences != null &&
+                  widget.savePreferences != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                UserPreferencesCard(
+                  load: widget.loadPreferences!,
+                  save: widget.savePreferences!,
+                  agentOptions: widget.preferenceAgentOptions,
+                  fallbackDisplayName: widget.preferenceFallbackDisplayName,
+                ),
+              ],
+
+              // 桌面能力项：移动端（visible == false）整段不展示。
+              if (widget.desktopInfo.visible) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                const SectionTitle('桌面集成', highlight: true),
+                Card(
+                  key: const ValueKey('settings-capabilities'),
+                  margin: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.keyboard_outlined),
+                        title: const Text('悬浮输入窗快捷键'),
+                        subtitle: Text(widget.desktopInfo.hotkeyLabel),
+                      ),
+                      const Divider(height: 1),
+                      // 托盘**已接线**（`desktop_integration.dart` 的
+                      // `_installTrayMenu` 推送菜单、注册显示/快速输入/退出回调），
+                      // 但「托盘图标是否真的出现在用户的桌面环境里」取决于
+                      // appindicator 支持——那只能真机验证。故文案区分这两件事：
+                      // 说「已接入菜单与回调」，而不是含糊的「未完成」（后者是
+                      // 事实错误，会让用户以为托盘根本没做）。
+                      const ListTile(
+                        leading: Icon(Icons.notifications_none_outlined),
+                        title: Text('系统托盘'),
+                        subtitle: Text('已接入菜单与回调（图标是否显示取决于桌面环境）'),
+                        enabled: false,
+                      ),
+                      if (widget.loadLaunchAtStartup != null) ...[
+                        const Divider(height: 1),
+                        SwitchListTile(
+                          key: const ValueKey('settings-launch-at-startup'),
+                          // SwitchListTile 的左侧图标参数叫 secondary（不是 leading）。
+                          secondary: const Icon(
+                            Icons.power_settings_new_outlined,
+                          ),
+                          title: const Text('开机自启'),
+                          subtitle: const Text('登录系统后自动在托盘启动'),
+                          // 读不到状态（null）时禁用：宁可显示「未知」也不显示
+                          // 一个可能是假的「已关闭」。
+                          value: _launchAtStartup ?? false,
+                          onChanged:
+                              (_launchAtStartup == null || _togglingLaunch)
+                              ? null
+                              : _toggleLaunchAtStartup,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+
+        // 错误与已保存提示不属于任何单个标签：它们描述的是「保存这页设置」
+        // 这个动作的结果，而保存按钮在 AppBar 上、两个标签都可能触发。
+        // 故放在所有 Offstage 外面，无论当前看哪个标签都看得见。
         if (_error != null) ...[
           const SizedBox(height: SpbSpacing.lg),
           _Banner(message: _error!, danger: true),
@@ -1259,71 +1419,80 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ],
 
-        // 危险操作区放最后：与上面的普通设置项拉开距离，避免误触。
-        if (widget.onSignOut != null) ...[
-          const SizedBox(height: SpbSpacing.lg),
-          const SectionTitle('账号', highlight: true),
-          Card(
-            margin: EdgeInsets.zero,
-            child: ListTile(
-              key: const ValueKey('settings-sign-out'),
-              leading: Icon(
-                Icons.logout,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              title: const Text('退出登录'),
-              subtitle: const Text('清除本机登录凭证'),
-              enabled: !_signingOut,
-              onTap: _signingOut ? null : _signOut,
-            ),
-          ),
-        ],
-        if (widget.onOpenMyTurns != null) ...[
-          const SizedBox(height: SpbSpacing.lg),
-          Card(
-            margin: EdgeInsets.zero,
-            child: ListTile(
-              key: const ValueKey('settings-my-turns-entry'),
-              leading: const Icon(Icons.history_outlined),
-              title: const Text('我的最近轮次'),
-              subtitle: const Text('跨对话回顾最近让 agent 做了什么'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: widget.onOpenMyTurns,
-            ),
-          ),
-        ],
+        // ---- 通用标签（账号区）----
+        Offstage(
+          offstage: !_onGeneral,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 危险操作区放最后：与上面的普通设置项拉开距离，避免误触。
+              if (widget.onSignOut != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                const SectionTitle('账号', highlight: true),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-sign-out'),
+                    leading: Icon(
+                      Icons.logout,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    title: const Text('退出登录'),
+                    subtitle: const Text('清除本机登录凭证'),
+                    enabled: !_signingOut,
+                    onTap: _signingOut ? null : _signOut,
+                  ),
+                ),
+              ],
+              if (widget.onOpenMyTurns != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-my-turns-entry'),
+                    leading: const Icon(Icons.history_outlined),
+                    title: const Text('我的最近轮次'),
+                    subtitle: const Text('跨对话回顾最近让 agent 做了什么'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: widget.onOpenMyTurns,
+                  ),
+                ),
+              ],
 
-        // 诊断：报障时把环境信息 + 最近日志导成一个文本文件（issue #40）。
-        //
-        // ## 为什么放在最后一节而不是「桌面集成」区块里
-        //
-        // 那个区块只在桌面端展示（`desktopInfo.visible`），而诊断入口在两端
-        // 都可接（移动端会得到 `unsupported`）。混进去会让移动端因为
-        // 「visible == false」而整个区块不渲染，入口跟着消失——而它本不属于
-        // 「桌面集成」的语义（与托盘/快捷键无关）。
-        if (widget.onExportDiagnostics != null) ...[
-          const SizedBox(height: SpbSpacing.lg),
-          Card(
-            margin: EdgeInsets.zero,
-            child: ListTile(
-              key: const ValueKey('settings-export-diagnostics'),
-              leading: const Icon(Icons.bug_report_outlined),
-              title: const Text('导出诊断日志'),
-              subtitle: const Text('包含版本、平台与最近日志；已对疑似凭据掩码'),
-              // 在途时用转圈替掉右侧箭头：保存对话框是模态的，用户看不到
-              // 「已在处理」就会再点一下。
-              trailing: _exportingDiagnostics
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.save_alt_outlined),
-              enabled: !_exportingDiagnostics,
-              onTap: _exportingDiagnostics ? null : _exportDiagnostics,
-            ),
+              // 诊断：报障时把环境信息 + 最近日志导成一个文本文件（issue #40）。
+              //
+              // ## 为什么放在最后一节而不是「桌面集成」区块里
+              //
+              // 那个区块只在桌面端展示（`desktopInfo.visible`），而诊断入口在两端
+              // 都可接（移动端会得到 `unsupported`）。混进去会让移动端因为
+              // 「visible == false」而整个区块不渲染，入口跟着消失——而它本不属于
+              // 「桌面集成」的语义（与托盘/快捷键无关）。
+              if (widget.onExportDiagnostics != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-export-diagnostics'),
+                    leading: const Icon(Icons.bug_report_outlined),
+                    title: const Text('导出诊断日志'),
+                    subtitle: const Text('包含版本、平台与最近日志；已对疑似凭据掩码'),
+                    // 在途时用转圈替掉右侧箭头：保存对话框是模态的，用户看不到
+                    // 「已在处理」就会再点一下。
+                    trailing: _exportingDiagnostics
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_alt_outlined),
+                    enabled: !_exportingDiagnostics,
+                    onTap: _exportingDiagnostics ? null : _exportDiagnostics,
+                  ),
+                ),
+              ],
+            ],
           ),
-        ],
+        ),
         const SizedBox(height: SpbSpacing.xl),
       ],
     );
@@ -1365,6 +1534,125 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 /// 分节标题。
+
+/// 交付物同步的「通道地图」。
+///
+/// ## 为什么需要这张卡
+///
+/// 下行同步有四条入口（手动 / 启动后一次 / 周期 / 进对话按需），它们共用
+/// 同一套目录与过滤配置，又各自有独立的开关。没有一张把它们说清的卡时，
+/// 用户只能靠「试」来理解：开了「周期同步」却问「为什么我没点它也在下载」，
+/// 或开了自动同步却发现什么都没发生（其实没选目录）。
+///
+/// ## 为什么把「不会上传」写在地图上
+///
+/// 四条下行通道**都是单向的**（云端 → 本地），而本地改动只能走「回传改动」
+/// 那一条显式通道。这两个方向极易被读成同一件事（「同步」在用户心里通常是
+/// 双向的），故单独占一行而不是只写在按钮下方的小字里。
+///
+/// [schedulesEnabled] 为 false（移动端）时，三条定时通道不列入——它们在
+/// 本端根本不会执行（后台定时器会被系统冻结/杀掉，见 §6.42），把它们写
+/// 成「可用」是在骗用户。
+class _SyncChannelsCard extends StatelessWidget {
+  const _SyncChannelsCard({required this.schedulesEnabled});
+
+  /// 本端是否装配了自动同步排程器（仅桌面端）。
+  final bool schedulesEnabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    final rows = <(IconData, String, String)>[
+      (
+        Icons.cloud_download_outlined,
+        '立即同步',
+        '手动跑一轮，结果就在按钮下方。与自动同步走同一条链路，不会多下一份。',
+      ),
+      if (schedulesEnabled)
+        (Icons.power_outlined, '启动后自动同步一次', '打开应用并登录成功后自动拉一轮，之后不再自己动。'),
+      if (schedulesEnabled)
+        (
+          Icons.repeat_outlined,
+          '周期同步',
+          '应用运行期间每隔一段时间拉一轮（可选 15/30/60/180 分钟）。'
+              '人不在应用里时，只有它能让本地目录保持新鲜。',
+        ),
+      if (schedulesEnabled)
+        (
+          Icons.chat_bubble_outline,
+          '进入对话时按需同步',
+          '打开某个对话时先查该对话有没有新交付物，有才提示，不会静默下载。',
+        ),
+      (
+        Icons.upload_outlined,
+        '回传改动（唯一上传通道）',
+        '上面四条都只把云端内容拉到本地。本地改过的文件要回传给 agent，'
+            '必须显式勾选后回传。',
+      ),
+    ];
+
+    return Card(
+      key: const ValueKey('settings-sync-channels'),
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('同步有四条下行通道', style: textTheme.titleSmall),
+            const SizedBox(height: SpbSpacing.xs),
+            Text(
+              // 先给结论再给列表：用户扫一眼就能知道「它们共用同一套配置」。
+              '它们共用下方的目录、范围与过滤设置；'
+              '未登录或未选择同步目录时，自动同步不会启动。',
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: SpbSpacing.md),
+            for (final row in rows)
+              Padding(
+                padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(row.$1, size: 16, color: scheme.onSurfaceVariant),
+                    const SizedBox(width: SpbSpacing.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(row.$2, style: textTheme.bodyMedium),
+                          Text(
+                            row.$3,
+                            style: textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (!schedulesEnabled)
+              Text(
+                // 移动端不装配排程器：写了开关也不会响。如实说明，而不是
+                // 默默少列三行让用户以为本端漏做了。
+                '本端只会手动同步：后台定时任务在移动系统上会被冻结，'
+                '排一个不会响的计时器等于误引导。',
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// 同步目录卡片。
 class _DirectoryCard extends StatelessWidget {
@@ -1414,7 +1702,10 @@ class _DirectoryCard extends StatelessWidget {
                   Text(
                     // 「换目录会重置同步记录」必须写在用户能看到的地方：
                     // 否则他会以为同步出错了（明明同步过，怎么又要重下）。
-                    '更换目录会重置同步记录（已下载的文件不会自动迁移）',
+                    // 「点保存才生效」同样必须写：本页现在直接带「立即同步」
+                    // 按钮，不提醒的话用户会拿未保存的新目录去跑一轮。
+                    '选择后需点右上角「保存」才生效；更换目录会重置同步记录'
+                    '（已下载的文件不会自动迁移）',
                     style: textTheme.bodySmall?.copyWith(
                       color: scheme.onSurfaceVariant,
                     ),

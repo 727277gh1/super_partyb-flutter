@@ -4,37 +4,48 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 
-/// 同步页测试。
+/// 同步运行区块测试（`SyncRunSection`，设置页「交付物同步」标签里的执行区）。
 ///
 /// ## 这个测试防的是什么
 ///
-/// 同步页的失败模式全是「静默」的：
-/// - 目录选了但没生效 → 用户以为选好了，同步却用旧目录（或报「未指定目录」）；
-/// - **用户点「取消」被当成清空目录** → 配置丢失，且用户不知道为什么；
+/// 本区块的失败模式全是「静默」的：
+/// - 单文件失败被显示成「整轮失败」→ 用户以为什么都没同步，实际大部分成功了；
 /// - 失败项只给数量不给文件名 → 用户无从判断要处理什么；
-/// - 单文件失败被显示成「整轮失败」→ 用户以为什么都没同步，实际大部分成功了。
+/// - 有未保存改动仍允许同步 → 用户做一次他以为配好了、其实没配好的同步；
+/// - 扫描 / 回传可重复提交 → 同一份改动传两次。
 ///
-/// 故这里逐条断言目录状态、取消语义、计数展示与失败项明细。
+/// ## 不再测目录选择
+///
+/// 目录选择与「取消不清空」的语义属于设置页的目录卡片（见
+/// `test/settings/settings_page_test.dart`）——本区块不含选择器，它只从
+/// [SyncRunSection.localRoot] 收到一个已生效的目录。
 void main() {
-  /// 把同步页放进最小可用的 MaterialApp。
-  Future<void> pumpSync(
+  /// 把区块放进最小可用的 MaterialApp。
+  ///
+  /// 外层套 `ListView`：真实使用时区块住在设置页的列表里，回传区块在下方；
+  /// 有可滚动祖先才能 `ensureVisible`（见 [tapVisible]）。
+  Future<void> pumpSection(
     WidgetTester tester, {
-    required PickSyncDirectory pickDirectory,
     required RunSyncAction runSync,
     ScanDirtyFilesAction? scanDirtyFiles,
     UploadChangesAction? uploadChanges,
-    String? initialLocalRoot,
-    ValueChanged<String?>? onLocalRootChanged,
+    String? localRoot,
+    bool hasUnsavedChanges = false,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
-        home: SyncPage(
-          pickDirectory: pickDirectory,
-          runSync: runSync,
-          scanDirtyFiles: scanDirtyFiles,
-          uploadChanges: uploadChanges,
-          initialLocalRoot: initialLocalRoot,
-          onLocalRootChanged: onLocalRootChanged,
+        home: Scaffold(
+          body: ListView(
+            children: [
+              SyncRunSection(
+                runSync: runSync,
+                scanDirtyFiles: scanDirtyFiles,
+                uploadChanges: uploadChanges,
+                localRoot: localRoot,
+                hasUnsavedChanges: hasUnsavedChanges,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -100,91 +111,13 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  group('同步页：目录选择', () {
-    testWidgets('未选目录时给出行动指引而非「未知」', (tester) async {
-      await pumpSync(
-        tester,
-        pickDirectory: () async => null,
-        runSync: () async => okReport(),
-      );
-
-      expect(find.textContaining('尚未选择'), findsOneWidget);
-    });
-
-    testWidgets('已选目录时展示该路径', (tester) async {
-      await pumpSync(
-        tester,
-        pickDirectory: () async => null,
-        runSync: () async => okReport(),
-        initialLocalRoot: '/home/u/deliverables',
-      );
-
-      expect(find.text('/home/u/deliverables'), findsOneWidget);
-    });
-
-    testWidgets('选择目录后展示新路径并回调上层', (tester) async {
-      String? notified;
-      await pumpSync(
-        tester,
-        pickDirectory: () async => '/home/u/new-root',
-        runSync: () async => okReport(),
-        initialLocalRoot: '/home/u/old-root',
-        onLocalRootChanged: (v) => notified = v,
-      );
-
-      await tester.tap(find.byKey(const ValueKey('sync-pick-directory')));
-      await tester.pumpAndSettle();
-
-      expect(find.text('/home/u/new-root'), findsOneWidget);
-      expect(
-        notified,
-        '/home/u/new-root',
-        reason: '目录变更必须回调出去，让上层在同一事务里重置同步状态',
-      );
-    });
-
-    testWidgets('用户取消（返回 null）不得清空已有目录、不得报错', (tester) async {
-      // 回归防线：把「取消」当成「清空」会让用户点一下取消就丢配置。
-      var notified = 0;
-      await pumpSync(
-        tester,
-        pickDirectory: () async => null,
-        runSync: () async => okReport(),
-        initialLocalRoot: '/home/u/keep-me',
-        onLocalRootChanged: (_) => notified++,
-      );
-
-      await tester.tap(find.byKey(const ValueKey('sync-pick-directory')));
-      await tester.pumpAndSettle();
-
-      expect(find.text('/home/u/keep-me'), findsOneWidget, reason: '取消应保持原目录');
-      expect(notified, 0, reason: '取消不该触发变更回调（否则会误清同步状态）');
-      expect(find.byKey(const ValueKey('sync-error')), findsNothing);
-    });
-
-    testWidgets('目录选择器抛异常时显示错误条（不白屏）', (tester) async {
-      await pumpSync(
-        tester,
-        pickDirectory: () async => throw const PlatformError('无 GUI 环境'),
-        runSync: () async => okReport(),
-      );
-
-      await tester.tap(find.byKey(const ValueKey('sync-pick-directory')));
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(const ValueKey('sync-error')), findsOneWidget);
-      expect(find.textContaining('无 GUI 环境'), findsOneWidget);
-    });
-  });
-
-  group('同步页：触发同步', () {
+  group('同步运行区块：触发同步', () {
     testWidgets('未选目录时点同步提示先选目录，且不调用 runSync', (tester) async {
       // 回归防线：在发起前拦住，否则用户看到的是底层「未指定目录」错误，
       // 而实际需要知道的是「先去选目录」。
       var calls = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async {
           calls++;
           return okReport();
@@ -201,14 +134,13 @@ void main() {
 
     testWidgets('点同步调用 runSync 一次并展示结果', (tester) async {
       var calls = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async {
           calls++;
           return okReport(downloaded: 7);
         },
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -221,9 +153,8 @@ void main() {
     });
 
     testWidgets('展示「下载 N / 跳过 M / 失败 K」三项计数', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(
           downloaded: 12,
           deleted: 3,
@@ -233,7 +164,7 @@ void main() {
           },
           failed: const [SyncFailure('a.md', '下载失败：超时')],
         ),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -251,9 +182,8 @@ void main() {
 
     testWidgets('失败项逐条列出文件名与原因（不只给数量）', (tester) async {
       // 回归防线：只给「失败 2 个」用户无从判断要处理什么。
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(
           downloaded: 5,
           failed: const [
@@ -261,7 +191,7 @@ void main() {
             SyncFailure('reports/b.pdf', '写入失败：权限不足'),
           ],
         ),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -279,14 +209,13 @@ void main() {
 
     testWidgets('单文件失败仍展示整轮结果（不误报为整轮失败）', (tester) async {
       // 失败不阻断其余文件：报告里同时有成功计数与失败项。
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(
           downloaded: 5,
           failed: const [SyncFailure('x.md', '下载失败')],
         ),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -298,11 +227,10 @@ void main() {
     });
 
     testWidgets('整轮失败（抛 SpbError）显示错误条而非结果卡', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => throw const NetworkError('连接超时'),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -315,16 +243,15 @@ void main() {
 
     testWidgets('同步中禁用按钮（防重复触发）', (tester) async {
       var calls = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async {
           calls++;
           // 永不完成，观察按钮是否禁用。
           await Future<void>.delayed(const Duration(seconds: 10));
           return okReport();
         },
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -349,33 +276,58 @@ void main() {
     });
 
     testWidgets('换目录后清掉上一轮结果（结果描述的是旧目录）', (tester) async {
-      await pumpSync(
-        tester,
-        pickDirectory: () async => '/new',
-        runSync: () async => okReport(downloaded: 9),
-        initialLocalRoot: '/old',
+      // 目录卡片现在住在设置页，本组件只从 [SyncRunSection.localRoot]
+      // 收到它。故这里直接重新 pump 一个新 localRoot（同一位置、同一
+      // widget 类型 → 复用同一个 State），而不是去点选择器。
+      Future<void> pumpWith(String? root) => tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ListView(
+              children: [
+                SyncRunSection(
+                  runSync: () async => okReport(downloaded: 9),
+                  localRoot: root,
+                ),
+              ],
+            ),
+          ),
+        ),
       );
 
+      await pumpWith('/old');
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('sync-report')), findsOneWidget);
 
-      await tester.tap(find.byKey(const ValueKey('sync-pick-directory')));
+      await pumpWith('/new');
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('sync-report')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('sync-report')),
+        findsNothing,
+        reason: '上一轮结果描述的是旧目录，换目录后必须清掉',
+      );
+    });
+
+    testWidgets('未选目录且未保存过时也不报错（null 只是「还没读出来」）', (tester) async {
+      // 设置页刚打开、已保存设置还没读回来时 localRoot 为 null，此时区块
+      // 应该正常渲染（按钮可点），而不是预先弹一个「请先选择目录」。
+      await pumpSection(tester, runSync: () async => okReport());
+
+      expect(find.byKey(const ValueKey('sync-start-button')), findsOneWidget);
+      expect(find.byKey(const ValueKey('sync-error')), findsNothing);
     });
 
     testWidgets('再次同步会覆盖上一轮结果（不叠加）', (tester) async {
       var n = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async {
           n++;
           return okReport(downloaded: n * 10);
         },
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -389,11 +341,10 @@ void main() {
     });
 
     testWidgets('未变更与删除计数仅在非零时展示（避免噪音）', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(downloaded: 1),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tester.tap(find.byKey(const ValueKey('sync-start-button')));
@@ -407,19 +358,78 @@ void main() {
     });
   });
 
-  group('同步页：单向语义与回传入口', () {
+  group('同步运行区块：未保存改动的门禁', () {
+    testWidgets('有未保存改动时禁用「立即同步」并说明原因', (tester) async {
+      // 同步用的是**已保存**的配置（装配层从配置读）。草稿未保存时让按钮
+      // 可点，等于让用户做一次他以为配好了、其实没配好的同步。
+      await pumpSection(
+        tester,
+        runSync: () async => okReport(),
+        localRoot: '/root',
+        hasUnsavedChanges: true,
+      );
+
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('sync-start-button')),
+      );
+      expect(button.onPressed, isNull, reason: '未保存时必须禁用');
+      expect(
+        find.byKey(const ValueKey('sync-unsaved-hint')),
+        findsOneWidget,
+        reason: '禁用必须配说明，否则用户只看到「按钮是灰的」',
+      );
+    });
+
+    testWidgets('禁用态下点击不会发起同步', (tester) async {
+      var calls = 0;
+      await pumpSection(
+        tester,
+        runSync: () async {
+          calls++;
+          return okReport();
+        },
+        localRoot: '/root',
+        hasUnsavedChanges: true,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('sync-start-button')),
+        warnIfMissed: false,
+      );
+      await tester.pumpAndSettle();
+
+      expect(calls, 0);
+      expect(find.byKey(const ValueKey('sync-report')), findsNothing);
+    });
+
+    testWidgets('无未保存改动时不禁用、也不显示提示', (tester) async {
+      // 反方向：把提示做成常驻会让它失去信号价值。
+      await pumpSection(
+        tester,
+        runSync: () async => okReport(),
+        localRoot: '/root',
+      );
+
+      final button = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('sync-start-button')),
+      );
+      expect(button.onPressed, isNotNull);
+      expect(find.byKey(const ValueKey('sync-unsaved-hint')), findsNothing);
+    });
+  });
+
+  group('同步运行区块：单向语义与回传入口', () {
     testWidgets('未注入回传回调时页面没有任何上传入口', (tester) async {
       // 自动同步永远是 UFS → 本地单向（反向自动同步会触发服务端 groupsync
       // 的写入回路，emit agent.file.* → 可能引发渲染推送/重跑）。回传必须是
       // 显式动作，故装配层没接回调时入口不出现。
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
-      expect(find.textContaining('自动同步不会上传本地改动'), findsOneWidget);
+      expect(find.textContaining('只从云端拉取到本地'), findsOneWidget);
       expect(find.byKey(const ValueKey('upload-section')), findsNothing);
       expect(find.byKey(const ValueKey('upload-scan-button')), findsNothing);
       expect(find.byKey(const ValueKey('upload-submit-button')), findsNothing);
@@ -428,27 +438,22 @@ void main() {
     testWidgets('文案把两条通道说清（自动不回传 / 回传是显式动作）', (tester) async {
       // 回归防线：旧文案是「单向同步：只把远端拉下来，不会上传本地改动」
       // ——它没说「那我想让 agent 知道怎么办」，用户会以为改动永远上不去。
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
-      expect(
-        find.textContaining('自动同步不会上传本地改动；可用「回传改动」把选中的修改显式交给 agent'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('本地改动要用「回传改动」显式交给 agent'), findsOneWidget);
     });
 
     testWidgets('注入回传回调后才展示入口', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => emptyScan(),
         uploadChanges: (_) async => const UploadReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       expect(find.byKey(const ValueKey('upload-section')), findsOneWidget);
@@ -457,15 +462,14 @@ void main() {
     });
   });
 
-  group('同步页：回传改动', () {
+  group('同步运行区块：回传改动', () {
     testWidgets('扫描前不展示空态（避免「扫描没做完」与「没改动」混淆）', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => emptyScan(),
         uploadChanges: (_) async => const UploadReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       expect(find.byKey(const ValueKey('upload-empty')), findsNothing);
@@ -474,16 +478,15 @@ void main() {
 
     testWidgets('无脏文件时扫描后显示空态', (tester) async {
       var scans = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async {
           scans++;
           return emptyScan();
         },
         uploadChanges: (_) async => const UploadReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -496,16 +499,15 @@ void main() {
     });
 
     testWidgets('有脏文件时逐条渲染路径与字节数，且默认全选', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 120),
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/specs/b.spec.json', 340),
         ]),
         uploadChanges: (_) async => const UploadReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -535,9 +537,8 @@ void main() {
     testWidgets('取消勾选后提交只传剩下的文件', (tester) async {
       // 回归防线：设计文档 §6「不搞一键全传黑箱」——勾选必须真正生效。
       Set<String>? sent;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 120),
@@ -547,7 +548,7 @@ void main() {
           sent = only;
           return const UploadReport();
         },
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -568,9 +569,8 @@ void main() {
 
     testWidgets('全部取消勾选时提交按钮禁用（不发起空回传）', (tester) async {
       var calls = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 120),
@@ -579,7 +579,7 @@ void main() {
           calls++;
           return const UploadReport();
         },
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -598,9 +598,8 @@ void main() {
     });
 
     testWidgets('结果按各终态逐条渲染：已回传 / 冲突已物化 / 走快速捕获 / 已跳过 / 失败', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 10),
@@ -644,7 +643,7 @@ void main() {
             ),
           ],
         ),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -725,9 +724,8 @@ void main() {
     testWidgets('上传成功但通知失败 → 明确提示 agent 还不知道', (tester) async {
       // 回归防线：把「已上传但没通知」显示成完全成功，用户会以为
       // agent 已经知道了而不再处理。
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 10),
@@ -741,7 +739,7 @@ void main() {
             ),
           ],
         ),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -755,13 +753,12 @@ void main() {
     });
 
     testWidgets('扫描抛 SpbError 时显示错误条（不白屏、不展示空态）', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => throw const PlatformError('目录不可读'),
         uploadChanges: (_) async => const UploadReport(),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -772,15 +769,14 @@ void main() {
     });
 
     testWidgets('回传抛 SpbError 时显示错误条', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 10),
         ]),
         uploadChanges: (_) async => throw const NetworkError('连接超时'),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -795,9 +791,8 @@ void main() {
       // 回归防线：报告描述的是上一轮提交，新扫描后仍显示会让用户以为
       // 刚扫描出来的这批已经回传过了。
       var n = 0;
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 10 + n++),
@@ -812,7 +807,7 @@ void main() {
             ),
           ],
         ),
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));
@@ -826,9 +821,8 @@ void main() {
     });
 
     testWidgets('回传进行中禁用扫描与提交（防重复提交）', (tester) async {
-      await pumpSync(
+      await pumpSection(
         tester,
-        pickDirectory: () async => null,
         runSync: () async => okReport(),
         scanDirtyFiles: () async => scanWith([
           dirty('a1b2c3d4e5f60718293a4b5c6d7e8f90/reports/a.md', 10),
@@ -837,7 +831,7 @@ void main() {
           await Future<void>.delayed(const Duration(seconds: 10));
           return const UploadReport();
         },
-        initialLocalRoot: '/root',
+        localRoot: '/root',
       );
 
       await tapVisible(tester, const ValueKey('upload-scan-button'));

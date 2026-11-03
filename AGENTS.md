@@ -1042,17 +1042,21 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 快速输入（Alt+Space） | 进悬浮模式（见 §6.5） |
 | 立即同步交付物 | `onSyncNow`（未注入回调时禁用） |
 | 打开同步目录 | `caps.revealPath(同步目录)`（**未配置同步目录时禁用**） |
-| 同步设置… | `_openSyncSettings()` → `/settings/sync` |
+| 同步设置… | `_openSyncSettings()` → `/settings?tab=sync`（见 §6.53：同步已并入设置页） |
 | 设置… | `_openSettings()` → `/settings`（见下「两个设置入口为什么都要有」） |
 | 退出 | `PlatformDesktopQuit.quit` |
 
 **「打开同步目录」为什么在未配置时禁用**：此时 `revealPath` 拿到空串，文件管理器
 会落到用户主目录——看起来像「功能坏了」而不是「还没配」。
 
-**「同步设置…」为什么走 `SpbRouter.sync` 而不是 `showWindow(settings)`**：
-`WindowRole` 只有 main / settings / quickCapture，没有 sync 这个角色——同步设置是
-`/settings/sync` 这个**子页面**，不是独立窗口。`showWindow(settings)` 只会落到设置
-页首个 tab，用户还得自己再点一次「同步」，而托盘项的标签承诺的是直达。
+**「同步设置…」为什么走 `_router.go(SpbRoutes.settingsSyncTab)` 而不是
+`showWindow(settings)`**：
+`WindowRole` 只有 main / settings / quickCapture，没有 sync 这个角色——同步配置
+是设置页里的一个**标签**（§6.53），不是独立窗口。`showWindow(settings)` 只会落到
+设置页首个 tab，用户还得自己再点一次「同步」，而托盘项的标签承诺的是直达。
+（守则必须看 **query**：已在同步标签时不再 `go`、已在通用标签时必须真的切
+过去。⚠️ **不要**把这个守卫的理由写成「否则会清掉草稿」——实测 `go()` 到
+**相同** location 时 go_router 不重建页面（见 §6.53 末段）。）
 
 **「同步设置…」与「设置…」为什么两个都要有**（2026-10 补的第二个）：
 
@@ -1060,17 +1064,30 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 
 | 项 | 目标 | 内容 |
 |---|---|---|
-| 同步设置… | `/settings/sync` | 「立即同步」按钮 + 本轮结果 + 目录 |
-| 设置… | `/settings` | 同步目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理 / 外观 / 个人偏好 / 导出诊断日志 |
+| 同步设置… | `/settings?tab=sync` | 同步执行（立即同步 / 回传改动）+ 目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理 / 自动同步 |
+| 设置… | `/settings`（首个标签） | 外观 / 个人偏好 / 桌面集成 / 导出诊断日志 / 账号 |
 
-⚠️ 在此之前桌面端**没有任何 UI 入口能到 `/settings`**：托盘只有「同步设置…」
-（直达子页），列表 AppBar 也没有设置图标，而 `WindowRole.settings → /settings`
+两个入口都指向 `/settings`，只是 `tab` 参数不同——**守卫不能只比 path**：
+`_openSettings` 若只比 `uri.path == SpbRoutes.settings`，会把「已在同步标签」
+当成「已在设置页」，把「设置…」变成死按钮（外观 / 个人偏好依然不可达）；
+`_openSyncSettings` 同理要检查 `tab == 'sync'` 才算「已经在那儿」。
+两个方向各有一条 `desktop_integration_test.dart` 用例钉住：「已在同步标签时
+点设置…」与「已在通用标签时触发交付物同步…」。
+
+⚠️ **但「已在同步标签时重复触发」不能写成用例**（实测纠正）：`go()` 到
+**相同** location 时 go_router 本来就不重建页面（同一 location 再 go 一次，
+页面 build 次数不变；query 变了才 +1）。所以一条「重复导航会清掉草稿」
+的断言是**假绿**——把守卫删掉它也照样通过。那条守卫的真实作用只是「不做
+多余的导航通告」，写注释时不能拿「保草稿」当理由（与 §6.17 / §6.33 同一
+教训：**一个会在错误实现上变绿的用例，比没有用例更危险**）。
+
+⚠️ 在此之前桌面端**没有任何 UI 入口能到 `/settings` 的通用标签**：托盘只有
+「同步设置…」，列表 AppBar 也没有设置图标，而 `WindowRole.settings → /settings`
 的映射虽然存在、生产代码里却**无调用方**（只有测试会 `showWindow(settings)`）。
-于是上表右列那些配置在界面上完全不可达，只能靠深链。
+于是外观 / 个人偏好 / 导出诊断日志在界面上完全不可达，只能靠深链。
 
 **两个「始终可用」**：「同步设置…」与「设置…」都**不**依赖 `isSyncConfigured`
 ——它们正是**配置入口**，禁用会让未配置的用户无法完成配置（死锁）。
-
 **「设置…」为什么直接 `_router.go` 而不走 `caps.showWindow(settings)`**：本类已持有
 router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`）。绕一圈回到
 自己的能力层会让「从悬浮窗切到设置要还原窗口」依赖桩实现是否转发 `onShowWindow`
@@ -1542,17 +1559,19 @@ AppBar 曾塞 7 个常驻元素（`AgentSwitcher` + 5 个 `IconButton` + 连接�
 源码里有 11 处注释写「两端构造点必须一致，否则一端功能缺失而测试仍绿」，
 但**约定靠注释不靠工具**。故本脚本对两端共享组件构造点的具名参数做集合比对。
 
-#### 覆盖面：4 个组件，不是 1 个（issue #42）
+#### 覆盖面：3 个组件，不是 1 个（issue #42）
 
 最初只登记了 `ConversationPage`。其余共享页面同样有单端差异且**同样没有
-守卫**。现已扩到：
+守卫**。现登记（2026-10 起 `SyncPage` 已并入设置页的同步标签，见 §6.53，
+从守卫里移除；其历史教训保留在下方）：
 
 | 组件 | desktop 单端 | mobile 单端 |
 |---|---|---|
 | `ConversationPage` | `onOpenAgentFile` / `onRevealAgentFile` | `overflowItems` |
 | `GroupListPage` | — | `onOpenQuickCapture` |
-| `SettingsPage` | `loadLaunchAtStartup` / `setLaunchAtStartup` / `onOpenDirectory` / `onExportDiagnostics` | `loadNotifications` / `saveNotifications` |
-| `SyncPage` | `onOpenDirectory` | — |
+| `SettingsPage` | `loadLaunchAtStartup` / `setLaunchAtStartup` / `onOpenDirectory` / `onExportDiagnostics` / `showAutoSync` | `loadNotifications` / `saveNotifications` |
+
+（`SyncPage` 行已于 2026-10 删除——它不再是独立页面，见 §6.53。）
 
 #### ⚠️ 守卫自己曾经假绿（issue #42 修掉的真实缺陷）
 
@@ -4322,7 +4341,7 @@ Directory('/tmp/revtest').exists()       = true
 
 ### 6.42 自动同步：可配置的启动 / 周期 / 进对话按需（2026-10）
 
-交付物同步此前只有**手动**入口（托盘「立即同步交付物」/ 同步页按钮）。用户
+交付物同步此前只有**手动**入口（托盘「立即同步交付物」/ 设置页同步标签的按钮）。用户
 得记得点，本地目录才会跟得上远端——而「本地有一份可离线打开的交付物」正是
 同步这个功能的全部意义。本轮补上**可配置的自动同步**。
 
@@ -5747,6 +5766,119 @@ show ScrollCacheExtent;`。
 `sync_queue_test.dart` 用真实内存 drift 库和临时文件目录验证并发入口串行化；
 `group_sync_wiring_test.dart` 验证提示条、失败后重试及切 group 的异步归属。
 
+### 6.53 同步页并入设置页：两个标签（2026-10）
+
+独立的 `/settings/sync`（`SyncPage`）与设置页（`SettingsPage`）曾有大量重复：
+**目录 / 范围 / 媒体开关 / 单文件上限 / 拉取范围 / 本地清理**两边各画一份，且
+两边选目录的行为还不一致（一边立即落盘、另一边走草稿）。用户要改同步配置
+得知道「有两个页、改哪个都行但行为不一样」。现整合为设置页的两个标签：
+
+| 标签 | 内容 |
+|---|---|
+| 通用 | 外观 / 通知订阅 / 个人偏好 / 桌面集成 / 导出诊断日志 / 账号 |
+| 交付物同步 | 目录 / 范围 / 过滤与拉取范围 / 自动同步 / 本地统计与清理 / 同步执行（`SyncRunSection`：立即同步 + 脏检测 + 回传改动） |
+
+入口全部收敛到 `/settings?tab=sync`（常量 `SpbRoutes.settingsSyncTab`）；
+旧路径 `/settings/sync` 重定向（不炸历史入口 / 深链 / 托盘旧文案）。
+
+#### 四个关键设计
+
+**1. 一个 `ListView` + 两个 `Offstage` 区块，不是 `TabBarView`。**
+两个标签各自都有不可丢的 State：同步标签的草稿与刚扫出的待回传清单，
+通用标签的表单草稿。`Offstage` 只跳过绘制与命中测试，Element / State /
+数据全留（与 §6.46 侧边栏同一手法）。附带两个好处：
+
+- `find.*` 默认 `skipOffstage: true`，隐藏标签里的同名 key 不会让
+  `findsOneWidget` 变 `findsNWidget`——测试可以精确断言「两标签内容分开」；
+- 目录卡片只画一处（`settings-pick-directory` 全页唯一）。
+
+代价：隐藏标签的子树仍在树上（内存与布局成本，同 §6.46 的量级分析），
+两标签内容都会在首帧构建——设置页本就是低频页面，可接受。
+
+**2. 「立即同步」跑的永远是**已保存**设置；草稿只能靠禁用隔离。**
+
+两个半边缺一不可：
+
+- **执行侧**：`runSyncActionProvider` / `_runSync` 每次都
+  `loadSyncSettingsProvider()` 重读**已落盘**的设置（见 providers 里那段
+  「每次都重新读设置」注释）。它**不看**页面上的草稿。
+- **UI 侧**：`SyncRunSection` 拿到的 `localRoot` 是 **draft**（为了与刚选的
+  目录一致、并能提示「尚未选目录」），但 `hasUnsavedChanges`（`_dirty`）
+  为真时**禁用**「立即同步 / 扫描 / 回传」三个按钮并提示先保存。
+
+少了后一半，用户会「按新目录点了同步，实际按旧目录跑」——而换目录会重置
+同步状态（`bindLocalRoot`），误触发一次不可逆的状态清理。草稿与执行之间
+没有灰区。
+
+**3. 目录选择必须走 `pickDirectoryProvider`。**
+桌面端 router 里曾把 `pickDirectory` 写成就地闭包
+`caps.pickDirectory(title: ...)`——功能上没问题，但**绕过了 provider**，
+测试 harness override 无效（tap 选目录后草稿不变、保存按钮不出现），
+且对话框标题散在两处。修法：回 provider，title 兜底在 provider 内。
+教训与 §6.17 / §6.33 同型：**装配层不要就地 new 依赖，注入点必须可替换**。
+
+**4. 错误与「已保存」提示不属于任何标签。**
+保存按钮在 AppBar 上、两个标签都可能触发；提示若只活在某个标签的 Offstage
+里，用户切一下标签就看不到「失败了」。故两个 `_Banner` 放在所有 Offstage
+外面（ListView 顶层）。
+
+#### 托盘与路由守卫的两个对称坑
+
+「同步设置…」与「设置…」现在都指向 `/settings`，只差 `tab` 参数。两个托盘
+守卫**都不能只比 path**：
+
+- `_openSyncSettings`：已在同步标签时重复 `go()` 会重建页面、清掉用户填到
+  一半的草稿 → 比 path + `tab == 'sync'` 才跳过；
+- `_openSettings`：只比 path 会把「已在同步标签」当成「已在设置页」，把
+  「设置…」变成死按钮 → 比 path + `tab != 'sync'` 才跳过。
+
+两个方向各有 `desktop_integration_test.dart` 用例钉住（含反向：从通用标签
+触发必须真的导航）。
+
+#### 移动端
+
+移动端本就没有独立的同步路由（`/settings/sync` 只在桌面端可达），设置页
+底部标签栏新增「同步」标签（`SpbRoutes.settings` 不带参数时落在首个标签，
+与桌面端一致）。两端 `SettingsPage` 的接线由 `check_wiring_parity.sh` 守住
+（`SyncPage` 条目已从守卫移除，`SettingsPage` 的豁免清单保持不变）。
+
+#### 测试要点（踩过的坑）
+
+- **设置页是长 ListView**：默认 800×600 窗口下，同步标签末尾的区块（本地
+  清理 / 同步执行）屏外不构建，`tap()` 会静默未命中（不报错！）——表现为
+  「草稿没变、保存按钮不出现」。要么用 `1000×2400` 高窗口，要么
+  `tester.ensureVisible` 后再 tap。
+- **断言 offstage 分离用 `findsNothing`**：通用标签断言
+  `settings-pick-directory` 不存在、同步标签断言 `settings-sign-out` 不存在，
+  防止将来有人把两标签内容合并。
+- **通用标签的内容锚点**：账号区（`settings-sign-out`）只在注入
+  `onSignOut` 时渲染、同步执行区块只在注入 `runSync` 时渲染——测试锚点
+  要么注入桩，要么换常驻锚点（标签条本身）。
+- **features 层新增「两个标签」group**（5 条：默认落点 / 内容不重叠 /
+  `initialTab=sync` 首屏 / 切标签不销毁草稿 / 错误提示跨标签可见），
+  路由层用例只管接线。
+
+#### 有意不做
+
+- **不做嵌套路由 / `StatefulShellRoute`**：两个标签共享同一份草稿状态与
+  AppBar 保存按钮，拆成子路由会把状态管理劈到两处；query 参数足以表达。
+- **不保留 `/settings/sync` 为独立页面**：重定向一步到位，不设过渡期。
+- **不在移动端加独立的「同步」底部 tab 之外的入口**：与桌面端 AppBar 设置
+  图标的既有豁免同一取向（见 §6.17）。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 失败用例 |
+|---|---|
+| `hasUnsavedChanges: _dirty` 改成 `false` | router_settings「换目录后未保存时禁用立即同步」 |
+| `pickDirectory` 改回就地闭包（绕过 provider） | 「选择目录后保存…」（harness override 失效） |
+| `_openSettings` 只比 path | 「已在同步标签时点设置…」 |
+| `_openSyncSettings` 只比 path（守卫过宽） | 「已在通用标签时触发交付物同步…」 |
+| 提示 banner 挪回某个 Offstage 里 | 「错误与「已保存」提示不属于任何标签」 |
+| 删掉旧路径重定向 | 「旧 /settings/sync 重定向到同步标签」（两端各 1） |
+| 同步标签改回「不在该标签时从树上摘掉」 | 「切标签不销毁草稿」 |
+| 把「重复触发不导航」当需求写进用例 | —（**已删**：go_router 对相同 location 不重建，断言恒绿） |
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -6060,6 +6192,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~独立的「同步页」（`SyncPage` / `/settings/sync`）与设置页大量重复（目录 / 范围 / 媒体开关 / 单文件上限 / 清理各画一份，且选目录行为不一致）~~ | ✅ 已整合（§6.53）：合并为设置页的**两个标签**（通用 / 交付物同步），入口统一`/settings?tab=sync`，旧路径重定向。用「一个 ListView + 两个 `Offstage` 区块」而非 `TabBarView`（切标签不销毁草稿与扫描结果）；同步执行区块的 `localRoot` 取 draft 而三个动作在 `hasUnsavedChanges` 时禁用（执行侧永远读**已保存**设置）；错误与「已保存」提示放在所有 Offstage 外面。桌面 `pickDirectory` 改回走 `pickDirectoryProvider`（就地闭包会让 harness override 失效）。⚠️ 记一次**自己写的假绿**：「重复触发不导航」那条用例在守卫被删后仍通过（go_router 对相同 location 不重建页面），已删除并在 §6.53 记录。 | §6.53 |
 | ~~点「发送」后到响应落地之间时间线什么都不显示（网络慢时像「点了没反应」）~~ | ✅ 已修（§6.50，issue #52）：`send()` 原本 `await` 完 HTTP 才注入回显——「乐观」只覆盖了「不等 SSE」，没覆盖「不等响应」。现回显**提前到请求发出之前**并带 `pending`：在飞时正文半透明 + 「发送中…」+ 隐藏复制入口；成功后 `_settleLocalEcho` **原位转正**（关 pending、落真 turnId，权威帧再按 turnId 原位合并，不出第二个气泡）；失败/入队则 `_removeLocalEcho` 移除（入队有自己的「待发送」条）。三个易写错处：① `turnId` 为空**也要**转正——反馈回执 `feedback_recorded` 不建 turn，此后没有权威帧，提前 return 会让气泡永久转圈；② `echoId` 从「本地标记」升级为**精确定位键**，`local-<微秒>` 同微秒会撞车（outbox 批量投递真实会）→ 加 `_echoSeq`；③ `idx < 0` 时**不得**重新注入（缓冲可能已属另一个对话）。归约按 `payload['pending'] == true` 解析（只认字面 true），故回填/缓存路径不会误显示。domain 10 + reducer 1 + 气泡 3 + 页面接线 1 条用例；8 项反向验证逐条实测——其中「同微秒」那条**曾经假绿**（重构时删掉了直接的 `id1 != id2` 断言，间接断言在碰撞时照样绿） | §6.50 |
 | ~~多轮对话之后，查看大块正文时向下滚动会丢内容~~ | ✅ 已修（§6.48）：**不是渲染问题，是数据被裁掉了**。服务端每个 token 发一条 `transient: true` 的增量事件（`pigo_core.go` 的 `flushEventTransient`），一个长回复上千条 → 几轮正常对话就撞破 `maxBufferEvents = 2000` → `_trimBuffer` 从**头部逐条**丢 → 而 `EventReducer.reduce` 是**全量重算**，丢头部等于把归约输入掐掉一截。三个用户可见后果：① 整轮对话消失（丢的那段含 `user_message` / `start`）；② 回复开头被截掉；③ 流式期间 item 的 `id` 取自「首条幸存增量」的 eventId → `ValueKey(item.id)` 逐条变化 → `AssistantMessageBubble` Element 反复重建 → `gpt_markdown` 的增量解析状态全丢 → 气泡塌成十几像素再重新打字（实测 `12912 → 36` 字符）。修法两道：① **紧邻同类增量入缓冲前合并**（同 turn / 同类型 / 同 session+agent / 两边都恰好一个文本键 → 拼进尾部，**保留首条 id**，归约输出逐字不变）——2600 条增量的回复只占 1 个槽位；② **裁剪改为按整轮丢**（`_turnBoundaryAtOrAfter` 从 excess 往后找轮次边界），绝不切在一轮中间；单轮超限时退回逐条丢 + `warn`（**只记一次**，否则一秒刷满 500 条诊断缓冲）。⚠️ 反向验证踩到的坑：「每轮 100 条」会让按轮裁剪的用例**假绿**（逐条丢 500 条与按轮丢 5 轮结果相同）——改成每轮 **137** 条（与 2000 不对齐）后两种实现才分道。domain 6 条 + page 2 条用例 | §6.48 |
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb` issue #30 |

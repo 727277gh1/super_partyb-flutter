@@ -41,12 +41,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('设置'), findsWidgets);
-    expect(find.byKey(const ValueKey('settings-sync-entry')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-tabs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-tab-sync')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('settings-include-media')),
-      findsOneWidget,
+      findsNothing,
+      reason: '同步配置属于「交付物同步」标签，通用标签不重复渲染',
     );
-    expect(find.byKey(const ValueKey('settings-prune')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('settings-capabilities')),
       findsNothing,
@@ -120,9 +121,10 @@ void main() {
   });
 
   testWidgets('移动端设置页展示固定沙箱目录（用户需知道文件落在哪）', (tester) async {
+    // 目录卡住在「交付物同步」标签里。
     final h = await pumpApp(tester);
 
-    h.router.go(SpbRoutes.settings);
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
 
     expect(find.text('/app/deliverables'), findsOneWidget);
@@ -237,7 +239,8 @@ void main() {
     SyncSettings? saved;
     final h = await pumpApp(tester, saveSyncSettings: (s) async => saved = s);
 
-    h.router.go(SpbRoutes.settings);
+    // 媒体开关与保存按钮都住在「交付物同步」标签里。
+    h.router.go(SpbRoutes.settingsSyncTab);
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('settings-include-media')));
@@ -314,18 +317,22 @@ void main() {
     );
   });
 
-  testWidgets('从设置进入 /settings/sync 渲染同步页', (tester) async {
+  testWidgets('同步标签可渲染（旧 /settings/sync 重定向到这里）', (tester) async {
+    // 跑同步的区块已并入设置页的「交付物同步」标签；旧路径保留为兼容重定向。
+    // 移动端没有目录选择器：按钮仍渲染（点了无副作用，provider 恒返回 null），
+    // 隐藏入口会让「未配目录」看起来像「功能坏了」。
     final h = await pumpApp(tester);
 
-    h.router.go(SpbRoutes.settings);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('settings-sync-entry')));
+    h.router.go(SpbRoutes.sync);
     await tester.pumpAndSettle();
 
-    expect(h.router.state.matchedLocation, SpbRoutes.sync);
+    expect(h.router.state.uri.path, SpbRoutes.settings);
+    expect(h.router.state.uri.queryParameters['tab'], 'sync');
     expect(find.byKey(const ValueKey('sync-start-button')), findsOneWidget);
-    // 移动端没有目录选择器，按钮点了无副作用（provider 恒返回 null）。
-    expect(find.byKey(const ValueKey('sync-pick-directory')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-pick-directory')),
+      findsOneWidget,
+    );
   });
   group('离线写队列装配（issue #30）', () {
     testWidgets('outboxQueueProvider 用注入的 AppDatabase（同一内存库）', (tester) async {

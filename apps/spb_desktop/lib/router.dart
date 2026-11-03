@@ -42,11 +42,19 @@ class SpbRoutes {
   /// 更弱的重复页面只会让下一个人以为它有用户。
   static const overlay = '/overlay';
 
-  /// 交付物同步页。
+  /// 交付物同步配置（旧「同步页」路径，现为设置页同步标签的重定向目标）。
   ///
-  /// 桌面端相对 webapp 的**核心差异价值**：把交付物真文件拉到磁盘上，
-  /// 可用系统程序打开、可离线查看。
+  /// 跑同步的区块现在住在设置页的「交付物同步」标签里（见 [SettingsTab]）。
+  /// 本路径保留是为了不炸掉历史入口（旧快捷方式 / 旧文档），路由层会把
+  /// 它重定向到 [settingsSyncTab]。**新代码一律用 [settingsSyncTab]**。
   static const sync = '/settings/sync';
+
+  /// 设置页的「交付物同步」标签。
+  ///
+  /// 配置与执行在同一屏：目录/范围/过滤决定「拉什么」，按钮决定「什么时候
+  /// 拉」，自动同步决定「不用我点也拉」——拆开后用户无法在同一屏核对
+  /// 「为什么没自动下载」。见 [SettingsTab.sync]。
+  static const settingsSyncTab = '/settings?tab=sync';
 
   /// 登录页。
   ///
@@ -263,11 +271,14 @@ List<RouteBase> buildDesktopRoutes() {
         ),
         GoRoute(
           path: 'settings',
-          builder: (context, state) => const _SettingsPage(),
+          builder: (context, state) =>
+              _SettingsPage(initialTab: _settingsTabFromQuery(state)),
           routes: [
+            // 旧「交付物同步页」的兼容重定向：跑同步的区块已并入设置页的
+            // 「交付物同步」标签（历史与理由见 [SettingsTab] 文档）。
             GoRoute(
               path: 'sync',
-              builder: (context, state) => const _SyncPage(),
+              redirect: (context, state) => SpbRoutes.settingsSyncTab,
             ),
           ],
         ),
@@ -362,13 +373,14 @@ class _HomePage extends ConsumerWidget {
       // 的一层，返回应回到对话列表并保留滚动位置。
       onOpenWorks: () => context.push(SpbRoutes.works),
       onOpenHabits: () => context.push(SpbRoutes.habits),
-      // 全局设置页（同步目录 / 范围 / 过滤 / 外观 / 个人偏好 / 诊断导出）。
+      // 全局设置页（两个标签：通用 = 外观 / 通知 / 个人偏好 / 桌面集成 /
+      // 账号；交付物同步 = 目录 / 范围 / 过滤 / 自动同步 / 立即同步 / 回传）。
       //
       // ## 为什么必须在这里给入口
       //
-      // 桌面端此前**没有**任何 UI 入口能到 `/settings`：托盘只有「同步设置…」
-      // （直达 `/settings/sync`），列表 AppBar 没有设置图标。结果是同步目录、
-      // 范围、媒体开关、本地清理、外观、个人偏好、导出诊断日志**在界面上不可达**。
+      // 桌面端在托盘之外曾**没有**任何 UI 入口能到 `/settings`：托盘只有一项
+      // 直达同步标签的「交付物同步…」，列表 AppBar 没有设置图标。结果是外观、
+      // 个人偏好、本地清理等通用配置**在界面上不可达**。
       // `WindowRole.settings → /settings` 的映射虽然存在，但生产代码里没有
       // 任何地方调 `showWindow(WindowRole.settings)`（只有测试会）。
       //
@@ -2631,53 +2643,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   };
 }
 
-/// 交付物同步页（接线到同步用例）。
+/// 解析设置页路由的 `?tab=` 参数。
 ///
-/// ## 与设置页的分工
-///
-/// - **设置页**（`/settings`）：配置同步目录、范围、过滤、清理；
-/// - **同步页**（`/settings/sync`）：只做「立即同步」并展示本轮结果。
-///
-/// 分开的理由：同步是**高频动作**（每次想看最新交付物就点一次），而配置是
-/// 低频动作。合在一页会让用户每次同步都要滚过一堆表单。
-///
-/// ## 页面不依赖平台插件
-///
-/// 目录选择与同步执行都通过 Provider 注入（`pickDirectoryProvider` /
-/// `runSyncActionProvider`），故本页在 widget test 里可以完整验证，
-/// 而真实实现（`file_selector` / UFS HTTP）只在生产装配里出现。
-class _SyncPage extends ConsumerWidget {
-  const _SyncPage();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // 初始目录：读数据库绑定。读取是异步的，未就绪时传 null（页面显示
-    // 「尚未选择」），就绪后由 watch 触发重建。
-    //
-    // 用 `.value`（riverpod 3 里它是可空的，未就绪/出错时为 null）：
-    // 「尚未选过目录」与「还没读出来」都表现为 null，而页面对两者的处理
-    // 完全相同（显示「尚未选择」），故不需要额外区分。
-    final localRoot = ref.watch(syncLocalRootProvider).value;
-
-    return SyncPage(
-      initialLocalRoot: localRoot,
-      pickDirectory: ref.watch(pickDirectoryProvider),
-      runSync: ref.watch(runSyncActionProvider),
-      // 回传是显式逐文件动作（自动同步仍单向，见 SyncPage 文档）。
-      scanDirtyFiles: ref.watch(scanDirtyFilesActionProvider),
-      uploadChanges: ref.watch(uploadChangesActionProvider),
-      onOpenDirectory: (path) =>
-          ref.read(desktopCapabilitiesProvider).revealPath(path),
-      onLocalRootChanged: (root) {
-        // 保存目录（换目录会在同一事务里清空同步状态，见 provider 说明）。
-        ref.read(saveLocalRootActionProvider)(root).catchError((Object e) {
-          SpbLog.warn('保存同步目录失败', {'error': e.toString()});
-          return false;
-        });
-      },
-    );
-  }
-}
+/// 只有 `tab=sync` 有意义；未知值一律回「通用」——把打错的参数变成
+/// 「落在第一个标签」比拋异常更符合路由参数的宽容语义。
+SettingsTab _settingsTabFromQuery(GoRouterState state) =>
+    state.uri.queryParameters['tab'] == 'sync'
+    ? SettingsTab.sync
+    : SettingsTab.general;
 
 /// 设置页（接线到注入的设置读写与平台能力）。
 ///
@@ -2693,11 +2666,15 @@ class _SyncPage extends ConsumerWidget {
 /// ——若在这里 `watch` 一个 FutureProvider 再重建，反而会在每次设置变化时
 /// 丢掉页面内部的表单草稿。
 class _SettingsPage extends ConsumerWidget {
-  const _SettingsPage();
+  const _SettingsPage({this.initialTab = SettingsTab.general});
+
+  /// 首次展示哪个标签（来自路由 `?tab=`，见 [_settingsTabFromQuery]）。
+  final SettingsTab initialTab;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
+      initialTab: initialTab,
       loadSettings: ref.watch(loadSyncSettingsProvider),
       saveSettings: (settings) async {
         await ref.read(saveSyncSettingsProvider)(settings);
@@ -2711,10 +2688,10 @@ class _SettingsPage extends ConsumerWidget {
       loadGroups: ref.watch(loadSyncGroupsProvider),
       scanGroups: ref.watch(scanLocalGroupsProvider),
       executePrune: ref.watch(executePruneProvider),
-      pickDirectory: () async {
-        final caps = ref.read(desktopCapabilitiesProvider);
-        return caps.pickDirectory(title: '选择交付物同步目录');
-      },
+      // 走 provider 而非就地拿 caps：测试只需 override 这一个注入点就能模拟
+      // 「用户选了某个目录」（真实实现里 `file_selector` 需要 GUI，本机与 CI
+      // 都没有）。与移动端同名同构。
+      pickDirectory: ref.watch(pickDirectoryProvider),
       desktopInfo: DesktopIntegrationInfo(
         visible: ref.watch(desktopCapabilitiesProvider).isSupported,
         hotkeyLabel: HotkeyBinding.quickCapture.label,
@@ -2765,8 +2742,13 @@ class _SettingsPage extends ConsumerWidget {
       // 自动同步：**仅桌面端**渲染（移动端没有可靠的后台排程，见
       // `SettingsPage.showAutoSync` 的说明）。
       showAutoSync: true,
-      // 配置在本页，跑同步在独立页面（见 SettingsPage.onOpenSync 说明）。
-      onOpenSync: () => context.go(SpbRoutes.sync),
+      // 同步执行区块直接住在「交付物同步」标签里（与配置同屏，见
+      // SettingsTab 文档）。装配层拿到的目录/范围也是**已保存**的那份
+      // （runSyncActionProvider 自行从配置读），页面层用 hasUnsavedChanges
+      // 拦住「改了没保存就同步」。
+      runSync: ref.watch(runSyncActionProvider),
+      scanDirtyFiles: ref.watch(scanDirtyFilesActionProvider),
+      uploadChanges: ref.watch(uploadChangesActionProvider),
       // 退出登录：清凭证 → 回登录页。
       //
       // ## 显式 `go(login)` 是「双保险」，路由守卫已能兜住

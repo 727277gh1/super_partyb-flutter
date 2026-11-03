@@ -179,10 +179,10 @@ Future<TestHarness> pumpApp(
   Future<String?> Function()? signInAction,
   void Function(DioAdapter adapter)? beforePump,
 
-  /// 目录选择器（同步页用）。默认「用户取消」。
-  PickSyncDirectory? pickDirectory,
+  /// 目录选择器（设置页「交付物同步」标签用）。默认「用户取消」。
+  PickSettingsDirectory? pickDirectory,
 
-  /// 同步动作（同步页 / 托盘用）。默认返回空报告。
+  /// 同步动作（设置页同步标签 / 托盘用）。默认返回空报告。
   RunSyncAction? runSync,
 
   /// 定向同步动作（对话页提示条上的「立即同步」用）。默认返回空报告。
@@ -192,7 +192,7 @@ Future<TestHarness> pumpApp(
   /// 无法断言「点提示条时到底跑了哪个」。
   GroupSyncRun? runGroupSync,
 
-  /// 同步目录初始值（同步页用）。默认未选。
+  /// 同步目录初始值（设置页同步标签用）。默认未选。
   String? syncLocalRoot,
 
   /// 测试用数据库。默认在内存库上新建。
@@ -422,7 +422,7 @@ Future<TestHarness> pumpApp(
         ref.onDispose(db.close);
         return db;
       }),
-      // 同步页的两个注入点：默认「取消 + 空报告」，需要断言的用例显式传。
+      // 设置页目录卡与同步标签的注入点：默认「取消 + 空报告」，需要断言的用例显式传。
       pickDirectoryProvider.overrideWithValue(
         pickDirectory ?? ({String? title}) async => null,
       ),

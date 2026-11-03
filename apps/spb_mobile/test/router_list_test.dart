@@ -746,7 +746,7 @@ void main() {
     // 切到「设置」。
     h.router.go(SpbRoutes.settings);
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('settings-sync-entry')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-tabs')), findsOneWidget);
 
     // 用 goBranch 切回「对话」分支（模拟点底部标签）。
     final shell = tester.widget<NavigationBar>(find.byType(NavigationBar));
@@ -774,7 +774,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(h.router.state.matchedLocation, SpbRoutes.settings);
-    expect(find.byKey(const ValueKey('settings-sync-entry')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-tabs')), findsOneWidget);
 
     // 回到对话标签，确认列表 AppBar 没有第二个设置入口。
     shell.onDestinationSelected?.call(0);

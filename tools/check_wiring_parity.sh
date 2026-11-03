@@ -21,7 +21,7 @@
 #
 # 最初只登记了 `ConversationPage`。其余共享页面同样有单端差异（桌面端有托盘/
 # 快捷键/诊断导出，移动端有小程序订阅额度），且**同样没有守卫**。现已扩到
-# 4 个组件：`ConversationPage` / `GroupListPage` / `SettingsPage` / `SyncPage`。
+# 3 个组件：`ConversationPage` / `GroupListPage` / `SettingsPage`。
 #
 # ⚠️ **`SyncPage` 的差异曾被本脚本误判为「两端一致」**——因为匹配用了
 # `component + '('` 的裸子串搜索，而两端 router 里各有一个同名的私有包装
@@ -124,19 +124,6 @@ TARGETS = [
             # 微信小程序订阅消息额度（AGENTS.md §6.9.1）：桌面端没有小程序
             # 运行环境，展示它无法兑现。
             'mobile': {'loadNotifications', 'saveNotifications'},
-        },
-    },
-    {
-        'component': 'SyncPage',
-        'decl': 'packages/spb_features/lib/src/sync/sync_page.dart',
-        'sites': {
-            'desktop': 'apps/spb_desktop/lib/router.dart',
-            'mobile': 'apps/spb_mobile/lib/router.dart',
-        },
-        'exempt': {
-            # 移动端无「同步目录」概念（NoopDesktopCapabilities，§6.10）。
-            'desktop': {'onOpenDirectory'},
-            'mobile': set(),
         },
     },
 ]

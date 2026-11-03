@@ -425,9 +425,9 @@ void main() {
   });
 
   /// 桌面端 `/settings` 此前**没有任何 UI 入口**——
-  /// 托盘只有「同步设置…」（直达 `/settings/sync`），列表 AppBar 没有设置
+  /// 托盘只有「交付物同步…」（直达 `/settings?tab=sync`），列表 AppBar 没有设置
   /// 图标，而 `WindowRole.settings → /settings` 的映射在生产代码里无调用方。
-  /// 于是同步目录 / 范围 / 过滤 / 外观 / 个人偏好 / 导出诊断日志全不可达。
+  /// 于是外观 / 通知 / 个人偏好 / 导出诊断日志全不可达。
   ///
   /// ## 为什么从 router 层断言
   ///
@@ -446,7 +446,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(h.router.state.matchedLocation, SpbRoutes.settings);
-    // 真进了设置页（而不是只改了路径）。
-    expect(find.byKey(const ValueKey('settings-scope-all')), findsOneWidget);
+    // 真进了设置页（而不是只改了路径）——落在**首个标签**，不带 tab 参数。
+    expect(find.byKey(const ValueKey('settings-tabs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-appearance')), findsOneWidget);
+    expect(h.router.state.uri.queryParameters.containsKey('tab'), isFalse);
   });
 }

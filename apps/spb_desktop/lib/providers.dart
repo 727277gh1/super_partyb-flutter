@@ -1209,11 +1209,11 @@ final syncLocalRootProvider = FutureProvider<String?>((ref) async {
 
 /// 目录选择器（平台能力）。
 ///
-/// 包装成 `PickSyncDirectory`（可选 title 参数）供同步页注入——页面不直接
+/// 包装成 `PickSettingsDirectory`（可选 title 参数）供设置页注入——页面不直接
 /// 依赖 `spb_platform`。
-final pickDirectoryProvider = Provider<PickSyncDirectory>((ref) {
+final pickDirectoryProvider = Provider<PickSettingsDirectory>((ref) {
   final caps = ref.watch(desktopCapabilitiesProvider);
-  return ({String? title}) => caps.pickDirectory(title: title);
+  return ({String? title}) => caps.pickDirectory(title: title ?? '选择交付物同步目录');
 });
 
 /// 偏好键：是否同步媒体。
@@ -1277,14 +1277,14 @@ final _syncTaskRunnerProvider =
       };
     });
 
-/// 全量同步入口：托盘、同步页和定时器在途时复用同一轮结果，
+/// 全量同步入口：托盘、设置页同步标签和定时器在途时复用同一轮结果，
 /// 与定向同步通过共享队列串行执行。
 final runSyncActionProvider = Provider<RunSyncAction>((ref) {
   // 单飞（single-flight）：同一时刻只允许一轮同步。
   //
   // ## 为什么必须有它（自动同步引入后）
   //
-  // 现在有三个入口能触发同步：托盘「立即同步交付物」、同步页按钮、自动同步
+  // 现在有三个入口能触发同步：托盘「立即同步交付物」、设置页的「立即同步」、自动同步
   // 调度器。前两者靠用户手动，天然不会同时点；但自动 tick 与手动触发**可以
   // 重叠**——而 `DeliverableSyncUseCase` 会按 stateKey 读写同一份游标，
   // 两轮并发推进同一游标不安全（可能互相覆盖，导致已下载的文件被重复下载、
@@ -1648,22 +1648,6 @@ final runGroupSyncActionProvider = Provider<GroupSyncRun>((ref) {
         unawaited(inFlight.remove(groupId));
       }
     });
-  };
-});
-
-/// 保存同步目录（换目录时**在同一事务里**清空同步状态）。
-///
-/// 返回是否发生了状态重置（true = 目录变更）。
-final saveLocalRootActionProvider = Provider<Future<bool> Function(String?)>((
-  ref,
-) {
-  return (String? root) async {
-    final store = ref.read(syncStateStoreProvider);
-    // bindLocalRoot：目录变了 → 清空全部状态（**同一事务**）。
-    final reset = await store.bindLocalRoot(root);
-    // 让依赖它的 provider 重新读取（目录已变）。
-    ref.invalidate(syncLocalRootProvider);
-    return reset;
   };
 });
 

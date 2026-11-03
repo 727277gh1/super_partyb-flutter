@@ -49,6 +49,10 @@ void main() {
     Future<void> Function(ThemeMode)? saveThemeMode,
     Future<DiagnosticsExportOutcome> Function()? onExportDiagnostics,
     bool showAutoSync = false,
+    SettingsTab tab = SettingsTab.general,
+    RunSyncAction? runSync,
+    ScanDirtyFilesAction? scanDirtyFiles,
+    UploadChangesAction? uploadChanges,
   }) async {
     // ## 为什么要把测试窗口调高
     //
@@ -85,6 +89,10 @@ void main() {
           saveThemeMode: saveThemeMode,
           onExportDiagnostics: onExportDiagnostics,
           showAutoSync: showAutoSync,
+          initialTab: tab,
+          runSync: runSync,
+          scanDirtyFiles: scanDirtyFiles,
+          uploadChanges: uploadChanges,
         ),
       ),
     );
@@ -102,9 +110,114 @@ void main() {
         updatedAt: DateTime(2026, 1, 2),
       );
 
+  group('设置页：两个标签（通用 / 交付物同步）', () {
+    testWidgets('两个标签都在，默认落在首个', (tester) async {
+      // 账号区（退出登录）作为「通用标签的内容」锚点：它只在注入
+      // onSignOut 时渲染，故这里显式注入。
+      await pumpSettings(tester, onSignOut: () async {});
+
+      expect(find.byKey(const ValueKey('settings-tabs')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('settings-tab-general')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('settings-tab-sync')), findsOneWidget);
+      // 默认标签的内容（外观需要注入 load/saveThemeMode 才渲染，这里用
+      // 账号区：它在通用标签末段）。
+      expect(find.byKey(const ValueKey('settings-sign-out')), findsOneWidget);
+    });
+
+    testWidgets('两个标签的内容不重叠（offstage 不可见）', (tester) async {
+      await pumpSettings(
+        tester,
+        initial: const SyncSettings(localRoot: '/r'),
+        onSignOut: () async {},
+        // 「立即同步」只在注入了 runSync 时渲染（同步执行区块），这里给它
+        // 一个桩以便断言它的显隐。
+        runSync: () async => SyncReport(),
+      );
+
+      // 通用标签：同步配置不可见。
+      expect(
+        find.byKey(const ValueKey('settings-pick-directory')),
+        findsNothing,
+      );
+      expect(find.byKey(const ValueKey('sync-start-button')), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('settings-tab-sync')));
+      await tester.pumpAndSettle();
+
+      // 同步标签：目录 / 范围 / 立即同步都在。
+      expect(
+        find.byKey(const ValueKey('settings-pick-directory')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('sync-start-button')), findsOneWidget);
+      // 而账号区（通用标签）不可见。
+      expect(find.byKey(const ValueKey('settings-sign-out')), findsNothing);
+    });
+
+    testWidgets('initialTab=sync 时首屏就是同步内容', (tester) async {
+      await pumpSettings(tester, tab: SettingsTab.sync, onSignOut: () async {});
+
+      expect(
+        find.byKey(const ValueKey('settings-sync-channels')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('settings-sign-out')), findsNothing);
+    });
+
+    testWidgets('切标签不销毁草稿（改动仍在，保存按钮仍在）', (tester) async {
+      // 这是选「Offstage 而不是 TabBarView」的全部理由：两个标签各自都有
+      // 不可丢的 State（同步标签的草稿与扫描结果，通用标签的表单草稿）。
+      await pumpSettings(tester, tab: SettingsTab.sync);
+
+      await tester.tap(find.byKey(const ValueKey('settings-include-media')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('settings-save')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('settings-tab-general')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-tab-sync')));
+      await tester.pumpAndSettle();
+
+      final media = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-include-media')),
+      );
+      expect(media.value, isTrue, reason: '切标签不得重建 State——否则草稿会被静默抹掉');
+      expect(find.byKey(const ValueKey('settings-save')), findsOneWidget);
+    });
+
+    testWidgets('错误与「已保存」提示不属于任何标签', (tester) async {
+      // 保存按钮在 AppBar 上，两个标签都可能触发；提示若只活在某个标签里，
+      // 用户切一下标签就看不到「失败了」。
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        onSave: (_) async => throw const StorageError('磁盘已满'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-include-media')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-save')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('磁盘已满'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('settings-tab-general')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('磁盘已满'),
+        findsOneWidget,
+        reason: '错误提示必须在另一个标签也看得见',
+      );
+    });
+  });
+
   group('设置页：表单草稿语义（改动不即时落盘）', () {
     testWidgets('未改动时隐藏「保存」按钮', (tester) async {
-      await pumpSettings(tester);
+      await pumpSettings(tester, tab: SettingsTab.sync);
       expect(
         find.byKey(const ValueKey('settings-save')),
         findsNothing,
@@ -114,7 +227,11 @@ void main() {
 
     testWidgets('切换媒体开关后出现保存按钮，但未保存前不落盘', (tester) async {
       var saves = 0;
-      await pumpSettings(tester, onSave: (_) async => saves++);
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        onSave: (_) async => saves++,
+      );
 
       await tester.tap(find.byKey(const ValueKey('settings-include-media')));
       await tester.pumpAndSettle();
@@ -129,7 +246,11 @@ void main() {
 
     testWidgets('点保存把整份设置一次性提交', (tester) async {
       SyncSettings? saved;
-      await pumpSettings(tester, onSave: (s) async => saved = s);
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        onSave: (s) async => saved = s,
+      );
 
       await tester.tap(find.byKey(const ValueKey('settings-include-media')));
       await tester.pumpAndSettle();
@@ -151,6 +272,7 @@ void main() {
       var saves = 0;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         pickDirectory: () async => '/home/u/new-root',
         onSave: (_) async => saves++,
       );
@@ -165,6 +287,7 @@ void main() {
     testWidgets('取消选目录不改变现有目录', (tester) async {
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(localRoot: '/home/u/keep-me'),
         pickDirectory: () async => null, // 用户取消
       );
@@ -183,7 +306,11 @@ void main() {
 
   group('设置页：同步范围', () {
     testWidgets('默认「全部对话」开启，不展示勾选列表', (tester) async {
-      await pumpSettings(tester, groups: [chatGroup('g1', '对话一')]);
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        groups: [chatGroup('g1', '对话一')],
+      );
 
       final sw = tester.widget<SwitchListTile>(
         find.byKey(const ValueKey('settings-scope-all')),
@@ -200,6 +327,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         groups: [chatGroup('g1', '对话一'), chatGroup('g2', '对话二')],
         onSave: (s) async => saved = s,
       );
@@ -222,6 +350,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         groups: [chatGroup('g1', '对话一')],
         onSave: (s) async => saved = s,
       );
@@ -243,6 +372,7 @@ void main() {
     testWidgets('已归档对话也可勾选并标注状态', (tester) async {
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(
           scope: SyncScopeConfig(allGroups: false, groupIds: ['g1']),
         ),
@@ -255,7 +385,7 @@ void main() {
 
   group('设置页：过滤与拉取范围', () {
     testWidgets('媒体开关默认关闭（生产媒体占体积绝大多数）', (tester) async {
-      await pumpSettings(tester);
+      await pumpSettings(tester, tab: SettingsTab.sync);
 
       final sw = tester.widget<SwitchListTile>(
         find.byKey(const ValueKey('settings-include-media')),
@@ -267,6 +397,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(
           filter: SyncFilterConfig(maxFileSize: 5 * 1024 * 1024),
         ),
@@ -294,6 +425,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(
           filter: SyncFilterConfig(maxFileSize: 10 * 1024 * 1024),
         ),
@@ -317,6 +449,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(
           filter: SyncFilterConfig(maxFileSize: 10 * 1024 * 1024),
         ),
@@ -345,7 +478,11 @@ void main() {
 
     testWidgets('拉取范围默认「不限」，可切到近 7 天并保存', (tester) async {
       SyncSettings? saved;
-      await pumpSettings(tester, onSave: (s) async => saved = s);
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        onSave: (s) async => saved = s,
+      );
 
       expect(find.text('不限'), findsOneWidget);
 
@@ -365,6 +502,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(sinceDays: 7),
         onSave: (s) async => saved = s,
       );
@@ -382,7 +520,7 @@ void main() {
 
   group('设置页：自动同步（showAutoSync）', () {
     testWidgets('showAutoSync=false（移动端）整段不渲染', (tester) async {
-      await pumpSettings(tester);
+      await pumpSettings(tester, tab: SettingsTab.sync);
 
       expect(
         find.byKey(const ValueKey('settings-auto-sync-on-group-open')),
@@ -399,7 +537,7 @@ void main() {
     });
 
     testWidgets('showAutoSync=true（桌面端）渲染三个入口', (tester) async {
-      await pumpSettings(tester, showAutoSync: true);
+      await pumpSettings(tester, tab: SettingsTab.sync, showAutoSync: true);
 
       expect(
         find.byKey(const ValueKey('settings-auto-sync-on-group-open')),
@@ -420,6 +558,7 @@ void main() {
     testWidgets('初值来自注入的设置', (tester) async {
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         showAutoSync: true,
         initial: const SyncSettings(
           auto: AutoSyncConfig(onLaunch: true, intervalMinutes: 60),
@@ -437,6 +576,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         showAutoSync: true,
         onSave: (s) async => saved = s,
       );
@@ -456,6 +596,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         showAutoSync: true,
         onSave: (s) async => saved = s,
       );
@@ -478,6 +619,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         showAutoSync: true,
         initial: const SyncSettings(
           auto: AutoSyncConfig(onLaunch: true, intervalMinutes: 60),
@@ -501,7 +643,7 @@ void main() {
     testWidgets('启用后展示「只拉取不上传 / 首次可能很大」的提示', (tester) async {
       // 不说清楚会让用户以为「开了自动同步却卡住」——那其实是正在下第一批
       // （生产实测首次全量 5666 条 / 4.7 GB）。
-      await pumpSettings(tester, showAutoSync: true);
+      await pumpSettings(tester, tab: SettingsTab.sync, showAutoSync: true);
       expect(
         find.textContaining('首次同步会拉取全部历史交付物'),
         findsNothing,
@@ -521,6 +663,7 @@ void main() {
       SyncSettings? saved;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         showAutoSync: true,
         onSave: (s) async => saved = s,
       );
@@ -546,6 +689,7 @@ void main() {
       // 否则用户只开这一项时看不到「首次可能很大」的警告。
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         showAutoSync: true,
         initial: const SyncSettings(auto: AutoSyncConfig(onGroupOpen: true)),
       );
@@ -553,7 +697,7 @@ void main() {
     });
 
     testWidgets('自动同步的改动参与「有未保存改动」判定', (tester) async {
-      await pumpSettings(tester, showAutoSync: true);
+      await pumpSettings(tester, tab: SettingsTab.sync, showAutoSync: true);
       expect(find.byKey(const ValueKey('settings-save')), findsNothing);
 
       await tester.tap(
@@ -740,6 +884,7 @@ void main() {
     testWidgets('展示本地统计（目录数/文件数/体积）', (tester) async {
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(localRoot: '/home/u/out'),
         localGroups: const [
           LocalGroupStats(
@@ -763,7 +908,7 @@ void main() {
     });
 
     testWidgets('未选目录时清理按钮禁用', (tester) async {
-      await pumpSettings(tester);
+      await pumpSettings(tester, tab: SettingsTab.sync);
 
       final btn = tester.widget<OutlinedButton>(
         find.byKey(const ValueKey('settings-prune')),
@@ -775,6 +920,7 @@ void main() {
       var executed = 0;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(localRoot: '/home/u/out'),
         localGroups: [
           LocalGroupStats(
@@ -826,6 +972,7 @@ void main() {
       var executed = 0;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(localRoot: '/home/u/out'),
         localGroups: [
           LocalGroupStats(
@@ -855,6 +1002,7 @@ void main() {
       var executed = 0;
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(localRoot: '/home/u/out'),
         // 刚同步过：不满足「超过 30 天」
         localGroups: [
@@ -883,6 +1031,7 @@ void main() {
     testWidgets('清理失败时展示失败原因而非静默成功', (tester) async {
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         initial: const SyncSettings(localRoot: '/home/u/out'),
         localGroups: [
           LocalGroupStats(
@@ -921,6 +1070,7 @@ void main() {
     testWidgets('保存失败时展示原因并保留未保存改动', (tester) async {
       await pumpSettings(
         tester,
+        tab: SettingsTab.sync,
         onSave: (_) async => throw const StorageError('磁盘已满'),
       );
 
@@ -941,6 +1091,8 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: SettingsPage(
+            // 媒体开关与对话列表都在同步标签里。
+            initialTab: SettingsTab.sync,
             loadSettings: () async => const SyncSettings(
               scope: SyncScopeConfig(allGroups: false, groupIds: ['g1']),
             ),
