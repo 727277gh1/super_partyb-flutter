@@ -6050,6 +6050,95 @@ stale 提示 → 排队/重试状态 → 「已调用 N 个工具 · 最近 X」
   `_executionStatus` / `_staleTurnIds`），另起路由会得到另一份并立刻漂移（§6.10
   同一取向）。
 
+### 6.55 Windows 托盘：图标不显示 + 右键菜单卡死（2026-11）
+
+用户报障两个叠加的 Windows 问题：托盘没有图标；托盘右键菜单弹出来后
+「是一个卡住的列表」（点外面收不回去，看起来像应用死机）。
+
+#### 缺陷 ①：托盘图标 —— `LoadImage` 不认 PNG
+
+| 层 | 事实 |
+|---|---|
+| `tray_manager` Dart 端 | `setIcon('assets/tray_icon.png')` 会把路径拼成 `data/flutter_assets/assets/tray_icon.png` 传给平台 |
+| `tray_manager` Windows 端 `SetIcon` | `LoadImage(nullptr, path, IMAGE_ICON, …, LR_LOADFROMFILE)` ——**只认 BMP 系资源**（`.bmp` / DIB 帧的 `.ico` / `.cur`），给它 PNG 返回 `NULL` HICON，`Shell_NotifyIcon` 挂着空图标 → **托盘上什么都没有** |
+| 插件 `setIcon` 返回值 | **恒 `true`，不报错** → `_trayAvailable` 照样置位 → 「关窗即隐藏」照样生效 → 用户关窗后**没有任何办法唤回应用**（进程还在，图标没有，窗口没了） |
+
+**修法**（三处协同）：
+
+1. `tools/gen_brand_assets.py` 新增 `windows_runtime()`：生成
+   `apps/spb_desktop/assets/tray_icon.ico`，**显式 `bitmap_format='bmp'`**
+   ——PIL 的 ICO 默认输出是 **PNG 帧**（Pillow ≥ 9.1），PNG 帧的 `.ico`
+   同样不被 `LoadImage` 认。尺寸只取 16/32（BMP 帧无压缩，256 单帧
+   256 KB，而 `.ico` 整体打进二进制）。
+2. `PlatformDesktopCapabilities` 新增 `trayIconAssetWindows`（默认
+   `assets/tray_icon.ico`），`_initTray` 按 `HostPlatform.current()` 分流
+   ——Linux/macOS 继续用同一张 64px PNG（appindicator / NSStatusItem
+   都认 PNG）。
+3. `apps/spb_desktop/pubspec.yaml` 声明 `assets/tray_icon.ico`。
+
+⚠️ **运行时检测不了**：`Shell_NotifyIcon` 的 `NIM_ADD` 失败被插件内部吞掉，
+Dart 侧拿不到「图标真的显示了吗」的信号。防御手段是资源本身（`.ico` 由
+生成脚本落盘、`.gitattributes` 的 `*.ico binary` 禁转换），不是运行时检查。
+
+#### 缺陷 ②：右键菜单卡死 —— `TrackPopupMenu` 前台要求
+
+Win32 的 `TrackPopupMenu` 要求**调用窗口处于前台**，否则菜单弹出后点
+外面收不回去（Raymond Chen 的经典条目；MSDN Remarks 专门写了这条）。
+`tray_manager` 把修法暴露为 `popUpContextMenu(bringAppToFront:)`——该
+参数**只在 Windows 实现**（README 明写），默认 `false`。我们没传，
+于是 `PopUpContextMenu` 不调 `SetForegroundWindow` 直接 `TrackPopupMenu`
+→ 卡死的菜单（2026-11 Windows 用户报障的原因）。
+
+**修法**：
+
+1. `spb_platform` 新增纯函数 `trayMenuNeedsBringToFront(HostPlatform)`
+   ——Windows `true`，其余 `false`。平台判据必须可无头单测（本机无
+   Windows，这条是 Windows 分支唯一自动化保障，与 `spawnSystemOpen`
+   同一取向）。
+2. `TrayActionTarget` 新增 `popUpTrayContextMenu()`；`PlatformDesktopCapabilities`
+   实现它（带判据结果调 `tray_manager`；Linux 上 `popUpContextMenu`
+   **未实现**，调用抛 `MissingPluginException` → catch 住记 debug，
+   appindicator 的菜单由桌面环境自行展示）。
+3. `onTrayIconRightMouseDown` 改为经 `popUpTrayContextMenu()`。
+
+⚠️ `bringAppToFront` 在 tray_manager 0.5.3 标注了 deprecated
+（"only supported on Windows and will be removed"）——但 Windows 上它
+**恰恰是必需的**。显式 `// ignore: deprecated_member_use` 并注释：若将来
+参数真被移除，需自写 `SetForegroundWindow`（插件 PR 或换库）。
+
+#### 顺带修的第三个同根因问题：`windowManager.setIcon` 在 Windows 上帮倒忙
+
+`window_manager` 的 Windows `SetIcon` 同样走 `LoadImage`——PNG 读出来是
+`NULL` HICON，而 `WM_SETICON(ICON_SMALL/ICON_BIG, NULL)` 会**移除** exe
+资源图标（`Runner.rc` 的 `IDI_APP_ICON`，win32_window.cpp 注册窗口类时
+加载）。也就是说 `_initWindowIcon` 在 Windows 上不跳过比跳过更糟：
+任务栏图标从「品牌图标」退回默认 Flutter 占位。现 Windows 分支直接
+`return`（exe 资源已静态覆盖窗口图标；`.ico` 资源由生成脚本同步维护）。
+
+#### 测试与反向验证
+
+| 用例 | 钉住 |
+|---|---|
+| `packages/spb_platform/test/tray_bring_to_front_test.dart`（3 条） | windows=true / linux·macos·other=false |
+| `apps/spb_desktop/test/desktop_integration_test.dart` +1 | `popUpTrayContextMenu` 可从能力层到达（接线断裂时本桩层无法感知——但接口不存在时编译器会报，故钉的是「右键处理仍调它」的前提） |
+
+反向验证：`trayMenuNeedsBringToFront` 改恒 `false` → windows 用例失败；
+改全平台 `true` → linux/macos 用例失败。图标修复的最终验证需 Windows
+真机（本机无，AGENTS.md §9）——但 `.ico` 帧格式已由脚本与
+`file` 输出逐字节确认（`MS Windows icon resource … 24 bits/pixel`，
+无 PNG 帧）。
+
+#### 有意不做
+
+- **不换 `system_tray` / `quick_window` 等其它托盘库**：换库是更大的面，
+  tray_manager 的问题两处都已定点修掉。
+- **不在 Dart 侧做「图标加载成功与否」的探测**：拿不到信号（见上），
+  伪造探测只会增加假绿面。
+- **不给 macOS 换 `.icns` 或调整托盘图标尺寸**：macOS 路径从未报障，
+  与本次两个缺陷无关。
+- **不改 `setHideOnClose` 的判定**：`_trayAvailable` 的语义（图标已创建）
+  在资源正确的前提下成立；误置的风险源（PNG）已在资源侧消除。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -6364,6 +6453,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~Windows 托盘无图标 + 右键菜单卡死（「一个卡住的列表」）~~ | ✅ 已修（§6.55）：**两个独立缺陷**。① `tray_manager` Windows 端用 `LoadImage(LR_LOADFROMFILE)` 读图标，**只认 BMP 系资源**，PNG 读出 `NULL` HICON → 无图标；且插件 `setIcon` 恒返回 true → `_trayAvailable` 误置位 → 「关窗即隐藏」生效后用户无法唤回应用。修法：`gen_brand_assets.py` 新增 BMP 帧的 `assets/tray_icon.ico`（**显式 `bitmap_format='bmp'`**——PIL 默认 ICO 输出就是 PNG 帧，同样不被认），`_initTray` 按平台分流。② Win32 `TrackPopupMenu` 要求调用窗口处于前台，否则菜单弹出后收不回去；`tray_manager` 的 `bringAppToFront`（只 Windows）默认 false。修法：`spb_platform` 新增纯函数 `trayMenuNeedsBringToFront`（本机无 Windows，这条判据是 Windows 分支唯一自动化保障）+ `TrayActionTarget.popUpTrayContextMenu()`。顺带修掉同根因第三处：`windowManager.setIcon` 在 Windows 上同样 LoadImage 失败，`WM_SETICON(NULL)` 会**移除** exe 资源图标 → Windows 分支直接跳过。反向验证：判据改恒 false → windows 用例失败；改全平台 true → linux/macos 失败。图标修复的最终确认需 Windows 真机，帧格式已逐字节验证 | §6.55 |
 | ~~一轮 agent 工作产出几十张工具卡，正文被挤出时间线；同时「它现在跑到哪一步」无处可看~~ | ✅ 已做（§6.54，三件一起）：**A** 连续 ≥5 条工具调用在**展示层**折成一张批卡（`ToolCallBatchRow` + `ToolCallBatchCard`）——归约结果一条不动，故对话内搜索仍能命中批内成员、`locateIdsOf` 仍能定位、计数不变；批内含在飞工具时默认展开、跑完自动收起（`ExpansibleController`，`initiallyExpanded` 只在 `initState` 读一次，写错就是「永远摊着」）、用户点过后以用户为准（`_syncingExpansion` 必须把程序同步与用户点击分开，否则一次自动收起会把卡永久锁成「用户收的」）。**B** 「诊断」改名「动态」（`GroupActivityPanel`）并**去掉发布构建门控**，内容扩为「当前轮次状态 + 工具调用 + gate 决策」，移动端也接（AppBar 图标 / 溢出菜单 → 底部弹层）；入参是**原始状态**（`items`/`activities`/`staleTurnIds`/`executionStatus`/`decisions`）故两端不会在「哪一轮在跑」上漂移，移动端 `decisions: null` 表示「本端不看这块」而非「没有决策」；`showModalBottomSheet` 是独立 route，靠 `_activityTick` 哨兵刷新。**C** 底部状态条在流式期间报「已调用 N 个工具 · 最近 X」，槽位优先级 stale → 排队/重试 → 工具进度 → 活动指示；状态派生只做**一次尾部扫描**（`scanTurnProgress`，`break` 只在 turnId 变化时），`PerfProbe` 预算不受影响。89 条新用例（domain 16 / status 35 / panel 12 / card 11 / page 9 / desktop +2 / mobile 4）。⚠️ **两处自己写出来的假绿**：① ⭐「用户展开后不得被收回去」原版只推两次**内容相同**的批（`hasRunning` 没翻转），删掉判据照样绿——已改成「展开 → 同批又跑起一个工具 → 再跑完」；② 移动端哨兵单独摘掉任一条 `_bumpActivitySheet()` 都仍绿（`_emit` 会重推 items/activities/executionStatus 三条流），只有四条全删才红，故事实用例守的是「弹层不冻住」而不是某一条 bump | §6.54 |
 | ~~独立的「同步页」（`SyncPage` / `/settings/sync`）与设置页大量重复（目录 / 范围 / 媒体开关 / 单文件上限 / 清理各画一份，且选目录行为不一致）~~ | ✅ 已整合（§6.53）：合并为设置页的**两个标签**（通用 / 交付物同步），入口统一`/settings?tab=sync`，旧路径重定向。用「一个 ListView + 两个 `Offstage` 区块」而非 `TabBarView`（切标签不销毁草稿与扫描结果）；同步执行区块的 `localRoot` 取 draft 而三个动作在 `hasUnsavedChanges` 时禁用（执行侧永远读**已保存**设置）；错误与「已保存」提示放在所有 Offstage 外面。桌面 `pickDirectory` 改回走 `pickDirectoryProvider`（就地闭包会让 harness override 失效）。⚠️ 记一次**自己写的假绿**：「重复触发不导航」那条用例在守卫被删后仍通过（go_router 对相同 location 不重建页面），已删除并在 §6.53 记录。 | §6.53 |
 | ~~点「发送」后到响应落地之间时间线什么都不显示（网络慢时像「点了没反应」）~~ | ✅ 已修（§6.50，issue #52）：`send()` 原本 `await` 完 HTTP 才注入回显——「乐观」只覆盖了「不等 SSE」，没覆盖「不等响应」。现回显**提前到请求发出之前**并带 `pending`：在飞时正文半透明 + 「发送中…」+ 隐藏复制入口；成功后 `_settleLocalEcho` **原位转正**（关 pending、落真 turnId，权威帧再按 turnId 原位合并，不出第二个气泡）；失败/入队则 `_removeLocalEcho` 移除（入队有自己的「待发送」条）。三个易写错处：① `turnId` 为空**也要**转正——反馈回执 `feedback_recorded` 不建 turn，此后没有权威帧，提前 return 会让气泡永久转圈；② `echoId` 从「本地标记」升级为**精确定位键**，`local-<微秒>` 同微秒会撞车（outbox 批量投递真实会）→ 加 `_echoSeq`；③ `idx < 0` 时**不得**重新注入（缓冲可能已属另一个对话）。归约按 `payload['pending'] == true` 解析（只认字面 true），故回填/缓存路径不会误显示。domain 10 + reducer 1 + 气泡 3 + 页面接线 1 条用例；8 项反向验证逐条实测——其中「同微秒」那条**曾经假绿**（重构时删掉了直接的 `id1 != id2` 断言，间接断言在碰撞时照样绿） | §6.50 |
