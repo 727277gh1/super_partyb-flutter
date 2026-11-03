@@ -53,6 +53,52 @@ final class AgentFileBatchRow extends TimelineDisplayRow {
   int get count => files.length;
 }
 
+/// 折叠卡：一段连续、同 turn 的工具调用（≥ [TOOL_CALL_BATCH_MIN_COUNT] 条）。
+///
+/// ## 为什么也要折叠（与文件批量卡同一动机，但痛点不同）
+///
+/// 文件批量卡解决的是「一次产出几十个文件」；本行解决的是「一轮调了几十次
+/// 工具」。每条 `ToolCallItem` 在时间线里是一张独立的 `Card`（折叠态约 56px），
+/// 20 次调用就是 20 张同构卡片夹在正文之间，把对话正文挤出视野。
+///
+/// ## 与文件批量卡的**两处**口径差异
+///
+/// | | 文件批 | 工具调用批 |
+///|---|---|---|
+///| 分组键 | 同 turn **且同秒** | 同 turn（**不看秒**） |
+///| 阈值 | 5 | 5（同一取值，但理由不同） |
+///
+/// 「不看秒」是必需的而非疏忽：文件产物的 `created_at` 由服务端批量写入，
+/// 同秒是常态；工具调用是**串行**的，一批 20 次调用横跨几分钟，按秒分组会
+/// 让每一秒各自成批（阈值永不满足），等于没做。
+///
+/// ## 为什么定义在本文件
+///
+/// [TimelineDisplayRow] 是 `sealed`，Dart 要求子类与父类在**同一库**。放进去
+/// 是为了让「时间线有哪些展示形态」仍是一个可穷举的集合（新增行类型时所有
+/// `switch` 都会被编译器要求补分支）——这个价值大于「文件名更贴切」的收益。
+/// 聚合口径本身在 `tool_call_batch.dart`。
+final class ToolCallBatchRow extends TimelineDisplayRow {
+  const ToolCallBatchRow({required this.calls});
+
+  /// 批内成员，保持时间线原始顺序（展开后按此顺序逐条渲染）。
+  final List<ToolCallItem> calls;
+
+  int get count => calls.length;
+
+  /// 批内最后一条（摘要行用它显示「最近：某工具」）。
+  ToolCallItem get last => calls.last;
+
+  /// 是否有尚未返回结果的调用（`output == null` 即「执行中」）。
+  ///
+  /// 决定折叠卡的**默认展开态**：一轮正在跑工具时把它折起来，等于把用户
+  /// 唯一能看见的「它在干活」的证据藏掉。故含在飞项的批默认展开。
+  bool get hasRunning => calls.any((c) => c.output == null);
+
+  /// 已完成条数（摘要行显示「已完成 N / 共 M」时用）。
+  int get completedCount => calls.where((c) => c.output != null).length;
+}
+
 /// 一行在时间线搜索定位中占用的全部 `item.id`。
 ///
 /// ## 为什么放在领域层
@@ -66,6 +112,9 @@ final class AgentFileBatchRow extends TimelineDisplayRow {
 List<String> locateIdsOf(TimelineDisplayRow row) => switch (row) {
   SingleItemRow(:final item) => [item.id],
   AgentFileBatchRow(:final files) => [for (final f in files) f.id],
+  // 与文件批量卡同理：搜索命中拿到的可能是批内**第 N 条**工具调用的 id，
+  // 每个成员都要能定位到这张折叠卡，否则退化成「请向上滚动」。
+  ToolCallBatchRow(:final calls) => [for (final c in calls) c.id],
 };
 
 /// 当前时间线上**全部**可用于定位的 `item.id`。

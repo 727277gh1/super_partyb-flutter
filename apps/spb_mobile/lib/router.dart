@@ -1562,6 +1562,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           tooltip: '目标历史',
           onPressed: _group == null ? null : _openGoalHistory,
         ),
+        IconButton(
+          key: const ValueKey('open-group-activity'),
+          icon: const Icon(Icons.monitor_heart_outlined),
+          tooltip: '动态',
+          onPressed: _openActivitySheet,
+        ),
       ],
     ];
   }
@@ -1594,7 +1600,76 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         label: '目标历史',
         onTap: groupReady ? _openGoalHistory : null,
       ),
+      // 「动态」：现在这一轮在干什么 + 工具调用。
+      //
+      // 与其余低频入口同档（多一步不痛），但它**不要求** `_group` 就绪：
+      // 内容全部来自时间线归约与 SSE 快照，与 group 拉取无关——group 拉取
+      // 失败时用户恰恰更需要知道「它还在跑吗」。
+      ConversationOverflowItem(
+        key: const ValueKey('menu-group-activity'),
+        icon: Icons.monitor_heart_outlined,
+        label: '动态',
+        onTap: _openActivitySheet,
+      ),
     ];
+  }
+
+  /// 有打开的「动态」弹层时转一次（见 [_activityTick] 的文档）。
+  void _bumpActivitySheet() => _activityTick?.value++;
+
+  /// 「动态」弹层打开时的刷新哨兵；null 表示当前没有打开的弹层。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `showModalBottomSheet` 是**独立 route**：页面的 `setState` 不会让它重建。
+  /// 而本面板的内容全是实时状态（当前轮次在干什么、调了几个工具），打开后
+  /// 就静止等于在骗用户——那正是这个面板存在的唯一理由。
+  ///
+  /// 因此四个相关的事件回调（items / activities / executionStatus /
+  /// staleTurnIds）都 bump 它，弹层用 `ValueListenableBuilder` 重建自己。
+  ///
+  /// 不用 provider：这些数据都在 `_ChatPage` 的 State 里（见本文件多处注释：
+  /// 用弹层而非新路由正是为了共享这份 State）。
+  ValueNotifier<int>? _activityTick;
+
+  /// 打开「动态」底部弹层。
+  ///
+  /// 同 [_openSettings] / [_openGoalTasks]：用弹层而非新路由，共享同一份
+  /// State（`_items` / `_activities` / `_executionStatus` / `_staleTurnIds`）。
+  ///
+  /// ## 为什么移动端不显示 gate 决策
+  ///
+  /// 移动端没有订阅 `controller.gateDecisions`（既有行为）。传 `null` 而不是
+  /// 空列表：空列表会渲染一个「还没有 gate 决策」的空态，那是**假的结论**
+  /// （真相是本端没接这条数据）。面板在 null 时整块不渲染。
+  Future<void> _openActivitySheet() async {
+    final tick = ValueNotifier<int>(0);
+    _activityTick = tick;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (sheetContext) => ValueListenableBuilder<int>(
+          valueListenable: tick,
+          builder: (context, _, child) => SizedBox(
+            height: MediaQuery.of(sheetContext).size.height * 0.8,
+            child: GroupActivityPanel(
+              items: _items,
+              activities: _activities,
+              staleTurnIds: _staleTurnIds,
+              executionStatus: _executionStatus,
+              decisions: null,
+            ),
+          ),
+        ),
+      );
+    } finally {
+      // 关掉后必须摘掉哨兵：否则事件会持续 bump 一个已无人监听的 notifier，
+      // 而 dispose 之后的写入会抛。
+      _activityTick = null;
+      tick.dispose();
+    }
   }
 
   /// 打开目标版本历史底部弹层。
@@ -1823,12 +1898,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onStaleTurnIdsChanged(Set<String> ids) {
     if (!mounted) return;
     setState(() => _staleTurnIds = ids);
+    _bumpActivitySheet();
   }
 
   /// 监听 controller.activities：驱动对话页的空窗期进度指示。
   void _onActivitiesChanged(Map<String, TurnActivitySnapshot> activities) {
     if (!mounted) return;
     setState(() => _activities = activities);
+    _bumpActivitySheet();
   }
 
   /// 监听 controller.contextUsage：驱动对话页顶部的用量读数。
@@ -1869,6 +1946,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       _items = items;
       if (!isFirstSync && hasNew) _deliverablesReloadToken++;
     });
+    // 「动态」弹层是独立 route，页面 setState 不会让它重建 → 显式转一次。
+    _bumpActivitySheet();
 
     // ## 为什么要刷新待确认角标
     //
@@ -1905,6 +1984,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onExecutionStatusChanged(ExecutionStatus? status) {
     if (!mounted) return;
     setState(() => _executionStatus = status);
+    _bumpActivitySheet();
   }
 
   /// 监听 controller.ttsStatus：驱动对话页的播报状态条。

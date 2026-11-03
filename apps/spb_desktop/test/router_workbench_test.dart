@@ -476,7 +476,7 @@ void main() {
       expect(find.text('weekly report'), findsOneWidget);
     });
   });
-  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 续跑 / 诊断）', () {
+  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 续跑 / 动态）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。
     Future<FakeUfsApi> openChat(
@@ -532,7 +532,7 @@ void main() {
     /// 侧边栏宽 320px，tab 条是**横向可滚的** `ListView.builder`。它的子项是
     /// **懒构建**的：超出 `cacheExtent`（默认 250px）的 tab 根本不在树里，
     /// `find.byKey` 会得到 0 个——那不是「tab 被删了」，而是「还没构建」。
-    /// tab 数量增加到 7 个后，「诊断」正好落到可视区 + cacheExtent 之外。
+    /// tab 数量增加到 7 个后，「动态」正好落到可视区 + cacheExtent 之外。
     ///
     /// 故断言尾部 tab 之前必须先滚到它——`scrollUntilVisible` 会驱动
     /// `ListView` 构建出目标项。真实用户横向滚动一下也能看到，这是
@@ -591,7 +591,7 @@ void main() {
       expect(find.text('交付物'), findsNothing);
     });
 
-    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 续跑 / 诊断）', (
+    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 续跑 / 动态）', (
       tester,
     ) async {
       final sse = FakeSseClient();
@@ -608,8 +608,8 @@ void main() {
       expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
       await revealTab(tester, '续跑');
       expect(find.byKey(const ValueKey('sidebar-tab-续跑')), findsOneWidget);
-      await revealTab(tester, '诊断');
-      expect(find.byKey(const ValueKey('sidebar-tab-诊断')), findsOneWidget);
+      await revealTab(tester, '动态');
+      expect(find.byKey(const ValueKey('sidebar-tab-动态')), findsOneWidget);
     });
 
     /// 把 tab 条横向滚到露出 [label] 那个 tab，然后点它。
@@ -723,160 +723,61 @@ void main() {
       expect(find.text('0'), findsNothing);
     });
 
-    testWidgets('门控关闭（发布构建）时「诊断」tab 整个消失，其余 tab 仍在', (tester) async {
+    testWidgets('「动态」tab 始终可见（不再按发布构建门控）', (tester) async {
       // ## 这个用例防的是什么
       //
-      // 诊断面板展示工具调用入参与 gate 决策明细，是内部视图，不应随发布包
-      // 分发。但此前全仓没有任何 `kReleaseMode` / `isRelease` 使用——发布包里
-      // 它照样在。
+      // 此前它叫「诊断」，由 `showDebugPanelProvider`（= `!SpbEnv.isRelease`）
+      // 门控——发布版用户完全看不到工具调用与 gate 决策，于是两个最常报障的
+      // 问题（「它卡在哪一步」「它为什么自己又跑了一轮」）在界面上无解。
       //
-      // ## 为什么能在这里断言
+      // 现在它叫「动态」并**常驻**：内容仍是只读事实，不含凭据、不含管理面
+      // 操作。本用例钉住这个决定本身——若有人把门控加回来，它会红。
       //
-      // 若门控写成 `if (!SpbEnv.isRelease)`，测试跑在 JIT 下 `isRelease` 恒为
-      // false，这个行为**根本无法验证**。故门控走 provider，测试可以把它置为
-      // false（等价于发布构建）。
-      final sse = FakeSseClient();
-      await pumpApp(
-        tester,
-        initialLocation: SpbRoutes.chat('grp_x'),
-        mockGroups: false,
-        sseClient: sse,
-        ufsApi: FakeUfsApi(),
-        showDebugPanel: false,
-        beforePump: (adapter) {
-          adapter.onGet(
-            '/api/auth/me',
-            (server) => server.reply(200, {
-              'id': 'usr_REAL',
-              'email': 'a@b.c',
-              'name': 'Test',
-              'role': 'member',
-              'roles': ['member'],
-              'permissions': <String>[],
-              'status': 'active',
-            }),
-          );
-          adapter.onGet(
-            '/chat/groups/grp_x/timeline',
-            (server) => server.reply(200, {
-              'items': <Map<String, dynamic>>[],
-              'next_before_global_seq': '',
-            }),
-            queryParameters: {'limit': 200},
-          );
-          adapter.onGet(
-            '/users/usr_REAL/chat/messages/pending',
-            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-            queryParameters: {'group_id': 'grp_x', 'limit': 20},
-          );
-        },
-      );
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
-
-      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const ValueKey('sidebar-tab-诊断')),
-        findsNothing,
-        reason: '发布包不该暴露工具调用与 gate 决策诊断',
-      );
-      expect(
-        find.byKey(const ValueKey('debug-panel')),
-        findsNothing,
-        reason: '面板本身也必须不在树里（不只是 tab 按钮隐藏）',
-      );
-      // 其余 tab 不受影响（门控只该拿掉诊断那一个）。
-      expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
-      expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
-      await revealTab(tester, '续跑');
-      expect(find.byKey(const ValueKey('sidebar-tab-续跑')), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('sidebar-tab-诊断')),
-        findsNothing,
-        reason: '滚到尾部后诊断仍不该存在',
-      );
-      // 默认落点仍是第一个 tab（删掉尾部 tab 不改索引语义）：
-      // IndexedStack 显示的是 index 0 的「交付物」，其空态已渲染。
-      final stack = tester.widget<IndexedStack>(
-        find.byKey(const ValueKey('sidebar-content')),
-      );
-      expect(
-        stack.index,
-        0,
-        reason: 'tabs 变短不该改变默认落点（initialIndex 语义与 tab 数量无关）',
-      );
-      expect(find.byKey(const ValueKey('deliverables-empty')), findsOneWidget);
-    });
-
-    testWidgets('门控打开（开发构建）时「诊断」tab 仍在', (tester) async {
-      // 与上一条成对：证明「tab 消失」确实来自门控，而不是别的原因（例如
-      // tab 被误删、或被挤出可视区而 find 不到——后者要靠滚动才可见，
-      // 但 `findsOneWidget` 检查的是挂载，不是可见）。
-      final sse = FakeSseClient();
-      await pumpApp(
-        tester,
-        initialLocation: SpbRoutes.chat('grp_x'),
-        mockGroups: false,
-        sseClient: sse,
-        ufsApi: FakeUfsApi(),
-        showDebugPanel: true,
-        beforePump: (adapter) {
-          adapter.onGet(
-            '/api/auth/me',
-            (server) => server.reply(200, {
-              'id': 'usr_REAL',
-              'email': 'a@b.c',
-              'name': 'Test',
-              'role': 'member',
-              'roles': ['member'],
-              'permissions': <String>[],
-              'status': 'active',
-            }),
-          );
-          adapter.onGet(
-            '/chat/groups/grp_x/timeline',
-            (server) => server.reply(200, {
-              'items': <Map<String, dynamic>>[],
-              'next_before_global_seq': '',
-            }),
-            queryParameters: {'limit': 200},
-          );
-          adapter.onGet(
-            '/users/usr_REAL/chat/messages/pending',
-            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-            queryParameters: {'group_id': 'grp_x', 'limit': 20},
-          );
-        },
-      );
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
-
-      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
-      await tester.pumpAndSettle();
-
-      // 诊断在 tab 条尾部，懒构建，先滚到它。
-      await revealTab(tester, '诊断');
-      expect(
-        find.byKey(const ValueKey('sidebar-tab-诊断')),
-        findsOneWidget,
-        reason: '开发构建下诊断入口必须可用',
-      );
-    });
-
-    testWidgets('切到诊断 tab 显示工具调用 + gate 面板（两者空态）', (tester) async {
+      // ⚠️ 断言的是**挂载**而不是可见：`ChatSidebar` 用惰性构建，尾部 tab 的
+      // 标签要滚到才可见，但 tab 按钮本身一直在树里。
       final sse = FakeSseClient();
       await openChat(tester, sse);
 
       await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
       await tester.pumpAndSettle();
-      await tapTab(tester, '诊断');
 
-      // 诊断 tab = 工具调用 + gate 决策上下分栏（对齐 webapp 的 debug tab）。
-      expect(find.byKey(const ValueKey('debug-panel')), findsOneWidget);
+      await revealTab(tester, '动态');
+      expect(
+        find.byKey(const ValueKey('sidebar-tab-动态')),
+        findsOneWidget,
+        reason: '动态入口必须对发布版用户同样可用',
+      );
+      expect(
+        find.byKey(const ValueKey('sidebar-tab-诊断')),
+        findsNothing,
+        reason: '旧名字不该残留（同一个面板改了名，不是新增第二个 tab）',
+      );
+      // 默认落点仍是第一个 tab（改 tab 名/数量不改索引语义）。
+      final stack = tester.widget<IndexedStack>(
+        find.byKey(const ValueKey('sidebar-content')),
+      );
+      expect(stack.index, 0);
+      expect(find.byKey(const ValueKey('deliverables-empty')), findsOneWidget);
+    });
+
+    testWidgets('切到动态 tab：状态行 + 工具调用 + gate 面板（后两者空态）', (tester) async {
+      final sse = FakeSseClient();
+      await openChat(tester, sse);
+
+      await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
+      await tester.pumpAndSettle();
+      await tapTab(tester, '动态');
+
+      // 动态 tab = 顶部状态行 + 工具调用 + gate 决策（上下分栏）。
+      expect(find.byKey(const ValueKey('activity-panel')), findsOneWidget);
+      expect(find.byKey(const ValueKey('activity-status')), findsOneWidget);
+      // 没有进行中的轮次 → 明确说「当前没有进行中的轮次」，而不是空白或
+      // 一条陈旧的「执行中」。
+      expect(
+        find.byKey(const ValueKey('activity-status-text')),
+        findsOneWidget,
+      );
+      expect(find.text('当前没有进行中的轮次'), findsOneWidget);
       expect(find.byKey(const ValueKey('toolcalls-empty')), findsOneWidget);
       expect(find.byKey(const ValueKey('gate-empty')), findsOneWidget);
       expect(tester.takeException(), isNull);

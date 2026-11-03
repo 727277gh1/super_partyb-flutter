@@ -64,6 +64,8 @@ library;
 //   buildTextPreview / TextPreview     —— 文本预览裁剪（大文件截断 + 明确提示）
 //   groupFileEventsForDisplay / FILE_BATCH_MIN_COUNT —— 时间线 → 展示行（同 turn 同秒批量聚合，纯逻辑）
 //   TimelineDisplayRow / SingleItemRow / AgentFileBatchRow —— 展示行 sealed 家族（不改归约结果）
+//   groupToolCallsForDisplay / TOOL_CALL_BATCH_MIN_COUNT —— 展示行再折叠一层（连续同 turn 的工具调用 → 一张卡，纯展示层）
+//   ToolCallBatchRow —— 工具调用折叠行（TimelineDisplayRow 家族成员，含在飞项时默认展开）
 //   deliverableDownloadRelPath / agentFileDownloadRelPath —— 下载到本地的落地相对路径（{groupId}/<group 内相对路径>，两端同一口径）
 export 'src/agent_file_batch.dart';
 export 'src/artifact_tree.dart';
@@ -98,6 +100,7 @@ export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
 export 'src/outbox.dart';
 export 'src/timeline_cache.dart';
+export 'src/tool_call_batch.dart';
 export 'src/tts_audio_path.dart';
 export 'src/tts_status.dart';
 export 'src/turn_activity.dart';

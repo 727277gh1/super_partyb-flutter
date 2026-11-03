@@ -29,7 +29,9 @@ import 'pending_messages_bar.dart';
 import 'perf_probe.dart';
 import 'row_locate_registry.dart';
 import 'thought_tile.dart';
+import 'tool_call_batch_card.dart';
 import 'tool_call_tile.dart';
+import 'turn_status.dart';
 import 'user_message_bubble.dart';
 
 /// 溢出菜单的一项（窄屏时收纳 AppBar 的低频入口）。
@@ -1642,28 +1644,21 @@ class _ConversationPageState extends State<ConversationPage> {
     return streaming != null && streaming.turnId.isNotEmpty;
   }
 
-  /// 当前应展示的执行中活动快照；null 表示不该展示。
+  /// 本 turn 的进度（工具调用数 + 最近工具名 + 是否已有正文）。
   ///
-  /// ## 显示条件（逐条对齐 webapp `ChatMessageList.tsx:471`）
+  /// ## 为什么三个量合成一次扫描
   ///
-  /// | webapp 条件 | 本页等价物 |
-  /// |---|---|
-  /// | `turn.activity` 存在 | [_activities] 里有该 turnId 的快照 |
-  /// | `isStreaming` | 该 turn 是 [streaming]（即 `_findStreamingItem` 的结果）的 turn |
-  /// | `!hasAgentContent` | 该 turn 还没有非空正文的 [AssistantMessageItem] |
-  /// | `!turn.status`（无终态） | 有流式项即意味着 `done` 尚未到达（`_sealStreaming` 会闭合全部流式段） |
-  /// | `!turn.queueReason` | 客户端**未跟踪**排队原因（无对应领域字段），恒真 |
+  /// 它们都要「从尾部往回转，遇到别的 turn 就停」。分开算就是多次带早退的
+  /// 扫描；合成一次后 [PerfProbe.visitedItems] 的上界不变（仍是一次尾向
+  /// 扫描），而底部状态条能同时拿到「调了几个工具」与「有没有正文」。
   ///
-  /// ## 为什么四个条件都要
+  /// 扫描本身在 [scanTurnProgress]（与两端「动态」面板共用同一口径），本方法
+  /// 只负责两件页面独有的事：stale 让位、把性能计数器接上。
   ///
-  /// 只判「有活动」会在两种情况下产生误导：
-  /// 1. **已有正文**：正文在往下滚，再插一句「已运行 3 分」只是噪声；
-  /// 2. **已收尾**：`done` 之后活动快照可能仍在 State 里（它是 Transient，
-  ///    只能靠下一个事件或切对话清掉），不判终态会在完成的对话下挂一条
-  ///    「执行中」，比不显示更糟。
+  /// ## stale 时全部清零
   ///
-  /// 反过来，这两个条件都不能用来「省掉 `isStreaming`」：`isStreaming` 才是
-  /// 「turn 在跑」的直接证据，而「无正文」也可能是「早就跑完且本来就没回复」。
+  /// 继续显示「已调 8 个工具」会与「长时间无进展」自相矛盾——后者是关于前者
+  /// 的结论。活动快照同理（它是 Transient，断线后可能停在 State 里）。
   ///
   /// ## 「已有正文」为何从尾部倒扫
   ///
@@ -1675,27 +1670,29 @@ class _ConversationPageState extends State<ConversationPage> {
   /// ⚠️ 早退条件只能是 `turnId != streaming.turnId`，**不能**是
   /// `is AssistantMessageItem`：同一 turn 中间可能夹着 `ToolCallItem` /
   /// `ThoughtItem`，用类型早退会漏掉工具轮之后的正文（那个 turn 就永远
-  /// 挂着「执行中」）。
-  TurnActivitySnapshot? _visibleActivityFor(ConversationItem? streaming) {
-    if (streaming == null || streaming.turnId.isEmpty) return null;
+  /// 挂着「执行中」）。同一理由也让它能顺手数完本 turn 的工具调用。
+  TurnProgress _turnProgressFor(ConversationItem? streaming) {
+    if (streaming == null || streaming.turnId.isEmpty) return TurnProgress.none;
 
     // 已判超时 → 让位给 [_StaleTurnNotice]。
-    //
-    // 活动快照是 Transient（不落库），断线后可能停在 State 里；继续显示
-    // 「执行中 · 已运行 12 分」会与「长时间无进展」自相矛盾。
-    if (_staleTurnIds.contains(streaming.turnId)) return null;
+    if (_staleTurnIds.contains(streaming.turnId)) return TurnProgress.none;
 
-    final activity = _activities[streaming.turnId];
-    if (activity == null) return null;
+    return scanTurnProgress(
+      _items,
+      turnId: streaming.turnId,
+      // 把计数上交给页面：`scanTurnProgress` 不依赖 Flutter，拿不到 PerfProbe。
+      onVisit: () => PerfProbe.visitedItems++,
+    );
+  }
 
-    // 已有正文 → 让位给真实内容。
-    for (var i = _items.length - 1; i >= 0; i--) {
-      PerfProbe.visitedItems++;
-      final item = _items[i];
-      if (item.turnId != streaming.turnId) break;
-      if (item is AssistantMessageItem && item.text.isNotEmpty) return null;
-    }
-    return activity;
+  /// 该上屏的活动快照；null 表示不该显示。
+  ///
+  /// 已有正文 → 让位给真实内容。这条**只属于页面细条**：面板是「现在在干
+  /// 什么」的集中视图，即使正文在流式也照示。
+  TurnActivitySnapshot? _activityFor(TurnProgress progress) {
+    final turnId = progress.turnId;
+    if (turnId == null || progress.hasAgentContent) return null;
+    return _activities[turnId];
   }
 
   @override
@@ -1712,12 +1709,14 @@ class _ConversationPageState extends State<ConversationPage> {
     // ⚠️ 计数器 [PerfProbe.visitedItems] 就挂在下面这两处扫描里，测试用
     // 「一次 build 扫了多少条」钉住这个上界。
     //
-    // ⚠️ `_visibleActivity` 仍会扫一次 `_items`（找「本 turn 是否已有正文」），
-    // 但那是**带早退**的尾向扫描（遇到别的 turn 就 break），而不是全表。
+    // ⚠️ `_turnProgressFor` 仍会扫一次 `_items`（数本 turn 的工具调用、找
+    // 「是否已有正文」），但那是**带早退**的尾向扫描（遇到别的 turn 就
+    // break），而不是全表。
     final streaming = _findStreamingItem(_items);
     final staleTurnItem = _staleTurnItemFor(streaming);
     final canCancelTurn = _canCancelTurnFor(streaming);
-    final visibleActivity = _visibleActivityFor(streaming);
+    final progress = _turnProgressFor(streaming);
+    final visibleActivity = _activityFor(progress);
 
     return Scaffold(
       appBar: title == null
@@ -1820,6 +1819,23 @@ class _ConversationPageState extends State<ConversationPage> {
             const _StaleTurnNotice()
           else if (_executionStatus != null)
             _ExecutionStatusBar(status: _executionStatus!)
+          else if (progress.toolCount > 0)
+            // 有工具调用的轮次：报「已调 N 个工具 · 最近 X」。
+            //
+            // 这一档是新增的：此前调了 8 个工具的长回复里底部什么都没有
+            //（正文一出现，活动指示就按既有规则让位），用户看不出「它还在
+            // 干活」还是「已经停了」。
+            //
+            // `deriveTurnStatus` 在 `toolCount > 0` 时必定非 null（与上面的
+            // 判据同口径），故用 `!` 而不是再造一个兜底文案。
+            TurnStatusStrip(
+              summary: deriveTurnStatus(
+                isStreaming: true,
+                activity: visibleActivity,
+                toolCount: progress.toolCount,
+                lastToolName: progress.lastToolName,
+              )!,
+            )
           else if (visibleActivity != null)
             _TurnActivityIndicator(activity: visibleActivity),
           // 离线队列（issue #30）：紧贴待处理栏**上方**。
@@ -1911,7 +1927,10 @@ class _ConversationPageState extends State<ConversationPage> {
     if (cached != null && identical(_items, _lastRowsItems)) return cached;
 
     PerfProbe.displayRowsComputations++;
-    final rows = groupFileEventsForDisplay(_items);
+    // 两趟展示层聚合：同 turn 同秒的文件→批量卡，连续同 turn 的工具调用→折叠卡。
+    // 入口在 `spb_domain`（`groupTimelineForDisplay`），口径不放在这里：它不是
+    // 渲染细节（阈值与分组规则三端应一致，且需能在无头环境逐条断言）。
+    final rows = groupTimelineForDisplay(_items);
     _lastRows = rows;
     _lastRowsItems = _items;
     _lastLocateIds = locateIdsOfAll(rows);
@@ -2029,6 +2048,10 @@ class _ConversationPageState extends State<ConversationPage> {
             key: ValueKey(switch (row) {
               SingleItemRow(:final item) => item.id,
               AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
+              // 前缀隔开：工具批与文件批的首成员 id 都是服务端事件 id，不带
+              // 前缀时「同一秒生成的第一个文件」与「同一轮第一条工具调用」
+              // 理论上可能撞上同一个 key。
+              ToolCallBatchRow(:final calls) => 'tool-batch:${calls.first.id}',
             }),
             padding: const EdgeInsets.only(bottom: SpbSpacing.md),
             child: switch (row) {
@@ -2048,6 +2071,9 @@ class _ConversationPageState extends State<ConversationPage> {
                 onReveal: widget.onRevealAgentFile,
                 onPreview: widget.onPreviewAgentFile,
               ),
+              // 工具调用折叠卡：不需要任何页面回调（工具卡是纯展示，入参/输出
+              // 已在归约结果里），故不经过 [_buildItem]。
+              ToolCallBatchRow() => ToolCallBatchCard(batch: row),
             },
           );
           return KeyedSubtree(
@@ -2557,7 +2583,7 @@ class _ExecutionStatusBar extends StatelessWidget {
             const SizedBox(width: SpbSpacing.sm),
             Expanded(
               child: Text(
-                _text(status),
+                executionStatusLabel(status),
                 key: const ValueKey('conversation-execution-status-text'),
                 style: textTheme.bodySmall?.copyWith(
                   color: scheme.onSecondaryContainer,
@@ -2580,24 +2606,9 @@ class _ExecutionStatusBar extends StatelessWidget {
     );
   }
 
-  /// 横幅文案（判定链与 webapp `ChatMessageList.tsx` 一致）。
-  ///
-  /// ⚠️ 重试分支**不看** `reason`：Go 的 `retry_scheduled.reason` 是执行器
-  /// stderr 原文（可能很长、含路径与噪声），拿它当文案会把横幅变成一堆日志。
-  /// webapp 同样只用 `attempt`。
-  static String _text(ExecutionStatus s) {
-    if (s.kind == ExecutionStatusKind.retryScheduled) {
-      // attempt 缺失时退化为 1（与 webapp 的 `|| "1"` 一致）：
-      // 宁可说「第 1 次」也不要拼出「第 null 次」。
-      return '正在安排第 ${s.attempt ?? 1} 次重试';
-    }
-    return switch (s.reason) {
-      'session_busy' => '正在等待当前会话完成',
-      'user_concurrency_limit' => '正在等待用户并发额度',
-      'global_concurrency_limit' => '正在等待执行资源',
-      _ => '正在等待执行',
-    };
-  }
+  /// 文案在 `turn_status.dart` 的 [executionStatusLabel]：侧边栏「动态」面板
+  /// 的状态行要用同一句话，在此处留一份副本就会出现两个说法（它已经被
+  /// [TurnStatusSummary] 引用）。
 }
 
 /// 执行中活动指示：在「已起跑但还没有正文」的空窗期展示「已运行 X · 最近：Y」。
@@ -2793,36 +2804,9 @@ class _TurnActivityIndicator extends StatelessWidget {
   }
 }
 
-/// 已运行时长文案（毫秒 → 中文）。
-///
-/// ## 为什么在客户端算，而不是直接用服务端字符串
-///
-/// 服务端只给 `elapsed_ms`（数字），文案是渲染层职责。
-///
-/// ## 单位选择：≥ 1 分钟才拆成「X 分 Y 秒」
-///
-/// webapp 用 `date-fns` 的 `formatDuration({seconds}, {zero: false})`，实测输出
-/// 是「3 秒」「90 秒」「7325 秒」——即**只取最大单位且不拆**（因为传进去的
-/// duration 只有 `seconds` 字段）。本函数采用同一口径，但把 ≥ 60s 拆成
-/// 「X 分 Y 秒」：
-///
-/// - `formatDuration` 在这种输入下给出的是「7325 秒」，人脑得自己除 60；
-/// - 空窗期动辄几分钟，这是用户唯一的时间参照，「2 分 2 秒」比「122 秒」好读。
-///
-/// 这是**有意偏离**（改善可读性，不是修正错误）。若将来要求逐字对齐，改成
-/// 「只取最大单位」即可，判定逻辑已在下方分开。
-///
-/// 负数与缺失一律按 0 处理（服务端异常载荷不产出「已运行 -1 秒」）。
-@visibleForTesting
-String formatTurnElapsed(int elapsedMs) {
-  final totalSeconds = elapsedMs <= 0 ? 0 : (elapsedMs / 1000).round();
-  if (totalSeconds < 60) return '$totalSeconds 秒';
-
-  final minutes = totalSeconds ~/ 60;
-  final seconds = totalSeconds % 60;
-  if (seconds == 0) return '$minutes 分钟';
-  return '$minutes 分 $seconds 秒';
-}
+// 已运行时长文案（毫秒 → 中文）已移到 `turn_status.dart` 的
+// [formatTurnElapsed]：对话页底部状态条与侧边栏「动态」面板要用同一句时长
+// 描述，两份副本必然漂移。
 
 /// 连接状态指示（AppBar 右侧）。
 ///

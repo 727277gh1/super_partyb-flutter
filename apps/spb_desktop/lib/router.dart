@@ -892,12 +892,6 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 最近一次归约出的播报状态；null 表示本群未开语音/尚无事件。
   TtsStatus? _ttsStatus;
 
-  /// 最近一次归约出的工具调用快照（平铺、非按 turn 分组）。
-  ///
-  /// 诊断 tab 的「工具调用」区是平铺视图（对齐 webapp 的 WorkbenchToolCallsPanel），
-  /// 不需要按 turn 分组——故直接从 `_items` 提取 ToolCallItem。
-  List<ToolCallItem> _toolCalls = const [];
-
   /// 正在提交的确认卡行 id（供待办面板防重复点 + 显示 spinner）。
   final _resolvingConfirmations = <String>{};
 
@@ -2095,27 +2089,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           reloadToken: widget.groupId,
                         ),
                       ),
-                      // 诊断 tab：仅在非发布构建展示。
+                      // 动态 tab：**始终可见**，不再只在非发布构建展示。
                       //
-                      // 面板内容含工具调用入参与 gate 决策明细，是开发/排查用的内部
-                      // 视图，不应随发布包分发。门控走 provider 而非直接判
-                      // `SpbEnv.isRelease`：后者是编译期常量，测试无法切换，也就无法
-                      // 验证「发布包里它真的消失了」。
+                      // 此前它叫「诊断」，由 `showDebugPanelProvider`（=
+                      // `!SpbEnv.isRelease`）门控，理由是「工具入参与 gate 决策是
+                      // 内部视图」。但那让**发布版的用户**完全无法回答两个最常
+                      // 报障的问题——「它卡在哪一步」「它为什么自己又跑了一轮」，
+                      // 而时间线折叠之后也需要一个替代视图承接被收起的过程信息。
                       //
-                      // ## 删掉这个 tab 不会让侧边栏默认落到别的 tab
-                      //
-                      // `ChatSidebar` 用 `initialIndex`（默认 0，即「交付物」）初始化
-                      // `_index`，不依赖 tab 数量；且 `didUpdateWidget` 只在
-                      // `_index` 越界时才夹取。少一个尾部 tab 不影响任何既有索引。
-                      if (ref.watch(showDebugPanelProvider))
-                        ChatSidebarTab(
-                          label: '诊断',
-                          icon: Icons.insights_outlined,
-                          content: GroupDebugPanel(
-                            toolCalls: _toolCalls,
-                            decisions: _gateDecisions,
-                          ),
+                      // 内容仍是只读事实（工具调用 + gate 决策 + 当前状态），不含
+                      // 凭据、不含管理面操作，没有理由藏起来。逐条仍默认折叠。
+                      ChatSidebarTab(
+                        label: '动态',
+                        icon: Icons.monitor_heart_outlined,
+                        content: GroupActivityPanel(
+                          items: _items,
+                          activities: _activities,
+                          decisions: _gateDecisions,
+                          staleTurnIds: _staleTurnIds,
+                          executionStatus: _executionStatus,
                         ),
+                      ),
                     ],
                   ),
                 ),
@@ -2442,9 +2436,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     if (!mounted) return;
     // 同一次 setState 里同时更新待办面板的数据与交付物刷新令牌：
     // items 流推送时两者都要变，分开 setState 会多一次重建。
+    //
+    // 「动态」面板不在这里另存一份工具调用快照——它直接从 `_items` 派生
+    // （多一份派生缓存就多一处会与 `_items` 不同步的地方）。
     setState(() {
       _items = items;
-      _toolCalls = items.whereType<ToolCallItem>().toList(growable: false);
       if (!isFirstSync && hasNew) _deliverablesReloadToken++;
     });
 

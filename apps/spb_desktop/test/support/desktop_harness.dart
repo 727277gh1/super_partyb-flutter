@@ -299,13 +299,6 @@ Future<TestHarness> pumpApp(
   /// 监听本地端口，测试里跑不了——于是那段接线长期零覆盖。
   /// 注入后可以喂一份真实形态的 token 响应并断言落盘结果。
   LoopbackSignIn? loopbackSignIn,
-
-  /// 「诊断」tab 的门控开关。默认不 override（即 `!SpbEnv.isRelease`）。
-  ///
-  /// 测试跑在 JIT 下，`SpbEnv.isRelease` 恒为 false → 诊断 tab 默认**可见**，
-  /// 与既有用例的期望一致。要验证发布包行为（tab 消失）的用例显式传 false
-  /// ——这正是把门控做成 provider 而非直接判 `isRelease` 的理由。
-  bool? showDebugPanel,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -475,9 +468,6 @@ Future<TestHarness> pumpApp(
       windowFocusedProvider.overrideWith(
         () => FixedWindowFocused(windowFocused),
       ),
-      // 仅显式传值时 override：默认走 provider 自己的 `!SpbEnv.isRelease`。
-      if (showDebugPanel != null)
-        showDebugPanelProvider.overrideWithValue(showDebugPanel),
       // 初始目录：写进内存库的绑定表，让 syncLocalRootProvider 读得到。
       if (syncLocalRoot != null)
         syncLocalRootProvider.overrideWith((ref) async => syncLocalRoot),
