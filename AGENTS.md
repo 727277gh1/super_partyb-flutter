@@ -5618,6 +5618,39 @@ show ScrollCacheExtent;`。
 - `planning_stalled` / `goal_not_active` 缺映射 → 退化为兜底文案（「自动推进已停止」）
   ，正是 miniapp `7a952437` 修的那个症状。
 
+#### 6.49.1 第五个开关 goal_discovery + 两个 409 错误码 + 排程 DTO 重写（2026-11）
+
+上游 Go `040855fe` / `a18a017e` / `ceff2f81` / `b2a54b5a` 四个提交的客户端同步。
+另在 upstream 登记了 issue #95（GET /me/preferences 缺 goal_discovery 下发）。
+
+| 上游提交 | 客户端同步 |
+|---|---|
+| `040855fe` goal_discovery 偏好开关 + createGoal auto_start | 偏好模型/PUT/偏好卡加第五个开关 `goalDiscovery`（缺省**关**）；`createGoal auto_start` **暂不接**（客户端建目标场景未出现，字段留服务端可选） |
+| `a18a017e` 反馈回执原子化 + 可重放 | 新失败形态 `409 {code: feedback_not_applied}`，与 404 同文案「这条反馈已失效，无法再作答」 |
+| `ceff2f81` 发送重放保护 | 新失败形态 `409 {code: group_unavailable}`，特判文案「目标对话已失效，请返回列表重新选择对话后发送」；`SendMessageResult` 的 `status`/`deduped` 既有解析不变 |
+| `b2a54b5a` 排程 DTO 重写 + 授权修复 | ⚠️ **真破坏**：`GET …/auto-schedules` 从 sqlc camelCase 行改为 `scheduleToDTO` **snake_case**（`policy` 对象化、新增 `schedule_state`、`last_error` 对象化、`trigger_status` 平串）——旧模型按 camelCase 解析**不报错但全部字段落空**（`?? ''` 吞掉），面板表现为「没有排程」。`ChatTurnSchedule` 整体重写为新 DTO；`AutoSchedulesUseCase` 的两步 workaround（GET group 拿 agentId）随服务端修复撤销，改单次请求 |
+
+**`HttpError.errorCode`（`spb_core`）**：服务端 2026-11 起给 409 带 `code` 键，但
+`ChatApi._bodyPreview` 存的是 `data.toString()`——Dio 已解析成 Map，故 body 实际是
+**Dart Map 字面量**（键值不带引号），不是 JSON。getter 用宽松正则兼容两种形态；
+**不**解析成结构化字段——哪些错误带 code 由服务端决定，客户端按需特判。
+
+**goal_discovery 的解析防御**：GET 响应当前**不下发** `goal_discovery` /
+`goal_discovery_available`（上游 #95），解析按「缺省关 / 缺省可用」兜底——与
+§6.49 的 `*_available` 取舍一致。服务端修复后 UI 开关才能正确回显已开启状态，
+在那之前：用户开了开关 → 重新打开设置页会显示关（但 PUT 已提交，服务端行为
+是对的）。夹具已按「修复后的形状」写键并注明。
+
+**auto-schedules 两个易错点**：① `last_error` 现在是 parseJSON 解析过的**对象**，
+原文串不可得——面板压缩为单行文本（优先取 `error`/`message`/`reason` 键，形状
+不可假设）；② `groupId` 本地断言从 workaround **降级为校验**但不能删：停用端点
+的 SQL 仍按 `policy.meta.group_id` 过滤，解析不出该键的行停用端点碰不到，显示
+出来会让「停用全部」永远可点。
+
+**测试**：models（DTO 新形状 + camelCase 负例回归 + `chatScheduleGroupIdFromPolicy`
+防御）、api（五个开关 body + 排程 snake_case 契约）、core（`errorCode` 两形态 +
+无 code）、features（第五开关 UI 4 条 + 排程用例重写 + 409 两处文案 + 无 code 反例）。
+
 ---
 
 ### 6.50 发送的乐观回显与 pending（「发送中」）生命周期（2026-11，issue #52）
