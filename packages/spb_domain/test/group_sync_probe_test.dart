@@ -317,6 +317,68 @@ void main() {
       expect(t.allows('g1'), isTrue);
       expect(t.allows('g1'), isTrue);
     });
+
+    group('容量上限（docs/memory-audit.md G 系列）', () {
+      const cap = GroupSyncThrottle.maxTrackedGroups;
+
+      test('容量满 → 最旧 group 被淘汰（恢复 allows），新条目仍被冷却', () {
+        final t = GroupSyncThrottle(cooldown: const Duration(minutes: 10));
+
+        // 塞满容量，再补 1 条 → 淘汰最旧的 oldest。
+        for (var i = 0; i < cap; i++) {
+          t.markTriggered('g_$i');
+        }
+        expect(t.allows('g_0'), isFalse, reason: '前置：容量内第一条被冷却');
+        t.markTriggered('g_new');
+
+        expect(
+          t.allows('g_0'),
+          isTrue,
+          reason: '最旧条目被淘汰 → 冷却失效（安全方向：只多探测，不误挡）',
+        );
+        expect(t.allows('g_new'), isFalse, reason: '新条目仍在冷却期内');
+        // 淘汰只发生一次：相邻的第二旧条目仍在。
+        expect(t.allows('g_1'), isFalse);
+      });
+
+      test('重新触发的 key 挪到尾部：淘汰的是最久未触发的，不是第一个插入的', () {
+        // LinkedHashMap 重复赋值不移动 key 位置。若 markTriggered 不先
+        // remove 再插入，g_0 被重新触发后位置仍在头部——下一个新条目会把
+        // 「刚刚还在冷却期内」的 g_0 淘汰掉，而某个早已过期的老 key 反而存活。
+        final t = GroupSyncThrottle(cooldown: const Duration(minutes: 10));
+
+        t.markTriggered('g_0');
+        for (var i = 1; i < cap; i++) {
+          t.markTriggered('g_$i');
+        }
+        // g_0 重新触发：此刻它在冷却期内，但它应被移到尾部而不是留在头部。
+        t.markTriggered('g_0');
+        t.markTriggered('g_new');
+
+        expect(
+          t.allows('g_0'),
+          isFalse,
+          reason: '重新触发的 key 必须仍在冷却期（淘汰的是最久未触发者，不是它）',
+        );
+        expect(
+          t.allows('g_1'),
+          isTrue,
+          reason: '被淘汰的是「最久未触发」的 g_1（原头部之外的次序随触发时间排）',
+        );
+      });
+
+      test('reset() 仍全清', () {
+        final t = GroupSyncThrottle();
+        for (var i = 0; i < cap + 3; i++) {
+          t.markTriggered('g_$i');
+        }
+        expect(t.allows('g_${cap - 1}'), isFalse);
+        t.reset();
+        expect(t.allows('g_0'), isTrue);
+        expect(t.allows('g_${cap - 1}'), isTrue);
+        expect(t.allows('g_new'), isTrue);
+      });
+    });
   });
 
   group('AutoSyncConfig.onGroupOpen', () {

@@ -256,7 +256,20 @@ class GroupSyncThrottle {
 
   final DateTime Function() _now;
 
+  /// 冷却记录的容量上限（docs/memory-audit.md G 系列无界集合项）。
+  ///
+  /// 单条仅 groupId → DateTime（约几十字节），512 条 ≈ 几十 KB，
+  /// 远超真实场景（用户一次会话里打开的对话数）。超容时淘汰「最久未触发」
+  /// 的 group——被淘汰的条目 [allows] 恒返回 true，唯一后果是那个 group
+  /// 下次进对话多一次探测；而冷却语义本来就只对近期访问有意义。
+  static const int maxTrackedGroups = 512;
+
   /// groupId → 上次触发时刻。
+  ///
+  /// `LinkedHashMap` 保插入序，[keys.first] 即最久未触发的 key
+  /// （容量淘汰的依据）。注意 Dart 的 LinkedHashMap **不会**因重复赋值
+  /// 移动 key 位置——[markTriggered] 因此用「先 remove 再插入」维持
+  /// 「最近触发在尾部」的次序，否则刚重新触发的老 group 反而会被淘汰。
   final Map<String, DateTime> _lastTriggered = {};
 
   /// 是否允许为 [groupId] 触发同步（只查询，不记录）。
@@ -271,7 +284,13 @@ class GroupSyncThrottle {
   /// 调用时机：同步成功或用户明确忽略。展示提示和失败不应占用冷却，
   /// 否则切走后再回来会丢掉尚未处理的提示。
   void markTriggered(String groupId) {
+    // 先 remove 再插入（见 [_lastTriggered] 文档）：重触发把 key 挪到尾部，
+    // 淘汰的才是「最久未触发」的那个。
+    _lastTriggered.remove(groupId);
     _lastTriggered[groupId] = _now();
+    if (_lastTriggered.length > maxTrackedGroups) {
+      _lastTriggered.remove(_lastTriggered.keys.first);
+    }
   }
 
   /// 清空（登出 / 换同步目录时调用：新目录下每个 group 都该重新判定）。
