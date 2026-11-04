@@ -57,6 +57,15 @@ String confirmationNotificationPayload(String groupId) => '/chat/$groupId';
 ///
 /// 见库级文档的三条规则。本类**不做 IO**（除通过 [NotificationSink] 发送）：
 /// 判定是纯逻辑，可在无平台通道的环境里完整单测。
+///
+/// ## 判重集合的容量（docs/memory-audit.md G3）
+///
+/// [_notifiedIds] 加了宽松容量上限（[notifiedIdsCapacity]，环形思路对齐
+/// `SpbLog.recentLogCapacity`）：超容量时淘汰最旧 id。折衷（诚实记录）：
+/// 一张**极旧**的确认卡在长会话里被服务端重放、且其 id 恰好已被淘汰时，
+/// 理论上可能重复通知一次。服务端确认 id 全局唯一、且回放窗口上限 500 条
+/// （`chat_stream.go`），触发概率极低；而换取的是判重集合不再随长会话
+/// 无界增长。若要消除该折衷只能换持久化结构，成本不匹配。
 class ConfirmationNotifier {
   ConfirmationNotifier({
     required NotificationSink sink,
@@ -64,6 +73,12 @@ class ConfirmationNotifier {
     this.text = const ConfirmationNotificationText(),
   }) : _sink = sink,
        _isWindowFocused = isWindowFocused;
+
+  /// 判重集合的容量上限。
+  ///
+  /// 4096 ≈ 数千张卡的判重历史，远超单次回放窗口（500）；内存上约几十 KB
+  /// （id 是短字符串），是「长会话无界增长」与「误淘汰风险」的折衷点。
+  static const int notifiedIdsCapacity = 4096;
 
   final NotificationSink _sink;
 
@@ -75,10 +90,23 @@ class ConfirmationNotifier {
 
   final ConfirmationNotificationText text;
 
-  /// 已处理过的确认卡 id。
+  /// 已处理过的确认卡 id（容量上限见 [notifiedIdsCapacity]）。
   ///
   /// 含「已发通知的」与「前台看到过的」「已解决的」——见类文档的规则 3。
+  /// `LinkedHashSet` 保插入序，[first] 即最旧 id（环形淘汰的依据）。
   final Set<String> _notifiedIds = {};
+
+  /// 记入一个已处理 id；超容量时淘汰最旧。
+  ///
+  /// 返回该 id 是否**新**加入（调用方据此决定发不发通知）——与直接调
+  /// `Set.add` 的返回语义一致。淘汰只发生在真的新增之后（重复 add 不增长）。
+  bool _markSeen(String id) {
+    final added = _notifiedIds.add(id);
+    if (added && _notifiedIds.length > notifiedIdsCapacity) {
+      _notifiedIds.remove(_notifiedIds.first);
+    }
+    return added;
+  }
 
   /// 已处理的确认卡 id 数（供测试与诊断）。
   int get notifiedCount => _notifiedIds.length;
@@ -142,10 +170,10 @@ class ConfirmationNotifier {
       if (id.isEmpty) continue;
       if (item.resolved) {
         // 已解决的卡：记入但不发（历史回填会把旧卡推来）。
-        _notifiedIds.add(id);
+        _markSeen(id);
         continue;
       }
-      if (_notifiedIds.add(id)) fresh.add(item);
+      if (_markSeen(id)) fresh.add(item);
     }
 
     if (fresh.isEmpty) return const [];

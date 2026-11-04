@@ -410,4 +410,83 @@ void main() {
       sink.onSelect = (_) {};
     });
   });
+
+  group('判重集合容量上限（docs/memory-audit.md G3）', () {
+    /// 塞满容量后返回第一个（最旧）被淘汰的 id。
+    ///
+    /// 直接用 resolved 卡填（不发通知、不发权限），判重集合照记。
+    Future<String> fillToCapacity(
+      ConfirmationNotifier notifier, {
+      int from = 0,
+    }) async {
+      const cap = ConfirmationNotifier.notifiedIdsCapacity;
+      final cards = List.generate(
+        cap,
+        (i) => _card(id: 'cap_${from + i}', resolved: true),
+      );
+      await notifier.handleItems(cards);
+      return 'cap_$from';
+    }
+
+    test('塞入超容量 → notifiedCount 封顶、最旧 id 被淘汰（hasSeen false）', () async {
+      final sink = _RecordingSink();
+      final notifier = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => false,
+      );
+      const cap = ConfirmationNotifier.notifiedIdsCapacity;
+
+      final oldest = await fillToCapacity(notifier);
+      expect(notifier.notifiedCount, cap, reason: '恰好塞满');
+      expect(notifier.hasSeen(oldest), isTrue, reason: '前置：最旧 id 在集合里');
+
+      // 再加 1 条 → 超容量 → 淘汰最旧。
+      await notifier.handleItems([_card(id: 'cap_extra', resolved: true)]);
+
+      expect(notifier.notifiedCount, cap, reason: '超容量后必须封顶（不是继续增长到 cap+1）');
+      expect(
+        notifier.hasSeen(oldest),
+        isFalse,
+        reason: '最旧 id 被淘汰，这正是「极旧卡可能重复通知」的折衷点',
+      );
+      expect(notifier.hasSeen('cap_extra'), isTrue);
+    });
+
+    test('未超容量时最旧 id 仍在（容量内不误淘汰）', () async {
+      final sink = _RecordingSink();
+      final notifier = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => false,
+      );
+
+      await notifier.handleItems([_card(id: 'early', resolved: true)]);
+      // 塞到恰好容量（补 cap-1 条）。
+      const cap = ConfirmationNotifier.notifiedIdsCapacity;
+      await notifier.handleItems(
+        List.generate(cap - 1, (i) => _card(id: 'fill_$i', resolved: true)),
+      );
+
+      expect(notifier.notifiedCount, cap);
+      expect(notifier.hasSeen('early'), isTrue, reason: '未超容量时不得淘汰任何 id');
+    });
+
+    test('淘汰语义不影响 allows 判重（hasSeen/add 语义不变）', () async {
+      final sink = _RecordingSink();
+      final notifier = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => false,
+      );
+
+      // 同 id 重复 add：不增长、不触发淘汰。
+      await notifier.handleItems([_card(id: 'dup', resolved: true)]);
+      await notifier.handleItems([_card(id: 'dup', resolved: true)]);
+      await notifier.handleItems([_card(id: 'dup', resolved: true)]);
+
+      expect(notifier.notifiedCount, 1, reason: '重复 add 不增长');
+
+      // 新未解决卡在容量内照发（判重语义未被容量改造影响）。
+      final sent = await notifier.handleItems([_card(id: 'fresh_1')]);
+      expect(sent, hasLength(1), reason: '判重语义不变：新卡仍发通知');
+    });
+  });
 }
