@@ -713,6 +713,25 @@ void main() {
       expect(r.items, isEmpty);
     });
 
+    test('token_usage 不进时间线（观测数据不挤占对话事件）', () {
+      // 它是**落库业务事件**（有 eventId、推游标），但不在渲染白名单里：
+      // 账单位于顶部读数区（见 ConversationPage 的 _UsageBar），进时间线会把
+      // 对话冲散。归约器无 case → 落到 default，不产生任何条目。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.tokenUsage,
+          payload: {'input_tokens': 100, 'output_tokens': 20, 'calls': 1},
+        ),
+      ]);
+
+      expect(r.items, isEmpty);
+      expect(r.gateDecisions, isEmpty);
+      expect(r.activities, isEmpty);
+      // 也不能把它当成活动状态或成本：
+      expect(r.executionStatus, isNull);
+      expect(r.contextUsage, isNull);
+    });
+
     test('空输入产出空结果', () {
       final r = EventReducer.reduce(const <ChatEvent>[]);
       expect(r.items, isEmpty);

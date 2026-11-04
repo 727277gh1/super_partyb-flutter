@@ -107,6 +107,18 @@ class ChatStreamController {
   final _errorController = StreamController<SpbError>.broadcast();
   final _stateController = StreamController<SseState>.broadcast();
 
+  /// group 级 token 消耗合计流（与 [items] 平行，**不是**归约产物）。
+  final _usageSummaryController =
+      StreamController<GroupUsageSummary?>.broadcast();
+
+  /// 当前 group 的用量基线 + 本地增量（见 [usageSummary]）。
+  ///
+  /// **不走 `EventReducer`**：归约的输入是 [_buffer]，而缓冲有上限（2000 条，
+  /// 按整轮裁剪）——从缓冲求和会「越用越少」。真源是 `usage-summary` 端点
+  /// （服务端 `SUM(json_extract(...))`），这里只在拿到基线之后按 SSE 事件
+  /// 做本地增量，并把结果同时缓存为本字段与推给 [_usageSummaryController]。
+  GroupUsageSummary? _usageSummary;
+
   /// 事件缓冲区上限（条）。
   ///
   /// ## 为什么必须有上限
@@ -245,6 +257,26 @@ class ChatStreamController {
   Stream<GoalUpdate> get goalUpdates => _goalUpdatesController.stream;
 
   Stream<SpbError> get errors => _errorController.stream;
+
+  /// group 级 token 消耗合计流（账单口径，与 `ContextUsage` 的水位口径是**两个量**）。
+  ///
+  /// ## 数据来源：REST 基线 + SSE 增量
+  ///
+  /// 1. [start] / [switchGroup] 时拉一次 `usage-summary` 作基线（非阻塞、失败静默）；
+  /// 2. 之后每条 `token_usage` 事件（持久化业务事件，不在渲染白名单里）在
+  ///    [_onFrame] 里做本地 `+1 条事件` 的增量，把结果推给本流。
+  ///
+  /// **不从 [_buffer] 求和**：缓冲有上限且按整轮裁剪（见 [maxBufferEvents]），
+  /// 长会话里较早的 `token_usage` 会被丢掉——那样算出来的总量会越用越少。
+  /// **也不在 [_backfill] / [loadOlder] 时增量**：基线已包含那些已落库的事件，
+  /// 再累加就是双重计数。
+  ///
+  /// 推 null 表示当前无可用数据（未拉取 / 拉取失败 / 已切到无 group 的模式），
+  /// 消费方应隐藏该区域。
+  Stream<GroupUsageSummary?> get usageSummary => _usageSummaryController.stream;
+
+  /// 用量快照（供 UI 首次渲染，同 [contextUsageSnapshot]）。
+  GroupUsageSummary? get usageSummarySnapshot => _usageSummary;
 
   /// 当前时间线是否来自**本地缓存**（而非服务端）。
   ///
@@ -661,6 +693,7 @@ class ChatStreamController {
     _buffer.clear();
     _oldestLoadedGlobalSeq = null;
     _resetStaleWatch();
+    _resetUsageSummary(groupId);
 
     if (groupId != null) {
       await _backfill(groupId);
@@ -681,6 +714,10 @@ class ChatStreamController {
       // 「服务端可达」这个真正关心的条件。
       if (s == SseState.connected) {
         unawaited(_outbox?.onConnectivityRestored() ?? Future<void>.value());
+        // 断线期间错过的 `token_usage` 事件若不在回放窗口内，本地增量会偏小；
+        // 重连即向服务端对一次账（成功才覆盖，失败保留本地读数）。同取向：
+        // webapp 在 `use-workbench-state` 的重连路径上重拉 `usage-summary`。
+        unawaited(_loadUsageSummaryQuietly());
       }
     });
 
@@ -733,6 +770,7 @@ class ChatStreamController {
     _oldestLoadedGlobalSeq = null;
     _setFromCache(false);
     _resetStaleWatch();
+    _resetUsageSummary(groupId);
     if (groupId != null) {
       await _backfill(groupId);
     }
@@ -1352,6 +1390,20 @@ class ChatStreamController {
       _pushStaleTurnIds();
     }
 
+    // token_usage：本地增量累加到 group 总量（账单口径）。
+    //
+    // 放在 group 过滤**之后**（不按当前 group 过滤就会把别的对话的账记到本 group），
+    // 且只在这里（实时帧）做——[_backfill] / [loadOlder] 拿到的是**已落库**的
+    // 同一批事件，REST 基线已包含它们，再累加就是双重计数。
+    //
+    // 它**继续**走下面的通用路径：`token_usage` 是落库事件（`Transient` 为零值
+    // false）、带有效 eventId，故游标应当推进、事件也应落入 [_buffer]
+    // （归约器无 case ⇒ 不产生时间线条目，只是保持「落库事件走通用路径」
+    // 这条不变式不被特例破坏）。
+    if (event.eventType == EventTypes.tokenUsage) {
+      _applyUsageIncrement(event);
+    }
+
     _appendEvent(event);
     _trimBuffer();
 
@@ -1428,6 +1480,94 @@ class ChatStreamController {
     // 每次缓冲变更都同步看门狗：判据是「距最后一次活动」，故只有
     // [touched] 里那些 turn 的到期时刻被推后（见 [_syncStaleWatch]）。
     _syncStaleWatch(touchedTurnIds: touched);
+  }
+
+  /// 重拉当前 group 的用量基线（供页面主动刷新，如下拉 / 回到前台）。
+  ///
+  /// 无聚焦 group 时为空操作。失败静默（用量是非关键展示）。
+  Future<void> refreshUsageSummary() async {
+    final gid = _groupId;
+    if (gid == null) return;
+    await _loadUsageSummary(gid);
+  }
+
+  /// 重连时的对账（内部用，不暴露给页面）。
+  ///
+  /// 与 [refreshUsageSummary] 的差别只是「没有聚焦 group 时什么都不做」——
+  /// 列表页建的全局连接（`groupId == null`）也会收到 `SseState.connected`，
+  /// 那时既无账单可拉，也不该为一个没打开的对话发请求。
+  Future<void> _loadUsageSummaryQuietly() async {
+    final gid = _groupId;
+    if (gid == null || gid.isEmpty) return;
+    await _loadUsageSummary(gid);
+  }
+
+  /// 切换 group 时重置用量状态，并按需拉取新 group 的基线。
+  ///
+  /// 先重置再拉取：否则旧 group 的账单会在新对话的首帧继续显示
+  /// （那是一个会误导人的跨对话串数据）。
+  void _resetUsageSummary(String? groupId) {
+    _usageSummary = null;
+    if (!_usageSummaryController.isClosed) _usageSummaryController.add(null);
+    if (groupId != null && groupId.isNotEmpty) {
+      // 不 await：用量是非关键展示，不能拖慢首屏回填 / 切对话。
+      unawaited(_loadUsageSummary(groupId));
+    }
+  }
+
+  /// 拉一次 group 用量基线。
+  ///
+  /// ## 三条约束
+  ///
+  /// 1. **不重试、不报错**：只记 debug。用量是一块只读读数，拉取失败应静默
+  ///    降级为「不显示」，而不是给用户一个错误提示（同 webapp `loadUsageSummary`
+  ///    的 `catch {}`）。
+  /// 2. **结果必须校验归属**：请求在飞期间用户可能已切到另一个对话，晚到的响应
+  ///    会把 A 的账单挂到 B 上（跨对话串数据，比不显示更糟）。
+  /// 3. **失败时保留旧值？不**——失败时什么都不改，故旧值（此时一定为 null，
+  ///    因为 [_resetUsageSummary] 刚清过）保持不变。
+  Future<void> _loadUsageSummary(String groupId) async {
+    try {
+      final summary = await _api.groupUsageSummary(groupId);
+      if (_disposed || _groupId != groupId) return;
+      _usageSummary = summary;
+      if (!_usageSummaryController.isClosed) {
+        _usageSummaryController.add(summary);
+      }
+    } catch (e) {
+      SpbLog.debug('group 用量汇总拉取失败（静默降级为不显示）', {
+        'group': groupId,
+        'error': e.toString(),
+      });
+    }
+  }
+
+  /// 收到一条 `token_usage` 事件：把本轮账加到本地总量上。
+  ///
+  /// ## 基线未就绪时跳过（不是「先攒着」）
+  ///
+  /// 基线（[_usageSummary]）为 null 有两种情形：刚切 group、基线请求在飞。
+  /// 此时若先累加再叠加晚到的基线，会**双重计数**（基线快照通常已包含这条事件）。
+  /// 故跳过——基线落地后自会包含它。代价是「基线快照早于事件」时会少算一轮，
+  /// 下次拉取即纠正：偏好「少算」而非「多算」（与 webapp `if (!cur) return prev`
+  /// 同一取舍）。
+  void _applyUsageIncrement(ChatEvent event) {
+    final current = _usageSummary;
+    if (current == null) {
+      SpbLog.debug('token_usage 到达时用量基线未就绪，跳过本地增量', {
+        'group': event.groupId,
+        'turn': event.turnId,
+      });
+      return;
+    }
+    _usageSummary = current.incrementedByEvent(
+      event.payload ?? const <String, dynamic>{},
+      // 时间在**事件行**上（payload 不带），与服务端 `MIN/MAX(created_at)` 同源。
+      occurredAt: event.createdAt.toIso8601String(),
+    );
+    if (!_usageSummaryController.isClosed) {
+      _usageSummaryController.add(_usageSummary);
+    }
   }
 
   /// 发送消息（经完整前置链）。
@@ -1653,6 +1793,7 @@ class ChatStreamController {
     await _goalUpdatesController.close();
     await _errorController.close();
     await _stateController.close();
+    await _usageSummaryController.close();
   }
 
   static Map<String, dynamic>? _decode(String data) {
