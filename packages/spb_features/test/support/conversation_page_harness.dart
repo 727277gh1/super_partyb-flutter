@@ -268,6 +268,7 @@ Future<void> pumpPage(
   VoidCallback? onReconnect,
   bool wireActivities = true,
   bool wireContextUsage = true,
+  bool wireUsageSummary = true,
   bool wireExecutionStatus = true,
   bool wireTtsStatus = true,
   bool wireStaleTurnIds = true,
@@ -333,6 +334,11 @@ Future<void> pumpPage(
         contextUsage: wireContextUsage ? controller.contextUsage : null,
         contextUsageSnapshot: wireContextUsage
             ? controller.contextUsageSnapshot
+            : null,
+        // group token 消耗同理：默认接上，wireUsageSummary=false 验证未注入时不展示。
+        usageSummary: wireUsageSummary ? controller.usageSummary : null,
+        usageSummarySnapshot: wireUsageSummary
+            ? controller.usageSummarySnapshot
             : null,
         // 等待/重试状态同理。
         executionStatus: wireExecutionStatus

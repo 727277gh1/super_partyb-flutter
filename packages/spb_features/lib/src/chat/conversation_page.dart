@@ -115,6 +115,8 @@ class ConversationPage extends StatefulWidget {
     this.activitiesSnapshot,
     this.contextUsage,
     this.contextUsageSnapshot,
+    this.usageSummary,
+    this.usageSummarySnapshot,
     this.executionStatus,
     this.executionStatusSnapshot,
     this.ttsStatus,
@@ -439,6 +441,24 @@ class ConversationPage extends StatefulWidget {
   /// 读 `controller.contextUsageSnapshot` 是同步 getter，建立不了依赖，故首帧
   /// 值必须由调用方显式传入（同 [activitiesSnapshot]）。
   final ContextUsage? contextUsageSnapshot;
+
+  /// group 级 token 消耗合计流（`usage-summary` 基线 + `token_usage` 增量）。
+  ///
+  /// ## 与 [contextUsage] 的分工（两个量，不可合并）
+  ///
+  /// - 本参数：**账单**——这个对话总共烧了多少 token（服务端 SUM 聚合，
+  ///   单调递增）；
+  /// - [contextUsage]：**水位**——当前占多少上下文窗口（`context_update`
+  ///   快照，compaction 后会变小）。
+  ///
+  /// 两者都在顶部读数区展示但各自成行；塞进同一个「已用 / 窗口」会得到一个
+  /// 既不解释账单也不解释压缩的数字（webapp 状态侧栏为此拆成两段）。
+  ///
+  /// 为 null 时不展示消耗区（同 [contextUsage] 的「注入才订阅」取向）。
+  final Stream<GroupUsageSummary?>? usageSummary;
+
+  /// 首帧消耗快照（同步初值，同 [contextUsageSnapshot]）。
+  final GroupUsageSummary? usageSummarySnapshot;
 
   /// 执行等待/重试状态流（`queue_state` / `retry_scheduled` 归约输出）。
   ///
@@ -868,6 +888,10 @@ class _ConversationPageState extends State<ConversationPage> {
   StreamSubscription<ContextUsage?>? _contextUsageSub;
   ContextUsage? _contextUsage;
 
+  /// group 用量合计订阅与最近一次快照（与 [_contextUsage] 同取向）。
+  StreamSubscription<GroupUsageSummary?>? _usageSummarySub;
+  GroupUsageSummary? _usageSummary;
+
   /// `queue_state` / `retry_scheduled` 订阅与最近一次等待状态。
   ///
   /// 与 [_contextUsage] 同取向：存 State + 订阅推送时 setState。
@@ -916,6 +940,7 @@ class _ConversationPageState extends State<ConversationPage> {
     _scrollController.addListener(_onScroll);
     _subscribeActivities();
     _subscribeContextUsage();
+    _subscribeUsageSummary();
     _subscribeExecutionStatus();
     _subscribeTtsStatus();
     _subscribeStaleTurnIds();
@@ -984,6 +1009,17 @@ class _ConversationPageState extends State<ConversationPage> {
     _contextUsage = widget.contextUsageSnapshot;
   }
 
+  /// 订阅 group 用量合计流（仅在调用方传了 [ConversationPage.usageSummary] 时）。
+  void _subscribeUsageSummary() {
+    final stream = widget.usageSummary;
+    if (stream == null) return;
+    _usageSummarySub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _usageSummary = snapshot);
+    });
+    _usageSummary = widget.usageSummarySnapshot;
+  }
+
   /// 订阅等待/重试状态流（仅在调用方传了 [ConversationPage.executionStatus] 时）。
   void _subscribeExecutionStatus() {
     final stream = widget.executionStatus;
@@ -1041,6 +1077,13 @@ class _ConversationPageState extends State<ConversationPage> {
       _contextUsageSub = null;
       _contextUsage = null;
       _subscribeContextUsage();
+    }
+    // 消耗合计流同理。
+    if (oldWidget.usageSummary != widget.usageSummary) {
+      unawaited(_usageSummarySub?.cancel());
+      _usageSummarySub = null;
+      _usageSummary = null;
+      _subscribeUsageSummary();
     }
     // 等待/重试流同理。
     if (oldWidget.executionStatus != widget.executionStatus) {
@@ -1111,6 +1154,7 @@ class _ConversationPageState extends State<ConversationPage> {
     _itemsSub?.cancel();
     _activitiesSub?.cancel();
     _contextUsageSub?.cancel();
+    _usageSummarySub?.cancel();
     _executionStatusSub?.cancel();
     _ttsStatusSub?.cancel();
     _staleTurnIdsSub?.cancel();
@@ -1812,13 +1856,17 @@ class _ConversationPageState extends State<ConversationPage> {
           // **整个时间线**，故贴顶且独立成条（与切片 A 的
           // `GroupListPage._CacheNotice` 同一取向）。
           if (_timelineFromCache) const _OfflineTimelineNotice(),
-          // 上下文用量：贴在时间线**上方**（顶部诊断区），不进时间线。
+          // 上下文用量 + token 消耗：贴在时间线**上方**（顶部读数区），不进时间线。
           //
           // 与下面两条状态条的位置差异是有意的：用量是「资源占用」的常驻读数，
           // 与输入/待处理无关，故贴顶；而活动指示描述「正在跑的那个 turn」，
           // 语义上贴时间线底部。
-          if (_contextUsage != null && _contextUsage!.hasData)
-            _ContextUsageBar(usage: _contextUsage!),
+          //
+          // 两行（消耗 / 上下文）同时存在时不拆成两条 bar：它们回答的是同一个
+          // 问题（「这个对话贵不贵、快不快要压缩」），并在同一个槽位里对齐比较。
+          if ((_contextUsage != null && _contextUsage!.hasData) ||
+              (_usageSummary != null && _usageSummary!.hasData))
+            _UsageBar(contextUsage: _contextUsage, groupUsage: _usageSummary),
           // 语音播报状态：同样贴顶（常驻读数区）。
           //
           // 与下面「等待/活动」槽位分开是有意的：那两个回答「为什么还没回复」，
@@ -2456,7 +2504,7 @@ class _TtsStatusBar extends StatelessWidget {
   }
 }
 
-/// 上下文用量条：展示「已用 / 窗口」与（若服务端提供）费用。
+/// 顶部读数区：token 消耗（账单）+ 上下文窗口（水位）。
 ///
 /// ## 为什么贴在时间线顶部
 ///
@@ -2464,53 +2512,68 @@ class _TtsStatusBar extends StatelessWidget {
 /// 故贴顶常驻；而 `_TurnActivityIndicator` 描述的是「正在跑的那个 turn」，
 /// 语义上属于时间线底部。两者位置不同是**有意**的，不要为了对称把它们并排。
 ///
+/// ## 两行的语义不同，不可合并
+///
+/// - 「Token 消耗」（[GroupUsageSummary]）：`token_usage` 事件求和，**计费口径**
+///   ——这个对话总共烧了多少 token，单调递增；
+/// - 「上下文」（[ContextUsage]）：`context_update` 快照，**窗口水位**
+///   ——当前占多少窗口，compaction 后会变小。
+///
+/// 塞进同一个「已用 / 窗口」会得到一个既不解释账单也不解释压缩的数字
+/// （webapp `WorkbenchStatusSidebar` 的注释逐字说明过这一点）。
+///
 /// ## 对齐 webapp
 ///
-/// `apps/webapp/messages/zh.json`：
-/// - `costAndUsage` = `成本与用量`
-/// - `tokenUsed` = `已使用`
-/// - `tokenCostLabel` = `费用`
+/// `apps/webapp/messages/zh.json`：`tokensBurned`/`tokenInput`/`tokenOutput`/
+/// `tokenCached`/`tokenRequests`/`contextWindow`。取值口径与
+/// `WorkbenchStatusSidebar` 一致：
 ///
-/// 取值口径与 `WorkbenchStatusSidebar` 一致：只在 `used` 与 `size` 都已知时
-/// 显示 token 行；费用只在 `amount > 0` 时显示。
-class _ContextUsageBar extends StatelessWidget {
-  const _ContextUsageBar({required this.usage});
+/// - 消耗 = `input + output`（**cached 不加总**——它是 input 的子集，加了就
+///   重复计数）；只在 `calls > 0`（有账单记录）时渲染，否则连零行都不出
+///   ——「还没有记录」与「消耗为 0」是两回事；
+/// - 缓存只在 `cached_tokens > 0` 时括注；
+/// - 上下文只在 `used` 与 `size` 都已知时显示 token 行；
+/// - 费用只在 `amount > 0` 时显示（Go 后端从不发射，实际运行时不存在）。
+///
+/// ## `first_at` 的提示
+///
+/// `token_usage` 事件从引入该能力的部署时点起才有，数字不覆盖更早的历史 turn。
+/// 故把首条事件时间以 Tooltip（移动端长按）的形式挂在消耗行上：
+/// 「统计自 X 起（更早的会话无记录）」——不弹、不阻塞，但想核实的人能找到。
+class _UsageBar extends StatelessWidget {
+  const _UsageBar({required this.contextUsage, required this.groupUsage});
 
-  final ContextUsage usage;
+  final ContextUsage? contextUsage;
+  final GroupUsageSummary? groupUsage;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final used = usage.used;
-    final size = usage.size;
-    final cost = usage.cost;
+    final totals = (groupUsage != null && groupUsage!.hasData)
+        ? groupUsage!.totals
+        : null;
+    final usage = (contextUsage != null && contextUsage!.hasData)
+        ? contextUsage
+        : null;
+    final cost = usage?.cost;
 
-    return Material(
-      key: const ValueKey('conversation-context-usage'),
-      // 与连接/活动条区分：用量是中性读数而非「临时状态」，用 surfaceContainer
-      // 而非 secondaryContainer，视觉上不与「正在执行」混淆。
-      color: scheme.surfaceContainerHighest,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.md,
-          vertical: SpbSpacing.sm,
+    final lines = <Widget>[
+      if (totals != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: SpbSpacing.xs),
+          child: _UsageTotalsLines(totals: totals),
         ),
-        child: Row(
+      if (usage != null)
+        Row(
           children: [
-            Icon(
-              Icons.data_usage,
-              size: SpbSpacing.lg,
-              color: scheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: SpbSpacing.sm),
             Expanded(
               child: Text(
                 // 只在两端都已知时拼「X / Y」：只有 used 时拼出「12K / null」
                 // 比只显示「12K」更糟（用户会以为窗口未知是缺陷）。
-                (used != null && size != null)
-                    ? '上下文：${formatTokenCount(used)} / ${formatTokenCount(size)}'
-                    : '上下文：${formatTokenCount(used ?? size ?? 0)}',
+                (usage.used != null && usage.size != null)
+                    ? '上下文：${formatTokenCount(usage.used!)} / ${formatTokenCount(usage.size!)}'
+                    : '上下文：${formatTokenCount(usage.used ?? usage.size ?? 0)}',
                 key: const ValueKey('conversation-context-usage-tokens'),
                 style: textTheme.bodySmall?.copyWith(
                   color: scheme.onSurfaceVariant,
@@ -2529,8 +2592,96 @@ class _ContextUsageBar extends StatelessWidget {
               ),
           ],
         ),
+    ];
+
+    return Material(
+      key: const ValueKey('conversation-context-usage'),
+      // 与连接/活动条区分：用量是中性读数而非「临时状态」，用 surfaceContainer
+      // 而非 secondaryContainer，视觉上不与「正在执行」混淆。
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(
+                Icons.data_usage,
+                size: SpbSpacing.lg,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: lines,
+              ),
+            ),
+          ],
+        ),
       ),
     );
+  }
+}
+
+/// 消耗段的两行（总量行 + 明细行）。
+///
+/// 拆两行而不是塞一行：320–412dp 的窄屏（AGENTS.md §6.16）下单行会折到两行
+/// 且断点不可控；拆行后每行都可独立换行，`Column` 只会变高、不会溢出。
+class _UsageTotalsLines extends StatelessWidget {
+  const _UsageTotalsLines({required this.totals});
+
+  final GroupUsageTotals totals;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final style = textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
+    final cached = totals.cachedTokens;
+    final firstAt = totals.firstAtTime;
+
+    final head =
+        'Token 消耗 ${formatTokenCount(totals.burnedTokens)} · 请求 ${totals.calls} 次';
+    final detail =
+        '输入 ${formatTokenCount(totals.inputTokens)}'
+        '${cached > 0 ? '（缓存 ${formatTokenCount(cached)}）' : ''}'
+        ' · 输出 ${formatTokenCount(totals.outputTokens)}';
+
+    Widget lines = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          head,
+          key: const ValueKey('conversation-usage-tokens'),
+          style: style,
+        ),
+        Text(
+          detail,
+          key: const ValueKey('conversation-usage-breakdown'),
+          style: style,
+        ),
+      ],
+    );
+
+    if (firstAt != null) {
+      lines = Tooltip(
+        message:
+            '统计自 ${firstAt.year}-'
+            '${firstAt.month.toString().padLeft(2, '0')}-'
+            '${firstAt.day.toString().padLeft(2, '0')}'
+            ' 起（更早的会话无记录）',
+        child: lines,
+      );
+    }
+    return lines;
   }
 }
 
