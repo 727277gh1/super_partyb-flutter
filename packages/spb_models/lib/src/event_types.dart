@@ -187,11 +187,34 @@ class EventTypes {
   /// 无需再改客户端。
   static const habitAutoRunCompleted = 'habit_auto_run_completed';
 
+  /// turn 收尾的 token 用量（`internal/chatexec/usage.go` 的 `TokenUsageEvent`）。
+  ///
+  /// ## 为什么是独立业务事件，而不是挂在 `done` / `executor_completed` 上
+  ///
+  /// - `executor_completed` 是**诊断事件**：受 `runtime.diagnostics_*` 开关控制，
+  ///   且在 `eventretention.purgeableEventTypes` 清理白名单里——账单不能被保留期
+  ///   清掉，也不能随诊断开关消失；
+  /// - `done` 是 turn 生命周期事件，与「有没有采到用量」无因果关系
+  ///   （取消 / 超时也照样记账，见 `turn_worker` 的发射点）。
+  ///
+  /// ## 它是**落库**事件，但**不进** [timelineVisible]
+  ///
+  /// Go 侧 `chatbus.Event.Transient` 未设（零值 false），故它落 `chat_events`
+  /// 表、带有效 eventId：**SSE 游标应当推进**，断线回放也应覆盖它（事件行本身
+  /// 不渲染，但 `recordEventId` 必须走通用路径）。
+  ///
+  /// 而观测数据不该挤占对话事件（也不该占小程序 `limit=200` 的历史配额），故
+  /// 它**不在**渲染白名单里——归约器无 case、不产生时间线条目。客户端要展示的
+  /// 是**聚合值**，真源是 `GET /chat/groups/:id/usage-summary`（服务端
+  /// `SUM(json_extract(...))`），不是把事件加起来（缓冲有上限、会裁掉旧的）。
+  static const tokenUsage = 'token_usage';
+
   /// 本客户端已知的全部事件类型。
   ///
   /// 新增事件时同步加进来；[ChatEvent.isKnown] 依赖它区分「服务端发了新事件」
   /// 与「契约漂移导致解析失败」。
   static const Set<String> all = {
+    tokenUsage,
     start,
     message,
     thought,
