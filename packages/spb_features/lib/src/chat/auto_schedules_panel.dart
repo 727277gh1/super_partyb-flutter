@@ -19,9 +19,14 @@ typedef LoadAutoSchedules = Future<List<ChatTurnSchedule>> Function();
 ///
 /// 若返回 void，面板只能自己再 `load()` 一次——那会与用例内部的回读重复
 /// （多两次请求），且两次读取之间服务端可能又变了，面板显示的反而可能是
-/// 更旧的一份。让回调把用例刚读到的权威列表带回来，面板直接替换本地状态，
+/// 更旧的一份。让回调把用例刚读到的权威结果带回来，面板直接替换本地状态，
 /// **一次读取、一个真相**。
-typedef StopAllAutoSchedules = Future<List<ChatTurnSchedule>> Function();
+///
+/// 返回完整结果（含 `disabledCount`）而不是裸列表：停用端点的谓词是
+/// `enabled=1 AND run_count < max_runs`，并发场景下「列表里有 3 条待触发」
+/// 与「实际停用了 0 条」可能同时为真（另一端已先停用）——条数是唯一权威
+/// 信号，面板据此给出「已停用 N 个 / 没有在途」的反馈。
+typedef StopAllAutoSchedules = Future<AutoSchedulesStopResult> Function();
 
 /// 自动续跑排程面板：查看 / 停用「Goal Gate 自动续跑」。
 ///
@@ -89,6 +94,10 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
   bool _loading = false;
   String? _error;
 
+  /// 停用操作的一次性反馈（成功后显示，下一次加载/停用/换对话时清除）。
+  /// null = 无反馈。与 [_error] 互斥（同一次操作要么成功要么失败）。
+  String? _notice;
+
   /// 停用操作在途（与 [AutoSchedulesPanel.busy] 分开：后者是父层共享的 busy，
   /// 本面板自己的按钮点击不该让设置面板也跟着转圈）。
   bool _stopping = false;
@@ -108,6 +117,7 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
       setState(() {
         _items = const [];
         _error = null;
+        _notice = null;
       });
       _reload();
     }
@@ -118,6 +128,8 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
     setState(() {
       _loading = true;
       _error = null;
+      // 重新拉取意味着用户看到了当前真实状态——上一次停用的反馈已过时。
+      _notice = null;
     });
     try {
       final items = await widget.load();
@@ -158,11 +170,18 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
       _error = null;
     });
     try {
-      final items = await stop();
+      final result = await stop();
       if (!mounted) return;
       setState(() {
-        _items = items;
+        _items = result.items;
         _stopping = false;
+        // 反馈（Go b2a54b5a 语义：stop 只停 goal_gate 排程）：
+        // - disabledCount == 0 → 没有在途的自动续跑（并发下另一端已停用，
+        //   或条目在点击与服务端之间已被触发），不是错误。
+        // - disabledCount > 0 → 已停用 N 个。
+        _notice = result.disabledCount > 0
+            ? '已停用 ${result.disabledCount} 个自动续跑排程'
+            : '没有在途的自动续跑排程';
       });
     } on AutoSchedulesFailure catch (e) {
       if (!mounted) return;
@@ -307,6 +326,31 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
                       label: Text(
                         _hasPending ? '停用全部待触发（$pendingCount）' : '停用全部待触发',
                       ),
+                    ),
+                  ),
+                // 一次性反馈：停用成功后给一句（含 disabledCount == 0 的
+                // 「没有在途」——那也是有效结论，不能静默）。
+                if (_notice != null)
+                  Padding(
+                    key: const ValueKey('auto-schedules-notice'),
+                    padding: const EdgeInsets.only(top: SpbSpacing.xs),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.check_circle_outline,
+                          size: SpbSpacing.md,
+                          color: theme.colorScheme.primary,
+                        ),
+                        const SizedBox(width: SpbSpacing.xs),
+                        Expanded(
+                          child: Text(
+                            _notice!,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.primary,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
               ],

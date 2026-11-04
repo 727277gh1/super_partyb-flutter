@@ -76,6 +76,7 @@ void main() {
     Object? reloadToken = 'grp_1',
     List<ChatTurnSchedule>? stopReturns,
     AutoSchedulesFailure? loadFailure,
+    int? stopDisabledCount,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -90,7 +91,13 @@ void main() {
                 ? () async {
                     stopCalls++;
                     items = stopReturns ?? items;
-                    return items;
+                    final disabled =
+                        stopDisabledCount ??
+                        items.where((s) => s.isPending).length;
+                    return AutoSchedulesStopResult(
+                      disabledCount: disabled,
+                      items: items,
+                    );
                   }
                 : null,
             busy: busy,
@@ -384,6 +391,51 @@ void main() {
       expect(
         find.byKey(const ValueKey('auto-schedules-empty')),
         findsOneWidget,
+      );
+    });
+
+    testWidgets('停用成功反馈：disabledCount > 0 → 「已停用 N 个…」（Go b2a54b5a）', (
+      tester,
+    ) async {
+      useStubs(initial: [pending('sch_1'), pending('sch_2')]);
+      await pumpPanel(
+        tester,
+        stopReturns: [disabled('sch_1'), disabled('sch_2')],
+        // 服务端回执 2 条（harness 不会自动从 items 推断——并发下两者可能不一致）。
+        stopDisabledCount: 2,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('auto-schedules-stop-all')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.text('已停用 2 个自动续跑排程'),
+        findsOneWidget,
+        reason: '条数是服务端 disabled_count 的权威回执，不能静默',
+      );
+    });
+
+    testWidgets('disabledCount == 0 → 「没有在途的自动续跑排程」（不是「已停用 0 个」）', (
+      tester,
+    ) async {
+      // 并发场景：列表回读时仍是 pending（另一端在点击后才停用），
+      // 但服务端谓词实际撤了 0 条。条数是唯一权威信号。
+      useStubs(initial: [pending('sch_1')]);
+      await pumpPanel(
+        tester,
+        stopReturns: [pending('sch_1')],
+        stopDisabledCount: 0,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('auto-schedules-stop-all')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.text('没有在途的自动续跑排程'),
+        findsOneWidget,
+        reason: '「已停用 0 个」会像功能坏了；「没有在途」是有效结论',
       );
     });
   });
