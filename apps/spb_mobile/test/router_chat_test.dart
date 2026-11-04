@@ -1137,4 +1137,69 @@ void main() {
       reason: '硬编码的「对话」与列表页同名，用户看不出自己进了哪个对话',
     );
   });
+
+  testWidgets('对话页接上了 group 用量流（router 层接线）', (tester) async {
+    // 与桌面端逐字同构（见 `apps/spb_desktop/test/router_chat_test.dart` 的
+    // 同名用例）。守的是**调用点**：`ConversationPage` 的 usage 参数在自己的
+    // 测试里是自己传的，「router 忘了把 `controller.usageSummary` 传下去」
+    // 在那里永远发现不了（§6.17 同一失败模式）。
+    //
+    // 断言「流接上了」而非「读数渲染出来」：基线是 unawaited 的 REST 请求，
+    // 而控制器是 `autoDispose.family`，进路由时会被换过一次，首次响应总落在
+    // 已 dispose 的控制器上（实测）。渲染与增量语义见
+    // `packages/spb_features/test/chat/conversation_page_usage_test.dart`。
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_usage'),
+      mockGroups: false,
+      sseClient: FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_TEST',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_usage',
+          (server) => server.reply(200, {
+            'id': 'grp_usage',
+            'user_id': 'usr_TEST',
+            'title': '用量对话',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_usage/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_TEST/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_usage', 'limit': 20},
+        );
+      },
+    );
+
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    final page = tester.widget<ConversationPage>(find.byType(ConversationPage));
+    expect(
+      page.usageSummary,
+      isNotNull,
+      reason: 'router 漏传 controller.usageSummary → Token 消耗读数永远不出现',
+    );
+    expect(page.contextUsage, isNotNull, reason: '同一条读数区的另一半：上下文窗口流也必须接上');
+  });
 }

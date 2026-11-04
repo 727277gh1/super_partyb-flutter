@@ -391,10 +391,70 @@ void main() {
       reason: '进入对话后 AppBar 必须显示对话名',
     );
     expect(
-      find.widgetWithText(AppBar, '对话'),
+      find.byKey(const ValueKey('conversation-usage-tokens')),
       findsNothing,
-      reason: '硬编码的「对话」与列表页同名，用户看不出自己进了哪个对话',
+      reason: 'usage-summary 未 mock（拉取失败静默降级）→ 消耗行不出现',
     );
+  });
+
+  testWidgets('对话页接上了 group 用量流（router 层接线）', (tester) async {
+    // ## 为什么必须在 router 层断言
+    //
+    // `ConversationPage` 的 `usageSummary` / `usageSummarySnapshot` 在页面自己的
+    // 测试里是**自己传**的——「router 忘了把 `controller.usageSummary` 传下去」
+    // 在那里永远发现不了（§6.17 同一失败模式：只测被调用的组件、不测调用点）。
+    // `check_wiring_parity.sh` 也查不到这一条：它只比对两端**同名**参数集合，
+    // 两端同时漏接不会有任何信号。
+    //
+    // ## 为什么断言的是「流被接上」而不是「读数渲染出来」
+    //
+    // 基线是 `unawaited` 的 REST 请求，而 `chatStreamControllerProvider` 是
+    // `autoDispose.family`：进入路由时控制器会被换过一次（`_focus` 在异步间隙里
+    // 先 `read`、`build` 里的 `watch` 才建立），于是**首次**基线响应总是落在一个
+    // 已 dispose 的控制器上、被归属校验丢弃（实测）。要稳定断言渲染结果就得把
+    // 控制器注入进来，而 harness 没有这个覆盖点。故这里守接线，渲染与增量语义由
+    // `packages/spb_features/test/chat/conversation_page_usage_test.dart` 覆盖。
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_usage'),
+      mockGroups: false,
+      sseClient: FakeSseClient(),
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/chat/groups/grp_usage',
+          (server) => server.reply(200, {
+            'id': 'grp_usage',
+            'user_id': 'usr_TEST',
+            'title': '用量对话',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_usage/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_TEST/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_usage', 'limit': 20},
+        );
+      },
+    );
+
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    final page = tester.widget<ConversationPage>(find.byType(ConversationPage));
+    expect(
+      page.usageSummary,
+      isNotNull,
+      reason: 'router 必须把 controller.usageSummary 传给页面（漏接则读数永远不出现）',
+    );
+    expect(page.contextUsage, isNotNull, reason: '同一条读数区的另一半：上下文窗口流也必须接上');
   });
 
   testWidgets('同一 userId 下跨两个 group 只建一次 SSE（切 group 走 switchGroup）', (

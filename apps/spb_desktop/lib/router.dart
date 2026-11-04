@@ -851,6 +851,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 页面据此隐藏用量区。
   ContextUsage? _contextUsage;
 
+  /// controller.usageSummary 的订阅（group 级 token 消耗合计）。
+  ///
+  /// 与 [_contextUsageSub] 平行，但**是两个量**：本流是「这个对话总共烧了
+  /// 多少 token」（账单），contextUsage 是「当前占多少上下文窗口」（水位）。
+  StreamSubscription<GroupUsageSummary?>? _usageSummarySub;
+
+  /// 最近一次 group 用量合计（`usage-summary` 基线 + `token_usage` 增量）。
+  ///
+  /// 为 null 表示尚无数据（未拉取 / 拉取失败 / 该 group 无记录），
+  /// 页面据此隐藏消耗区——不用 0 伪造「消耗为 0」。
+  GroupUsageSummary? _usageSummary;
+
   /// controller.executionStatus 的订阅（queue_state / retry_scheduled）。
   StreamSubscription<ExecutionStatus?>? _executionStatusSub;
 
@@ -942,6 +954,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     _gateSub?.cancel();
     _activitiesSub?.cancel();
     _contextUsageSub?.cancel();
+    _usageSummarySub?.cancel();
     _executionStatusSub?.cancel();
     _ttsStatusSub?.cancel();
     _staleTurnIdsSub?.cancel();
@@ -1449,6 +1462,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       _contextUsageSub = controller.contextUsage.listen(_onContextUsageChanged);
       _onContextUsageChanged(controller.contextUsageSnapshot);
     }
+    if (_usageSummarySub == null) {
+      // group token 消耗走独立流（见 ChatStreamController.usageSummary）。
+      // 同样先订阅再同步一次快照：基线是在 start/switchGroup 里异步拉的，
+      // 晚于本页挂载到达，但**早于**它到达的情况也存在（复用已建立的控制器）。
+      _usageSummarySub = controller.usageSummary.listen(_onUsageSummaryChanged);
+      _onUsageSummaryChanged(controller.usageSummarySnapshot);
+    }
     if (_executionStatusSub == null) {
       // 等待/重试状态走独立流（见 ExecutionStatus 类文档）。
       _executionStatusSub = controller.executionStatus.listen(
@@ -1587,6 +1607,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 与移动端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       contextUsage: controller.contextUsage,
       contextUsageSnapshot: _contextUsage,
+      // group token 消耗（usage-summary 基线 + token_usage 增量）：与上下文
+      // 水位同区但各成一行。与另一端同步接线（两端构造点必须一致，否则
+      // 一端功能缺失而测试仍绿）。
+      usageSummary: controller.usageSummary,
+      usageSummarySnapshot: _usageSummary,
       // 等待/重试提示（queue_state / retry_scheduled）：与活动指示共用槽位。
       // 与移动端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       executionStatus: controller.executionStatus,
@@ -2324,6 +2349,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onContextUsageChanged(ContextUsage? usage) {
     if (!mounted) return;
     setState(() => _contextUsage = usage);
+  }
+
+  /// 监听 controller.usageSummary：驱动对话页顶部的 token 消耗读数。
+  void _onUsageSummaryChanged(GroupUsageSummary? summary) {
+    if (!mounted) return;
+    setState(() => _usageSummary = summary);
   }
 
   /// 监听 controller.executionStatus：驱动对话页的等待/重试提示。
