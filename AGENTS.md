@@ -1121,24 +1121,25 @@ router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：964
+# 当前（HEAD）量：970
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=964 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=970 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1718
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1727
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1718 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1727 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 947、`spb_domain` 180、
+量级分布（HEAD，字符串字面量数）：`spb_features` 970、`spb_domain` 180、
 `spb_desktop` 170、`spb_models` 97、`spb_mobile` 95、`spb_platform` 79、
 `spb_api` 71、`spb_data` 39、`spb_core` 13、`spb_ui` 5、`spb_design` 3。
-（§6.54 的工具批卡与「动态」面板贡献了 `spb_features` 增量的大部分。）
+（§6.54 的工具批卡与「动态」面板、§6.56 的用量读数区贡献了 `spb_features`
+增量的主要部分。）
 
 ⚠️ **`spb_core` 从 0 涨到 8 是 issue #40/#45 引入的**（诊断报告文案、错误分类
 文案）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
@@ -1174,7 +1175,7 @@ grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 | # | 条件 | 为什么是它 |
 |---|---|---|
 | 1 | 产品**进入非中文市场**，且有明确目标语言与验收人 | 无目标语言时引入 i18n 只会产出无人验证的翻译 |
-| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 947，见上方命令） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
+| 2 | `spb_features` 硬编码字符串数 **> 1500**（当前 970，见上方命令） | 提取工作量翻倍，且说明 UI 文案已成规模、值得一次性上工具链 |
 | 3 | 出现「**同一文案在 ≥3 处需按语境改写**」的实际需求 | 说明缺的是 message key 机制而非翻译；此时直译方案已不够用 |
 
 #### 若将来要做（供重开时参考，**不要现在就动手**）
@@ -2326,7 +2327,7 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（§6.20）——本
 | **容差（选用）** | 小漂移放行（不打扰正常开发），大漂移拦住（防文档烂到误导决策） |
 
 默认容差 **5%**（标记可 `tolerance=` 覆盖）。依据：§6.12 的阈值是 `> 1500` 而
-当前 947——5% 的漂移（约 47 条）远不足以改变「离阈值还有多远」的判断。
+当前 970——5% 的漂移（约 49 条）远不足以改变「离阈值还有多远」的判断。
 
 **命令定义在脚本里，不在文档的标记里**：两条复现命令**自身含单引号**
 （`grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'"`），塞进标记属性就得转义、属性解析会先崩。
@@ -6193,6 +6194,87 @@ Win32 的 `TrackPopupMenu` 要求**调用窗口处于前台**，否则菜单弹�
   与本次两个缺陷无关。
 - **不改 `setHideOnClose` 的判定**：`_trayAvailable` 的语义（图标已创建）
   在资源正确的前提下成立；误置的风险源（PNG）已在资源侧消除。
+
+### 6.56 group 用量（token 消耗）展示：REST 权威 + SSE 增量 + 重连对账（2026-11，对齐 Go `4a05176c` / `20874489`）
+
+上游把「这段对话花了多少 token」做成了两个面：turn 收尾发一条 `token_usage`
+业务事件（持久化、可回放），加一个聚合端点
+`GET /chat/groups/:id/usage-summary`。客户端据此在对话页顶部读数区拆出两行：
+**Token 消耗（账单）**与**上下文窗口（水位）**——后者是既有 `context_update`
+的展示，本轮补前者。
+
+#### 语义约束（全部有上游代码依据，勿凭直觉改）
+
+| 约束 | 依据 |
+|---|---|
+| `token_usage` 是持久化业务事件，**不进** timeline 渲染白名单，但带合法 `eventId` → 走通用 buffer/cursor 路径，SSE 游标照常推进 | Go broker：`EventTokenUsage` 未列入 `timelineVisible`；webapp 同样不渲染它 |
+| `cached_tokens` 是 input 的子集，只括注（「输入 100（缓存 20）」）**不参与加总** | 加总即双计；webapp 同口径 |
+| 总量以 REST `usage-summary` 为**权威**；SSE 到达时本地增量累加 `totals`；`by_agent` 不做本地合并（解析但暂不渲染） | webapp `use-workbench-state`：本地只给「顶部一行合计」，明细等下次 REST |
+| `first_at` 提示「统计自 X 起（更早的会话无记录）」；usage 缺席不发零值事件 | Go `omitempty`：`calls==0` 时 `totals` 字段缺省、`first_at`/`last_at` 可能缺字段 |
+| `calls` 增量 = **+1**（事件条数），不用 payload `calls`（那是对话框到当前值，不是增量） | 后端 `COUNT(*)`；webapp `usage + 1` 同型 |
+| `total_tokens` 缺失按 0 处理 | Go 零值省略 |
+
+#### 数据流
+
+```
+进入对话 / 切对话        → GET usage-summary（unawaited，失败静默）→ baseline
+SSE token_usage 到达      → 只在 _onFrame 实时路径增量（_backfill/loadOlder 不加，REST 基线已含）
+SSE 重连（connected）     → _loadUsageSummaryQuietly() 再对一次账（成功才覆盖，失败保留本地读数）
+切对话                    → _resetUsageSummary（防串场）
+```
+
+三个易写错处：
+
+1. **重连对账必须跳过「全局模式」**（`ensureConnected()` 建的列表页连接，
+   `groupId == null`）：否则每次全局重连都为当前未打开的对话发一次账单请求。
+   与 `refreshUsageSummary()`（页面主动刷新，要求非空 group）语义区分。
+2. **基线落点带归属校验**（`_disposed || _groupId != groupId`）：切对话后晚到的
+   响应不得写进新 group 的读数（竞态有专门测试，用 `_UsageGate` 拦截器门控）。
+3. **本地增量只补 `firstAt`（不覆盖）与 `lastAt`（只前进）**：事件时间是真实的，
+   REST 的 `first_at` 也是真实的，两者应一致；覆盖会丢「统计起点」。
+
+#### 读数区 UI
+
+`_UsageBar`（`conversation_page.dart`）渲染条件
+`(_contextUsage?.hasData) || (_usageSummary?.hasData)`——只有上下文也渲染，
+只有账单也渲染，两者并存时同一条 bar 上下两行。窄屏（320dp）安全：读数区是
+可换行的 `Column`（**勿改单行 Row**，突变验证过会 overflow）。
+
+| key | 内容 |
+|---|---|
+| `conversation-usage-tokens` | 「Token 消耗 150 · 请求 3 次」行 |
+| `conversation-usage-breakdown` | 「输入 100（缓存 20） · 输出 50」行；cached=0 不括注 |
+| `conversation-context-usage` / `conversation-context-usage-cost` | 既有上下文水位行 |
+
+大数字 K 缩写（`formatTokenCount`：60K / 131.3K）；`first_at` Tooltip 说明
+统计起点；`by_agent` 明细暂不渲染（数据已解析，留待 UI 需要）。
+
+#### 测试与两个实测教训
+
+| 层 | 文件 | 覆盖 |
+|---|---|---|
+| models | `group_usage_test.dart`（+471 全包） | `incrementedByEvent` / `deltaFromEventPayload` / `burnedTokens` / `plus` / omitempty 容错 |
+| api | `chat_api_contract_test.dart`（+41） | 真实 `HttpServer` 契约：路径无 `/api` 前缀、全 snake_case |
+| domain | `chat_stream_controller_usage_test.dart`（13 条） | 基线拉取 / SSE 增量 / **重连对账** / 全局模式跳过 / 切对话重置 / 竞态丢弃 |
+| features | `conversation_page_usage_test.dart`（13 条） | 渲染 / cached 括注 / K 缩写 / first_at Tooltip / 320dp 窄屏 / `wireUsageSummary: false` 不渲染 |
+| 两端 router | `router_chat_test.dart` 各 +1 | 接线断言（见下） |
+
+**教训 1：`http_mock_adapter` 的 handler 计数不可信。** 注册 `onGet(path, handler)`
+时 handler 可能在**注册阶段**就被 adapter 内部触发（`RequestHandling.onRoute`），
+「handler 内 `requests++`」数出来的是注册次数。domain 层的请求计数改用
+`_UsageProbe extends Interceptor`，在**真实请求路径**（`onRequest`）计数并即时
+resolve 响应。
+
+**教训 2：router 层只能守「流接上了」，守不了「读数渲染出来」。**
+`chatStreamControllerProvider` 是 `autoDispose.family`，进路由时控制器会被换过
+一次（`_focus` 在异步间隙里先 `read`、`build` 里的 `watch` 才建立住），于是
+**首次**基线响应总是落在一个已 dispose 的控制器上、被归属校验丢弃（实测：
+`DBG usage ok` 后紧跟 `DBG dropped disposed=true`）。稳定断言渲染需要 harness
+提供控制器注入点，目前没有。故 router 用例断言
+`tester.widget<ConversationPage>(...).usageSummary != null`（漏接则读数永远不出现，
+反向验证：删掉 `usageSummary: controller.usageSummary` → 两端各 1 条失败）；
+渲染与增量语义由 features 层的 harness 用例覆盖（`wireUsageSummary` 开关 +
+`settleBaseline` 用 `tester.runAsync` 真实等待 unawaited 基线）。
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
