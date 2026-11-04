@@ -6592,9 +6592,74 @@ Windows 上两者都不存在 → `sync.db` 落临时目录、同步状态每次
 
 #### 有意不做
 
-- **不显示目标对话标题**：`MatchedTitle` 只在 HTTP 响应（`SendMessageResult.matchedTitle`），
-  不在 `routing_selected` payload 里——徽标无法回答「切到了哪个对话」，需服务端先加字段。
 - **不动 `routing_feedback_request`**（归属反馈卡）：那是另一条机制（用户评分），与本徽标无关。
+
+### 6.59 内存审计与处置（2026-11）：无界集合加界 / 图片解码降采样 / batch 写入
+
+本轮目标是「系统排查全仓内存相关内容并优化」。**权威对账单是
+`docs/memory-audit.md`**（A1–A20 已有界核实通过 / G1a–G5 本轮修复 / K1–K6
+有意保留），本节记录**方法、修复判据与折衷**——细节证据（file:line）以对账单
+为准，这里不重复。
+
+#### 方法与边界（先读这个再补充排查）
+
+排查范围：`packages/*`（9 包）+ 两端 `apps/*/lib`。方法：grep 内存持有模式
+（`Map`/`Set`/`List` 字段、缓存字段、`Image.*`、`imageCache`、`Uint8List`、
+Stream/Timer 生命周期）→ 逐条读码核实有界性。**边界（诚实记录）**：本机无
+`DISPLAY` 无真机（§9），没有做过绝对 RSS profile——「无界」是读码确认的
+**结构事实**，增长速率与用户可感知影响未量化；第三方包（gpt_markdown / drift
+/ dio）内部缓存不在可核实范围。绝对内存曲线（RSS / Dart heap 分解）需
+DevTools + 桌面环境，列为 openQuestion。
+
+#### 五项修复的判据与折衷（每项均有反向验证）
+
+| # | 修复 | 判据与折衷（诚实记录） | 验证 |
+|---|---|---|---|
+| G4 | **图片解码降采样 + imageCache 显式上限**（`spb_platform` `configureImageCache` / `imageDecodeCeilingFor`；两端 main 接线；缩略图/预览/头像三处 `cacheWidth`；`agent_file_card` 改持单份 `Uint8List` 去 `Uint8List.fromList` 逐帧拷贝） | 上限 32MB（`kImageCacheMaxBytes`）是**收紧**（框架默认 100MB）；预览解码上限 `kImagePreviewDecodeCeilingLogicalWidth = 1024dp` × DPR ≈ 2048px。**折衷**：InteractiveViewer 放大到 8× 时超过解码宽的部分被插值放大（「全屏清晰、极限放大略糊」）；若要高倍仍清晰需分级重解码，独立复杂度不做 | `image_cache_config_test.dart`（默认值/幂等/上限）；`agent_file_card_test` 断言 provider 是按显示尺寸的 `ResizeImage` 且字节实例 identical；**反向验证**：去 cacheWidth → ResizeImage 断言红 |
+| G1 | **`ConfirmationNotifier` 判重集合加容 + 登出接线 `reset()`** | `notifiedIdsCapacity = 4096`（`LinkedHashSet` 保插入序，环形淘汰）。**折衷**：极旧卡在长会话被重放且 id 恰被淘汰时理论上重复通知一次——服务端 id 全局唯一 + 回放窗口 ≤500，概率极低；消除它只能换持久化结构，成本不匹配。`reset()` 接在两端 `signOut()`（`logout()` 之后）——**唯一允许时机**，不得接页面重建（否则 SSE 回放重复弹通知） | domain 3 条容量用例 + 两端 router 层「signOut 清空判重集合」（**接线断裂页面测试抓不到**，§6.17 教训）；**反向验证**：删淘汰分支 → 容量用例红；删 desktop reset → 装配用例红 |
+| G2 | **`GroupSyncThrottle` 冷却记录加容**（`maxTrackedGroups = 512`） | 被淘汰条目 `allows` 恒 true——**安全方向**：只多探测不误挡。⚠️ Dart `LinkedHashMap` **重复赋值不移动 key 位置**（与 JS Map 不同），`markTriggered` 因此「先 remove 再插入」维持「最近触发在尾部」，否则刚重触发的老 group 反先被淘汰——有测试钉住防回退 | domain 3 条（超容淘汰最旧 / 重复触发挪尾 / reset 全清）；**反向验证**：删淘汰分支红、删 remove+re-insert 红 |
+| G3 | **两端 4 处 `_titles` 改共享有界 `GroupTitleCache`**（`spb_domain`，默认 512；`titleOf`/`contains`/`remember` 与裸 Map 取值语义一致） | 淘汰只导致下次预取重新拉取一次标题，**无行为风险**（miss → 「未知对话」占位）。淘汰按「最旧写入」序而非 LRU：预取天然按「最近看见」写入，几乎重合，LRU 的维护成本不值 | domain 5 条 + desktop 1 条（习惯页 router 层）+ mobile 2 条（预取命中展示 / getGroup 失败降级「未知对话」）；**反向验证**：删淘汰分支 → 容量用例红；`groupTitleOf` 改恒 null → 预取展示用例红 |
+| G5 | **`SyncStateStore.save` 逐条 `await` 改 `_db.batch`**（对齐 `DriftTimelineCacheStore` 既有写法） | 同事务、`StorageError` 包装、upsert 覆盖同 relPath 语义均不变；生产 5666 文件全量替换从 N 次往返降为 1 次。不动表定义（无 build_runner 重跑） | spb_data 新增 2 条幂等/覆盖用例；**反向验证**：去掉「先删旧记录」的整体替换步骤 → 用例红 |
+
+#### 有意保留（K1–K6，勿顺手「优化」）
+
+- **K1 桌面侧边栏 `Offstage` 常驻**（§6.46）：~130KB 固定 + 已加载交付物清单
+  （5666 文件约 2.6MB），换「再展开零延迟零请求、滚动位置保留」；
+- **K2 `scrollCacheExtent = viewport(1.5)`**（§6.47/§6.51）：换掉帧内 Markdown
+  冷解析，代价是同时挂载行变多；
+- **K3 `maxBufferEvents=2000` / `_keepAliveWindow=12` / `_bubbleCacheLimit=200`**
+  （§6.47/§6.48）：全部经实测校准且有测试钉住契约；
+- **K4 group 列表 `_groups` 无条数上限**（§6.10）：列表语义 = 用户 group 总数，
+  截断会丢已加载分页；
+- **K5/K6**：面板 `IndexedStack` 常驻与已 dispose 的 `ValueNotifier`（对照项，
+  无泄漏）。
+
+推翻 K1–K3 需先拿到 `SPB_FRAME_TIMING=true` 的真机慢帧数据（§6.47 的观测
+手段）——本机做不了，故「结构性无界才修、实测取舍过的不动」是本轮判据。
+
+#### 三个跨任务的一致性取向
+
+1. **容量常量公开 + 类文档记折衷**：`notifiedIdsCapacity` / `maxTrackedGroups` /
+   `GroupTitleCache.defaultCapacity` / `kImageCacheMaxBytes` 都是公开 `const`，
+   文档写明「被淘汰条目退回默认行为」的安全方向论证（只多做事不出错：重新
+   拉取 / 多探测一次 / 理论上重复通知一次）。
+2. **淘汰语义统一为「最旧写入」**：三处都靠 `LinkedHashMap`/`LinkedHashSet`
+   插入序取 `keys.first`，不走 LRU——预取/判重场景「最近写入 ≈ 最近使用」，
+   LRU 的维护成本不值。**陷阱**：Dart `LinkedHashMap` 重复赋值不移动位置，
+   需要「刷新即最近」语义时必须 remove+re-insert（G2 已踩）。
+3. **接线断点用装配层用例自证**：`check_wiring_parity.sh` 只比对两端共享
+   组件构造点参数，**不覆盖 providers / router 内部**——本轮 G1 的 `reset()`
+   接线、G3 的 router 层用例都是这个失败模式的直接应用（§6.17 教训）。
+
+#### 验证
+
+全量守卫（`check_agents_refs` / `check_agents_numbers` / `check_wiring_parity`
+/ `check_silent_catches` / `check_codegen` / `check_layering` / `check_format`
+/ `check_unused_deps` / `check_analysis_options` / `check_test_support_sync`
+/ `check_workflow_steps` / `check_build_defines`）+ 7 个 `*_selftest.sh` 全绿；
+五包测试（spb_domain / spb_api / spb_data / spb_features / spb_platform 纯 Dart
+四包 + 两端 flutter test）全绿。对账单 `docs/memory-audit.md` 的 G1–G5 处置
+结论已逐条落实，A1–A20 / K1–K6 与代码现状复核一致。
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
