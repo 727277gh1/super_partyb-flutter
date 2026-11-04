@@ -2221,10 +2221,18 @@ class _ConversationPageState extends State<ConversationPage> {
   }
 
   Widget _buildItem(ConversationItem item) => switch (item) {
-    UserMessageItem(:final text, :final pending) => UserMessageBubble(
-      text: text,
-      pending: pending,
-    ),
+    UserMessageItem(
+      :final text,
+      :final pending,
+      :final routingReason,
+      :final routingSwitched,
+    ) =>
+      UserMessageBubble(
+        text: text,
+        pending: pending,
+        routingReason: routingReason,
+        routingSwitched: routingSwitched,
+      ),
     // `isStreaming` 与超时集合求交：判超时后停掉光标。
     //
     // ⚠️ 只影响光标，**不改归约结果**——若 turn 其实仍在跑、增量帧随后到达，
@@ -2281,6 +2289,11 @@ class _ConversationPageState extends State<ConversationPage> {
       // 进度卡里的按钮（goal_gate 的 spec 无动作，这里主要是向前兼容）。
       onAction: _handleSpecAction,
     ),
+    // 孤儿归属事件（同 turn 用户气泡不在缓冲里时的回退，如空文本消息被跳过 /
+    // 缓冲裁剪边界）。归约层是唯一守门员：无聊的孤儿已被丢弃，能走到这里的
+    // 都是有信息量的（新建 / 切换 / 未知原因），故这里**不再过滤**——上一版
+    // 在这里再判一次 isRoutineRoutingReason，会误杀「reason 无聊但
+    // switched=true」的行（页面看不到 switched，归约层凭它放行）。
     RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
     GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
     ScheduleCreatedItem() => _ScheduleCreatedNotice(item: item),
@@ -3147,10 +3160,15 @@ class _RoutingNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 文案与气泡徽标共用同一映射（[routingAttributionNotice]）：新建/切换用
+    // 短标签，未知原因原样透传；映射后仍为 null（理论上到不了——归约层已把
+    // 无聊孤儿丢弃）时退回旧的通用文案。
+    final notice = routingAttributionNotice(reason: reason);
+    final text = notice?.label ?? '已自动判定归属';
     return Align(
       alignment: Alignment.center,
       child: Text(
-        reason == null || reason!.isEmpty ? '已自动判定归属' : '归属：$reason',
+        text,
         style: Theme.of(context).textTheme.labelSmall
             ?.copyWith(color: scheme.onSurfaceVariant),
       ),
