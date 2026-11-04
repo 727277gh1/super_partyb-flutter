@@ -122,6 +122,16 @@ class ChatEvent {
   String? get routingGroupId =>
       _str('group_id') ?? _str('groupId') ?? _str('selected_group_id');
 
+  /// 静默切换标记（`routing_selected`，Go `pipeline_events.go`）。
+  ///
+  /// 请求带着 `group_id` 进来但归属判定选了**另一个** group（`req.GroupID != ""
+  /// && target.GroupID != req.GroupID`）。Go 注释原文：「静默切换（用户未必
+  /// 知道消息跑到了别的对话）——单独标记便于统计与告警」。
+  ///
+  /// 注意 `classify_reuse` 也可能伴随切换（复用某条相似对话但不是当前这条），
+  /// 故「切没切」与 reason 是否 boring 是**两个独立维度**，不能互推。
+  bool get routingSwitched => payload?['group_switched'] == true;
+
   /// 队列位置（`queue_state`）。
   int? get queuePosition {
     final v = payload?['position'] ?? payload?['queue_position'];

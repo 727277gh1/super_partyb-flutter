@@ -38,6 +38,8 @@ final class UserMessageItem extends ConversationItem {
     required this.text,
     super.turnId,
     this.agentId,
+    this.routingReason,
+    this.routingSwitched = false,
     this.pending = false,
   });
 
@@ -46,6 +48,18 @@ final class UserMessageItem extends ConversationItem {
   /// 发出时选中的 agent（本地乐观回显才有；服务端 `user_message` 事件不带该
   /// 字段，故权威帧合并后会丢失）。用途是「重发」时带上同一个 agent。
   final String? agentId;
+
+  /// 归属判定原因（`routing_selected` 的 `group_decision_reason`，与该消息
+  /// 同 turn）。**只存原始值**：中文标签由 UI 经 [routingAttributionNotice]
+  /// 解析，这里不做映射，保证归约层不依赖文案。
+  ///
+  /// null = 服务端没发（旧数据 / 归属事件丢失 / 被「无聊」分类吞掉）。
+  final String? routingReason;
+
+  /// 归属判定发生了**静默切换**（`routing_selected` 的 `group_switched`）：
+  /// 请求带着一个 group id 进来，但判定选了另一个对话。多数用户根本没意识到
+  /// 消息跑去了别的对话，这条徽标是唯一的可见信号（Go 侧专门打了这个标记）。
+  final bool routingSwitched;
 
   /// 尚未拿到服务端确认（请求在飞，issue #52）。
   ///
@@ -203,6 +217,9 @@ final class DiagnosticNoticeItem extends ConversationItem {
 }
 
 /// 归属判定提示（`routing_selected`）。
+///
+/// 仅作「孤儿事件」回退：同 turn 的用户气泡不在缓冲里时（空文本消息被跳过 /
+/// 缓冲裁剪边界），有信息量的归属事件才落到这里成为独立提示行。
 final class RoutingNoticeItem extends ConversationItem {
   const RoutingNoticeItem({
     required super.id,
@@ -210,10 +227,15 @@ final class RoutingNoticeItem extends ConversationItem {
     super.turnId,
     this.groupId,
     this.reason,
+    this.switched = false,
   });
 
   final String? groupId;
   final String? reason;
+
+  /// 静默切换标记（`group_switched`）。reason 本身可能「无聊」（如
+  /// `classify_reuse`）但切换仍值得看，故归约层凭它放行、UI 凭它选文案。
+  final bool switched;
 }
 
 /// 待用户确认（`confirmation_required`）。

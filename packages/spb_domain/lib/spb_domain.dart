@@ -54,6 +54,7 @@ library;
 //   ExecutionStatus / Kind        —— 执行等待/重试状态（queue_state / retry_scheduled 归约输出）
 //   TtsStatus / TtsPhase          —— 语音播报状态（tts_started / tts_completed / tts_failed 归约输出）
 //   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
+//   routingAttributionNotice 等   —— 归属徽标派生（routing_selected → 气泡徽标，无聊原因不展示）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
 //   resolvePreviewKind / FilePreviewKind —— 文件预览类型判定（text/image/external，纯逻辑）
 //   resolveTextPreview / TextPreviewPayload —— 内容层判定（map / spec 文档 or 原文，纯逻辑）
@@ -95,6 +96,7 @@ export 'src/local_download_path.dart';
 export 'src/map_schema.dart';
 export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
+export 'src/routing_attribution.dart';
 export 'src/spec_ui.dart';
 export 'src/sync_auto_config.dart';
 export 'src/sync_cursor.dart';

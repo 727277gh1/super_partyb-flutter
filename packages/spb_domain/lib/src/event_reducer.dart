@@ -3,6 +3,7 @@ import 'package:spb_models/spb_models.dart';
 import 'conversation_item.dart';
 import 'execution_status.dart';
 import 'gate_decision.dart';
+import 'routing_attribution.dart';
 import 'spec_ui.dart';
 import 'tts_status.dart';
 import 'turn_activity.dart';
@@ -442,16 +443,37 @@ class EventReducer {
           _sealStreaming(items);
 
         case EventTypes.routingSelected:
-          // 只在与用户可见归属相关时展示；`auto` 且无 group 变化的场景由 UI 过滤。
-          items.add(
-            RoutingNoticeItem(
-              id: ev.eventId,
-              createdAt: ev.createdAt,
-              turnId: ev.turnId,
-              groupId: ev.routingGroupId,
-              reason: ev.routingReason,
-            ),
+          // 归属判定结果。**默认不占一行**：绝大多数 `routing_selected` 是
+          // `fixed_reuse` / `classify_reuse` 之类「就落在当前对话」的零信息量
+          // 结论（webapp 也不在时间线渲染它），此前每个 turn 都多出一行「归属：
+          // fixed_reuse」，把正文挤出视野。
+          //
+          // 现在的做法：把原始字段合并进**同 turn** 的 [UserMessageItem]（与
+          // `agent_id` 的继承同一模式），由 UI 经 [routingAttributionNotice]
+          // 决定是否在气泡上显示徽标；只有「孤儿事件」（找不到用户气泡：空文本
+          // 消息被跳过 / 缓冲裁剪边界 / 旧数据缺 turnId）才回退成独立提示行，
+          // 且**无聊的孤儿直接丢弃**、未知原因 fail-open 保留。
+          final reason = ev.routingReason;
+          final switched = ev.routingSwitched;
+          final merged = _mergeRoutingIntoUserMessage(
+            items,
+            turnId: ev.turnId,
+            reason: reason,
+            switched: switched,
           );
+          if (merged) break;
+          if (switched || !isRoutineRoutingReason(reason)) {
+            items.add(
+              RoutingNoticeItem(
+                id: ev.eventId,
+                createdAt: ev.createdAt,
+                turnId: ev.turnId,
+                groupId: ev.routingGroupId,
+                reason: reason,
+                switched: switched,
+              ),
+            );
+          }
 
         case EventTypes.confirmationRequired:
           items.add(
@@ -972,6 +994,42 @@ class EventReducer {
       if (it is UserMessageItem && it.turnId == turnId) return i;
     }
     return null;
+  }
+
+  /// 把 `routing_selected` 的原始字段合并进**同 turn** 的 [UserMessageItem]。
+  ///
+  /// 返回是否找到并合并了目标项；false = 孤儿事件，调用方回退成独立提示行。
+  ///
+  /// ## 两个易错点
+  ///
+  /// - **item.id 保持不变**（不换成路由事件的 eventId）：id 是列表 diff 的
+  ///   键，换掉会重挂整个气泡；后续事件仍按 turnId 找它，无碍。
+  /// - **必须新建实例**而非改旧对象：[ConversationItem] 家族全是不可变值类型
+  ///   （[AssistantMessageItem.copyWith] 同型），原地改引用可变字段会在
+  ///   `identical` 缓存（§6.47 气泡实例缓存）与测试断言上同时出错。
+  static bool _mergeRoutingIntoUserMessage(
+    List<ConversationItem> items, {
+    required String turnId,
+    required String? reason,
+    required bool switched,
+  }) {
+    final idx = _indexOfUserMessage(items, turnId);
+    if (idx == null) return false;
+    final prev = items[idx] as UserMessageItem;
+    if (prev.routingReason == reason && prev.routingSwitched == switched) {
+      return true;
+    }
+    items[idx] = UserMessageItem(
+      id: prev.id,
+      createdAt: prev.createdAt,
+      text: prev.text,
+      turnId: prev.turnId,
+      agentId: prev.agentId,
+      routingReason: reason,
+      routingSwitched: prev.routingSwitched || switched,
+      pending: prev.pending,
+    );
+    return true;
   }
 
   /// 仍在进行中的 turn id 集合。
