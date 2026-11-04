@@ -500,6 +500,42 @@ void main() {
     );
   });
 
+  testWidgets('signOut 清空确认卡判重集合（登出接线 reset，§6.17 教训）', (tester) async {
+    // providers.dart 的 signOut() 是装配层代码：页面测试自己传参、
+    // check_wiring_parity.sh 不覆盖 providers——漏接一端不会被守卫发现。
+    // 故直接从容器调 signOut，断言判重集合被清。
+    final h = await pumpApp(tester);
+
+    final notifier = h.container.read(confirmationNotifierProvider);
+    // 塞一张已解决的卡（不发通知、不弹权限，只记判重）。
+    await notifier.handleItems([
+      ConfirmationItem(
+        id: 'ev_pre',
+        createdAt: DateTime(2024, 3, 5, 12),
+        question: 'q',
+        resolved: true,
+        confirmationId: 'conf_pre',
+        groupId: 'grp_1',
+      ),
+    ]);
+    expect(
+      notifier.notifiedCount,
+      greaterThan(0),
+      reason: '前置：判重集合必须有内容，否则本用例空洞通过',
+    );
+
+    await h.container.read(authStateProvider.notifier).signOut();
+    await tester.pumpAndSettle();
+
+    expect(
+      notifier.notifiedCount,
+      0,
+      reason:
+          '登出必须清空判重集合（切用户语义）：否则新会话沿用旧会话的'
+          '「已见过」历史，且集合无界增长跨会话累积',
+    );
+  });
+
   testWidgets('设置页退出登录：取消则保留凭证且留在设置页', (tester) async {
     // 同上：底部条目需要更高的测试窗口才会被构建。
     tester.view.physicalSize = const Size(1000, 2400);

@@ -608,6 +608,10 @@ class AuthStateNotifier extends Notifier<AuthState> {
   /// 登出：清凭证并切到未登录。
   Future<void> signOut() async {
     await ref.read(sessionManagerProvider).logout();
+    // 确认卡判重与权限缓存属「本会话」状态：换用户后清掉（文档注释的
+    // 「切用户 / 退出登录时调用」唯一允许时机）。这里 read 而非 watch：
+    // 登出是一次性副作用，不需要让本 notifier 随认证状态重建。
+    ref.read(confirmationNotifierProvider).reset();
     state = AuthState.unauthenticated;
   }
 
