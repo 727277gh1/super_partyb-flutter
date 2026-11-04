@@ -1121,28 +1121,28 @@ router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：970
+# 当前（HEAD）量：972
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=970 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=972 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1727
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1743
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1727 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1743 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 970、`spb_domain` 180、
-`spb_desktop` 170、`spb_models` 97、`spb_mobile` 95、`spb_platform` 79、
-`spb_api` 71、`spb_data` 39、`spb_core` 13、`spb_ui` 5、`spb_design` 3。
+量级分布（HEAD，字符串字面量数）：`spb_features` 972、`spb_domain` 182、
+`spb_desktop` 183、`spb_models` 98、`spb_mobile` 95、`spb_platform` 79、
+`spb_api` 71、`spb_data` 39、`spb_core` 16、`spb_ui` 5、`spb_design` 3。
 （§6.54 的工具批卡与「动态」面板、§6.56 的用量读数区贡献了 `spb_features`
 增量的主要部分。）
 
-⚠️ **`spb_core` 从 0 涨到 8 是 issue #40/#45 引入的**（诊断报告文案、错误分类
-文案）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
+⚠️ **`spb_core` 从 0 涨到 16**：issue #40/#45 的诊断报告与错误分类文案（到 13），
+加 §6.57 的 `FileLogSink` 启动 / 轮转 / 写失败文案（到 16）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
 基础设施层的文案随功能增加而增长，而它们**不在 Widget 里**。
 
 #### 为什么不做
@@ -1264,15 +1264,16 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 | `spb_models` | 88.0% | `spb_ui` | 73.7% |
 | `spb_design` | 86.0% | **总计** | **85.7%**（≈16291/19004） |
 
-全仓用例 **4054 条**（各包 `+N` 相加，即 `testDone` 且非 hidden；issue #48 拆分
+全仓用例 **4181 条**（各包 `+N` 相加，即 `testDone` 且非 hidden；issue #48 拆分
 本身 0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
 §6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线，+38 是 §6.41 的
 定位与下载布局，+66 是 §6.42 的自动同步，+50 是 §6.43 的进对话按需同步，+89 是
-§6.54 的工具调用折叠 / 「动态」面板 / 流式进度条）。
+§6.54 的工具调用折叠 / 「动态」面板 / 流式进度条，+46 是 §6.57 的文件日志 /
+悬浮窗回滚顺序 / 默认同步目录）。
 
-分包含量（2026-11 实测，会漂移）：`spb_models` 450、`spb_api` 487、`spb_domain`
-1071、`spb_features` 1246、`spb_data` 130、`spb_platform` 158、`spb_core` 112、
-`spb_ui` 43、`spb_design` 34、`spb_desktop` 207、`spb_mobile` 116。
+分包含量（2026-11 实测，会漂移）：`spb_models` 471、`spb_api` 495、`spb_domain`
+1094、`spb_features` 1275、`spb_data` 130、`spb_platform` 166、`spb_core` 147、
+`spb_ui` 43、`spb_design` 34、`spb_desktop` 209、`spb_mobile` 117。
 
 ⚠️ **`spb_data` 的测试要用 `flutter test`，不能用 `dart test`**：它虽然也是纯
 Dart 语义（drift + sqlite3），但依赖链里含 Flutter（`secure_pending_auth_store`
@@ -1779,6 +1780,11 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 ---
 
 ### 6.20 诊断日志导出（issue #40，**第一层已实现**）
+
+> ⚠️ **本节写完后又补了一层本地日志**（§6.57）：`LogSink` 现在还有 `FileLogSink`
+> （落 `~/.local/share/super_partyb/logs/app.log`）与 `MultiLogSink`。它解决的是
+> 「进程死了、环形缓冲与 stdout 一起没了」这一类，**不是**远程通道——本节的
+> 第 2 层（崩溃上报）「有意不做」结论不变。
 
 客户端此前**没有任何远程日志通道**：`LogSink` 只有 `ConsoleLogSink`（打印到
 stdout）与 `NullLogSink`（测试用）。用户报障时除了「它不工作」没有别的信息
@@ -6294,6 +6300,176 @@ resolve 响应。
 渲染与增量语义由 features 层的 harness 用例覆盖（`wireUsageSummary` 开关 +
 `settleBaseline` 用 `tester.runAsync` 真实等待 unawaited 基线）。
 
+### 6.57 桌面端可诊断性：本地文件日志 + 会话标记 + 悬浮窗失败回滚（2026-11）
+
+用户报障原话：「按 Alt+Space 弹出了一个小输入窗口，但**卡住不动**，然后**应用退出了**。
+是否需要新增本地日志来协助调试？」这一节把**诊断结论**（哪些是确证、哪些是假设）与
+三项改动一起记下来——因为「要不要加日志」这个问题本身就是这次排障的产出之一。
+
+#### 一、诊断结论（严格区分确证 / 假设）
+
+| 结论 | 强度 | 依据 |
+|---|---|---|
+| 「卡住的小窗」是**窗口属性半改造**状态 | ✅ **确证（代码级）** | `enterOverlayMode` 串行改 7 项窗口属性（minSize → size → resizable → alwaysOnTop → skipTaskbar → position → show/focus），任一中途抛异常时**只丢弃快照、不回滚**；而 `exitOverlayMode` 的早退判据是 `_preOverlayBounds == null`——快照已丢 ⇒ 之后所有退出都是**空操作**。于是窗口停在「720×360 / 置顶 / 不进任务栏」这类形态 |
+| 「应用退出了」= 进程真的退出 | ❌ **未确证** | 全仓 grep 无 `exit(`；`windowManager.destroy()` 只在 `quit()`（会先记 info「用户请求退出应用」）。更符合代码的解释是：`skipTaskbar=true` 让窗口**从任务栏消失**，而小窗一旦失去置顶/焦点就再也找不到入口 → 用户读作「退出了」。要证伪需要真实日志，而**当时没有日志** |
+| 「快捷键触发过」 | ❌ 当时**不可知** | `_onHotkeyPressed` 原为 `SpbLog.debug`，而 `SpbLog._minLevel` 默认 `info` ⇒ 生产里根本没写。这是 §6.43 那条教训的**同型复发**：门控/触发类日志用 debug 等于没写。现已升为 `info` |
+
+⇒ 回答用户的问题：**需要，但不是新起一套**。`SpbLog` + 环形缓冲 + `redactSecrets` +
+「导出诊断日志」的骨架已经建好（§6.20），缺的是三个具体的洞。
+
+#### 二、三个真实缺口（本轮补齐）
+
+| 缺口 | 后果 | 补法 |
+|---|---|---|
+| **只有 stdout** | 桌面启动器/双击拉起时 stdout 无处可去，日志等于**没产生** | `FileLogSink`（`spb_core`）追加写文件，`MultiLogSink` 与控制台并行 |
+| **无持久会话边界** | 「崩了」与「被关了」事后无法区分 | 每次启动写 `logSessionStartMessage`，`quit()` 写 `logSessionCleanExitMessage`；下次启动扫出结论并 warn |
+| **环形缓冲只在内存** | 进程死了证据就没了，而「导出诊断日志」要求应用**还活着**且用户能进设置页 | 文件日志天然解决——崩溃前最后写的一行就是证据 |
+
+##### `FileLogSink` 的四条判据（`packages/spb_core/lib/src/log_file_sink.dart`）
+
+| 判据 | 取值 | 为什么 |
+|---|---|---|
+| 写盘方式 | 每条 `File.writeAsBytesSync(mode: append)`，**不持有 `IOSink`** | 「崩了之后还有内容」是本 sink 存在的唯一理由。`IOSink` 有内部缓冲，进程被杀就丢最后一段——而那一段恰好最想看 |
+| 轮转 | 默认 5 MB × 2 份历史（`app.log` / `.1` / `.2`） | 常驻进程跑一周能写几十万条；无轮转就是无界增长。**先删 `.maxFiles` 再从后往前逐个后移**：Linux 上 `rename` 覆盖目标、省掉删除也能跑，但 Windows 上目标已存在时 `renameSync` **抛异常**——统一「先删后移」就不必按平台分叉 |
+| 脱敏 | 写盘前过 `redactSecrets`（可用 `redact: false` 关掉） | 日志会被用户**整份贴进公开 issue**（§6.20 的安全红线）。实测掩码后是 `authorization: ***`——键名保留、值整体掩掉 |
+| 失败处理 | 首次写失败 → **停用** + `print` 一次，之后静默跳过 | 日志是旁路：磁盘满/目录只读不能让应用起不来；而「每条都重试 + 每条都 print」会变成刷屏。⚠️ **内部绝不调 `SpbLog`**——那在 `SpbLog` 的调用链上，会无限递归 |
+
+`MultiLogSink` 同理：单个 sink 抛异常不影响其它 sink，也不冒泡（同样不能记日志，理由同上）。
+
+##### ⚠️ 会话标记的判据是「从后往前找边界标记」，不是「最后一条是不是退出标记」
+
+这是本轮**自己踩到并改掉**的一处（原实现只看最后一条非空日志）。后者会**级联误报**：
+一次崩溃之后，下次启动会写「会话启动」+ 一条「上次未正常退出」的告警；此后即使每次
+都干净退出，只要退出标记**之后**还有任何一条日志（`quit()` 之后的 `dispose()` 就会写），
+下一次启动又判成崩溃 —— 告警从此**永远**出现，于是它不再携带信息。
+
+现在的判据（`previousSessionExitedCleanly`）：读文件末尾 8 KB，**从后往前**看先遇到哪个边界标记。
+
+| 先遇到 | 返回 | 含义 |
+|---|---|---|
+| `logSessionCleanExitMessage` | `true` | 上次走到了 `quit()` 收尾（其后的收尾日志不影响） |
+| `logSessionStartMessage` | `false` | 新会话开了头，上一个没留退出标记 |
+| 都没有 | `null` | 首次运行 / 刚轮转 / 标记之前的老日志 —— **不可**当成崩溃 |
+
+`_configureLogging()` 里的**顺序有语义**：必须先读上次结论、再装 sink、再写启动标记。
+写反就永远等于「上次正常退出」——启动标记会把「最后一条」抢走（对应上一条教训）。
+
+##### 日志位置与取证方式（报障时直接给用户这一句）
+
+```
+Linux / macOS：${XDG_DATA_HOME:-~/.local/share}/super_partyb/logs/app.log
+Windows：      %APPDATA%/super_partyb/logs/app.log
+覆盖目录：      --dart-define 无关，运行期 SPB_LOG_DIR=<dir> 即可
+```
+
+⚠️ **与 `sync.db` 同一根目录**是刻意的：报障时「把 `~/.local/share/super_partyb/` 打包发来」
+一句话就够了，多一个根目录（如 `$XDG_STATE_HOME`）会让「日志在哪」变成需要解释的问题。
+
+零改动的替代取证手段（临时构建，不必等发版）：
+
+```bash
+flutter build linux --release --dart-define=SPB_VERBOSE_LOG=true
+# 然后**从终端**启动二进制，debug 级日志也会出来（含快捷键触发细节）
+```
+
+#### 三、A：悬浮窗进入失败的回滚（`overlayRollbackOrder`）
+
+| 判据 | 内容 |
+|---|---|
+| 只回滚**真的改过**的 | `_overlayApplied` 逐步记账（`_applyOverlayStep` 成功才记账）。全量重设会篡改未改过的属性——`setResizable(true)` 对一个用户手动设为不可缩放的窗口就是破坏「撤销」语义 |
+| **逆序**回滚 | 最后改的最先还原（`overlayRollbackOrder`） |
+| 剔除 `visibility` | 它没有「之前的值」可还原；改为**无条件** `show()` + `focus()`——失败路径上「用户能找到窗口」优先于「窗口尺寸正确」 |
+| 回滚尽力而为、**不抛** | 已在出错路径上，抛出会吞掉原异常。逐步 try/catch + 汇总日志（`回滚悬浮窗属性失败` / `悬浮窗属性已回滚` / `悬浮窗属性回滚不完整`） |
+| 失败后**仍然导航**到 `/overlay` | 既有测试明确要求（`enterSucceeds=false` 仍须 `router.state.uri.path == SpbRoutes.overlay`）。回滚后窗口恢复主窗口尺寸，页面可输入 —— 比完全不导航好 |
+| 判据放 `spb_platform` | `PlatformDesktopCapabilities` 要 `window_manager` 才能构造，**测试里造不出来**（§6.41 / §6.45 同一取向）。故顺序判据抽成纯函数，6 条用例逐条钉 |
+
+⚠️ **最小尺寸不做快照**：`window_manager` 0.5.2 **没有 `getMinimumSize()`**（只有 setter），
+「调用那一刻的值」取不到。回滚时退回 `WindowSpec.main.minWidth/minHeight`——那正是启动时
+由本类设置的唯一来源，实践上等价（将来若支持运行期改最小尺寸，需自己记字段）。
+
+日志侧同时补了三项（都按 §6.43 的「门控/触发类用 info」）：快捷键触发 `debug → info`、
+未绑定 id `→ warn`、`桌面能力触发导航` `debug → info`，失败日志带
+`failed_step` / `applied` / `attribute` / `failed` / `rolled_back`。
+
+#### 四、C：同步目录未选择时给默认值（`defaultSyncLocalRoot`）
+
+用户另一句诉求是「同步目录如果没选的话给个默认设置」。此前 `localRoot == null` 的语义是
+「未选择 ⇒ 不能同步」，于是首次启动的用户必须先进设置页：托盘「立即同步」是禁用的、
+进对话的按需同步被 `canSync` 跳过 —— 功能**看起来不存在**。
+
+| 顺序 | 条件 | 结果 |
+|---|---|---|
+| 1 | `SPB_SYNC_ROOT` 非空 | 直接用它（便携部署 / 测试） |
+| 2 | `<home>/Documents` **存在** | `<home>/Documents/Super PartyB` |
+| 3 | 有应用数据目录 | `<data>/super_partyb/deliverables` |
+| 4 | 连 home 都没有 | `null`（保持「未配置」语义，设置页提示选目录） |
+
+| 判据 | 为什么 |
+|---|---|
+| 优先 `~/Documents` | 同步目录的价值是「用户能自己打开它」。藏在 `.local/share` 下是隐藏目录，与「交付物放到我电脑上」的预期不符；但 `~/Documents` 不总存在，故必须有不成立时的第二条 |
+| **两处读点共用** `effectiveSyncLocalRoot` | `syncLocalRootProvider`（托盘/门控/自动同步）与 `loadSyncSettingsProvider`（设置页表单）。只在一处加默认值会得到「托盘认为未配置（按钮置灰）而设置页显示了一个目录」——§6.17 同一类漂移 |
+| 默认目录**顺手建出来** | 「打开同步目录」会 `revealPath`，目录不存在时返回 false，表现成「点了没反应」（§6.41 同一症状）。创建失败只 warn，不阻断（同步引擎写文件时会再试） |
+| 不持久化 | 默认值每次纯计算。写进 `sync_bindings` 会把旧机器的绝对路径带到新机器；代价是「用户清空目录」会静默回落默认值 |
+| desktop-only | 移动端已有 `syncLocalRootProvider`，本轮不改其语义（移动端没有本地目录这个使用场景，见 §6.42 的取向） |
+| 纯函数 + 参数全注入 | 环境、`isWindows`、`documentsExists` 都得注入才能覆盖四个分支（本机有 `~/Documents`，CI 容器没有） |
+
+#### 五、测试与反向验证
+
+| 文件 | 条数 | 钉住 |
+|---|---|---|
+| `packages/spb_core/test/log_file_sink_test.dart` | 31 | 追加不覆盖 / 自动建目录 / 一行一日志（`format()` 把换行转义成字面 `\n`）/ 脱敏 / 轮转（`.1`+`.2` 存在、`.3` 不出现、最新在当前文件、`maxFiles=0` 不留历史、`size` 归零）/ 目录不可写时停用且不抛 / `MultiLogSink` 扇出与隔离 / 会话标记六态（true / false / null / 收尾日志在其后仍 true / 崩溃后一次干净退出不级联误报 / 截断半行）/ 路径推导六变体 |
+| `packages/spb_platform/test/overlay_window_state_test.dart` | 6 | 逆序 / 剔除 `visibility` / 部分失败只回滚前缀 / 空清单 / 去重 / 返回值独立于入参 |
+| `packages/spb_domain/test/default_sync_root_test.dart` | 9 | 覆盖优先 / 空白不算覆盖 / Documents 存在与不存在 / Windows 与 Linux 各两条 / Windows 不读 Linux 变量 / 无 home → null |
+
+回归：`spb_core` 147、`spb_domain` 1094、`spb_platform` 166、`spb_desktop` 209 全绿；
+十个守卫 + codegen 全绿。
+
+反向验证（逐条实测）：
+
+| 改坏 | 失败用例数 |
+|---|---|
+| `previousSessionExitedCleanly` 退回「只看最后一条非空日志」 | **3**（收尾日志在其后 / 崩溃后一次干净退出 / 截断半行） |
+| 轮转删错对象（删 `.1` 而不是 `.maxFiles`） | 1 |
+| 写盘不追加而覆盖（`FileMode.write`） | 5 |
+| 写失败后不禁用（每条都重试 + 每条都 print） | 1 |
+| `MultiLogSink` 去掉 try/catch | 1 |
+| `overlayRollbackOrder` 改正序 | 2 |
+| `overlayRollbackOrder` 不剔除 `visibility` | 2 |
+| `defaultSyncLocalRoot` 去掉应用数据目录那一档兜底 | 2 |
+| 只在 `syncLocalRootProvider` 加默认值 | —（**未写成用例**：两个读点之间的漂移靠 code review，`check_wiring_parity.sh` 查不到函数内部实现） |
+| `_configureLogging` 里先写标记、再读上次结论 | —（**未写成用例**：装配顺序在 `main.dart`，不在测试树里；已写成代码注释） |
+
+⚠️ 用 `cp` 备份/还原被改文件，**不要**用 `git checkout`——这些文件都是未提交的
+工作区改动，`checkout` 会把本轮新增整段冲掉（§6.28.2 踩过）。
+
+#### 六、有意不做
+
+- **不做崩溃上报（Sentry / logs-collector）**：仍是 §6.20 第 2 层「有意不做」——文件日志已能回答
+  「崩了还是被关了」，上报会引入隐私审查与新依赖。
+- **不引入 `path_provider` 到 `spb_core`**：`FileLogSink` 只收路径，目录由 app 侧算好传入。
+  纯 Dart 包为「找目录」引插件是层级下沉（§4）。
+- **不异步批量写盘**：会重新引入缓冲丢失，与这个 sink 的存在理由冲突。同步 append 的量
+  （info 级、每条几十字节）不足以影响帧率；真要优化应先降日志量而不是改写法治。
+- **不给 `previousSessionExitedCleanly` 加「崩溃后自动上传/弹窗」**：只记一条 warn 留证据。
+  主动弹窗会把「上次崩了」变成每次启动的骚扰，而多数用户不在意。
+- **不持久化默认同步目录**：见上表。
+- **不改移动端**：无本地同步目录使用场景，且不写文件日志（沙箱无稳定可写目录）。
+
+#### 七、已知边界
+
+- **「进程真的退出」仍未被证实**。本轮把「能观测到」做齐了（快捷键触发、失败步骤、回滚结果、
+  会话边界都进了文件日志），但用户的两次报障发生在**没有日志的版本**上，故成因仍是假设。
+  下次复现时先取 `app.log` 再动代码。
+- **`_initTray` 的降级本身不改**（§6.55 已修掉图标资源那一半）：托盘不可用时记 warn 后继续运行
+  是设计（桌面环境没有 tray 协议时不该报错）。仍只有 debug 的是 `popUpContextMenu` 缺实现
+  （§6.55 有意如此，Linux 上属常态），需要时用 `SPB_VERBOSE_LOG=true` 临时构建。
+- **轮转会把退出标记带走**：这是 `null`（不知道）而非 `false`（崩溃）存在的原因，也是
+  「刚轮转后的首次启动不误报崩溃」的依据。
+- **默认目录不感知本地化**：Windows 上「文档」可能是 OneDrive 重定向路径，探测不到就落到
+  应用数据目录——不会错，只是不够显眼。
+- **需真机验证**：本机无 `DISPLAY`（§9）。悬浮窗回滚的**真实表现**（窗口是否回到原尺寸/位置、
+  是否重新出现在任务栏）必须在有桌面环境的机器上确认；本轮只验证了顺序判据与接线。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -6549,6 +6725,9 @@ export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
 - [x] 进对话时按需同步（默认关闭；判定命中只提示、不静默下载，见 §6.43）
 - [x] 设置页（目录 / 范围 / 媒体开关 / 单文件上限 / 本地清理）
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 §6.20）
+- [x] 本地文件日志 + 会话标记（§6.57：`FileLogSink` / `MultiLogSink`，能区分「崩了」与「被关了」，日志与 `sync.db` 同根）
+- [x] 悬浮窗进入失败时回滚窗口属性（§6.57：只回滚真的改过的、逆序、失败仍导航）
+- [x] 同步目录未选择时的默认值（§6.57：`~/Documents/Super PartyB` → 应用数据目录，仅桌面端）
 - [x] 工具调用折叠 + 「动态」面板 + 流式进度条（§6.54：展示层批卡、诊断→动态并两端可见、底部状态条报工具进度）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 §6.24）
 - [x] 工程卫生批量（issue #47：`.gitattributes` / Dependabot / action pin / 三项严格模式 / release notes 由 `git log` 生成 / `tools/` 清单守卫，见 §6.26）
@@ -6608,6 +6787,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~按 Alt+Space 后「小窗卡住，然后应用退出了」，而**没有任何本地日志**可查~~ | ✅ 已修（§6.57，三件一起）：**A** `enterOverlayMode` 串行改 7 项窗口属性，中途抛异常时**只丢快照不回滚**，而 `exitOverlayMode` 的早退判据是「快照为空」⇒ 之后所有退出都是空操作，窗口停在「720×360 / 置顶 / 不进任务栏」——即「卡住的小窗」，代码级确证（但「进程真的退出」**未确证**：全仓无 `exit(`，更符合代码的解释是 `skipTaskbar` 让窗口从任务栏消失后再无入口）。修法：逐步记账 `_overlayApplied` + `overlayRollbackOrder`（**逆序、剔除 `visibility`**）回滚，只回滚真的改过的（全量重设会篡改未改属性），回滚尽力而为不抛，之后无条件 `show()`+`focus()`，并**保留**「失败仍导航到 `/overlay`」的既有语义。**B** 补本地文件日志（此前只有 stdout，桌面启动器拉起时等于没产生日志；环形缓冲纯内存，进程死了证据就没了，而「导出诊断日志」要求应用还活着）：`FileLogSink`（同步 append 不持 `IOSink`，否则崩了丢最后一段；5MB×2 轮转；写盘前 `redactSecrets`；失败即停用且**内部绝不调 `SpbLog`** 免递归）+ `MultiLogSink` 扇出。再加一对**会话标记**，`previousSessionExitedCleanly` 从末尾**往前**找先遇到哪个边界（true/false/null 三态）——⚠️ 原设计「只看最后一条是不是退出标记」会**级联误报**：崩溃后写的那条告警与 `quit()` 之后 `dispose()` 的日志都会让它永远报「上次崩溃」。顺序有语义：**先读上次结论、再写启动标记**。日志与 `sync.db` 同根（`~/.local/share/super_partyb/logs/app.log`；`SPB_LOG_DIR` 可覆盖）。另把快捷键触发/门控类日志按 §6.43 的教训从 debug 升 **info**（debug 在生产被过滤，等于没写）。**C** 同步目录未选择时给默认值（`~/Documents/Super PartyB` → `<data>/super_partyb/deliverables` → null；`SPB_SYNC_ROOT` 可覆盖），两个读点共用 `effectiveSyncLocalRoot`，并顺手建目录（否则「打开同步目录」点了没反应）。46 条新用例（31 + 6 + 9）；8 项反向验证逐条实测（含「只看最后一条」这个自己写错的判据）+ 2 项诚实记录「未写成用例」 | §6.57 |
 | ~~Windows 托盘无图标 + 右键菜单卡死（「一个卡住的列表」）~~ | ✅ 已修（§6.55）：**两个独立缺陷**。① `tray_manager` Windows 端用 `LoadImage(LR_LOADFROMFILE)` 读图标，**只认 BMP 系资源**，PNG 读出 `NULL` HICON → 无图标；且插件 `setIcon` 恒返回 true → `_trayAvailable` 误置位 → 「关窗即隐藏」生效后用户无法唤回应用。修法：`gen_brand_assets.py` 新增 BMP 帧的 `assets/tray_icon.ico`（**显式 `bitmap_format='bmp'`**——PIL 默认 ICO 输出就是 PNG 帧，同样不被认），`_initTray` 按平台分流。② Win32 `TrackPopupMenu` 要求调用窗口处于前台，否则菜单弹出后收不回去；`tray_manager` 的 `bringAppToFront`（只 Windows）默认 false。修法：`spb_platform` 新增纯函数 `trayMenuNeedsBringToFront`（本机无 Windows，这条判据是 Windows 分支唯一自动化保障）+ `TrayActionTarget.popUpTrayContextMenu()`。顺带修掉同根因第三处：`windowManager.setIcon` 在 Windows 上同样 LoadImage 失败，`WM_SETICON(NULL)` 会**移除** exe 资源图标 → Windows 分支直接跳过。反向验证：判据改恒 false → windows 用例失败；改全平台 true → linux/macos 失败。图标修复的最终确认需 Windows 真机，帧格式已逐字节验证 | §6.55 |
 | ~~一轮 agent 工作产出几十张工具卡，正文被挤出时间线；同时「它现在跑到哪一步」无处可看~~ | ✅ 已做（§6.54，三件一起）：**A** 连续 ≥5 条工具调用在**展示层**折成一张批卡（`ToolCallBatchRow` + `ToolCallBatchCard`）——归约结果一条不动，故对话内搜索仍能命中批内成员、`locateIdsOf` 仍能定位、计数不变；批内含在飞工具时默认展开、跑完自动收起（`ExpansibleController`，`initiallyExpanded` 只在 `initState` 读一次，写错就是「永远摊着」）、用户点过后以用户为准（`_syncingExpansion` 必须把程序同步与用户点击分开，否则一次自动收起会把卡永久锁成「用户收的」）。**B** 「诊断」改名「动态」（`GroupActivityPanel`）并**去掉发布构建门控**，内容扩为「当前轮次状态 + 工具调用 + gate 决策」，移动端也接（AppBar 图标 / 溢出菜单 → 底部弹层）；入参是**原始状态**（`items`/`activities`/`staleTurnIds`/`executionStatus`/`decisions`）故两端不会在「哪一轮在跑」上漂移，移动端 `decisions: null` 表示「本端不看这块」而非「没有决策」；`showModalBottomSheet` 是独立 route，靠 `_activityTick` 哨兵刷新。**C** 底部状态条在流式期间报「已调用 N 个工具 · 最近 X」，槽位优先级 stale → 排队/重试 → 工具进度 → 活动指示；状态派生只做**一次尾部扫描**（`scanTurnProgress`，`break` 只在 turnId 变化时），`PerfProbe` 预算不受影响。89 条新用例（domain 16 / status 35 / panel 12 / card 11 / page 9 / desktop +2 / mobile 4）。⚠️ **两处自己写出来的假绿**：① ⭐「用户展开后不得被收回去」原版只推两次**内容相同**的批（`hasRunning` 没翻转），删掉判据照样绿——已改成「展开 → 同批又跑起一个工具 → 再跑完」；② 移动端哨兵单独摘掉任一条 `_bumpActivitySheet()` 都仍绿（`_emit` 会重推 items/activities/executionStatus 三条流），只有四条全删才红，故事实用例守的是「弹层不冻住」而不是某一条 bump | §6.54 |
 | ~~独立的「同步页」（`SyncPage` / `/settings/sync`）与设置页大量重复（目录 / 范围 / 媒体开关 / 单文件上限 / 清理各画一份，且选目录行为不一致）~~ | ✅ 已整合（§6.53）：合并为设置页的**两个标签**（通用 / 交付物同步），入口统一`/settings?tab=sync`，旧路径重定向。用「一个 ListView + 两个 `Offstage` 区块」而非 `TabBarView`（切标签不销毁草稿与扫描结果）；同步执行区块的 `localRoot` 取 draft 而三个动作在 `hasUnsavedChanges` 时禁用（执行侧永远读**已保存**设置）；错误与「已保存」提示放在所有 Offstage 外面。桌面 `pickDirectory` 改回走 `pickDirectoryProvider`（就地闭包会让 harness override 失效）。⚠️ 记一次**自己写的假绿**：「重复触发不导航」那条用例在守卫被删后仍通过（go_router 对相同 location 不重建页面），已删除并在 §6.53 记录。 | §6.53 |
