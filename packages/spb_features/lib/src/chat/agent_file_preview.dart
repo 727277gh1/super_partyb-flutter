@@ -8,9 +8,20 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'map_spec_card.dart';
 import 'spec_ui_card.dart';
+
+/// 预览图的解码上限基准：**逻辑宽度上限 1024dp**。
+///
+/// 最终解码宽 = `1024 × devicePixelRatio`（`imageDecodeCeilingFor`）。
+/// 取 1024 而不是实际视口宽：预览对话框在窄屏手机上不足 1024，但解码
+/// 宽只影响内存不影响显示（`BoxFit.contain` 自己缩）；而桌面端全屏预览
+/// 可能接近这个量级。1024×2（常见 DPR）≈ 2048 物理像素，是「高清阅读
+/// 与内存占用」的折衷点（docs/memory-audit.md G4b 的 2048px 上限）。
+/// 放大看细节时超过此宽的部分会被插值放大（见 `_imageBody` 内注释）。
+const double kImagePreviewDecodeCeilingLogicalWidth = 1024;
 
 /// 取文件**原始字节**（预览用）。null 表示取不到（无 id / 已删除 / 下载失败）。
 ///
@@ -501,7 +512,23 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
           bytes,
           key: const ValueKey('agent-file-preview-image'),
           fit: BoxFit.contain,
-          // 字节损坏/非图片时退化为提示，不让整个对话框抛异常。
+          // 解码上限（docs/memory-audit.md G4b）：不传时按原图分辨率解码，
+          // 一张 4000×3000 的截图 ≈ 48MB 位图。上限取「屏幕逻辑宽 × 设备
+          // 像素比」——预览图不会宽过窗口。
+          //
+          // ## 折衷（诚实记录）
+          //
+          // InteractiveViewer 放大（maxScale 8）时，超过解码宽度的部分
+          // 会被插值放大——放大到 8× 后清晰度略低于原图。取屏幕宽而非
+          // 原图意味着「全屏阅读清晰、极限放大略糊」；比「多张 48MB 位图
+          // 驻留 imageCache」可控（全局上限见 spb_platform
+          // configureImageCache）。若将来需要高倍放大仍清晰，得改成
+          // 分级重解码（按当前 scale 重建 cacheWidth），那是独立的复杂度。
+          cacheWidth: imageDecodeCeilingFor(
+            displayLogicalWidth: kImagePreviewDecodeCeilingLogicalWidth,
+            view: View.of(context),
+          ),
+          gaplessPlayback: true,
           errorBuilder: (c, o, s) => _errorBody('图片无法解码（可能不是有效的图片数据）'),
         ),
       ),

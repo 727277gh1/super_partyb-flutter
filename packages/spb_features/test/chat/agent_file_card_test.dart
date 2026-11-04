@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -547,4 +550,108 @@ void main() {
       expect(calls, 2, reason: '远端文件 id 变了，缓存必须失效');
     });
   });
+
+  group('缩略图解码降采样（docs/memory-audit.md G4）', () {
+    /// 一个 1x1 合法 PNG（可被 Image.memory 解码成功）。
+    final png = _tinyPngBytes();
+
+    Future<AgentFileCard> pumpImageCard(WidgetTester t) async {
+      AgentFileCard? card;
+      await t.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => AgentFileCard(
+                key: const ValueKey('probe'),
+                file: _file(mimeType: 'image/png', fileName: 'p.png'),
+                onDownload: (_) async {},
+                onLoadThumbnail: () async => png,
+              ),
+            ),
+          ),
+        ),
+      );
+      await t.pumpAndSettle();
+      card = t.widget<AgentFileCard>(find.byKey(const ValueKey('probe')));
+      return card;
+    }
+
+    testWidgets('渲染出的 Image provider 是按显示尺寸限制解码宽的 ResizeImage', (t) async {
+      await pumpImageCard(t);
+      final image = t.widget<Image>(find.byType(Image));
+      final provider = image.image;
+      expect(
+        provider,
+        isA<ResizeImage>(),
+        reason:
+            'cacheWidth 会被折成 ResizeImage；不传时这里是裸 MemoryImage，'
+            '按原图分辨率解码进 imageCache',
+      );
+      final resize = provider as ResizeImage;
+      expect(resize.width, isNotNull);
+      // 48dp × 测试 DPR 3.0 = 144。
+      expect(resize.width, 144);
+      expect(
+        resize.allowUpscaling,
+        isFalse,
+        reason: 'ResizeImage 默认不放大：小原图不会被拉到上限浪费内存',
+      );
+    });
+
+    testWidgets('同一次加载的字节在重建时不再换实例（不逐帧拷贝）', (t) async {
+      /// 取出 provider 链底层的 MemoryImage.bytes（即本卡持有的那一份字节）。
+      Uint8List? bytesOf(ImageProvider<Object>? provider) => switch (provider) {
+        ResizeImage(:final imageProvider) => switch (imageProvider) {
+          MemoryImage(:final bytes) => bytes,
+          _ => null,
+        },
+        _ => null,
+      };
+
+      // 记录第一次 build 时的字节实例。
+      await pumpImageCard(t);
+      final firstBytes = bytesOf(t.widget<Image>(find.byType(Image)).image);
+      expect(
+        firstBytes,
+        isNotNull,
+        reason: '前置：provider 应是 ResizeImage(MemoryImage)',
+      );
+
+      // 触发父级重建（不换文件、不换 key）：didUpdateWidget 判据不命中，
+      // 缓存不重拉，字节实例必须保持 identical。
+      await t.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => AgentFileCard(
+                key: const ValueKey('probe'),
+                file: _file(mimeType: 'image/png', fileName: 'p.png'),
+                onDownload: (_) async {},
+                onLoadThumbnail: () async => png,
+              ),
+            ),
+          ),
+        ),
+      );
+      await t.pumpAndSettle();
+
+      final secondBytes = bytesOf(t.widget<Image>(find.byType(Image)).image);
+      expect(
+        identical(secondBytes, firstBytes),
+        isTrue,
+        reason:
+            'MemoryImage 由同一份 Uint8List 字段构造；若字段被逐帧'
+            'Uint8List.fromList 拷贝，字节实例会变（ResizeImage 外层每次 '
+            'build 都是新实例属正常，链底层的 bytes 才是拷贝判据）',
+      );
+    });
+  });
 }
+
+/// 最小合法 PNG（1x1），与 `agent_file_preview_test.dart` 同一份 base64。
+Uint8List _tinyPngBytes() => Uint8List.fromList(
+  base64Decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/'
+    'q842iQAAAABJRU5ErkJggg==',
+  ),
+);

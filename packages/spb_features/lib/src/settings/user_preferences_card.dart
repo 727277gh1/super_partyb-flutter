@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_platform/spb_platform.dart';
 import 'package:spb_ui/spb_ui.dart';
 
 /// 读取用户偏好（`GET /me/preferences`）。
@@ -941,6 +942,13 @@ class _AvatarPreview extends StatelessWidget {
           : ClipOval(
               child: Image.network(
                 url!,
+                // 解码上限（docs/memory-audit.md G4b）：头像显示为 32dp
+                // 圆形，原图按需解码到「显示尺寸 × DPR」即可；网络大图
+                // 不传时同样按原图分辨率进 imageCache。
+                cacheWidth: imageDecodeCeilingFor(
+                  displayLogicalWidth: SpbSpacing.xxl,
+                  view: View.of(context),
+                ),
                 width: SpbSpacing.xxl,
                 height: SpbSpacing.xxl,
                 fit: BoxFit.cover,

@@ -1,10 +1,10 @@
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
-
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'agent_file_preview.dart';
 
@@ -90,7 +90,18 @@ class AgentFileCard extends StatefulWidget {
 }
 
 class _AgentFileCardState extends State<AgentFileCard> {
-  List<int>? _thumbnail;
+  /// 缩略图字节（单份引用，渲染时**不再拷贝**）。
+  ///
+  /// ## 为什么不是 `List<int>` + 每帧 `Uint8List.fromList`
+  ///
+  /// 旧写法在每次 build 的 `_leading()` 里都做一次全量拷贝
+  /// （`Uint8List.fromList(_thumbnail!)`）：`SliverChildBuilderDelegate
+  /// .shouldRebuild` 恒 true，父级每次 `setState` 都重建本卡，拷贝随之反复
+  /// 发生——纯垃圾，推高峰值内存（docs/memory-audit.md G4a）。
+  ///
+  /// `Image.memory` 接受 `Uint8List`，加载完成后本字段是**单份不可变引用**：
+  /// 同一次加载的字节被同一次解码使用，无逐帧拷贝。
+  Uint8List? _thumbnail;
   bool _loadingThumb = false;
   bool _downloading = false;
 
@@ -145,7 +156,11 @@ class _AgentFileCardState extends State<AgentFileCard> {
       final bytes = await loader();
       if (!mounted) return;
       setState(() {
-        _thumbnail = bytes;
+        // loader 契约是 List<int>?（见 AgentFileCard.onLoadThumbnail 的文档）。
+        // 仅在有内容时持一份 Uint8List；null / 空 → 退化图标，不渲染图片。
+        _thumbnail = (bytes != null && bytes.isNotEmpty)
+            ? Uint8List.fromList(bytes)
+            : null;
         _loadingThumb = false;
       });
     } on Object catch (e) {
@@ -293,10 +308,24 @@ class _AgentFileCardState extends State<AgentFileCard> {
     if (_thumbnail != null && _thumbnail!.isNotEmpty) {
       // 图片缩略图：用内存字节渲染。失败（如字节损坏）退化为图标，
       // 不让整卡崩——这正是加 try/catch 的目的。
+      //
+      // ## 为什么传 cacheWidth（docs/memory-audit.md G4b）
+      //
+      // 不传时按原图分辨率解码进全局 imageCache：一张 4000×3000 的截图
+      // ≈48MB 位图，只为一个 48px 方块。上限取「显示尺寸 × 设备像素比」
+      // 的物理像素数——再大纯属浪费；view 不可得时按逻辑宽自退（宁可
+      // 多解码，不让缩略图糊掉）。gaplessPlayback 防止文件被新版本覆盖
+      // 重拉时闪一下空白。
+      final dpr = MediaQuery.maybeDevicePixelRatioOf(context);
       return ClipRRect(
         borderRadius: SpbRadius.cardAll,
         child: Image.memory(
-          Uint8List.fromList(_thumbnail!),
+          _thumbnail!,
+          cacheWidth: imageDecodeCeilingFor(
+            displayLogicalWidth: SpbSpacing.xxxl,
+            view: dpr == null ? null : View.of(context),
+          ),
+          gaplessPlayback: true,
           width: SpbSpacing.xxxl,
           height: SpbSpacing.xxxl,
           fit: BoxFit.cover,
