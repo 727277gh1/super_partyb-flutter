@@ -516,8 +516,20 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
             // 来源决定重新展开时能否被覆盖，值得显示。
             _chip(theme, task.origin.label),
             if (task.editedByUser) _chip(theme, '已编辑'),
+            // 定时（not_before）只在仍是未来锚点时展示（isScheduledAfter 即该判据）。
             if (task.isScheduledAfter(DateTime.now()))
               _chip(theme, '定时 ${_shortTime(task.notBefore!)}'),
+            // 开始时间：pending 还没真正起跑，不展示（对齐 webapp taskTimeMeta）。
+            if (task.startedAt != null && task.status != GoalTaskStatus.pending)
+              _chip(theme, '开始 ${_shortTime(task.startedAt!)}'),
+            // 完成时间只在成功类终态（completed/skipped）展示；error_stopped 恒无
+            // 完成时间（服务端写 NULL），失败时刻不编造。
+            if (task.completedAt != null &&
+                task.status == GoalTaskStatus.completed)
+              _chip(theme, '完成 ${_shortTime(task.completedAt!)}'),
+            if (task.completedAt != null &&
+                task.status == GoalTaskStatus.skipped)
+              _chip(theme, '跳过 ${_shortTime(task.completedAt!)}'),
             if (task.errorReason != null)
               _chip(theme, task.errorReason!, tone: scheme.error),
           ],

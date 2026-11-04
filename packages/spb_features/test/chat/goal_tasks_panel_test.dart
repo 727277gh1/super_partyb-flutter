@@ -234,6 +234,51 @@ void main() {
       // 清单本身仍渲染。
       expect(find.text('TASK-001'), findsOneWidget);
     });
+
+    testWidgets('时间元信息：开始/完成 chip 按状态展示（Go 8733e5b1）', (t) async {
+      await pump(
+        t,
+        snap: snapshot(
+          tasks: [
+            // completed：开始 + 完成 都展示。
+            task(
+              'TASK-001',
+              status: 'completed',
+              extra: {
+                'started_at': '2024-03-05T08:30:00Z',
+                'completed_at': '2024-03-05T10:00:00Z',
+              },
+            ),
+            // skipped：展示「跳过」而不是「完成」。
+            task(
+              'TASK-002',
+              status: 'skipped',
+              extra: {'completed_at': '2024-03-05T11:00:00Z'},
+            ),
+            // error_stopped：服务端不写 completed_at，即使意外带上也不展示
+            // （失败时刻不编造）。
+            task(
+              'TASK-003',
+              status: 'error_stopped',
+              extra: {'started_at': '2024-03-05T09:00:00Z'},
+            ),
+            // pending：没真正起跑，started_at 即使有值也不展示。
+            task(
+              'TASK-004',
+              status: 'pending',
+              extra: {'started_at': '2024-03-05T07:00:00Z'},
+            ),
+          ],
+        ),
+      );
+
+      expect(find.text('开始 3/5 16:30'), findsOneWidget);
+      expect(find.text('完成 3/5 18:00'), findsOneWidget);
+      expect(find.text('跳过 3/5 19:00'), findsOneWidget);
+      // TASK-003（error_stopped）只有开始、无完成；TASK-004（pending）两者都无。
+      expect(find.text('开始 3/5 17:00'), findsOneWidget);
+      expect(find.text('开始 3/5 15:00'), findsNothing);
+    });
   });
 
   group('未注入回调 = 只读（不渲染操作入口，而不是禁用）', () {

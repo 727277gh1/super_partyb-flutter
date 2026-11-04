@@ -1315,14 +1315,27 @@ class _ConversationPageState extends State<ConversationPage> {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('网络不可用，已加入待发送：${e.message}')));
     } on HttpError catch (e) {
-      // 409 group_unavailable（Go `ceff2f81` 起）：目标对话已失效（如另一端
-      // 已归档/不可用），服务端要求重新选对话。默认的「HTTP 409」对用户
-      // 毫无意义，而这里的措辞要与服务端错误文案同义——不重新选对话，
-      // 重试永远失败。
+      // 服务端稳定业务码（Go `ceff2f81` 起）：409/429 默认的「HTTP 409」对用户
+      // 毫无意义，措辞要与服务端错误语义同义，并给出可行出路。
       if (!mounted) return;
-      final detail = e.errorCode == 'group_unavailable'
-          ? '目标对话已失效，请返回列表重新选择对话后发送'
-          : '发送失败：${e.message}';
+      final String detail;
+      switch (e.errorCode) {
+        case 'group_unavailable':
+          // 目标对话已失效（如另一端已归档/不可用），服务端要求重新选对话。
+          detail = '目标对话已失效，请返回列表重新选择对话后发送';
+        case 'group_archived':
+          // 归档 ≠ 不存在：去「已归档」里恢复，而不是重新建对话
+          //（服务端 pipeline 与降级路径都回这个码，chat_stream.go:81/190）。
+          detail = '该对话已归档，请先恢复后再发送';
+        case 'queued_quota_exceeded':
+          // 排队轮次达到上限：等在跑的轮次结束后再发。
+          detail = '排队轮次已达上限，请稍等当前任务完成后再发送';
+        case 'workspace_quota_exceeded':
+          // 工作区并发配额用尽：同样是等待语义。
+          detail = '同时运行的任务已达上限，请稍后再试';
+        default:
+          detail = '发送失败：${e.message}';
+      }
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(detail)));
     } on SpbError catch (e) {

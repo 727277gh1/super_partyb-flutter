@@ -177,6 +177,76 @@ void main() {
       expect(find.textContaining('发送失败'), findsOneWidget);
       expect(find.textContaining('重新选择对话'), findsNothing);
     });
+
+    testWidgets('409 group_archived 提示先恢复对话（不是重新建）', (tester) async {
+      // 归档 ≠ 不存在：服务端 pipeline 与降级路径都回这个码
+      //（chat_stream.go:81/190），用户该去「已归档」里恢复。
+      mockTimeline();
+      await startController(tester);
+      adapter.onPost(
+        '/users/usr_1/chat/messages',
+        (server) => server.reply(409, {
+          'error': '该对话已归档，请先恢复后再发送',
+          'code': 'group_archived',
+        }),
+        data: Matchers.any,
+      );
+      await pumpPage(tester);
+
+      await tester.enterText(find.byType(TextField), '发给已归档对话');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('该对话已归档，请先恢复后再发送'), findsOneWidget);
+      // 与「目标对话已失效」区分开：归档可自行恢复，不必重新选对话。
+      expect(find.textContaining('重新选择对话'), findsNothing);
+      expect(find.textContaining('HTTP 409'), findsNothing);
+    });
+
+    testWidgets('429 queued_quota_exceeded 提示等待而非重试', (tester) async {
+      // 服务端 error 是英文（"queued turn quota exceeded"），直出对用户无意义。
+      mockTimeline();
+      await startController(tester);
+      adapter.onPost(
+        '/users/usr_1/chat/messages',
+        (server) => server.reply(429, {
+          'error': 'queued turn quota exceeded',
+          'code': 'queued_quota_exceeded',
+        }),
+        data: Matchers.any,
+      );
+      await pumpPage(tester);
+
+      await tester.enterText(find.byType(TextField), '排队满了');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('排队轮次已达上限，请稍等当前任务完成后再发送'), findsOneWidget);
+      expect(find.textContaining('quota'), findsNothing);
+    });
+
+    testWidgets('429 workspace_quota_exceeded 同样映射为等待语义', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      adapter.onPost(
+        '/users/usr_1/chat/messages',
+        (server) => server.reply(429, {
+          'error': 'workspace turn quota exceeded',
+          'code': 'workspace_quota_exceeded',
+        }),
+        data: Matchers.any,
+      );
+      await pumpPage(tester);
+
+      await tester.enterText(find.byType(TextField), '配额用尽');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('同时运行的任务已达上限，请稍后再试'), findsOneWidget);
+    });
   });
 
   group('ConversationPage 停止生成', () {
