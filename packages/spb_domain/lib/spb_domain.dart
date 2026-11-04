@@ -67,6 +67,7 @@ library;
 //   groupToolCallsForDisplay / TOOL_CALL_BATCH_MIN_COUNT —— 展示行再折叠一层（连续同 turn 的工具调用 → 一张卡，纯展示层）
 //   ToolCallBatchRow —— 工具调用折叠行（TimelineDisplayRow 家族成员，含在飞项时默认展开）
 //   deliverableDownloadRelPath / agentFileDownloadRelPath —— 下载到本地的落地相对路径（{groupId}/<group 内相对路径>，两端同一口径）
+//   defaultSyncLocalRoot / defaultSyncFolderName —— 默认的交付物同步目录（用户未选目录时用，纯函数可注入）
 export 'src/agent_file_batch.dart';
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
@@ -74,6 +75,7 @@ export 'src/confirmation_notifier.dart';
 export 'src/notifications.dart';
 export 'src/conversation_item.dart';
 export 'src/conversation_search.dart';
+export 'src/default_sync_root.dart';
 export 'src/deliverable_sync.dart';
 export 'src/deliverable_sync_usecase.dart';
 export 'src/deliverable_upload.dart';
