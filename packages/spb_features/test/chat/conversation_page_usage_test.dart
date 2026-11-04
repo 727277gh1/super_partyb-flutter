@@ -63,9 +63,19 @@ void main() {
       await pumpPage(tester);
 
       expect(bar, findsOneWidget);
+      // 默认收起为一行：总量 chip 可见，明细不渲染（读数不该比正文占地方）。
       expect(find.text('Token 消耗 150 · 请求 3 次'), findsOneWidget);
-      // 缓存是 input 的子集：只括注，不参与加总。
+      expect(find.text('输入 100（缓存 20） · 输出 50'), findsNothing);
+
+      // 点按展开后才见明细；缓存是 input 的子集：只括注，不参与加总。
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
       expect(find.text('输入 100（缓存 20） · 输出 50'), findsOneWidget);
+
+      // 再点一次收起。
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
+      expect(find.text('输入 100（缓存 20） · 输出 50'), findsNothing);
     });
 
     testWidgets('cached 为 0 时不括注（不写「缓存 0」）', (tester) async {
@@ -75,6 +85,8 @@ void main() {
       await settleBaseline(tester);
       await pumpPage(tester);
 
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
       expect(find.text('输入 100 · 输出 50'), findsOneWidget);
       expect(find.textContaining('缓存'), findsNothing);
     });
@@ -87,6 +99,8 @@ void main() {
       await pumpPage(tester);
 
       expect(find.text('Token 消耗 60K · 请求 12 次'), findsOneWidget);
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
       expect(find.text('输入 50K（缓存 40K） · 输出 10K'), findsOneWidget);
     });
 
@@ -136,9 +150,12 @@ void main() {
       await settleBaseline(tester);
       await pumpPage(tester);
 
+      // Tooltip 挂在明细行上（默认收起）——先展开再找。
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
       final tooltip = tester.widget<Tooltip>(
         find.ancestor(
-          of: find.byKey(const ValueKey('conversation-usage-tokens')),
+          of: find.byKey(const ValueKey('conversation-usage-breakdown')),
           matching: find.byType(Tooltip),
         ),
       );
@@ -170,6 +187,9 @@ void main() {
 
       // payload 无 calls ⇒ 仍按事件条数 +1（服务端是 COUNT(*)）。
       expect(find.text('Token 消耗 1.4K · 请求 4 次'), findsOneWidget);
+      // 明细行默认收起；展开后增量同步可见（totals 是同一份）。
+      await tester.tap(bar);
+      await tester.pumpAndSettle();
       expect(find.text('输入 1.1K（缓存 20） · 输出 250'), findsOneWidget);
     });
 

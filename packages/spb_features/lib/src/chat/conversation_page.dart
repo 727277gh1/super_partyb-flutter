@@ -2540,100 +2540,142 @@ class _TtsStatusBar extends StatelessWidget {
 /// `token_usage` 事件从引入该能力的部署时点起才有，数字不覆盖更早的历史 turn。
 /// 故把首条事件时间以 Tooltip（移动端长按）的形式挂在消耗行上：
 /// 「统计自 X 起（更早的会话无记录）」——不弹、不阻塞，但想核实的人能找到。
-class _UsageBar extends StatelessWidget {
+class _UsageBar extends StatefulWidget {
   const _UsageBar({required this.contextUsage, required this.groupUsage});
 
   final ContextUsage? contextUsage;
   final GroupUsageSummary? groupUsage;
 
   @override
+  State<_UsageBar> createState() => _UsageBarState();
+}
+
+/// 默认**收起为一行**，点按展开明细。
+///
+/// 早期实现把「Token 消耗 / 输入输出明细 / 上下文水位」纵向堆三行，占掉
+/// 接近三行正文的高度——它是**读数**，不该比正文更占地方。现改为：
+///
+/// - 收起态：`Wrap` 并排「Token 消耗 150 · 请求 3 次」与「上下文 50K / 200K」
+///   （窄屏 Wrap 自动换行到第二行——仍是行内折行，不会溢出，§6.16）；
+/// - 明细行（输入 / 缓存 / 输出）**只在展开时**渲染，右上角箭头提示可展开；
+/// - 整条 bar 可点（`behavior: translucent`，空白处也算命中）。
+class _UsageBarState extends State<_UsageBar> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final totals = (groupUsage != null && groupUsage!.hasData)
-        ? groupUsage!.totals
+    final totals = (widget.groupUsage != null && widget.groupUsage!.hasData)
+        ? widget.groupUsage!.totals
         : null;
-    final usage = (contextUsage != null && contextUsage!.hasData)
-        ? contextUsage
+    final usage = (widget.contextUsage != null && widget.contextUsage!.hasData)
+        ? widget.contextUsage
         : null;
     final cost = usage?.cost;
+    final style = textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
 
-    final lines = <Widget>[
+    final chips = <Widget>[
       if (totals != null)
-        Padding(
-          padding: const EdgeInsets.only(bottom: SpbSpacing.xs),
-          child: _UsageTotalsLines(totals: totals),
+        Text(
+          'Token 消耗 ${formatTokenCount(totals.burnedTokens)} · 请求 ${totals.calls} 次',
+          key: const ValueKey('conversation-usage-tokens'),
+          style: style,
         ),
       if (usage != null)
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                // 只在两端都已知时拼「X / Y」：只有 used 时拼出「12K / null」
-                // 比只显示「12K」更糟（用户会以为窗口未知是缺陷）。
-                (usage.used != null && usage.size != null)
-                    ? '上下文：${formatTokenCount(usage.used!)} / ${formatTokenCount(usage.size!)}'
-                    : '上下文：${formatTokenCount(usage.used ?? usage.size ?? 0)}',
-                key: const ValueKey('conversation-context-usage-tokens'),
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-            // 费用：Go 后端从不发射（见 ContextUsage 类文档），故实际运行时
-            // 这一段不渲染。不用 0 伪造——「未提供」与「花了 0 元」是两回事。
-            if (cost != null && cost.amount > 0)
-              Text(
-                '费用：\$${cost.amount.toStringAsFixed(4)} ${cost.currency}',
-                key: const ValueKey('conversation-context-usage-cost'),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-          ],
+        Text(
+          // 只在两端都已知时拼「X / Y」：只有 used 时拼出「12K / null」
+          // 比只显示「12K」更糟（用户会以为窗口未知是缺陷）。
+          (usage.used != null && usage.size != null)
+              ? '上下文 ${formatTokenCount(usage.used!)} / ${formatTokenCount(usage.size!)}'
+              : '上下文 ${formatTokenCount(usage.used ?? usage.size ?? 0)}',
+          key: const ValueKey('conversation-context-usage-tokens'),
+          style: style,
+        ),
+      // 费用：Go 后端从不发射（见 ContextUsage 类文档），故实际运行时
+      // 这一段不渲染。不用 0 伪造——「未提供」与「花了 0 元」是两回事。
+      if (cost != null && cost.amount > 0)
+        Text(
+          '费用 \$${cost.amount.toStringAsFixed(4)} ${cost.currency}',
+          key: const ValueKey('conversation-context-usage-cost'),
+          style: textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
         ),
     ];
+
+    final hasDetail = totals != null;
 
     return Material(
       key: const ValueKey('conversation-context-usage'),
       // 与连接/活动条区分：用量是中性读数而非「临时状态」，用 surfaceContainer
       // 而非 secondaryContainer，视觉上不与「正在执行」混淆。
       color: scheme.surfaceContainerHighest,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.md,
-          vertical: SpbSpacing.sm,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Icon(
-                Icons.data_usage,
-                size: SpbSpacing.lg,
-                color: scheme.onSurfaceVariant,
+      child: InkWell(
+        // 没有明细可展开时整个收起点按无意义，不吞手势。
+        onTap: hasDetail ? () => setState(() => _expanded = !_expanded) : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: SpbSpacing.md,
+            vertical: SpbSpacing.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.data_usage,
+                    size: SpbSpacing.md,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: SpbSpacing.sm),
+                  Expanded(
+                    // Wrap 而非 Row：320dp 下放不下时折到第二行（仍是行内折行，
+                    // 不会 RenderFlex overflow），AGENTS.md §6.16 的窄屏取向。
+                    child: Wrap(
+                      spacing: SpbSpacing.md,
+                      runSpacing: 2,
+                      children: chips,
+                    ),
+                  ),
+                  if (hasDetail)
+                    Tooltip(
+                      message: _expanded ? '收起明细' : '展开明细（输入 / 缓存 / 输出）',
+                      child: Icon(
+                        _expanded
+                            ? Icons.keyboard_arrow_up
+                            : Icons.keyboard_arrow_down,
+                        size: SpbSpacing.lg,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
               ),
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: lines,
-              ),
-            ),
-          ],
+              // 明细行只在展开时渲染——收起态只保留一行读数。
+              if (hasDetail && _expanded)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    top: SpbSpacing.xs,
+                    left: SpbSpacing.md + SpbSpacing.sm,
+                  ),
+                  child: _UsageTotalsLines(totals: totals),
+                ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// 消耗段的两行（总量行 + 明细行）。
+/// 消耗的明细行（**只在展开时**渲染）。
 ///
-/// 拆两行而不是塞一行：320–412dp 的窄屏（AGENTS.md §6.16）下单行会折到两行
-/// 且断点不可控；拆行后每行都可独立换行，`Column` 只会变高、不会溢出。
+/// 总量行（「Token 消耗 X · 请求 N 次」）已上提为收起态的 chip（见
+/// [_UsageBarState]），这里只剩「输入 / 缓存 / 输出」一行：拆出去的目的是
+/// 让默认视图只占一行，明细点开才看。
+///
+/// 缓存是 input 的子集：只括注，不参与加总（加总即双计）。
 class _UsageTotalsLines extends StatelessWidget {
   const _UsageTotalsLines({required this.totals});
 
@@ -2647,41 +2689,28 @@ class _UsageTotalsLines extends StatelessWidget {
     final cached = totals.cachedTokens;
     final firstAt = totals.firstAtTime;
 
-    final head =
-        'Token 消耗 ${formatTokenCount(totals.burnedTokens)} · 请求 ${totals.calls} 次';
     final detail =
         '输入 ${formatTokenCount(totals.inputTokens)}'
         '${cached > 0 ? '（缓存 ${formatTokenCount(cached)}）' : ''}'
         ' · 输出 ${formatTokenCount(totals.outputTokens)}';
 
-    Widget lines = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          head,
-          key: const ValueKey('conversation-usage-tokens'),
-          style: style,
-        ),
-        Text(
-          detail,
-          key: const ValueKey('conversation-usage-breakdown'),
-          style: style,
-        ),
-      ],
+    Widget line = Text(
+      detail,
+      key: const ValueKey('conversation-usage-breakdown'),
+      style: style,
     );
 
     if (firstAt != null) {
-      lines = Tooltip(
+      line = Tooltip(
         message:
             '统计自 ${firstAt.year}-'
             '${firstAt.month.toString().padLeft(2, '0')}-'
             '${firstAt.day.toString().padLeft(2, '0')}'
             ' 起（更早的会话无记录）',
-        child: lines,
+        child: line,
       );
     }
-    return lines;
+    return line;
   }
 }
 

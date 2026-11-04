@@ -6236,21 +6236,36 @@ SSE 重连（connected）     → _loadUsageSummaryQuietly() 再对一次账（�
 3. **本地增量只补 `firstAt`（不覆盖）与 `lastAt`（只前进）**：事件时间是真实的，
    REST 的 `first_at` 也是真实的，两者应一致；覆盖会丢「统计起点」。
 
-#### 读数区 UI
+#### 读数区 UI（2026-11 压缩：默认收起为一行）
 
 `_UsageBar`（`conversation_page.dart`）渲染条件
 `(_contextUsage?.hasData) || (_usageSummary?.hasData)`——只有上下文也渲染，
-只有账单也渲染，两者并存时同一条 bar 上下两行。窄屏（320dp）安全：读数区是
-可换行的 `Column`（**勿改单行 Row**，突变验证过会 overflow）。
+只有账单也渲染，两者并存时同一条 bar。**初版把「Token 消耗 / 输入输出明细 /
+上下文水位」纵向堆三行，用户报「左上角统计占太多纵向空间」**——它是读数，
+不该比正文更占地方。现改为：
 
-| key | 内容 |
-|---|---|
-| `conversation-usage-tokens` | 「Token 消耗 150 · 请求 3 次」行 |
-| `conversation-usage-breakdown` | 「输入 100（缓存 20） · 输出 50」行；cached=0 不括注 |
-| `conversation-context-usage` / `conversation-context-usage-cost` | 既有上下文水位行 |
+- **收起态（默认）**：一行。`Wrap` 并排「Token 消耗 150 · 请求 3 次」与
+  「上下文 50K / 200K」chip；320dp 放不下时 Wrap 自动折到第二行（行内折行，
+  不是 RenderFlex overflow——**勿改回单行 Row**，突变验证过会炸）；
+- **明细行（输入 / 缓存 / 输出）只在点按展开时渲染**，右侧小箭头（上下三角）
+  提示可展开；整条 bar 可点（`InkWell`），无明细可展开时不吞手势；
+- `first_at` Tooltip 挂在**明细行**上（收起时看不到统计起点，展开才有——
+  可接受：它是低频核实信息）。
 
-大数字 K 缩写（`formatTokenCount`：60K / 131.3K）；`first_at` Tooltip 说明
-统计起点；`by_agent` 明细暂不渲染（数据已解析，留待 UI 需要）。
+| key | 位置 | 内容 |
+|---|---|---|
+| `conversation-usage-tokens` | 收起态 chip | 「Token 消耗 150 · 请求 3 次」 |
+| `conversation-usage-breakdown` | 展开态 | 「输入 100（缓存 20） · 输出 50」；cached=0 不括注 |
+| `conversation-context-usage-tokens` / `-cost` | 收起态 chip | 上下文水位 / 费用（Go 不发射，实际不渲染） |
+| `conversation-context-usage` | 整条 bar | 渲染条件与视觉基调（surfaceContainer）不变 |
+
+大数字 K 缩写（`formatTokenCount`：60K / 131.3K）；`by_agent` 明细暂不渲染
+（数据已解析，留待 UI 需要）。
+
+> ⚠️ 测试连锁影响：凡断言明细文案（`输入 … · 输出 …`）与 `first_at`
+> Tooltip 的用例，必须先 `tester.tap(bar)` 展开再断言——收起态下它们不在树上。
+> 总量 chip（`conversation-usage-tokens`）不受影响，收起态即可见、SSE 增量
+> 即时刷新。
 
 #### 测试与两个实测教训
 
@@ -6259,7 +6274,7 @@ SSE 重连（connected）     → _loadUsageSummaryQuietly() 再对一次账（�
 | models | `group_usage_test.dart`（+471 全包） | `incrementedByEvent` / `deltaFromEventPayload` / `burnedTokens` / `plus` / omitempty 容错 |
 | api | `chat_api_contract_test.dart`（+41） | 真实 `HttpServer` 契约：路径无 `/api` 前缀、全 snake_case |
 | domain | `chat_stream_controller_usage_test.dart`（13 条） | 基线拉取 / SSE 增量 / **重连对账** / 全局模式跳过 / 切对话重置 / 竞态丢弃 |
-| features | `conversation_page_usage_test.dart`（13 条） | 渲染 / cached 括注 / K 缩写 / first_at Tooltip / 320dp 窄屏 / `wireUsageSummary: false` 不渲染 |
+| features | `conversation_page_usage_test.dart`（13 条） | 渲染 / **默认收起·点开见明细·再点收起** / cached 括注 / K 缩写 / first_at Tooltip（展开态）/ 320dp 窄屏 / `wireUsageSummary: false` 不渲染 |
 | 两端 router | `router_chat_test.dart` 各 +1 | 接线断言（见下） |
 
 **教训 1：`http_mock_adapter` 的 handler 计数不可信。** 注册 `onGet(path, handler)`
