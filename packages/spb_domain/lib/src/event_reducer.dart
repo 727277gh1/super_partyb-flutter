@@ -382,7 +382,37 @@ class EventReducer {
           currentAssistantIdx = null;
           currentThoughtIdx = null;
 
+          // 同一工具调用会收到**两条** tool_call 事件（同 `id`）：
+          //   ① 权威帧（message_end）带完整 arguments（`handleAuthoritative` →
+          //      `emitToolCall`，Go 侧有 `emittedToolCall` 去重）；
+          //   ② `tool_execution_start` 帧：`{"id", "name", "status": "running"}`，
+          //      无参数——Go 注释自称「补充执行开始状态，供调试/实时消费者使用」
+          //      （`c8041a65` 引入，webapp 用 `dedupeToolCallsById` 按 id 合并）。
+          //
+          // 若当新行处理：②会再开一行且**覆盖** `toolIdxById[callId]`，
+          // `tool_result` 只回填到②——①永远停在无结果态、②只有名字没参数，
+          // 用户看到的就是「两个气泡，一个有数据一个没数据」（2026-11 生产实测）。
+          // 故按 callId 合并：已见过的 id 就地更新（补参数 / 保留首见信息），
+          // 不新开行。无 id 的事件无法关联，保持旧行为（独立成行）。
           final callId = ev.toolCallId ?? ev.eventId;
+          final existingToolIdx = ev.toolCallId == null
+              ? null
+              : toolIdxById[ev.toolCallId!];
+          if (existingToolIdx != null &&
+              existingToolIdx < items.length &&
+              items[existingToolIdx] is ToolCallItem) {
+            final prev = items[existingToolIdx] as ToolCallItem;
+            items[existingToolIdx] = ToolCallItem(
+              id: prev.id,
+              createdAt: prev.createdAt,
+              name: ev.toolName ?? prev.name,
+              turnId: prev.turnId,
+              args: ev.toolArgs ?? prev.args,
+              output: prev.output,
+              isComplete: prev.isComplete,
+            );
+            break;
+          }
           toolIdxById[callId] = items.length;
           items.add(
             ToolCallItem(
@@ -406,6 +436,11 @@ class EventReducer {
             );
           } else {
             // 结果先于调用到达（或缺失 call）——独立成项，不丢弃信息。
+            // 同步登记 callId：若随后的重复 tool_call（tool_execution_start，
+            // 同 id 无参数）到达，会合并进本行而不是再开一行。
+            if (callId != null) {
+              toolIdxById[callId] = items.length;
+            }
             items.add(
               ToolCallItem(
                 id: ev.eventId,

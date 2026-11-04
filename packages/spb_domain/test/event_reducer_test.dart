@@ -461,6 +461,151 @@ void main() {
     });
   });
 
+  group('同一调用的重复 tool_call（tool_execution_start）合并', () {
+    // 生产真实形态（2026-11，turn 06e3bd60 / 3c4e87c8 实测）：
+    //   seq=8 tool_call {"arguments":{...},"id":"call_x","name":"read"}   ← 权威帧（handleAuthoritative）
+    //   seq=9 tool_call {"id":"call_x","name":"read","status":"running"} ← tool_execution_start（c8041a65）
+    //   seq=10 tool_result {"id":"call_x","status":"completed"}
+    // webapp 用 dedupeToolCallsById 按 id 合并；归约器此前把②当新行且覆盖
+    // toolIdxById，导致「两个气泡一个有数据一个没数据」。
+    test('tool_execution_start 不开新行：就地更新既有调用（保 id / 保参数）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {
+            'id': 'call_f7d57',
+            'name': 'read',
+            'arguments': {'path': '/tmp/a.md'},
+          },
+          id: 'evt_8',
+        ),
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'call_f7d57', 'name': 'read', 'status': 'running'},
+          id: 'evt_9',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1), reason: '同 id 不应产生两个气泡');
+      final item = r.items.single as ToolCallItem;
+      expect(item.id, 'evt_8', reason: '保留首见（权威帧）的 eventId，避免 ValueKey 抖动');
+      expect(item.name, 'read');
+      expect(item.args?['path'], '/tmp/a.md');
+      expect(item.isComplete, isFalse, reason: '尚未收到结果，不能谎报完成');
+    });
+
+    test('合并后 tool_result 正常回填（生产三连序列）', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {
+            'id': 'call_f7d57',
+            'name': 'read',
+            'arguments': {'path': '/tmp/a.md'},
+          },
+          id: 'evt_8',
+        ),
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'call_f7d57', 'name': 'read', 'status': 'running'},
+          id: 'evt_9',
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.toolResult,
+          payload: {'id': 'call_f7d57', 'name': 'read', 'status': 'completed'},
+          id: 'evt_10',
+          globalSeq: 3,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as ToolCallItem;
+      expect(item.isComplete, isTrue);
+      expect(item.args?['path'], '/tmp/a.md');
+    });
+
+    test('结果先到、重复 call 后到：孤儿结果行被合并而非新增', () {
+      // tool_result 分支的孤儿路径会先开一行（id=result 的 eventId）；
+      // 随后的重复 tool_call 不应再开第二行。tool_result 的真实形态是
+      // {id, name, status}（pigo headless 不回传结果正文），故用显式
+      // output 键验证「孤儿行已有的输出不丢」。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolResult,
+          payload: {
+            'id': 'call_x',
+            'name': 'bash',
+            'status': 'completed',
+            'output': '文件列表',
+          },
+          id: 'evt_10',
+        ),
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'call_x', 'name': 'bash', 'status': 'running'},
+          id: 'evt_9',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1), reason: '同 id 不得出两行');
+      final item = r.items.single as ToolCallItem;
+      expect(item.output, '文件列表', reason: '孤儿行已有的输出不丢');
+      expect(item.isComplete, isTrue);
+    });
+
+    test('第二个 tool_call 带完整参数时补齐首见缺失', () {
+      // 乱序边界：权威帧参数缺失（极端情况）而 execution_start 反而带了参数。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'call_y', 'name': 'bash'},
+          id: 'evt_1',
+        ),
+        ev(
+          EventTypes.toolCall,
+          payload: {
+            'id': 'call_y',
+            'name': 'bash',
+            'arguments': {'command': 'ls'},
+          },
+          id: 'evt_2',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(1));
+      final item = r.items.single as ToolCallItem;
+      expect(item.args?['command'], 'ls');
+    });
+
+    test('不同 id 的 tool_call 不受影响，仍各开一行', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.toolCall, payload: {'id': 'c1', 'name': 'a'}, id: 'e1'),
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'c2', 'name': 'b'},
+          id: 'e2',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2));
+    });
+
+    test('无 tool_call_id 的 tool_call 不合并（旧行为：独立成行）', () {
+      // 无法关联调用者，合并会张冠李戴；保持旧路径。
+      final r = EventReducer.reduce([
+        ev(EventTypes.toolCall, payload: {'name': 'a'}, id: 'e1'),
+        ev(EventTypes.toolCall, payload: {'name': 'a'}, id: 'e2', globalSeq: 2),
+      ]);
+
+      expect(r.items, hasLength(2));
+    });
+  });
+
   group('确认卡状态', () {
     test('confirmation_required 产出未解决卡片', () {
       final r = EventReducer.reduce([
