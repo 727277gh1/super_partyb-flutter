@@ -272,12 +272,21 @@ void main() {
         ),
       );
 
-      expect(find.text('开始 3/5 16:30'), findsOneWidget);
-      expect(find.text('完成 3/5 18:00'), findsOneWidget);
-      expect(find.text('跳过 3/5 19:00'), findsOneWidget);
+      // 期望值与被测代码同口径推导（模型 `fromJson._date` 统一 `.toLocal()`，
+      // chip 用 toLocal 后的 hour/minute）。⚠️ 不能把时刻写死（如「16:30」）：
+      // 本机是 UTC+8、CI 是 UTC，写死必有一边红（2026-11 CI 实测）。
+      String chipAt(String iso) {
+        final t = DateTime.parse(iso).toLocal();
+        String p2(int v) => v.toString().padLeft(2, '0');
+        return '${t.month}/${t.day} ${p2(t.hour)}:${p2(t.minute)}';
+      }
+
+      expect(find.text('开始 ${chipAt('2024-03-05T08:30:00Z')}'), findsOneWidget);
+      expect(find.text('完成 ${chipAt('2024-03-05T10:00:00Z')}'), findsOneWidget);
+      expect(find.text('跳过 ${chipAt('2024-03-05T11:00:00Z')}'), findsOneWidget);
       // TASK-003（error_stopped）只有开始、无完成；TASK-004（pending）两者都无。
-      expect(find.text('开始 3/5 17:00'), findsOneWidget);
-      expect(find.text('开始 3/5 15:00'), findsNothing);
+      expect(find.text('开始 ${chipAt('2024-03-05T09:00:00Z')}'), findsOneWidget);
+      expect(find.text('开始 ${chipAt('2024-03-05T07:00:00Z')}'), findsNothing);
     });
   });
 

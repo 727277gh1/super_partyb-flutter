@@ -5664,8 +5664,11 @@ show ScrollCacheExtent;`。
 | 标题重新生成（Go `210db5f3`） | `ChatApi.regenerateTitle`（POST `/chat/groups/:id/title/regenerate`）+ `GroupSettingsUseCase.regenerateTitle`（写后回读权威 group）+ `GroupSettingsPanel` 标题区块（key `group-title-regenerate`，未注入不渲染、busy 禁用），两端接线 | 与手动改名语义不同：改名会打 `title_generated` 标记（gate 永不覆盖），重生成是「放弃自动标题、让它重新起」；写端点无响应体，不回读会让界面继续显示旧标题 |
 | 停用全部反馈（Go `b2a54b5a` 停用端点语义） | `StopAllAutoSchedules` 返回完整 `AutoSchedulesStopResult`（含 `disabledCount`）；面板成功后显示一次性反馈：`> 0` → 「已停用 N 个自动续跑排程」，`== 0` → 「没有在途的自动续跑排程」 | 条数是服务端谓词的**唯一权威回执**：并发下「列表里仍有 pending」与「实际停用了 0 条」可能同时为真；「已停用 0 个」看起来像功能坏了，「没有在途」是有效结论 |
 
-**两个易写错处**：① 任务时间断言——`Goal.fromJson._date` 做 `.toLocal()`，测试时间按
-本地时区断言（UTC+8 下 08:30Z → 16:30）；② 停用反馈的测试 harness 不能从返回的
+**两个易写错处**：① 任务时间断言——`Goal.fromJson._date` 做 `.toLocal()`，chip 用
+toLocal 后的 hour/minute。⚠️ **期望值不能写死时刻**（如「开始 3/5 16:30」）：
+本机是 UTC+8、CI 是 UTC，写死必有一边红（2026-11 CI 实测）。必须与被测代码
+同口径推导期望（`DateTime.parse(iso).toLocal()` 再取 month/day/hour/minute）；
+② 停用反馈的测试 harness 不能从返回的
 items 自动推断 `disabledCount`（items 是停用**后**的列表，已全部非 pending，推断
 恒为 0）——必须显式传，否则「已停用 N」用例在正确实现上也会红。
 
