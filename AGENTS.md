@@ -1123,12 +1123,12 @@ router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`�
 # 决策时（issue #23 创建于 f446250）的基线：782
 # 当前（HEAD）量：973
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=973 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=972 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
 # 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1744
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1744 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1748 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
@@ -6488,6 +6488,77 @@ flutter build linux --release --dart-define=SPB_VERBOSE_LOG=true
 - **需真机验证**：本机无 `DISPLAY`（§9）。悬浮窗回滚的**真实表现**（窗口是否回到原尺寸/位置、
   是否重新出现在任务栏）必须在有桌面环境的机器上确认；本轮只验证了顺序判据与接线。
 
+### 6.58 归属提示重构：`routing_selected` 合并进气泡，无聊原因零空间（2026-11）
+
+**症状**：每条发出的消息下面都跟着一行「归属： fixed_reuse」。对话内发送的常态
+（group 合法、原样复用）是**零信息量**的，却每个 turn 占一整行，把正文挤出视野。
+
+#### 语义前提（全部有 Go 写端依据）
+
+`routing_selected` payload 的三个字段（`pipeline_events.go`）：
+`group_decision_reason`（原因）、`selected_group_id`（目标对话）、
+`group_switched`（静默切换标记，Go 注释原文「用户未必知道消息跑到了别的对话」）。
+
+两个关键维度**互相独立**，不能互推：
+
+| 维度 | 说明 |
+|---|---|
+| reason 是否「无聊」 | `fixed_reuse` / `classify_reuse` 等 8 个复用类值 = 就落在当前（或既有）对话，零信息量；`create_new` / `fixed_new` 等 5 个新建类值 = 建了新对话 |
+| 是否切换 | `classify_reuse`（复用了**另一条**相似对话）也可能伴随 `group_switched=true`——reason 无聊 ≠ 没切换 |
+
+> 值表逐字对齐 Go 写端（`pipeline_routing.go` / `pipeline_classify.go` /
+> `pipeline_events.go` 兜底），见 `routing_attribution.dart` 的文档注释，勿凭猜测增删。
+
+#### 设计：三层分工
+
+| 层 | 职责 |
+|---|---|
+| `spb_models` | `ChatEvent.routingSwitched` 访问器（读 `group_switched`） |
+| `spb_domain` | ① `routing_attribution.dart`：`isRoutineRoutingReason`（8 值）+ `routingAttributionNotice`（**新建 > 切换**判定序，未知原因 fail-open 原样透传为徽标文案）；② reducer 把 `routing_selected` **合并进同 turn 的 `UserMessageItem`**（`routingReason`/`routingSwitched` 两字段，与 `agent_id` 继承同一模式），**`item.id` 不变**（不换 EventId，避免流式期间 `ValueKey` 抖动重挂） |
+| `spb_features` | `UserMessageBubble` 内联徽标（labelSmall + 图标，tertiary 强调、Tooltip 带完整解释 + 原始 reason code） |
+
+渲染决策：`routingAttributionNotice(reason, switched)` 返回 null（无聊 + 未切换）→
+气泡零额外空间；否则徽标。**不另占时间线行**。
+
+#### 三个易写错的点
+
+1. **合并失败时的孤儿回退必须看 `switched`**：同 turn 用户气泡不在缓冲里时
+   （空文本消息被跳过 / 缓冲裁剪边界），无聊孤儿**整条丢弃**，但「reason 无聊 +
+   `switched=true`」的孤儿**必须保留**（静默切换是有信息量的）——故
+   `RoutingNoticeItem` 带 `switched` 字段。⚠️ 页面层**不得**再判一次
+   `isRoutineRoutingReason` 过滤：页面看不到 `switched`，会把这类行误杀
+   （变异测试抓到：页面二次过滤 → 该场景 0 条用例失败，行为却错了）。
+   **归约层是唯一守门员**。
+2. **新建优先于切换**：`fixed_new` 必然伴随 `group_switched=true`，徽标应显示
+   「已新建对话」（发生了什么）而非「已切换对话」（怎么发生的）。
+3. **回退行 `_RoutingNotice` 文案与徽标共用同一映射**：旧文案「归属：
+   `create_new`」改为「已新建对话」，未知原因仍原样透传（fail-open）。
+
+#### 测试
+
+| 文件 | 条数 | 钉住 |
+|---|---|---|
+| `spb_domain/test/routing_attribution_test.dart` | 13 | 全量 reason 表 / 优先级序 / 未知原因透传 / tooltip 内容 |
+| `spb_domain/test/event_reducer_routing_test.dart` | 12 | 合并（id 不变 / agentId 继承 / 权威帧覆盖后仍保留）/ 孤儿三态 / 乱序边界（routing 先到 → 回退独立行，生产不可达：服务端同事务 user_message 在前 + 控制器按 globalSeq 排序） |
+| `spb_features/test/chat/user_message_bubble_routing_test.dart` | 8 | 徽标渲染四态 / pending 隐藏 / Tooltip message 区分复制按钮的「复制」Tooltip |
+| `spb_features/test/chat/conversation_page_routing_test.dart` | 5 | SSE → 归约 → 渲染端到端：fixed_reuse 全时间线零元素 / 徽标文案 / 孤儿回退 |
+
+反向验证（逐条实测，`cp` 备份还原）：
+
+| 改坏 | 失败 |
+|---|---|
+| 还原「一律产独立行」旧行为 | domain **7** + features 3 |
+| 新建集合漏 `fixed_new` | **2** |
+| 徽标对一切非 null reason 显示（不判无聊） | **4** |
+| 合并丢 `agentId` 继承 | **1** |
+| 页面二次过滤无聊孤儿 | **0**（⚠️ 假绿教训见上：这条变异暴露的是**页面实现错**而非用例缺——已改实现并补 `switched` 字段说明） |
+
+#### 有意不做
+
+- **不显示目标对话标题**：`MatchedTitle` 只在 HTTP 响应（`SendMessageResult.matchedTitle`），
+  不在 `routing_selected` payload 里——徽标无法回答「切到了哪个对话」，需服务端先加字段。
+- **不动 `routing_feedback_request`**（归属反馈卡）：那是另一条机制（用户评分），与本徽标无关。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -6805,6 +6876,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~每条消息下面都跟着一行「归属： fixed_reuse」，把正文挤出视野~~ | ✅ 已重构（§6.58）：`routing_selected` 与 `user_message` 同 turn 时**合并进气泡**（`routingReason`/`routingSwitched` 两字段，与 `agent_id` 继承同一模式，`item.id` 不变避免重挂）；由 `routingAttributionNotice` 判定：8 个复用类「无聊」原因 + 未切换 → **零空间**；新建（`create_new`/`fixed_new` 等）→ 气泡内「已新建对话」徽标；切换（`group_switched`，与 reason 独立）→「已切换对话」；未知原因 fail-open 原样透传。孤儿事件（同 turn 气泡不在缓冲里）回退成独立行，**归约层是唯一守门员**——页面层不得再判 `isRoutineRoutingReason`（看不到 `switched`，会误杀「reason 无聊但 switched=true」的行，变异测试抓到）。38 条新用例；5 项反向验证逐条实测（其中「页面二次过滤」变异 0 条用例失败但行为错——暴露的是实现缺陷而非用例缺，已改实现）。目标对话标题不显示：`MatchedTitle` 只在 HTTP 响应，不在事件 payload，需服务端先加字段 | §6.58 |
 | ~~按 Alt+Space 后「小窗卡住，然后应用退出了」，而**没有任何本地日志**可查~~ | ✅ 已修（§6.57，三件一起）：**A** `enterOverlayMode` 串行改 7 项窗口属性，中途抛异常时**只丢快照不回滚**，而 `exitOverlayMode` 的早退判据是「快照为空」⇒ 之后所有退出都是空操作，窗口停在「720×360 / 置顶 / 不进任务栏」——即「卡住的小窗」，代码级确证（但「进程真的退出」**未确证**：全仓无 `exit(`，更符合代码的解释是 `skipTaskbar` 让窗口从任务栏消失后再无入口）。修法：逐步记账 `_overlayApplied` + `overlayRollbackOrder`（**逆序、剔除 `visibility`**）回滚，只回滚真的改过的（全量重设会篡改未改属性），回滚尽力而为不抛，之后无条件 `show()`+`focus()`，并**保留**「失败仍导航到 `/overlay`」的既有语义。**B** 补本地文件日志（此前只有 stdout，桌面启动器拉起时等于没产生日志；环形缓冲纯内存，进程死了证据就没了，而「导出诊断日志」要求应用还活着）：`FileLogSink`（同步 append 不持 `IOSink`，否则崩了丢最后一段；5MB×2 轮转；写盘前 `redactSecrets`；失败即停用且**内部绝不调 `SpbLog`** 免递归）+ `MultiLogSink` 扇出。再加一对**会话标记**，`previousSessionExitedCleanly` 从末尾**往前**找先遇到哪个边界（true/false/null 三态）——⚠️ 原设计「只看最后一条是不是退出标记」会**级联误报**：崩溃后写的那条告警与 `quit()` 之后 `dispose()` 的日志都会让它永远报「上次崩溃」。顺序有语义：**先读上次结论、再写启动标记**。日志与 `sync.db` 同根（`~/.local/share/super_partyb/logs/app.log`；`SPB_LOG_DIR` 可覆盖）。另把快捷键触发/门控类日志按 §6.43 的教训从 debug 升 **info**（debug 在生产被过滤，等于没写）。**C** 同步目录未选择时给默认值（`~/Documents/Super PartyB` → `<data>/super_partyb/deliverables` → null；`SPB_SYNC_ROOT` 可覆盖），两个读点共用 `effectiveSyncLocalRoot`，并顺手建目录（否则「打开同步目录」点了没反应）。50 条新用例（31 + 6 + 9 + 4）；8 项反向验证逐条实测（含「只看最后一条」这个自己写错的判据）+ 2 项诚实记录「未写成用例」 | §6.57 |
 | ~~Windows 托盘无图标 + 右键菜单卡死（「一个卡住的列表」）~~ | ✅ 已修（§6.55）：**两个独立缺陷**。① `tray_manager` Windows 端用 `LoadImage(LR_LOADFROMFILE)` 读图标，**只认 BMP 系资源**，PNG 读出 `NULL` HICON → 无图标；且插件 `setIcon` 恒返回 true → `_trayAvailable` 误置位 → 「关窗即隐藏」生效后用户无法唤回应用。修法：`gen_brand_assets.py` 新增 BMP 帧的 `assets/tray_icon.ico`（**显式 `bitmap_format='bmp'`**——PIL 默认 ICO 输出就是 PNG 帧，同样不被认），`_initTray` 按平台分流。② Win32 `TrackPopupMenu` 要求调用窗口处于前台，否则菜单弹出后收不回去；`tray_manager` 的 `bringAppToFront`（只 Windows）默认 false。修法：`spb_platform` 新增纯函数 `trayMenuNeedsBringToFront`（本机无 Windows，这条判据是 Windows 分支唯一自动化保障）+ `TrayActionTarget.popUpTrayContextMenu()`。顺带修掉同根因第三处：`windowManager.setIcon` 在 Windows 上同样 LoadImage 失败，`WM_SETICON(NULL)` 会**移除** exe 资源图标 → Windows 分支直接跳过。反向验证：判据改恒 false → windows 用例失败；改全平台 true → linux/macos 失败。图标修复的最终确认需 Windows 真机，帧格式已逐字节验证 | §6.55 |
 | ~~一轮 agent 工作产出几十张工具卡，正文被挤出时间线；同时「它现在跑到哪一步」无处可看~~ | ✅ 已做（§6.54，三件一起）：**A** 连续 ≥5 条工具调用在**展示层**折成一张批卡（`ToolCallBatchRow` + `ToolCallBatchCard`）——归约结果一条不动，故对话内搜索仍能命中批内成员、`locateIdsOf` 仍能定位、计数不变；批内含在飞工具时默认展开、跑完自动收起（`ExpansibleController`，`initiallyExpanded` 只在 `initState` 读一次，写错就是「永远摊着」）、用户点过后以用户为准（`_syncingExpansion` 必须把程序同步与用户点击分开，否则一次自动收起会把卡永久锁成「用户收的」）。**B** 「诊断」改名「动态」（`GroupActivityPanel`）并**去掉发布构建门控**，内容扩为「当前轮次状态 + 工具调用 + gate 决策」，移动端也接（AppBar 图标 / 溢出菜单 → 底部弹层）；入参是**原始状态**（`items`/`activities`/`staleTurnIds`/`executionStatus`/`decisions`）故两端不会在「哪一轮在跑」上漂移，移动端 `decisions: null` 表示「本端不看这块」而非「没有决策」；`showModalBottomSheet` 是独立 route，靠 `_activityTick` 哨兵刷新。**C** 底部状态条在流式期间报「已调用 N 个工具 · 最近 X」，槽位优先级 stale → 排队/重试 → 工具进度 → 活动指示；状态派生只做**一次尾部扫描**（`scanTurnProgress`，`break` 只在 turnId 变化时），`PerfProbe` 预算不受影响。89 条新用例（domain 16 / status 35 / panel 12 / card 11 / page 9 / desktop +2 / mobile 4）。⚠️ **两处自己写出来的假绿**：① ⭐「用户展开后不得被收回去」原版只推两次**内容相同**的批（`hasRunning` 没翻转），删掉判据照样绿——已改成「展开 → 同批又跑起一个工具 → 再跑完」；② 移动端哨兵单独摘掉任一条 `_bumpActivitySheet()` 都仍绿（`_emit` 会重推 items/activities/executionStatus 三条流），只有四条全删才红，故事实用例守的是「弹层不冻住」而不是某一条 bump | §6.54 |
