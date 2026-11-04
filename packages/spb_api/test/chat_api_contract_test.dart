@@ -717,4 +717,133 @@ void main() {
       );
     });
   });
+
+  group('契约：groupUsageSummary（GET /chat/groups/:group_id/usage-summary）', () {
+    // 真源：`router.go:128` 的 `registerChatRoutes(chatRG, d)` →
+    // `chat_usage.go` 的 `rg.GET("/groups/:group_id/usage-summary", ...)`，
+    // 挂在 `chatRG := r.Group("/chat")` 下 ⇒ **无 `/api` 前缀**
+    // （与 `groupConfirmations` 那族不同，见上面那组的教训：前缀必须照抄
+    // 服务端真实路由表，不能看端点名字猜）。
+    //
+    // 响应是**平铺**的 `{totals, by_agent}`，字段全 snake_case，与
+    // `token_usage` 事件 payload 同风格（同一个 `chatexec.TokenUsage`）。
+
+    test('路径正确（/chat 组内，无 /api 前缀）', () async {
+      final rec = await startRecorder(
+        (_) => {
+          'totals': {'input_tokens': 1, 'output_tokens': 1, 'calls': 1},
+          'by_agent': <Object?>[],
+        },
+      );
+      addTearDown(rec.close);
+
+      await apiFor(rec).groupUsageSummary('grp_1');
+
+      expect(rec.paths, ['/chat/groups/grp_1/usage-summary']);
+    });
+
+    test('解析 totals / by_agent 的 snake_case 字段', () async {
+      final rec = await startRecorder(
+        (_) => {
+          'totals': {
+            'input_tokens': 89100,
+            'output_tokens': 42200,
+            'cached_tokens': 40000,
+            'reasoning_tokens': 1200,
+            'total_tokens': 131300,
+            'calls': 12,
+            'first_at': '2026-11-01T02:03:04Z',
+            'last_at': '2026-11-02T02:03:04Z',
+          },
+          'by_agent': [
+            {
+              'agent_id': 'agt_1',
+              'agent_name': '小明',
+              'input_tokens': 60000,
+              'output_tokens': 30000,
+              'cached_tokens': 20000,
+              'calls': 8,
+              'last_at': '2026-11-02T02:03:04Z',
+            },
+          ],
+        },
+      );
+      addTearDown(rec.close);
+
+      final s = await apiFor(rec).groupUsageSummary('grp_1');
+
+      expect(s.hasData, isTrue);
+      // 账单口径：cached 是 input 的子集，不参与加总。
+      expect(s.totals.burnedTokens, 131300);
+      expect(s.totals.cachedTokens, 40000);
+      expect(s.byAgent.single.displayName, '小明');
+      // 服务端会自己解析 agent 名（`enrichUsageAgents`），客户端照抄。
+      expect(rec.paths, ['/chat/groups/grp_1/usage-summary']);
+    });
+
+    test('无数据形态：calls 0 + by_agent 空 + 时间字段缺席（omitempty）', () async {
+      // Go 的 `usageTotals.FirstAt/LastAt` 带 `omitempty`：无记录时**键不存在**，
+      // 不是空串。客户端若把它当字符串读会炸或产出怪文案。
+      final rec = await startRecorder(
+        (_) => {
+          'totals': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'cached_tokens': 0,
+            'reasoning_tokens': 0,
+            'total_tokens': 0,
+            'calls': 0,
+          },
+          'by_agent': <Object?>[],
+        },
+      );
+      addTearDown(rec.close);
+
+      final s = await apiFor(rec).groupUsageSummary('grp_1');
+
+      expect(s.hasData, isFalse, reason: 'calls 0 ⇒ 尚无记录，UI 不得渲染全 0 账单');
+      expect(s.byAgent, isEmpty);
+      expect(s.totals.firstAtTime, isNull);
+      expect(s.totals.lastAtTime, isNull);
+    });
+
+    test('NULL agent_id 由服务端标成「未分配」并保留在合计里', () async {
+      // 事件落账时 agent_id 可能为 NULL（绑定解析前 / agent 被硬删）。
+      // 服务端把它归为「未分配」而不是丢掉——合计仍包含它。
+      final rec = await startRecorder(
+        (_) => {
+          'totals': {'input_tokens': 100, 'calls': 2},
+          'by_agent': [
+            {
+              'agent_id': '',
+              'agent_name': '未分配',
+              'input_tokens': 100,
+              'calls': 2,
+            },
+          ],
+        },
+      );
+      addTearDown(rec.close);
+
+      final s = await apiFor(rec).groupUsageSummary('grp_1');
+
+      expect(s.byAgent.single.agentId, '');
+      expect(s.byAgent.single.displayName, '未分配');
+    });
+
+    test('404 抛 HttpError（非本人 / 不存在；调用方静默降级）', () async {
+      final rec = await startRecorder(
+        (_) => {'error': 'group not found'},
+        statusCode: 404,
+      );
+      addTearDown(rec.close);
+
+      await expectLater(
+        apiFor(rec).groupUsageSummary('grp_missing'),
+        throwsA(
+          isA<HttpError>().having((e) => e.statusCode, 'statusCode', 404),
+        ),
+      );
+    });
+  });
 }

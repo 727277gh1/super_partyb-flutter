@@ -375,6 +375,32 @@ class ChatApi {
     return CursorPage<ChatEvent>.fromJson(_asMap(res), ChatEvent.fromJson);
   }
 
+  /// `GET /chat/groups/:group_id/usage-summary` —— group 级 token 消耗合计。
+  ///
+  /// ## 语义：**账单**，不是上下文水位
+  ///
+  /// 数据源是 `token_usage` 业务事件的 `SUM(json_extract(payload_json, ...))`
+  /// （见 Go `internal/server/chat_usage.go`）：多轮工具调用时每轮 input 都是
+  /// 「重发全上下文」的量，故按计费口径逐帧累加——这是「这个对话总共烧了
+  /// 多少」，与 `context_update` 的「当前窗口占多少」是**两个不同的量**，
+  /// 不可合并成同一个「已用 / 窗口」。
+  ///
+  /// ## 为什么不自己把事件加起来
+  ///
+  /// `token_usage` 不在渲染白名单里（观测数据不挤占对话事件），且客户端时间线
+  /// 缓冲**有上限并按整轮裁剪**——从缓冲求和会越用越少。SSE 事件只在本端点
+  /// 已给出基线之后做**本地增量**（见 `GroupUsageSummary.incrementedByEvent`）。
+  ///
+  /// ## 失败处理
+  ///
+  /// 调用方（`ChatStreamController`）不重试、不报错：用量是非关键展示，拉取
+  /// 失败静默降级为「不显示」，避免为一块只读读数制造噪声（同 webapp
+  /// `loadUsageSummary` 的 `catch {}`）。
+  Future<GroupUsageSummary> groupUsageSummary(String groupId) async {
+    final res = await _get('/chat/groups/$groupId/usage-summary');
+    return GroupUsageSummary.fromJson(_asMap(res));
+  }
+
   // ==================== 轮次 ====================
 
   /// `POST /chat/groups/:group_id/turns` —— 直接建 turn（不经消息流）。
