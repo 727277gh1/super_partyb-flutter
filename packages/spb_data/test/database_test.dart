@@ -270,6 +270,65 @@ void main() {
       expect(back.files['a.md']?.size, 9);
     });
 
+    test('save 幂等覆盖同 key：单次 save 内同 relPath 覆盖（batch upsert）', () async {
+      // 回归防线（docs/memory-audit.md）：save 改为 _db.batch 一次性
+      // insertOrReplace 后，upsert 语义不得变——同一 relPath 在同一批里
+      // 覆盖而非插两行；游标与文件仍原子。
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final store = DriftSyncStateStore(db);
+
+      await store.save(
+        workspaceStateKey,
+        const SyncState(
+          cursor: 'c1',
+          files: {
+            'a.md': SyncedFile(etag: 'e1', size: 1),
+            'b.md': SyncedFile(etag: 'e2', size: 2),
+          },
+        ),
+      );
+      // 同 key 二次 save：覆盖同 relPath 的 etag/size，另一 key 保留。
+      await store.save(
+        workspaceStateKey,
+        const SyncState(
+          cursor: 'c2',
+          files: {
+            'a.md': SyncedFile(etag: 'e1-new', size: 11),
+            'c.md': SyncedFile(etag: 'e3', size: 3),
+          },
+        ),
+      );
+
+      final back = await store.load(workspaceStateKey);
+      expect(back.cursor, 'c2');
+      expect(back.files, hasLength(2));
+      expect(back.files['a.md']?.etag, 'e1-new');
+      expect(back.files['a.md']?.size, 11);
+      expect(back.files['c.md']?.etag, 'e3');
+      expect(back.files.containsKey('b.md'), isFalse);
+    });
+
+    test('单次 save 内重复 relPath 不插两行（batch 幂等）', () async {
+      final db = _memoryDb();
+      addTearDown(db.close);
+      final store = DriftSyncStateStore(db);
+
+      // 同一批里对同 relPath 写两次（后者生效），load 回来必须只有一行。
+      await store.save(
+        workspaceStateKey,
+        const SyncState(files: {'dup.md': SyncedFile(etag: 'first', size: 1)}),
+      );
+      await store.save(
+        workspaceStateKey,
+        const SyncState(files: {'dup.md': SyncedFile(etag: 'second', size: 2)}),
+      );
+
+      final back = await store.load(workspaceStateKey);
+      expect(back.files, hasLength(1));
+      expect(back.files['dup.md']?.etag, 'second');
+    });
+
     test('不同状态键互不干扰（单 group 与 workspace 分开）', () async {
       final db = _memoryDb();
       addTearDown(db.close);

@@ -64,11 +64,19 @@ class DriftSyncStateStore implements SyncStateStore {
               ),
             );
 
-        for (final entry in state.files.entries) {
-          await _db
-              .into(_db.syncedFiles)
-              .insertOnConflictUpdate(entry.value.toCompanion(key, entry.key));
-        }
+        // 批量插入（对齐 DriftTimelineCacheStore 的 batch 写法）：
+        // 全量替换大状态（生产实测 5666 文件）从 N 次往返降为 1 次。
+        // 逐条 await 的写法在本仓库属明确要消除的模式（docs/memory-audit.md）。
+        //
+        // 仍用 `insertOrReplace` 保持与 `insertOnConflictUpdate` 相同的
+        // upsert 语义（同 relPath 覆盖而非冲突报错）；位于同一事务里，
+        // 与游标写入原子。
+        await _db.batch((b) {
+          b.insertAll(_db.syncedFiles, [
+            for (final entry in state.files.entries)
+              entry.value.toCompanion(key, entry.key),
+          ], mode: InsertMode.insertOrReplace);
+        });
       });
     } catch (e) {
       throw StorageError('写入同步状态失败：$e', cause: e);
