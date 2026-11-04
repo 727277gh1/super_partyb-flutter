@@ -13,6 +13,10 @@ typedef ToggleGroupGoalGate = Future<void> Function(bool enabled);
 /// 保存最大自动轮次（调用方收到的值已 clamp 到 1..200）。
 typedef SaveGroupMaxAutoTurns = Future<void> Function(int maxAutoTurns);
 
+/// 重新生成对话标题（Go `210db5f3`：重置 title_generated 标记 + 标题回占位
+/// 符，下一轮 turn 成功后 Title Gate 自动重新起名）。为 null 时不渲染入口。
+typedef RegenerateGroupTitle = Future<void> Function();
+
 // ⚠️ 群级「后续提问建议」/「习惯建议」开关（onToggleFollowUpSuggest /
 // onToggleHabitSuggest）已随服务端重构移除（2026-11，Go `452cc432` /
 // `47e9950e`）：两个 reminder 的准入迁到 `/me/preferences` 的个人运行时开关
@@ -84,6 +88,7 @@ class GroupSettingsPanel extends StatefulWidget {
     this.onToggleGoalGate,
     this.onSaveMaxAutoTurns,
     this.onSaveTts,
+    this.onRegenerateTitle,
     this.busy = false,
     this.showHeader = true,
   });
@@ -97,6 +102,10 @@ class GroupSettingsPanel extends StatefulWidget {
   final ToggleGroupGoalGate? onToggleGoalGate;
   final SaveGroupMaxAutoTurns? onSaveMaxAutoTurns;
   final SaveGroupTts? onSaveTts;
+
+  /// 重新生成标题入口。为 null 时**整个区块不渲染**（同其它可选回调：
+  /// 不渲染而不是禁用）。
+  final RegenerateGroupTitle? onRegenerateTitle;
 
   /// 是否有写操作在途。为 true 时全部控件禁用（防止并发提交把 CAS 打成 409）。
   final bool busy;
@@ -166,6 +175,8 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
       padding: const EdgeInsets.symmetric(vertical: SpbSpacing.sm),
       children: [
         if (widget.showHeader) _title(context),
+        _titleSection(context),
+        const Divider(height: SpbSpacing.lg),
         _goalSection(context),
         const Divider(height: SpbSpacing.lg),
         _goalGateSection(context, theme),
@@ -195,6 +206,39 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
           Text('对话设置', style: theme.textTheme.titleSmall),
         ],
       ),
+    );
+  }
+
+  // ==================== 标题 ====================
+
+  /// 标题区块：重新生成入口（Go `210db5f3`）。
+  ///
+  /// 只在装配层注入 [GroupSettingsPanel.onRegenerateTitle] 时渲染。
+  /// 手动改名走列表菜单（`RenameGroup`），会打 title_generated 标记
+  /// （gate 永不覆盖）；这里是另一条路：**放弃自动标题、让它重新起**。
+  /// 两者语义不同，不能互替。
+  Widget _titleSection(BuildContext context) {
+    final cb = widget.onRegenerateTitle;
+    if (cb == null) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    return _section(
+      context,
+      children: [
+        _label(context, '标题'),
+        const SizedBox(height: SpbSpacing.xxs),
+        Text(
+          '自动起的标题不满意？重置后，下一轮对话完成时会重新生成。',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: SpbSpacing.xs),
+        OutlinedButton(
+          key: const ValueKey('group-title-regenerate'),
+          onPressed: _busy ? null : cb,
+          child: const Text('重新生成标题'),
+        ),
+      ],
     );
   }
 

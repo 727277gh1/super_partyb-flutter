@@ -57,12 +57,14 @@ void main() {
   late List<bool> goalGateToggles;
   late List<int> savedMaxTurns;
   late List<Map<String, dynamic>> ttsSaves;
+  int regenerateTitleCalls = 0;
 
   setUp(() {
     savedGoals = [];
     goalGateToggles = [];
     savedMaxTurns = [];
     ttsSaves = [];
+    regenerateTitleCalls = 0;
   });
 
   Future<void> pumpPanel(
@@ -71,6 +73,7 @@ void main() {
     bool busy = false,
     bool withGoalGate = true,
     bool withTts = true,
+    bool withRegenerateTitle = false,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -100,6 +103,9 @@ void main() {
                     if (narrationMode != null) 'narration_mode': narrationMode,
                     if (fileSummary != null) 'file_summary': fileSummary,
                   })
+                : null,
+            onRegenerateTitle: withRegenerateTitle
+                ? () async => regenerateTitleCalls++
                 : null,
           ),
         ),
@@ -587,6 +593,56 @@ void main() {
         find.byKey(const ValueKey('group-tts-mode')),
       );
       expect(mode.selected, {'filler'});
+    });
+  });
+
+  group('标题重新生成（Go 210db5f3）', () {
+    ChatGroup anyGroup() => ChatGroup.fromJson(
+      groupJson(
+        metadata: {
+          'goal_gate': {'enabled': true, 'continue_until_done': true},
+        },
+        currentGoal: goalSnapshot('把同步做稳'),
+      ),
+    );
+
+    testWidgets('注入后渲染入口，点击回调被调', (tester) async {
+      await pumpPanel(tester, group: anyGroup(), withRegenerateTitle: true);
+
+      expect(
+        find.byKey(const ValueKey('group-title-regenerate')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('重新生成'), findsWidgets);
+
+      await tester.tap(find.byKey(const ValueKey('group-title-regenerate')));
+      await tester.pumpAndSettle();
+
+      expect(regenerateTitleCalls, 1);
+    });
+
+    testWidgets('未注入时不渲染区块（而不是禁用）', (tester) async {
+      await pumpPanel(tester, group: anyGroup());
+
+      expect(
+        find.byKey(const ValueKey('group-title-regenerate')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('busy 时入口禁用（与其它写操作同一防并发策略）', (tester) async {
+      await pumpPanel(
+        tester,
+        group: anyGroup(),
+        busy: true,
+        withRegenerateTitle: true,
+      );
+
+      final btn = tester.widget<OutlinedButton>(
+        find.byKey(const ValueKey('group-title-regenerate')),
+      );
+      expect(btn.onPressed, isNull);
+      expect(regenerateTitleCalls, 0);
     });
   });
 

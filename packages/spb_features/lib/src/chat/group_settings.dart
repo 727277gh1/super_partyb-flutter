@@ -72,6 +72,14 @@ class GroupSettingsUseCase {
     groupId,
   );
 
+  /// 重新生成对话标题（Go `210db5f3`）。
+  ///
+  /// 重置 title_generated 标记 + 标题回占位符，下一轮 turn 成功后 Title Gate
+  /// 自动重新起名。写端点无响应体（只有状态码），故同样走 `_write` 取权威
+  /// group——否则界面会继续显示旧标题，用户以为没生效。
+  Future<ChatGroup> regenerateTitle(String groupId) =>
+      _write(() => _api.regenerateTitle(groupId), groupId);
+
   /// 写 + 重新拉取权威状态。
   ///
   /// ## 为什么 reload 失败也算整体失败

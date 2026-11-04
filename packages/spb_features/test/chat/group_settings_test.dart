@@ -161,6 +161,20 @@ void main() {
       });
     });
 
+    test('regenerateTitle：POST title/regenerate → 回读 group（无响应体）', () async {
+      // 写端点无响应体，若不回读，界面会继续显示旧标题——用户以为没生效。
+      adapter.onPost(
+        '/chat/groups/grp_1/title/regenerate',
+        (server) => server.reply(200, <String, dynamic>{}),
+      );
+      mockGroupGet();
+
+      await useCase.regenerateTitle('grp_1');
+
+      expect(calls.map((c) => c.method), ['POST', 'GET']);
+      expect(calls.first.path, '/chat/groups/grp_1/title/regenerate');
+    });
+
     test('saveGoal：清空目标走 PATCH goals/:id，然后回读 group', () async {
       adapter.onGet(
         '/chat/groups/grp_1/goals/current',

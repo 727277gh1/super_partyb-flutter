@@ -394,6 +394,16 @@ void main() {
       ]);
     });
 
+    test('regenerateTitle 路径 + 方法（Go 210db5f3）', () async {
+      final rec = await startRecorder((_) => {'reset': true});
+      addTearDown(rec.close);
+      final api = apiFor(rec);
+
+      await api.regenerateTitle('grp_1');
+
+      expect(rec.paths.single, '/chat/groups/grp_1/title/regenerate');
+    });
+
     test('listGroups 空列表不抛异常', () async {
       final rec = await startRecorder((_) => {'items': <dynamic>[]});
       addTearDown(rec.close);

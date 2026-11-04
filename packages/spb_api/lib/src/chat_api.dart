@@ -81,6 +81,18 @@ class ChatApi {
     return ChatGroup.fromJson(_asMap(res));
   }
 
+  /// `POST /chat/groups/:group_id/title/regenerate`
+  ///
+  /// 重置标题状态（Go `210db5f3`）：删除 metadata.title_generated 标记 +
+  /// 标题回默认占位符「新会话」。下一轮 turn 成功完成后 Title Gate 自动
+  /// 重新生成语义标题（ShouldRun：title_generated=false 且标题为占位符）。
+  ///
+  /// 用途：自动起的标题不满意时，用户主动让它重新起（而不是手动改名——
+  /// 手动改名会打 title_generated 标记，gate 永不覆盖）。
+  /// 广播 `group_updated`，权威标题由订阅方（`GroupUpdate.applyTo`）刷新。
+  Future<void> regenerateTitle(String groupId) =>
+      _post('/chat/groups/$groupId/title/regenerate');
+
   /// `DELETE /chat/groups/:group_id`
   Future<void> deleteGroup(String groupId) => _delete('/chat/groups/$groupId');
 
