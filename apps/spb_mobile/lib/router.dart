@@ -1262,6 +1262,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                               ),
                           onChanged: setSheetState,
                         ),
+                    // 重新生成标题（Go 210db5f3）：与桌面端同构，走
+                    // GroupSettingsUseCase 写后回读权威 group。
+                    onRegenerateTitle: () => _runSetting(
+                      () => ref
+                          .read(groupSettingsUseCaseProvider)
+                          .regenerateTitle(widget.groupId),
+                      onChanged: setSheetState,
+                    ),
                   ),
                 ),
                 const Divider(height: 1),
@@ -1285,11 +1293,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                     load: () => ref
                         .read(autoSchedulesUseCaseProvider)
                         .load(widget.groupId),
-                    onStopAll: () async =>
-                        (await ref
-                                .read(autoSchedulesUseCaseProvider)
-                                .stopAll(widget.groupId))
-                            .items,
+                    onStopAll: () => ref
+                        .read(autoSchedulesUseCaseProvider)
+                        .stopAll(widget.groupId),
                     // 弹层自带拖拽条，且本 section 上方已有分割线，不重复标题。
                     showHeader: false,
                     // 切对话时重拉（Flutter 会复用面板 State）。
@@ -1718,13 +1724,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
               //
               // `tasksSource: manual` 必须显式传：它决定重新展开时能否覆盖
               // 任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
-              onCreate: (goalText) => _runGoalWrite(
+              // `autoStart` 来自新建对话框的「创建后自动推进」勾选
+              //（Go 040855fe 的 auto_start，非 null 即提交）。与桌面端逐字同构。
+              onCreate: (goalText, {autoStart = false}) => _runGoalWrite(
                 () => ref
                     .read(goalApiProvider)
                     .createGoal(
                       widget.groupId,
                       goalText: goalText,
                       tasksSource: GoalTasksSource.manual,
+                      autoStart: autoStart,
                     ),
                 requireGoal: false,
                 onChanged: setSheetState,

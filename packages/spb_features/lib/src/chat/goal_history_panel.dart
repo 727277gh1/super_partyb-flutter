@@ -19,10 +19,18 @@ typedef SetGoalStatus = Future<void> Function(String goalId, GoalStatus status);
 
 /// 新建目标（`POST /chat/groups/:group_id/goals`）。
 ///
+/// 新建目标的回调。
+///
 /// 入参是用户填的**目标文本**；`groupId` / `tasksSource` 由装配层补齐——
 /// 面板不掌握「当前是哪个 group」，也不该替用户选 `tasks_source`（见
 /// [GoalHistoryPanel.onCreate] 的说明）。
-typedef CreateGoal = Future<void> Function(String goalText);
+///
+/// `autoStart`：用户在新建对话框里勾选「创建后自动推进」时为 true（默认
+/// false，服务端缺省同为 false）。对接 Go `040855fe` 的 `auto_start`：
+/// 一次调用完成「建 goal + 开 goal_gate」，避免两请求间出现
+/// 「goal 已存在但 gate 未开」的中间态。用**命名可选参**而不是把布尔
+/// 包进对象：既有装配层只需补一个转发，不破签名。
+typedef CreateGoal = Future<void> Function(String goalText, {bool autoStart});
 
 /// 目标版本历史面板：查看历史目标 / 切回 / 标记完成 / 归档。
 ///
@@ -225,15 +233,15 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
   /// 让用户看到全文。
   Future<void> _create() async {
     if (widget.busy || _creating) return;
-    final text = await showDialog<String>(
+    final draft = await showDialog<CreateGoalDraft>(
       context: context,
       builder: (_) => const _CreateGoalDialog(),
     );
-    if (text == null || text.isEmpty) return;
+    if (draft == null || draft.goalText.isEmpty) return;
 
     setState(() => _creating = true);
     try {
-      await widget.onCreate!(text);
+      await widget.onCreate!(draft.goalText, autoStart: draft.autoStart);
       // 新建会改变列表（新行 + 旧 active 被归档），必须回读——
       // 与 [_run] 同一理由：不回读会留下与真相不符的列表。
       await _reload();
@@ -417,6 +425,20 @@ class _GoalHistoryPanelState extends State<GoalHistoryPanel> {
 ///
 /// 目标常是一整句意图，单行输入框在窄侧边栏里看不全。`minLines: 2` 让用户能
 /// 在提交前确认自己写了什么。
+/// 新建目标对话框的提交结果。
+///
+/// 用记录类而不是裸 `String`：`auto_start` 与文本是一次提交的两个决定，
+/// 分开传会让调用方难以确认「用户到底勾了没有」。
+class CreateGoalDraft {
+  const CreateGoalDraft({required this.goalText, this.autoStart = false});
+
+  /// 用户填写的目标文本（已 trim）。
+  final String goalText;
+
+  /// 是否勾选「创建后自动推进」（服务端 `auto_start`，缺省 false）。
+  final bool autoStart;
+}
+
 class _CreateGoalDialog extends StatefulWidget {
   const _CreateGoalDialog();
 
@@ -426,6 +448,7 @@ class _CreateGoalDialog extends StatefulWidget {
 
 class _CreateGoalDialogState extends State<_CreateGoalDialog> {
   final _controller = TextEditingController();
+  bool _autoStart = false;
 
   @override
   void initState() {
@@ -448,7 +471,8 @@ class _CreateGoalDialogState extends State<_CreateGoalDialog> {
   void _submit() {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
-    Navigator.of(context).pop(text);
+    Navigator.of(context)
+        .pop(CreateGoalDraft(goalText: text, autoStart: _autoStart));
   }
 
   @override
@@ -483,6 +507,25 @@ class _CreateGoalDialogState extends State<_CreateGoalDialog> {
             '新建会归档当前目标并切换指针，旧目标仍保留在历史中。',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.xs),
+          // auto_start（Go 040855fe）：勾选后一次调用完成「建 goal + 开
+          // goal_gate 自动推进」。默认关：自动推进会连续消耗轮次，不该由
+          // 客户端默认替用户按下（与个人偏好开关的取向一致）。
+          CheckboxListTile(
+            key: const ValueKey('goal-create-autostart'),
+            value: _autoStart,
+            onChanged: (v) => setState(() => _autoStart = v ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('创建后自动推进'),
+            subtitle: Text(
+              '开启 goal_gate，任务未完成时自动继续下一轮',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
         ],

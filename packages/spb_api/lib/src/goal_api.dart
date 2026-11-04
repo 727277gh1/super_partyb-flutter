@@ -83,6 +83,7 @@ class GoalApi {
     required String goalText,
     GoalTasksSource? tasksSource,
     String? sourceMarkdown,
+    bool? autoStart,
   }) async {
     final res = await _post(
       '/chat/groups/$groupId/goals',
@@ -91,6 +92,13 @@ class GoalApi {
         if (tasksSource != null && tasksSource.wire.isNotEmpty)
           'tasks_source': tasksSource.wire,
         if (sourceMarkdown != null) 'source_markdown': sourceMarkdown,
+        // Go `040855fe`：可选，缺省 false。true 时服务端在同一 handler 内
+        // 完成「建 goal + 开 goal_gate（enabled + continue_until_done）」，
+        // 避免两个请求之间出现「goal 已存在但 gate 未开」的中间态（那会让
+        // 下一轮 turn 注入 goal_gate_progress 约定却无法续跑）。
+        // 非空即提交：false 与「不传」在服务端语义相同（缺省 false），
+        // 但显式传 false 能表达「用户取消了勾选」这一意图。
+        if (autoStart != null) 'auto_start': autoStart,
       },
     );
     return Goal.fromJson(_sub(res, 'goal'));

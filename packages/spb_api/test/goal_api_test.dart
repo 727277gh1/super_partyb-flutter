@@ -126,6 +126,22 @@ void main() {
       expect(onlyBody()['tasks_source'], 'llm_expand');
     });
 
+    test('createGoal autoStart 只在非 null 时下发 auto_start（Go 040855fe）', () async {
+      nextStatus = 201;
+      nextBody = {'goal': <String, dynamic>{}};
+
+      await api.createGoal('grp_1', goalText: 'x');
+      expect(onlyBody().containsKey('auto_start'), isFalse);
+
+      await api.createGoal('grp_1', goalText: 'x', autoStart: true);
+      expect(bodies.last.contains('"auto_start":true'), isTrue);
+
+      await api.createGoal('grp_1', goalText: 'x', autoStart: false);
+      // 显式 false 也要发：服务端缺省同为 false，语义相同，但客户端
+      // 显式表达「用户取消了勾选」这个决定（非 null 即提交）。
+      expect(bodies.last.contains('"auto_start":false'), isTrue);
+    });
+
     test('listGoals → GET /chat/groups/:id/goals?limit=，解析 items', () async {
       nextBody = {
         'items': [

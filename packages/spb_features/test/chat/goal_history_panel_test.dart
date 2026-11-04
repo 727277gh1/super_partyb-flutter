@@ -46,6 +46,7 @@ void main() {
   late List<String> switched;
   late List<(String, GoalStatus)> statusChanges;
   late List<String> created;
+  late List<bool> createdAutoStart;
   SpbError? loadError;
 
   void useStubs({List<Goal>? initial, SpbError? error}) {
@@ -55,6 +56,7 @@ void main() {
     switched = [];
     statusChanges = [];
     created = [];
+    createdAutoStart = [];
   }
 
   Future<void> pumpPanel(
@@ -79,7 +81,12 @@ void main() {
             onSetStatus: wireSetStatus
                 ? (id, status) async => statusChanges.add((id, status))
                 : null,
-            onCreate: wireCreate ? (text) async => created.add(text) : null,
+            onCreate: wireCreate
+                ? (text, {autoStart = false}) async {
+                    created.add(text);
+                    createdAutoStart.add(autoStart);
+                  }
+                : null,
             currentGoalId: currentGoalId,
             busy: busy,
             reloadToken: reloadToken,
@@ -324,8 +331,47 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(created, ['把 CI 修绿并补上回归测试']);
+      // 未勾选时 autoStart 为 false（对话框默认不勾，见 _CreateGoalDialog）。
+      expect(createdAutoStart, [false]);
       // 新建会改变列表（新行 + 旧 active 被归档），必须回读。
       expect(loadCalls, 2, reason: '不回读会留下与真相不符的列表');
+    });
+
+    testWidgets('勾选「创建后自动推进」时回调收到 autoStart=true（Go 040855fe）', (tester) async {
+      useStubs(initial: [goal('goal_1')]);
+      await pumpPanel(tester, currentGoalId: 'goal_1', wireCreate: true);
+
+      await tester.tap(find.byKey(const ValueKey('goal-create')));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const ValueKey('goal-create-field')),
+        '自动推进的目标',
+      );
+      // 默认不勾：自动推进连续消耗轮次，不该由客户端默认替用户按下。
+      final box = tester.widget<CheckboxListTile>(
+        find.byKey(const ValueKey('goal-create-autostart')),
+      );
+      expect(box.value, isFalse);
+
+      await tester.tap(find.byKey(const ValueKey('goal-create-autostart')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<CheckboxListTile>(
+              find.byKey(const ValueKey('goal-create-autostart')),
+            )
+            .value,
+        isTrue,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('goal-create-submit')));
+      await tester.pumpAndSettle();
+
+      expect(created, ['自动推进的目标']);
+      expect(createdAutoStart, [true]);
+      // 两条既有用例（未勾选路径）在同一文件里由 createdAutoStart 记录，
+      // 这里只断言本用例自己的提交。
     });
 
     testWidgets('空文本时确定按钮禁用（服务端对空 goal_text 返回 400）', (tester) async {

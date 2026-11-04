@@ -1941,6 +1941,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                                             fileSummary: fileSummary,
                                           ),
                                     ),
+                                // 重新生成标题（Go 210db5f3）：重置后下一轮
+                                // turn 成功完成时 Title Gate 自动重新起名。
+                                // 走 GroupSettingsUseCase 写后回读权威 group
+                                //（标题回占位符立即反映到 AppBar）。
+                                onRegenerateTitle: () => _runSetting(
+                                  () => ref
+                                      .read(groupSettingsUseCaseProvider)
+                                      .regenerateTitle(widget.groupId),
+                                ),
                               ),
                       ),
                       ChatSidebarTab(
@@ -1979,16 +1988,20 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           //
                           // `tasksSource: manual` 必须显式传：它决定重新展开时能否
                           // 覆盖任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
-                          onCreate: (goalText) => _runGoalWrite(
-                            () => ref
-                                .read(goalApiProvider)
-                                .createGoal(
-                                  widget.groupId,
-                                  goalText: goalText,
-                                  tasksSource: GoalTasksSource.manual,
-                                ),
-                            requireGoal: false,
-                          ),
+                          // `autoStart` 来自新建对话框的「创建后自动推进」勾选
+                          //（Go 040855fe 的 auto_start，非 null 即提交）。
+                          onCreate: (goalText, {autoStart = false}) =>
+                              _runGoalWrite(
+                                () => ref
+                                    .read(goalApiProvider)
+                                    .createGoal(
+                                      widget.groupId,
+                                      goalText: goalText,
+                                      tasksSource: GoalTasksSource.manual,
+                                      autoStart: autoStart,
+                                    ),
+                                requireGoal: false,
+                              ),
                         ),
                       ),
                       ChatSidebarTab(
@@ -2078,11 +2091,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           load: () => ref
                               .read(autoSchedulesUseCaseProvider)
                               .load(widget.groupId),
-                          onStopAll: () async =>
-                              (await ref
-                                      .read(autoSchedulesUseCaseProvider)
-                                      .stopAll(widget.groupId))
-                                  .items,
+                          onStopAll: () => ref
+                              .read(autoSchedulesUseCaseProvider)
+                              .stopAll(widget.groupId),
                           // tab 标签已命名「续跑」，不重复面板标题。
                           showHeader: false,
                           // 切对话时重拉（Flutter 会复用面板 State）。
