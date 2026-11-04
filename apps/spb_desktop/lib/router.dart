@@ -444,7 +444,11 @@ class _PendingConfirmationsPage extends ConsumerStatefulWidget {
 
 class _PendingConfirmationsPageState
     extends ConsumerState<_PendingConfirmationsPage> {
-  final _titles = <String, String>{};
+  /// groupId → title 缓存（有界，docs/memory-audit.md G3）。
+  ///
+  /// 预取循环只查缺的、不重复查（[GroupTitleCache.contains]）；淘汰只导致
+  /// 下次预取重新拉取一次标题，无行为风险。
+  final _titles = GroupTitleCache();
 
   @override
   Widget build(BuildContext context) {
@@ -455,10 +459,10 @@ class _PendingConfirmationsPageState
         // 预取涉及的 group 标题（缺失则静默，卡片展示「未知对话」）。
         await Future.wait(
           items.map((c) async {
-            if (_titles.containsKey(c.groupId)) return;
+            if (_titles.contains(c.groupId)) return;
             try {
               final g = await api.getGroup(c.groupId);
-              _titles[c.groupId] = g.title;
+              _titles.remember(c.groupId, g.title);
             } on Object catch (e) {
               // 拉取失败不阻断列表渲染（卡片展示「未知对话」）。
               //
@@ -483,7 +487,7 @@ class _PendingConfirmationsPageState
         ref.invalidate(pendingConfirmationsProvider);
         return items;
       },
-      groupTitleOf: (gid) => _titles[gid],
+      groupTitleOf: (gid) => _titles.titleOf(gid),
       onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
       onResolve: (c, action) async {
         await api.resolveConfirmation(c.groupId, c.id, action: action);
@@ -579,7 +583,8 @@ class _HabitsPage extends ConsumerStatefulWidget {
 
 class _HabitsPageState extends ConsumerState<_HabitsPage> {
   /// groupId → title 缓存（`/api/habits/runs` 只给 id，标题要自己查）。
-  final _titles = <String, String>{};
+  /// 有界（[GroupTitleCache]，docs/memory-audit.md G3）。
+  final _titles = GroupTitleCache();
 
   @override
   Widget build(BuildContext context) {
@@ -600,10 +605,10 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
         await Future.wait(
           runs.map((r) async {
             final gid = r.deliveryGroupId ?? r.originGroupId;
-            if (gid.isEmpty || _titles.containsKey(gid)) return;
+            if (gid.isEmpty || _titles.contains(gid)) return;
             try {
               final g = await ref.read(chatApiProvider).getGroup(gid);
-              _titles[gid] = g.title;
+              _titles.remember(gid, g.title);
             } on Object catch (e) {
               // 标题查不到不该让整个列表失败（展示「未知对话」）。
               SpbLog.debug('运行记录预取对话标题失败', {
@@ -615,7 +620,7 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
         );
         return result;
       },
-      groupTitleOf: (gid) => _titles[gid],
+      groupTitleOf: (gid) => _titles.titleOf(gid),
       // 写操作统一走 `HabitApi`。异常由 `HabitsPage` 接住并翻成提示
       // （409 → 「状态已变化」），故这里不做 try/catch。
       onTrigger: (h) => api.triggerHabit(h.id),

@@ -279,6 +279,108 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   });
+
+  group('待确认页标题缓存（docs/memory-audit.md G3）', () {
+    // _titles 从裸 Map 换成有界的 GroupTitleCache 后，取值语义不变：
+    // 预取拉到标题则展示、miss 则「未知对话」。本用例从 router 层
+    // 端到端断言「预取真的发生且标题真的展示」（漏接 titleOf / 写错
+    // remember 时的唯一防线——wiring 守卫不覆盖 providers/router 内部）。
+    testWidgets('预取标题后卡片展示对话名（缓存命中 → 同步查询）', (tester) async {
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.confirmations,
+        mockGroups: false,
+        mockPendingConfirmations: false,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/confirmations',
+            (server) => server.reply(200, {
+              'items': [
+                {
+                  'id': 'conf_t1',
+                  'turn_id': 'turn_t1',
+                  'group_id': 'grp_title',
+                  'user_id': 'usr_1',
+                  'kind': 'continue_suggestion',
+                  'status': 'pending',
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'decision': {
+                    'decision': 'need_confirmation',
+                    'reason': '标题缓存用例',
+                  },
+                },
+              ],
+            }),
+            queryParameters: {'status': 'pending', 'limit': 50},
+          );
+          adapter.onGet(
+            '/chat/groups/grp_title',
+            (server) => server.reply(200, {
+              'id': 'grp_title',
+              'user_id': 'usr_1',
+              'title': '有界缓存对话',
+            }),
+          );
+        },
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(
+        find.text('有界缓存对话'),
+        findsOneWidget,
+        reason: '预取到的标题必须经 GroupTitleCache 同步查询并展示',
+      );
+      expect(find.text('标题缓存用例'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('getGroup 失败时卡片降级为「未知对话」（预取静默）', (tester) async {
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.confirmations,
+        mockGroups: false,
+        mockPendingConfirmations: false,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/chat/confirmations',
+            (server) => server.reply(200, {
+              'items': [
+                {
+                  'id': 'conf_t2',
+                  'turn_id': 'turn_t2',
+                  'group_id': 'grp_missing',
+                  'user_id': 'usr_1',
+                  'kind': 'continue_suggestion',
+                  'status': 'pending',
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'decision': {
+                    'decision': 'need_confirmation',
+                    'reason': '降级用例',
+                  },
+                },
+              ],
+            }),
+            queryParameters: {'status': 'pending', 'limit': 50},
+          );
+          // 不 mock /chat/groups/grp_missing → 预取失败 → cache miss。
+        },
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(
+        find.text('未知对话'),
+        findsOneWidget,
+        reason: 'cache miss → titleOf 返回 null → 卡片展示占位（不崩）',
+      );
+      expect(tester.takeException(), isNull);
+    });
+  });
   group('导入会话（粘贴凭证 → 落盘 → 请求带 Bearer）', () {
     testWidgets('导入合法会话后状态变为已登录', (tester) async {
       // 移动端登录闭环的唯一入口：IdP 未注册 `partyb://oidc/callback`

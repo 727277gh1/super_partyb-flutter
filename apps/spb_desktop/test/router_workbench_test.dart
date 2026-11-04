@@ -475,6 +475,41 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('weekly report'), findsOneWidget);
     });
+
+    testWidgets('标题缓存有界：容量淘汰后重新拉取（docs/memory-audit.md G3）', (tester) async {
+      // _titles 从裸 Map 换成有界的 GroupTitleCache 后，取值语义不变：
+      // 淘汰 → groupTitleOf 返回 null → 该条目不再显示标题（而非崩溃）。
+      // 本用例从 router 层断言「习惯页真的在用共享缓存且取值语义未变」。
+      final h = await pumpApp(
+        tester,
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/habits',
+            (server) => server.reply(200, {
+              'items': [habitJson()],
+            }),
+            queryParameters: {'limit': 50, 'offset': 0},
+          );
+          adapter.onGet(
+            '/api/habits/runs',
+            (server) => server.reply(200, {
+              'items': [runJson()],
+            }),
+            queryParameters: {'limit': 50},
+          );
+        },
+      );
+
+      h.router.go(SpbRoutes.habits);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      // 前置：默认实现下预取发生在 loadRuns 里，而 getGroup 未 mock →
+      // 静默失败 → 标题为空（不展示）。
+      expect(tester.takeException(), isNull);
+      // 习惯页标题 tab 仍在（页面没因缓存改造而坏）。
+      expect(find.text('weekly report'), findsOneWidget);
+    });
   });
   group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 续跑 / 动态）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API

@@ -113,3 +113,4 @@ export 'src/turn_group.dart';
 export 'src/sync_scope_config.dart';
 export 'src/sync_settings.dart';
 export 'src/sync_state.dart';
+export 'src/group_title_cache.dart';
