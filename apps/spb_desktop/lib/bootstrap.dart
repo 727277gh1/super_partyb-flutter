@@ -421,13 +421,19 @@ class PlatformDesktopCapabilities
   }
 
   void _onHotkeyPressed(String id) {
-    SpbLog.debug('全局快捷键触发', {'id': id});
+    // ## 为什么是 info 而不是 debug
+    //
+    // `SpbLog` 默认 `minLevel = info`，debug 在生产**被过滤**。
+    // 「按 Alt+Space 没反应 / 窗口卡住」这类报障的第一问就是「快捷键到底
+    // 有没有触发」——若这条是 debug，诊断日志与文件日志里都看不到它
+    // （AGENTS.md §6.43 的同一教训）。快捷键是低频操作，info 不会刷屏。
+    SpbLog.info('全局快捷键触发', {'id': id});
     switch (id) {
       case 'quickCapture':
         // 悬浮输入窗：显示并聚焦，用户即可直接打字。
         showWindow(WindowRole.quickCapture);
       default:
-        SpbLog.debug('未绑定的快捷键 id', {'id': id});
+        SpbLog.warn('未绑定的快捷键 id', {'id': id});
     }
   }
 
@@ -850,14 +856,42 @@ class PlatformDesktopCapabilities
   bool _preOverlaySkipTaskbar = false;
   bool _preOverlayResizable = true;
 
+  /// 本轮**已成功执行**的改写步骤（失败时据此逆序回滚）。
+  ///
+  /// ## 为什么必须记下来，而不是「回滚时全部重设一遍」
+  ///
+  /// 全量重设会把**还没改过的**属性也写一遍（`setAlwaysOnTop(false)` 对一个
+  /// 本来就没置顶的窗口是空操作，但 `setResizable(true)` 对一个用户手动设为
+  /// 不可缩放的窗口就是篡改）。只回滚真正改过的，才叫「撤销」。
+  final List<OverlayWindowAttribute> _overlayApplied = [];
+
+  /// 当前正在执行的步骤（失败日志用：`failed_step`）。
+  OverlayWindowAttribute? _overlayStep;
+
   @override
   Future<bool> enterOverlayMode(WindowSpec spec) async {
     // 幂等：已在悬浮模式时不重复保存（否则会把悬浮态当成「原状态」，
     // 退出时还原成小窗口，用户再也回不到主界面尺寸）。
     if (_preOverlayBounds != null) return true;
 
+    _overlayApplied.clear();
+    _overlayStep = null;
+
     try {
+      // ---- 阶段 1：快照（只读，失败则窗口并未被改动）----
       final bounds = await windowManager.getBounds();
+      _preOverlayAlwaysOnTop = await windowManager.isAlwaysOnTop();
+      _preOverlaySkipTaskbar = await windowManager.isSkipTaskbar();
+      _preOverlayResizable = await windowManager.isResizable();
+      // ## 为什么最小尺寸不做快照
+      //
+      // `window_manager` 0.5.2 **没有 `getMinimumSize()`**（只有 setter），
+      // 故「调用那一刻的最小尺寸」取不到。回滚时退回
+      // `WindowSpec.main.minWidth/minHeight`——那正是启动时由本类设置的唯一
+      // 来源，因此实践上等价（除非将来有人加入运行期改最小尺寸的功能，那时
+      // 得把值自己记在字段里）。
+      // 快照完整之后才置位：`isOverlayModeActive` 的判据必须等价于
+      // 「有可用的快照」（见该 getter 的文档）。
       _preOverlayBounds = WindowGeometry(
         role: WindowRole.main,
         x: bounds.left,
@@ -865,37 +899,165 @@ class PlatformDesktopCapabilities
         width: bounds.width,
         height: bounds.height,
       );
-      _preOverlayAlwaysOnTop = await windowManager.isAlwaysOnTop();
-      _preOverlaySkipTaskbar = await windowManager.isSkipTaskbar();
-      _preOverlayResizable = await windowManager.isResizable();
 
+      // ---- 阶段 2：改写（逐步记账，失败可逆序回滚）----
+      //
       // 顺序：先放宽最小尺寸，否则 setSize 会被旧的 min 钳住。
       // 主窗口 min 是 860×600，而悬浮窗只有 720×360——不先放宽就永远设不小。
-      await windowManager.setMinimumSize(const Size(1, 1));
-      await windowManager.setSize(Size(spec.width, spec.height));
-      await windowManager.setResizable(spec.resizable);
-      await windowManager.setAlwaysOnTop(spec.alwaysOnTop);
-      await windowManager.setSkipTaskbar(spec.skipTaskbar);
+      await _applyOverlayStep(
+        OverlayWindowAttribute.minimumSize,
+        () => windowManager.setMinimumSize(const Size(1, 1)),
+      );
+      await _applyOverlayStep(
+        OverlayWindowAttribute.size,
+        () => windowManager.setSize(Size(spec.width, spec.height)),
+      );
+      await _applyOverlayStep(
+        OverlayWindowAttribute.resizable,
+        () => windowManager.setResizable(spec.resizable),
+      );
+      await _applyOverlayStep(
+        OverlayWindowAttribute.alwaysOnTop,
+        () => windowManager.setAlwaysOnTop(spec.alwaysOnTop),
+      );
+      await _applyOverlayStep(
+        OverlayWindowAttribute.skipTaskbar,
+        () => windowManager.setSkipTaskbar(spec.skipTaskbar),
+      );
 
       // 定位到鼠标所在显示器（多屏场景），失败则居中。
       final geometry = await computeQuickCaptureGeometry(spec);
-      if (geometry != null) {
-        await windowManager.setPosition(Offset(geometry.x, geometry.y));
-      } else {
-        await windowManager.center();
-      }
+      await _applyOverlayStep(OverlayWindowAttribute.position, () async {
+        if (geometry != null) {
+          await windowManager.setPosition(Offset(geometry.x, geometry.y));
+        } else {
+          await windowManager.center();
+        }
+      });
 
-      await windowManager.show();
-      await windowManager.focus();
+      // show/focus 不需要还原旧值（见 OverlayWindowAttribute.visibility），
+      // 但仍要记入 `_overlayApplied`，否则日志里的「已执行步骤」会漏掉它们。
+      await _applyOverlayStep(OverlayWindowAttribute.visibility, () async {
+        await windowManager.show();
+        await windowManager.focus();
+      });
+
+      _overlayStep = null;
       SpbLog.info('进入悬浮输入窗模式', {
         'size': '${spec.width.toInt()}x${spec.height.toInt()}',
+        'steps': _overlayApplied.map((a) => a.name).join(','),
       });
       return true;
-    } catch (e) {
-      // 失败时清掉快照，避免 exitOverlayMode 用一个不完整的快照去还原。
-      _preOverlayBounds = null;
-      SpbLog.warn('进入悬浮输入窗模式失败', {'error': '$e'});
+    } catch (e, st) {
+      // ## 为什么必须回滚（而不是只清快照）
+      //
+      // 只清快照会让已生效的改动**残留**：窗口已是 720×360、置顶、且从任务栏
+      // 消失，而 `isOverlayModeActive == false` 又让所有 `exitOverlayMode()`
+      // 变成空操作（它开头就 `if (bounds == null) return`）。用户看到的就是
+      // 「一个卡住的小窗，然后应用像是退出了」——而进程还活着。
+      final failedStep = _overlayStep?.name ?? 'snapshot';
+      SpbLog.warn('进入悬浮输入窗模式失败，开始回滚', {
+        'failed_step': failedStep,
+        'applied': _overlayApplied.map((a) => a.name).join(','),
+      });
+      await _rollbackOverlay();
+      SpbLog.error(
+        '进入悬浮输入窗模式失败（已尝试回滚窗口属性）',
+        error: e,
+        stackTrace: st,
+        fields: {
+          'failed_step': failedStep,
+          'size': '${spec.width.toInt()}x${spec.height.toInt()}',
+        },
+      );
       return false;
+    }
+  }
+
+  /// 执行一步改写并记账。抛异常时该步**不会**进入 [_overlayApplied]
+  /// （它没成功，不该被回滚），但 [_overlayStep] 会留下失败步名。
+  Future<void> _applyOverlayStep(
+    OverlayWindowAttribute attribute,
+    Future<void> Function() op,
+  ) async {
+    _overlayStep = attribute;
+    await op();
+    _overlayApplied.add(attribute);
+  }
+
+  /// 按 [overlayRollbackOrder] 逆序尽力回滚。
+  ///
+  /// ## 为什么「尽力」而不是「失败就抛」
+  ///
+  /// 回滚发生在**已经出错**的路径上：抛出只会把「窗口没回滚」变成「连原异常
+  /// 都丢了」。逐步 try/catch + 汇总记录，保证「能回滚的都回滚了」，且日志里
+  /// 留下**具体哪一步没回滚**（用户报障时这是关键线索）。
+  Future<void> _rollbackOverlay() async {
+    final bounds = _preOverlayBounds;
+    final plan = overlayRollbackOrder(_overlayApplied);
+    final failed = <String>[];
+
+    for (final attribute in plan) {
+      try {
+        switch (attribute) {
+          case OverlayWindowAttribute.minimumSize:
+            await windowManager.setMinimumSize(
+              Size(WindowSpec.main.minWidth, WindowSpec.main.minHeight),
+            );
+          case OverlayWindowAttribute.size:
+            // 没有快照就无法还原尺寸：此时窗口可能仍是悬浮尺寸，但至少
+            // 置顶/任务栏属性会被后面的步骤还原（下面还会 show + focus）。
+            if (bounds != null) {
+              await windowManager.setSize(Size(bounds.width, bounds.height));
+            }
+          case OverlayWindowAttribute.resizable:
+            await windowManager.setResizable(_preOverlayResizable);
+          case OverlayWindowAttribute.alwaysOnTop:
+            await windowManager.setAlwaysOnTop(_preOverlayAlwaysOnTop);
+          case OverlayWindowAttribute.skipTaskbar:
+            await windowManager.setSkipTaskbar(_preOverlaySkipTaskbar);
+          case OverlayWindowAttribute.position:
+            if (bounds != null) {
+              await windowManager.setPosition(Offset(bounds.x, bounds.y));
+            }
+          case OverlayWindowAttribute.visibility:
+            // overlayRollbackOrder 已剔除；分支保留仅为穷尽 switch。
+            break;
+        }
+      } catch (e, st) {
+        failed.add(attribute.name);
+        SpbLog.error(
+          '回滚悬浮窗属性失败',
+          error: e,
+          stackTrace: st,
+          fields: {'attribute': attribute.name},
+        );
+      }
+    }
+
+    // 回滚后无条件显示一次：失败路径上窗口可能停在「已隐藏 / 无任务栏图标」
+    // 的状态，而那是用户**唯一**能找回应用的入口。
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (e) {
+      SpbLog.warn('回滚后显示窗口失败', {'error': '$e'});
+    }
+
+    _overlayApplied.clear();
+    _overlayStep = null;
+    _preOverlayBounds = null;
+
+    if (failed.isEmpty) {
+      SpbLog.info('悬浮窗属性已回滚', {'steps': plan.map((a) => a.name).join(',')});
+    } else {
+      SpbLog.error(
+        '悬浮窗属性回滚不完整',
+        fields: {
+          'failed': failed.join(','),
+          'rolled_back': plan.length - failed.length,
+        },
+      );
     }
   }
 
@@ -908,6 +1070,8 @@ class PlatformDesktopCapabilities
     if (bounds == null) return; // 未进入过：空操作（可能被重复调用）。
 
     _preOverlayBounds = null;
+    _overlayApplied.clear();
+    _overlayStep = null;
     try {
       await windowManager.setAlwaysOnTop(_preOverlayAlwaysOnTop);
       await windowManager.setSkipTaskbar(_preOverlaySkipTaskbar);
@@ -922,8 +1086,17 @@ class PlatformDesktopCapabilities
       await windowManager.show();
       await windowManager.focus();
       SpbLog.info('退出悬浮输入窗模式');
-    } catch (e) {
-      SpbLog.warn('退出悬浮输入窗模式失败', {'error': '$e'});
+    } catch (e, st) {
+      // 用 error 级 + 带栈：还原失败意味着窗口会**停在悬浮形态**（小窗、
+      // 置顶、不在任务栏），是用户可见故障，且它发生在一次正常操作后
+      // ——不该埋在一条 warn 里。
+      SpbLog.error('退出悬浮输入窗模式失败', error: e, stackTrace: st);
+      // 尽力把窗口显示出来：哪怕尺寸不对，用户至少能看见它。
+      try {
+        await windowManager.show();
+      } catch (_) {
+        // 不掩盖上面的根因（已在上一条 error 日志里）。
+      }
     }
   }
 
@@ -940,6 +1113,12 @@ class PlatformDesktopCapabilities
   @override
   Future<void> quit() async {
     SpbLog.info('用户请求退出应用');
+    // 会话正常退出标记：**必须在这次会话的所有业务日志之后**。下次启动时
+    // `previousSessionExitedCleanly` 从末尾往前找边界标记，故它之后若还有
+    // debug 级收尾日志（如 `dispose()` 里的托盘销毁失败）不影响判定，但
+    // **不得**再写 info 及以上的业务日志——那会让「退出」看起来像中途。
+    // 详见 logSessionCleanExitMessage 的文档。
+    SpbLog.info(logSessionCleanExitMessage);
     await dispose();
     await windowManager.destroy();
   }

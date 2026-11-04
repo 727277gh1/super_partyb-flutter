@@ -1171,7 +1171,7 @@ final preferencesStoreProvider = Provider<PreferencesStore>((ref) {
   return PreferencesStore(ref.watch(appDatabaseProvider));
 });
 
-/// 当前同步目录（从数据库绑定读取）。
+/// 当前同步目录（从数据库绑定读取，**未绑定时回落到默认目录**）。
 ///
 /// ## 为什么目录绑定要单独读（而不是放偏好表）
 ///
@@ -1179,10 +1179,83 @@ final preferencesStoreProvider = Provider<PreferencesStore>((ref) {
 /// 完成（见 `DriftSyncStateStore.bindLocalRoot`）。若目录存在偏好表、状态存在
 /// 状态表，就会出现「目录已改、状态没清」的中间态——表现为「换目录后同步
 /// 显示成功，但新目录是空的」。
+///
+/// ## 为什么要有默认值（`effectiveSyncLocalRoot` 的分工）
+///
+/// 此前 null = 「尚未选择，不能同步」——于是首次启动的用户必须先进设置页选
+/// 目录，否则托盘「立即同步」是禁用的、进对话的按需同步被 `canSync` 跳过。
+/// 用户报障原话是「同步目录如果没选的话给个默认设置」。判据见
+/// `spb_domain` 的 `defaultSyncLocalRoot`（优先 `~/Documents/Super PartyB`，
+/// 不可用时落到应用数据目录）。
 final syncLocalRootProvider = FutureProvider<String?>((ref) async {
-  final db = ref.watch(appDatabaseProvider);
-  return DriftSyncStateStore(db).boundLocalRoot();
+  final store = ref.watch(syncStateStoreProvider);
+  return effectiveSyncLocalRoot(store);
 });
+
+/// 有效的同步目录 = 用户绑定过的目录 ?? **默认目录**。
+///
+/// ## 为什么两处读点必须共用本函数
+///
+/// 两个读点：[syncLocalRootProvider]（托盘/门控/自动同步）与
+/// [loadSyncSettingsProvider]（设置页表单）。若只在一处加默认值，就会出现
+/// 「托盘认为未配置（按钮置灰）但设置页显示了一个目录」——用户看得见却用不了。
+/// 这与 AGENTS.md §6.17 的接线漂移同一取向：同一份判断不该抄两遍。
+///
+/// ## 为什么默认目录要顺手建出来
+///
+/// - 「打开同步目录」托盘项会 `revealPath`——目录不存在时它返回 false，
+///   表现成「点了没反应」（§6.41 的同一症状）；
+/// - 同步引擎写文件时会自己建父目录，但用户点开资源管理器时不该看到「空目录
+///   都不存在」的困惑。
+///
+/// 创建失败**不算错**：同步时会再试一次（`LocalFileSink` 也会建），这里只记
+/// 一条 warn 留证据。
+Future<String?> effectiveSyncLocalRoot(DriftSyncStateStore store) async {
+  final bound = await store.boundLocalRoot();
+  if (bound != null && bound.trim().isNotEmpty) return bound;
+
+  final root = defaultSyncLocalRoot(
+    environment: Platform.environment,
+    isWindows: HostPlatform.current() == HostPlatform.windows,
+    documentsExists: _documentsDirectoryExists(),
+  );
+  if (root == null) {
+    // 连 home 都拿不到（极端沙箱）：保持「未配置」语义，设置页会提示选目录。
+    SpbLog.warn('无法推导默认同步目录（无 HOME/USERPROFILE），请手动选择');
+    return null;
+  }
+
+  try {
+    final dir = Directory(root);
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+  } catch (e) {
+    // 目录建不出来不代表目录本身不可用（例如只读挂载点、稍后由同步引擎
+    // 以其它路径写入）；不让它阻断设置页与门控。
+    SpbLog.warn('创建默认同步目录失败', {'root': root, 'error': '$e'});
+  }
+  SpbLog.info('使用默认同步目录', {'root': root});
+  return root;
+}
+
+/// `<home>/Documents` 是否存在（`defaultSyncLocalRoot` 的输入之一）。
+///
+/// 只看这一层，不拼接产品名：`Super PartyB` 子目录会在
+/// [effectiveSyncLocalRoot] 里按需创建。
+bool _documentsDirectoryExists() {
+  final env = Platform.environment;
+  final home =
+      (HostPlatform.current() == HostPlatform.windows
+              ? env['USERPROFILE']
+              : env['HOME'])
+          ?.trim();
+  if (home == null || home.isEmpty) return false;
+  try {
+    return Directory('$home/Documents').existsSync();
+  } catch (_) {
+    // 权限异常等：当作不存在，回落到应用数据目录。
+    return false;
+  }
+}
 
 /// 目录选择器（平台能力）。
 ///
@@ -1775,7 +1848,7 @@ final loadSyncSettingsProvider = Provider<LoadSyncSettings>((ref) {
     final prefs = ref.read(preferencesStoreProvider);
 
     return SyncSettings(
-      localRoot: await store.boundLocalRoot(),
+      localRoot: await effectiveSyncLocalRoot(store),
       scope: SyncScopeConfig.decode(await prefs.getString(scopePrefKey)),
       filter: SyncFilterConfig(
         includeMedia: await prefs.getBool(

@@ -27,6 +27,17 @@ import 'providers.dart';
 /// `installGlobalErrorHandlers` 内部装的是 [FlutterError.onError]、
 /// [PlatformDispatcher.instance.onError] 与 `runZonedGuarded` 三道防线
 /// （实现与理由见 `spb_platform/lib/src/global_error_handler.dart`）。
+///
+/// ## 日志去向（控制台 + 本地文件）
+///
+/// 进程从桌面启动器/双击拉起时 stdout **无处可去**，而「导出诊断日志」需要
+/// 应用还活着、用户能进设置页。故除控制台外再追加一份文件日志
+/// （[FileLogSink]，路径见 [defaultLogFilePath]）。
+///
+/// 同时写一对会话标记（[logSessionStartMessage] / [logSessionCleanExitMessage]）：
+/// 下次启动时若日志末尾没有正常退出标记，就说明上次是崩溃 / 被杀 / 掉电
+/// ——在「崩溃上报」有意不做（AGENTS.md §6.20 第 2 层）的前提下，这是能区分
+/// 「崩了」与「被关了」的最低成本手段。
 void main() {
   installGlobalErrorHandlers(() async {
     // ensureInitialized 的静态返回类型是 WidgetsBinding，实际实例是
@@ -35,10 +46,7 @@ void main() {
     final binding =
         WidgetsFlutterBinding.ensureInitialized() as WidgetsFlutterBinding;
 
-    SpbLog.configure(
-      sink: const ConsoleLogSink(),
-      minLevel: SpbEnv.verboseLogging ? LogLevel.debug : LogLevel.info,
-    );
+    _configureLogging();
     SpbLog.info('启动 Super PartyB 桌面端', {
       'env': SpbEnv.environment,
       // 读解析后的基地址：启动探测可能已升级到 IPv6 源站域名。
@@ -91,7 +99,7 @@ void main() {
         overrides: [
           desktopCapabilitiesProvider.overrideWithValue(capabilities),
           // 拖拽能力仅在桌面端真实可用：移动端保留 Provider 默认的
-          // NoopDragDropCapability（见 providers.dart），UI 只需判 isSupported。
+          // NoopDragDropCapability（见 providers.dart），UI 只需判 supports。
           dragDropCapabilityProvider.overrideWithValue(
             const DesktopDragDropCapability(),
           ),
@@ -100,4 +108,55 @@ void main() {
       ),
     );
   });
+}
+
+/// 装配日志 sink：控制台 + **本地文件**（后者是「进程死了就没证据」的补偿）。
+///
+/// ## 为什么要先读上次会话状态，再写启动标记
+///
+/// 顺序写反就永远等于「上次正常退出」：先写 [logSessionStartMessage] 会把
+/// 「日志最后一行」变成启动标记，于是 [previousSessionExitedCleanly] 永远
+/// 只能看到它、看不到上一次会话的退出标记。故：
+///
+/// 1. 读（上次最后一行是干净的退出标记吗？）；
+/// 2. 装 sink；
+/// 3. 写启动标记（并把上一轮的结论一并记下）；
+/// 4. 若上一轮不干净，补一条 `warn`（不带它，用户永远不会知道）。
+///
+/// ## 为什么文件日志不可用时只降级、不抛
+///
+/// 日志是旁路：磁盘满 / 目录只读 / 沙箱拒绝都不能让应用起不来。
+/// `FileLogSink` 自身在首次写入失败后会停用（不重试刷屏），这里补一条
+/// `warn` 把原因留在控制台上；用户报障时我们仍能从会话标记看出「日志不全」。
+void _configureLogging() {
+  const minLevel = SpbEnv.verboseLogging ? LogLevel.debug : LogLevel.info;
+  final path = defaultLogFilePath();
+  if (path == null) {
+    // 拿不到 HOME / APPDATA：只输出到控制台（与既有行为一致）。
+    SpbLog.configure(sink: const ConsoleLogSink(), minLevel: minLevel);
+    return;
+  }
+
+  final previousClean = previousSessionExitedCleanly(path);
+  final fileSink = FileLogSink(path: path);
+  SpbLog.configure(
+    sink: MultiLogSink([const ConsoleLogSink(), fileSink]),
+    minLevel: minLevel,
+  );
+
+  SpbLog.info(logSessionStartMessage, {
+    'log': path,
+    // null = 首次运行 / 刚轮转（不可判为异常，见函数文档）。
+    'previous_clean': previousClean ?? '(未知)',
+  });
+
+  if (previousClean == false) {
+    SpbLog.warn('上次会话未正常退出（无退出标记：崩溃 / 被结束进程 / 掉电）', {'log': path});
+  }
+  if (fileSink.isDisabled) {
+    SpbLog.warn('本地文件日志不可写，仅输出到控制台', {
+      'log': path,
+      'error': '${fileSink.lastError}',
+    });
+  }
 }

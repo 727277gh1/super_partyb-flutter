@@ -170,7 +170,12 @@ class DesktopIntegration {
       await _exitOverlayWindow();
     }
 
-    SpbLog.debug('桌面能力触发导航', {'role': role.name, 'path': target});
+    // ## 为什么是 info
+    //
+    // 与 `_onHotkeyPressed` 同一取向：`minLevel` 默认 info，debug 在生产被
+    // 过滤。而「按了快捷键、窗口变了形、但页面没换」这种报障，第一步就要
+    // 看「导航有没有发生、去了哪里」。导航是低频操作，不会刷屏。
+    SpbLog.info('桌面能力触发导航', {'role': role.name, 'path': target});
     _router.go(target);
   }
 
@@ -202,7 +207,16 @@ class DesktopIntegration {
     final ok = await overlay.enterOverlayMode(
       WindowSpec.quickCaptureWithAttachments,
     );
-    if (!ok) SpbLog.warn('悬浮窗形态切换失败，窗口可能未置顶');
+    if (!ok) {
+      // 失败时实现方已**回滚**窗口属性（见 `enterOverlayMode`），故这里
+      // 只剩下「没有悬浮效果」。仍继续导航：页面本身可以输入，用户至少
+      // 有反应（既有行为，见 desktop_integration_test 的用例）。
+      //
+      // 但 `isOverlayModeActive == false` 意味着后续 `leaveOverlay()` /
+      // `_exitOverlayWindow()` 都是空操作——那是**对的**（窗口没被改过，
+      // 没什么可还原），这正是回滚修复的意义。
+      SpbLog.warn('悬浮窗形态切换失败（窗口属性已回滚），仅导航到悬浮输入页');
+    }
   }
 
   Future<void> _exitOverlayWindow() async {
