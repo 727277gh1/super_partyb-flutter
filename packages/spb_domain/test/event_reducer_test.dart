@@ -595,6 +595,68 @@ void main() {
       expect(r.items, hasLength(2));
     });
 
+    test('同 call_id 但不同 turn 不合并（两个 turn 撞名不得串行）', () {
+      // call_id 的唯一性只由产生它的执行器会话保证；两个 turn 撞名时
+      // （如重试重放、或调用方复用简单命名），按裸 id 合并会把第二个
+      // turn 的调用并进第一个 turn 的行——第二个 turn 整行消失。
+      // 键必须含 turnId。webapp 的 collectToolCalls 同样按 turn 内去重。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'c0', 'name': 'tool_0'},
+          turnId: 'turn_1',
+          id: 't1_tc0',
+        ),
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'c0', 'name': 'tool_0'},
+          turnId: 'turn_2',
+          id: 't2_tc0',
+          globalSeq: 2,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2), reason: '不同 turn 的同名 call 各自成行');
+      expect((r.items[0] as ToolCallItem).turnId, 'turn_1');
+      expect((r.items[1] as ToolCallItem).turnId, 'turn_2');
+    });
+
+    test('tool_result 按 turnId + call_id 回填，不串到别 turn 的同 id 调用', () {
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'c0', 'name': 'a'},
+          turnId: 'turn_1',
+          id: 't1_tc0',
+        ),
+        ev(
+          EventTypes.toolCall,
+          payload: {'id': 'c0', 'name': 'a'},
+          turnId: 'turn_2',
+          id: 't2_tc0',
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.toolResult,
+          payload: {'id': 'c0', 'output': 'r2'},
+          turnId: 'turn_2',
+          id: 't2_tr0',
+          globalSeq: 3,
+        ),
+        ev(
+          EventTypes.toolResult,
+          payload: {'id': 'c0', 'output': 'r1'},
+          turnId: 'turn_1',
+          id: 't1_tr0',
+          globalSeq: 4,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2));
+      expect((r.items[0] as ToolCallItem).output, 'r1');
+      expect((r.items[1] as ToolCallItem).output, 'r2');
+    });
+
     test('无 tool_call_id 的 tool_call 不合并（旧行为：独立成行）', () {
       // 无法关联调用者，合并会张冠李戴；保持旧路径。
       final r = EventReducer.reduce([

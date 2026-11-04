@@ -129,7 +129,14 @@ class EventReducer {
     int? currentAssistantIdx;
     int? currentThoughtIdx;
 
-    // tool_call_id → items 中的索引，用于把 tool_result 合并回对应的 call。
+    // turnId + call_id → items 中的索引，用于把 tool_result 合并回对应的 call。
+    //
+    // ⚠️ 键必须含 turnId：call_id 的唯一性由**产生它的会话**保证（pigo 每
+    // 次 run 自产），同一 group 的不同 turn 若复用了同一执行器会话之外的路
+    // 径（如重试重放、历史回填边界），理论上可能撞名——按裸 call_id 合并
+    // 会把第二个 turn 的调用并进第一个 turn 的行（实测：测试夹具里两个
+    // turn 复用 c0/c1/c2 就复现了）。同 turn 内 call_id 重复则仍合并
+    // （见 toolCall 分支的长注释）。
     final toolIdxById = <String, int>{};
 
     // 收到过终态事件（`done` / `error`）的 turn 集合。
@@ -389,15 +396,15 @@ class EventReducer {
           //      无参数——Go 注释自称「补充执行开始状态，供调试/实时消费者使用」
           //      （`c8041a65` 引入，webapp 用 `dedupeToolCallsById` 按 id 合并）。
           //
-          // 若当新行处理：②会再开一行且**覆盖** `toolIdxById[callId]`，
+          // 若当新行处理：②会再开一行且**覆盖**索引，
           // `tool_result` 只回填到②——①永远停在无结果态、②只有名字没参数，
           // 用户看到的就是「两个气泡，一个有数据一个没数据」（2026-11 生产实测）。
-          // 故按 callId 合并：已见过的 id 就地更新（补参数 / 保留首见信息），
-          // 不新开行。无 id 的事件无法关联，保持旧行为（独立成行）。
-          final callId = ev.toolCallId ?? ev.eventId;
-          final existingToolIdx = ev.toolCallId == null
+          // 故按 (turnId, callId) 合并：已见过的键就地更新（补参数 / 保留首见
+          // 信息），不新开行。无 id 的事件无法关联，保持旧行为（独立成行）。
+          final callKey = ev.toolCallId == null
               ? null
-              : toolIdxById[ev.toolCallId!];
+              : '${ev.turnId}\x1f${ev.toolCallId!}';
+          final existingToolIdx = callKey == null ? null : toolIdxById[callKey];
           if (existingToolIdx != null &&
               existingToolIdx < items.length &&
               items[existingToolIdx] is ToolCallItem) {
@@ -413,7 +420,7 @@ class EventReducer {
             );
             break;
           }
-          toolIdxById[callId] = items.length;
+          if (callKey != null) toolIdxById[callKey] = items.length;
           items.add(
             ToolCallItem(
               id: ev.eventId,
@@ -426,8 +433,11 @@ class EventReducer {
           );
 
         case EventTypes.toolResult:
-          final callId = ev.toolCallId;
-          final idx = callId == null ? null : toolIdxById[callId];
+          // 与 toolCall 同键（turnId + call_id）：跨 turn 撞名不得串行。
+          final callKey = ev.toolCallId == null
+              ? null
+              : '${ev.turnId}\x1f${ev.toolCallId!}';
+          final idx = callKey == null ? null : toolIdxById[callKey];
           final output = ev.toolOutput ?? ev.text;
           if (idx != null && idx < items.length && items[idx] is ToolCallItem) {
             items[idx] = (items[idx] as ToolCallItem).copyWith(
@@ -436,10 +446,10 @@ class EventReducer {
             );
           } else {
             // 结果先于调用到达（或缺失 call）——独立成项，不丢弃信息。
-            // 同步登记 callId：若随后的重复 tool_call（tool_execution_start，
+            // 同步登记键：若随后的重复 tool_call（tool_execution_start，
             // 同 id 无参数）到达，会合并进本行而不是再开一行。
-            if (callId != null) {
-              toolIdxById[callId] = items.length;
+            if (callKey != null) {
+              toolIdxById[callKey] = items.length;
             }
             items.add(
               ToolCallItem(
