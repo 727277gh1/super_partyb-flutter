@@ -1121,14 +1121,14 @@ router，且 `WindowRole.settings` 的映射也在本类里（`_navigateToRole`�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：947
+# 当前（HEAD）量：964
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=947 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=964 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1699
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1718
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1699 -->
+# <!-- number-check: name=repo_hardcoded_zh value=1718 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
@@ -5650,6 +5650,28 @@ show ScrollCacheExtent;`。
 **测试**：models（DTO 新形状 + camelCase 负例回归 + `chatScheduleGroupIdFromPolicy`
 防御）、api（五个开关 body + 排程 snake_case 契约）、core（`errorCode` 两形态 +
 无 code）、features（第五开关 UI 4 条 + 排程用例重写 + 409 两处文案 + 无 code 反例）。
+
+#### 6.49.2 上游对齐收尾：任务时间元信息 / 4xx 文案分支 / auto_start / 标题重生成 / 停用反馈（2026-11）
+
+§6.49.1 之后的第二轮收尾，全部对齐上游 webapp 既有行为（不是新发功能）：
+
+| 项 | 改动 | 判据 |
+|---|---|---|
+| 任务时间 chips（Go `8733e5b1`） | `goal_tasks_panel.dart` 给任务行补时间标签：`开始`（`started_at` 且 status ≠ pending）、`完成`（`completed_at` 且 completed）、`跳过`（同上且 skipped）；`定时`（`not_before` 未来）原有保留 | 对齐 webapp `taskTimeMeta` 规则：`not_before` 只在仍未来时显示；`error_stopped` 永无完成时间（服务端不写） |
+| 发送 4xx 文案分支（Go `a18a017e`/`ceff2f81` 同批错误码） | `_handleSubmit` 的 `HttpError` 分支改为 switch on `e.errorCode`：`group_archived` → 「该对话已归档，请先恢复后再发送」；`queued_quota_exceeded` / `workspace_quota_exceeded` → 各自可行动的中文；未知 code 回落「发送失败：HTTP <status>」 | 归档≠失效（恢复即可用，不该叫用户重选对话）；429 是「稍后再试」不是「失败」。服务端英文文案（如 "queued turn quota exceeded"）不能直接给用户 |
+| `createGoal auto_start`（Go `040855fe`） | `GoalApi.createGoal` 新增 `bool? autoStart`（非 null 即提交）；目标历史面板新建对话框加「创建后自动推进」勾选（key `goal-create-autostart`，**默认不勾**）；两端 router 同构接线 | 一次调用完成「建 goal + 开 goal_gate」避免中间态；自动推进连续消耗轮次，不该由客户端默认替用户按下；显式 `false` 也要发（非 null 即提交，同 §6.49 开关语义） |
+| 标题重新生成（Go `210db5f3`） | `ChatApi.regenerateTitle`（POST `/chat/groups/:id/title/regenerate`）+ `GroupSettingsUseCase.regenerateTitle`（写后回读权威 group）+ `GroupSettingsPanel` 标题区块（key `group-title-regenerate`，未注入不渲染、busy 禁用），两端接线 | 与手动改名语义不同：改名会打 `title_generated` 标记（gate 永不覆盖），重生成是「放弃自动标题、让它重新起」；写端点无响应体，不回读会让界面继续显示旧标题 |
+| 停用全部反馈（Go `b2a54b5a` 停用端点语义） | `StopAllAutoSchedules` 返回完整 `AutoSchedulesStopResult`（含 `disabledCount`）；面板成功后显示一次性反馈：`> 0` → 「已停用 N 个自动续跑排程」，`== 0` → 「没有在途的自动续跑排程」 | 条数是服务端谓词的**唯一权威回执**：并发下「列表里仍有 pending」与「实际停用了 0 条」可能同时为真；「已停用 0 个」看起来像功能坏了，「没有在途」是有效结论 |
+
+**两个易写错处**：① 任务时间断言——`Goal.fromJson._date` 做 `.toLocal()`，测试时间按
+本地时区断言（UTC+8 下 08:30Z → 16:30）；② 停用反馈的测试 harness 不能从返回的
+items 自动推断 `disabledCount`（items 是停用**后**的列表，已全部非 pending，推断
+恒为 0）——必须显式传，否则「已停用 N」用例在正确实现上也会红。
+
+**测试**：features（时间 chips + 4xx 三分支 + 新建勾选 + 面板重生成 3 条 + 停用反馈
+2 条）、api（`regenerateTitle` 契约 + `createGoal auto_start` 三态 body + useCase 两步）、
+两端 router 接线随编译器/既有用例覆盖。全量 1262（features）/ 490（api）/ 208（desktop）/
+116（mobile）用例绿。
 
 ---
 
