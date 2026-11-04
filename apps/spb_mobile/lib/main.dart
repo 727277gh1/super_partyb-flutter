@@ -43,6 +43,10 @@ void main() {
       'api': SpbEndpoints.current.apiBaseUrl,
     });
 
+    // 全局 imageCache 显式上限（docs/memory-audit.md G4b）：移动端内存更
+    // 紧张，显式收紧到字节驱动。必须在 ensureInitialized 之后。
+    configureImageCache();
+
     // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。
     //
     // 放在 `SpbLog.configure` **之后**：上报器在帧回调里写 SpbLog，若在

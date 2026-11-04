@@ -29,6 +29,9 @@ library;
 ///   FrameTimingReporter / summarizeTimings / installFrameTimingReporter
 ///                               —— 帧耗时观测（按批次汇总慢帧 → SpbLog，
 ///                                  由 `SPB_FRAME_TIMING` 编译期开关控制）
+///   configureImageCache / imageDecodeCeilingFor
+///                               —— 全局 imageCache 显式上限与解码降采样
+///                                  （docs/memory-audit.md G4）
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
@@ -36,6 +39,7 @@ export 'src/drag_drop.dart';
 export 'src/file_sink.dart';
 export 'src/frame_timing.dart';
 export 'src/global_error_handler.dart';
+export 'src/image_cache_config.dart';
 export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
 export 'src/overlay_files.dart';

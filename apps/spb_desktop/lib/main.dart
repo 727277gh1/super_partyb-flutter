@@ -54,6 +54,11 @@ void main() {
       'release': SpbEnv.isRelease,
     });
 
+    // 全局 imageCache 显式上限（docs/memory-audit.md G4b）。默认的框架上限
+    // 偏大且按张数淘汰；显式收紧到字节驱动后，几张预览大图不会驻留几十 MB
+    // 解码位图。必须在 ensureInitialized 之后（本函数已在其中）。
+    configureImageCache();
+
     // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。
     //
     // 放在 `SpbLog.configure` **之后**：上报器在帧回调里写 SpbLog，若在
