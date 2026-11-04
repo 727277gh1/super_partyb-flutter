@@ -195,6 +195,11 @@ Future<TestHarness> pumpApp(
   /// 同步目录初始值（设置页同步标签用）。默认未选。
   String? syncLocalRoot,
 
+  /// 初始目录是否为**默认值**（用户未选过）。默认 `false` = 已绑定。
+  ///
+  /// 真实推导要探测 `HOME`/`~/Documents`，测试里换成显式值，结论才稳定。
+  bool syncLocalRootIsDefault = false,
+
   /// 测试用数据库。默认在内存库上新建。
   ///
   /// 需要预置**同步状态 / 目录绑定**的用例传入自己 seed 过的实例——
@@ -471,6 +476,12 @@ Future<TestHarness> pumpApp(
       // 初始目录：写进内存库的绑定表，让 syncLocalRootProvider 读得到。
       if (syncLocalRoot != null)
         syncLocalRootProvider.overrideWith((ref) async => syncLocalRoot),
+      // 「是否默认」标记：与目录同源，但走的是独立 provider，也要一并
+      // override——否则真实实现会去探测 HOME/Documents，测试结果随
+      // 跑测试的机器变化（CI 无 ~/Documents 时会得到不同结论）。
+      syncLocalRootIsDefaultProvider.overrideWith(
+        (ref) => syncLocalRootIsDefault,
+      ),
     ],
   );
   addTearDown(container.dispose);

@@ -2780,6 +2780,12 @@ class _SettingsPage extends ConsumerWidget {
       // 自动同步：**仅桌面端**渲染（移动端没有可靠的后台排程，见
       // `SettingsPage.showAutoSync` 的说明）。
       showAutoSync: true,
+      // 目录卡片的「默认，可修改」标签。同源的两个 provider 一起 watch：
+      // 任一变化（保存后 invalidate）都会重建本页，页面草稿语义由它自己
+      // 保护（`_draft`/`_saved` 比对），重建不丢用户输入。移动端不接：
+      // 那里的目录由系统分配，永远不是「默认值」也不是「用户选的」。
+      localRootIsDefault:
+          ref.watch(syncLocalRootIsDefaultProvider).value ?? false,
       // 同步执行区块直接住在「交付物同步」标签里（与配置同屏，见
       // SettingsTab 文档）。装配层拿到的目录/范围也是**已保存**的那份
       // （runSyncActionProvider 自行从配置读），页面层用 hasUnsavedChanges

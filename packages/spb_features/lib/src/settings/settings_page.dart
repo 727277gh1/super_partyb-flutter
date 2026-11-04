@@ -180,6 +180,7 @@ class SettingsPage extends StatefulWidget {
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
     this.showAutoSync = false,
+    this.localRootIsDefault = false,
     this.title = '设置',
   });
 
@@ -333,6 +334,16 @@ class SettingsPage extends StatefulWidget {
   ///
   /// 默认 `false`：未显式注入时按「本端没有排程器」处理。
   final bool showAutoSync;
+
+  /// 当前生效的同步目录是否为**默认值**（用户从未选过）。
+  ///
+  /// `true` 时目录卡片把路径标注为「默认，可修改」——否则用户分不清这个
+  /// 路径是他自己配的、还是应用猜的（配置了默认目录后新出现的歧义）。
+  ///
+  /// 默认 `false`：移动端目录由系统分配、永远不是「用户选的」，也谈不上
+  /// 「应用猜的」，保持原样最诚实（与 `showAutoSync` 同一取向：两端语义
+  /// 不同就不硬凑同一个 UI）。
+  final bool localRootIsDefault;
 
   final String title;
 
@@ -1130,6 +1141,10 @@ class _SettingsPageState extends State<SettingsPage>
               const SectionTitle('同步目录', highlight: true),
               _DirectoryCard(
                 localRoot: draft.localRoot,
+                // 有未保存改动时不标「默认」：那行字描述的是**已保存**的
+                // 事实，而用户刚选的新目录还未落盘（且一旦保存就不再是
+                // 默认值），标签会在下一帧自相矛盾。
+                isDefault: widget.localRootIsDefault && !_dirty,
                 onPick: _pickDirectory,
                 onOpenDirectory:
                     widget.onOpenDirectory == null ||
@@ -1659,11 +1674,19 @@ class _DirectoryCard extends StatelessWidget {
   const _DirectoryCard({
     required this.localRoot,
     required this.onPick,
+    this.isDefault = false,
     this.onOpenDirectory,
   });
 
   final String? localRoot;
   final VoidCallback onPick;
+
+  /// 目录是否为应用给的**默认值**（而非用户选过的）。
+  ///
+  /// 为 `true` 时在路径下方加一行「默认，可修改」：没有它，用户无法区分
+  /// 「这条路径是我配的」与「应用替我挑的」——而两者的心理预期不同
+  /// （前者不该动，后者可以换）。
+  final bool isDefault;
 
   /// 打开目录回调（null = 不展示「打开目录」按钮）。桌面端注入。
   final Future<void> Function()? onOpenDirectory;
@@ -1698,6 +1721,17 @@ class _DirectoryCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     maxLines: 2,
                   ),
+                  if (hasRoot && isDefault) ...[
+                    const SizedBox(height: SpbSpacing.xxs),
+                    Text(
+                      '默认，可修改',
+                      key: const ValueKey('settings-local-root-default'),
+                      style: textTheme.bodySmall?.copyWith(
+                        color: scheme.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: SpbSpacing.xxs),
                   Text(
                     // 「换目录会重置同步记录」必须写在用户能看到的地方：

@@ -1189,7 +1189,20 @@ final preferencesStoreProvider = Provider<PreferencesStore>((ref) {
 /// 不可用时落到应用数据目录）。
 final syncLocalRootProvider = FutureProvider<String?>((ref) async {
   final store = ref.watch(syncStateStoreProvider);
-  return effectiveSyncLocalRoot(store);
+  final (root, _) = await effectiveSyncLocalRoot(store);
+  return root;
+});
+
+/// 当前生效目录是否为**默认值**（用户从未绑定过目录）。
+///
+/// 与 [syncLocalRootProvider] 同源、同一次解析：设置页拿它区分
+/// 「默认，可修改」与「已选择」。`false` = 用户绑定过目录（**含**后来
+/// 又解绑/绑成空串的——此时两个 provider 一起回落到默认值， UI 会同时
+/// 显示「默认，可修改」，两个读数说的是同一件事）。
+final syncLocalRootIsDefaultProvider = FutureProvider<bool>((ref) async {
+  final store = ref.watch(syncStateStoreProvider);
+  final (_, isDefault) = await effectiveSyncLocalRoot(store);
+  return isDefault;
 });
 
 /// 有效的同步目录 = 用户绑定过的目录 ?? **默认目录**。
@@ -1201,6 +1214,9 @@ final syncLocalRootProvider = FutureProvider<String?>((ref) async {
 /// 「托盘认为未配置（按钮置灰）但设置页显示了一个目录」——用户看得见却用不了。
 /// 这与 AGENTS.md §6.17 的接线漂移同一取向：同一份判断不该抄两遍。
 ///
+/// 返回值是 `(root, isDefault)` 二元组：[isDefault] 表示该目录是**推导出的
+/// 默认值**而非用户绑定的（[syncLocalRootIsDefaultProvider] 同源消费它）。
+///
 /// ## 为什么默认目录要顺手建出来
 ///
 /// - 「打开同步目录」托盘项会 `revealPath`——目录不存在时它返回 false，
@@ -1210,9 +1226,13 @@ final syncLocalRootProvider = FutureProvider<String?>((ref) async {
 ///
 /// 创建失败**不算错**：同步时会再试一次（`LocalFileSink` 也会建），这里只记
 /// 一条 warn 留证据。
-Future<String?> effectiveSyncLocalRoot(DriftSyncStateStore store) async {
+Future<(String?, bool)> effectiveSyncLocalRoot(
+  DriftSyncStateStore store,
+) async {
   final bound = await store.boundLocalRoot();
-  if (bound != null && bound.trim().isNotEmpty) return bound;
+  if (bound != null && bound.trim().isNotEmpty) {
+    return (bound, false);
+  }
 
   final root = defaultSyncLocalRoot(
     environment: Platform.environment,
@@ -1222,7 +1242,7 @@ Future<String?> effectiveSyncLocalRoot(DriftSyncStateStore store) async {
   if (root == null) {
     // 连 home 都拿不到（极端沙箱）：保持「未配置」语义，设置页会提示选目录。
     SpbLog.warn('无法推导默认同步目录（无 HOME/USERPROFILE），请手动选择');
-    return null;
+    return (null, true);
   }
 
   try {
@@ -1234,7 +1254,7 @@ Future<String?> effectiveSyncLocalRoot(DriftSyncStateStore store) async {
     SpbLog.warn('创建默认同步目录失败', {'root': root, 'error': '$e'});
   }
   SpbLog.info('使用默认同步目录', {'root': root});
-  return root;
+  return (root, true);
 }
 
 /// `<home>/Documents` 是否存在（`defaultSyncLocalRoot` 的输入之一）。
@@ -1846,9 +1866,10 @@ final loadSyncSettingsProvider = Provider<LoadSyncSettings>((ref) {
   return () async {
     final store = ref.read(syncStateStoreProvider);
     final prefs = ref.read(preferencesStoreProvider);
+    final (root, _) = await effectiveSyncLocalRoot(store);
 
     return SyncSettings(
-      localRoot: await effectiveSyncLocalRoot(store),
+      localRoot: root,
       scope: SyncScopeConfig.decode(await prefs.getString(scopePrefKey)),
       filter: SyncFilterConfig(
         includeMedia: await prefs.getBool(
@@ -1906,6 +1927,10 @@ final saveSyncSettingsProvider = Provider<SaveSyncSettings>((ref) {
     // `SyncSettings.filter`（[loadSyncSettingsProvider] 每次现读），故无需
     // 在此额外通知。
     ref.invalidate(syncLocalRootProvider);
+    // 与目录同源的「是否默认」标记：任何一次保存都会 bindLocalRoot（把
+    // 当前路径显式落库），此后它就不再是「默认」——UI 标签必须跟着消失，
+    // 否则用户保存过后仍看到「默认，可修改」。
+    ref.invalidate(syncLocalRootIsDefaultProvider);
 
     // 换目录 = 每个 group 都该重新判定（新目录下什么都没有）。
     //

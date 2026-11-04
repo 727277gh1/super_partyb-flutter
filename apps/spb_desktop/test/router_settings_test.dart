@@ -280,6 +280,27 @@ void main() {
     expect(find.text('/home/u/deliverables'), findsOneWidget);
   });
 
+  testWidgets('目录是默认值时同步标签显示「默认，可修改」', (tester) async {
+    // ⚠️ 必须从 router 层断言（§6.17/§6.44 同一失败模式）：页面测试自己传参，
+    // 捕不住「接线漏了」。harness 不传 syncLocalRoot 时 loadSettings 的
+    // 假实现返回 null 目录，但真实接线里 effectiveSyncLocalRoot 会推导出
+    // 默认值并标 isDefault——用显式参数钉住这一条。
+    final h = await pumpApp(
+      tester,
+      syncLocalRoot: '/home/me/Documents/Super PartyB',
+      syncLocalRootIsDefault: true,
+    );
+
+    h.router.go(SpbRoutes.settingsSyncTab);
+    await tester.pumpAndSettle();
+
+    expect(find.text('/home/me/Documents/Super PartyB'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('settings-local-root-default')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('同步标签点「立即同步」调用注入的 runSync 并展示结果', (tester) async {
     var calls = 0;
     final h = await pumpApp(

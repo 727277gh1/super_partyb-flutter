@@ -49,6 +49,7 @@ void main() {
     Future<void> Function(ThemeMode)? saveThemeMode,
     Future<DiagnosticsExportOutcome> Function()? onExportDiagnostics,
     bool showAutoSync = false,
+    bool localRootIsDefault = false,
     SettingsTab tab = SettingsTab.general,
     RunSyncAction? runSync,
     ScanDirtyFilesAction? scanDirtyFiles,
@@ -89,6 +90,7 @@ void main() {
           saveThemeMode: saveThemeMode,
           onExportDiagnostics: onExportDiagnostics,
           showAutoSync: showAutoSync,
+          localRootIsDefault: localRootIsDefault,
           initialTab: tab,
           runSync: runSync,
           scanDirtyFiles: scanDirtyFiles,
@@ -300,6 +302,73 @@ void main() {
         find.byKey(const ValueKey('settings-save')),
         findsNothing,
         reason: '取消不构成改动',
+      );
+    });
+  });
+
+  group('设置页：默认目录标记（localRootIsDefault）', () {
+    testWidgets('默认目录显示「默认，可修改」，用户选过的只显示路径', (tester) async {
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        initial: const SyncSettings(localRoot: '/home/me/Super PartyB'),
+        localRootIsDefault: true,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-local-root-default')),
+        findsOneWidget,
+        reason: '默认值目录必须标注出来，否则用户分不清「配的」与「应用猜的」',
+      );
+
+      // 用户绑定过目录（isDefault=false）时不显示标签。
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        initial: const SyncSettings(localRoot: '/home/me/own-root'),
+      );
+      expect(
+        find.byKey(const ValueKey('settings-local-root-default')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('未配置目录时不显示「默认」标签（无路径可标）', (tester) async {
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        localRootIsDefault: true,
+      );
+      // 此时卡片走「尚未选择」分支，标签只随路径出现。
+      expect(
+        find.byKey(const ValueKey('settings-local-root-default')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('用户改了草稿后「默认」标签消失（未保存前不双标）', (tester) async {
+      await pumpSettings(
+        tester,
+        tab: SettingsTab.sync,
+        initial: const SyncSettings(localRoot: '/home/me/Super PartyB'),
+        pickDirectory: () async => '/home/me/own-root',
+        localRootIsDefault: true,
+      );
+
+      expect(
+        find.byKey(const ValueKey('settings-local-root-default')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-pick-directory')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('/home/me/own-root'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('settings-local-root-default')),
+        findsNothing,
+        reason:
+            '草稿已换目录，标签（描述已落盘事实）必须先消失，'
+            '否则同一张卡片同时说「默认」和显示别的路径',
       );
     });
   });
