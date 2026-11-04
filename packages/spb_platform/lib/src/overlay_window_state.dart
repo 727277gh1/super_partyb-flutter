@@ -1,0 +1,69 @@
+/// 悬浮输入窗的窗口属性改写与**回滚**顺序。
+///
+/// ## 为什么这段逻辑单独成文件（而不是留在 `apps/spb_desktop/bootstrap.dart`）
+///
+/// 「进入悬浮窗」是**多步窗口改写**（放宽最小尺寸 → 改尺寸 → 置顶 → 隐藏
+/// 任务栏 → 定位 → 显示聚焦）。任一步失败时，若只清掉快照而不回滚，窗口会
+/// 留在**半改造**状态：720×360、置顶、且**不在任务栏**——用户看到「一个卡住的
+/// 小窗、然后应用像是退出了」，而进程其实还活着。
+///
+/// 而 `PlatformDesktopCapabilities` 需要 `window_manager` 才能构造，**测试里
+/// 造不出来**（AGENTS.md §6.41 / §6.45 的同一取向）。故顺序判据（「逆序、跳过
+/// 不可回滚项」）放在本包做纯逻辑，`bootstrap.dart` 只负责把每个枚举值翻译成
+/// 一次 `windowManager` 调用。
+library;
+
+/// 进入悬浮模式时按顺序改写的窗口属性。
+enum OverlayWindowAttribute {
+  /// 最小尺寸（主窗口 860×600 → 1×1，否则 `setSize` 被钳住）。
+  minimumSize,
+
+  /// 窗口尺寸。
+  size,
+
+  /// 是否可调整大小。
+  resizable,
+
+  /// 是否置顶。
+  alwaysOnTop,
+
+  /// 是否从任务栏隐藏。
+  skipTaskbar,
+
+  /// 位置。
+  position,
+
+  /// 显示 + 聚焦。
+  ///
+  /// **不可回滚**：它没有「之前的值」这种概念（用户之前是显示也是显示）。
+  /// 还原窗口尺寸/置顶之后调一次 `show()` 即可，单独「逆序还原显示」没有
+  /// 意义——故 [overlayRollbackOrder] 会把它剔除。
+  visibility,
+}
+
+/// 失败回滚时的步骤顺序：**逆序**、去重、剔除 [OverlayWindowAttribute.visibility]。
+///
+/// ## 为什么必须逆序
+///
+/// 正向是「先放宽 min，再改 size」。反过来先改 size 再恢复 min 会被仍为
+/// 1×1 的 min 兜住吗——不会，但**顺序反了更容易踩**「改回大尺寸后立刻被
+/// 旧的置顶/任务栏属性掩盖」这类问题。逆序是「撤销一个事务」的默认语义，
+/// 也保证「最后改的东西最先回退」。
+///
+/// ## 为什么剔除 visibility
+///
+/// 它不可回滚（见该枚举值），而 callers 会无条件在最后调一次 `show()`。
+/// 这里剔除是为了让「回滚计划」只包含**真正需要还原旧值**的步骤——否则
+/// 调用方得在 switch 里写一个空分支，而空分支最容易被后来者填成错误动作。
+List<OverlayWindowAttribute> overlayRollbackOrder(
+  List<OverlayWindowAttribute> applied,
+) {
+  final seen = <OverlayWindowAttribute>{};
+  final plan = <OverlayWindowAttribute>[];
+  for (final attribute in applied.reversed) {
+    if (attribute == OverlayWindowAttribute.visibility) continue;
+    if (!seen.add(attribute)) continue;
+    plan.add(attribute);
+  }
+  return plan;
+}

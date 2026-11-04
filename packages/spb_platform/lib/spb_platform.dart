@@ -22,6 +22,8 @@ library;
 ///   executePrunePlan            —— 按计划清理本地目录（删除前重新校验）
 ///   HostPlatform / ProcessRunner / spawnSystemOpen / spawnSystemReveal
 ///                               —— 系统「打开 / 定位」命令的三平台分派（可注入以便测试）
+///   OverlayWindowAttribute / overlayRollbackOrder
+///                               —— 悬浮窗属性改写与失败回滚顺序（纯逻辑，可无头单测）
 ///   installGlobalErrorHandlers   —— 全局错误兜底（FlutterError / PlatformDispatcher
 ///                                  / Zone 三道防线 → SpbLog 环形缓冲，issue #45）
 ///   FrameTimingReporter / summarizeTimings / installFrameTimingReporter
@@ -37,6 +39,7 @@ export 'src/global_error_handler.dart';
 export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
 export 'src/overlay_files.dart';
+export 'src/overlay_window_state.dart';
 export 'src/system_open.dart';
 export 'src/tray.dart';
 export 'src/window_manager.dart';
