@@ -273,11 +273,36 @@ String? defaultLogFilePath({
   Map<String, String>? environment,
   bool? isWindows,
 }) {
+  // SPB_LOG_DIR 优先于默认解析（便携部署 / 测试用）；只覆盖日志位置，
+  // 不影响 defaultAppDataDir（sync.db 等数据文件不跟着走）。
+  final overrideEnv = environment ?? Platform.environment;
+  final override = overrideEnv['SPB_LOG_DIR']?.trim();
+  if (override != null && override.isNotEmpty) return '$override/app.log';
+
+  final dir = defaultAppDataDir(environment: environment, isWindows: isWindows);
+  if (dir == null) return null;
+  return '$dir/logs/app.log';
+}
+
+/// 应用数据根目录（各端数据文件的统一落点，如 `sync.db`）。
+///
+/// ## 为什么抽成公开函数
+///
+/// 曾有两个调用点各写一份「找数据目录」：日志文件这份认 Windows 的
+/// `%APPDATA%`，而 `sync.db` 那份（apps 层）只认 Linux 的
+/// `XDG_DATA_HOME`/`HOME`——于是 Windows 上日志能落盘、同步状态却每次
+/// 启动清零（落到临时目录），且日志里只有一句误导性的
+/// 「未找到 XDG_DATA_HOME 与 HOME」。抽到 `spb_core` 共用同一份解析，
+/// 是「同一口径必须只有一份实现」的常规收敛。
+///
+/// 返回不带尾斜杠的目录（`.../super_partyb`），调用方自行拼子路径。
+/// `SPB_LOG_DIR` 不影响本函数（它只覆盖日志位置，见
+/// [defaultLogFilePath]）。
+///
+/// [environment] / [isWindows] 可注入，便于在无对应平台的环境里单测。
+String? defaultAppDataDir({Map<String, String>? environment, bool? isWindows}) {
   final env = environment ?? Platform.environment;
   final win = isWindows ?? Platform.isWindows;
-
-  final override = env['SPB_LOG_DIR']?.trim();
-  if (override != null && override.isNotEmpty) return '$override/app.log';
 
   final String? base;
   if (win) {
@@ -296,5 +321,5 @@ String? defaultLogFilePath({
         : ((home != null && home.isNotEmpty) ? '$home/.local/share' : null);
   }
   if (base == null) return null;
-  return '$base/super_partyb/logs/app.log';
+  return '$base/super_partyb';
 }

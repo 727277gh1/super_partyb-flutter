@@ -6387,6 +6387,43 @@ flutter build linux --release --dart-define=SPB_VERBOSE_LOG=true
 「调用那一刻的值」取不到。回滚时退回 `WindowSpec.main.minWidth/minHeight`——那正是启动时
 由本类设置的唯一来源，实践上等价（将来若支持运行期改最小尺寸，需自己记字段）。
 
+##### ⚠️ 本节的回滚防不了原生崩溃（2026-11 Windows 实测，已修）
+
+用户报「按 Alt+Space 后主窗口变小、卡住、进程退出」。事件查看器（Event ID 1000）：
+**故障模块 `window_manager_plugin.dll`，异常码 c0000005（访问违例）**，紧随「全局快捷键触发」
+日志 200ms——**原生崩溃不走 Dart 的 catch，本节整套回滚 + error 日志完全不可见**（这也是
+逐步日志 `_applyOverlayStep` 每步记 info 的由来：日志最后一行即崩溃点）。
+
+根因（读插件 0.5.2 Windows 原生源码钉死，`window_manager.cpp`）：
+
+```cpp
+ITaskbarList3* taskbar_ = nullptr;            // 初始为空
+void WaitUntilReadyToShow() {                 // taskbar_ 的**唯一**初始化点
+  ::CoCreateInstance(CLSID_TaskbarList, ..., &taskbar_);
+}
+void SetSkipTaskbar(...) {
+  taskbar_->HrInit();                         // ← 无空检查；nullptr 上调 COM 虚方法
+  taskbar_->DeleteTab(hWnd);                  //   → c0000005，进程即死
+}
+```
+
+而本仓库 bootstrap 因「runApp 前调它会等首帧、死锁」（旧版语义）**从不调**
+`waitUntilReadyToShow` → `taskbar_` 永远是 nullptr → 悬浮窗第一步 `setSkipTaskbar(true)`
+即崩。修法：`initialize()` 里调一次**裸的**（无 options 无回调）`waitUntilReadyToShow()`——
+三平台原生实现都已核实（Windows = CoCreateInstance 立即返回、Linux = 返回 true、
+macOS = 空函数体），应用运行后调用不存在「等首帧」；放在 initialize() 而非 enterOverlayMode，
+是因为后面**四处** `setSkipTaskbar`（applyWindowSpec 分支 + 悬浮窗改写步 + 两处回滚）一次全覆盖。
+
+⚠️ 两个教训：① 「插件文档说的推荐用法有死锁」这类结论要区分**平台实现**与**Dart 包装**——
+死锁风险在带 options/callback 的包装层，原生调用本身不等待；② 窗口属性类插件调用的崩溃
+在 Windows 上表现为**进程静默死亡**，排障时事件查看器的故障模块比应用日志更快指向根因。
+
+顺带修的第二个 Windows 缺陷：`_dbFile()` 只认 Linux 的 `XDG_DATA_HOME`/`HOME`，
+Windows 上两者都不存在 → `sync.db` 落临时目录、同步状态每次启动清零（日志里那句
+「未找到 XDG_DATA_HOME 与 HOME」就是它）。已抽 `spb_core.defaultAppDataDir()`
+（Windows 用 `%APPDATA%`，与 `FileLogSink` 同一份解析）供两个调用点共用——
+重构时曾弄丢 `SPB_LOG_DIR` 覆盖逻辑，被既有测试当场抓住。
+
 日志侧同时补了三项（都按 §6.43 的「门控/触发类用 info」）：快捷键触发 `debug → info`、
 未绑定 id `→ warn`、`桌面能力触发导航` `debug → info`，失败日志带
 `failed_step` / `applied` / `attribute` / `failed` / `rolled_back`。

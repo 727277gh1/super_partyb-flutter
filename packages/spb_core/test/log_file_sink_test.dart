@@ -352,6 +352,54 @@ void main() {
       );
     });
   });
+
+  group('defaultAppDataDir', () {
+    // ## 这组用例钉住的真实缺陷
+    //
+    // `_dbFile()`（apps 层）曾只认 Linux 变量：Windows 上 `XDG_DATA_HOME`
+    // 与 `HOME` 都不存在 → `sync.db` 落到临时目录、同步状态每次启动清零。
+    // 抽成公共函数后，两条路径（日志 / sync.db）必须对同一环境给出
+    // **同一根**——否则又是「同一口径两份实现」的漂移。
+
+    test('Linux 与 Windows 同根（与 defaultLogFilePath 只差 logs/app.log）', () {
+      final linuxEnv = {'XDG_DATA_HOME': '/xdg', 'HOME': '/home/u'};
+      expect(
+        defaultAppDataDir(environment: linuxEnv, isWindows: false),
+        '/xdg/super_partyb',
+      );
+      expect(
+        defaultLogFilePath(environment: linuxEnv, isWindows: false),
+        '/xdg/super_partyb/logs/app.log',
+      );
+
+      // Windows 的 %APPDATA% 路径——就是 sync.db 曾丢失的那一档。
+      final winEnv = {r'APPDATA': r'C:\Users\me\AppData\Roaming'};
+      expect(
+        defaultAppDataDir(environment: winEnv, isWindows: true),
+        r'C:\Users\me\AppData\Roaming/super_partyb',
+      );
+      expect(
+        defaultLogFilePath(environment: winEnv, isWindows: true),
+        r'C:\Users\me\AppData\Roaming/super_partyb/logs/app.log',
+      );
+    });
+
+    test('SPB_LOG_DIR 只影响日志路径，不影响数据根', () {
+      final env = {'SPB_LOG_DIR': '/tmp/override', 'HOME': '/home/u'};
+      expect(
+        defaultAppDataDir(environment: env, isWindows: false),
+        '/home/u/.local/share/super_partyb',
+      );
+    });
+
+    test('无环境变量 → null（与日志路径同一判定）', () {
+      expect(
+        defaultAppDataDir(environment: const {}, isWindows: false),
+        isNull,
+      );
+      expect(defaultAppDataDir(environment: const {}, isWindows: true), isNull);
+    });
+  });
 }
 
 class _RecordingSink implements LogSink {

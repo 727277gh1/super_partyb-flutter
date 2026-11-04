@@ -1136,19 +1136,21 @@ final appDatabaseProvider = Provider<AppDatabase>((ref) {
 ///
 /// 这里手写路径而不用 `path_provider`：后者需要平台通道，在 `flutter test`
 /// 里会抛 `MissingPluginException`——而 provider 一旦在测试里被读到就会炸。
-/// `XDG_DATA_HOME` / `$HOME` 在桌面端一定可用，且与 path_provider 在 Linux
-/// 上的结果一致。
+/// 解析逻辑在 `spb_core` 的 `defaultAppDataDir`（纯函数，可无头单测）：
+/// Windows 用 `%APPDATA%`，Linux 用 `XDG_DATA_HOME`/`$HOME`，与
+/// `FileLogSink` 的日志目录**同一根**。
+///
+/// ⚠️ 曾经只认 Linux 变量：Windows 上两者都拿不到，`sync.db` 落到临时
+/// 目录且同步状态每次启动清零——日志里只有一句误导性的
+/// 「未找到 XDG_DATA_HOME 与 HOME」。
 File _dbFile() {
-  final env = Platform.environment;
-  final base =
-      env['XDG_DATA_HOME'] ??
-      (env['HOME'] != null ? '${env['HOME']}/.local/share' : null);
+  final base = defaultAppDataDir();
   if (base == null) {
-    // 极端环境（无 HOME）：退回临时目录。同步状态会不跨启动，但功能可用。
-    SpbLog.warn('未找到 XDG_DATA_HOME 与 HOME，同步状态将不持久');
+    // 极端环境（无 HOME/APPDATA）：退回临时目录。同步状态会不跨启动，但功能可用。
+    SpbLog.warn('未能解析应用数据目录，同步状态将不持久');
     return File('${Directory.systemTemp.path}/super_partyb-sync.db');
   }
-  final dir = Directory('$base/super_partyb');
+  final dir = Directory(base);
   if (!dir.existsSync()) dir.createSync(recursive: true);
   return File('${dir.path}/sync.db');
 }

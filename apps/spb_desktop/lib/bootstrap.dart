@@ -30,7 +30,7 @@ Future<DesktopCapabilities> bootstrapDesktop(
     await caps.initialize();
     // 在 runApp **之前**应用主窗口配置。
     //
-    // ## ⚠️ 这里不能用 `waitUntilReadyToShow`
+    // ## ⚠️ 这里不能调 `waitUntilReadyToShow(options, callback)`（带参数的形态）
     //
     // 那是 `window_manager` 的推荐用法，但它会**等到首帧渲染后**才执行回调。
     // 而本函数在 `runApp` 之前运行——首帧永远不会到来，`await` 会死锁，
@@ -39,6 +39,11 @@ Future<DesktopCapabilities> bootstrapDesktop(
     // 故改用直接的 setter（`setSize`/`setMinimumSize`/`center`…）。它们在
     // 窗口创建后即可调用，不需要等首帧。代价是没有「先隐藏再显示」的原子性，
     // 启动瞬间可能看到默认尺寸闪一下——比死锁可接受得多。
+    //
+    // （无参数的裸 `waitUntilReadyToShow()` 是安全的，见 initialize()：
+    // Windows 原生只是 CoCreateInstance、Linux/macOS 是 no-op，且它在
+    // 应用运行后被调，不存在「等首帧」的语义。真正危险的是带 options/
+    // callback 的 Dart 侧包装——它会追加 setState 等首帧后的操作。）
     await caps.applyWindowSpec(WindowSpec.main);
     return caps;
   } catch (e, st) {
@@ -170,6 +175,26 @@ class PlatformDesktopCapabilities
     await windowManager.ensureInitialized();
     windowManager.addListener(this);
 
+    // ## 为什么这里要调一次裸的 waitUntilReadyToShow（无 options 无回调）
+    //
+    // 2026-11 Windows 实测崩溃（事件查看器：window_manager_plugin.dll +
+    // c0000005，紧随「全局快捷键触发」日志）：插件 0.5.2 的 Windows 原生
+    // `taskbar_`（ITaskbarList3）**只有一个初始化点**——
+    // `WaitUntilReadyToShow()` 里的 `CoCreateInstance(CLSID_TaskbarList)`；
+    // 而 `SetSkipTaskbar` 直接 `taskbar_->HrInit()` **不做空检查**。此前
+    // 本应用从不调 waitUntilReadyToShow（见 bootstrapDesktop 的死锁警告），
+    // 于是 `taskbar_` 永远是 nullptr，悬浮窗第一步 `setSkipTaskbar(true)`
+    // 就是对空指针调 COM 虚方法——窗口变小后进程即死，Dart 侧 catch
+    // 与 §6.57 的回滚完全不可见（原生崩溃不走 Dart 异常）。
+    //
+    // 这里调是安全的：①无 options 无回调，不会重设任何窗口属性；
+    // ②三平台 0.5.2 原生实现都已核实——Windows = CoCreateInstance
+    // （正是要的，立即返回），Linux = 直接返回 true，macOS = 空函数体。
+    // 放在 initialize() 而不是 enterOverlayMode：后面**四处**
+    // `setSkipTaskbar`（applyWindowSpec 的 spec.skipTaskbar 分支、悬浮窗
+    // 改写步、两处回滚）全部被覆盖，不必逐处补调用。
+    await windowManager.waitUntilReadyToShow();
+
     await _initWindowIcon();
     await _initLaunchAtStartup();
     await _initTray();
@@ -293,6 +318,10 @@ class PlatformDesktopCapabilities
   @override
   Future<void> showWindow(WindowRole role) async {
     // 单窗口模型：先确保主窗口可见/聚焦，再通知上层切到对应路由。
+    // ⚠️ 这两行也要有日志：与 _applyOverlayStep 同一取向，原生层崩溃
+    // 不走 Dart catch，若死在 show()/focus() 里，没有这行就分不清
+    // 「死在导航前」还是「死在属性改写中」。
+    SpbLog.info('窗口显示请求', {'role': role.name});
     try {
       await windowManager.show();
       await windowManager.focus();
@@ -877,6 +906,10 @@ class PlatformDesktopCapabilities
     _overlayApplied.clear();
     _overlayStep = null;
 
+    // 注：Windows 原生 taskbar_（ITaskbarList3）已在 initialize() 里经裸
+    // waitUntilReadyToShow 初始化——setSkipTaskbar 对它调 HrInit() 且
+    // 不做空检查，不初始化就是 c0000005 原生崩溃（详见 initialize() 内注释）。
+
     try {
       // ---- 阶段 1：快照（只读，失败则窗口并未被改动）----
       final bounds = await windowManager.getBounds();
@@ -976,11 +1009,22 @@ class PlatformDesktopCapabilities
 
   /// 执行一步改写并记账。抛异常时该步**不会**进入 [_overlayApplied]
   /// （它没成功，不该被回滚），但 [_overlayStep] 会留下失败步名。
+  ///
+  /// ## 为什么每步都记 info
+  ///
+  /// 2026-11 Windows 实测：按 Alt+Space 后窗口变小、随后进程直接死亡，
+  /// 日志终止在「全局快捷键触发」——原生层崩溃不会走 Dart 的 catch，
+  /// §6.57 的回滚 + error 日志完全不可见。逐步日志把「最后一步是什么」
+  /// 直接写进文件日志：下一步复现时，日志的最后一行就是原生崩溃点
+  /// （与 Windows 事件查看器的故障模块交叉验证）。每步一行、每轮最多
+  /// 7 行，低频操作不会刷屏——与「快捷键触发」升 info 的同一取向
+  /// （§6.43：门控/触发类日志用 debug 等于没写）。
   Future<void> _applyOverlayStep(
     OverlayWindowAttribute attribute,
     Future<void> Function() op,
   ) async {
     _overlayStep = attribute;
+    SpbLog.info('悬浮窗属性改写步骤', {'step': attribute.name});
     await op();
     _overlayApplied.add(attribute);
   }
