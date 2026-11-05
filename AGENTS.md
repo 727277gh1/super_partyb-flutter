@@ -1264,16 +1264,17 @@ COVERAGE_INCLUDE_GENERATED=1 bash tools/coverage.sh --summary-only
 | `spb_models` | 88.0% | `spb_ui` | 73.7% |
 | `spb_design` | 86.0% | **总计** | **85.7%**（≈16291/19004） |
 
-全仓用例 **4186 条**（各包 `+N` 相加，即 `testDone` 且非 hidden；issue #48 拆分
+全仓用例 **4261 条**（各包 `+N` 相加，即 `testDone` 且非 hidden；issue #48 拆分
 本身 0 变化。+13 是 SSE 端到端（§6.27），+31 是零调用者端点契约（§6.28），+6 是
 §6.37 的 `bearerToken` / `fromOidcTokens` / 两端接线回归防线，+38 是 §6.41 的
 定位与下载布局，+66 是 §6.42 的自动同步，+50 是 §6.43 的进对话按需同步，+89 是
 §6.54 的工具调用折叠 / 「动态」面板 / 流式进度条，+46 是 §6.57 的文件日志 /
-悬浮窗回滚顺序 / 默认同步目录）。
+悬浮窗回滚顺序 / 默认同步目录，+75 是内存审计轮（§6.59：无界集合容量淘汰 /
+图片解码降采样 / 标题缓存 / batch 写入）。
 
 分包含量（2026-11 实测，会漂移）：`spb_models` 471、`spb_api` 495、`spb_domain`
-1094、`spb_features` 1278、`spb_data` 130、`spb_platform` 166、`spb_core` 147、
-`spb_ui` 43、`spb_design` 34、`spb_desktop` 210、`spb_mobile` 117。
+1138、`spb_features` 1293、`spb_data` 132、`spb_platform` 173、`spb_core` 150、
+`spb_ui` 43、`spb_design` 34、`spb_desktop` 212、`spb_mobile` 120。
 
 ⚠️ **`spb_data` 的测试要用 `flutter test`，不能用 `dart test`**：它虽然也是纯
 Dart 语义（drift + sqlite3），但依赖链里含 Flutter（`secure_pending_auth_store`
