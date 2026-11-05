@@ -32,6 +32,8 @@ library;
 ///   configureImageCache / imageDecodeCeilingFor
 ///                               —— 全局 imageCache 显式上限与解码降采样
 ///                                  （docs/memory-audit.md G4）
+///   installMemoryPressureHandler —— 系统内存压力信号 → 清 imageCache +
+///                                  app 层可再生态（docs/memory-audit.md G9）
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
@@ -42,6 +44,7 @@ export 'src/global_error_handler.dart';
 export 'src/image_cache_config.dart';
 export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
+export 'src/memory_pressure.dart';
 export 'src/overlay_files.dart';
 export 'src/overlay_window_state.dart';
 export 'src/system_open.dart';

@@ -59,6 +59,13 @@ void main() {
     // 解码位图。必须在 ensureInitialized 之后（本函数已在其中）。
     configureImageCache();
 
+    // 系统内存压力信号（docs/memory-audit.md G9）：桌面端引擎不派发这条信号
+    // （Linux/Windows/macOS 无此系统回调），注册后零效果、无副作用——两端
+    // 无差别接线，将来若引擎补齐也无需改这里。
+    installMemoryPressureHandler(
+      onRelease: () => SpbLog.info('系统内存压力：已清空图片解码缓存'),
+    );
+
     // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。
     //
     // 放在 `SpbLog.configure` **之后**：上报器在帧回调里写 SpbLog，若在

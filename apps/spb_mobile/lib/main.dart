@@ -47,6 +47,17 @@ void main() {
     // 紧张，显式收紧到字节驱动。必须在 ensureInitialized 之后。
     configureImageCache();
 
+    // 系统内存压力信号（docs/memory-audit.md G9）：Android/iOS 引擎在内存
+    // 吃紧时派发 `memoryPressure`，此前全仓无接收方。收到后清空全局解码缓存
+    // （可再生：下次显示时重解码，不丢任何数据）。
+    //
+    // 为什么不在这里传页面级缓存的清理：`_bubbleCache` / `_thumbnailMemo`
+    // 是对话页 State 的私有字段，跨层清空需要新管路；两者合计只有 KB~MB
+    // 级，而 imageCache 是最大头的可再生态（单张大图可达几十 MB）。
+    installMemoryPressureHandler(
+      onRelease: () => SpbLog.info('系统内存压力：已清空图片解码缓存'),
+    );
+
     // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。
     //
     // 放在 `SpbLog.configure` **之后**：上报器在帧回调里写 SpbLog，若在
