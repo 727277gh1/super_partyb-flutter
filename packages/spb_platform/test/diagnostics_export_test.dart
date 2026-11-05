@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 /// `DiagnosticsExporter` 与诊断报告装配（issue #40）。
@@ -246,6 +247,78 @@ void main() {
         const NoopDesktopCapabilities(),
       );
       expect(outcome, DiagnosticsExportOutcome.unsupported);
+    });
+
+    group('时间线快照：从静态探针取（控制器此时已 dispose）', () {
+      tearDown(TimelineProbe.reset);
+
+      test('控制器写过快照 → 报告里出现「## 时间线快照」', () async {
+        // 导出发生在设置页，对话页已卸载；`ChatStreamController` 是
+        // autoDispose.family，此刻通常已经 dispose——故只能读进程级探针。
+        TimelineProbe.record(
+          const TimelineDiagnostics(
+            groupId: 'grp_1',
+            bufferedEvents: 2000,
+            maxBufferEvents: 2000,
+            itemCount: 42,
+            assistantChars: 9000,
+            turns: [
+              TurnTextStat(
+                turnId: 'turn_long',
+                chars: 9000,
+                items: 1,
+                isStreaming: false,
+              ),
+            ],
+            oldestLoadedGlobalSeq: 100,
+            newestBufferedGlobalSeq: 2100,
+            trimCount: 3,
+            lastTrimDropped: 5,
+            lastTrimKept: 2000,
+            lastTrimPerTurn: true,
+            fromCache: false,
+            replayGapRepairs: 0,
+            sseCursorPresent: true,
+          ),
+        );
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, contains('## 时间线快照'));
+        expect(captured, contains('turn_long'));
+        expect(captured, contains('9000 字符'));
+        expect(captured, contains('裁剪: 共 3 次'));
+        // 正文本身绝不得入报告（报告会被贴进公开 issue）。
+        expect(captured, isNot(contains('你好')));
+      });
+
+      test('没采集过快照 → 小节不出现（而不是空节）', () async {
+        TimelineProbe.reset();
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, isNot(contains('## 时间线快照')));
+      });
+
+      test('显式传入 timeline 时覆盖探针（测试与将来多快照用）', () async {
+        TimelineProbe.reset();
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps, timeline: const ['缓冲事件: 1 / 2000']);
+
+        expect(captured, contains('缓冲事件: 1 / 2000'));
+      });
     });
   });
 }

@@ -105,6 +105,7 @@ export 'src/sync_path.dart';
 export 'src/sync_prune.dart';
 export 'src/outbox.dart';
 export 'src/timeline_cache.dart';
+export 'src/timeline_diagnostics.dart';
 export 'src/tool_call_batch.dart';
 export 'src/tts_audio_path.dart';
 export 'src/tts_status.dart';

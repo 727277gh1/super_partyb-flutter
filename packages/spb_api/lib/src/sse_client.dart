@@ -82,7 +82,10 @@ class _Utf8LineSink implements Sink<String> {
 /// - 端点：`GET /users/:user_id/chat/stream?cursor=<eventId>`
 /// - 格式：`event: <type>\ndata: <json>\n\n`，心跳 `: heartbeat\n\n`
 /// - `cursor` 回放：返回该事件**之后**落库的事件，上限 500 条
-/// - 超出回放窗口时返回空 → 客户端应改用 timeline API 整段回填
+/// - 超出回放窗口时返回空 —— ⚠️ **与「没有新事件」完全同形**（服务端不回任何
+///   错误、也不发「回放结束」标记）。故「整段回填」不能靠读流时顺手做，得
+///   由上层**主动探测**：见 `ChatStreamController` 的 `_scheduleReplayGapProbe`
+///   与 AGENTS.md §6.65。
 ///
 /// ## 使用方式
 ///

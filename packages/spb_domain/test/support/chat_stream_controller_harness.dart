@@ -293,6 +293,85 @@ void mockTimeline({List<Map<String, dynamic>>? events}) {
   );
 }
 
+/// 挂载「按调用次数给不同页」的 timeline mock，返回当前**真实请求**次数。
+///
+/// ## 为什么需要它
+///
+/// 同一个路径 `GET /chat/groups/:id/timeline` 在控制器里有**两种**用途：
+/// 首屏/整段回填（`limit=200`）与缺口探测（`limit=1`）。而「断线回放被截断」
+/// 这个场景本身就是「先回填一次（空）、修复时再回填一次（有新内容）」——
+/// 同一个 mock 必须能返回**不同的页**，否则测不出「修复真的发生了」。
+///
+/// ## ⚠️ 计数器必须写在 `replyCallback` 的 data 里
+///
+/// `http_mock_adapter` 的 `onGet(route, handler)` 里那个 `handler` **在注册时就
+/// 被执行一次**（它只负责把响应存到 matcher 上），每次请求执行的是它构造出的
+/// `mockResponse`。故把计数 / 副作用写在外层会得到：「注册即计一次、页永远
+/// 取第 0 页」——而那种错会让「回填根本没发生时用例也绿」。
+///
+/// [pages] 的最后一项会被后续调用重复使用（调用次数多于页数时）。
+int Function() mockTimelineSequence(
+  List<List<Map<String, dynamic>>> pages, {
+  String groupId = 'grp_1',
+}) {
+  var calls = 0;
+  adapter.onGet(
+    '/chat/groups/$groupId/timeline',
+    (server) => server.replyCallback(200, (options) {
+      final idx = calls < pages.length ? calls : pages.length - 1;
+      calls++;
+      return {'items': pages[idx], 'next_before_global_seq': ''};
+    }),
+    queryParameters: {'limit': 200},
+  );
+  return () => calls;
+}
+
+/// 挂载「断线缺口探测」的 mock（`limit=1`），返回当前**真实请求**次数。
+///
+/// [newestGlobalSeq] 是服务端该 group 的最新 `globalSeq`——探测就是拿它与本地
+/// 见过的最大值比。
+///
+/// [onRequest] 在**响应返回之前**调用，用来模拟「回放还在到达」（往 [sse] 推
+/// 事件）：它跑在产响应数据的同步函数里，因此事件的投递一定早于
+/// `_probeReplayGap` 读「本地最大值」那一步。
+int Function() mockTimelineProbe({
+  required int newestGlobalSeq,
+  void Function()? onRequest,
+  String groupId = 'grp_1',
+}) {
+  var calls = 0;
+  adapter.onGet(
+    '/chat/groups/$groupId/timeline',
+    (server) => server.replyCallback(200, (options) {
+      calls++;
+      onRequest?.call();
+      return {
+        'items': [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'newest_$newestGlobalSeq',
+            turnId: 'turn_newest',
+            globalSeq: newestGlobalSeq,
+          ),
+        ],
+        'next_before_global_seq': '',
+      };
+    }),
+    queryParameters: {'limit': 1},
+  );
+  return () => calls;
+}
+
+/// 挂载一个**失败**的 timeline（回填失败 → 走缓存回落分支）。
+void mockTimelineFailure({String groupId = 'grp_1', int status = 500}) {
+  adapter.onGet(
+    '/chat/groups/$groupId/timeline',
+    (server) => server.reply(status, {'error': 'boom'}),
+    queryParameters: {'limit': 200},
+  );
+}
+
 /// 挂载 sendMessage 的 mock。
 ///
 /// `data: Matchers.any` 必需：http_mock_adapter 的默认匹配器会连**请求体**一起

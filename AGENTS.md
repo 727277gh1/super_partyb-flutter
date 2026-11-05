@@ -208,13 +208,13 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 8. 构建平台限制
 
-| 平台 | 本机可构建 | 在哪出包 |
-|---|---|---|
-| Linux | ✅ | 本地 / CI（需 GTK 开发库 + `bundle_linux_deps.sh`） |
-| Android | ✅ | 本地 / CI |
-| Windows | ❌ | GitHub `windows-2022` |
-| macOS | ❌ | GitHub `macos-14`（**仅 tag**，10× 计费） |
-| iOS | ❌ | 未出包 |
+| 平台 | 本机可构建 | 在哪出包 | 备注 |
+|---|---|---|---|
+| Linux | ✅ | 本地 / CI | 需 GTK 开发库 + `bundle_linux_deps.sh` |
+| Android | ✅ | 本地 / CI | **模拟器不可用**（无 `/dev/kvm`；跟踪 `super_partyb` issue #30） |
+| Windows | ❌ | GitHub `windows-2022` | 无代码签名（运行弹 SmartScreen） |
+| macOS | ❌ | GitHub `macos-14`（**仅 tag**，10× 计费） | 未公证（首开需绕过 Gatekeeper） |
+| iOS | ❌ | 未出包 | 需 Apple Developer 账号 |
 
 为什么（MSVC runner / Gatekeeper / 三个 Windows 坑 / `ditto` 打包）见
 [`build-and-release.md`](docs/design-decisions/build-and-release.md) §8。
@@ -231,21 +231,16 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 11. 已知问题
 
-**全表（含 60 余条已修项的根因与反向验证）见 [`docs/known-issues.md`](docs/known-issues.md)。**
-下面只留**当前仍未修 / 待决策 / 有意不做**的（细节在链接里）：
+**全表（含 60 余条已修项的根因与反向验证，以及两项会漂移的跨仓状态——bcc 库 `chat_*` 全为 0、
+缓存切片 C「反向验证为 0」）见 [`docs/known-issues.md`](docs/known-issues.md)。**
+下面只留**有意不做**的（环境限制见 §8）：
 
-| 问题 | 状态与依据 |
+| 不做什么 | 依据 |
 |---|---|
-| Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策（`super_partyb` issue #30） |
-| macOS 包未签名/未公证（首开需绕过 Gatekeeper）；Windows 包无代码签名（SmartScreen） | 已知限制（§8、`docs/windows-release.md` §4） |
-| iOS 出包需 Apple Developer 账号（无签名账号） | 待决策（见 §8） |
-| 四项检索面板未接（语义 / 图谱 / 两个「演化」） | **有意不做**：数据面为空 / 数据源在 Go 时代已停写，前置是服务端先恢复写入（§6.9.6） |
-| 离线缓存切片 C 的「反向验证为 0」 | ⚠️ 唯一一条诚实记录：`drain` 进度哨兵在正确代码上不可达，属 **fail-safe**（`docs/offline-cache-design.md` §7bis.11） |
-| bcc `partyb-go-api` 的 `chat_turns`/`chat_groups`/`chat_events` 全为 0 | **待排查**（属 `super_partyb` 侧）：2026-09-27 备份有 3559 行，现库缺 `chat_*`（§6.9.6 末尾注） |
-| TTS 语音只展示状态、不播放（无音频播放插件） | **有意不做**：音频由交付物同步拉到本地（`packages/spb_domain/lib/src/tts_status.dart`） |
-| `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：原生插件，drift 移动端运行时需要；已在 `tools/check_unused_deps.sh` 显式豁免 |
-| 两端 `providers.dart` 上百个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，平台相关装配留在各 app（一致性由 §6.17 守卫） |
-| 契约同步靠人工 | 可接受（§6.2） |
+| TTS 只展示状态、**不播放**（无音频播放插件） | 音频由交付物同步拉到本地（`packages/spb_domain/lib/src/tts_status.dart`） |
+| **不删** `sqlite3_flutter_libs`（零 Dart import） | 原生插件，drift 移动端运行时需要；已在 `tools/check_unused_deps.sh` 豁免 |
+| **不接**四项检索面板（语义 / 图谱 / 两个「演化」） | 数据面为空 / 数据源在 Go 时代已停写，前置是服务端先恢复写入（§6.9.6） |
+| **不上提**两端 `providers.dart` 的百个同名 provider | 独立重构；装配留各 app，一致性由 §6.17 守卫 |
 
 ## 12. 提交约定
 

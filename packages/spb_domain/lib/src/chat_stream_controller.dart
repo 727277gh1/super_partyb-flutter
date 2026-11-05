@@ -13,6 +13,7 @@ import 'gate_decision.dart';
 import 'goal_update.dart';
 import 'outbox.dart';
 import 'timeline_cache.dart';
+import 'timeline_diagnostics.dart';
 import 'tts_status.dart';
 import 'turn_activity.dart';
 
@@ -36,6 +37,8 @@ class ChatStreamController {
     Duration? turnTimeoutOverride,
     TimelineCacheStore? timelineCache,
     OutboxQueue? outbox,
+    this.replayGapProbeDelay = const Duration(seconds: 2),
+    this.replayGapSettle = const Duration(milliseconds: 600),
   }) : assert(
          userId != '',
          // WHY 断言而非静默容忍：空 userId 会拼出 `/users//chat/stream` 这种
@@ -55,6 +58,19 @@ class ChatStreamController {
   final SseClient _sse;
   final ChatApi _api;
   final String userId;
+
+  /// 连上后等多久再探测「断线回放是否被截断」（见 [_probeReplayGap]）。
+  ///
+  /// 这个延迟的意义是**让回放帧先到达**：服务端在同一个响应里先写回放、再进
+  /// 实时循环，探测若跑得太早会把「回放还在路上」误判成缺口。
+  final Duration replayGapProbeDelay;
+
+  /// 判定缺口前的「静默窗口」：本地 `globalSeq` 在这段时间内**不再前进**，
+  /// 且仍落后于服务端，才认定回放被截断。
+  ///
+  /// 单纯「落后」不足以判定——HTTP 探测的响应完全可能跑在 SSE 投递前面
+  /// （两个独立连接）。故先等一个窗口再看本地是否还在追。
+  final Duration replayGapSettle;
 
   /// timeline 只读缓存（issue #26 切片 B / issue #29）。
   ///
@@ -159,6 +175,45 @@ class ChatStreamController {
   ///
   /// 重置时机：`start` / `switchGroup`——换了 group，历史边界无意义。
   int? _oldestLoadedGlobalSeq;
+
+  /// 缓冲区里见过的最大落库 `globalSeq`（**只增不减**，裁剪不降低它）。
+  ///
+  /// ## 为什么要单独记，而不是每次扫缓冲
+  ///
+  /// 用途是「本地覆盖到哪一段」的对账（[TimelineDiagnostics]）与断线缺口探测
+  /// （[_probeReplayGap]），两者都在低频路径上，但扫描 2000 条事件并不便宜；
+  /// 而它在追加时顺手更新是 O(1)。
+  ///
+  /// 只增不减是**有意**的：裁剪把最旧的事件丢掉，最大值不受影响；而
+  /// [_backfill] / [_fallbackToCache] 是整段替换，必须显式重置（否则残留的
+  /// 旧最大值会让缺口探测漏判）。
+  int? _maxBufferedGlobalSeq;
+
+  /// 裁剪统计（诊断用，见 [timelineDiagnostics]）。
+  int _trimCount = 0;
+  int _lastTrimDropped = 0;
+  int _lastTrimKept = 0;
+  bool _lastTrimPerTurn = false;
+
+  /// 上一次把裁剪写进日志的时刻（节流用，见 [_recordTrim]）。
+  DateTime? _lastTrimLogAt;
+
+  /// 本 group 的裁剪是否已做过一次**完整**快照（见 [_recordTrim]）。
+  bool _trimEpisodeStarted = false;
+
+  /// 裁剪日志的最小间隔。
+  ///
+  /// 缓冲满了之后**每来一条新事件都会裁一次**，逐次 info 会在一秒内刷满 500 条
+  /// 的诊断环形缓冲（AGENTS.md §6.20），把真正的异常扫掉——与 §6.48 单轮降级
+  /// 路径只 warn 一次是同一教训。计数器不受节流影响，报告里永远是准的。
+  static const Duration _trimLogInterval = Duration(seconds: 30);
+
+  /// 本次聚焦期间「回放被截断 → 整段回填」的次数。
+  int _replayGapRepairs = 0;
+
+  /// 挂起的缺口探测 / 已重试次数。
+  Timer? _gapProbeTimer;
+  int _gapProbeAttempts = 0;
 
   StreamSubscription<SseFrame>? _frameSub;
   StreamSubscription<SseState>? _stateSub;
@@ -692,6 +747,7 @@ class ChatStreamController {
     _groupId = groupId;
     _buffer.clear();
     _oldestLoadedGlobalSeq = null;
+    _resetTimelineTracking();
     _resetStaleWatch();
     _resetUsageSummary(groupId);
 
@@ -718,6 +774,9 @@ class ChatStreamController {
         // 重连即向服务端对一次账（成功才覆盖，失败保留本地读数）。同取向：
         // webapp 在 `use-workbench-state` 的重连路径上重拉 `usage-summary`。
         unawaited(_loadUsageSummaryQuietly());
+        // 同一次重连也要对一次**时间线**的账：服务端回放窗口只有 500 条，
+        // 超出时它会静默返回空（与「没有事件」同形），见 [_probeReplayGap]。
+        _scheduleReplayGapProbe();
       }
     });
 
@@ -768,6 +827,7 @@ class ChatStreamController {
     _groupId = groupId;
     _buffer.clear();
     _oldestLoadedGlobalSeq = null;
+    _resetTimelineTracking();
     _setFromCache(false);
     _resetStaleWatch();
     _resetUsageSummary(groupId);
@@ -870,10 +930,23 @@ class ChatStreamController {
       _buffer
         ..clear()
         ..addAll(events);
+      // 缓冲被整段换掉 → 缓存的归约立即失效。
+      //
+      // ⚠️ 不能只靠后面的 `_emit()` 置脏：本方法在 `_emit()` **之前**就要读
+      // 一次归约（写诊断快照），不先置脏就会把「旧对话的归约结果」当成本次
+      // 回填的基线写进报告（实测踩过：回填后快照的助手字符数恒为 0）。
+      _reductionDirty = true;
+      // 整段替换：必须先清掉旧的最大值，否则上一个对话残留的 globalSeq 会让
+      // 缺口探测（[_probeReplayGap]）把「本轮真的有缺口」判成「已追上」。
+      _maxBufferedGlobalSeq = null;
+      _noteMaxGlobalSeq(events);
       // 首屏拉的是**最新**一页，故本页最小值就是「历史边界」。
       _oldestLoadedGlobalSeq = _minGlobalSeqOf(events);
       _trimBuffer();
       SpbLog.info('对话历史回填完成', {'groupId': groupId, 'count': events.length});
+      // 回填后的基线写进诊断快照：
+      // 报告里能分「一开始就只有 200 条」与「跑着跑着被裁到 200 条」。
+      TimelineProbe.record(timelineDiagnostics());
       // 写缓存：**只在网络成功路径**（§4.3）。SSE 热路径不写。
       //
       // 不 await：写缓存是旁路，不应拖慢首屏渲染（实现层已静默，不会抛）。
@@ -908,6 +981,9 @@ class ChatStreamController {
     // 防御性的：归约器假定输入正序，而错序**不会报错**，只会渲染顺序颠倒。
     cached.sort((a, b) => (a.globalSeq ?? 0).compareTo(b.globalSeq ?? 0));
     _buffer.addAll(cached);
+    _reductionDirty = true;
+    _maxBufferedGlobalSeq = null;
+    _noteMaxGlobalSeq(cached);
     // 历史边界：缓存里最小的事件就是能继续向上翻页的起点。
     //
     // ⚠️ 但服务端分页谓词是 `global_seq < cursor`，而缓存**可能**不含连续的
@@ -1012,6 +1088,10 @@ class ChatStreamController {
         return false;
       }
       _buffer.insertAll(0, fresh);
+      _reductionDirty = true;
+      // 前插的是更早的事件，最大值通常不变；仍走一遍以保持「任何灌入路径都
+      // 更新区间」这条不变式（避免将来改成乱序插入时静默失效）。
+      _noteMaxGlobalSeq(fresh);
       // 历史边界下调到本页最小值（只降不升）：裁剪不影响它，故这里用
       // 「本页最小值」而不是「缓冲区最小值」。
       final oldest = _minGlobalSeqOf(fresh);
@@ -1064,6 +1144,46 @@ class ChatStreamController {
     return min;
   }
 
+  /// 一组事件中最大的**落库** globalSeq；无有效值返回 null。
+  ///
+  /// 与 [_minGlobalSeqOf] 同一语义（跳过 `null` 与 `<= 0`），用在缺口探测与
+  /// [TimelineDiagnostics] 的「本地覆盖到哪一段」上。
+  static int? _maxGlobalSeqOf(Iterable<ChatEvent> events) {
+    int? max;
+    for (final e in events) {
+      final g = e.globalSeq;
+      if (g == null || g <= 0) continue;
+      if (max == null || g > max) max = g;
+    }
+    return max;
+  }
+
+  /// 把 [events] 的落库 globalSeq 并入 [_maxBufferedGlobalSeq]（只增不减）。
+  void _noteMaxGlobalSeq(Iterable<ChatEvent> events) {
+    final max = _maxGlobalSeqOf(events);
+    if (max == null) return;
+    final cur = _maxBufferedGlobalSeq;
+    if (cur == null || max > cur) _maxBufferedGlobalSeq = max;
+  }
+
+  /// 换 group / 重新 start 时重置「本地覆盖区间」与裁剪、修复统计。
+  ///
+  /// 与 `_oldestLoadedGlobalSeq` 同一时机：换了一个 group，这些数字描述的
+  /// 都是**上一个**对话的事实，留着会让诊断报告张冠李戴。
+  void _resetTimelineTracking() {
+    _maxBufferedGlobalSeq = null;
+    _trimCount = 0;
+    _lastTrimDropped = 0;
+    _lastTrimKept = 0;
+    _lastTrimPerTurn = false;
+    _lastTrimLogAt = null;
+    _trimEpisodeStarted = false;
+    _replayGapRepairs = 0;
+    _gapProbeAttempts = 0;
+    _gapProbeTimer?.cancel();
+    _gapProbeTimer = null;
+  }
+
   /// 把事件追加到缓冲区尾部（**流式增量先与尾部合并**）。
   ///
   /// 所有「往尾部追加」的路径都必须经这里，而不是直接 `_buffer.add`——否则
@@ -1071,8 +1191,14 @@ class ChatStreamController {
   /// 目前只有 [_onFrame] 走这条路径；[_backfill] / [loadOlder] 灌的是**落库**
   /// 事件（`transient == false`），不参与合并。
   void _appendEvent(ChatEvent event) {
+    // 先置脏：合并与追加都会改缓冲。放在最前面是因为 [_coalesceIntoTail] 的
+    // 命中路径也会就地改写 `_buffer.last`（合并后文本变了）。
+    _reductionDirty = true;
     if (_coalesceIntoTail(event)) return;
     _buffer.add(event);
+    // 合并路径不会走到这里，而增量事件本就没有 globalSeq——故只需在真正
+    // 追加时更新一次。
+    _noteMaxGlobalSeq([event]);
   }
 
   /// 若 [event] 可以并入 `_buffer.last` 就并入并返回 true。
@@ -1212,6 +1338,7 @@ class ChatStreamController {
     if (cut == null) {
       // 整个缓冲区都在同一个 turn 里，没有边界可切——退回逐条丢头部。
       _buffer.removeRange(0, excess);
+      _recordTrim(excess, perTurn: false);
       // 只在本降级时段的第一条记 warn（见 `_singleTurnTrimWarned`）。
       if (!_singleTurnTrimWarned) {
         _singleTurnTrimWarned = true;
@@ -1228,12 +1355,78 @@ class ChatStreamController {
 
     _singleTurnTrimWarned = false;
     _buffer.removeRange(0, cut);
-    SpbLog.debug('事件缓冲区超出上限，按轮丢弃最旧事件', {
-      'dropped': cut,
+    _recordTrim(cut, perTurn: true);
+  }
+
+  /// 记一次裁剪：先更新**不受节流影响**的计数器，再按需写日志与诊断快照。
+  ///
+  /// ## 为什么日志要节流、计数器不能
+  ///
+  /// 缓冲满了之后**每来一条新事件就裁一次**（新事件 → 超限 → 丢一条）。逐次
+  /// info 会在一秒内刷满 500 条的诊断环形缓冲，把真正的异常扫掉——与
+  /// `_singleTurnTrimWarned` 是同一教训。而报障时要回答的「到底裁过没有、
+  /// 裁掉多少」必须**永远准**，故计数器不节流，只节流写日志。
+  ///
+  /// 裁剪日志从 debug 升 **info**：debug 在发布构建被过滤，等于没写
+  /// （AGENTS.md §6.57 的同一纠正）。
+  void _recordTrim(int dropped, {required bool perTurn}) {
+    _trimCount++;
+    _lastTrimDropped = dropped;
+    _lastTrimKept = _buffer.length;
+    _lastTrimPerTurn = perTurn;
+
+    // ① 计数与区间是 O(1) 的，**每次都**补到已有快照上：报障要回答的
+    // 「到底裁过没有、裁了多少」不能靠采样。
+    _patchProbeTrimStats();
+
+    // ② 完整快照（正文字符数与逐轮明细）要一次归约，故只在本 group 的
+    // **首次**裁剪与每 [_trimLogInterval] 采一次。
+    final now = DateTime.now();
+    final firstOfEpisode = !_trimEpisodeStarted;
+    final last = _lastTrimLogAt;
+    if (!firstOfEpisode &&
+        last != null &&
+        now.difference(last) < _trimLogInterval) {
+      return;
+    }
+    _trimEpisodeStarted = true;
+    _lastTrimLogAt = now;
+    SpbLog.info('事件缓冲区超出上限，已丢弃最旧事件', {
+      'dropped': dropped,
       'kept': _buffer.length,
       'limit': maxBufferEvents,
-      'excess': excess,
+      'per_turn': perTurn,
+      'trim_count': _trimCount,
     });
+    // 裁剪是「内容从客户端消失」最直接的可疑原因，故顺手落一份诊断快照：
+    // 报告里能看到裁剪**之后**还剩多少正文。
+    TimelineProbe.record(timelineDiagnostics());
+  }
+
+  /// 把「计数与区间」补到已有快照上（**不重算归约**）。
+  ///
+  /// ## 为什么要判断 group
+  ///
+  /// 跨 group 的补丁会把上一个对话的裁剪史算到当前对话头上（`switchGroup`
+  /// 会清计数，但快照是进程级的）。不同 group 就什么都不做——本 group 的
+  /// 首次完整快照（和 `done`）会带上正确的累计值。
+  void _patchProbeTrimStats() {
+    final cur = TimelineProbe.latest;
+    if (cur == null || cur.groupId != _groupId) return;
+    TimelineProbe.record(
+      cur.withTrimStats(
+        bufferedEvents: _buffer.length,
+        trimCount: _trimCount,
+        lastTrimDropped: _lastTrimDropped,
+        lastTrimKept: _lastTrimKept,
+        lastTrimPerTurn: _lastTrimPerTurn,
+        oldestLoadedGlobalSeq: _oldestLoadedGlobalSeq,
+        newestBufferedGlobalSeq: _maxBufferedGlobalSeq,
+        replayGapRepairs: _replayGapRepairs,
+        sseCursorPresent: (_sse.lastEventId ?? '').isNotEmpty,
+        fromCache: _fromCache,
+      ),
+    );
   }
 
   /// 单轮降级裁剪是否已记过 warn（防日志洪水）。
@@ -1258,6 +1451,179 @@ class ChatStreamController {
       if (_buffer[i].turnId != _buffer[i - 1].turnId) return i;
     }
     return null;
+  }
+
+  // ==================== 诊断：时间线数据面快照 ====================
+
+  /// 当前时间线的「数据面」快照（见 [TimelineDiagnostics]）。
+  ///
+  /// ## 成本与调用点（重要）
+  ///
+  /// 它需要**一次归约**（若缓存已失效）+ 一遍 O(items) 统计。故只在低频节点
+  /// 调用：一轮结束、裁剪、回填、回放修复。**不要**放进每帧/每条事件的路径。
+  ///
+  /// ## 它解决的判据
+  ///
+  /// 用户报「回复大块内容消失」时，先看这里的 `assistant_chars` 与 `trim_count`：
+  ///
+  /// | 快照 | 结论 |
+  /// |---|---|
+  /// | 字符数正常、搜索也能命中 | **渲染层**（§6.51 那一类），数据没丢 |
+  /// | 字符数本身就少 / `assistant_chars` 比记忆中少 | **数据层**：裁剪或回放截断 |
+  /// | `trim_count > 0` 且丢的轮次对得上 | 就是 2000 上限裁的（§6.48），不是新缺陷 |
+  TimelineDiagnostics timelineDiagnostics() {
+    final items = _reduction.items;
+    var assistantChars = 0;
+    final byTurn = <String, List<int>>{};
+    final streaming = <String>{};
+    for (final item in items) {
+      if (item is! AssistantMessageItem) continue;
+      final len = item.text.length;
+      assistantChars += len;
+      if (item.isStreaming) streaming.add(item.turnId);
+      // [字符数, 段数]
+      final acc = byTurn.putIfAbsent(item.turnId, () => <int>[0, 0]);
+      acc[0] += len;
+      acc[1] += 1;
+    }
+    final turns =
+        byTurn.entries
+            .map(
+              (e) => TurnTextStat(
+                turnId: e.key,
+                chars: e.value[0],
+                items: e.value[1],
+                isStreaming: streaming.contains(e.key),
+              ),
+            )
+            .toList()
+          ..sort((a, b) => b.chars.compareTo(a.chars));
+
+    return TimelineDiagnostics(
+      groupId: _groupId,
+      bufferedEvents: _buffer.length,
+      maxBufferEvents: maxBufferEvents,
+      itemCount: items.length,
+      assistantChars: assistantChars,
+      turns: turns,
+      oldestLoadedGlobalSeq: _oldestLoadedGlobalSeq,
+      newestBufferedGlobalSeq: _maxBufferedGlobalSeq,
+      trimCount: _trimCount,
+      lastTrimDropped: _lastTrimDropped,
+      lastTrimKept: _lastTrimKept,
+      lastTrimPerTurn: _lastTrimPerTurn,
+      fromCache: _fromCache,
+      replayGapRepairs: _replayGapRepairs,
+      sseCursorPresent: (_sse.lastEventId ?? '').isNotEmpty,
+    );
+  }
+
+  /// 把快照写进日志环形缓冲与 [TimelineProbe]（导出诊断报告读的就是它）。
+  void _logTimelineDigest(String reason) {
+    final d = timelineDiagnostics();
+    TimelineProbe.record(d);
+    SpbLog.info('时间线数据面快照', {'reason': reason, ...d.toLogFields()});
+  }
+
+  // ==================== 断线回放缺口探测 ====================
+
+  /// 排一次缺口探测（见 [_probeReplayGap]）。
+  ///
+  /// 只在**带游标的重连**上排：首次连接（游标为空）时 [start] 已经整段回填过，
+  /// 没有「回放」可言；全局模式（`_groupId == null`）没有时间线，也无从对账。
+  void _scheduleReplayGapProbe() {
+    if (_disposed || _groupId == null) return;
+    final cursor = _sse.lastEventId;
+    if (cursor == null || cursor.isEmpty) return;
+    _gapProbeAttempts = 0;
+    _gapProbeTimer?.cancel();
+    _gapProbeTimer = Timer(
+      replayGapProbeDelay,
+      () => unawaited(_probeReplayGap()),
+    );
+  }
+
+  /// 探测「断线回放是不是被服务端截断了」，是则改用 timeline 整段回填。
+  ///
+  /// ## 为什么客户端必须自己探测（服务端给不出任何信号）
+  ///
+  /// 服务端 `replayUserEvents`（`chat_stream.go`）只取该用户**最近 500 条**
+  /// 落库事件，在其中定位 cursor；**找不到就返回空**，然后照常进入实时循环。
+  /// 于是「断线期间超过 500 条事件」与「断线期间什么都没有」在线上**完全同形**
+  /// ——客户端不探测，就会带着一段永久空洞继续渲染（用户看到「回复少了一大块」）。
+  ///
+  /// `docs/api-contract.md` §5.4 早就写了「超出窗口时返回空 → 客户端应改用
+  /// timeline API 整段回填」，但本方法之前**没有实现**：`_backfill` 只在
+  /// `start` / `switchGroup` 调用，重连路径上一次也不拉。
+  ///
+  /// ## 判据（两道）
+  ///
+  /// 1. **不是「落后」，是「追不上」**：拉一条 `limit=1` 的 timeline 拿该 group
+  ///    的最新 globalSeq，与本地见过的最大值比。HTTP 探测的响应完全可能跑在
+  ///    SSE 投递前面（两个独立连接），故「落后」只作为必要条件；
+  /// 2. **静默窗口**：等 [replayGapSettle]，若本地最大值在这段时间里**还在前进**，
+  ///    说明回放仍在到达（或实时流仍在追），重新排一次探测（最多 2 次）；
+  ///    静默了整整一个窗口仍然落后，才判定为真缺口。
+  ///
+  /// 这两道缺一不可：只按「落后」判，正常流式期间的每次重连都会误触发整段回填
+  /// （把用户在看的正文重置成最新 200 条）；只按「静默」判，缓冲根本不动时
+  /// 永远判不出缺口（因为「不动」本身不代表回放结束了）。
+  ///
+  /// ## 修复动作就是既有路径
+  ///
+  /// 缺口意味着缓冲区**中间有洞**，拼接无意义（无法得知洞在哪、有多长）——
+  /// 与部分页拼接相比，整段回填是唯一不会「看起来连续但实际缺一段」的选择。
+  /// 代价是丢掉缓冲里更早的已加载页与滚动位置（文档已把它列为该路径的既有语义）。
+  Future<void> _probeReplayGap() async {
+    final groupId = _groupId;
+    if (_disposed || groupId == null || _loadingOlder) return;
+    final localMax = _maxBufferedGlobalSeq;
+    // 本地还没有任何落库事件（首屏回填失败/离线）：无从对账，不得误判成缺口。
+    if (localMax == null) return;
+
+    CursorPage<ChatEvent> page;
+    try {
+      page = await _api.groupTimeline(groupId, limit: 1);
+    } on Object catch (e) {
+      // 探测失败不打扰用户：下一次重连会再探一次。debug 级（发布构建被过滤）。
+      SpbLog.debug('断线回放缺口探测失败（忽略）', {'error': e.toString()});
+      return;
+    }
+    if (_disposed || _groupId != groupId) return;
+
+    final serverMax = _maxGlobalSeqOf(page.items);
+    if (serverMax == null || serverMax <= localMax) return;
+
+    // `localMax` 是**发请求之前**的值。不能用探测返回后再读的值做基线：
+    // 探针的响应可能已经把回放帧「憋」在路上，读到的已经是前进过的值，
+    // 于是「还在动」这个信号会被吃掉（实测踩过：写成本行之后的重新读取，
+    // 「重排一次再追上」那条用例直接跳到回填）。
+    final atProbe = localMax;
+    await Future<void>.delayed(replayGapSettle);
+    if (_disposed || _groupId != groupId) return;
+    final after = _maxBufferedGlobalSeq;
+    // 追上了：回放/实时流已经把差距补上——这正是「探测跑在 SSE 前面」的正常情况。
+    if (after == null || after >= serverMax) return;
+    if (after != atProbe && _gapProbeAttempts < 2) {
+      _gapProbeAttempts++;
+      _gapProbeTimer?.cancel();
+      _gapProbeTimer = Timer(
+        replayGapSettle,
+        () => unawaited(_probeReplayGap()),
+      );
+      return;
+    }
+
+    _gapProbeAttempts = 0;
+    _replayGapRepairs++;
+    SpbLog.warn('断线回放被截断（cursor 已超出服务端回放窗口），改用 timeline 整段回填', {
+      'group_id': groupId,
+      'local_max_global_seq': after,
+      'server_max_global_seq': serverMax,
+      'repairs': _replayGapRepairs,
+    });
+    await _backfill(groupId);
+    _emit();
   }
 
   void _onFrame(SseFrame frame) {
@@ -1413,6 +1779,18 @@ class ChatStreamController {
     }
 
     _emit(touchedTurnId: event.turnId);
+
+    // 一轮结束：把「数据面」快照写进日志/诊断报告。
+    //
+    // 为什么在 `done` 而不是每条事件：这是「这一轮的正文到底进了归约结果没有」
+    // 的唯一稳定对账点——用户报障时说的是「刚才那条长回复没了」，而下一轮
+    // 开始后缓冲/裁剪已经又变了一次。频度也是一轮一条，不会刷满环形缓冲。
+    //
+    // 若 `done` 丢失（turn worker 崩了 / 断线），还有裁剪与回填两个点会写快照，
+    // 不会因为少一个对账点就什么都看不到。
+    if (event.eventType == EventTypes.done) {
+      _logTimelineDigest('done');
+    }
   }
 
   void _onStreamError(Object error) {
@@ -1773,6 +2151,9 @@ class ChatStreamController {
     _emitTimer?.cancel();
     _emitTimer = null;
     _pendingTouchedTurnIds = null;
+    // 丢弃挂起的缺口探测（回调里会再查 `_disposed`，但取消更干净）。
+    _gapProbeTimer?.cancel();
+    _gapProbeTimer = null;
     for (final t in _staleTimers.values) {
       t.cancel();
     }

@@ -677,5 +677,65 @@ void _diagnosticsReportTests() {
         reason: '节内除节尾外不得有空行',
       );
     });
+
+    group('时间线快照小节', () {
+      test('有快照时排在「最近日志」**之前**（报障先看这一段）', () {
+        final report = buildDiagnosticsReport(
+          environment: const {'app': 'x'},
+          timeline: const ['缓冲事件: 2000 / 2000', '裁剪: 共 3 次'],
+          logs: const [],
+        );
+
+        expect(report, contains('## 时间线快照'));
+        expect(report, contains('缓冲事件: 2000 / 2000'));
+        expect(
+          report.indexOf('## 时间线快照'),
+          lessThan(report.indexOf('## 最近日志')),
+          reason: '“正文在客户端就没的”这个答案不该埋在 500 条日志里',
+        );
+      });
+
+      test('无快照时整个小节省略（不写空节）', () {
+        // 空节会被读成「快照采集挂了」，而实际只是「还没打开过对话」。
+        final report = buildDiagnosticsReport(
+          environment: const {'app': 'x'},
+          logs: const [],
+        );
+
+        expect(report, isNot(contains('## 时间线快照')));
+      });
+
+      test('空列表与 null 同义（调用方不必自己判空）', () {
+        final report = buildDiagnosticsReport(
+          environment: const {'app': 'x'},
+          timeline: const [],
+          logs: const [],
+        );
+
+        expect(report, isNot(contains('## 时间线快照')));
+      });
+
+      test('快照行里的换行也被转义（与日志同口径）', () {
+        final report = buildDiagnosticsReport(
+          environment: const {},
+          timeline: const ['逐轮正文: a\nb'],
+          logs: const [],
+        );
+
+        expect(report, contains(r'逐轮正文: a\nb'));
+      });
+
+      test('快照同样过一遍脱敏（它也会被贴进公开 issue）', () {
+        final report = buildDiagnosticsReport(
+          environment: const {},
+          timeline: const [
+            'debug_header: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def',
+          ],
+          logs: const [],
+        );
+
+        expect(report, isNot(contains('eyJhbGciOiJIUzI1NiJ9')));
+      });
+    });
   });
 }

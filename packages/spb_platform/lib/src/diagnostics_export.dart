@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 
 import 'desktop_capabilities.dart';
 
@@ -193,13 +194,27 @@ Map<String, String> diagnosticsEnvironment() {
 /// ```
 ///
 /// [now] 只供测试固定时间戳（文件名与报告头都用到它）。
+///
+/// [timeline] 默认取 [TimelineProbe.latest]（最近一份「数据面」快照）。
+///
+/// ## 为什么要从静态探针取，而不是从页面传
+///
+/// 导出发生时用户在**设置页**，对话页已经卸载；`ChatStreamController` 是
+/// `autoDispose.family`，此刻通常已经 `dispose`。改成长驻只为能给报告供数据，
+/// 代价是多一条长连接的寿命（移动端耗电与流量）——不划算。故由控制器在
+/// 一轮结束 / 裁剪 / 回填这些低频点写入 [TimelineProbe]，报告读最近一份。
+///
+/// 还没采集过任何快照时（刚从启动就导出，从未打开对话）整个小节省略：
+/// 写空小节会让读者以为「快照采集挂了」，而不是「还没看过对话」。
 Future<DiagnosticsExportOutcome> exportDiagnosticsReport(
   DesktopCapabilities capabilities, {
   DateTime? now,
+  List<String>? timeline,
 }) {
   final at = now ?? DateTime.now();
   final text = buildDiagnosticsReport(
     environment: diagnosticsEnvironment(),
+    timeline: timeline ?? TimelineProbe.latest?.toReportLines(),
     generatedAt: at,
   );
   return capabilities.saveDiagnostics(

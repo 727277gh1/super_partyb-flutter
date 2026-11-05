@@ -337,6 +337,12 @@ final _credentialPairRe = RegExp(
 /// `FlutterVersion` / `appBuildName` 这类 Flutter 侧常量。键名与顺序由调用方
 /// 决定，报告按传入顺序逐行输出。
 ///
+/// [timeline] 是时间线「数据面」快照的**已格式化行**（`## 时间线快照` 小节）。
+/// 本包看不到 `spb_domain` 的 `TimelineDiagnostics`（依赖方向是
+/// `spb_domain → spb_core`），故调用方把它拍平成字符串行传进来。为空时整个
+/// 小节省略——「还没打开过任何对话」时不该出现空小节，否则读者会以为快照
+/// 采集挂了。
+///
 /// [logs] 默认取 [SpbLog.recentLogs]。显式传入主要供测试构造确定内容。
 ///
 /// 返回的文本**必定**经过 [redactSecrets]，调用方无需（也不应）自行拼接——
@@ -344,6 +350,7 @@ final _credentialPairRe = RegExp(
 String buildDiagnosticsReport({
   required Map<String, String> environment,
   List<LogRecord>? logs,
+  List<String>? timeline,
   DateTime? generatedAt,
 }) {
   final entries = logs ?? SpbLog.recentLogs;
@@ -360,6 +367,17 @@ String buildDiagnosticsReport({
   } else {
     for (final entry in environment.entries) {
       buf.writeln('${entry.key}: ${_escapeNewlines(entry.value)}');
+    }
+  }
+
+  // 时间线快照放在**日志之前**：报障时要先回答「正文是不是在客户端就没的」，
+  // 而这个答案在 500 条日志里找不到。放在这里让人一眼看到，不必翻。
+  if (timeline != null && timeline.isNotEmpty) {
+    buf
+      ..writeln()
+      ..writeln('## 时间线快照');
+    for (final line in timeline) {
+      buf.writeln(_escapeNewlines(line));
     }
   }
 
