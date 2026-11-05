@@ -2,28 +2,22 @@
 
 本文件指导 Claude Code / pi 等 AI Agent 在 **super_partyb-flutter** 仓库中工作。
 
-> **本文件每次请求都会被全文注入上下文**（它不是 wiki，是提示词）。所以这里只放
-> 「现在就要遵守的判据 + 去哪找细节」：决策复盘在 `docs/design-decisions/`，
-> 已知问题在 `docs/known-issues.md`，契约在 `docs/api-contract.md`。
-> 体积由 `tools/check_agents_size.sh` 守着——**别把它写回成变更日志**。
+> **本文件每次请求都会被全文注入上下文**（它是提示词，不是 wiki）：只放「现在就要
+> 遵守的判据 + 去哪找细节」。体积由 `tools/check_agents_size.sh` 守着——别把它写回成变更日志。
 
-> 姊妹仓库：`super_partyb`（Go API + Next.js webapp + Taro 小程序，**未公开**）。
-> **本仓库只做客户端**，业务真源永远在 `super_partyb/apps/go-api`。
->
-> ⚠️ 下文出现的 `super_partyb/...` 路径、`api-gateway/...`、`id-provider/...`
-> 等**不在本仓库内**，仅作为契约依据的引用。本仓库可独立构建与测试，
-> 不需要这些仓库在场（除下节“引用”说明的契约同步工作外）。
+> 姊妹仓库 `super_partyb`（Go API + Next.js webapp + Taro 小程序，**未公开**）：**本仓库只做
+> 客户端**，业务真源永远是 `super_partyb/apps/go-api`。下文出现的 `super_partyb/...`、
+> `api-gateway/...` 等路径**不在本仓库内**，仅作契约依据；本仓库可独立构建与测试。
 
 ---
 
 ## 1. 这是什么
 
-用 **Flutter** 实现 Super PartyB 的**桌面端 + 移动端**（取代原 `super_partyb/apps/desktop`
-的 Tauri 薄壳，并新增 iOS/Android App）。这是**「加一个端」**，不是换栈：
-webapp（Next.js）与微信小程序（Taro）全部保留，功能最全的仍是 webapp。
+用 **Flutter** 实现 Super PartyB 的**桌面端 + 移动端**（取代原 Tauri 薄壳，新增 iOS/Android App）。
+这是**「加一个端」**不是换栈：webapp（Next.js）与小程序（Taro）全部保留，功能最全的仍是 webapp。
 
-**关键约束：Go API 一行不改。** 客户端适配服务端，不是反过来；任何「为客户端方便而改
-Go API」的提案，必须先证明无法在客户端解决。各平台能否在本机构建、在哪出包 → §8。
+**关键约束：Go API 一行不改。** 客户端适配服务端，不是反过来；「为客户端方便改 Go API」
+的提案必须先证明无法在客户端解决。平台与出包能力 → §8。
 
 ---
 
@@ -45,8 +39,7 @@ for f in tools/check_*.sh; do bash "$f" || break; done
 cd apps/spb_desktop && flutter test   # 桌面端
 cd apps/spb_mobile  && flutter test   # 移动端
 dart test                             # 纯 Dart 包（spb_core/models/api/domain）
-# ⚠️ `spb_data` 虽然也是纯 Dart 语义，但依赖链含 Flutter（secure storage）→
-# 必须 `cd packages/spb_data && flutter test`，`dart test` 会报 dart:ui 不可用。
+cd packages/spb_data && flutter test  # ⚠️ 依赖链含 Flutter，dart test 会报 dart:ui 不可用
 
 # 覆盖率（逐包采集汇总，默认剔除生成代码；用法见 tools/coverage.sh 文件头）
 bash tools/coverage.sh [包名] [--summary-only]
@@ -63,8 +56,7 @@ cd apps/spb_mobile  && flutter build apk --release
 bash tools/bundle_linux_deps.sh
 
 # 代码生成（drift：spb_data 的 database.g.dart）
-# ⚠️ 必须 cd 进包目录（根目录跑是静默空转，wrote 0 outputs），跑完必须 format
-# （生成物不是 dart format 形态，详见 tools/check_codegen.sh 文件头）。
+# ⚠️ 必须 cd 进包目录（根目录跑静默空转），跑完必须 format——见 tools/check_codegen.sh 文件头
 cd packages/spb_data && dart run build_runner build && dart format lib && cd ../..
 ```
 
@@ -77,35 +69,32 @@ cd packages/spb_data && dart run build_runner build && dart format lib && cd ../
 ## 3. 仓库结构
 
 `apps/spb_desktop`（linux/windows/macos）与 `apps/spb_mobile`（android/ios）**只做装配**
-（DI / 路由 / 入口）。`packages/` 十个包：`spb_core`（基础设施）`spb_models`（数据契约）
-`spb_api`（HTTP + SSE）`spb_domain`（领域逻辑）`spb_data`（drift 本地持久化）
-`spb_design`（令牌/主题）`spb_ui`（通用组件）`spb_platform`（平台能力）`spb_features`（功能模块）。
+（DI / 路由 / 入口）；`packages/` 九个包：`spb_core` `spb_models` `spb_api` `spb_domain`
+`spb_data` `spb_design` `spb_ui` `spb_platform` `spb_features`（职责见 §4 的表与「依赖方向」）。
 
 `tools/` —— 守卫（每个 `check_*.sh` 都配一个 `check_*_selftest.sh`，自测脚本不单列，
 用 `ls tools/` 看全量）：
 
 | 脚本 | 查什么 |
 |---|---|
-| `tools/check_layering.sh` | 纯 Dart 包禁依赖 Flutter |
+| `tools/check_layering.sh` | 分层规则 |
 | `tools/check_format.sh` | dart format 门禁 |
-| `tools/check_analysis_options.sh` | 成员包都引用根 analysis_options |
-| `tools/check_test_support_sync.sh` | 跨包重复的测试辅助文件逐字节相同 |
-| `tools/check_workflow_steps.sh` | workflow 的 step 没被注释吞掉 |
-| `tools/check_wiring_parity.sh` | 两端对共享组件的接线一致 |
-| `tools/check_unused_deps.sh` | 没有「声明但零 import」的依赖 |
-| `tools/check_silent_catches.sh` | 空 catch 必须留痕（说明或日志） |
-| `tools/check_codegen.sh` | 提交进 git 的 .g.dart 与源文件一致 |
-| `tools/check_build_defines.sh` | 发布构建必须传 `--dart-define`（§6.33） |
-| `tools/check_agents_refs.sh` | 本文引用的标识符存在、tools/ 脚本都被列出 |
-| `tools/check_agents_numbers.sh` | 带标记的数字不漂移（容差 5%） |
-| `tools/check_agents_size.sh` | 本文体积上限（每次请求全文注入） |
+| `tools/check_analysis_options.sh` | analysis_options 接线 |
+| `tools/check_test_support_sync.sh` | 重复的测试辅助文件一致 |
+| `tools/check_workflow_steps.sh` | workflow step 未被注释吞掉 |
+| `tools/check_wiring_parity.sh` | 两端接线一致 |
+| `tools/check_unused_deps.sh` | 零 import 依赖 |
+| `tools/check_silent_catches.sh` | 静默吞异常 |
+| `tools/check_codegen.sh` | 生成物漂移 |
+| `tools/check_build_defines.sh` | 发布构建传 `--dart-define` |
+| `tools/check_agents_refs.sh` | 文档标识符引用 |
+| `tools/check_agents_numbers.sh` | 文档数字漂移 |
+| `tools/check_agents_size.sh` | 本文体积 |
 
 工具：`tools/coverage.sh`（覆盖率）、`tools/bundle_linux_deps.sh`（Linux 分发依赖打包）、
-`tools/gen_brand_assets.py`（品牌图标生成）、`tools/build_windows_installer.ps1`
-（Inno Setup 安装包）、`tools/reverse_verify_issue50.sh`（双栈降级变异验证）、
-`tools/sync-to-github.sh`（导出 HEAD 为单提交干净仓库推 GitHub）、
-`tools/scrub-history.sh`（开源前重写 git 历史里的真实标识——**只重写历史**，工作区里的
-真实标识须先清干净；映射文件 `SPB_OS_MAP` 含真实值、绝不入库；顺序 `--dry-run` → 执行 → `--verify`）。
+`tools/gen_brand_assets.py`（品牌图标）、`tools/build_windows_installer.ps1`（Inno Setup 包）、
+`tools/reverse_verify_issue50.sh`（双栈降级变异验证）、`tools/sync-to-github.sh`（导出干净仓库
+推 GitHub）、`tools/scrub-history.sh`（开源前重写历史里的真实标识；**只重写历史**，用法见脚本头）。
 
 ### 依赖方向（**单向，不可逆**）
 
@@ -171,14 +160,12 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 6. 关键设计决策
 
-完整复盘（症状 → 根因 → 反直觉点 → 实测证据 → file:line）在
-[`docs/design-decisions/`](docs/design-decisions/README.md)，§6.x 逐条索引见该目录 `README.md`。
+完整复盘在 [`docs/design-decisions/`](docs/design-decisions/README.md)（§6.x 逐条索引见该目录 `README.md`）。
+**编号永久稳定**：`§6.43` 永远指同一件事，只是换了文件——代码、`tools/`、`docs/` 里大量 `§6.x`
+引用因此不失效：按上表找到主题文件、再按编号定位小节即可。
 
-**编号永久稳定**：`§6.43` 永远指同一件事，只是换了文件——代码、`tools/`、`docs/` 里大量
-`§6.x` 引用因此不失效：按上表找到主题文件、再按编号定位小节即可。
-
-> ⚠️ **新增决策写进 `docs/design-decisions/<主题>.md`，本文件只在下表加一行。**
-> 它每次请求都被全文注入，体积就是上下文预算（`tools/check_agents_size.sh` 守着）。
+> ⚠️ **新增决策写进 `docs/design-decisions/<主题>.md`；本文件只在下表加一行索引（≤ 1 行），
+> 正文一律不进本文。** 它每次请求都被全文注入，体积就是上下文预算（`tools/check_agents_size.sh` 守着）。
 
 ### 6.0 仍然约束写代码的硬规则
 
@@ -213,53 +200,46 @@ spb_design / spb_models / spb_core → 无包内依赖
 | 产品边界与可运维性 | [`runtime-and-ops.md`](docs/design-decisions/runtime-and-ops.md) |
 | 性能与内存 | [`performance.md`](docs/design-decisions/performance.md) |
 
-（哪个 §6.x 在哪个文件：见该目录 `README.md` 的「全部小节」表。）
-
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 `libkeybinder-3.0-dev` / `libayatana-appindicator3-dev` / `libsecret-1-dev` **不是默认安装项**；
-发分发包前**必须**跑 `tools/bundle_linux_deps.sh`——非系统库若装在非标准前缀，产物会把
-那个绝对路径写进 RUNPATH，结果「开发机能跑、分发即挂」。清单与细节见
-[`build-and-release.md`](docs/design-decisions/build-and-release.md) §7。
+发分发包前**必须**跑 `tools/bundle_linux_deps.sh`（否则非系统库的绝对路径进 RUNPATH，
+「开发机能跑、分发即挂」）。清单见 [`build-and-release.md`](docs/design-decisions/build-and-release.md) §7。
 
 ## 8. 构建平台限制
 
-| 平台 | 本机（Linux）可构建 | 在哪出包 | 限制 |
-|---|---|---|---|
-| Linux | ✅ | 本地 / CI | 需 GTK 开发库 + `bundle_linux_deps.sh` |
-| Windows | ❌ | GitHub `windows-2022` | `my_app.exe` 是 MSVC 编译的 C++ runner，Linux 无 MSVC |
-| macOS | ❌ | GitHub `macos-14`（**仅 tag**，10× 计费） | ad-hoc 签名，未公证，首次打开需绕过 Gatekeeper |
-| Android | ✅ | 本地 / CI | 模拟器不可用（`/dev/kvm` 未透传） |
-| iOS | ❌ | 未出包 | 需 Apple Developer 账号（$99/年） |
+| 平台 | 本机可构建 | 在哪出包 |
+|---|---|---|
+| Linux | ✅ | 本地 / CI（需 GTK 开发库 + `bundle_linux_deps.sh`） |
+| Android | ✅ | 本地 / CI |
+| Windows | ❌ | GitHub `windows-2022` |
+| macOS | ❌ | GitHub `macos-14`（**仅 tag**，10× 计费） |
+| iOS | ❌ | 未出包 |
 
-三个 Windows 坑（VC++ 运行库不在产物里 / 锁 `windows-2022` 而非 `latest` / MSIX 沙箱内崩溃）
-与 macOS 必须用 `ditto` 打包的要求，见
+为什么（MSVC runner / Gatekeeper / 三个 Windows 坑 / `ditto` 打包）见
 [`build-and-release.md`](docs/design-decisions/build-and-release.md) §8。
 
 ## 9. 开发环境
 
-见 [`docs/development.md`](docs/development.md)。本机是 **Debian 12 LXC 容器**：
-无 `/dev/kvm`、无 Windows/macOS 主机、无真机——「无头测试能证明什么、
-不能证明什么」在那里写清了。
+见 [`docs/development.md`](docs/development.md)：本机是 **Debian 12 LXC 容器**（无 `DISPLAY`、
+无真机），「无头测试能证明什么、不能证明什么」在那里写清了。
 
 ## 10. 待办与里程碑
 
-见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。
-仍未闭合的两项：移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`）、
-iOS 出包（需 Apple Developer 账号）。
+见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。仍未闭合的两项：
+移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`）、iOS 出包（需 Apple 账号）。
 
 ## 11. 已知问题
 
-**全部条目（含 60 余条已修项的根因、修法与反向验证）见
-[`docs/known-issues.md`](docs/known-issues.md)。** 下面只留**当前仍未修 / 待决策 /
-有意不做**的（一行一条，细节在链接里）：
+**全表（含 60 余条已修项的根因与反向验证）见 [`docs/known-issues.md`](docs/known-issues.md)。**
+下面只留**当前仍未修 / 待决策 / 有意不做**的（细节在链接里）：
 
 | 问题 | 状态与依据 |
 |---|---|
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策（`super_partyb` issue #30） |
 | macOS 包未签名/未公证（首开需绕过 Gatekeeper）；Windows 包无代码签名（SmartScreen） | 已知限制（§8、`docs/windows-release.md` §4） |
 | iOS 出包需 Apple Developer 账号 | 待决策（`super_partyb` issue #31） |
-| 四项检索面板未接（语义 / 图谱 / 文件演化 / 决策演化） | **有意不做**（issue #12）：语义搜索嵌入链路通但数据面为空（`chat_groups` = 0 行）；两个「演化」面板的数据源在 Go 时代已停写——前置是服务端先恢复写入（§6.9.6） |
+| 四项检索面板未接（语义 / 图谱 / 两个「演化」） | **有意不做**（issue #12）：数据面为空 / 数据源在 Go 时代已停写，前置是服务端先恢复写入（§6.9.6） |
 | 离线缓存切片 C 的「反向验证为 0」 | ⚠️ 唯一一条诚实记录：`drain` 进度哨兵在正确代码上不可达，属 **fail-safe**（`docs/offline-cache-design.md` §7bis.11） |
 | bcc `partyb-go-api` 的 `chat_turns`/`chat_groups`/`chat_events` 全为 0 | **待排查**（属 `super_partyb` 侧）：2026-09-27 备份有 3559 行，现库缺 `chat_*`（§6.9.6 末尾注） |
 | TTS 语音只展示状态、不播放（无音频播放插件） | **有意不做**：音频由交付物同步拉到本地（`packages/spb_domain/lib/src/tts_status.dart`） |
