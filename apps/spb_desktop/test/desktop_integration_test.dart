@@ -49,7 +49,7 @@ class _WiringCapabilities
       trayActions[id] = action;
 
   @override
-  void setHideOnClose(bool value) => hideOnClose = value;
+  Future<void> setHideOnClose(bool value) async => hideOnClose = value;
 
   // ---- 托盘右键弹出（2026-11 Windows 卡死菜单修复的接线验证） ----
   int popupCalls = 0;

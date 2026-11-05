@@ -361,7 +361,20 @@ abstract interface class TrayActionTarget {
   bool get trayAvailable;
 
   /// 是否在关闭主窗口时隐藏到托盘。
-  void setHideOnClose(bool value);
+  ///
+  /// ## 实现方必须真正**拦截**关闭，而不只是收到通知后 `hide()`
+  ///
+  /// `window_manager` 的关闭事件是「先派发事件，再看 `preventClose` 决定要不要
+  /// 继续关闭」：Windows 是 `WM_CLOSE` 分支、Linux 是 GTK `delete_event` 回调、
+  /// macOS 是 `windowShouldClose`。而事件是**异步**投递到 Dart 的——等监听器里的
+  /// `hide()` 跑到时，原生侧早已把窗口销毁（Windows 上窗口销毁 → 消息循环退出
+  /// → 进程结束）。故 `setHideOnClose(true)` 必须同时打开 `preventClose`，否则
+  /// 用户点关闭按钮的表现是「应用直接退出」而不是「隐藏到托盘」。
+  ///
+  /// 之所以是 `Future`：打开 `preventClose` 是一次平台通道往返。若允许
+  /// fire-and-forget，用户在启动瞬间（attach 之后、通道返回之前）点关闭就会
+  /// 走回「直接退出」的老路——而这正是本方法存在的意义。
+  Future<void> setHideOnClose(bool value);
 }
 
 /// 「真正退出应用」的能力。

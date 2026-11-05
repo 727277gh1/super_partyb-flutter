@@ -6928,6 +6928,121 @@ overflow，故门禁全绿而界面不可用——与 §6.16（窄屏 AppBar 溢
 - **不把徽标合并成单行 `·` 连接**：时间锚点（`开始 …` / `完成 …` / `跳过 …`）
   被精确文案断言钉住，且窄栏里合并后仍会换行，没有收益。
 
+### 6.63 「关窗即隐藏」从未生效：`close` 是通知，不是拦截（2026-11）
+
+**症状**：Windows 用户点窗口关闭按钮，应用**直接退出**，托盘里也找不到。
+期望是「隐藏到托盘、进程继续跑交付物同步，可从托盘或 `Alt+Space` 唤回」。
+
+#### 根因：`onWindowClose` 里的 `hide()` 永远晚于原生侧的销毁
+
+`_hideOnClose` 机制（`bootstrap.dart` 的 `onWindowClose` → `windowManager.hide()`）
+一直在，`desktop_integration.dart` 也一直在 `tray.setHideOnClose(tray.trayAvailable)`——
+**唯一缺的是 `setPreventClose`**。`window_manager` 的 `close` 事件是**通知**而不是
+**拦截**：三平台原生侧的顺序都是「先异步派发 `close` 事件，再看 `isPreventClose()`
+决定要不要继续关闭」。
+
+| 平台 | 原生侧代码 | 不拦截的后果 |
+|---|---|---|
+| Windows | `WM_CLOSE` 分支：发 `close` 事件，然后 `if (IsPreventClose()) return -1;` | 落到 `DefWindowProc` → **销毁窗口** → 消息循环退出 → 进程结束 |
+| Linux | GTK `delete_event` 回调 `return plugin->_is_prevent_close;` | 返回 FALSE → GTK 销毁窗口 |
+| macOS | `windowShouldClose` 发 `close` 后返回 `isPreventClose()` | 返回 true → 窗口关闭 |
+
+事件是**异步**投递到 Dart 的，故等 `hide()` 跑到时窗口**早已销毁**：
+
+```
+修复前：点关闭 → 原生派发 close → DefWindowProc 销毁窗口 → 消息循环退出 → 进程结束
+        （Dart 的 hide() 永远来不及）
+修复后：点关闭 → 原生派发 close → preventClose 为真 → return -1
+        → 窗口保留 → Dart 的 hide() 把它从屏幕上收起来
+```
+
+即「关窗即隐藏」**从未真正生效过**（Linux 同理，只是没人报障）。这与 §6.21 /
+§6.33 / §6.37 是同一失败模式：**`hide()` 确实被调用了、返回值也正常，所有门禁全绿**。
+
+#### 修法（三处，缺一不可）
+
+| 位置 | 改动 | 为什么 |
+|---|---|---|
+| `PlatformDesktopCapabilities.setHideOnClose` | 记 `_hideOnClose` 之后 `await windowManager.setPreventClose(value)`，try/catch + info/warn | 让原生侧真的**不**关闭，Dart 的 `hide()` 才有意义 |
+| 契约 `TrayActionTarget.setHideOnClose` | `void` → `Future<void>` | 它做的是平台通道 I/O。留 `void` 就是 fire-and-forget，签名在**承诺**它异步完成却没有交付 |
+| `quit()` | `destroy()` **之前** `setPreventClose(false)` | macOS 的 `destroy()` 是 `NSApp.terminate(nil)`，AppKit 在终止序列里会逐窗口问 `windowShouldClose:`，**任一返回 NO 就取消终止** → 托盘「退出」在 macOS 上会变成死按钮 |
+
+`desktop_integration.dart` 的调用点用 `unawaited(...)`（`_installTrayMenu` 是同步的，
+失败已在能力层记 warn 并降级成「关窗即退出」）。`attach()` 发生在首帧之前，
+故不存在「用户抢在通道返回前点了关闭」的竞态。
+
+**`quit()` 仍能退出**：`destroy()` 在 Windows 是 `PostQuitMessage`（与
+`is_prevent_close_` 无关）、Linux 自己先把 `_is_prevent_close` 置 false 再
+`gtk_window_close`、macOS 是 `NSApp.terminate`。故拦截关闭不会把用户困住。
+
+#### 为什么 `_hideOnClose=false` 时必须把 preventClose 也关掉
+
+一律拦截而托盘没起来（Linux 无 appindicator、Flatpak 沙箱），用户点关闭会得到
+一个「既没退出、也没有任何入口」的僵尸进程。`desktop_integration.dart` 的
+`tray.setHideOnClose(tray.trayAvailable)` 这条守卫（§6.11）只有配上「preventClose
+镜像该值」才完整。
+
+#### 唤回路径（本来就有，无需新增）
+
+| 入口 | 链路 |
+|---|---|
+| 托盘左键 | `onTrayIconMouseDown` → `showWindow(WindowRole.main)`（show + focus，幂等、不 toggle） |
+| 托盘菜单「显示主窗口」 | `TrayActionIds.show` → 同上 |
+| `Alt+Space` | `_onHotkeyPressed('quickCapture')` → `showWindow(quickCapture)` → `_navigateToRole` → `/overlay`（注册失败只 warn——`Alt+Space` 常被系统占用） |
+| 托盘菜单「快速输入」 | `TrayActionIds.quickCapture` → 同上（快捷键被占用时的鼠标兜底） |
+
+#### 关窗相关日志一律 `info`
+
+`SpbLog` 默认 `minLevel = info`，debug 在生产被过滤（§6.43 的同一教训）。关窗是
+低频操作，三条都记 info 不刷屏：`关窗行为已设置` / `关闭主窗口：隐藏到托盘…` /
+`关闭主窗口：未启用隐藏到托盘，按默认行为退出`。**后者尤其重要**——原生侧一旦
+销毁窗口，Dart 就再没有机会记录任何东西，那条日志是「这次关窗到底退出了没有」
+的唯一线索（§6.57 的会话标记同一取向）。
+
+#### 测试（`window_close_test.dart`，6 条）
+
+`PlatformDesktopCapabilities` 的构造函数只存资源路径、不碰通道，故可以**直接构造**
+再 mock `MethodChannel('window_manager')`（`bootstrap.dart` 其余部分确实无法在无头
+环境构造，§6.57 同一取向）。断言的是**通道上到底发了什么**——这是唯一能钉住
+「拦截是否真的打开」的观测面。
+
+| 用例 | 钉住 |
+|---|---|
+| `setHideOnClose(true)` 打开 preventClose | 通道收到 `setPreventClose` 且 `isPreventClose == true` |
+| `setHideOnClose(false)` 关闭 preventClose | 托盘不可用时必须允许关窗退出 |
+| `onWindowClose` 启用时隐藏且不销毁 | 有 `hide`、**没有** `destroy` |
+| `onWindowClose` 未启用时不做窗口操作 | 既不 `hide` 也不 `destroy`（让原生按默认行为退出） |
+| 通道不可用时不抛 | 降级为「关窗即退出」，应用仍可用 |
+| `quit()` 先关 preventClose 再 destroy | 两个调用的**顺序** + 参数为 false（macOS 退出） |
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 失败用例 |
+|---|---|
+| 去掉 `setPreventClose(value)`（复现原缺陷） | **2**（true / false 两条） |
+| 去掉 `quit()` 里的 `setPreventClose(false)` | **1**（顺序断言） |
+
+#### 有意不做
+
+- **不在 `onWindowClose` 里想办法赢过原生关闭**：事件是异步的，这条路**结构上**
+  走不通。唯一正确的点是让原生侧别继续关闭。
+- **不把 `setPreventClose` 硬编码成 true**：它必须镜像 `_hideOnClose`，否则托盘
+  不可用时得到僵尸进程（见上）。
+- **不做托盘左键 toggle（已显示则隐藏）**：现有语义是幂等 show（§6.5 的
+  `showWindow`）。toggle 会让「双击托盘」在窗口已显示时把它收起来，而那看起来
+  像「点没了」。
+- **不给 Windows 做「隐藏后自动最小化到托盘气泡提示」**：需要额外通知依赖，
+  而窗口从任务栏消失本身就是足够信号（`ShowWindow(SW_HIDE)` 在 Windows 上
+  同时移出任务栏——这正是 hide-on-close 必须以 `trayAvailable` 为前提的原因）。
+
+#### 已知边界
+
+- **需 Windows 真机验证**（本机无 Windows，§8/§9）：无头测试钉的是通道层的
+  调用事实，「关窗后托盘图标在、左键能唤回」必须在有桌面环境的机器上确认。
+- **`_trayAvailable` 在 Windows 上可能误置 true**：`tray_manager` 的 `setIcon`
+  恒返回 true（§6.55 已记录），故图标资源形态错时 hide-on-close 仍会启用而
+  图标不显示。防御手段是资源本身（`.ico` 由生成脚本落盘），不是运行时检测。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -7249,8 +7364,9 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 缓存作为局部规避；无头测试未复现设备上的原始空白，**待故障设备验证**。
 
 | 问题 | 状态 | 参考 |
-| ~~目标任务清单的内容被操作按钮挤到看不见（桌面侧边栏 320dp 下标题宽度为 0、单条任务 1008dp 高）~~ | ✅ 已修（§6.62）：根因是 `ListTile.trailing` **先按固有宽度占位**——5 个行级 `IconButton` 的点击区下限各 48dp（`visualDensity: compact` 不缩它，实测仍 48×48），合计 240dp；320 − 内边距 32 − 勾选框 48 − 240 = **0**。且**不抛异常**（0 宽标题是合法布局），故门禁全绿而界面不可用。修法对齐 webapp `GoalTaskEditor`：`ListTile` → 状态色边框卡片，标题独占整行（`Expanded`，`maxLines: 3`），描述与出错原因各占一行，动作移到卡片**底部**的 `Align + Wrap`，状态徽标**本身就是**下拉触发器（比再摆一个 `more_horiz` 少 48dp）。实测 320dp：标题 **0 → 258**，单条 **1008 → 198**；420dp 弹层标题 92 → 358。新增 3 条**显式压到 320dp** 的用例（默认 800dp 的 43 条发现不了，同 §6.16 失败模式）；反向验证：动作塞回同一行 → 2 条红，状态改回独立图标按钮 → 4 条红 | §6.62 |
 |---|---|---|
+| ~~目标任务清单的内容被操作按钮挤到看不见（桌面侧边栏 320dp 下标题宽度为 0、单条任务 1008dp 高）~~ | ✅ 已修（§6.62）：根因是 `ListTile.trailing` **先按固有宽度占位**——5 个行级 `IconButton` 的点击区下限各 48dp（`visualDensity: compact` 不缩它，实测仍 48×48），合计 240dp；320 − 内边距 32 − 勾选框 48 − 240 = **0**。且**不抛异常**（0 宽标题是合法布局），故门禁全绿而界面不可用。修法对齐 webapp `GoalTaskEditor`：`ListTile` → 状态色边框卡片，标题独占整行（`Expanded`，`maxLines: 3`），描述与出错原因各占一行，动作移到卡片**底部**的 `Align + Wrap`，状态徽标**本身就是**下拉触发器（比再摆一个 `more_horiz` 少 48dp）。实测 320dp：标题 **0 → 258**，单条 **1008 → 198**；420dp 弹层标题 92 → 358。新增 3 条**显式压到 320dp** 的用例（默认 800dp 的 43 条发现不了，同 §6.16 失败模式）；反向验证：动作塞回同一行 → 2 条红，状态改回独立图标按钮 → 4 条红 | §6.62 |
+| ~~Windows 上点窗口关闭按钮，应用**直接退出**（托盘里也找不到），「关窗即隐藏到托盘」从未生效~~ | ✅ 已修（§6.63）：根因不在 `onWindowClose`（它一直在调 `windowManager.hide()`），而在 **`preventClose` 从未被打开**——`window_manager` 的 `close` 事件是**通知**不是**拦截**，三平台原生侧都是「先异步派发 `close`，再看 `isPreventClose()` 决定要不要继续关闭」（Windows `WM_CLOSE` → `return -1`，否则落 `DefWindowProc` 销毁窗口 → 消息循环退出；Linux GTK `delete_event` 的返回值；macOS `windowShouldClose` 的 bool）。事件是异步投递到 Dart 的，故等 `hide()` 跑到时窗口**早已销毁**——`hide()` 确实被调用了、返回值也正常，所有门禁全绿。修法三处：① `PlatformDesktopCapabilities.setHideOnClose` 记完 `_hideOnClose` 再 `await windowManager.setPreventClose(value)`（失败只 warn，降级成「关窗即退出」）；② 契约 `TrayActionTarget.setHideOnClose` 由 `void` 改 **`Future<void>`**（它做平台通道 I/O，留 void 就是 fire-and-forget），调用点用 `unawaited`；③ **`quit()` 在 `destroy()` 之前先 `setPreventClose(false)`**——macOS 的 `destroy()` 是 `NSApp.terminate(nil)`，AppKit 在终止序列里逐窗口问 `windowShouldClose:`，任一返回 NO 就**取消终止**，不先关掉的话托盘「退出」在 macOS 上是死按钮（Windows `PostQuitMessage` / Linux 自己置 false 不受影响，但统一处理不留平台分叉）。唤回路径本来就有、无需新增：托盘左键 / 托盘「显示主窗口」→ `showWindow(WindowRole.main)`，`Alt+Space` / 托盘「快速输入」→ `/overlay`。关窗相关日志一律 **info**（debug 在生产被过滤），其中「未启用隐藏到托盘，按默认行为退出」是「这次关窗到底退出了没有」的唯一线索。新增 `window_close_test.dart` 6 条（mock `MethodChannel('window_manager')`，断言通道上到底发了什么——这是唯一能钉住「拦截是否真的打开」的观测面）；反向验证：去掉 `setPreventClose` → 2 条失败，去掉 `quit()` 里的 `setPreventClose(false)` → 1 条失败。**需 Windows 真机确认**托盘图标与左键唤回 | §6.63 |
 | ~~Windows 只发 zip，没有安装包（用户得自己建快捷方式、升级前手动退出、卸载靠删文件夹）~~ | ✅ 已加（§6.61）：发 **Inno Setup 安装包** `spb_desktop-windows-x64-setup.exe`，与 zip **并列**发布（zip 保留给便携场景，两者内容逐字节相同）。`.iss` 只做「拷文件 + 快捷方式 + 卸载项」，安装后行为与 zip 版完全一致——两套行为就是两套 bug。四个易写错的点：① `.iss` **必须 UTF-8 带 BOM**（否则 ISCC 按 ANSI 读，中文注释乱码），且 `AppName` 等字符串保持 ASCII、**不引**第三方 `ChineseSimplified.isl`（runner 上没有，引了即失败）；② `x64compatible` 是 Inno 6.3 才有的标识符，`windows-2022` 若装 6.2 会直接编译失败（最难自查的红），故用 ISPP `#if VER >= EncodeVer(6,3,0)` 二选一；③ 版本号须归一成纯数字 `x.y.z`（Inno 靠它比新旧），`v1.2.3-rc1` → `1.2.3`，来源链 `-Version` → `$env:GITHUB_REF_NAME` → pubspec → `0.0.0`；④ `AppId` 永不改（Windows 靠它识别同一产品的升级/卸载项，改了就是「又装一份」）。`SetupIconFile` 另做一份**纯 BMP 帧**的 16/32/48/64/128（82 KB，不含 256——BMP 帧不压缩、单张 256 KB），因为 ISCC 对 PNG 帧的支持未验证，且这与 §6.55 托盘图标是同一个坑。**本机无 Windows/ISCC，编译与装机行为都没跑过**：已用 pwsh 7.4 在 Linux 上跑通脚本五条路径（成功/缺运行库/无 ISCC/ISCC 非 0/成功但无产物）、断言 `/D` 是单个 argv、四种版本来源逐条实测；真机验证清单见 §6.61 | §6.61 |
 | ~~每条消息下面都跟着一行「归属： fixed_reuse」，把正文挤出视野~~ | ✅ 已重构（§6.58）：`routing_selected` 与 `user_message` 同 turn 时**合并进气泡**（`routingReason`/`routingSwitched` 两字段，与 `agent_id` 继承同一模式，`item.id` 不变避免重挂）；由 `routingAttributionNotice` 判定：8 个复用类「无聊」原因 + 未切换 → **零空间**；新建（`create_new`/`fixed_new` 等）→ 气泡内「已新建对话」徽标；切换（`group_switched`，与 reason 独立）→「已切换对话」；未知原因 fail-open 原样透传。孤儿事件（同 turn 气泡不在缓冲里）回退成独立行，**归约层是唯一守门员**——页面层不得再判 `isRoutineRoutingReason`（看不到 `switched`，会误杀「reason 无聊但 switched=true」的行，变异测试抓到）。38 条新用例；5 项反向验证逐条实测（其中「页面二次过滤」变异 0 条用例失败但行为错——暴露的是实现缺陷而非用例缺，已改实现）。目标对话标题不显示：`MatchedTitle` 只在 HTTP 响应，不在事件 payload，需服务端先加字段 | §6.58 |
 | ~~按 Alt+Space 后「小窗卡住，然后应用退出了」，而**没有任何本地日志**可查~~ | ✅ 已修（§6.57，三件一起）：**A** `enterOverlayMode` 串行改 7 项窗口属性，中途抛异常时**只丢快照不回滚**，而 `exitOverlayMode` 的早退判据是「快照为空」⇒ 之后所有退出都是空操作，窗口停在「720×360 / 置顶 / 不进任务栏」——即「卡住的小窗」，代码级确证（但「进程真的退出」**未确证**：全仓无 `exit(`，更符合代码的解释是 `skipTaskbar` 让窗口从任务栏消失后再无入口）。修法：逐步记账 `_overlayApplied` + `overlayRollbackOrder`（**逆序、剔除 `visibility`**）回滚，只回滚真的改过的（全量重设会篡改未改属性），回滚尽力而为不抛，之后无条件 `show()`+`focus()`，并**保留**「失败仍导航到 `/overlay`」的既有语义。**B** 补本地文件日志（此前只有 stdout，桌面启动器拉起时等于没产生日志；环形缓冲纯内存，进程死了证据就没了，而「导出诊断日志」要求应用还活着）：`FileLogSink`（同步 append 不持 `IOSink`，否则崩了丢最后一段；5MB×2 轮转；写盘前 `redactSecrets`；失败即停用且**内部绝不调 `SpbLog`** 免递归）+ `MultiLogSink` 扇出。再加一对**会话标记**，`previousSessionExitedCleanly` 从末尾**往前**找先遇到哪个边界（true/false/null 三态）——⚠️ 原设计「只看最后一条是不是退出标记」会**级联误报**：崩溃后写的那条告警与 `quit()` 之后 `dispose()` 的日志都会让它永远报「上次崩溃」。顺序有语义：**先读上次结论、再写启动标记**。日志与 `sync.db` 同根（`~/.local/share/super_partyb/logs/app.log`；`SPB_LOG_DIR` 可覆盖）。另把快捷键触发/门控类日志按 §6.43 的教训从 debug 升 **info**（debug 在生产被过滤，等于没写）。**C** 同步目录未选择时给默认值（`~/Documents/Super PartyB` → `<data>/super_partyb/deliverables` → null；`SPB_SYNC_ROOT` 可覆盖），两个读点共用 `effectiveSyncLocalRoot`，并顺手建目录（否则「打开同步目录」点了没反应）。50 条新用例（31 + 6 + 9 + 4）；8 项反向验证逐条实测（含「只看最后一条」这个自己写错的判据）+ 2 项诚实记录「未写成用例」 | §6.57 |

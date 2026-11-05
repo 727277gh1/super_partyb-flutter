@@ -386,7 +386,15 @@ class DesktopIntegration {
     // 该行为的目的是让应用留在托盘继续跑同步。若托盘没起来（Linux 无
     // appindicator、Flatpak 沙箱等），关窗后用户**没有任何办法唤回应用**
     // ——进程还在，窗口没了。故托盘不可用时保持「关窗即退出」。
-    tray.setHideOnClose(tray.trayAvailable);
+    //
+    // ## 为什么用 `unawaited` 而不是 await
+    //
+    // 本方法（与 `attach`）是同步的，托盘菜单已经推上去了；而
+    // `setHideOnClose` 内部会做一次平台通道往返（`setPreventClose`）。
+    // 失败已在能力层记 warn 并降级成「关窗即退出」，不应阻塞接线。
+    // 窗口在此时还没显示给用户（`attach` 发生在首帧之前），故不存在
+    // 「用户抢在通道返回前点了关闭」的竞态。
+    unawaited(tray.setHideOnClose(tray.trayAvailable));
   }
 
   /// 跳到设置页的「交付物同步」标签。

@@ -725,8 +725,32 @@ class PlatformDesktopCapabilities
     //
     // 若托盘不可用（_initTray 降级），这里隐藏窗口会让应用「消失且无法唤回」
     // ——故由 app 层决定是否启用该行为（见 `setHideOnClose`）。
-    if (!_hideOnClose) return;
-    windowManager.hide();
+    if (!_hideOnClose) {
+      // 未拦截关闭（托盘不可用）：让原生侧按默认行为销毁窗口 → 进程退出。
+      // 这条日志是「关窗到底退出了没有」的唯一线索（见 setHideOnClose 的
+      // 说明：原生侧一旦销毁窗口，Dart 侧就再没有机会记录任何东西）。
+      SpbLog.info('关闭主窗口：未启用隐藏到托盘，按默认行为退出');
+      return;
+    }
+    // ## 为什么这条必须是 info
+    //
+    // 「点了关闭，应用去哪了」是关窗相关报障的第一问。`SpbLog` 默认
+    // `minLevel = info`，debug 在生产被过滤（AGENTS.md §6.43 的同一教训）；
+    // 关窗是低频操作，info 不会刷屏。
+    SpbLog.info('关闭主窗口：隐藏到托盘（可从托盘或 Alt+Space 唤回）');
+    unawaited(_hideToTray());
+  }
+
+  /// 隐藏主窗口（关窗后的实际动作）。
+  ///
+  /// 失败只记日志：此时窗口仍在屏幕上（用户至少不会「找不到应用」），
+  /// 比反过来（以为隐藏成功、实际没有入口）好。
+  Future<void> _hideToTray() async {
+    try {
+      await windowManager.hide();
+    } catch (e) {
+      SpbLog.warn('隐藏主窗口失败（应用仍在运行）', {'error': '$e'});
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -753,8 +777,44 @@ class PlatformDesktopCapabilities
   /// 是否在关闭主窗口时隐藏到托盘（而非退出）。
   ///
   /// 仅在托盘**确认可用**后才应设为 true，否则用户关窗后无法唤回应用。
+  ///
+  /// ## 为什么必须同时调 `setPreventClose`（2026-11 修的真实缺陷）
+  ///
+  /// `window_manager` 的 `close` 事件是**通知**而不是**拦截**。三平台原生侧
+  /// 的顺序都是「先派发 `close` 事件，再看 `isPreventClose()` 决定要不要继续
+  /// 关闭」（Windows `WM_CLOSE` 分支 `return -1`、Linux `delete_event` 回调
+  /// 的返回值、macOS `windowShouldClose` 的 bool）。而事件是**异步**投递到
+  /// Dart 的——等 [onWindowClose] 里的 `windowManager.hide()` 跑到时，原生侧
+  /// 早已把窗口销毁了：
+  ///
+  /// ```
+  /// 修复前：点关闭 → 原生派发 close 事件 → DefWindowProc 销毁窗口
+  ///         → 消息循环退出 → 进程结束（Dart 的 hide() 永远来不及）
+  /// 修复后：点关闭 → 原生派发 close 事件 → preventClose 为真 → return -1
+  ///         → 窗口保留 → Dart 的 hide() 把它从屏幕上收起来
+  /// ```
+  ///
+  /// 即「关窗即隐藏」此前**从未真正生效过**（Linux 同理，只是没人报障）；
+  /// 用户看到的就是「点关闭 = 应用退出」。
+  ///
+  /// ## 为什么托盘不可用时要传 false
+  ///
+  /// 那样才允许关窗直接退出。若一律拦截，托盘又没起来（Linux 无
+  /// appindicator、Flatpak 沙箱），用户点关闭会得到一个「既没退出、也没有
+  /// 任何入口」的僵尸进程。
   @override
-  void setHideOnClose(bool value) => _hideOnClose = value;
+  Future<void> setHideOnClose(bool value) async {
+    _hideOnClose = value;
+    try {
+      await windowManager.setPreventClose(value);
+    } catch (e) {
+      // 失败不抛：最坏结果是「关窗即退出」（= 托盘不可用时的既有行为），
+      // 应用本身仍可用。
+      SpbLog.warn('设置关窗拦截失败', {'hideOnClose': value, 'error': '$e'});
+      return;
+    }
+    SpbLog.info('关窗行为已设置', {'hideOnClose': value});
+  }
 
   // ---------------------------------------------------------------------------
   // 目录选择
@@ -1164,6 +1224,23 @@ class PlatformDesktopCapabilities
     // 详见 logSessionCleanExitMessage 的文档。
     SpbLog.info(logSessionCleanExitMessage);
     await dispose();
+    // ## 为什么退出前必须关掉 preventClose（macOS 上不关就退不出去）
+    //
+    // 「关窗即隐藏」靠 `preventClose = true` 拦截关闭（见 `setHideOnClose`）。
+    // 而 macOS 的 `destroy()` 实现是 `NSApp.terminate(nil)`——AppKit 在终止
+    // 序列里会逐个窗口问 `windowShouldClose:`，**任何一个返回 NO 就取消终止**。
+    // 不先关掉它就是「点了退出，应用毫无反应」。
+    //
+    // Windows（`PostQuitMessage`）与 Linux（`gtk_window_close` 前自己把
+    // `_is_prevent_close` 置 false）不受影响，但统一在这里做：三个平台同一条
+    // 退出路径，不留「只在某个平台上需要记得」的分叉。
+    //
+    // 失败不拦退出：最坏情况是 macOS 上取消一次终止，用户再点一次即可。
+    try {
+      await windowManager.setPreventClose(false);
+    } catch (e) {
+      SpbLog.warn('退出前关闭关窗拦截失败', {'error': '$e'});
+    }
     await windowManager.destroy();
   }
 
