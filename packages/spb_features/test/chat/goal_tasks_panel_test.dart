@@ -1031,4 +1031,99 @@ void main() {
       expect(find.byKey(const ValueKey('goal-tasks-decisions')), findsNothing);
     });
   });
+
+  group('窄栏布局：动作不得挤占任务内容', () {
+    /// 把窗口压到桌面端侧边栏的定宽（320dp，见
+    /// `apps/spb_desktop/lib/router.dart` 的 `SizedBox(width: 320, ...)`）。
+    ///
+    /// ⚠️ **默认 800dp 窗口的用例发现不了这个问题**：`ListTile.trailing` 里
+    /// 5 个 48dp 的 `IconButton` 会先占满宽度，320dp 下标题的可用宽度是 **0**
+    /// （实测 `Size(0, 40)`），每枚徽标各自换行 → 单条任务 1008dp 高。
+    /// 这与 AGENTS.md §6.16（窄屏 AppBar 溢出）是同一失败模式：测试环境比
+    /// 真机宽，掩盖真实布局。
+    Future<void> pumpNarrow(
+      WidgetTester t, {
+      required GoalSnapshot snap,
+    }) async {
+      t.view.physicalSize = const Size(320, 1400);
+      t.view.devicePixelRatio = 1.0;
+      addTearDown(t.view.reset);
+
+      await pump(
+        t,
+        snap: snap,
+        onSetStatus: (_, _) async {},
+        onCreate: ({required title, description}) async {},
+        onUpdateTask: (_, {title, description}) async {},
+        onDelete: (_) async {},
+        onReorder: (_) async {},
+      );
+    }
+
+    testWidgets('320dp 且动作全装配：标题仍有可用宽度，单条不撑满一屏', (t) async {
+      await pumpNarrow(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', title: '修 CI 里的编译错误')]),
+      );
+
+      // 1) 标题拿到真实宽度（回归时这里是 0）。
+      expect(
+        t.getSize(find.text('修 CI 里的编译错误')).width,
+        greaterThan(150),
+        reason: '标题被行级动作挤到没有宽度（ListTile.trailing 的老缺陷）',
+      );
+      // 2) 整条任务不再是「一屏一条」。
+      expect(
+        t.getSize(find.byKey(const ValueKey('goal-task-TASK-001'))).height,
+        lessThan(260),
+        reason: '一条任务占掉大半屏（徽标每枚换一行）',
+      );
+      // 3) 没有溢出异常（溢出是 RenderFlex 抛的，不是静默的）。
+      expect(t.takeException(), isNull);
+    });
+
+    testWidgets('320dp：行级动作在标题**下方**，不在同一行', (t) async {
+      await pumpNarrow(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', title: '修 CI 里的编译错误')]),
+      );
+
+      final titleBottom = t.getBottomLeft(find.text('修 CI 里的编译错误')).dy;
+      for (final key in [
+        'goal-task-edit-TASK-001',
+        'goal-task-up-TASK-001',
+        'goal-task-down-TASK-001',
+        'goal-task-delete-TASK-001',
+      ]) {
+        expect(
+          t.getTopLeft(find.byKey(ValueKey(key))).dy,
+          greaterThanOrEqualTo(titleBottom),
+          reason: '$key 与标题抢同一行宽度（会重新把标题压到 0）',
+        );
+      }
+    });
+
+    testWidgets('状态徽标本身就是状态菜单的触发器（少一个按钮）', (t) async {
+      await pumpNarrow(
+        t,
+        snap: snapshot(tasks: [task('TASK-001', status: 'in_progress')]),
+      );
+
+      // 触发器里就是那枚徽标文本（不是另一个 more_horiz 图标按钮）。
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('goal-task-status-menu-TASK-001')),
+          matching: find.text('进行中'),
+        ),
+        findsOneWidget,
+      );
+
+      await t.tap(find.byKey(const ValueKey('goal-task-status-menu-TASK-001')));
+      await t.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('goal-task-status-TASK-001-blocked')),
+        findsOneWidget,
+      );
+    });
+  });
 }

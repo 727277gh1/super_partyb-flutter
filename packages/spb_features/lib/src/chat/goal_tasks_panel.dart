@@ -249,8 +249,9 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
   ///
   /// ## 为什么用对话框而不是行内编辑
   ///
-  /// 行内编辑需要把「标题 + 描述」两个字段的草稿塞进行布局，而行已经被
-  /// task_id / 状态 / 来源 / 时间锚点等多个徽标占满（见 [_taskTile]）。
+  /// 行内编辑需要把「标题 + 描述」两个字段的草稿塞进卡片布局，而卡片里已经有
+  /// 标题、描述、徽标行与动作行（见 [_taskTile]）；在 320dp 的侧边栏里再塞
+  /// 两个输入框会让每条任务占掉大半屏。
   /// 对话框是**同一个面板里已验证的模式**（[_confirm] / 新增行都用它），
   /// 且能容纳多行描述。
   ///
@@ -478,135 +479,262 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
     );
   }
 
+  /// 一条任务的卡片。
+  ///
+  /// ## 为什么不用 [ListTile]（2026-11 实测）
+  ///
+  /// `ListTile` 的布局是「leading / title+subtitle / **trailing**」三区，
+  /// trailing 会先按固有宽度占位，剩下的才给标题。本面板最多 5 个行级动作
+  /// （编辑 / 状态 / 上移 / 下移 / 删除），而 `IconButton` 的点击区下限是
+  /// 48×48（`MaterialTapTargetSize.padded`）——合计 240dp。桌面端侧边栏定宽
+  /// **320dp**（`apps/spb_desktop/lib/router.dart`），减去内边距与勾选框后：
+  ///
+  /// | 容器宽度 | 标题可用宽度 | 单条 tile 高度 |
+  /// |---|---|---|
+  /// | 320（桌面侧边栏） | **0** | **1008dp**（徽标每个独占一行） |
+  /// | 420（移动端弹层） | 92 | 264dp |
+  /// | 600 | 272 | 144dp |
+  ///
+  /// 即「任务内容被动作挤到看不见」，与用户报障一致。故改为卡片 + [Column]：
+  /// **标题独占一行（全宽），动作另起一行**，与 webapp `GoalTaskEditor`
+  /// 的卡片结构一致（状态用下拉、动作在正文下方）。
+  ///
+  /// 卡片化同时解决徽标拥挤：窄栏里 `Wrap` 会给每个徽标真实宽度，不再出现
+  /// 「宽度 0 → 每枚徽标换一行」。
   Widget _taskTile(ThemeData theme, GoalTask task, int index, int total) {
     final scheme = theme.colorScheme;
     final done = task.isCompleted;
+    final tone = _statusTone(scheme, task);
+    // 描述与标题重复时不重复渲染（LLM 展开的清单常见这种重复）。
+    final description = task.description.trim();
+    final showDescription = description.isNotEmpty && description != task.title;
 
-    return ListTile(
+    return Container(
       key: ValueKey('goal-task-${task.taskId}'),
-      dense: true,
-      // 勾选框只在装配了状态回调时出现（见类文档「未注入回调 = 只读」）。
-      leading: widget.onSetStatus == null
-          ? null
-          : Checkbox(
-              key: ValueKey('goal-task-check-${task.taskId}'),
-              value: done,
-              onChanged: _locked ? null : (_) => _toggle(task),
+      margin: const EdgeInsets.fromLTRB(
+        SpbSpacing.sm,
+        0,
+        SpbSpacing.sm,
+        SpbSpacing.xs,
+      ),
+      padding: const EdgeInsets.fromLTRB(
+        SpbSpacing.xs,
+        SpbSpacing.xs,
+        SpbSpacing.xs,
+        SpbSpacing.xxs,
+      ),
+      decoration: BoxDecoration(
+        borderRadius: SpbRadius.cardAll,
+        // 边框承载状态色：一眼扫过就能看出哪条卡住了 / 出错了。
+        // 完成态更淡（它是「已完成」，不需要再吸引注意）。
+        border: Border.all(color: tone.withValues(alpha: done ? 0.2 : 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 勾选框只在装配了状态回调时出现（见类文档「未注入回调 = 只读」）。
+              if (widget.onSetStatus != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: SpbSpacing.xs),
+                  child: Checkbox(
+                    key: ValueKey('goal-task-check-${task.taskId}'),
+                    value: done,
+                    // shrinkWrap + compact：默认 48dp 点击区在 320dp 侧边栏里
+                    // 会白白吃掉正文宽度。视觉尺寸仍是标准的 18dp 方框。
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: _locked ? null : (_) => _toggle(task),
+                  ),
+                ),
+              Expanded(
+                child: Padding(
+                  // 与勾选框的文字基线大致对齐（勾选框自身有内边距）。
+                  padding: const EdgeInsets.only(top: SpbSpacing.xs),
+                  child: Text(
+                    task.title,
+                    // 3 行：窄栏里标题常见折 2~3 行，截断太早会让两条任务
+                    // 看起来一样（都以「修复 …」开头）。
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: done
+                        ? theme.textTheme.bodyMedium?.copyWith(
+                            decoration: TextDecoration.lineThrough,
+                            color: scheme.onSurfaceVariant,
+                          )
+                        : theme.textTheme.bodyMedium,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (showDescription)
+            Padding(
+              padding: const EdgeInsets.only(
+                left: SpbSpacing.xs,
+                right: SpbSpacing.xs,
+                top: SpbSpacing.xxs,
+              ),
+              child: Text(
+                description,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
             ),
-      title: Text(
-        task.title,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: done
-            ? theme.textTheme.bodyMedium?.copyWith(
-                decoration: TextDecoration.lineThrough,
-                color: scheme.onSurfaceVariant,
-              )
-            : theme.textTheme.bodyMedium,
+          // 出错原因单独一行而不是徽标：它常常是一整条编译错误，做成徽标
+          // 会在窄栏里溢出一屏宽。
+          if (task.errorReason != null)
+            Padding(
+              padding: const EdgeInsets.only(
+                left: SpbSpacing.xs,
+                right: SpbSpacing.xs,
+                top: SpbSpacing.xxs,
+              ),
+              child: Text(
+                task.errorReason!,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(top: SpbSpacing.xxs),
+            child: Wrap(
+              spacing: SpbSpacing.xs,
+              runSpacing: SpbSpacing.xxs,
+              children: [
+                // task_id 是路径里要用的标识，显示出来便于与 API 日志对上。
+                _chip(theme, task.taskId),
+                _statusChip(theme, task),
+                // 来源决定重新展开时能否被覆盖，值得显示。
+                _chip(theme, task.origin.label),
+                if (task.editedByUser) _chip(theme, '已编辑'),
+                // 定时（not_before）只在仍是未来锚点时展示（isScheduledAfter 即该判据）。
+                if (task.isScheduledAfter(DateTime.now()))
+                  _chip(theme, '定时 ${_shortTime(task.notBefore!)}'),
+                // 开始时间：pending 还没真正起跑，不展示（对齐 webapp taskTimeMeta）。
+                if (task.startedAt != null &&
+                    task.status != GoalTaskStatus.pending)
+                  _chip(theme, '开始 ${_shortTime(task.startedAt!)}'),
+                // 完成时间只在成功类终态（completed/skipped）展示；error_stopped 恒无
+                // 完成时间（服务端写 NULL），失败时刻不编造。
+                if (task.completedAt != null &&
+                    task.status == GoalTaskStatus.completed)
+                  _chip(theme, '完成 ${_shortTime(task.completedAt!)}'),
+                if (task.completedAt != null &&
+                    task.status == GoalTaskStatus.skipped)
+                  _chip(theme, '跳过 ${_shortTime(task.completedAt!)}'),
+              ],
+            ),
+          ),
+          ?_actionsRow(task, index, total),
+        ],
       ),
-      subtitle: Padding(
-        padding: const EdgeInsets.only(top: SpbSpacing.xxs),
-        child: Wrap(
-          spacing: SpbSpacing.xs,
-          runSpacing: SpbSpacing.xxs,
-          children: [
-            // task_id 是路径里要用的标识，显示出来便于与 API 日志对上。
-            _chip(theme, task.taskId),
-            _chip(theme, task.status.label, tone: _statusTone(scheme, task)),
-            // 来源决定重新展开时能否被覆盖，值得显示。
-            _chip(theme, task.origin.label),
-            if (task.editedByUser) _chip(theme, '已编辑'),
-            // 定时（not_before）只在仍是未来锚点时展示（isScheduledAfter 即该判据）。
-            if (task.isScheduledAfter(DateTime.now()))
-              _chip(theme, '定时 ${_shortTime(task.notBefore!)}'),
-            // 开始时间：pending 还没真正起跑，不展示（对齐 webapp taskTimeMeta）。
-            if (task.startedAt != null && task.status != GoalTaskStatus.pending)
-              _chip(theme, '开始 ${_shortTime(task.startedAt!)}'),
-            // 完成时间只在成功类终态（completed/skipped）展示；error_stopped 恒无
-            // 完成时间（服务端写 NULL），失败时刻不编造。
-            if (task.completedAt != null &&
-                task.status == GoalTaskStatus.completed)
-              _chip(theme, '完成 ${_shortTime(task.completedAt!)}'),
-            if (task.completedAt != null &&
-                task.status == GoalTaskStatus.skipped)
-              _chip(theme, '跳过 ${_shortTime(task.completedAt!)}'),
-            if (task.errorReason != null)
-              _chip(theme, task.errorReason!, tone: scheme.error),
-          ],
-        ),
-      ),
-      trailing: _rowActions(task, index, total),
     );
   }
 
-  Widget? _rowActions(GoalTask task, int index, int total) {
+  /// 状态徽标。装配了 [GoalTasksPanel.onSetStatus] 时它是**下拉触发器**
+  /// （对齐 webapp `GoalTaskEditor` 的 `Select`），否则是纯展示徽标。
+  ///
+  /// ## 为什么把「改状态」做在徽标上，而不是再摆一个图标按钮
+  ///
+  /// 侧边栏只有 320dp，每多一个 48dp 按钮就少 48dp 正文宽度（见 [_taskTile]
+  /// 的实测表）。而「点状态改状态」本身就是最直白的映射——比一个 `more_horiz`
+  /// 图标更容易被发现。
+  Widget _statusChip(ThemeData theme, GoalTask task) {
+    final tone = _statusTone(theme.colorScheme, task);
+    final chip = _chip(theme, task.status.label, tone: tone);
+    if (widget.onSetStatus == null) return chip;
+
+    return PopupMenuButton<GoalTaskStatus>(
+      key: ValueKey('goal-task-status-menu-${task.taskId}'),
+      tooltip: '设置状态',
+      enabled: !_locked,
+      // 徽标本身就是触发器：`child` 存在时 PopupMenuButton 用 shrinkWrap
+      // 点击区（不强制 48dp），故不会把卡片撑高。
+      padding: EdgeInsets.zero,
+      onSelected: (s) => _guard(() => widget.onSetStatus!(task.taskId, s)),
+      itemBuilder: (ctx) => [
+        for (final s in GoalTaskStatus.values)
+          if (s != GoalTaskStatus.unknown)
+            PopupMenuItem(
+              key: ValueKey('goal-task-status-${task.taskId}-${s.wire}'),
+              value: s,
+              enabled: s != task.status,
+              child: Text(s == task.status ? '${s.label}（当前）' : s.label),
+            ),
+      ],
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          chip,
+          Icon(Icons.arrow_drop_down, size: SpbSpacing.lg, color: tone),
+        ],
+      ),
+    );
+  }
+
+  /// 行级动作（编辑 / 上移 / 下移 / 删除）。
+  ///
+  /// 放在卡片**底部**而不是 `ListTile.trailing`——原因见 [_taskTile] 的实测表
+  /// （trailing 会把标题压到 0 宽）。用 [Wrap] 而不是 [Row]：移动端底部弹层
+  /// 最窄约 360dp，4 个按钮加间距可能放不下，折行比溢出好。
+  ///
+  /// 状态不在这里——它在 [_statusChip] 上（点徽标即改状态）。
+  Widget? _actionsRow(GoalTask task, int index, int total) {
     final canMove = widget.onReorder != null;
     final canDelete = widget.onDelete != null;
     final canEdit = widget.onUpdateTask != null;
-    if (!canMove && !canDelete && !canEdit && widget.onSetStatus == null) {
-      return null;
-    }
+    if (!canMove && !canDelete && !canEdit) return null;
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // 编辑：与删除/重排同排（都是行级动作）。未注入时整个不渲染。
-        if (canEdit)
-          IconButton(
-            key: ValueKey('goal-task-edit-${task.taskId}'),
-            icon: const Icon(Icons.edit_outlined, size: SpbSpacing.lg),
-            tooltip: '编辑',
-            visualDensity: VisualDensity.compact,
-            onPressed: _locked ? null : () => _edit(task),
-          ),
-        // 状态菜单：复选框只有两态，其余四种状态在这里（见类文档）。
-        if (widget.onSetStatus != null)
-          PopupMenuButton<GoalTaskStatus>(
-            key: ValueKey('goal-task-status-menu-${task.taskId}'),
-            tooltip: '设置状态',
-            enabled: !_locked,
-            icon: const Icon(Icons.more_horiz, size: SpbSpacing.lg),
-            onSelected: (s) =>
-                _guard(() => widget.onSetStatus!(task.taskId, s)),
-            itemBuilder: (ctx) => [
-              for (final s in GoalTaskStatus.values)
-                if (s != GoalTaskStatus.unknown)
-                  PopupMenuItem(
-                    key: ValueKey('goal-task-status-${task.taskId}-${s.wire}'),
-                    value: s,
-                    enabled: s != task.status,
-                    child: Text(s == task.status ? '${s.label}（当前）' : s.label),
-                  ),
-            ],
-          ),
-        if (canMove) ...[
-          IconButton(
-            key: ValueKey('goal-task-up-${task.taskId}'),
-            icon: const Icon(Icons.arrow_upward, size: SpbSpacing.lg),
-            tooltip: '上移',
-            visualDensity: VisualDensity.compact,
-            // 首位不能再上移：置灰而不是隐藏（位置稳定，列表不会跳动）。
-            onPressed: _locked || index == 0 ? null : () => _move(task, -1),
-          ),
-          IconButton(
-            key: ValueKey('goal-task-down-${task.taskId}'),
-            icon: const Icon(Icons.arrow_downward, size: SpbSpacing.lg),
-            tooltip: '下移',
-            visualDensity: VisualDensity.compact,
-            onPressed: _locked || index == total - 1
-                ? null
-                : () => _move(task, 1),
-          ),
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          // 编辑：与删除/重排同排（都是行级动作）。未注入时整个不渲染。
+          if (canEdit)
+            IconButton(
+              key: ValueKey('goal-task-edit-${task.taskId}'),
+              icon: const Icon(Icons.edit_outlined, size: SpbSpacing.lg),
+              tooltip: '编辑',
+              visualDensity: VisualDensity.compact,
+              onPressed: _locked ? null : () => _edit(task),
+            ),
+          if (canMove) ...[
+            IconButton(
+              key: ValueKey('goal-task-up-${task.taskId}'),
+              icon: const Icon(Icons.arrow_upward, size: SpbSpacing.lg),
+              tooltip: '上移',
+              visualDensity: VisualDensity.compact,
+              // 首位不能再上移：置灰而不是隐藏（位置稳定，列表不会跳动）。
+              onPressed: _locked || index == 0 ? null : () => _move(task, -1),
+            ),
+            IconButton(
+              key: ValueKey('goal-task-down-${task.taskId}'),
+              icon: const Icon(Icons.arrow_downward, size: SpbSpacing.lg),
+              tooltip: '下移',
+              visualDensity: VisualDensity.compact,
+              onPressed: _locked || index == total - 1
+                  ? null
+                  : () => _move(task, 1),
+            ),
+          ],
+          if (canDelete)
+            IconButton(
+              key: ValueKey('goal-task-delete-${task.taskId}'),
+              icon: const Icon(Icons.delete_outline, size: SpbSpacing.lg),
+              tooltip: '删除',
+              visualDensity: VisualDensity.compact,
+              onPressed: _locked ? null : () => _delete(task),
+            ),
         ],
-        if (canDelete)
-          IconButton(
-            key: ValueKey('goal-task-delete-${task.taskId}'),
-            icon: const Icon(Icons.delete_outline, size: SpbSpacing.lg),
-            tooltip: '删除',
-            visualDensity: VisualDensity.compact,
-            onPressed: _locked ? null : () => _delete(task),
-          ),
-      ],
+      ),
     );
   }
 
