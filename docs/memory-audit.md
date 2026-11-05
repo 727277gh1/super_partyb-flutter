@@ -102,9 +102,52 @@
 
 ---
 
+## 六、第二轮排查（2026-11，含本轮已修 3 项 + 待议 4 项）
+
+第一轮（一~五节）收口于「结构上任意增长」的容器。第二轮换了一条判据：**峰值
+与主线程占用**——不是「会不会无界」，而是「一次操作瞬时占多少」。大文件同步
+（4.7 GB 全量，单文件上限内可达 100 MB）与长正文滚动的瞬时峰值都在这一层。
+
+### 6.1 已修（本轮）
+
+| # | 问题 | 证据（file:line） | 影响 | 处置 |
+|---|---|---|---|---|
+| G6 | `contentHashOf` 在**主线程**对下载/上传的整份字节算 SHA256（`List<int>` 已全部驻留内存后同步计算） | `packages/spb_domain/lib/src/sync_state.dart`（`contentHashOf` / 新增 `contentHashOfAsync`）；调用点 `deliverable_sync.dart`（下载后判重）、`deliverable_upload.dart`（上传前比对 baseline） | 单个 100 MB 文件 = 主线程冻结约数百毫秒（帧预算 16.7 ms）；同步首轮会连续命中 | **新增 `contentHashOfAsync`**：> 8 KB 走 `Isolate.run` + `TransferableTypedData`（worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆；⚠️ `fromList` 自身会拷贝一次——实测确认，非所有权移交），≤ 8 KB 仍走同步路径（isolate 启动成本更高）。同步版 `contentHashOf` 保留（测试与小数据与异步版的回退路径） |
+| G7 | 交付物面板用 `ListView(children: _tree.map(...))`：build 阶段一次性构造**全部**节点 widget | `packages/spb_features/lib/src/chat/group_deliverables_panel.dart`（`_rows` getter + `ListView.builder`） | 5666 文件全量同步后，打开「交付物」tab 的一帧构造 5666 个 widget（目录节点是 `ExpansionTile`：StatefulWidget + controller），绝大部分滚出视口即丢弃；且每次 SSE 文件事件 bump `reloadToken` 都会重来一遍 | **flatten + `ListView.builder`**：可见行由「展开中的目录」递归派生（`_rows`），折叠的子树**不进行集合**（真正的懒，而非仅视觉隐藏）；展开状态由面板自持（`_userExpansion`，只记用户点过的目录）；缓存按 `(_tree identity, 展开修订号)` 双判据失效。行为对齐：顶层默认展开 / 深层默认折叠 / 点击折叠展开 / 同对话刷新保留 / 切对话重置 |
+| G9 | 全仓 `didHaveMemoryPressure` **零命中**：系统内存压力信号没有任何接收方 | `packages/spb_platform/lib/src/memory_pressure.dart`（新增）；两端 `main.dart` 接线 | 移动端是最需要这条信号的端（内存最紧张），收到压力时什么都不做，直到被系统杀掉 | **新增 `installMemoryPressureHandler`**：`WidgetsBindingObserver.didHaveMemoryPressure` → `imageCache.clear()` + `imageCache.clearLiveImages()` + app 层 `onRelease`。⚠️ 实测确认框架的 `RendererBinding.handleMemoryPressure()` **已经** `clear()`，但**不**清 live images（还有 listener 的图，例如正显示的预览大图）——`clearLiveImages()` 才是本模块独有的增量。故测试必须钉住 `liveImageCount`，只钉 `currentSize` 会是假绿 |
+
+### 6.2 待议（有证据，但需要产品取舍或真机数据）
+
+| # | 项 | 证据（file:line） | 为什么这轮不动 | 已登记 issue |
+|---|---|---|---|
+| G8 | `_thumbnailMemo`（`Map<String, Future<List<int>?>>`）会话内**无界**；键只有 `ufsFileId`，同路径新版本覆盖时不失效 | `packages/spb_features/lib/src/chat/conversation_page.dart`（`_thumbnailMemo`，唯一所有者）；两端只注入 loader（`apps/spb_desktop/lib/router.dart` / `apps/spb_mobile/lib/router.dart` 的 `onLoadThumbnailAgentFile`） | 第一轮 A14 曾判「有界（会话级）」，定量上偏乐观：一个长会话浏览过几千张缩略图后累计可达数十 MB。但设上限要选淘汰策略，而**淘汰后重新请求**会把 §6.47 修掉的「同一缩略图反复请求」重新引回来——须先有真机峰值数据再定 #70 |
+| G10 | `gpt_markdown` 的 `imageBuilder` **未传**：Markdown 里的图片走插件默认 builder，绕过 `cacheWidth` 降采样 | `packages/spb_features/lib/src/chat/assistant_message_bubble.dart`（`GptMarkdown(...)` 无 `imageBuilder`） | 插件 1.3.0 支持该参数（已核实签名），但默认 builder 的实际解码路径需实测确认（是否自带 `ResizeImage`）——未验证就改是在猜 #71 |
+| J1 | `isStreaming` 翻转导致气泡**整棵 remount**：`child: isStreaming ? md : SelectionArea(child: md)`，`SelectionArea` 引入/移除使子树换父节点，`gpt_markdown` 的增量解析状态全丢 | `assistant_message_bubble.dart`（同处） | 影响是「回复完成瞬间」的一次重解析（不是持续卡顿）。修法要么常驻 `SelectionArea`（流式期间可选文本的语义变化），要么给 `md` 加 `GlobalKey` 保 Element——两者都有取舍，需产品确认「流式期间是否允许选中文本」 #72 |
+| J2 | `FileLogSink` 每条日志**同步写盘**（`writeAsBytesSync`，§6.57 有意如此） | `packages/spb_core/lib/src/log_file_sink.dart` | 这是 §6.57 明确记录的取舍：异步缓冲会在崩溃时丢最后一段，而「崩溃后仍能读到」正是该 sink 存在的唯一理由。真要优化应先降日志量，而不是改写法治 #73 |
+| J3 | 流式 fade 逐字动画（`charactersPerSecond: 600`） | `assistant_message_bubble.dart`（`GptMarkdown(animation: fade, ...)`） | 逐字揭示是**产品表达**而非性能缺陷；关掉会让长回复「一坨文字突然出现」。若要控成本，方向是「大回复降级为一次性显示」，须产品决定 #74 |
+| J4 | `_followBottom` 的 `animateTo` 在每批事件各重启一次（§6.47 已把**调度**去重为一次，但动画本身仍被打断重来） | `packages/spb_features/lib/src/chat/conversation_page.dart`（`_followBottom`） | 与 §6.47 修的不是同一处：那里修的是「一帧排多个 post-frame 回调」，这里是「动画被新事件打断后从当前位置继续」——实际观感受滚动距离与事件频率影响，需真机确认是否可感知 #75 |
+> 6 条待议项均已开 issue 讨论（#70 G8 / #71 G10 / #72 J1 / #73 J2 / #74 J3 / #75 J4），
+> 后续进展以 issue 为准，本表不再更新。
+>
+> G8/G10 是**内存**方向，J1–J4 是**卡顿**方向。四类卡顿项的共同前提是：
+> 本机无 `DISPLAY`、无真机（AGENTS.md §9），拿不到 `SPB_FRAME_TIMING` 的慢帧
+> 数据——**没有实测数据就调参，是把 K1–K3 那类已论证的取舍推翻重来**。
+
+### 6.3 与 §三（有意保留）的边界
+
+G7 与 K1 **不冲突**：K1 说的是「侧边栏收起时不销毁子树」（保留已加载数据与
+滚动位置，用 ~130KB + 清单换零延迟），G7 说的是「子树里的列表本身要懒构建」
+（用 `ListView.builder` 少构造几千个 widget）。两者叠加才是目标状态：数据留着、
+widget 按需建。
+
+---
+
 ## 五、结论摘要
 
-- 结构上无界的点共 **7 条**（G1a/G1b/G2/G3/G4a/G4b/G5），全部映射到任务
-  tmw2jseq42–tmw2jseq46；
-- 已有界且核实通过 **20 条**（A1–A20），无需改动；
-- 有意保留 **6 条**（K1–K6），均有 AGENTS.md 实测依据，本轮明确不动。
+- 第一轮：结构上无界的点共 **7 条**（G1a/G1b/G2/G3/G4a/G4b/G5），全部映射到
+  任务 tmw2jseq42–tmw2jseq46，**均已修复**；
+- 第一轮：已有界且核实通过 **20 条**（A1–A20），无需改动；
+- 第一轮：有意保留 **6 条**（K1–K6），均有 AGENTS.md 实测依据，本轮明确不动。
+- 第二轮（峰值/主线程口径）：已修 **3 条**（G6 哈希 isolate / G7 树 builder /
+  G9 内存压力），待议 **6 条**（G8 / G10 / J1–J4）均**缺少真机或产品
+  取舍依据**，不以猜测改动，已开 issue 讨论（#70–#75）。

@@ -85,6 +85,10 @@ EXEMPT = {
     # §6.47 用它解释「keep-alive 的子项不在每帧布局/绘制路径上」——
     # 那是对 SDK 内部实现的引用，本仓库当然没有这个文件。
     'sliver_multi_box_adaptor.dart': 'Flutter SDK 文件名，非本仓库符号（§6.47）',
+    # 第三方插件 gpt_markdown 的内部文件（pub-cache 里，本仓库当然没有）。
+    # §6.60 用它钉死「插件默认图片渲染不带解码上限」的证据
+    # （`imageSpan` 默认分支是裸 `NetworkImage(url)`）。
+    'shared_render.dart': 'gpt_markdown 插件源码文件，非本仓库符号（§6.60）',
 }
 
 with open(DOC, encoding='utf-8') as fh:

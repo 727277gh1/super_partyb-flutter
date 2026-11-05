@@ -6662,6 +6662,108 @@ DevTools + 桌面环境，列为 openQuestion。
 四包 + 两端 flutter test）全绿。对账单 `docs/memory-audit.md` 的 G1–G5 处置
 结论已逐条落实，A1–A20 / K1–K6 与代码现状复核一致。
 
+### 6.60 第二轮内存/峰值优化：哈希下放 isolate / 交付物树懒构建 / 内存压力接线（2026-11）
+
+第一轮（§6.59）收口的是「结构上任意增长」的容器；第二轮（对账单
+`docs/memory-audit.md` §六）换了一条判据：**峰值与主线程占用**——大文件同步
+（全量 4.7 GB、单文件上限内可达 100 MB）与交付物树展开的瞬时峰值在这一层。
+本轮修 **3 项**（G6 / G7 / G9），**待议 6 项**（G8 / G10 / J1–J4）只登记不动。
+
+#### G6：SHA256 下放 isolate（`contentHashOfAsync`）
+
+同步/上传链路在字节**全部驻留内存之后**于主线程算哈希，单份 100 MB 文件约
+数百毫秒——帧预算是 16.7 ms，同步首轮会连续命中。新增
+`contentHashOfAsync(List<int> bytes)`：
+
+| 判据 | 取值 | 为什么 |
+|---|---|---|
+| 阈值 | > 8 KB 走 `Isolate.run`，≤ 8 KB 走同步 `contentHashOf` | isolate 启动/拷贝本身有成本，小输入反而更慢；8 KB 以下同步哈希 < 1 ms，无感知 |
+| 传输 | `TransferableTypedData.fromList` | worker 侧拿**外部缓冲视图**（`materialize()` 零拷贝），不额外占 worker 的 Dart 堆。⚠️ **它不是所有权移交**：实测 `fromList` 自身就拷贝一次（`fromList` 之后改原 buffer，`materialize()` 出来的字节不受影响），故调用方**仍可**继续读 `bytes`——「移交后不可再读」是不成立的约束，已从代码注释与对账单删除。收益不在「少一次拷贝」，而在 worker 不产生堆分配 |
+| 保留同步版 | `contentHashOf` 不动 | 测试与小数据路径不变；restricted 环境（`Isolate.run` 抛 `UnsupportedError`）回落同步 |
+| 不上流式 | `ResponseType.stream` + chunked hash 是「彻底档」，未做 | 现状字节本就全量驻留（下载缓冲 + 写盘），isolate 化只解决「主线程冻结」这一半；流式要动 UFS 下载契约与 `FileSink`，收益/风险比不划算，登记在对账单 |
+
+反向验证：isolate 路径改为返回错误哈希 → 3 条新用例红；还原后绿。
+
+#### G7：交付物树 flatten + `ListView.builder`
+
+面板原是 `ListView(children: _tree.map(_buildNode).toList())`——build 阶段把
+**全部**节点 widget 一次构造完（目录节点是 `ExpansionTile`：StatefulWidget +
+controller 装配），5666 文件的一帧构造 5666 个、滚出视口即弃；且每次 SSE 文件
+事件 bump `reloadToken` 都全量重来。现改为：
+
+- **可见行派生**（`_rows` getter）：只递归「展开中的目录」，折叠子树**不进行
+  集合**——这才是真正的懒（`ExpansionTile` 的折叠是视觉隐藏，子树仍挂载）；
+- **展开状态自持**（`_userExpansion: Map<String,bool>`，只记用户点过的目录；
+  未点过的按层级取默认：顶层展开 / 深层折叠，与原 `initiallyExpanded: depth == 0` 一致）；
+- **缓存双判据失效**：`identical(_rowsSource, _tree) && _rowsSourceRev == _rowsRev`。
+  只比 `_tree` identity 不够——**点击目录不换树，但可见行集合变了**，须用修订号；
+- 生命周期语义（三条既有测试钉住 + 两条新测试钉住）：同对话 `reloadToken`
+  刷新**保留**展开状态（用户正在看的目录不能被折叠回去）；切对话**重置**
+  （旧目录名可能相同但语义已不同）。
+
+⚠️ **测试自坑（诚实记录）**：「切对话后展开状态重置」最初失败——`_file()` 夹具
+的路径固定用默认 gid，切到另一 group 后 `buildArtifactTree` 剥不掉
+`/workspace/groups/<新gid>/` 前缀，整棵树为空 → 用例红的是**夹具**而非实现
+（红在「切对话后没有任何行」）。修夹具（`_file(..., gid: gid)`）后绿。
+
+反向验证：退回 `ListView(children:)` → 2 条红（builder 委托结构断言 + 折叠行数）；
+切对话不清展开状态 → 1 条红；toggle 去掉 `_rowsRev++` → 1 条红（点击无反应）。
+
+与 K1（§6.46 侧边栏 Offstage）不冲突：K1 保数据与滚动位置，G7 让子树里的列表
+本身懒构建——两者叠加才是目标状态。
+
+#### G9：系统内存压力接线（`installMemoryPressureHandler`）
+
+全仓 `didHaveMemoryPressure` 零命中。移动端是最需要这条信号的端（内存最紧张），
+收到压力时什么都不做直到被系统杀掉。新增
+`spb_platform` 的 `installMemoryPressureHandler({onRelease})`（进程级 observer，
+两端 `main.dart` 在 `configureImageCache()` 后无差别接线——桌面引擎不派发该
+信号，注册后无效果，故无需平台分支）。
+
+**框架已经做了一半（实测确认）**：`RendererBinding.handleMemoryPressure()`
+会先调 `imageCache.clear()` 再遍历 observer——但 `clear()` **不清 live
+images**（还有外部 listener 的图，例如正显示的预览大图）：
+
+```
+清空前: size=1 live=1
+clear(): size=0 live=1        ← 框架只做到这里
+clearLiveImages(): size=0 live=0  ← 本模块补的
+```
+
+「用户正盯着一张 4000×3000 预览图」恰恰是移动端最容易 OOM 的场景，故
+`clearLiveImages()` 才是本模块的真实增量（`clear()` 保留为幂等防御）。
+`onRelease` 留给 app 层的页面级可再生缓存。**不**清任何持久化状态（离线缓存 /
+同步状态 / outbox）——那些不是「内存」，清掉丢用户数据。
+
+⚠️ **测试假绿（实测踩过，与 §6.17 同型）**：第一版测试只断言 `currentSize == 0`，
+且没把条目真正放进缓存——清不清都绿。两个必要前置：① 用
+`putIfAbsent + OneFrameImageStreamCompleter` 真的放条目，且**冲一轮微任务**
+（completer 回调在微任务里，否则读到的是 pending 态）；② **挂外部 listener
+保持 live**——不挂的话 completer 完成后 `_LiveImage` 自动释放，`liveImageCount
+== 0` 恒真。修好后反向验证才有效：去掉 `clearLiveImages()` → 1 条红；去掉
+`onRelease` 调用 → 3 条红。
+
+#### 待议项（只登记，不动）
+
+G8（`_thumbnailMemo` 无界 + 版本覆盖不失效，#70）、G10（gpt_markdown `imageBuilder`
+未传，绕过降采样，#71——写 issue 时已核实插件默认路径**不带** `cacheWidth`/`ResizeImage`，
+见 `gpt_markdown` 1.3.0 `shared_render.dart` 的 `imageSpan` 默认分支 `NetworkImage(url)`）、
+J1（`isStreaming` 翻转致气泡 remount，`SelectionArea`
+换父节点丢解析状态，#72）、J2（`FileLogSink` 同步写盘——§6.57 的有意取舍，#73）、
+J3（流式逐字 fade 动画——产品表达，#74）、J4（`_followBottom` 动画被打断重来，#75）
+——逐条证据与「为什么这轮不动」见对账单 §6.2，后续讨论以各 issue 为准。共同前提：本机无 `DISPLAY`
+无真机，拿不到 `SPB_FRAME_TIMING` 慢帧数据；**没有实测数据就调参，是把
+K1–K3 那类已论证的取舍推翻重来**。
+
+#### 验证
+
+`dart analyze` 全仓干净；12 守卫 + 自测全绿；测试：spb_domain 1141 / spb_api
+495 / spb_models 471 / spb_core 150 / spb_platform 177 / spb_features 1297 /
+spb_desktop 212 / spb_mobile 120 全绿（spb_domain +3 = `contentHashOfAsync`
+等价性 / 已知向量 / 非 `Uint8List` 输入；spb_platform +4 = 内存压力接线；
+spb_features +4 = builder 委托结构 / 折叠行不进行集合 / 同对话刷新保留 /
+切对话重置）。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
