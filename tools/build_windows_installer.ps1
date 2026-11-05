@@ -125,10 +125,18 @@ if (-not $appVersion) {
 }
 
 # ── 3. 找 ISCC ─────────────────────────────────────────────────────────
-function Find-Iscc {
-    $candidates = @()
-    $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-    if ($cmd) { $candidates += $cmd.Source }
+# ⚠️ 不能「取 PATH 上第一个」。装了 Chocolatey 的机器（GitHub 的 windows runner
+# 就是）PATH 上会有一个 `C:\ProgramData\Chocolatey\bin\ISCC.exe` **shim**——它是
+# shimgen 生成的转发器，`VersionInfo.FileVersion` 是 `0.0.0.0`，于是「需要 6.0+」
+# 的检查会把它判死，而真正的编译器就在 Program Files 下好好躺着。
+# 2026-11 CI 实测：这一步红在 `需要 Inno Setup 6.0+，当前 0.0.0.0（...\Chocolatey\bin\ISCC.exe）`。
+# 故收集**全部**候选、按版本号挑最高的那个（未知版本 0 排最后）。
+function Get-IsccCandidates {
+    $list = @()
+    $cmd = @(Get-Command ISCC.exe -All -ErrorAction SilentlyContinue)
+    foreach ($c in $cmd) {
+        if ($c -and $c.Source) { $list += $c.Source }
+    }
 
     $bases = @()
     if (${env:ProgramFiles(x86)}) { $bases += ${env:ProgramFiles(x86)} }
@@ -136,14 +144,36 @@ function Find-Iscc {
     if ($env:LOCALAPPDATA) { $bases += (Join-Path $env:LOCALAPPDATA 'Programs') }
     foreach ($base in $bases) {
         foreach ($dir in @('Inno Setup 6', 'Inno Setup 5')) {
-            $candidates += (Join-Path $base "$dir/ISCC.exe")
+            $list += (Join-Path $base "$dir/ISCC.exe")
         }
     }
+    return $list
+}
 
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c)) { return (Resolve-Path $c).Path }
+function Find-Iscc {
+    $seen = @{}
+    $best = $null
+    $bestMajor = -1
+    $report = @()
+    foreach ($c in (Get-IsccCandidates)) {
+        if (-not $c) { continue }
+        if (-not (Test-Path $c)) { continue }
+        $path = (Resolve-Path $c).Path
+        $key = $path.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+
+        $vi = (Get-Item $path).VersionInfo
+        $major = 0
+        if ($vi.FileMajorPart) { $major = [int]$vi.FileMajorPart }
+        $report += "$path (v$($vi.FileVersion))"
+        if ($major -gt $bestMajor) {
+            $bestMajor = $major
+            $best = $path
+        }
     }
-    return $null
+    if ($report.Count -gt 0) { Write-Host ('ISCC 候选：' + ($report -join '; ')) }
+    return $best
 }
 
 $iscc = Find-Iscc
@@ -161,9 +191,16 @@ if (-not $iscc) {
 
 # 脚本用了 {autopf} / WizardStyle / 内置 ISPP，都是 Inno 6.0+ 的语法；
 # 5.x 上会得到一堆「未知参数」的报错，提前拦住更好定位。
+# 版本号读不出来（0，通常是 shim）时**不**硬拦：那种情况读不到 ≠ 版本太旧，
+# 交给 ISCC 自己报错比在这里瞎猜好——shim 会把参数转发给真正的编译器。
 $isccVersion = (Get-Item $iscc).VersionInfo
-if ($isccVersion.FileMajorPart -lt 6) {
+$isccMajor = 0
+if ($isccVersion.FileMajorPart) { $isccMajor = [int]$isccVersion.FileMajorPart }
+if ($isccMajor -gt 0 -and $isccMajor -lt 6) {
     throw "需要 Inno Setup 6.0+，当前 $($isccVersion.FileVersion)（$iscc）"
+}
+if ($isccMajor -eq 0) {
+    Write-Warning "读不出 $iscc 的版本号（可能是 shim），直接尝试编译"
 }
 
 # ── 4. 跑 ISCC ─────────────────────────────────────────────────────────

@@ -6803,7 +6803,7 @@ spb_features +4 = builder 委托结构 / 折叠行不进行集合 / 同对话刷
 `--dart-define=SPB_API_BASE_URL`」，拆成新 job 就要把整套 define 再抄一遍，而漏抄
 的表现正是 §6.33 那个「连 127.0.0.1」的真实缺陷。
 
-#### 五个易写错的点
+#### 六个易写错的点
 
 1. **`.iss` 必须 UTF-8 带 BOM**。没有 BOM 时 ISCC 按 ANSI/系统码页读，中文注释
    变乱码。故文件用 `encoding='utf-8-sig'` 写；而 `AppName` 等**字符串保持 ASCII**
@@ -6821,6 +6821,17 @@ spb_features +4 = builder 委托结构 / 折叠行不进行集合 / 同对话刷
 5. **`PrivilegesRequired=lowest`**：不弹 UAC，`{autopf}` 落到
    `%LOCALAPPDATA%\Programs`（每用户安装），与本客户端「不碰系统目录」的定位一致；
    要装进 Program Files 的用户可在向导里选（`PrivilegesRequiredOverridesAllowed=dialog`）。
+6. **不能取 PATH 上第一个 `ISCC.exe`**。装了 Chocolatey 的机器（GitHub 的
+   `windows-2022` 就是——`InnoSetup 6.7.1` 由 choco 装）PATH 上有一个
+   `C:\ProgramData\Chocolatey\bin\ISCC.exe` **shim**，它的 `FileVersion` 是
+   `0.0.0.0`，于是「需要 6.0+」的检查把它判死，而真正的编译器就在
+   `Program Files (x86)\Inno Setup 6` 下好好躺着。2026-11 CI 实测：
+   `需要 Inno Setup 6.0+，当前 0.0.0.0（C:\ProgramData\Chocolatey\bin\ISCC.exe）`
+   ——**本机没有 Windows，这一条只在 CI 上才会现形**（§6.61 的验证清单里写明
+   「没有 Windows 手测」，这就是它的代价）。故 `Find-Iscc` 收集**全部**候选、
+   按 `FileMajorPart` 挑最高（未知版本 0 排最后），并把候选清单打进日志；
+   读不出版本号时只 warn 不抛（shim 会把参数转发给真正的编译器，交给它报错比
+   在这里瞎猜好）。
 
 #### 安装包图标为什么另做一份
 
@@ -7365,6 +7376,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~CI 的 `build-windows` 在「Build Inno Setup installer」一步红掉（`需要 Inno Setup 6.0+，当前 0.0.0.0`）~~ | ✅ 已修（§6.61 第 6 条）：`tools/build_windows_installer.ps1` 的 `Find-Iscc` 取的是 **PATH 上第一个** `ISCC.exe`，而 `windows-2022` 由 Chocolatey 装 InnoSetup 6.7.1，PATH 上那个 `C:\ProgramData\Chocolatey\bin\ISCC.exe` 是 shimgen 生成的**转发器**（`FileVersion` = `0.0.0.0`），于是「6.0+」检查把它判死——真正的编译器就在 `Program Files (x86)\Inno Setup 6` 下。改为收集**全部**候选、按 `FileMajorPart` 挑最高（未知版本 0 排最后）、把候选清单打进日志；读不出版本号时只 warn 不抛（shim 会转发给真编译器，交给它报错比瞎猜好）。⚠️ 这条**本机（Linux）测不出来**：Linux pwsh 上所有 `ISCC.exe` 的 `VersionInfo` 都是空的，版本择优无从验证——已用假 ISCC 实测「shim 路径不再硬失败」与「多候选去重 + 全部列出」两条，版本择优由下一次 CI 实跑确认 | §6.61 |
 | ~~目标任务清单的内容被操作按钮挤到看不见（桌面侧边栏 320dp 下标题宽度为 0、单条任务 1008dp 高）~~ | ✅ 已修（§6.62）：根因是 `ListTile.trailing` **先按固有宽度占位**——5 个行级 `IconButton` 的点击区下限各 48dp（`visualDensity: compact` 不缩它，实测仍 48×48），合计 240dp；320 − 内边距 32 − 勾选框 48 − 240 = **0**。且**不抛异常**（0 宽标题是合法布局），故门禁全绿而界面不可用。修法对齐 webapp `GoalTaskEditor`：`ListTile` → 状态色边框卡片，标题独占整行（`Expanded`，`maxLines: 3`），描述与出错原因各占一行，动作移到卡片**底部**的 `Align + Wrap`，状态徽标**本身就是**下拉触发器（比再摆一个 `more_horiz` 少 48dp）。实测 320dp：标题 **0 → 258**，单条 **1008 → 198**；420dp 弹层标题 92 → 358。新增 3 条**显式压到 320dp** 的用例（默认 800dp 的 43 条发现不了，同 §6.16 失败模式）；反向验证：动作塞回同一行 → 2 条红，状态改回独立图标按钮 → 4 条红 | §6.62 |
 | ~~Windows 上点窗口关闭按钮，应用**直接退出**（托盘里也找不到），「关窗即隐藏到托盘」从未生效~~ | ✅ 已修（§6.63）：根因不在 `onWindowClose`（它一直在调 `windowManager.hide()`），而在 **`preventClose` 从未被打开**——`window_manager` 的 `close` 事件是**通知**不是**拦截**，三平台原生侧都是「先异步派发 `close`，再看 `isPreventClose()` 决定要不要继续关闭」（Windows `WM_CLOSE` → `return -1`，否则落 `DefWindowProc` 销毁窗口 → 消息循环退出；Linux GTK `delete_event` 的返回值；macOS `windowShouldClose` 的 bool）。事件是异步投递到 Dart 的，故等 `hide()` 跑到时窗口**早已销毁**——`hide()` 确实被调用了、返回值也正常，所有门禁全绿。修法三处：① `PlatformDesktopCapabilities.setHideOnClose` 记完 `_hideOnClose` 再 `await windowManager.setPreventClose(value)`（失败只 warn，降级成「关窗即退出」）；② 契约 `TrayActionTarget.setHideOnClose` 由 `void` 改 **`Future<void>`**（它做平台通道 I/O，留 void 就是 fire-and-forget），调用点用 `unawaited`；③ **`quit()` 在 `destroy()` 之前先 `setPreventClose(false)`**——macOS 的 `destroy()` 是 `NSApp.terminate(nil)`，AppKit 在终止序列里逐窗口问 `windowShouldClose:`，任一返回 NO 就**取消终止**，不先关掉的话托盘「退出」在 macOS 上是死按钮（Windows `PostQuitMessage` / Linux 自己置 false 不受影响，但统一处理不留平台分叉）。唤回路径本来就有、无需新增：托盘左键 / 托盘「显示主窗口」→ `showWindow(WindowRole.main)`，`Alt+Space` / 托盘「快速输入」→ `/overlay`。关窗相关日志一律 **info**（debug 在生产被过滤），其中「未启用隐藏到托盘，按默认行为退出」是「这次关窗到底退出了没有」的唯一线索。新增 `window_close_test.dart` 6 条（mock `MethodChannel('window_manager')`，断言通道上到底发了什么——这是唯一能钉住「拦截是否真的打开」的观测面）；反向验证：去掉 `setPreventClose` → 2 条失败，去掉 `quit()` 里的 `setPreventClose(false)` → 1 条失败。**需 Windows 真机确认**托盘图标与左键唤回 | §6.63 |
 | ~~Windows 只发 zip，没有安装包（用户得自己建快捷方式、升级前手动退出、卸载靠删文件夹）~~ | ✅ 已加（§6.61）：发 **Inno Setup 安装包** `spb_desktop-windows-x64-setup.exe`，与 zip **并列**发布（zip 保留给便携场景，两者内容逐字节相同）。`.iss` 只做「拷文件 + 快捷方式 + 卸载项」，安装后行为与 zip 版完全一致——两套行为就是两套 bug。四个易写错的点：① `.iss` **必须 UTF-8 带 BOM**（否则 ISCC 按 ANSI 读，中文注释乱码），且 `AppName` 等字符串保持 ASCII、**不引**第三方 `ChineseSimplified.isl`（runner 上没有，引了即失败）；② `x64compatible` 是 Inno 6.3 才有的标识符，`windows-2022` 若装 6.2 会直接编译失败（最难自查的红），故用 ISPP `#if VER >= EncodeVer(6,3,0)` 二选一；③ 版本号须归一成纯数字 `x.y.z`（Inno 靠它比新旧），`v1.2.3-rc1` → `1.2.3`，来源链 `-Version` → `$env:GITHUB_REF_NAME` → pubspec → `0.0.0`；④ `AppId` 永不改（Windows 靠它识别同一产品的升级/卸载项，改了就是「又装一份」）。`SetupIconFile` 另做一份**纯 BMP 帧**的 16/32/48/64/128（82 KB，不含 256——BMP 帧不压缩、单张 256 KB），因为 ISCC 对 PNG 帧的支持未验证，且这与 §6.55 托盘图标是同一个坑。**本机无 Windows/ISCC，编译与装机行为都没跑过**：已用 pwsh 7.4 在 Linux 上跑通脚本五条路径（成功/缺运行库/无 ISCC/ISCC 非 0/成功但无产物）、断言 `/D` 是单个 argv、四种版本来源逐条实测；真机验证清单见 §6.61 | §6.61 |
