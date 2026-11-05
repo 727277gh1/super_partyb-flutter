@@ -187,13 +187,32 @@ jobs:
       # 同上的**数字**版本：§6.12 的「重新评估条件 2」是「spb_features 硬编码
       # 字符串 > 1500」——文档里的当前值若不准，会基于错误基线做决策
       # （issue #46）。容差 5%（小漂移放行、大漂移拦住）。
+      #
+      # 2026-11 起扫描范围是 AGENTS.md **与拆出去的 docs/**：带标记的 §6.12
+      # 搬进了 `docs/design-decisions/runtime-and-ops.md`，只扫 AGENTS.md 会让
+      # 标记「消失」而按设计硬失败。
       - name: AGENTS.md number references
         run: bash tools/check_agents_numbers.sh
 
       # 上面那条守卫的假绿/假红风险（无标记空转、大漂移漏检、小漂移误报、
-      # 文档展示的命令与脚本不一致）各有断言。
+      # 文档展示的命令与脚本不一致、拆出去的正文漏扫）各有断言。
       - name: AGENTS.md number guard self-test
         run: bash tools/check_agents_numbers_selftest.sh
+
+      # `AGENTS.md` 不是 wiki，是**提示词**：pi / Claude Code 每次请求都把它
+      # 全文拼进 system prompt（无截断）——它的体积直接等于上下文预算。
+      #
+      # 2026-11 的实测代价：长到 522 KB（~159k tokens / 200k 窗口 = 79%），
+      # 一次排查里 **28 分钟触发 8 次 compaction**，每次压缩后 cache 全失效
+      # （等于每 2 分钟全量重发 ~190k prompt）。拆进 `docs/design-decisions/`
+      # 后 ~25 KB；这条守卫防它长回去（最近 30 次编辑的增删比曾是 16:1）。
+      - name: AGENTS.md size budget
+        run: bash tools/check_agents_size.sh
+
+      # 上面那条守卫的假绿/假红风险（比较方向写反、README 豁免写成「豁免全部」
+      # 导致静默空转、决策文件漏索引不报）各有断言。
+      - name: AGENTS.md size guard self-test
+        run: bash tools/check_agents_size_selftest.sh
 
       # `catch (_) {}` 让异常完全消失。issue #40 建好了「导出诊断日志」通道，
       # 但它的输入只有显式走 SpbLog 的日志——静默 catch 里的异常永远不会出现
