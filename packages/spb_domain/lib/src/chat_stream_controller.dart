@@ -1594,17 +1594,16 @@ class ChatStreamController {
     final serverMax = _maxGlobalSeqOf(page.items);
     if (serverMax == null || serverMax <= localMax) return;
 
-    // `localMax` 是**发请求之前**的值。不能用探测返回后再读的值做基线：
-    // 探针的响应可能已经把回放帧「憋」在路上，读到的已经是前进过的值，
-    // 于是「还在动」这个信号会被吃掉（实测踩过：写成本行之后的重新读取，
-    // 「重排一次再追上」那条用例直接跳到回填）。
-    final atProbe = localMax;
     await Future<void>.delayed(replayGapSettle);
     if (_disposed || _groupId != groupId) return;
     final after = _maxBufferedGlobalSeq;
     // 追上了：回放/实时流已经把差距补上——这正是「探测跑在 SSE 前面」的正常情况。
     if (after == null || after >= serverMax) return;
-    if (after != atProbe && _gapProbeAttempts < 2) {
+    // ⚠️ 与 [localMax]（**发请求之前**的值）比，不是与「响应到达后」的值比：
+    // 探针的响应可能已经把回放帧憋在路上，读到的是已经前进过的值，于是
+    // 「还在动」这个信号被吃掉（实测踩过：换成响应后重新读，「重排一次再
+    // 追上」那条用例直接跳到整段回填）。
+    if (after != localMax && _gapProbeAttempts < 2) {
       _gapProbeAttempts++;
       _gapProbeTimer?.cancel();
       _gapProbeTimer = Timer(
