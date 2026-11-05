@@ -90,7 +90,6 @@ DOCS = [pathlib.Path("AGENTS.md")] + [
     for p in (
         [
             "docs/api-contract.md",
-            "docs/architecture.md",
             "docs/development.md",
             "docs/roadmap.md",
             "docs/known-issues.md",

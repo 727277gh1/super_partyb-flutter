@@ -247,8 +247,8 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 
 - **值**：两端传的表达式不同是正常的（`enableSearch` 就按宽度给），脚本只比对
   参数**名**是否存在，不解析值语义；
-- **provider 层**：两端 `providers.dart` 有 88 个同名 provider，上提到共享包是
-  独立重构（issue #39 已登记），不在本守卫范围。
+- **provider 层**：两端 `providers.dart` 有上百个同名 provider（其中以 `Provider`
+  结尾的 86 个），上提到共享包是独立重构（issue #39 已登记），不在本守卫范围。
 
 #### 四个易写错的点（写这类脚本时）
 

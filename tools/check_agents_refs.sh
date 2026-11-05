@@ -79,7 +79,6 @@ DOC = 'AGENTS.md'
 # 那个入口不能分散到 10 个文件里。
 SPLIT_DOCS = [
     'docs/api-contract.md',
-    'docs/architecture.md',
     'docs/development.md',
     'docs/roadmap.md',
     'docs/known-issues.md',

@@ -270,6 +270,9 @@ super_partyb-flutter/
 响应格式 / SSE 事件契约 / 无归属入口 / 落点存储 / 分页 / 超时兜底）。
 改任何契约前先确认服务端真源 `super_partyb/apps/go-api`。
 
+> ⚠️ 代码注释里的 `AGENTS.md §5.1.1` / `§5.5` / `§5.7` 指**本节的细分小节**，
+> 它们住在 `docs/api-contract.md` 的同名小节里（本文 §5 只留下面三条铁律）。
+
 三条最容易踩的（细节在该文件里）：
 
 1. **客户端不解析 JWT、不申请 API Key**。凭证交给 `api-gateway`，它注入
@@ -286,9 +289,8 @@ super_partyb-flutter/
 §6.1–§6.63 的逐条索引见该目录的 `README.md`。
 
 **编号永久稳定**：`§6.43` 永远指同一件事，只是换了文件——代码注释、`docs/`、
-issue 里的 `§6.x` 引用都不会失效。代码与 `tools/` 里现有 **175 处**
-`AGENTS.md §6.x` / `§6.x` 引用就是靠这条活着的（无需逐个改成文件路径），
-按下表找到主题文件、再按编号定位小节即可。
+`docs/` 里的 `§6.x` 引用都不会失效——按上表找到主题文件、再按编号定位小节即可
+（无需逐个改写成文件路径）。
 
 > ⚠️ **新增决策写进 `docs/design-decisions/<主题>.md`，本文件只在下表加一行。**
 > `AGENTS.md` 每次请求都被全文注入，它的体积就是上下文预算
@@ -377,8 +379,9 @@ iOS 出包（需 Apple Developer 账号）。
 | 四项检索面板未接（语义 / 图谱 / 文件演化 / 决策演化） | **有意不做**（issue #12）。语义搜索的**嵌入链路是通的**，但数据面为空（`chat_groups` = 0 行）；两个「演化」面板的数据源在 Go 时代已停写——**前置条件是服务端先恢复数据写入** | issue #12、§6.9.6 |
 | 离线缓存切片 C 的「反向验证为 0」 | ⚠️ **唯一一条**（诚实记录）：`drain` 进度哨兵——正确代码上不可达，属 **fail-safe**（拦「将来有人改坏 `_nextSendable`」，把挂死变成记 error + 中断）。另两条初版缺口（store `delete`/`clear` 静默降级、`onConnectivityRestored` 不碰 `failed`）**已补测** | `docs/offline-cache-design.md` §7bis.11 |
 | ⚠️ bcc `partyb-go-api` 的 `chat_turns` / `chat_groups` / `chat_events` 全为 0（2026-10-11 实测） | **待排查**（属 `super_partyb` 侧，不在本仓库）。2026-09-27 备份有 `chat_turns` 3559 行，而现库是一份缺 `chat_*` 数据的状态；`topics` / `user_memories` / `embeddings` 仍在 | §6.9.6 末尾注 |
+| TTS 语音**只展示状态、不播放**（无音频播放插件） | **有意不做**：音频文件由交付物同步拉到本地，`TtsStatus` 只回答「播报到哪一步 / 为什么失败」，不持有可播放句柄。⚠️ 曾被 §11 引用、拆分时漏搬，2026-11 补回 | `packages/spb_domain/lib/src/tts_status.dart` |
 | `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：它是原生插件（把 `libsqlite3.so` 打进 Android/iOS 包），drift 移动端运行时需要；已写进 `check_unused_deps.sh` 的显式豁免。实测 apk 含 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so` | issue #36、§6.4 |
-| 两端 `providers.dart` 88 个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
+| 两端 `providers.dart` 上百个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，且平台相关装配需留在各 app；当前只把「接线一致性」做了自动守卫（§6.17） | issue #39 |
 | 契约同步靠人工 | 可接受 | [§6.2](docs/design-decisions/architecture.md) |
 
 ## 12. 提交约定
