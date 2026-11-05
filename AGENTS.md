@@ -25,7 +25,7 @@
 
 ```bash
 # 依赖（workspace 根执行，所有包共享一份 lockfile；CI 用 --enforce-lockfile，
-# 改依赖要把根 pubspec.lock 一起提交，见 issue #35）
+# 改依赖要把根 pubspec.lock 一起提交——否则构建不可复现）
 flutter pub get
 
 # 静态分析 / 格式化
@@ -238,13 +238,13 @@ spb_design / spb_models / spb_core → 无包内依赖
 |---|---|
 | Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策（`super_partyb` issue #30） |
 | macOS 包未签名/未公证（首开需绕过 Gatekeeper）；Windows 包无代码签名（SmartScreen） | 已知限制（§8、`docs/windows-release.md` §4） |
-| iOS 出包需 Apple Developer 账号 | 待决策（`super_partyb` issue #31） |
-| 四项检索面板未接（语义 / 图谱 / 两个「演化」） | **有意不做**（issue #12）：数据面为空 / 数据源在 Go 时代已停写，前置是服务端先恢复写入（§6.9.6） |
+| iOS 出包需 Apple Developer 账号（无签名账号） | 待决策（见 §8） |
+| 四项检索面板未接（语义 / 图谱 / 两个「演化」） | **有意不做**：数据面为空 / 数据源在 Go 时代已停写，前置是服务端先恢复写入（§6.9.6） |
 | 离线缓存切片 C 的「反向验证为 0」 | ⚠️ 唯一一条诚实记录：`drain` 进度哨兵在正确代码上不可达，属 **fail-safe**（`docs/offline-cache-design.md` §7bis.11） |
 | bcc `partyb-go-api` 的 `chat_turns`/`chat_groups`/`chat_events` 全为 0 | **待排查**（属 `super_partyb` 侧）：2026-09-27 备份有 3559 行，现库缺 `chat_*`（§6.9.6 末尾注） |
 | TTS 语音只展示状态、不播放（无音频播放插件） | **有意不做**：音频由交付物同步拉到本地（`packages/spb_domain/lib/src/tts_status.dart`） |
 | `sqlite3_flutter_libs` 零 Dart import 但**不能删** | **有意保留**：原生插件，drift 移动端运行时需要；已在 `tools/check_unused_deps.sh` 显式豁免 |
-| 两端 `providers.dart` 上百个同名 provider 未上提共享包 | **有意不做（本轮）**（issue #39） |
+| 两端 `providers.dart` 上百个同名 provider 未上提共享包 | **有意不做（本轮）**：属独立重构，平台相关装配留在各 app（一致性由 §6.17 守卫） |
 | 契约同步靠人工 | 可接受（§6.2） |
 
 ## 12. 提交约定
