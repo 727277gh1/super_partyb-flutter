@@ -599,6 +599,57 @@ void main() {
       );
     });
 
+    test('窗口非正视为无数据（旧版 pigo 的 0/0，不渲染 0 / 0）', () {
+      // 生产实测：202 条 context_update 里 198 条是这个形状——headless 驱动在
+      // pi-go a2c265b 之前不启用自动压缩，遥测恒发 0/0。
+      expect(
+        ContextUsage.fromEventPayload(const {
+          'telemetry': {
+            'turns': 1,
+            'context_utilization': 0.0,
+            'context_tokens': 0,
+            'context_window': 0,
+          },
+        }),
+        isNull,
+        reason: '窗口 0 是「没报」，不是「窗口是 0」',
+      );
+      // 遗留形状同样适用（webapp 的 parseContextUsage 也是 size <= 0 即 null）。
+      expect(
+        ContextUsage.fromEventPayload(const {
+          'context': {'used': 0, 'size': 0},
+        }),
+        isNull,
+      );
+      // 扁平兜底路径也不得漏过。
+      expect(
+        ContextUsage.fromEventPayload(const {'token_used': 0, 'token_size': 0}),
+        isNull,
+      );
+    });
+
+    test('窗口已知但 tokens 为 0 仍是有效数据（空上下文不是「未知」）', () {
+      final u = ContextUsage.fromEventPayload(const {
+        'telemetry': {'context_tokens': 0, 'context_window': 128000},
+      });
+
+      expect(u, isNotNull);
+      expect(u!.used, 0);
+      expect(u.size, 128000);
+      expect(u.remaining, 128000);
+      expect(u.utilization, 0);
+    });
+
+    test('compaction 帧无窗口字段时不受「窗口非正」守卫影响', () {
+      final u = ContextUsage.fromEventPayload(const {
+        'compaction': {'status': 'completed', 'tokens_after': 42000},
+      });
+
+      expect(u, isNotNull);
+      expect(u!.used, 42000);
+      expect(u.size, isNull);
+    });
+
     test('mergedWith：逐字段合并，used 更新后 remaining 重算', () {
       const base = ContextUsage(used: 10000, size: 200000, remaining: 190000);
       const newer = ContextUsage(used: 3000);

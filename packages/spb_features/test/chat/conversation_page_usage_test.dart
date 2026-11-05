@@ -249,6 +249,38 @@ void main() {
       );
       expect(find.textContaining('12K / 200K'), findsOneWidget);
     });
+
+    testWidgets('旧版 pigo 的 0/0 遥测不渲染「上下文 0 / 0」', (tester) async {
+      // 生产实测（2026-11-05）：202 条 context_update 里 198 条是这个形状
+      // （headless 驱动在 pi-go a2c265b 之前不启用自动压缩 ⇒ ContextWindow=0）。
+      // 窗口 0 = 「执行器没报」，不是「窗口是 0」——渲染 0 / 0 会让人以为窗口坏了。
+      mockTimeline();
+      await startController(tester);
+      await settleBaseline(tester);
+      await pumpPage(tester);
+
+      await pushEvent(
+        tester,
+        EventTypes.contextUpdate,
+        sseEvent(
+          EventTypes.contextUpdate,
+          id: 'e_ctx_zero',
+          seq: 44,
+          payload: {
+            'telemetry': {
+              'turns': 1,
+              'context_utilization': 0.0,
+              'context_tokens': 0,
+              'context_window': 0,
+            },
+          },
+        ),
+      );
+      await tester.pump();
+
+      expect(bar, findsNothing, reason: '无水位数据时整条读数区不渲染');
+      expect(find.textContaining('上下文 0 / 0'), findsNothing);
+    });
   });
 
   group('窄屏（AGENTS.md §6.16）', () {

@@ -25,6 +25,21 @@
 /// 活着的来源，`context` 留给向前兼容与 webapp 对齐。**不要**只抄 webapp 的
 /// 解析——那会复刻一个永不亮起的 UI。
 ///
+/// ## ⚠️ `context_window = 0` 不是「窗口是 0」，而是「执行器没报窗口」
+///
+/// pi-go 的遥测只在 `cfg.ContextWindow > 0` 时才 `recordContext`（
+/// `internal/runtime/loop.go` 的 `afterTurn`），而 headless 驱动在
+/// `a2c265b`（2026-11-04）之前根本不启用自动压缩 ⇒ `ContextWindow` 恒为 0
+/// ⇒ 每轮遥测都是 `context_tokens: 0, context_window: 0`。
+///
+/// 生产实测（2026-11-05，202 条 `context_update`）：**198 条**是这种 0/0；
+/// 只有升级 pigo 之后的 4 条带真实值（`42457/128000` 等）。
+///
+/// 故 [fromEventPayload] 对「窗口非正」的帧返回 **null**（整帧按无数据处理，
+/// 同一帧里的 tokens 也不可信——它恒为 0），否则 UI 会渲染出误导性的
+/// `0 / 0`。这与 webapp 的同款修复（`apps/webapp/src/lib/workbench/
+/// context-usage.ts` 的 `parseContextUsage`）口径一致。
+///
 /// ## 费用：Go 从不发射
 ///
 /// Go 侧没有 `cost` / `currency` 的任何产出点（全仓 grep 零命中）。故 [cost]
@@ -105,8 +120,9 @@ class ContextUsage {
 
   /// 从 `context_update` 的 payload 解析。
   ///
-  /// 返回 null 表示本 payload 没有任何可识别的用量字段（异常载荷，调用方应
-  /// 保留上一次快照而非清空）。
+  /// 返回 null 表示本 payload 没有任何可识别的用量字段（异常载荷），**或**
+  /// 窗口非正（执行器没报窗口，见类文档）。两种情况调用方都应保留上一次
+  /// 快照而非清空，也不应渲染 `0 / 0`。
   ///
   /// ## 支持的三种形状
   ///
@@ -165,6 +181,17 @@ class ContextUsage {
           currency: _string(payload['currency']) ?? 'USD',
         );
       }
+    }
+
+    // ---------- 窗口非正 ⇒ 整帧无数据 ----------
+    //
+    // 「窗口未知」的帧长这样：`{context_tokens: 0, context_window: 0}`（旧版
+    // pigo 的 headless 驱动）。它不是「窗口是 0、用了 0 token」，而是「根本没
+    // 报」。保留它会渲染 `0 / 0`，或（更糟）与上一帧的真实窗口合并成
+    // `0 / 128000`——都是不存在的事实。故整帧按无数据处理（返回 null 让调用
+    // 方保留上一次快照），与 webapp 的 `parseContextUsage` 一致。
+    if (size != null && size <= 0) {
+      return null;
     }
 
     // ---------- 推导：remaining / size ----------

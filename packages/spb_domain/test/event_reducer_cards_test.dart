@@ -628,6 +628,33 @@ void main() {
       expect(r.contextUsage!.used, 2000);
     });
 
+    test('旧版 pigo 的 0/0 帧不得覆盖已知的真实水位', () {
+      // 混合历史：同一 group 里既有升级 pigo 之后的真实值，也可能回放到
+      // 升级前的 0/0（或将来镜像回退）。0/0 是「窗口没报」，不是「窗口归零」。
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {'context_tokens': 42457, 'context_window': 128000},
+        }, globalSeq: 1),
+        ctx({
+          'telemetry': {'context_tokens': 0, 'context_window': 0},
+        }, globalSeq: 2),
+      ]);
+
+      expect(r.contextUsage!.used, 42457, reason: '0/0 帧应被当作无数据跳过');
+      expect(r.contextUsage!.size, 128000);
+      expect(r.contextUsage!.utilization, closeTo(0.3317, 1e-3));
+    });
+
+    test('只有 0/0 帧时 contextUsage 为 null（不渲染 0 / 0）', () {
+      final r = EventReducer.reduce([
+        ctx({
+          'telemetry': {'context_tokens': 0, 'context_window': 0},
+        }, globalSeq: 1),
+      ]);
+
+      expect(r.contextUsage, isNull);
+    });
+
     test('无 context_update 时 contextUsage 为 null', () {
       final r = EventReducer.reduce([
         ev(EventTypes.message, payload: {'text': 'hi'}),
