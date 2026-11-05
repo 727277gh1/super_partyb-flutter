@@ -4,9 +4,9 @@
 ## 为什么需要这个脚本
 
 品牌标志的**真源**在姊妹仓库 `super_partyb/apps/webapp/src/app/icon.svg`
-（成蹊 logo，1024×1024）。本仓库需要把它分发成 **36 个**平台图标文件
-（macOS 7 / iOS 15 / Android 5 legacy + 5 adaptive + 5 splash / Windows ico /
-桌面运行时 2 / 应用内 1）。
+（成蹊 logo，1024×1024）。本仓库需要把它分发成 **43 个**平台图标文件
+（macOS 7 / iOS 15 / Android 5 legacy + 5 adaptive + 5 splash / Windows exe 资源 1 /
+Windows 托盘 1 / 安装包 1 / 桌面运行时 2 / 应用内 1）。
 
 手工逐个导出的问题不是「慢」，而是**漂移**：改一次品牌色，得记得重新导出
 每一个尺寸，而漏掉的那几个只有在真机/对应平台上看图标时才会发现——本仓库
@@ -43,6 +43,7 @@ python3 tools/gen_brand_assets.py --master /tmp/logo-master.png
 | Android adaptive | 背景色 + **透明底**前景区 | API 26+ 由启动器按厂商形状裁切；前景的标志须落在 66% 安全区 |
 | macOS | **圆角方形 + 留白** | Big Sur 起的栅格：1024 画布内 824×824 圆角矩形（圆角 185），四周各留 100 |
 | Windows .ico | 满幅多尺寸内嵌 | 资源管理器按尺寸挑帧 |
+| 安装包 .ico | 满幅多尺寸、**BMP 帧** | 见 `windows_installer` 的说明：PNG 帧能不能被 ISCC 读是未验证的依赖 |
 | 桌面运行时 | 满幅（托盘 64 / 窗口 256） | GTK / Windows 自己缩放；窗口图标会被 Alt+Tab 放大，用 64 会糊 |
 
 ## 为什么 adaptive 前景要「反预乘」解出 alpha
@@ -127,16 +128,34 @@ class Generator:
         self.master = master
         self.brand = brand
         self.written: list[str] = []
+        # `--dry-run`：只记录将写哪些文件，不落盘。
+        #
+        # ⚠️ 每个写盘方法都必须查它（`save` / `save_ico` 各一处）。此前 main()
+        # 是用「把 self.save 换成 lambda」实现的，新增一个不走 `save` 的写盘
+        # 方法（ico 的 format/bitmap_format 与 PNG 不同）就会在 --dry-run 下
+        # 真的写文件——静默破坏「试运行不动工作区」的承诺。
+        self.dry_run = False
 
     # -- 基础 ---------------------------------------------------------------
     def resize(self, size: int) -> Image.Image:
         return self.master.resize((size, size), Image.LANCZOS)
 
     def save(self, im: Image.Image, rel: str) -> None:
+        self.written.append(rel)
+        if self.dry_run:
+            return
         full = os.path.join(ROOT, rel)
         os.makedirs(os.path.dirname(full), exist_ok=True)
         im.save(full, format='PNG', optimize=True)
+
+    def save_ico(self, im: Image.Image, rel: str, sizes: list[tuple[int, int]],
+                 bitmap_format: str) -> None:
         self.written.append(rel)
+        if self.dry_run:
+            return
+        full = os.path.join(ROOT, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        im.save(full, format='ICO', bitmap_format=bitmap_format, sizes=sizes)
 
     # -- 各平台 -------------------------------------------------------------
     def macos(self) -> None:
@@ -275,12 +294,34 @@ class Generator:
         通知区 16，DPI 缩放向下取），256 对托盘是浪费。BMP 帧无压缩，
         256×256 单帧就要 256 KB，而 .ico 会整体打进二进制。
         """
-        rel = 'apps/spb_desktop/assets/tray_icon.ico'
-        full = os.path.join(ROOT, rel)
-        self.resize(32).save(
-            full, format='ICO', bitmap_format='bmp',
-            sizes=[(16, 16), (32, 32)])
-        self.written.append(rel)
+        self.save_ico(
+            self.resize(32), 'apps/spb_desktop/assets/tray_icon.ico',
+            sizes=[(16, 16), (32, 32)], bitmap_format='bmp')
+
+    def windows_installer(self) -> None:
+        """Inno Setup 安装包图标（`SetupIconFile`）：**BMP 帧**的 .ico。
+
+        ## 为什么不复用 `app_icon.ico`
+
+        那个 .ico 由本脚本的 [windows] 生成，帧是 **PNG**（Pillow ≥ 9.1 的
+        默认）。它能当 exe 资源用——`LoadIcon` 走 Windows 的图标解码，PNG
+        帧从 Vista 起就支持。而 Inno Setup 的 `SetupIconFile` 由 **ISCC 自己**
+        读，PNG 帧是否被接受取决于编译器版本，本仓库**验证不了**（无 Windows，
+        见 AGENTS.md §9），而失败的形态是「CI 红在打包步骤」而不是「图标不好
+        看」——用一份 BMP 帧的 .ico 换掉这个未验证依赖，代价只是几十 KB。
+
+        ## 为什么没有 256×256
+
+        256 在 ICO 里约定用 **PNG** 帧（BMP 帧 = 256 KB，且宽/高字节写 0 表示
+        256，属边角形态）。本文件要提交进 git、也会被 ISCC 整体嵌入 setup.exe，
+        故止步 128（Windows 会把 128 放大到 256，安装包图标在 200% DPI 下略软，
+        但那是「好看一点」与「多背 256 KB + 一个边角格式」之间的取舍）。
+        """
+        self.save_ico(
+            self.resize(256),
+            'apps/spb_desktop/windows/installer/setup_icon.ico',
+            sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128)],
+            bitmap_format='bmp')
 
     def desktop_runtime(self) -> None:
         """托盘 64 / 窗口 256（Linux/macOS 运行时用）。"""
@@ -297,6 +338,7 @@ class Generator:
         self.android()
         self.windows()
         self.windows_runtime()
+        self.windows_installer()
         self.desktop_runtime()
         self.in_app()
 
@@ -322,9 +364,7 @@ def main() -> int:
 
     brand = brand_from_svg(args.svg) if args.svg else DEFAULT_BRAND
     gen = Generator(master, brand)
-    if args.dry_run:
-        # 试运行：把 save 换成只记录
-        gen.save = lambda im, rel: gen.written.append(rel)  # type: ignore[method-assign]
+    gen.dry_run = args.dry_run
     gen.run()
 
     action = '将写入' if args.dry_run else '已写入'

@@ -509,3 +509,25 @@ jobs:
           name: windows-release
           path: apps/spb_desktop/build/windows/x64/runner/Release/
           retention-days: 7
+
+      # Inno Setup 安装包（Windows 用户的常规安装形态）。zip 仍保留给「解压即用」
+      # 的用户，两者装出来的内容完全一致。
+      #
+      # 为什么放在**同一个 job** 里而不是单开一个：`tools/check_build_defines.sh`
+      # 按 job 切块断言「有 flutter build windows --release 的 job 也必须传
+      # --dart-define=SPB_API_BASE_URL」。拆出去就得把整套 define 再抄一遍，
+      # 而漏抄的表现是「安装包连 127.0.0.1」——AGENTS.md §6.33 那个真实缺陷。
+      - name: Build Inno Setup installer
+        shell: pwsh
+        # 版本号经 env 传入：`${{ }}` 插值发生在 shell 解析之前，值里有引号/
+        # 空格会把命令拼坏（tag 名理论上可以含这些）。
+        env:
+          SPB_VERSION: ${{ github.ref_name }}
+        run: |
+          ./tools/build_windows_installer.ps1 -Version $env:SPB_VERSION
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-installer
+          path: build/windows-installer/*.exe
+          retention-days: 7

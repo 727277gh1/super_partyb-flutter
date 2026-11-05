@@ -163,7 +163,8 @@ super_partyb-flutter/
     # 工具
     ├── coverage.sh                 # 逐包覆盖率采集 + 汇总表（剔除生成代码）
     ├── bundle_linux_deps.sh        # Linux 分发包依赖打包（非系统库 + RUNPATH）
-    ├── gen_brand_assets.py         # 从品牌 SVG 生成各端图标（见 §6.32）
+    ├── gen_brand_assets.py         # 从品牌 SVG 生成各端图标（含安装包图标，见 §6.32）
+    ├── build_windows_installer.ps1 # 把 Windows Release 产物打成 Inno Setup 安装包（见 §6.61）
     ├── reverse_verify_issue50.sh   # 双栈降级/升级的变异验证（就地改代码再还原，见 §5.1.1）
     ├── sync-to-github.sh           # 导出 HEAD 为单提交干净仓库并推 GitHub（值无关，见 §6.29）
     └── scrub-history.sh            # 开源前重写 git 历史里的真实标识（值无关，见脚本头）
@@ -3380,7 +3381,7 @@ access token`（`PUT` 对不存在的变量报 404，容易误判成路径错）
 
 ---
 
-### 6.32 品牌图标：真源在 super_partyb，41 个文件由脚本生成
+### 6.32 品牌图标：真源在 super_partyb，43 个文件由脚本生成
 
 客户端此前用的是 **Flutter 模板的默认图标**（macOS/iOS/Android 都是那个蓝白
 「F」字）。它与产品无关——装到桌面上，用户看到的不是「Super PartyB」。
@@ -3391,7 +3392,7 @@ access token`（`PUT` 对不存在的变量报 404，容易误判成路径错）
 
 #### 为什么是脚本而不是手工导出
 
-不是「慢」，而是**漂移**：改一次品牌色要重新导出 36 个文件，漏掉的那几个
+不是「慢」，而是**漂移**：改一次品牌色要重新导出 43 个文件，漏掉的那几个
 只在真机上看图标时才会发现——而本仓库恰好验证不了 macOS / iOS / Windows
 （§9）。写成脚本后，改品牌 = 重跑一次。
 
@@ -3420,6 +3421,7 @@ python3 tools/gen_brand_assets.py --master /tmp/logo-master.png \
 | Android adaptive | 背景色 + **透明底**前景区 | API 26+ 由启动器按厂商形状裁切（见下） |
 | macOS | **圆角方形 + 留白** | Big Sur 栅格：1024 画布内 824×824 圆角矩形（圆角 185），四周各留 100 |
 | Windows `.ico` | 满幅多尺寸内嵌 | 资源管理器按尺寸挑帧 |
+| 安装包 `.ico` | 满幅多尺寸、**BMP 帧** | ISCC 读 `SetupIconFile` 时对 PNG 压缩帧的支持未经验证（本机无 Windows/ISCC，测不了），故只写 BMP 帧；同理不含 256×256——BMP 帧不压缩，单张就 256 KB |
 | 桌面运行时 | 托盘 64 / 窗口 256 | GTK 自己缩放；窗口图标会被 Alt+Tab 放大，用 64 会糊 |
 
 #### Android 自适应图标的两个硬约束（实测踩过）
@@ -6764,6 +6766,95 @@ spb_desktop 212 / spb_mobile 120 全绿（spb_domain +3 = `contentHashOfAsync`
 spb_features +4 = builder 委托结构 / 折叠行不进行集合 / 同对话刷新保留 /
 切对话重置）。
 
+### 6.61 Windows 分发：zip 之外再发 Inno Setup 安装包（2026-11）
+
+此前 Windows 只有 `spb_desktop-windows-x64.zip`（解压即用）。问题不是「不能用」，
+而是它把**安装的每一步都推给用户**：自己挑目录、自己建快捷方式、升级时先手动退出
+（否则文件被占用）、卸载时自己去删文件夹（还会漏掉 `%LOCALAPPDATA%` 里的数据）。
+
+`docs/windows-release.md` §4 早就把「未做安装包」列为已知限制，本节兑现它。
+
+#### 三个候选里为什么是 Inno Setup
+
+| 方案 | 结论 |
+|---|---|
+| **Inno Setup**（选用） | 单个 `.exe`，产物与 zip **内容完全相同**（同一个 exe、同一套用户目录），没有额外运行时；Windows runner 预装 |
+| MSIX | ❌ **已知崩溃**：`flutter_windows.dll` 在沙箱内 `INVALID_POINTER_READ`（同样产物直接跑不崩，§8 坑 3），且薄壳应用要额外声明 `internetClientServer` / `runFullTrust`，否则网络调用 hang |
+| Tauri 时代的 updater | ❌ 与本仓库无关（那是另一个栈的能力），且需要签名/托管 |
+
+#### 两个产物，一份内容
+
+| 产物 | 用途 |
+|---|---|
+| `spb_desktop-windows-x64-setup.exe` | **推荐**：开始菜单快捷方式、卸载项、升级时自动关掉正在运行的客户端 |
+| `spb_desktop-windows-x64.zip` | 便携版：不动系统任何位置（**保留**，不是过渡态——U 盘/免安装场景没有替代品） |
+
+#### 实现的三块
+
+| 文件 | 职责 |
+|---|---|
+| `apps/spb_desktop/windows/installer/spb_desktop.iss` | 安装包脚本（**UTF-8 带 BOM**，见下） |
+| `tools/build_windows_installer.ps1` | 找 ISCC / 算版本号 / 传 `/D` / 断言产物存在 |
+| `apps/spb_desktop/windows/installer/setup_icon.ico` | 安装包图标（由 `gen_brand_assets.py` 生成，见 §6.32） |
+
+两个 workflow 各只有一行调用（`ci.yml` 的 `build-windows` 与 `release.yml` 的
+`windows`），且都放在**已有 job 内部**——`tools/check_build_defines.sh` 按 job 切块
+断言「有 `flutter build windows --release` 的 job 也必须传
+`--dart-define=SPB_API_BASE_URL`」，拆成新 job 就要把整套 define 再抄一遍，而漏抄
+的表现正是 §6.33 那个「连 127.0.0.1」的真实缺陷。
+
+#### 五个易写错的点
+
+1. **`.iss` 必须 UTF-8 带 BOM**。没有 BOM 时 ISCC 按 ANSI/系统码页读，中文注释
+   变乱码。故文件用 `encoding='utf-8-sig'` 写；而 `AppName` 等**字符串保持 ASCII**
+   （`{cm:...}` 的 `[Languages]` 也不引第三方 `ChineseSimplified.isl`——那是非官方
+   翻译，runner 上不存在，引了就是构建失败）。
+2. **`ArchitecturesAllowed` 按编译器版本二选一**。`x64compatible` 是 Inno 6.3 才
+   引入的标识符，`windows-2022` 上装的若是 6.2 就直接编译失败，而「红在打包步骤」
+   是最难自查的形态。故用 ISPP 守卫：`#if VER >= EncodeVer(6,3,0)` → `x64compatible`，
+   `#else` → `x64`。
+3. **版本号必须归一成纯数字 `x.y.z`**。Inno 靠 `AppVersion` 判断「谁更新」，非数字
+   时升级安装的版本比较失效。故 `v1.2.3-rc1` → `1.2.3`（正则 `^v?(\d+(\.\d+){0,2})`），
+   来源链 `-Version` → `$env:GITHUB_REF_NAME` → pubspec `version:` → `0.0.0`。
+4. **`AppId` 永不改变**。Windows 靠它识别「同一个产品的升级/卸载项」，改了就会
+   「又装一份」，卸载列表出现两个条目。
+5. **`PrivilegesRequired=lowest`**：不弹 UAC，`{autopf}` 落到
+   `%LOCALAPPDATA%\Programs`（每用户安装），与本客户端「不碰系统目录」的定位一致；
+   要装进 Program Files 的用户可在向导里选（`PrivilegesRequiredOverridesAllowed=dialog`）。
+
+#### 安装包图标为什么另做一份
+
+`windows/runner/resources/app_icon.ico` 是 **PNG 帧**的 256px 图标（`Runner.rc` 的
+exe 资源用它，资源管理器正常）。而 ISCC 读 `SetupIconFile` 时对 PNG 压缩帧的支持
+**未经验证**——本机没有 Windows/ISCC，测不了；且这与 §6.55 的托盘图标是同一个坑
+（`LoadImage` 只认 BMP 系资源）。故 `gen_brand_assets.py` 新增 `windows_installer()`，
+出**纯 BMP 帧**的 16/32/48/64/128（82 KB）。**不含 256×256**：BMP 帧不压缩，单张
+就 256 KB，而 128 放大到资源管理器的大图标尺寸肉眼无差。
+
+#### 验证（**没有 Windows 手测**，如实记录）
+
+本机无 Windows/ISCC，故 `.iss` 的编译与装出来的行为**都没跑过**。已做的自动化验证：
+
+- `tools/build_windows_installer.ps1` 用 pwsh 7.4 在 Linux 上跑通**全部五条路径**
+  （成功 / 缺运行库 / 找不到 ISCC / ISCC 非 0 退出 / ISCC 成功但无产物），
+  并用假 ISCC 断言 `/D` 参数是**单个 argv**（路径含空格也不被拆）；
+- 版本推导四种来源逐条实测（`v1.2.3-rc1` → `1.2.3`、`GITHUB_REF_NAME=v0.9.0` →
+  `0.9.0`、pubspec → `0.1.0`、兜底 `0.0.0`）；
+- `setup_icon.ico` 用 `file` 确认 `5 icons, 16x16, 24 bits/pixel`（BMP 帧）；
+- YAML 语法 + `check_workflow_steps` / `check_build_defines` / `check_agents_refs`
+  全绿。
+
+首次真机验证清单：装→开始菜单快捷方式→卸载→重装（确认没有两个条目）→升级安装
+（确认自动关掉正在运行的客户端）。
+
+#### 有意不做
+
+- **不做自动更新器**：需要签名与托管，且与「无代码签名」现状冲突（§11 已知限制）。
+- **不做 MSIX**：见上，有已知崩溃。
+- **不给安装包单独写一套 UI/脚本逻辑**：`.iss` 只做「拷文件 + 快捷方式 + 卸载项」，
+  安装后的行为与 zip 版**逐字节相同**——两套行为就是两套 bug。
+- **不在 `.iss` 里引中文语言包**：非官方翻译文件在 runner 上不存在，引了即构建失败。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -6887,7 +6978,12 @@ windows:
 
 1. **VC++ 运行库不在产物里**：`Release/` 只有 `flutter_windows.dll` / `my_app.exe` / `data/`，**没有** `msvcp140.dll` / `vcruntime140.dll` / `vcruntime140_1.dll`。目标机未装 [VC++ Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist) 会**直接闪退且报错不友好**。必须手动拷贝（上面的 pwsh 步骤）。
 2. **`windows-latest` 正迁往 VS 2026**：Flutter 3.47.5 已适配（`cmakeGenerator` 有 `'Visual Studio 18 2026'` 分支）。要可复现就锁 `runs-on: windows-2022`。
-3. **MSIX 沙箱内崩溃**：`flutter_windows.dll` 在 MSIX 沙箱内崩溃（`INVALID_POINTER_READ` @ `FlutterWindowsViewController::engine`），**同样产物直接跑不崩**。且薄壳类应用需声明 `internetClientServer` / `runFullTrust` 能力，否则网络调用 hang。**建议先用 zip / Inno Setup 分发，暂不碰 MSIX。**
+3. **MSIX 沙箱内崩溃**：`flutter_windows.dll` 在 MSIX 沙箱内崩溃（`INVALID_POINTER_READ` @ `FlutterWindowsViewController::engine`），**同样产物直接跑不崩**。且薄壳类应用需声明 `internetClientServer` / `runFullTrust` 能力，否则网络调用 hang。**故本项目发 zip + Inno Setup 安装包，不碰 MSIX（见 §6.61）。**
+
+> 上面的最小示例只出 zip。实际流水线（`ci.yml` 的 `build-windows` 与
+> `release.yml` 的 `windows`）在拷完运行库后再调
+> `tools/build_windows_installer.ps1` 出 Inno Setup 安装包——两个产物内容
+> 完全相同，只差分发形态。
 
 ### macOS / iOS：需 macOS 主机
 
@@ -7081,6 +7177,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 
 | 问题 | 状态 | 参考 |
 |---|---|---|
+| ~~Windows 只发 zip，没有安装包（用户得自己建快捷方式、升级前手动退出、卸载靠删文件夹）~~ | ✅ 已加（§6.61）：发 **Inno Setup 安装包** `spb_desktop-windows-x64-setup.exe`，与 zip **并列**发布（zip 保留给便携场景，两者内容逐字节相同）。`.iss` 只做「拷文件 + 快捷方式 + 卸载项」，安装后行为与 zip 版完全一致——两套行为就是两套 bug。四个易写错的点：① `.iss` **必须 UTF-8 带 BOM**（否则 ISCC 按 ANSI 读，中文注释乱码），且 `AppName` 等字符串保持 ASCII、**不引**第三方 `ChineseSimplified.isl`（runner 上没有，引了即失败）；② `x64compatible` 是 Inno 6.3 才有的标识符，`windows-2022` 若装 6.2 会直接编译失败（最难自查的红），故用 ISPP `#if VER >= EncodeVer(6,3,0)` 二选一；③ 版本号须归一成纯数字 `x.y.z`（Inno 靠它比新旧），`v1.2.3-rc1` → `1.2.3`，来源链 `-Version` → `$env:GITHUB_REF_NAME` → pubspec → `0.0.0`；④ `AppId` 永不改（Windows 靠它识别同一产品的升级/卸载项，改了就是「又装一份」）。`SetupIconFile` 另做一份**纯 BMP 帧**的 16/32/48/64/128（82 KB，不含 256——BMP 帧不压缩、单张 256 KB），因为 ISCC 对 PNG 帧的支持未验证，且这与 §6.55 托盘图标是同一个坑。**本机无 Windows/ISCC，编译与装机行为都没跑过**：已用 pwsh 7.4 在 Linux 上跑通脚本五条路径（成功/缺运行库/无 ISCC/ISCC 非 0/成功但无产物）、断言 `/D` 是单个 argv、四种版本来源逐条实测；真机验证清单见 §6.61 | §6.61 |
 | ~~每条消息下面都跟着一行「归属： fixed_reuse」，把正文挤出视野~~ | ✅ 已重构（§6.58）：`routing_selected` 与 `user_message` 同 turn 时**合并进气泡**（`routingReason`/`routingSwitched` 两字段，与 `agent_id` 继承同一模式，`item.id` 不变避免重挂）；由 `routingAttributionNotice` 判定：8 个复用类「无聊」原因 + 未切换 → **零空间**；新建（`create_new`/`fixed_new` 等）→ 气泡内「已新建对话」徽标；切换（`group_switched`，与 reason 独立）→「已切换对话」；未知原因 fail-open 原样透传。孤儿事件（同 turn 气泡不在缓冲里）回退成独立行，**归约层是唯一守门员**——页面层不得再判 `isRoutineRoutingReason`（看不到 `switched`，会误杀「reason 无聊但 switched=true」的行，变异测试抓到）。38 条新用例；5 项反向验证逐条实测（其中「页面二次过滤」变异 0 条用例失败但行为错——暴露的是实现缺陷而非用例缺，已改实现）。目标对话标题不显示：`MatchedTitle` 只在 HTTP 响应，不在事件 payload，需服务端先加字段 | §6.58 |
 | ~~按 Alt+Space 后「小窗卡住，然后应用退出了」，而**没有任何本地日志**可查~~ | ✅ 已修（§6.57，三件一起）：**A** `enterOverlayMode` 串行改 7 项窗口属性，中途抛异常时**只丢快照不回滚**，而 `exitOverlayMode` 的早退判据是「快照为空」⇒ 之后所有退出都是空操作，窗口停在「720×360 / 置顶 / 不进任务栏」——即「卡住的小窗」，代码级确证（但「进程真的退出」**未确证**：全仓无 `exit(`，更符合代码的解释是 `skipTaskbar` 让窗口从任务栏消失后再无入口）。修法：逐步记账 `_overlayApplied` + `overlayRollbackOrder`（**逆序、剔除 `visibility`**）回滚，只回滚真的改过的（全量重设会篡改未改属性），回滚尽力而为不抛，之后无条件 `show()`+`focus()`，并**保留**「失败仍导航到 `/overlay`」的既有语义。**B** 补本地文件日志（此前只有 stdout，桌面启动器拉起时等于没产生日志；环形缓冲纯内存，进程死了证据就没了，而「导出诊断日志」要求应用还活着）：`FileLogSink`（同步 append 不持 `IOSink`，否则崩了丢最后一段；5MB×2 轮转；写盘前 `redactSecrets`；失败即停用且**内部绝不调 `SpbLog`** 免递归）+ `MultiLogSink` 扇出。再加一对**会话标记**，`previousSessionExitedCleanly` 从末尾**往前**找先遇到哪个边界（true/false/null 三态）——⚠️ 原设计「只看最后一条是不是退出标记」会**级联误报**：崩溃后写的那条告警与 `quit()` 之后 `dispose()` 的日志都会让它永远报「上次崩溃」。顺序有语义：**先读上次结论、再写启动标记**。日志与 `sync.db` 同根（`~/.local/share/super_partyb/logs/app.log`；`SPB_LOG_DIR` 可覆盖）。另把快捷键触发/门控类日志按 §6.43 的教训从 debug 升 **info**（debug 在生产被过滤，等于没写）。**C** 同步目录未选择时给默认值（`~/Documents/Super PartyB` → `<data>/super_partyb/deliverables` → null；`SPB_SYNC_ROOT` 可覆盖），两个读点共用 `effectiveSyncLocalRoot`，并顺手建目录（否则「打开同步目录」点了没反应）。50 条新用例（31 + 6 + 9 + 4）；8 项反向验证逐条实测（含「只看最后一条」这个自己写错的判据）+ 2 项诚实记录「未写成用例」 | §6.57 |
 | ~~Windows 托盘无图标 + 右键菜单卡死（「一个卡住的列表」）~~ | ✅ 已修（§6.55）：**两个独立缺陷**。① `tray_manager` Windows 端用 `LoadImage(LR_LOADFROMFILE)` 读图标，**只认 BMP 系资源**，PNG 读出 `NULL` HICON → 无图标；且插件 `setIcon` 恒返回 true → `_trayAvailable` 误置位 → 「关窗即隐藏」生效后用户无法唤回应用。修法：`gen_brand_assets.py` 新增 BMP 帧的 `assets/tray_icon.ico`（**显式 `bitmap_format='bmp'`**——PIL 默认 ICO 输出就是 PNG 帧，同样不被认），`_initTray` 按平台分流。② Win32 `TrackPopupMenu` 要求调用窗口处于前台，否则菜单弹出后收不回去；`tray_manager` 的 `bringAppToFront`（只 Windows）默认 false。修法：`spb_platform` 新增纯函数 `trayMenuNeedsBringToFront`（本机无 Windows，这条判据是 Windows 分支唯一自动化保障）+ `TrayActionTarget.popUpTrayContextMenu()`。顺带修掉同根因第三处：`windowManager.setIcon` 在 Windows 上同样 LoadImage 失败，`WM_SETICON(NULL)` 会**移除** exe 资源图标 → Windows 分支直接跳过。反向验证：判据改恒 false → windows 用例失败；改全平台 true → linux/macos 失败。图标修复的最终确认需 Windows 真机，帧格式已逐字节验证 | §6.55 |
@@ -7105,7 +7202,7 @@ Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE
 | ~~剪贴板文件粘贴无原生实现~~ | ✅ 三平台原生 channel 均已实现（Linux/Windows/macOS） | §6.8 |
 | ~~CI 产物用 127.0.0.1，用户报「远程计算机拒绝网络连接」~~ | ✅ 已修（§6.33）：`ci.yml` 的三个 `build-*` job 此前**一个 `--dart-define` 都没传**（整文件零命中），产物用 `SpbEnv` 默认值 `http://127.0.0.1:8000`。现在与 `release.yml` 共用同一套 `config` job（Variables → 内置默认值），五个 define 全传。新增 `tools/check_build_defines.sh`（静态按 job 切块断言 + 动态 grep AOT 快照里是否残留默认地址——传了 define 后默认值会被 tree-shake，实测可靠）+ 16 条自测；CI 在 quality 与 build-* 两处各跑一次 | §6.33 |
 | ~~Windows 上「门」显示成「方框 + 正中一根竖」~~ | ✅ 已修（§6.38）：根因**不是字符写错**，而是 `SpbTheme` 从未设 `fontFamily`。Flutter **没有**「用系统默认字体」——`ThemeData(fontFamily: null)` 时按平台取 `Typography.material2021` 里**写死字体名**的 TextTheme（Windows = `blackRedmond` = `Segoe UI`，纯拉丁、**零 fallback 列表**，而 Linux 的 `blackHelsinki` 有 6 个）。中文字形只能靠引擎的 last-resort 回退，取决于目标机器装了什么（日文 Yu Gothic / 繁体 JhengHei / 畸形字体）。修法：`SpbFonts.sansFor` **只给 Windows** 返回 `Microsoft YaHei UI` + `['Microsoft YaHei','Segoe UI','sans-serif']`，其余平台**有意留 null**（它们的 CoreText/fontconfig/Android 按 locale 匹配已正确，钉死 `PingFang SC` 会让日语用户被迫用简体字形）。⚠️ 踩过的坑：**给全部平台配 fallback 链会让 4 张 golden 全红**——不是渲染退化，而是 `flutter test` 里平台恒为 android 且**没有 CJK 字体**，中文从「Roboto 缺字的细线空心 tofu」变成「链耗尽落到 Ahem 的粗实心方块」，两份都是 tofu 只是画法不同。故非 Windows 配 fallback 是零收益且制造基线噪音，`fonts_test.dart` 有专门一条钉住。顺带统一 4 处 `fontFamily: 'monospace'` 的 CJK 兜底（`SpbFonts.monoFallback`，其中 3 处原本**没有** fallback，而工具入参经常含中文）。⚠️ **无法在 `flutter test` 里验证字形**（永远是 tofu），只能做结构性断言；真实字形需 Windows 手测（本机无，见 §8/§9） | §6.38 |
-| ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：41 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
+| ~~各端用的是 Flutter 模板默认图标（蓝白「F」）~~ | ✅ 已换成 super_partyb 的品牌 logo（成蹊）：43 个文件由 `tools/gen_brand_assets.py` 从真源 SVG 生成，含 macOS 圆角栅格 / iOS 无 alpha / Android 自适应（背景+透明前景区）/ Windows ico / 桌面托盘+窗口 / 安装包图标 / 应用内 `SpbLogo`；登录页首屏从 `Icons.shield_outlined` 换成品牌标志；Android/iOS 启动画面也换成「品牌蓝 + 居中标志」 | §6.32 |
 | ~~Windows 客户端无法打开浏览器（弹「无法打开浏览器，请手动访问…」，而浏览器其实已经打开）~~ | ✅ 已修（§6.35）：两个独立的 Windows 缺陷。① **URL 与路径必须用不同命令**——原先一律 `explorer`，而 `explorer <带 query 的 URL>` 打开的是**文件浏览器**（microsoft/WSL#3832），而 OIDC 授权 URL 必然带 8 个 query 参数，故每次 SSO 登录都会「成功」地打开一个空窗口、客户端继续等 loopback 回调。现 URL → `rundll32 url.dll,FileProtocolHandler`，路径 → `explorer`；`looksLikeUrl` 只认 `scheme://`（**不能**用 `Uri.parse().scheme`——它把 `C:\Users\me` 解成 `scheme=c`，会让每个 Windows 路径都走 URL 分支）。② **`explorer` 成功也返回 1**（microsoft/WSL#6565），原先按「非 0 即失败」判定 → 每次成功打开都被判失败。现 Windows 成功集合为 `{0,1}`，其余平台仍 `{0}`；`rundll32` 分支的退出码恒为 0，故用 `exitCodeIsMeaningful = false` **显式跳过**判定（代价：URL 打不开时靠上层 5 分钟超时兜底，不再有即时错误）。共 8 条新用例 + 5 项反向验证逐条实测。⚠️ 修复前测试有**两个假绿**：假 runner 一律返回 `exitCode = 0`；`windows 用 explorer` 那条用例传的是**路径**，于是「URL 也走 explorer」这条错误行为恰好被它「验证」为正确 | §6.35 |
 | ~~登录成功后**立刻**提示「会话已失效」并被踢回登录页（Windows 用户报障）~~ | ✅ 已修（§6.37）：客户端把 IdP 的 `access_token` 当 Bearer 发给网关，而那是 **fosite 不透明串**（`ory_at_…`，无点号）。网关的 `jwt_authenticate.go`（JWKS+RS256）与 `oidc_auth.go`（go-oidc compact JWS）**都要求三段式**，分别报「token contains an invalid number of segments」/「compact JWS format must have three parts」→ 登录刚完成就 401 → `onSessionExpired` 踢人。修法：`OidcTokens.bearerToken`（`idToken ?? accessToken`）+ `StoredTokens.fromOidcTokens` 单点转换，四端（两端登录 + 两端刷新）全部改用它。**与 `tbcc6.atjog.com` 无关**（登录走编译期 issuer，端点升级只改 API/UFS host）。⚠️ 修复前测试全绿：既有用例只断言 `OidcTokens` 原始字段或动作调用次数，而移动端 `onCode` **零覆盖**（内联在 provider 闭包里，只能从 `main.dart` 触达）——故另加了两个注入点（`loopbackSignInProvider` / `oidcCallbackHandlerProvider`）让落盘逻辑可测 | §6.37 |
 | ~~登录成功后客户端仍停在登录页（重启就好）~~ | ✅ 已修（§6.36）：`AuthStateNotifier.signIn()` 收尾**无条件**写 `state = unknown`，那是给旧实现（`openGatewaySignIn` 只发起、等浏览器 Cookie 回调）留的分支。而 `2d453cf` 换成 RFC 8252 loopback 后 `signInAction` 是**同步等到 token** 的——它在内部落盘并调 `signedIn()`，返回时状态已是 `authenticated`，随后被这条无条件赋值盖回 `unknown`。守卫对 `unknown` 明确放行（§6.34 的启动期语义），于是**永远停在 `/login`**，而凭证其实已在安全存储里（重启走 `restore()` 就正常，这也是「为什么重启就好」）。现判据改为「**别把已登录改回未判定**」（`if (!state.isAuthenticated)`），两端一并修（移动端回调接收器可能在 `signIn()` 返回前就完成）。两端各补 1 条从按钮出发的端到端用例；⚠️ 修复前测试有**两个假绿**——一条只断言「动作被调用 1 次」不看状态，另一条绕过 `signIn()` 直接调 `signedIn()` | §6.36 |

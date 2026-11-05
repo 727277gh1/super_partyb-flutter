@@ -71,9 +71,10 @@
 # Windows 平台脚本保持 CRLF
 # ---------------------------------------------------------------------------
 #
-# 本仓库当前**没有** `.bat` / `.ps1`（`git ls-files` 确认过），故下面是
-# 预防性规则：将来加 Windows 构建脚本时，`.bat` 用 LF 会导致 `cmd.exe`
-# 解析异常（尤其 `goto` 标签与多行 `if`），`.ps1` 则对 LF 宽容但惯例是 CRLF。
+# 本仓库的 Windows 构建脚本：`tools/build_windows_installer.ps1`（唯一一个，
+# 由 `ci.yml` / `release.yml` 的 windows job 调用）。`.bat` / `.cmd` 仍无——
+# 将来加时同样保持 CRLF：`.bat` 用 LF 会导致 `cmd.exe` 解析异常（尤其 `goto`
+# 标签与多行 `if`），`.ps1` 则对 LF 宽容但惯例是 CRLF。
 #
 # ⚠️ 注意 `apps/spb_mobile/android/gradlew.bat` 是 **untracked**（Flutter
 # 模板生成物，被 `.gitignore` 排除），故不在此列。
