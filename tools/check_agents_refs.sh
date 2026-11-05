@@ -68,6 +68,24 @@ import sys
 
 DOC = 'AGENTS.md'
 
+# 被拆走的正文同样受本守卫约束。
+#
+# 2026-11 把 §5–§11 拆进 docs/（AGENTS.md 从 522 KB 降到 ~25 KB，见
+# check_agents_size.sh 的头注）。那些文件与 AGENTS.md 原本是**同一份文本**，
+# 拆开后若只扫 AGENTS.md，等于给被拆走的部分**悄悄去掉守卫**——而这部分正是
+# 复盘与判据最密集的地方（`_privateMember` 引用最多）。
+#
+# 反过来，`tools/` 脚本清单仍只查 AGENTS.md：§3 的树是「读者找脚本的唯一入口」，
+# 那个入口不能分散到 10 个文件里。
+SPLIT_DOCS = [
+    'docs/api-contract.md',
+    'docs/architecture.md',
+    'docs/development.md',
+    'docs/roadmap.md',
+    'docs/known-issues.md',
+]
+SPLIT_DOCS += sorted(glob.glob('docs/design-decisions/*.md'))
+
 # 显式豁免：确知「不该在本仓库 lib/test 里找到」的引用。
 # key 是标识符，value 是理由。新增豁免必须写理由。
 EXEMPT = {
@@ -93,6 +111,14 @@ EXEMPT = {
 
 with open(DOC, encoding='utf-8') as fh:
     doc = fh.read()
+
+# 待检查的文档集合：(路径, 文本)。第一个永远是 AGENTS.md。
+scan_docs = [(DOC, doc)]
+for split_path in SPLIT_DOCS:
+    if not os.path.exists(split_path):
+        continue
+    with open(split_path, encoding='utf-8') as fh:
+        scan_docs.append((split_path, fh.read()))
 
 # 源码 + 测试 + 工具的文件名集合（给 `.dart` 规则用）。
 files = []
@@ -124,18 +150,19 @@ checks = [
 
 failed = False
 total = 0
-for pat, label, mode in checks:
-    cands = {m.group(1) for m in pat.finditer(doc)}
-    for name in sorted(cands):
-        total += 1
-        if name in EXEMPT:
-            continue
-        hit = (name in basenames) if mode == 'file' else (name in blob)
-        if not hit:
-            print(f'❌ AGENTS.md 引用了不存在的{label}：`{name}`')
-            print(f'   要么改文档（若代码已改名/删除），要么加进 '
-                  f'check_agents_refs.sh 的 EXEMPT 并注明来源。')
-            failed = True
+for doc_path, doc_text in scan_docs:
+    for pat, label, mode in checks:
+        cands = {m.group(1) for m in pat.finditer(doc_text)}
+        for name in sorted(cands):
+            total += 1
+            if name in EXEMPT:
+                continue
+            hit = (name in basenames) if mode == 'file' else (name in blob)
+            if not hit:
+                print(f'❌ {doc_path} 引用了不存在的{label}：`{name}`')
+                print(f'   要么改文档（若代码已改名/删除），要么加进 '
+                      f'check_agents_refs.sh 的 EXEMPT 并注明来源。')
+                failed = True
 
 if failed:
     sys.exit(1)
@@ -164,6 +191,6 @@ if missing:
     print('   请在 §3 的 tools/ 树里补上（它是读者找脚本的唯一入口）。')
     sys.exit(1)
 
-print(f'✅ AGENTS.md 标识符引用检查通过（{total} 个高置信度引用均存在；'
-      f'{len(glob.glob("tools/*.sh"))} 个脚本中非 selftest 者均已列出）')
+print(f'✅ 文档标识符引用检查通过（{len(scan_docs)} 个文件、{total} 个高置信度引用'
+      f'均存在；{len(glob.glob("tools/*.sh"))} 个脚本中非 selftest 者均已列出）')
 PY

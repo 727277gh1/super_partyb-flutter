@@ -154,9 +154,38 @@ if ! out=$(run_guard); then
 fi
 
 # ---------------------------------------------------------------------------
+# 5) 被拆走的正文（docs/design-decisions/）也必须被扫到
+# ---------------------------------------------------------------------------
+#
+# 2026-11 把 §5–§11 拆进 docs/。若守卫只看 AGENTS.md，等于给被拆走的部分
+# **悄悄去掉守卫**——那部分恰恰是 `_privateMember` 引用最密集的地方。
+mkdir -p "$repo/docs/design-decisions"
+cat > "$repo/docs/design-decisions/chat.md" <<'MD'
+# 对话与流式
+
+引用一个**不存在**的符号：`_noSuchMemberInSplitDoc`。
+MD
+
+out=$(run_guard) && {
+  note_fail "被拆走的正文（docs/design-decisions/*.md）没有被扫到（守卫只覆盖 AGENTS.md）"
+} || true
+case "$out" in
+  *"_noSuchMemberInSplitDoc"*) ;;
+  *) note_fail "拆分文档里的坏引用未被点名：$out" ;;
+esac
+
+# 修好之后必须恢复绿（防止「扫到了但永远红」）。
+printf '# 对话与流式\n\n引用一个真实存在的符号：`_privateThing`。\n' \
+  > "$repo/docs/design-decisions/chat.md"
+
+if ! out=$(run_guard); then
+  note_fail "拆分文档里的引用都正确时被误报：$out"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 if [ ${#failures[@]} -eq 0 ]; then
-  echo "✅ check_agents_refs 自测通过（4 条断言）"
+  echo "✅ check_agents_refs 自测通过（6 条断言）"
   exit 0
 fi
 

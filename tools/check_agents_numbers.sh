@@ -70,13 +70,35 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 python3 <<'PY'
+import glob
 import os
 import pathlib
 import re
 import subprocess
 import sys
 
-DOC = pathlib.Path("AGENTS.md")
+# 2026-11：§5–§11 拆进 docs/（AGENTS.md 从 522 KB 降到 ~25 KB，见
+# check_agents_size.sh 的头注）。带 number-check 标记的 §6.12 也随之搬到了
+# docs/design-decisions/runtime-and-ops.md——若只扫 AGENTS.md，标记会「消失」，
+# 守卫按设计报「静默空转」并硬失败。故扫描范围必须跟着内容走。
+#
+# ⚠️ 拆开的代价：一个数字的**标记**与**复现命令**可能落在不同文件里（标记跟着
+# 决策走、命令可能还在别处）。故「文档必须逐字展示同一条命令」这条断言用的是
+# **全部文档拼起来**的文本，而不是单文件——否则拆一次就假红。
+DOCS = [pathlib.Path("AGENTS.md")] + [
+    pathlib.Path(p)
+    for p in (
+        [
+            "docs/api-contract.md",
+            "docs/architecture.md",
+            "docs/development.md",
+            "docs/roadmap.md",
+            "docs/known-issues.md",
+        ]
+        + sorted(glob.glob("docs/design-decisions/*.md"))
+    )
+    if os.path.exists(p)
+]
 
 # name → 复现命令。**单一定义处**：AGENTS.md 里展示的命令必须与此逐字相同
 # （去掉连续空白后比较），由本守卫断言。
@@ -98,14 +120,17 @@ MARKER = re.compile(
     r"(?:\s+tolerance=(?P<tolerance>[0-9.]+))?\s*-->"
 )
 
-text = DOC.read_text(encoding="utf-8")
-matches = list(MARKER.finditer(text))
+texts = [(p, p.read_text(encoding="utf-8")) for p in DOCS]
+# 全局文本：只用于「文档里必须逐字展示同一条命令」这条断言。
+text = "\n".join(t for _, t in texts)
+matches = [(p, t, m) for p, t in texts for m in MARKER.finditer(t)]
 
 if not matches:
     print(
-        "❌ AGENTS.md 里没有任何 number-check 标记——守卫会静默空转。\n"
+        "❌ 文档里没有任何 number-check 标记——守卫会静默空转。\n"
         "   请在标注了复现命令的数字处加：\n"
-        "   <!-- number-check: name=... value=123 -->",
+        "   <!-- number-check: name=... value=123 -->\n"
+        f"   （已扫描：{', '.join(str(p) for p in DOCS)}）",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -124,15 +149,16 @@ def normalize(cmd: str) -> str:
 
 bad = []
 checked = 0
-for m in matches:
+for doc_path, doc_text, m in matches:
     name = m.group("name")
     expected = float(m.group("value"))
     tolerance = float(m.group("tolerance") or DEFAULT_TOLERANCE)
-    line = text[: m.start()].count("\n") + 1
+    line = doc_text[: m.start()].count("\n") + 1
+    where = f"{doc_path}:{line}"
 
     if name not in CHECKS:
         bad.append(
-            f"AGENTS.md:{line}: 未知的 number-check 名 `{name}`"
+            f"{where}: 未知的 number-check 名 `{name}`"
             f"（脚本 CHECKS 里没有它——标记写错了，或脚本忘了加）"
         )
         continue
@@ -142,7 +168,7 @@ for m in matches:
     # 1) 文档里必须展示同一条命令（否则用户复现出的数字与守卫的判定不一致）。
     if normalize(cmd) not in normalize(text):
         bad.append(
-            f"AGENTS.md:{line}: 文档里找不到与 CHECKS['{name}'] 相同的命令。\n"
+            f"{where}: 文档里找不到与 CHECKS['{name}'] 相同的命令。\n"
             f"    脚本里的命令：{cmd}\n"
             f"    请在文档里逐字展示它（用户要能复现守卫的判定）。"
         )
@@ -158,7 +184,7 @@ for m in matches:
     )
     if proc.returncode != 0:
         bad.append(
-            f"AGENTS.md:{line}: 复现命令失败（exit {proc.returncode}）\n"
+            f"{where}: 复现命令失败（exit {proc.returncode}）\n"
             f"    cmd: {cmd}\n"
             f"    stderr: {proc.stderr.strip()[:200]}"
         )
@@ -168,7 +194,7 @@ for m in matches:
         actual = float(proc.stdout.strip())
     except ValueError:
         bad.append(
-            f"AGENTS.md:{line}: 复现命令的输出不是数字："
+            f"{where}: 复现命令的输出不是数字："
             f"{proc.stdout.strip()[:80]!r}\n    cmd: {cmd}"
         )
         continue
@@ -177,13 +203,13 @@ for m in matches:
     deviation = 0.0 if expected == 0 else abs(actual - expected) / expected
     if deviation > tolerance:
         bad.append(
-            f"AGENTS.md:{line}: 文档写 {m.group('value')}，实测 {proc.stdout.strip()}"
+            f"{where}: 文档写 {m.group('value')}，实测 {proc.stdout.strip()}"
             f"（偏差 {deviation * 100:.1f}%，容差 {tolerance * 100:.1f}%）\n"
             f"    cmd: {cmd}"
         )
 
 if bad:
-    print("❌ AGENTS.md 里的数字与实测不符（issue #46）：", file=sys.stderr)
+    print("❌ 文档里的数字与实测不符（issue #46）：", file=sys.stderr)
     for b in bad:
         print(f"   {b}", file=sys.stderr)
     print(
@@ -193,5 +219,5 @@ if bad:
     )
     sys.exit(1)
 
-print(f"✅ AGENTS.md 数字检查通过（{checked} 处数字均在容差内）")
+print(f"✅ 文档数字检查通过（{checked} 处数字均在容差内；扫描 {len(DOCS)} 个文件）")
 PY

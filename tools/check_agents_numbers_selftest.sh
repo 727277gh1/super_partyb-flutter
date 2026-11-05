@@ -15,8 +15,9 @@
 #
 # ## 测法：受控的最小仓库
 #
-# 守卫用 `cd "$(dirname "$0")/.."` 定位仓库根，且只读 `AGENTS.md`——故把守卫
-# 真身复制进 `mktemp -d` 的受控仓库，再在那边造一份 `AGENTS.md`。
+# 守卫用 `cd "$(dirname "$0")/.."` 定位仓库根，读 `AGENTS.md` **与拆出去的
+# docs/**（2026-11 拆分，见第 7 条断言）——故把守卫真身复制进 `mktemp -d` 的
+# 受控仓库，再在那边造文档。
 #
 # ⚠️ 受控 `AGENTS.md` 里**必须包含与脚本 CHECKS 逐字相同的命令**（去空白后），
 # 否则会撞上第 4 条判定。故下面直接从脚本里抽出命令，而不是手抄（手抄会随
@@ -186,9 +187,38 @@ out=$(run_guard) && {
 } || true
 
 # ---------------------------------------------------------------------------
+# 7) 拆出去的正文里的标记也必须被查到
+# ---------------------------------------------------------------------------
+#
+# 2026-11 把带 number-check 标记的 §6.12 搬进了
+# docs/design-decisions/runtime-and-ops.md。若守卫只看 AGENTS.md，那些标记
+# 就**再也不会被检查**（而且因为「无标记要报错」，一拆就会硬失败）。
+mkdir -p "$repo/docs/design-decisions"
+write_doc "<!-- number-check: name=spb_features_hardcoded_zh value=$actual -->" 1
+# 拆分文档里放一条**错**的标记：必须被抓到。
+printf '# 产品边界\n\n<!-- number-check: name=spb_features_hardcoded_zh value=%s -->\n' \
+  "$wrong" > "$repo/docs/design-decisions/runtime-and-ops.md"
+
+out=$(run_guard) && {
+  note_fail "拆分文档（docs/design-decisions/*.md）里的标记没有被检查（守卫只覆盖 AGENTS.md）"
+} || true
+case "$out" in
+  *"runtime-and-ops.md"*) ;;
+  *) note_fail "拆分文档里的漂移未被点名到文件：$out" ;;
+esac
+
+# 修好之后必须恢复绿。
+printf '# 产品边界\n\n<!-- number-check: name=spb_features_hardcoded_zh value=%s -->\n' \
+  "$actual" > "$repo/docs/design-decisions/runtime-and-ops.md"
+
+if ! out=$(run_guard); then
+  note_fail "拆分文档里的标记正确时被误报：$out"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 if [ ${#failures[@]} -eq 0 ]; then
-  echo "✅ check_agents_numbers 自测通过（6 条断言）"
+  echo "✅ check_agents_numbers 自测通过（7 条断言）"
   exit 0
 fi
 
