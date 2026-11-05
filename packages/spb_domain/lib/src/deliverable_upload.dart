@@ -385,7 +385,9 @@ Future<LocalDirtyScanResult> scanLocalDirtyFiles({
       continue;
     }
 
-    if (contentHashOf(bytes) == baseline) {
+    // 后台 isolate 哈希（docs/memory-audit.md G6）：脏检测逐文件全量读入 +
+    // 哈希，大文件在主 isolate 会逐个冻结 UI。
+    if (await contentHashOfAsync(bytes) == baseline) {
       unchanged++;
       continue;
     }

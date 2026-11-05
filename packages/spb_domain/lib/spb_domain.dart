@@ -22,7 +22,8 @@ library;
 //   OutboxStore / OutboxQueue / OutboxRetryPolicy —— 离线写队列（切片 C / issue #30；
 //                                    **不是**可丢弃数据：读写失败抛 StorageError）
 //   SyncState / SyncedFile        —— 同步状态值类型（含 contentHash：脏检测的比对基准）
-//   contentHashOf                 —— 内容 SHA256（下载时记录与回传前比对共用同一算法）
+//   contentHashOf / contentHashOfAsync —— 内容 SHA256（下载时记录与回传前比对共用
+//                                     同一算法；生产用异步版，大文件不冻结 UI）
 //   workspaceStateKey             —— 「全部/选中若干 group」共用的状态键
 //   buildSyncPlan / SyncEngine    —— 交付物同步计划与执行（纯逻辑，可无头单测）
 //   SyncScope 家族                —— 同步范围（单 group / workspace / 选中若干）

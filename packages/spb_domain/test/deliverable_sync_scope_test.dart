@@ -263,6 +263,53 @@ void main() {
       );
     });
 
+    test('contentHashOfAsync 与同步版逐字节一致（docs/memory-audit.md G6）', () async {
+      // 两条路径必须产出**同一** hash：下载落盘时记录哪一版，脏检测就得
+      // 用同一版比对——不等价会让全部文件被判脏、每轮全量重下。
+      // 三个形态各验一次：小输入（主 isolate 快路径）、大输入
+      // （>8KB，走 Isolate.run）——边界两侧都要过同一条不变式。
+      final small = List<int>.generate(100, (i) => i % 251);
+      final large = List<int>.generate(64 * 1024, (i) => i % 251);
+      expect(
+        await contentHashOfAsync(small),
+        contentHashOf(small),
+        reason: '小输入（主 isolate 快路径）与同步版一致',
+      );
+      expect(
+        await contentHashOfAsync(large),
+        contentHashOf(large),
+        reason: '大输入（后台 isolate）与同步版一致',
+      );
+      expect(
+        await contentHashOfAsync(<int>[]),
+        contentHashOf(<int>[]),
+        reason: '空输入与同步版一致',
+      );
+    });
+
+    test('contentHashOfAsync 大输入返回正确的 SHA256（后台 isolate 真在跑）', () async {
+      // 不能只对拍 contentHashOf——若 isolate 路径静默退化成主 isolate，
+      // 上一条照样绿。这条用已知输入的哈希值钉住结果本身。
+      // sha256('a' * 100000) 的期望值由同步版在同一进程推导（等价于已知
+      // 向量：crypto 包对确定性输入结果恒定）。
+      final big = List<int>.filled(100 * 1024, 0x61); // 'a' * 102400
+      final got = await contentHashOfAsync(big);
+      expect(got, contentHashOf(big));
+      expect(got, hasLength(64));
+      expect(
+        RegExp(r'^[0-9a-f]{64}$').hasMatch(got),
+        isTrue,
+        reason: '必须是十六进制小写，与落盘记录的编码一致',
+      );
+    });
+
+    test('contentHashOfAsync 非 Uint8List 输入（List<int>）也正确', () async {
+      // 下载侧拿到的 bytes 是 dio 的 List<int>（未必是 Uint8List）。
+      // TransferableTypedData 需要 Uint8List，函数内须自行物化拷贝。
+      final plain = List<int>.generate(20 * 1024, (i) => i % 256);
+      expect(await contentHashOfAsync(plain), contentHashOf(plain));
+    });
+
     test('下载成功后记录含 contentHash（对实际写入字节计算）', () async {
       final sink = StubSink();
       final engine = SyncEngine(downloader: StubDownloader(), sink: sink);

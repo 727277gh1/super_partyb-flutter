@@ -17,6 +17,9 @@
 ///   「这个文件以前同步过、现在要删」。
 library;
 
+import 'dart:isolate' show Isolate, TransferableTypedData;
+import 'dart:typed_data' show Uint8List;
+
 import 'package:crypto/crypto.dart' as crypto;
 
 /// 计算内容的 SHA256（十六进制小写）。
@@ -26,8 +29,71 @@ import 'package:crypto/crypto.dart' as crypto;
 /// 「下载时记录 hash」（[SyncedFile.contentHash]）与「回传前比对本地是否被改」
 /// 必须用**同一种**算法与编码，否则脏检测会把全部文件都判成脏的。收敛到一处，
 /// 这个不变量就不依赖调用方的自觉。
+///
+/// ## 为什么不再被生产代码调用（docs/memory-audit.md G6）
+///
+/// 本函数在**当前 isolate** 同步跑完整段 SHA256。同步下载（几 MB 到上百 MB）
+/// 与回传脏检测都会经它：200MB ≈ 0.4s（SHA256 吞吐 ~500MB/s），期间**整个
+/// UI 冻结**（构建/滚动/流式全停）。生产代码一律改用 [contentHashOfAsync]
+/// （`Isolate.run`，大输入不占 UI 线程）。本函数保留给：
+///
+/// 1. 测试（已知向量、确定性断言）；
+/// 2. [contentHashOfAsync] 自身的回退路径；
+/// 3. 「两条路径必须产出同一 hash」这个不变量的同源保证——异步版复用它，
+///    算法/编码漂移在结构上不可能。
 String contentHashOf(List<int> bytes) =>
     crypto.sha256.convert(bytes).toString();
+
+/// 在后台 isolate 计算 SHA256（十六进制小写，与 [contentHashOf] 同一编码）。
+///
+/// ## 为什么要有它（docs/memory-audit.md G6）
+///
+/// 生产链路（下载落盘前的 hash、回传脏检测）此前都在 UI isolate 同步哈希
+/// 全量字节——同步一轮 5666 文件、或单个大视频，都会把 UI 冻住数百毫秒到
+/// 数秒。改走 `Isolate.run` 后：主 isolate 只付 isolate 启动（~1ms）与
+/// `TransferableTypedData` 物化（一次 memcpy）的成本，哈希本体在 worker。
+///
+/// ## `TransferableTypedData` 的作用（**不是**所有权转移）
+///
+/// 直接 `Isolate.run(() => sha256.convert(bytes))` 时，[bytes] 作为闭包捕获
+/// 量会在**发送消息**那一刻被整份拷贝进 worker。
+/// `TransferableTypedData.fromList` 把字节拷进一块**外部缓冲**，随后发送
+/// 消息与 worker 侧 `materialize()` 都不再拷贝——worker 拿到的是外部内存
+/// 视图，不占它的 Dart 堆。
+///
+/// ⚠️ **`fromList` 自己就拷贝一次**（实测：`fromList` 之后改原 buffer，
+/// `materialize()` 出来的字节不受影响），所以：
+///
+/// - 本函数**不改变** [bytes] 的内容，调用方仍可继续读它——不存在「转移后
+///   失效」的约束（曾误以为有，注释已纠正）；
+/// - 收益不是「少一次拷贝」，而是「worker 侧零拷贝 + 不产生堆分配」：对
+///   大文件避免的是 worker 的堆峰值与 GC 压力，UI isolate 的收益来自
+///   「哈希不再占用它」，与这里无关。
+///
+/// 空/小输入（< 8KB）直接在当前 isolate 算：isolate 启动 + 一次拷贝的成本
+/// 反而高于哈希本身，不划算。
+///
+/// ## 失败降级
+///
+/// `Isolate.run` 在某些受限环境（旧版 web/测试 host）可能抛
+/// `UnsupportedError`。此时回退到主 isolate 的 [contentHashOf]——慢但不坏，
+/// 与「图片解码失败不阻断卡片」同一取向。
+Future<String> contentHashOfAsync(List<int> bytes) async {
+  // 小输入不值得开 isolate：8KB 的 SHA256 ~15µs，而 isolate 往返 ~1ms+。
+  const smallInputThreshold = 8 * 1024;
+  if (bytes.length < smallInputThreshold) return contentHashOf(bytes);
+  try {
+    final transferable = TransferableTypedData.fromList([
+      if (bytes is Uint8List) bytes else Uint8List.fromList(bytes),
+    ]);
+    return await Isolate.run(
+      () => contentHashOf(transferable.materialize().asUint8List()),
+    );
+  } on UnsupportedError {
+    // 受限环境（无 isolate 支持）：回退主 isolate，行为与旧版一致。
+    return contentHashOf(bytes);
+  }
+}
 
 /// 单个已同步文件的记录。
 class SyncedFile {

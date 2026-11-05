@@ -914,7 +914,10 @@ class SyncEngine {
             etag: etag,
             size: bytes.length,
             updatedAt: updatedAt,
-            contentHash: contentHashOf(bytes),
+            // 后台 isolate 哈希（docs/memory-audit.md G6）：大文件不再冻结
+            // UI。worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆
+            // （见 contentHashOfAsync 的文档）。
+            contentHash: await contentHashOfAsync(bytes),
           );
         } catch (e) {
           // 失败：**不写状态、不推进游标**（见类文档的不变量 1、2）。
