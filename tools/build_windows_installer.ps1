@@ -126,18 +126,16 @@ if (-not $appVersion) {
 
 # ── 3. 找 ISCC ─────────────────────────────────────────────────────────
 # ⚠️ 不能「取 PATH 上第一个」。装了 Chocolatey 的机器（GitHub 的 windows runner
-# 就是）PATH 上会有一个 `C:\ProgramData\Chocolatey\bin\ISCC.exe` **shim**——它是
-# shimgen 生成的转发器，`VersionInfo.FileVersion` 是 `0.0.0.0`，于是「需要 6.0+」
-# 的检查会把它判死，而真正的编译器就在 Program Files 下好好躺着。
+# 就是）PATH 上会有一个 `C:\ProgramData\Chocolatey\bin\ISCC.exe` **shim**，
+# 而真正的编译器在 `Program Files (x86)\Inno Setup 6` 下。
 # 2026-11 CI 实测：这一步红在 `需要 Inno Setup 6.0+，当前 0.0.0.0（...\Chocolatey\bin\ISCC.exe）`。
-# 故收集**全部**候选、按版本号挑最高的那个（未知版本 0 排最后）。
+# 故收集**全部**候选（安装目录优先）、去重后按版本号挑最高。
 function Get-IsccCandidates {
+    # 顺序就是优先级：已知安装目录在前，PATH 上的**最后**。
+    # 理由：`ISCC.exe` 没有版本资源（实测 shim 与真身都是 `0.0.0.0`），
+    # 故「按版本挑最高」在 Windows 上永远并列——此时先命中的就是被调用的那个。
+    # 让安装目录先命中，就省掉一层 shimgen 转发。
     $list = @()
-    $cmd = @(Get-Command ISCC.exe -All -ErrorAction SilentlyContinue)
-    foreach ($c in $cmd) {
-        if ($c -and $c.Source) { $list += $c.Source }
-    }
-
     $bases = @()
     if (${env:ProgramFiles(x86)}) { $bases += ${env:ProgramFiles(x86)} }
     if ($env:ProgramFiles) { $bases += $env:ProgramFiles }
@@ -146,6 +144,11 @@ function Get-IsccCandidates {
         foreach ($dir in @('Inno Setup 6', 'Inno Setup 5')) {
             $list += (Join-Path $base "$dir/ISCC.exe")
         }
+    }
+
+    $cmd = @(Get-Command ISCC.exe -All -ErrorAction SilentlyContinue)
+    foreach ($c in $cmd) {
+        if ($c -and $c.Source) { $list += $c.Source }
     }
     return $list
 }
@@ -191,8 +194,11 @@ if (-not $iscc) {
 
 # 脚本用了 {autopf} / WizardStyle / 内置 ISPP，都是 Inno 6.0+ 的语法；
 # 5.x 上会得到一堆「未知参数」的报错，提前拦住更好定位。
-# 版本号读不出来（0，通常是 shim）时**不**硬拦：那种情况读不到 ≠ 版本太旧，
-# 交给 ISCC 自己报错比在这里瞎猜好——shim 会把参数转发给真正的编译器。
+#
+# ⚠️ 这个门只能是 best-effort：`ISCC.exe` **没有版本资源**，实测 shim 与真身的
+# `FileVersion` 都是 `0.0.0.0`（2026-11 CI 日志两行都是 `(v0.0.0.0)`）。
+# 故「读不出版本号」**不等于**「版本太旧」——那样会在一个真装了 6.7.1 的机器上判死。
+# 真到 Inno 5，ISCC 自己会报 `Unknown parameter`，同样能定位。
 $isccVersion = (Get-Item $iscc).VersionInfo
 $isccMajor = 0
 if ($isccVersion.FileMajorPart) { $isccMajor = [int]$isccVersion.FileMajorPart }
