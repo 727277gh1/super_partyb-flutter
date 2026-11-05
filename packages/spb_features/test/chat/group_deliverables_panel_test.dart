@@ -197,6 +197,114 @@ void main() {
       expect(find.text('spec.md'), findsOneWidget, reason: '再次点击应展开');
     });
 
+    testWidgets('ListView 走 builder 委托（懒构建，不一次性构造全部行）', (tester) async {
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [_file('reports/a.md'), _file('reports/b.md')],
+      );
+
+      final list = tester.widget<ListView>(
+        find.byKey(const ValueKey('deliverables-tree')),
+      );
+      // 动机（docs/memory-audit.md G7）：`ListView(children:)` 在 build 阶段
+      // 就构造全部子 widget；`ListView.builder` 只构建可见行。若有人改回
+      // children 形态，childrenDelegate 会退回 SliverChildListDelegate。
+      expect(list.childrenDelegate, isA<SliverChildBuilderDelegate>());
+    });
+
+    testWidgets('折叠的目录子项不进行集合（只隐藏不构建的真正来源）', (tester) async {
+      await pumpPanel(
+        tester,
+        loadFiles: () async => [
+          _file('reports/a.md'),
+          _file('reports/b.md'),
+          _file('README.md'),
+        ],
+      );
+
+      // 折叠 reports（展开目录行从行集合里移除其子项，折叠目录行本身仍在）。
+      await tester.tap(find.text('reports'));
+      await tester.pumpAndSettle();
+      expect(find.text('reports'), findsOneWidget);
+      expect(find.text('a.md'), findsNothing);
+      expect(find.text('b.md'), findsNothing);
+
+      // SliverChildBuilderDelegate 只对可见行调用 itemBuilder——折叠后行数
+      // 从 3（reports + a + b + README 其实是 3 行可见）降到 2。
+      final delegate =
+          tester
+                  .widget<ListView>(
+                    find.byKey(const ValueKey('deliverables-tree')),
+                  )
+                  .childrenDelegate
+              as SliverChildBuilderDelegate;
+      expect(
+        delegate.estimatedChildCount,
+        2,
+        reason: '折叠 reports 后只剩 reports 行 + README 行',
+      );
+    });
+
+    testWidgets('同一对话内 reloadToken 刷新后展开状态保留', (tester) async {
+      var calls = 0;
+      Widget panel({int? token}) => MaterialApp(
+        home: Scaffold(
+          body: GroupDeliverablesPanel(
+            groupId: _gid,
+            loadFiles: () async {
+              calls++;
+              return [_file('reports/spec.md')];
+            },
+            reloadToken: token,
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(panel(token: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('spec.md'), findsOneWidget);
+
+      // 用户折叠 reports。
+      await tester.tap(find.text('reports'));
+      await tester.pumpAndSettle();
+      expect(find.text('spec.md'), findsNothing);
+
+      // SSE 文件事件 bump reloadToken → 重拉（calls=2），但不应把用户
+      // 正在看的目录折叠回去。
+      await tester.pumpWidget(panel(token: 2));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
+      expect(find.text('spec.md'), findsNothing, reason: '同一对话刷新必须保留用户的折叠状态');
+    });
+
+    testWidgets('切对话后展开状态重置（顶层重新默认展开）', (tester) async {
+      Widget panel({required String gid}) => MaterialApp(
+        home: Scaffold(
+          body: GroupDeliverablesPanel(
+            groupId: gid,
+            // 路径必须带**该 group** 的 id：buildArtifactTree 按
+            // `/workspace/groups/<groupId>/` 前缀剥路径，前缀不匹配时
+            // 整棵树为空（那样本用例会在「切对话后没有任何行」上假绿）。
+            loadFiles: () async => [_file('reports/spec.md', gid: gid)],
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(panel(gid: _gid));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('reports'));
+      await tester.pumpAndSettle();
+      expect(find.text('spec.md'), findsNothing);
+
+      await tester.pumpWidget(panel(gid: _otherGid));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('spec.md'),
+        findsOneWidget,
+        reason: '切对话后旧折叠状态不再适用，回到「顶层默认展开」',
+      );
+    });
+
     testWidgets('顶层文件直接显示，不套目录', (tester) async {
       await pumpPanel(
         tester,

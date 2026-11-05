@@ -193,10 +193,13 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.groupId != widget.groupId) {
       _localPaths.clear();
+      // 换对话后旧展开状态不再适用（目录名可能相同但语义已不同），
+      // 重置到「顶层展开」默认态——与切换对话后重新加载的清单一致。
+      _userExpansion.clear();
       _load();
     } else if (oldWidget.reloadToken != widget.reloadToken) {
-      // 保留已下载路径（同一对话内刷新，下载过的文件仍在本地），
-      // 只重拉清单。切对话时上面已清。
+      // 保留已下载路径与展开状态（同一对话内刷新，下载过的文件仍在本地、
+      // 用户正在看的目录不应被折叠回去），只重拉清单。切对话时上面已清。
       _load();
     }
   }
@@ -410,10 +413,12 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
       );
     }
 
-    return ListView(
+    return ListView.builder(
       key: const ValueKey('deliverables-tree'),
       padding: const EdgeInsets.symmetric(vertical: SpbSpacing.xs),
-      children: _tree.map((n) => _buildNode(n, 0)).toList(),
+      itemCount: _rows.length,
+      itemBuilder: (context, index) =>
+          _buildNode(_rows[index].node, _rows[index].depth),
     );
   }
 
@@ -424,47 +429,128 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
     };
   }
 
+  /// 展开状态下**可见**的节点列表（build 期派生，缓存到字段）。
+  ///
+  /// ## 为什么不用 `ListView(children: _tree.map(...))`（docs/memory-audit.md G7）
+  ///
+  /// `ListView(children:)` 走 `SliverChildListDelegate`——**build 阶段就把
+  /// 全部子 widget 构造出来**。5666 文件的全量同步场景，打开「交付物」tab 的
+  /// 一帧要构造 5666 个节点 widget（目录节点还是 `ExpansionTile`：StatefulWidget
+  /// + controller 装配），其中绝大部分滚出视口后立即丢弃——纯浪费。
+  /// `ListView.builder` 只构建可见行（± cacheExtent）。
+  ///
+  /// ## 展开状态怎么表达
+  ///
+  /// `ExpansionTile` 自持展开/折叠状态（`PageStorageKey` 跨切换保留），但
+  /// **折叠的子节点不能进 rows**——否则折叠只是视觉隐藏、行仍被构建。
+  /// `ExpansionTile` 无法反过来驱动本列表，故展开状态由本页自持
+  /// （`_userExpansion`），目录行点击时翻转，派生 `_rows` 时只递归展开中的
+  /// 目录。顶层目录默认展开（与原 `initiallyExpanded: depth == 0` 一致）。
+  ///
+  /// 缓存判据与时间线的 `_displayRows` 同型：`_tree` 未变（`identical`）时
+  /// 不重算。展开状态变化（点击目录）才会触发重算——那是用户主动交互，
+  /// 一次 O(n) 摊销可接受。
+  List<({ArtifactNode node, int depth})> get _rows {
+    if (identical(_rowsSource, _tree) && _rowsSourceRev == _rowsRev) {
+      return _rowsCache;
+    }
+    final rows = <({ArtifactNode node, int depth})>[];
+    void walk(List<ArtifactNode> nodes, int depth) {
+      for (final node in nodes) {
+        rows.add((node: node, depth: depth));
+        final dir = node;
+        if (dir is ArtifactDirectoryNode && _isExpanded(dir, depth)) {
+          walk(dir.children, depth + 1);
+        }
+      }
+    }
+
+    walk(_tree, 0);
+    _rowsSource = _tree;
+    _rowsSourceRev = _rowsRev;
+    _rowsCache = rows;
+    return rows;
+  }
+
+  List<({ArtifactNode node, int depth})> _rowsCache = const [];
+  List<ArtifactNode>? _rowsSource;
+  int _rowsSourceRev = -1;
+
+  /// 展开状态翻转时递增（见 [_toggleDirectory]）。同一棵树下行的集合会
+  /// 随之变化，只比 `_tree` 的 identity 不够。
+  int _rowsRev = 0;
+
+  /// 展开状态：目录相对路径 → 用户设置的展开与否。
+  ///
+  /// 只存**用户点过**的目录；没点过的按层级取默认值（顶层展开、深层折叠，
+  /// 与原 `initiallyExpanded: depth == 0` 一致）。故本表的大小与「用户
+  /// 交互过多少个目录」成正比，不随文件总数增长。
+  ///
+  /// 为什么不用 `ExpansionTile` 自持状态：见 [_rows] 的注释——折叠的子节点
+  /// 必须**不进 rows**，否则折叠只是视觉隐藏、行仍被构建，`ListView.builder`
+  /// 就白用了。`ExpansionTile` 无法反向驱动本列表。
+  final Map<String, bool> _userExpansion = <String, bool>{};
+
+  bool _isExpanded(ArtifactDirectoryNode dir, int depth) =>
+      _userExpansion[dir.relativePath] ?? (depth == 0);
+
+  void _toggleDirectory(ArtifactDirectoryNode dir, int depth) {
+    setState(() {
+      _userExpansion[dir.relativePath] = !_isExpanded(dir, depth);
+      // 可见行集合变了，必须让 [_rows] 的缓存失效（展开状态是行的输入之一，
+      // 只比对 `_tree` 的 identity 会拿到翻转前的旧行——那样点击目录没反应）。
+      _rowsRev++;
+    });
+  }
+
   Widget _buildDirectory(ArtifactDirectoryNode dir, int depth) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Theme(
-      // 去掉 ExpansionTile 默认的分割线（侧边栏行已自带缩进层次）。
-      data: theme.copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        key: PageStorageKey<String>('artifact-dir-${dir.relativePath}'),
-        initiallyExpanded: depth == 0,
-        minTileHeight: 0,
-        tilePadding: EdgeInsets.only(
-          left: SpbSpacing.sm + depth * SpbSpacing.lg,
-          right: SpbSpacing.sm,
-        ),
-        childrenPadding: EdgeInsets.zero,
-        dense: true,
-        leading: Icon(
-          Icons.folder_outlined,
-          size: SpbSpacing.lg,
-          color: scheme.primary,
-        ),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                dir.name,
-                style: theme.textTheme.bodyMedium,
-                overflow: TextOverflow.ellipsis,
-                maxLines: 1,
+    final expanded = _isExpanded(dir, depth);
+    return ListTile(
+      key: ValueKey<String>('artifact-dir-${dir.relativePath}'),
+      dense: true,
+      minTileHeight: 0,
+      visualDensity: VisualDensity.compact,
+      contentPadding: EdgeInsets.only(
+        left: SpbSpacing.sm + depth * SpbSpacing.lg,
+        right: SpbSpacing.sm,
+      ),
+      onTap: () => _toggleDirectory(dir, depth),
+      leading: Icon(
+        Icons.folder_outlined,
+        size: SpbSpacing.lg,
+        color: scheme.primary,
+      ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              dir.name,
+              style: theme.textTheme.bodyMedium,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+          if (dir.fileCount > 0)
+            Text(
+              '${dir.fileCount}',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
               ),
             ),
-            if (dir.fileCount > 0)
-              Text(
-                '${dir.fileCount}',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-          ],
+        ],
+      ),
+      // 原 ExpansionTile 自带旋转箭头，换成自持状态后由本行提供（语义同等：
+      // 朝下 = 折叠、朝上 = 展开）。
+      trailing: AnimatedRotation(
+        turns: expanded ? 0.5 : 0,
+        duration: const Duration(milliseconds: 150),
+        child: Icon(
+          Icons.expand_more,
+          size: SpbSpacing.md,
+          color: scheme.onSurfaceVariant,
         ),
-        children: dir.children.map((c) => _buildNode(c, depth + 1)).toList(),
       ),
     );
   }
