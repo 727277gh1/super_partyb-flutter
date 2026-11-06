@@ -91,6 +91,18 @@
 		<string>weixinURLParamsAPI</string>
 		<string>wechat</string>
 	</array>
+	<!--
+	  本机门禁（issue #94）：`local_auth` 调 `LAContext.evaluatePolicy` 时必须
+	  声明用途，缺失会让 Face ID 验证**直接失败**（系统拒绝），而错误信息
+	  （`NSFaceIDUsageDescription` not found）只在 Xcode 控制台可见——表现为
+	  「开关打开了但每次解锁都失败」，非常难查。
+
+	  文案是那个系统弹窗上的一句话，要求写清「为什么」：这里说明验证通过后
+	  只是解锁已登录的会话，不会重新登录、也不会上传生物特征（生物特征比对
+	  全程在设备的安全隔区里，App 拿到的只有一个 bool）。
+	-->
+	<key>NSFaceIDUsageDescription</key>
+	<string>用 Face ID 解锁已登录的会话，避免重复登录。生物特征不会被上传或存储。</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

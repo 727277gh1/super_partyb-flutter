@@ -3,7 +3,7 @@
 /// ## 分层职责
 ///
 /// 本目录只做**渲染与状态表达**：登录页展示按钮与错误，[AuthState] 表达
-/// 「未知 / 已登录 / 未登录」。
+/// 「未知 / 已锁定 / 已登录 / 未登录」。
 ///
 /// **不含**以下内容（各自归属明确）：
 /// - 授权 URL 构造与 token 交换 → `spb_api`（`OidcClient`）；
@@ -14,5 +14,6 @@
 library;
 
 export 'auth_state.dart';
+export 'lock_page.dart';
 export 'login_page.dart';
 export 'magic_link_signin.dart';

@@ -465,3 +465,109 @@ App 侧 magic link 只帮得到 App；而两端点「使用 SSO 登录」打开�
   粘贴导入。本轮保留它——邮件可达性本身就是这条路径的失败模式（见上一条），
   在没有「邮件不可用时的替代确认」之前，删掉用户唯一的手工兜底并不划算，
   等 magic link 在真机/生产跑过一轮再决定。
+
+### 6.71 生物识别门禁：把「每次都得走微信」降为「第一次走微信」（issue #94，2026-11）
+
+#### 问题
+
+「下次打开还要扫码」是移动端登录最影响体感的一段，但它其实是两件事：
+
+| | 需要什么 | 多久一次 |
+|---|---|---|
+| **登录** | IdP 认账的凭据（微信 / 邮箱 / 短码 / 密码） | 第一次、换设备 |
+| **日常进入** | 证明「这台手机的持有者还是同一个人」 | 每次打开 |
+
+后者根本不需要出现在 SSO 页——refresh token 早就在 Keychain / Keystore 里。
+缺的只是一道门禁：在此之前，**任何拿到已解锁手机的人打开 App 就能看到全部
+对话**（启动即 `restore()`，无任何本机验证）。
+
+#### 状态机：新增 `AuthStatus.locked`
+
+不能复用「未认证」：未认证的下一步是「去 IdP 换新凭证」，locked 的下一步是
+「在本机验一下」——混用会把锁屏页渲染成登录页，用户看到的正是想消除的
+「扫码 / 邮箱登录」，还会以为登录态丢了。也不能当成「已认证」：那样内容直接
+可见，门禁等于没有。
+
+故 `AuthStatus` 增加第三个终态 `locked`，路由守卫把非 `/lock` 的访问送去
+`/lock?from=<原目标>`（`from` 复用登录页那套白名单校验，挡绝对 URL 与
+`//host`）。外部深链（`partyb://…`）同样先过 `/lock`——否则从通知点进来就能
+绕过门禁。
+
+#### 三条判定，各自有理由
+
+1. **冷启动**：先 `TokenStore.read()`（只读本地，**不发请求**）判断有没有凭证，
+   有才上锁。顺序很重要：先 `restore()` 会在 token 过期时触发**网络刷新**，
+   等于先替拿到手机的人把凭证换了，再谈上锁。
+2. **回前台**：`windowFocusedProvider` 由 false 变 true 时，离开时长超过宽限期
+   才重新上锁（默认 30 秒）。只挡冷启动会被「切后台再切回来」绕过；但不设
+   宽限期又会让「看一眼通知就回来」也弹 Face ID，用户会直接关掉这个功能。
+   判据抽成 `spb_platform` 的纯函数 `shouldLockOnResume`（`enabled` /
+   `authenticated` / `backgrounded` / `gracePeriod` 四条，可无头单测）。
+3. **开关默认关**：这是需要用户同意的功能，开启意味着每次冷启动都有系统验证框；
+   默认打开会让「只想看消息」的用户觉得被拦。改默认值只需改
+   `BiometricLockPolicy.enabledByDefault`。
+
+#### 失败分支：不把用户关在门外
+
+`local_auth` 3.x 抛 `LocalAuthException`（14 种错误码），必须归一成五种结果，
+因为每种对应**不同**的下一步：
+
+| 结果 | 含义 | 界面 |
+|---|---|---|
+| `success` | 通过 | 恢复会话 |
+| `failed` | 指纹不匹配 | 可重试 |
+| `canceled` | 用户 / 系统取消 | 提示「需要验证后继续」，**不报红** |
+| `lockedOut` | 平台锁定（连续失败过多） | 只剩「重新登录」 |
+| `unavailable` | 没硬件 / 没录入 / 插件缺失 | 只剩「重新登录」，并说明原因 |
+
+`lockedOut` / `unavailable` 时**不自动清凭证**：那会在「指纹传感器临时不可用」
+时销毁刚登录的会话，代价远大于让用户自己点一次「重新登录」。所谓「失败次数
+上限后强制走完整登录」由界面呈现——隐藏「解锁」、把「重新登录」升为主按钮。
+
+开关开着但设备不可用（删了指纹、换设备、插件缺失）时**放行到已登录**并记日志：
+门禁读不到就锁死等于永久锁死用户。
+
+#### 安全边界（必须写清）
+
+`local_auth` 是**应用层自锁**，token 本身没有绑定生物识别 ACL
+（`flutter_secure_storage` v9 不暴露 `kSecAccessControlBiometryCurrentSet`）：
+
+- 挡住「捡到已解锁手机的人」：**有效**；
+- 挡住「越狱 / root 后读应用沙盒」：**无效**。
+
+硬件级绑定要自建带生物识别 ACL 的 Keychain / Keystore 条目（iOS
+`SecAccessControlCreateWithFlags` + `.biometryCurrentSet`，Android
+`setUserAuthenticationRequired` + `BiometricPrompt`），属可选后续。
+真正的硬件因子是 Passkey（id-provider#12）。
+
+#### 分层与接线
+
+- `spb_platform/src/biometric_gate.dart`：**只有契约**
+  （`BiometricGate` / `BiometricAvailability` / `BiometricAuthOutcome` /
+  `BiometricLockPolicy` / `shouldLockOnResume`）与「永不通过」的空实现。
+  与 `wechat_launcher.dart` 同一取舍：本包不 import 插件，桌面端构建不会被
+  拖进移动端依赖。
+- `apps/spb_mobile/lib/biometric_gate.dart`：`local_auth` 的桥接，唯一一处
+  异常码映射。**漏挂 `buildProductionOverrides()` 那一行**的表现是「设置页
+  开关打开后永远提示设备不可用」——门禁静默失效，故默认实现是「永不通过」
+  而不是「假装通过」。
+- `spb_features/src/auth/lock_page.dart`：锁屏页，回调驱动（`onUnlock` /
+  `onUseSignIn`），无插件依赖，可 widget 测试五条分支。
+- 平台配置：iOS `NSFaceIDUsageDescription`（缺了 Face ID 直接失败，
+  错误只在 Xcode 控制台可见）；Android `MainActivity` 必须继承
+  `FlutterFragmentActivity`（`local_auth` 走 androidx `BiometricFragment`，
+  用 `FlutterActivity` 会在运行时类转换失败）。`USE_BIOMETRIC` 权限由插件
+  manifest 合并进来，不需要手写。
+
+#### 前置依赖
+
+id-provider#5（fosite 会话落到 SQLite）：在此之前 `idp-go` 每次重启都会作废
+所有 refresh token，门禁做完也只是把「重登」从每天变成每次部署后。
+
+#### 已知限制
+
+- 本机无法真机验证：`local_auth` 的平台通道、Face ID 权限、Android
+  `BiometricPrompt` 都只能真机确认；本轮的防线是「异常码 → 五态」的单测 +
+  真实实现只在 `buildProductionOverrides()` 里出现一次；
+- 默认关意味着大部分用户不会自己打开（可在设置页「安全」区块开启，副标题
+  写明触发时机与宽限期）。

@@ -38,6 +38,51 @@ typedef LoadThemeMode = Future<ThemeMode> Function();
 /// 故本项独立注入、选中即保存（与通知订阅额度同一取舍）。
 typedef SaveThemeMode = Future<void> Function(ThemeMode mode);
 
+/// 「生物识别解锁」的当前状态（纯数据，issue #94）。
+///
+/// ## 为什么把「开关」和「设备可用性」一起返回
+///
+/// 两者必须同时展示，否则会出现两种骗人的界面：
+///
+/// - 设备不支持却把开关显示成「已关闭」——用户点开、验证、发现永远失败；
+/// - 设备可用但没读到时显示成「已开启」——用户以为手机在保护他，其实没有。
+///
+/// 故一次读到两者，由页面按可用性禁用开关并给出**具体**原因
+/// （「去系统设置录入指纹」与「这台设备没有指纹硬件」是两件事）。
+class BiometricLockStatus {
+  const BiometricLockStatus({
+    required this.enabled,
+    required this.availability,
+    this.gracePeriod = const Duration(seconds: 30),
+  });
+
+  /// 用户是否开启了本机门禁。
+  final bool enabled;
+
+  /// 设备可用性（`spb_platform` 的 `BiometricAvailability`）。
+  final BiometricAvailability availability;
+
+  /// 切后台多久后回来需要重新解锁（用于说明文字）。
+  final Duration gracePeriod;
+
+  /// 是否可以在本机完成验证。「有设备凭据但没录指纹」也算可以（会降级到密码）。
+  bool get usable => availability == BiometricAvailability.available;
+
+  /// 不可用时的原因（可用时为 null）。
+  String? get unavailableReason => switch (availability) {
+    BiometricAvailability.available => null,
+    BiometricAvailability.noCredentials => '未录入指纹 / Face ID，也未设置设备密码',
+    BiometricAvailability.noHardware => '此设备没有指纹 / Face ID 硬件',
+    BiometricAvailability.unsupported => '此平台不支持本机验证',
+  };
+}
+
+/// 读取「生物识别解锁」状态。
+typedef LoadBiometricLock = Future<BiometricLockStatus> Function();
+
+/// 保存「生物识别解锁」开关（选中即保存，与主题同理：需要即时反馈）。
+typedef SaveBiometricLock = Future<void> Function(bool enabled);
+
 /// 读取已保存的同步设置。
 typedef LoadSyncSettings = Future<SyncSettings> Function();
 
@@ -174,6 +219,8 @@ class SettingsPage extends StatefulWidget {
     this.saveNotifications,
     this.loadThemeMode,
     this.saveThemeMode,
+    this.loadBiometricLock,
+    this.saveBiometricLock,
     this.loadPreferences,
     this.savePreferences,
     this.preferenceAgentOptions = const [],
@@ -286,6 +333,15 @@ class SettingsPage extends StatefulWidget {
 
   /// 保存主题模式。与 [loadThemeMode] 成对注入。
   final SaveThemeMode? saveThemeMode;
+
+  /// 读取「生物识别解锁」状态（issue #94）。为 null 时**不展示**该区块。
+  ///
+  /// 桌面端注入 null：桌面没有「应用层门禁」的语义（系统锁屏 + 窗口在前台），
+  /// 展示一个永远不会生效的开关会让人以为有保护。
+  final LoadBiometricLock? loadBiometricLock;
+
+  /// 保存「生物识别解锁」。与 [loadBiometricLock] 成对注入。
+  final SaveBiometricLock? saveBiometricLock;
 
   /// 用户偏好的读取入口。为 null 时**不展示**该区块。
   ///
@@ -403,6 +459,14 @@ class _SettingsPageState extends State<SettingsPage>
   /// 本页只是它的一个编辑入口。
   ThemeMode? _themeMode;
 
+  /// 「生物识别解锁」状态（null = 还没读到 / 未注入）。
+  ///
+  /// 与 [_themeMode] 同一处理：读不到就禁用开关，不假装成「已关闭」。
+  BiometricLockStatus? _biometricLock;
+
+  /// 正在写开关（防止连点产生两个并发写入）。
+  bool _togglingBiometric = false;
+
   /// 自启开关是否在途（防重复切换 + 禁用控件）。
   bool _togglingLaunch = false;
 
@@ -481,6 +545,7 @@ class _SettingsPageState extends State<SettingsPage>
       unawaited(_loadStats());
       unawaited(_loadLaunchAtStartup());
       unawaited(_loadThemeMode());
+      unawaited(_loadBiometricLock());
       if (!settings.scope.allGroups) unawaited(_loadGroups());
     } catch (e) {
       if (!mounted) return;
@@ -489,6 +554,20 @@ class _SettingsPageState extends State<SettingsPage>
         _error = '读取设置失败：$e';
       });
     }
+  }
+
+  /// 「生物识别解锁」的副标题。
+  ///
+  /// 三种情况必须给出**不同**的文案：可用（说明什么时候会要求验证）、
+  /// 设备不可用（说明为什么，以及该去哪儿修）、还没读到（别假装已知）。
+  String get _biometricLockSubtitle {
+    final status = _biometricLock;
+    if (status == null) return '读取中…';
+    final reason = status.unavailableReason;
+    if (reason != null) return '不可用：$reason';
+    final grace = status.gracePeriod.inSeconds;
+    return '开启后冷启动、或离开超过 $grace 秒再回来，需指纹 / Face ID 解锁'
+        '（未录入时用设备密码）';
   }
 
   void _syncMaxSizeField(SyncSettings s) {
@@ -510,6 +589,50 @@ class _SettingsPageState extends State<SettingsPage>
       setState(() => _themeMode = mode);
     } catch (e) {
       SpbLog.warn('读取主题模式失败', {'error': e.toString()});
+    }
+  }
+
+  /// 读取「生物识别解锁」状态（issue #94）。
+  ///
+  /// 与主题同理不阻塞首屏：它要走偏好库 + 平台能力探测（`local_auth` 可能
+  /// 需要一次平台通道往返），不该拖慢设置页首帧。
+  Future<void> _loadBiometricLock() async {
+    final loader = widget.loadBiometricLock;
+    if (loader == null) return;
+    try {
+      final status = await loader();
+      if (!mounted) return;
+      setState(() => _biometricLock = status);
+    } catch (e) {
+      // 读不到就保持 null（开关禁用）。刻意**不**回落成「已关闭」：
+      // 那会让用户以为门禁确实关着，而事实是「不知道」。
+      SpbLog.warn('读取生物识别解锁状态失败', {'error': e.toString()});
+    }
+  }
+
+  /// 切换「生物识别解锁」：选中即保存（即时反馈项，与主题同一取舍）。
+  Future<void> _toggleBiometricLock(bool enabled) async {
+    final saver = widget.saveBiometricLock;
+    final current = _biometricLock;
+    if (saver == null || current == null || _togglingBiometric) return;
+    // 乐观更新：开关必须立刻跟手，等落盘再变会让用户以为没点中。
+    setState(() {
+      _togglingBiometric = true;
+      _biometricLock = BiometricLockStatus(
+        enabled: enabled,
+        availability: current.availability,
+        gracePeriod: current.gracePeriod,
+      );
+    });
+    try {
+      await saver(enabled);
+    } catch (e) {
+      // 失败回滚：界面不能显示一个「看起来开着、实际没生效」的门禁。
+      if (!mounted) return;
+      setState(() => _biometricLock = current);
+      SpbLog.warn('保存生物识别解锁设置失败', {'error': e.toString()});
+    } finally {
+      if (mounted) setState(() => _togglingBiometric = false);
     }
   }
 
@@ -1119,6 +1242,33 @@ class _SettingsPageState extends State<SettingsPage>
                           ),
                       ],
                     ),
+                  ),
+                ),
+                const SizedBox(height: SpbSpacing.lg),
+              ],
+              // 安全：本机门禁（issue #94）。与外观同属「选中即保存」，
+              // 因为开/关的效果要立刻能看到（下次冷启动弹不弹验证框）。
+              if (widget.loadBiometricLock != null &&
+                  widget.saveBiometricLock != null) ...[
+                const SectionTitle('安全', highlight: true),
+                Card(
+                  key: const ValueKey('settings-security'),
+                  margin: EdgeInsets.zero,
+                  child: SwitchListTile(
+                    key: const ValueKey('settings-biometric-lock'),
+                    secondary: const Icon(Icons.fingerprint),
+                    title: const Text('生物识别解锁'),
+                    subtitle: Text(_biometricLockSubtitle),
+                    // 读不到状态 / 设备不可用时禁用：一个点不动的开关，
+                    // 比一个不显示的开关更容易让人以为「应用坏了」——
+                    // 故同时用 subtitle 说明原因（见 _biometricLockSubtitle）。
+                    value: _biometricLock?.enabled ?? false,
+                    onChanged:
+                        (_biometricLock == null ||
+                            !_biometricLock!.usable ||
+                            _togglingBiometric)
+                        ? null
+                        : _toggleBiometricLock,
                   ),
                 ),
                 const SizedBox(height: SpbSpacing.lg),

@@ -20,6 +20,11 @@ library;
 ///   DroppedFile                 —— 拖入文件的归一形态（惰性读字节）
 ///   scanLocalGroups / scanLocalStats —— 本地同步目录扫描（只认 group_id 形状）
 ///   executePrunePlan            —— 按计划清理本地目录（删除前重新校验）
+///   BiometricGate / BiometricAvailability / BiometricAuthOutcome
+///                               —— 生物识别门禁契约（issue #94）。**只有契约**，
+///                                  `local_auth` 的桥接在 `apps/spb_mobile`；
+///                                  「回前台要不要重新上锁」的纯逻辑
+///                                  （`shouldLockOnResume`）也在本包。
 ///   WeChatMiniProgramLauncher / OpenSdkMiniProgramLauncher
 ///                               —— 微信 OpenSDK 唤起小程序（issue #92，服务端
 ///                                  scheme 对个人主体不可用时的唯一通道）
@@ -43,6 +48,7 @@ library;
 ///   MemoryProbe / MemorySample / installMemoryProbe
 ///                               —— 进程内存采样（RSS / 峰值 / imageCache 占用
 ///                                  → 有界环形缓冲 → 导出诊断日志）
+export 'src/biometric_gate.dart';
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';

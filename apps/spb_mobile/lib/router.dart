@@ -64,6 +64,11 @@ class SpbRoutes {
   /// 重定向到一个不存在的路径，go_router 抛「no routes for location」。
   static const login = '/login';
 
+  /// 本机门禁锁屏页（issue #94）。
+  ///
+  /// 与 [login] 同一约定：守卫与路由表用同一个常量。
+  static const lock = '/lock';
+
   static String chat(String groupId) => '/chat/$groupId';
 
   /// 搜索页（搜消息正文，不是对话标题）。
@@ -135,12 +140,30 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
     // 守卫把用户送出。桌面端不需要这条：它的回调是 loopback HTTP，
     // 从不经 `Router` 进入（见 `docs/rfc8252-loopback-signin.md`）。
     if (state.uri.scheme.isNotEmpty) {
+      // 已锁定（issue #94）时先过门禁：深链不该成为绕过锁屏的入口——从通知 /
+      // 浏览器点进来的链接会绕过 App 的冷启动流程。
+      if (auth != null && auth.isLocked) return _lockLocation(null);
       return auth != null && auth.isAuthenticated
           ? SpbRoutes.conversations
           : SpbRoutes.login;
     }
 
     if (auth == null || auth.status == AuthStatus.unknown) return null;
+
+    // 已锁定：除锁屏页外一律送去 `/lock`，并把原目标带进 `from`（解锁后
+    // 回跳，与登录页同一套白名单校验）。
+    if (auth.isLocked) {
+      if (state.matchedLocation == SpbRoutes.lock) return null;
+      return _lockLocation(state.matchedLocation);
+    }
+
+    // 停在锁屏页但已不需要锁（刚解锁 / 用户在锁屏页选了「改用登录」）：
+    // 未登录去登录页，已登录回原目标。
+    if (state.matchedLocation == SpbRoutes.lock) {
+      if (!auth.isAuthenticated) return SpbRoutes.login;
+      return _safeFrom(state.uri.queryParameters['from'], SpbRoutes.login) ??
+          SpbRoutes.conversations;
+    }
 
     return resolveAuthRedirect(
       authenticated: auth.isAuthenticated,
@@ -182,6 +205,18 @@ String? resolveAuthRedirect({
   return null;
 }
 
+/// 构造锁屏页的 location（把原目标塞进 `from`）。
+///
+/// 与登录页的 `?from=` 同一形态，因此解锁后的回跳可以复用 [_safeFrom] 的
+/// 白名单校验：**不接受绝对 URL 与 `//host`**——否则锁屏页会变成开放重定向
+/// 的入口（`partyb://` 深链能带着任意 `from` 进来）。
+String _lockLocation(String? from) {
+  if (from == null || from.isEmpty || from == SpbRoutes.lock) {
+    return SpbRoutes.lock;
+  }
+  return '${SpbRoutes.lock}?from=${Uri.encodeComponent(from)}';
+}
+
 /// 校验 `from` 是否为可安全回跳的站内路径，非法返回 null。
 String? _safeFrom(String? raw, String loginRoute) {
   // 空串其实已被下面的 `startsWith('/')` 拒绝（`''.startsWith('/') == false`），
@@ -219,6 +254,12 @@ List<RouteBase> buildMobileRoutes() {
     GoRoute(
       path: SpbRoutes.login,
       builder: (context, state) => const _LoginPage(),
+    ),
+    // 锁屏页同样在 shell 之外：整屏页面，也不该占据任何标签的导航栈
+    // （解锁后「返回」不该回到锁屏页）。
+    GoRoute(
+      path: SpbRoutes.lock,
+      builder: (context, state) => const _SessionLockPage(),
     ),
     StatefulShellRoute.indexedStack(
       builder: (context, state, navigationShell) =>
@@ -317,6 +358,26 @@ class _LoginPage extends ConsumerWidget {
       // 邮箱 magic link：不依赖微信、也不要求走完浏览器 SSO 跳转。
       onEmailSignIn: (email, onSent) =>
           ref.read(authControllerProvider).emailSignIn(email, onSent),
+    );
+  }
+}
+
+/// 本机门禁锁屏页（issue #94）的接线。
+///
+/// 页面在 `spb_features`（可无插件测试），这里只把两个动作接到
+/// `AuthStateNotifier`：解锁走 [AuthStateNotifier.unlock]（内部会调
+/// `BiometricGate.authenticate` 并复用 `restore()` 读回会话），「改用登录」走
+/// `signOut()`——清凭证后守卫自动把人送到 `/login`。
+class _SessionLockPage extends ConsumerWidget {
+  const _SessionLockPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final policy = ref.watch(biometricLockPolicyProvider);
+    return SessionLockPage(
+      allowDeviceCredential: policy.allowDeviceCredential,
+      onUnlock: () => ref.read(authControllerProvider).unlock(),
+      onUseSignIn: () => ref.read(authControllerProvider).signOut(),
     );
   }
 }
@@ -684,6 +745,10 @@ class _SettingsTab extends ConsumerWidget {
       // 外观：选中即保存（不走 draft，见 SaveThemeMode 的说明）。
       loadThemeMode: ref.watch(loadThemeModeProvider),
       saveThemeMode: ref.watch(saveThemeModeProvider),
+      // 安全：本机门禁（issue #94）。移动端有指纹 / Face ID 的语义，
+      // 桌面端不注入（传 null → 不展示该区块）。
+      loadBiometricLock: ref.watch(loadBiometricLockStatusProvider),
+      saveBiometricLock: ref.watch(saveBiometricLockEnabledProvider),
       // 个人偏好：昵称 / 头像 / 回复语言 / 默认 Agent。
       //
       // 昵称回落值取自 `/api/auth/me` 的 name（服务端已按

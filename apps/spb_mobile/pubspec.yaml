@@ -58,6 +58,18 @@ dependencies:
   cupertino_icons: ^1.0.8
   app_links: ^7.2.1
 
+  # ---- 生物识别门禁（issue #94）----
+  #
+  # 与 fluwx 同一条理由：`spb_platform` 只放 `BiometricGate` 契约，插件声明
+  # 在本 App，桌面端构建不会被拖进移动端依赖。桥接见 `lib/biometric_gate.dart`。
+  #
+  # 3.x 的失败语义是**抛 `LocalAuthException`**（14 种错误码），不是返回
+  # false；映射集中在上面那个文件里，只有一处需要跟着插件升级改。
+  #
+  # 平台侧两个必需配置：Android `MainActivity` 继承 `FlutterFragmentActivity`；
+  # iOS Info.plist 声明 `NSFaceIDUsageDescription`。
+  local_auth: ^3.0.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

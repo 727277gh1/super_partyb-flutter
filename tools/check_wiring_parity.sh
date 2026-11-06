@@ -127,7 +127,17 @@ TARGETS = [
             },
             # 微信小程序订阅消息额度（AGENTS.md §6.9.1）：桌面端没有小程序
             # 运行环境，展示它无法兑现。
-            'mobile': {'loadNotifications', 'saveNotifications'},
+            #
+            # 生物识别解锁（AGENTS.md §6.71，issue #94）：桌面没有「应用层
+            # 门禁」的语义（系统锁屏 + 窗口在前台），`local_auth` 在 Linux
+            # 也没有实现；接上只会得到一个永远失败的开关。移动端注入真实
+            # 实现，桌面端传 null → 不展示该区块。
+            'mobile': {
+                'loadNotifications',
+                'saveNotifications',
+                'loadBiometricLock',
+                'saveBiometricLock',
+            },
         },
     },
 ]

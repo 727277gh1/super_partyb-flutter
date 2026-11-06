@@ -1,9 +1,7 @@
-import 'dart:async';
-
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 /// 邮箱 magic link 登录编排的测试。
 ///

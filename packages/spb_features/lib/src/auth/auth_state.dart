@@ -17,6 +17,19 @@ enum AuthStatus {
   /// 路由守卫在 [unknown] 时**不做任何重定向**（保持当前页，等判定结果）。
   unknown,
 
+  /// 有可用凭证，但**本机门禁未通过**（issue #94 的生物识别锁屏）。
+  ///
+  /// ## 为什么单列一个状态，而不是「未登录」
+  ///
+  /// 两者的**下一步完全不同**：未登录要去 IdP 换新凭证；locked 只需要在本机
+  /// 验证「你还是同一个人」，凭证就在手边（Keychain / Keystore 里的 refresh
+  /// token）。若混成「未登录」，锁屏页就会被渲染成登录页，用户看到的是
+  /// 「扫码 / 邮箱登录」——那正是本次要消除的体感，而且会让人误以为登录态
+  /// 丢了。也不能当成 authenticated：那样内容就直接可见了，门禁等于没有。
+  ///
+  /// 路由守卫据此把用户送到 `/lock`，而不是 `/login`。
+  locked,
+
   /// 有可用凭证。
   authenticated,
 
@@ -36,11 +49,16 @@ class AuthState {
   final String? message;
 
   static const unknown = AuthState();
+  static const locked = AuthState(status: AuthStatus.locked);
   static const authenticated = AuthState(status: AuthStatus.authenticated);
   static const unauthenticated = AuthState(status: AuthStatus.unauthenticated);
 
   bool get isAuthenticated => status == AuthStatus.authenticated;
+
   bool get isUnauthenticated => status == AuthStatus.unauthenticated;
+
+  /// 有凭证但本机门禁未通过（见 [AuthStatus.locked]）。
+  bool get isLocked => status == AuthStatus.locked;
 
   /// 带错误消息的未认证状态。
   factory AuthState.failed(String message) =>

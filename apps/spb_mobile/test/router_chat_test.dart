@@ -825,6 +825,9 @@ void main() {
           tokenStoreProvider.overrideWithValue(store),
           // 不真发 HTTP：直接返回一份「真实形态」的 token 响应。
           oidcClientProvider.overrideWithValue(FakeOidcClient()),
+          // 启动判定会读「生物识别解锁」偏好（drift → path_provider）。本用例
+          // 只关心回调落盘的是哪个字段，不需要真库——显式关掉门禁。
+          biometricLockEnabledProvider.overrideWith((ref) async => false),
         ],
       );
       addTearDown(container.dispose);

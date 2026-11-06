@@ -20,6 +20,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
+import 'biometric_gate.dart';
 import 'miniprogram_signin.dart';
 import 'wechat_open_sdk.dart';
 
@@ -82,6 +83,9 @@ List<Override> buildProductionOverrides() {
   return [
     // 本地通知（issue #21）。漏了这一行 = 通知功能整条静默失效。
     notificationSinkProvider.overrideWithValue(LocalNotificationSink()),
+    // 生物识别门禁（issue #94）。漏了这一行 = 设置页的开关打开后永远
+    // 「设备不可用」，门禁静默失效（默认实现是 `UnsupportedBiometricGate`）。
+    biometricGateProvider.overrideWithValue(LocalAuthBiometricGate()),
   ];
 }
 
@@ -505,12 +509,246 @@ final authStateProvider = NotifierProvider<AuthStateNotifier, AuthState>(
   AuthStateNotifier.new,
 );
 
+/// 生物识别门禁（issue #94）。
+///
+/// 默认 [UnsupportedBiometricGate]（「永不通过」），生产由
+/// [buildProductionOverrides] 覆盖为 [LocalAuthBiometricGate]。
+///
+/// ## 为什么默认是「不支持」而不是「假装通过」
+///
+/// 测试与「误装配」两种情况都会落到默认值。若默认实现直接放行，桌面端或某个
+/// 忘了覆盖的测试就会静默跳过门禁——门禁类功能最危险的失败方向就是「看起来
+/// 有，实际没有」。默认返回 unavailable 会让它退化成「走完整登录」，那是安全
+/// 的一侧。
+final biometricGateProvider = Provider<BiometricGate>((ref) {
+  return const UnsupportedBiometricGate();
+});
+
+/// 门禁策略（宽限期 30 秒 / 允许降级到设备密码）。
+final biometricLockPolicyProvider = Provider<BiometricLockPolicy>((ref) {
+  return const BiometricLockPolicy();
+});
+
+/// 「生物识别解锁」开关（偏好库里的一个布尔，默认关）。
+///
+/// ## 为什么内部吞掉读库异常
+///
+/// 读偏好要走 drift（`path_provider` 拿目录 → 开库）。这一步在**测试**里必然
+/// 抛 `MissingPluginException`，在真机上也可能因沙盒/权限失败。让它冒出去会
+/// 变成「启动时一个未处理的 Provider 异常」，而正确的降级是明确的：
+/// **读不到偏好就当没开**（不锁用户，门禁退化到「完整登录」那一侧）。
+final biometricLockEnabledProvider = FutureProvider<bool>((ref) async {
+  try {
+    final prefs = ref.watch(preferencesStoreProvider);
+    return await prefs.getBool(
+      BiometricLockPolicy.preferenceKey,
+      defaultValue: BiometricLockPolicy.enabledByDefault,
+    );
+  } catch (e) {
+    SpbLog.warn('读取生物识别解锁偏好失败，按默认值处理', {'error': e.toString()});
+    return BiometricLockPolicy.enabledByDefault;
+  }
+});
+
+/// 保存「生物识别解锁」开关。
+///
+/// 写完 `invalidate` 偏好 provider：`AuthStateNotifier` 在
+/// `ref.listen(biometricLockEnabledProvider)` 里缓存这份值，用来判断「回到
+/// 前台要不要重新上锁」。不 invalidate 的话，用户刚在设置页关掉开关，切一次
+/// 后台回来仍会被要求解锁——那会让人以为设置没生效。
+final saveBiometricLockEnabledProvider = Provider<Future<void> Function(bool)>((
+  ref,
+) {
+  return (enabled) async {
+    await ref
+        .read(preferencesStoreProvider)
+        .setBool(BiometricLockPolicy.preferenceKey, value: enabled);
+    // 同步更新缓存：`_onFocusChanged` 必须**同步**判断要不要上锁（异步读库
+    // 会晚一帧，内容先闪一下再被挡住），故这里直接把值推进 notifier。
+    ref.read(authStateProvider.notifier).setLockEnabled(enabled);
+    // 让设置页下次读到新值（它会 `read(...future)`，不 invalidate 会拿到旧值）。
+    ref.invalidate(biometricLockEnabledProvider);
+  };
+});
+
+/// 设置页的「生物识别解锁」状态（开关 + 设备可用性）。
+final loadBiometricLockStatusProvider =
+    Provider<Future<BiometricLockStatus> Function()>((ref) {
+      return () async {
+        final enabled = await ref.read(biometricLockEnabledProvider.future);
+        final availability = await ref
+            .read(biometricGateProvider)
+            .availability();
+        return BiometricLockStatus(
+          enabled: enabled,
+          availability: availability,
+          gracePeriod: ref.read(biometricLockPolicyProvider).gracePeriod,
+        );
+      };
+    });
+
 /// 认证状态控制器（与桌面端同构，见桌面 `providers.dart` 的详细说明）。
 class AuthStateNotifier extends Notifier<AuthState> {
+  /// 「生物识别解锁」偏好（缓存一份，供前台回切时同步判断）。
+  ///
+  /// 刻意不在回切时 `await` 读库：那时判断必须**同步**得出结果（晚一帧再上锁
+  /// 会让内容闪一下），而读偏好是异步的。故监听偏好 provider，把最新值缓存在
+  /// 这里，`_onFocusChanged` 只用缓存。
+  bool _lockEnabled = BiometricLockPolicy.enabledByDefault;
+
+  /// 上次进入后台的时刻（null = 当前在前台）。
+  DateTime? _backgroundedAt;
+
   @override
   AuthState build() {
-    unawaited(restore());
+    // 回前台重新上锁（issue #94）。挂在 `windowFocusedProvider` 而非直接
+    // `WidgetsBindingObserver`：本 Provider 不该关心平台生命周期细节，而
+    // 「是否在前台」已经被通知模块归一过一次（见 `_LifecycleFocusObserver`）。
+    ref.listen(
+      windowFocusedProvider,
+      (previous, next) => _onFocusChanged(next),
+    );
+    unawaited(_bootstrap());
     return AuthState.unknown;
+  }
+
+  /// 启动判定：先看要不要上锁，再决定是否恢复会话。
+  ///
+  /// ## 为什么不能直接 `restore()`
+  ///
+  /// `restore()` 会拿 `currentAccessToken()`——它在 token 过期时会**触发网络
+  /// 刷新**。门禁要挡的正是「拿到手机的人」，若先换了新 token 再挡，凭证已经
+  /// 在刷新链路里用掉了。故先用 `TokenStore.read()` 只读本地判断「有没有凭证」
+  /// （不发请求），有才上锁。
+  Future<void> _bootstrap() async {
+    StoredTokens? stored;
+    try {
+      stored = await ref.read(tokenStoreProvider).read();
+    } on SpbError catch (e) {
+      // 安全存储读不出来：按未登录处理，并让用户看到原因（而不是白屏）。
+      SpbLog.warn('读取本地凭证失败', {'error': e.toString()});
+      if (ref.mounted) state = AuthState.failed(e.message);
+      return;
+    }
+    // 启动判定是**异步**的，期间容器可能已被释放（widget 测试里很常见：
+    // 断言完就 dispose）。此后再 `ref.read` / 写 `state` 会抛
+    // 「Cannot use the Ref ... after it has been disposed」，而这条异常没有任何
+    // 调用方能接到（它挂在 `unawaited` 的 future 上）。
+    if (!ref.mounted) return;
+    if (stored == null) {
+      // 只在「还没判定」时写入：启动判定与深链回调 / 登录动作是并发的，
+      // 回调可能已经先把状态推进到已登录（那条路径上 token 是刚落盘的，
+      // 本方法读到的是「落盘之前」的快照）。无条件覆盖会把刚登录的用户
+      // 踢回登录页——与 `signIn()` 里「别把已登录改回未判定」同一条防线。
+      if (state.status == AuthStatus.unknown) {
+        state = AuthState.unauthenticated;
+      }
+      return;
+    }
+    final needGate = await _gateRequired();
+    if (!ref.mounted) return;
+    if (needGate) {
+      if (state.status == AuthStatus.unknown) state = AuthState.locked;
+      return;
+    }
+    await restore();
+  }
+
+  /// 现在是否需要先过本机门禁。
+  ///
+  /// 三个条件：用户开着开关、设备能验证、当前确实有已登录用户。第三点在
+  /// 调用方判过（有凭证），此处只判前两条。
+  Future<bool> _gateRequired() async {
+    bool enabled;
+    try {
+      enabled = await ref.read(biometricLockEnabledProvider.future);
+    } catch (e) {
+      // 偏好读不出来 → 不上锁。门禁读不到就锁死会把用户永久挡在门外，
+      // 而「漏锁一次」的代价远小于「用不了应用」。
+      SpbLog.warn('读取生物识别解锁偏好失败', {'error': e.toString()});
+      return false;
+    }
+    if (!ref.mounted) return false;
+    _lockEnabled = enabled;
+    if (!enabled) return false;
+    final availability = await ref.read(biometricGateProvider).availability();
+    if (!ref.mounted) return false;
+    if (availability != BiometricAvailability.available) {
+      // 开关开着但设备现在不可用（删了指纹、换了设备、插件缺失）：
+      // 放行到登录态并记日志。不能把人锁在外面，也不能假装验证过。
+      SpbLog.warn('已开启生物识别解锁，但本机验证不可用', {'availability': availability.name});
+      return false;
+    }
+    return true;
+  }
+
+  /// 前台/后台切换。
+  void _onFocusChanged(bool focused) {
+    if (!focused) {
+      _backgroundedAt ??= DateTime.now();
+      return;
+    }
+    final since = _backgroundedAt;
+    _backgroundedAt = null;
+    if (since == null) return;
+    final policy = ref.read(biometricLockPolicyProvider);
+    if (!shouldLockOnResume(
+      enabled: _lockEnabled,
+      // 只锁「已登录」：未判定 / 未登录时本来就看不到内容；正在走 OIDC 回调
+      // （`unknown`）时也不该被一道验证框打断。
+      authenticated: state.isAuthenticated,
+      backgrounded: DateTime.now().difference(since),
+      gracePeriod: policy.gracePeriod,
+    )) {
+      return;
+    }
+    lock();
+  }
+
+  /// 更新「生物识别解锁」缓存（设置页保存后由
+  /// [saveBiometricLockEnabledProvider] 推进来）。
+  ///
+  /// ## 为什么不用 `ref.listen(biometricLockEnabledProvider)`
+  ///
+  /// `ref.listen` 会**立刻挂载**偏好 provider（Riverpod 3 的行为），于是每次
+  /// 构造认证状态都要开一次 drift 库——测试里必抛、真机上是白付一次 I/O。
+  /// 改由写入方显式推送：只有一个写入点，不需要订阅。
+  void setLockEnabled(bool enabled) => _lockEnabled = enabled;
+
+  /// 立刻上锁（冷启动门禁与回前台门禁共用）。
+  void lock() {
+    if (!state.isAuthenticated) return;
+    state = AuthState.locked;
+  }
+
+  /// 过本机门禁（锁屏页调用）。
+  ///
+  /// ## 只在成功时恢复会话
+  ///
+  /// 失败返回原因，**不**在这里清凭证：清凭证应当由用户在锁屏页明确选择
+  /// 「改用登录」（`signOut()`）。自动清掉会在「指纹传感器临时不可用」这类
+  /// 场景下把用户刚登录的会话销毁——代价远大于多显示一次锁屏页。
+  ///
+  /// `lockedOut` / `unavailable` 交给页面处理：锁屏页据此隐藏「解锁」按钮、
+  /// 只留「重新登录」，这就是 issue #94 说的「失败次数上限后强制走完整登录」，
+  /// 但把最终决定权留给用户。
+  Future<BiometricAuthOutcome> unlock() async {
+    if (!state.isLocked) return BiometricAuthOutcome.success;
+    final policy = ref.read(biometricLockPolicyProvider);
+    final outcome = await ref
+        .read(biometricGateProvider)
+        .authenticate(
+          reason: '解锁 Super PartyB',
+          allowDeviceCredential: policy.allowDeviceCredential,
+        );
+    if (outcome == BiometricAuthOutcome.success) {
+      // 复用 restore：它会真实读回 token（顺带处理过期刷新），避免造出
+      // 「界面已登录、请求全 401」的假状态。
+      await restore();
+      // restore 失败（凭证其实已失效）时它会置为未登录 / 失败态，
+      // 路由守卫会把人送到登录页——这里不再覆盖它。
+    }
+    return outcome;
   }
 
   /// 从安全存储恢复登录态。
@@ -518,8 +756,10 @@ class AuthStateNotifier extends Notifier<AuthState> {
     final manager = ref.read(sessionManagerProvider);
     try {
       final token = await manager.currentAccessToken();
+      if (!ref.mounted) return;
       if (token == null) {
         final leftover = await ref.read(tokenStoreProvider).read();
+        if (!ref.mounted) return;
         if (leftover != null) await manager.logout();
         state = AuthState.unauthenticated;
         return;
@@ -527,6 +767,7 @@ class AuthStateNotifier extends Notifier<AuthState> {
       state = AuthState.authenticated;
     } on SpbError catch (e) {
       SpbLog.warn('恢复登录态失败', {'error': e.toString()});
+      if (!ref.mounted) return;
       state = AuthState.failed(e.message);
     }
   }
@@ -752,6 +993,7 @@ final authControllerProvider = Provider<AuthActions>((ref) {
     wechatSignIn: () => ref.read(authStateProvider.notifier).wechatSignIn(),
     emailSignIn: (email, onSent) =>
         ref.read(authStateProvider.notifier).emailSignIn(email, onSent),
+    unlock: () => ref.read(authStateProvider.notifier).unlock(),
   );
 });
 
@@ -763,6 +1005,7 @@ class AuthActions {
     required this.importSession,
     required this.wechatSignIn,
     required this.emailSignIn,
+    required this.unlock,
   });
 
   final Future<String?> Function() signIn;
@@ -777,6 +1020,9 @@ class AuthActions {
   /// 邮箱 magic link 登录，见 [AuthStateNotifier.emailSignIn]。
   final Future<String?> Function(String email, void Function() onSent)
   emailSignIn;
+
+  /// 过本机门禁（issue #94），见 [AuthStateNotifier.unlock]。
+  final Future<BiometricAuthOutcome> Function() unlock;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。

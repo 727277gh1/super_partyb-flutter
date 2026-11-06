@@ -619,7 +619,14 @@ void main() {
       // 走**真实实现**，再把它的适配器换成「一律 401」。
       final store = InMemoryTokenStore(freshTokens());
       final container = ProviderContainer(
-        overrides: [tokenStoreProvider.overrideWithValue(store)],
+        overrides: [
+          tokenStoreProvider.overrideWithValue(store),
+          // 启动判定会读「生物识别解锁」偏好（走 drift → path_provider）。
+          // 这个容器只关心认证/拦截器接线，不需要真库，显式关掉门禁即可
+          // （不覆盖会抛 MissingPluginException，且 drift 的 LazyDatabase 会
+          // 把它当未处理异步错误再报一次）。
+          biometricLockEnabledProvider.overrideWith((ref) async => false),
+        ],
       );
       addTearDown(container.dispose);
 

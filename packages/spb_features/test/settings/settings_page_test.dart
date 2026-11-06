@@ -30,6 +30,7 @@ const _gidB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
   _themeModeTests();
   _userPreferencesTests();
+  _biometricLockTests();
 
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
@@ -1784,6 +1785,133 @@ void _userPreferencesTests() {
       await tester.pumpAndSettle();
 
       expect(find.text('写作助手'), findsWidgets);
+    });
+  });
+}
+
+/// 设置页的「生物识别解锁」开关（issue #94）。
+///
+/// ## 这个测试防的是什么
+///
+/// 门禁开关有三个容易写歪的地方，且都**不会报错**：
+///
+/// 1. 设备不可用却把开关画成「可用」——用户打开后每次解锁都失败；
+/// 2. 读不到状态时回落成「已关闭」——用户以为门禁确实关着；
+/// 3. 保存失败却把开关留在新位置——界面显示「已开启」，实际没生效。
+void _biometricLockTests() {
+  Future<void> pumpLock(
+    WidgetTester tester, {
+    Future<BiometricLockStatus> Function()? load,
+    Future<void> Function(bool)? save,
+  }) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          desktopInfo: DesktopIntegrationInfo.hidden,
+          loadBiometricLock: load,
+          saveBiometricLock: save,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  group('设置页：生物识别解锁', () {
+    testWidgets('未注入时不展示该区块（桌面端）', (tester) async {
+      await pumpLock(tester);
+
+      expect(find.byKey(const ValueKey('settings-security')), findsNothing);
+      expect(find.text('生物识别解锁'), findsNothing);
+    });
+
+    testWidgets('可用 + 关闭：开关可点，点击即保存并回显', (tester) async {
+      final saved = <bool>[];
+      await pumpLock(
+        tester,
+        load: () async => const BiometricLockStatus(
+          enabled: false,
+          availability: BiometricAvailability.available,
+        ),
+        save: (enabled) async => saved.add(enabled),
+      );
+
+      expect(find.byKey(const ValueKey('settings-security')), findsOneWidget);
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-biometric-lock')),
+      );
+      expect(tile.value, isFalse, reason: '前置条件：初始为关闭');
+      expect(tile.onChanged, isNotNull, reason: '设备可用时开关必须可点');
+
+      await tester.tap(find.byKey(const ValueKey('settings-biometric-lock')));
+      await tester.pumpAndSettle();
+
+      expect(saved, [true]);
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('settings-biometric-lock')),
+            )
+            .value,
+        isTrue,
+        reason: '乐观更新：开关要立刻跟手',
+      );
+    });
+
+    testWidgets('设备不可用：开关禁用，并说明具体原因', (tester) async {
+      await pumpLock(
+        tester,
+        load: () async => const BiometricLockStatus(
+          enabled: false,
+          availability: BiometricAvailability.noCredentials,
+        ),
+        save: (_) async {},
+      );
+
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('settings-biometric-lock')),
+      );
+      expect(tile.onChanged, isNull, reason: '点不动的开关不能给点击回调');
+      expect(
+        tester.widget<Text>(find.textContaining('未录入')).data,
+        contains('未录入指纹'),
+      );
+    });
+
+    testWidgets('保存失败：开关回滚到原值（不显示一个假的门禁）', (tester) async {
+      await pumpLock(
+        tester,
+        load: () async => const BiometricLockStatus(
+          enabled: false,
+          availability: BiometricAvailability.available,
+        ),
+        save: (_) async => throw StateError('写偏好失败'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-biometric-lock')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(const ValueKey('settings-biometric-lock')),
+            )
+            .value,
+        isFalse,
+        reason: '落盘失败还显示「已开启」，等于骗用户手机在保护他',
+      );
     });
   });
 }
