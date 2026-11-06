@@ -72,6 +72,7 @@ export 'pending_confirmations_page.dart';
 export 'search_page.dart';
 export 'spec_ui_card.dart';
 export 'thought_tile.dart';
+export 'thumbnail_memo.dart';
 export 'tool_call_batch_card.dart';
 export 'tool_call_tile.dart';
 export 'turn_detail_panel.dart';

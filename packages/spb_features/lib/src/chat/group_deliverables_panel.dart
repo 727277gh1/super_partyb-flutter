@@ -173,6 +173,13 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
     return _localPaths[node.file.id];
   }
 
+  /// 内存账本登记令牌（[MemoryLedger.register] 的返回值）。
+  ///
+  /// 交付物清单是「按 group 全量拉取」的（生产单 group 可达 5666 个文件），
+  /// 故它必须出现在诊断报告的内存分解里——否则「打开交付物面板后 RSS 跳升」
+  /// 只能靠猜。读数闭包捕获本 State，**必须**在 [dispose] 里注销。
+  int? _ledgerToken;
+
   /// 是否至少有一个动作回调（决定行尾菜单是否渲染）。
   bool get _hasAnyAction =>
       widget.onDownload != null ||
@@ -185,7 +192,24 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
   @override
   void initState() {
     super.initState();
+    _ledgerToken = MemoryLedger.register(
+      name: 'deliverables.panel',
+      label: '交付物面板清单',
+      // 估算口径：清单条目 + 已构建的可见行（行缓存是懒的，折叠子树不进行）。
+      // 字节数不估算（节点持有的是路径字符串与 UFS 元数据，逐项精确统计
+      // 的收益不抵复杂度），报告里只体现「多少项」。
+      read: () =>
+          MemoryGauge(count: _entries.length + _rowsCache.length, bytes: 0),
+      warnCount: 2000,
+    );
     _load();
+  }
+
+  @override
+  void dispose() {
+    final token = _ledgerToken;
+    if (token != null) MemoryLedger.unregister(token);
+    super.dispose();
   }
 
   @override

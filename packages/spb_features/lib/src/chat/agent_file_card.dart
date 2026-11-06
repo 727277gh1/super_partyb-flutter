@@ -132,10 +132,14 @@ class _AgentFileCardState extends State<AgentFileCard> {
     // 三个判据缺一不可：
     //   - `id` 是归约层的稳定身份（归一化相对路径），换文件时它一定变；
     //   - `ufsFileId` 是远端文件 id，同一路径被新版本覆盖时它会变；
-    //   - `isDeleted` 翻转需要重新走一遍（删掉后不该继续展示旧缩略图）。
+    //   - `isDeleted` 翻转需要重新走一遍（删掉后不该继续展示旧缩略图）；
+    //   - `contentRevision` 覆盖「id 不变、内容变」（docs/memory-audit.md G8 /
+    //     issue #70）：UFS 覆盖写不换 id，只靠前三条会一直展示旧缩略图。
+    //     ⚠️ 页面层的 `_thumbnailMemo` 用同一个令牌逐出，两边必须一致。
     if (oldWidget.file.id != f.id ||
         oldWidget.file.ufsFileId != f.ufsFileId ||
-        oldWidget.file.isDeleted != f.isDeleted) {
+        oldWidget.file.isDeleted != f.isDeleted ||
+        oldWidget.file.contentRevision != f.contentRevision) {
       _thumbnail = null;
       if (!_loadingThumb) _maybeLoadThumbnail();
     }

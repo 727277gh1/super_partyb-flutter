@@ -944,6 +944,27 @@ final class AgentFileItem extends ConversationItem {
   /// 是否已被删除（UFS 软删，下载入口应禁用）。
   bool get isDeleted => action == 'deleted';
 
+  /// 内容修订令牌：判断「同一个 `ufsFileId` 下内容是否可能已变」。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// UFS 覆盖写是 `ReplaceContentAndCreateVersion`：**id 不变、内容变**
+  /// （生产数据：6948 个 group 文件里 4974 个 `updated_at > created_at`）。
+  /// 按 id 记忆化的缓存（对话页缩略图，docs/memory-audit.md G8 / issue #70）
+  /// 若只看 id，就会在覆盖写之后继续展示旧内容直到切对话。
+  ///
+  /// ## 为什么取这五个字段
+  ///
+  /// 它们都随 `agent.file.*` 事件更新，且 `_mergeAgentFile` 会保留最新非空值：
+  /// `action`（created/modified/deleted）、`modifiedAt`（modify 事件时间）、
+  /// `deletedAt`、`sizeBytes`、`mimeType`。**`createdAt` 故意不取**：归约时它
+  /// 锚定首次出现，覆盖写不会变（取了也检测不到变化）。
+  ///
+  /// 用 record 而不是拼字符串：`==` 是逐字段结构比较，不会因 `toString` 撞值
+  /// 而误判。
+  Object get contentRevision =>
+      (action, modifiedAt, deletedAt, sizeBytes, mimeType);
+
   /// 从一条 `agent.file.*` 事件构造文件项。
   ///
   /// ## 为什么需要它（而不是让调用方自己拼）

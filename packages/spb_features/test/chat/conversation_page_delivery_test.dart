@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 
@@ -166,6 +167,11 @@ void main() {
   });
 
   group('ConversationPage 文件卡缩略图透传', () {
+    // 内存账本是进程级单例：每条用例前后清空，避免上一个页面的登记项
+    // （若某条用例提前失败而没走到 dispose）影响「注销」断言。
+    setUp(MemoryLedger.reset);
+    tearDown(MemoryLedger.reset);
+
     /// 推一条 `agent.file.created`（形态照抄生产事件：snake_case 载荷）。
     Future<void> pushAgentFile(
       WidgetTester tester, {
@@ -377,6 +383,98 @@ void main() {
         reason:
             '卡片 State 被销毁重建，但页面层的 `_thumbnailMemo` 按 ufsFileId '
             '记忆化，故不该重拉；修复前这里会是 2 次',
+      );
+    });
+
+    testWidgets('同一 ufsFileId 被覆盖写（modified 事件）后重新拉缩略图', (tester) async {
+      // G8 / issue #70 的**正确性**那一半：UFS 覆盖写是「id 不变、内容变」，
+      // 键只有 ufsFileId 时旧缩略图会一直显示到切对话。修法是版本令牌
+      // （action + modifiedAt + deletedAt + sizeBytes + mimeType）。
+      final requested = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onLoadThumbnailAgentFile: (file) async {
+          requested.add(file.ufsFileId ?? '');
+          return null;
+        },
+      );
+      await pushAgentFile(tester);
+      expect(requested, ['ufs_1'], reason: '前置：首次挂载拉一次');
+
+      await pushEvent(
+        tester,
+        EventTypes.agentFileModified,
+        sseEvent(
+          EventTypes.agentFileModified,
+          id: 'e_file_mod',
+          seq: 2,
+          payload: {
+            'relative_path': 'grp_1/pic.png',
+            'ufs_file_id': 'ufs_1',
+            'mime_type': 'image/png',
+            'size_bytes': 2048,
+          },
+        ),
+      );
+
+      expect(requested, [
+        'ufs_1',
+        'ufs_1',
+      ], reason: '版本令牌变了必须重新请求，否则覆盖写后一直显示旧图');
+    });
+
+    testWidgets('删除事件逐出缩略图缓存（不白占字节）', (tester) async {
+      final requested = <String>[];
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(
+        tester,
+        onLoadThumbnailAgentFile: (file) async {
+          requested.add(file.ufsFileId ?? '');
+          return [1, 2, 3];
+        },
+      );
+      await pushAgentFile(tester);
+
+      int memoEntries() => MemoryLedger.snapshot()
+          .where((e) => e.name == 'conversation.thumbnails')
+          .fold<int>(0, (sum, e) => sum + e.count);
+
+      expect(memoEntries(), 1, reason: '前置：缓存里有一张缩略图');
+
+      await pushEvent(
+        tester,
+        EventTypes.agentFileDeleted,
+        sseEvent(
+          EventTypes.agentFileDeleted,
+          id: 'e_file_del',
+          seq: 2,
+          payload: {'relative_path': 'grp_1/pic.png', 'mime_type': 'image/png'},
+        ),
+      );
+
+      expect(memoEntries(), 0, reason: '被删的文件不再渲染缩略图，字节必须逐出（否则只能等切片/淘汰）');
+    });
+
+    testWidgets('页面销毁后注销内存账本读数（观测不得变成泄漏）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      expect(
+        MemoryLedger.registrationCount,
+        greaterThanOrEqualTo(3),
+        reason: '前置：缩略图/气泡/时间线三个读数已登记',
+      );
+
+      await tester.pumpWidget(const SizedBox());
+
+      expect(
+        MemoryLedger.registrationCount,
+        0,
+        reason: '读数闭包捕获页面 State：不注销就是把整页钉在内存里',
       );
     });
   });

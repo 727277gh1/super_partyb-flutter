@@ -29,6 +29,7 @@ import 'pending_messages_bar.dart';
 import 'perf_probe.dart';
 import 'row_locate_registry.dart';
 import 'thought_tile.dart';
+import 'thumbnail_memo.dart';
 import 'tool_call_batch_card.dart';
 import 'tool_call_tile.dart';
 import 'turn_status.dart';
@@ -728,6 +729,14 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 后出现的行渲染为空白（见该类的类文档）。
   final _rowKeys = RowLocateRegistry();
 
+  /// 内存账本登记令牌（[MemoryLedger.register] 的返回值）。
+  ///
+  /// 读数闭包捕获本 State，故每个令牌都**必须**在 [dispose] 里注销——
+  /// 否则页面销毁后账本仍钉着整页数据（观测变成泄漏）。
+  late final int _thumbnailGauge;
+  late final int _bubbleGauge;
+  late final int _timelineGauge;
+
   /// 缩略图字节的按文件记忆（`ufsFileId` → Future）。
   ///
   /// ## 为什么页面层还要再记一次（卡片自己已经缓存了）
@@ -759,26 +768,34 @@ class _ConversationPageState extends State<ConversationPage> {
   /// ——用 [ConversationPage.historyKey] 作信号（它的文档已说明「有效范围
   /// 是一个对话」），而不是 `widget.controller`（切 group 时那个实例不变）。
   ///
-  /// ## 已知边界：不随远端删除 / 版本覆盖失效
+  /// ## 有界 + 版本令牌（docs/memory-audit.md G8 / issue #70）
   ///
-  /// 键只有 `ufsFileId`，而它**不会**因「同一路径被新版本覆盖」而变——
-  /// 那种情况下本页会继续展示旧缩略图，直到切对话或重建页面。
-  /// （单卡自己的 `didUpdateWidget` 会把 `ufsFileId` 变化当作重拉信号，
-  /// 但走本方法时旧 Future 已经入缓存。）接受这个偏离的理由：
-  /// 文件卡的重建主要发生在**滚动**，而滚动恰恰是我们要去重的那个场景；
-  /// 而「图换了、缩略图没跟着换」是装饰层面的偏差（点开预览仍是新内容）。
-  /// 若要收紧，需把键改成 `ufsFileId` + `mtime`，但那要求事件载荷带 mtime
-  /// —— 服务端目前不发。
-  final Map<String, Future<List<int>?>> _thumbnailMemo = {};
+  /// 两件事都由 [ThumbnailMemo] 承担，**不要**退回裸 `Map`：
+  ///
+  /// 1. **有界**：条目数与字节数双上限（[kThumbnailMemoMaxEntries] /
+  ///    [kThumbnailMemoMaxBytes]），淘汰最旧写入。此前无上限，桌面端常驻
+  ///    进程里「滚过多少张图就留多少份字节」，生产单对话可达上千张。
+  /// 2. **版本失效**：UFS 覆盖写是「id 不变、内容变」，故键仍是 `ufsFileId`，
+  ///    但交给 [ThumbnailMemo.resolve] 的版本令牌是
+  ///    [AgentFileItem.contentRevision]（随 `action` / `modifiedAt` /
+  ///    `deletedAt` / `sizeBytes` / `mimeType` 变化）。令牌变了就逐出旧条目
+  ///    重新加载——修掉「覆盖写之后旧缩略图一直显示到切对话」。
+  ///    这不依赖服务端事件带 mtime/etag（`AgentFileItem` 本来就没有），
+  ///    只需要 `agent.file.modified` 事件本身（它会带新的 `modifiedAt`）。
+  ///
+  /// 删除事件由 [_evictThumbnailsOfDeletedFiles] 按 id 逐出：被删的卡不再
+  /// 渲染缩略图，留着字节只是白占。
+  final _thumbnailMemo = ThumbnailMemo();
 
-  /// 取缩略图字节（按 `ufsFileId` 记忆化）。
+  /// 取缩略图字节（按 `ufsFileId` + 版本令牌记忆化）。
   ///
   /// 只在已注入 `onLoadThumbnailAgentFile` 且该文件有 `ufsFileId` 时调用
   /// （判据与传 `null` 的那条一致，见 [_buildItem]）。
   Future<List<int>?> _loadThumbnailMemoized(AgentFileItem item) {
     final id = item.ufsFileId!;
-    return _thumbnailMemo.putIfAbsent(
+    return _thumbnailMemo.resolve(
       id,
+      item.contentRevision,
       () => widget.onLoadThumbnailAgentFile!(item),
     );
   }
@@ -945,6 +962,32 @@ class _ConversationPageState extends State<ConversationPage> {
     super.initState();
     _items = widget.controller.snapshot;
     _itemsSub = widget.controller.items.listen(_onItems);
+    // 内存账本（docs/memory-audit.md §四）：本页三个可再生态各报一行读数，
+    // 诊断报告与高水位日志据此回答「RSS 花在谁身上」。读数闭包捕获本 State，
+    // 故**必须**在 dispose 里注销（否则观测本身成了泄漏源）。
+    _thumbnailGauge = MemoryLedger.register(
+      name: 'conversation.thumbnails',
+      label: '对话页缩略图',
+      read: () => MemoryGauge(
+        count: _thumbnailMemo.length,
+        bytes: _thumbnailMemo.bytes,
+      ),
+      warnCount: kThumbnailMemoMaxEntries,
+      warnBytes: kThumbnailMemoMaxBytes,
+    );
+    _bubbleGauge = MemoryLedger.register(
+      name: 'conversation.bubbles',
+      label: '对话页气泡缓存',
+      read: () =>
+          MemoryGauge(count: _bubbleCache.length, bytes: _bubbleCacheBytes()),
+      warnCount: _bubbleCacheLimit,
+    );
+    _timelineGauge = MemoryLedger.register(
+      name: 'conversation.timeline',
+      label: '对话页时间线',
+      read: () => MemoryGauge(count: _items.length, bytes: _timelineBytes()),
+      warnCount: ChatStreamController.maxBufferEvents,
+    );
     _scrollController.addListener(_onScroll);
     _subscribeActivities();
     _subscribeContextUsage();
@@ -1159,6 +1202,9 @@ class _ConversationPageState extends State<ConversationPage> {
 
   @override
   void dispose() {
+    MemoryLedger.unregister(_thumbnailGauge);
+    MemoryLedger.unregister(_bubbleGauge);
+    MemoryLedger.unregister(_timelineGauge);
     _itemsSub?.cancel();
     _activitiesSub?.cancel();
     _contextUsageSub?.cancel();
@@ -1174,12 +1220,64 @@ class _ConversationPageState extends State<ConversationPage> {
   }
 
   void _onItems(List<ConversationItem> items) {
+    _evictThumbnailsOfDeletedFiles(items);
     setState(() => _items = items);
 
     if (_following) {
       // 等一帧：新项尚未布局完成，此时 maxScrollExtent 还是旧值。
       _scheduleFollowBottom();
     }
+  }
+
+  /// 逐出已被删除文件的缩略图（docs/memory-audit.md G8）。
+  ///
+  /// 删除事件本身不带 `ufsFileId`，但归约器 `_mergeAgentFile` 会保留创建时的
+  /// id，故合并后的 `AgentFileItem` 仍有 id。被删的卡不再渲染缩略图，留着
+  /// 字节只是白占——按 id 逐出是 O(1)，扫描是 O(条目数) 且只做 `isDeleted`
+  /// 判定（与每帧已有的展示行派生同量级）。
+  ///
+  /// 只在缓存非空时扫描：绝大多数对话没有任何图片交付物，不该为此付全表扫描。
+  void _evictThumbnailsOfDeletedFiles(List<ConversationItem> items) {
+    if (_thumbnailMemo.length == 0) return;
+    for (final item in items) {
+      if (item is! AgentFileItem || !item.isDeleted) continue;
+      final id = item.ufsFileId;
+      if (id != null && id.isNotEmpty) _thumbnailMemo.evict(id);
+    }
+  }
+
+  /// 气泡缓存里已解析正文的估算字节数（UTF-16：1 字符 = 2 字节）。
+  ///
+  /// 只算 [AssistantMessageBubble]（本页只缓存这一种）；其余类型不出现在
+  /// `_bubbleCache` 里，故无需分支。
+  int _bubbleCacheBytes() {
+    var chars = 0;
+    for (final entry in _bubbleCache.values) {
+      final widget = entry.widget;
+      if (widget is AssistantMessageBubble) chars += widget.text.length;
+    }
+    return chars * 2;
+  }
+
+  /// 时间线正文字符数的估算字节数（UTF-16）。
+  ///
+  /// 只统计带 `text` 的三类（用户/助手/思考）——文件卡、确认卡等持有的是
+  /// 结构化字段，量级远小于正文，逐项精确统计不值当。
+  int _timelineBytes() {
+    var chars = 0;
+    for (final item in _items) {
+      switch (item) {
+        case UserMessageItem(:final text):
+          chars += text.length;
+        case AssistantMessageItem(:final text):
+          chars += text.length;
+        case ThoughtItem(:final text):
+          chars += text.length;
+        default:
+          break;
+      }
+    }
+    return chars * 2;
   }
 
   /// 排一次「下一帧滚到底」（同一帧内重复请求只执行一次）。
