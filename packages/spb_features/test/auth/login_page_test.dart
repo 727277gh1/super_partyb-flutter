@@ -59,6 +59,11 @@ void main() {
       expect(find.textContaining('统一身份认证中心'), findsOneWidget);
     });
 
+    testWidgets('SSO 说明提到浏览器页的「用邮件登录」（否则用户不知道还有这条路）', (tester) async {
+      await pumpLogin(tester, onSignIn: () async => null);
+      expect(find.textContaining('用邮件登录'), findsOneWidget);
+    });
+
     testWidgets('默认不显示错误条', (tester) async {
       await pumpLogin(tester, onSignIn: () async => null);
       expect(find.byKey(const ValueKey('login-error')), findsNothing);

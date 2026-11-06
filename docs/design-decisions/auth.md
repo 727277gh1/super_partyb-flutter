@@ -417,6 +417,33 @@ loopback 端口。这也意味着 magic link 在桌面端不依赖「浏览器�
 进程」这条脆弱链路（Linux 无主流 webview 插件的历史问题，见
 `docs/rfc8252-loopback-signin.md`）。
 
+#### 浏览器半边：登录页的「用邮件登录」（IdP，2026-11）
+
+App 侧 magic link 只帮得到 App；而两端点「使用 SSO 登录」打开的是 IdP 登录页，
+在那里仍然只有密码。所以浏览器这半边单独实现了（id-provider `8f9c4b6`）：
+
+```
+登录页（底部 aux 链接）→ GET /idp/login/email?redirect_uri=…   输入邮箱
+  → POST /api/v1/auth/magic-link/browser  {email, redirect_uri}  发信
+  → 邮件链接 → 落地页点「确认登录」
+  → 在该浏览器签发 idp_access_token cookie，303 回 redirect_uri
+  → /oauth2/authorize 认出会话 → 302 客户端 redirect_uri?code=…
+```
+
+三个关键取舍：
+
+- **`returnTo` 存在服务端 entry 里，不进 URL**：确认后跳哪由服务端决定，
+  请求参数里没有任何可篡改的目标；写入时白名单校验（只允许站内相对路径，
+  挡 `//host`、CRLF、`javascript:`）。
+- **确认即建会话**（与 App 流程相反）：浏览器流程要的就是「在这个浏览器登录」，
+  否则 303 回授权端点会因为没有会话又被踢回登录页。App 流程仍然不设 cookie，
+  登录态只经 requestID + PKCE 兑换回发起的那台设备。
+- **两套文案共用一个链接**：落地页按 entry 里有没有 `returnTo` 切换文案
+  （「在这个浏览器登录」/「请回到应用」），而不是区分两套令牌。
+
+客户端侧只加了一行提示（登录页 SSO 按钮下方），因为入口在浏览器里，App 内
+没有可点的东西——这条路径的实现主体在 IdP。
+
 #### 部署前提
 
 1. **邮件渠道可用**：id-provider 的 `internal/mailer` 必须配置好（否则端点

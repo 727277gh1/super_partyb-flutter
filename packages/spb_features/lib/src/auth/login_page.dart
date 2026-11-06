@@ -388,8 +388,11 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                   const SizedBox(height: SpbSpacing.md),
                   Text(
-                    '登录将在系统浏览器中完成，'
-                    '完成后自动返回本应用（本地回环回调）。',
+                    // 提一句浏览器页里的免密入口：那是用户真正打开的那一页，
+                    // 只在 App 里写「用邮件登录」的话，从这里进 SSO 的人不会知道
+                    // 浏览器页上还有这条路。
+                    '登录将在系统浏览器中完成，完成后自动返回本应用。'
+                    '浏览器页也可选「用邮件登录」免密进入。',
                     textAlign: TextAlign.center,
                     style: textTheme.bodySmall?.copyWith(
                       color: scheme.onSurfaceVariant,
