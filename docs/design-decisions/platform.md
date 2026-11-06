@@ -662,10 +662,89 @@ Linux 上就多留 32px 空白——**正是本次要修的那个观感问题**�
 - **需真机验证**（本机无 `DISPLAY`，[§9](../development.md)）：`xvfb-run` 只能证明窗口能创建，
   证明不了「贴合后的高度看起来对」；Windows 的外框实测（`getSize` 与视图尺寸
   同一时刻）需在 Windows 上确认。
-- **贴合是「一帧后」生效**：窗口先按最小值出现，首帧布局完成后长到内容高度。
-  这一两帧内底部按钮可能被裁，或下方露出一条底色（故贴合模式下 Scaffold 用
-  不透明 `scheme.surface`，不透出窗口原生背景）。
+- **贴合发生在窗口可见之前**：进入悬浮模式时窗口是隐藏的（见本文件 §6.69），
+  内容高度的首次上报与 `setSize` 都在隐藏状态下完成，`revealOverlayMode` 才让
+  窗口出现——用户看不到「先小后长」。若首帧上报晚于 reveal（或上报失败），
+  兜底仍是「先最小值、下一次内容变化再长高」；此时下方可能露出一条底色，故
+  贴合模式下 Scaffold 用不透明 `scheme.surface`，不透出窗口原生背景。
 - **上限 480 是产品判断**：超过后内容区滚动而不是继续长高——否则拖入十几个
   附件会把悬浮窗拉长到盖住半个屏幕。
 - **不引入 `IntrinsicHeight`**：那能在一个布局 pass 内既「铺满视口」又「贴底」，
   但代价是额外测量与它的已知性能坑；这里用「两套布局 + 回调」换掉它。
+
+### 6.69 悬浮窗「不打扰」：进入时先缩小再跳、退出时弹出主窗口（2026-11）
+
+**症状**（Windows 用户报障）：
+
+1. 按 `Alt+Space`，先看到**主窗口被缩小、跳到别处**，然后才变成快捷输入窗；
+2. 记完关掉快捷窗，**原先的主窗口自己弹出来**，把正在用的应用顶掉。
+
+第 2 点把「快捷记一笔」变成了「切换应用」——与这个功能的全部意义相反。
+
+#### 根因：三处顺序/取舍错误，彼此独立
+
+| # | 位置 | 事实 |
+|---|---|---|
+| ① | `showWindow` | 先 `windowManager.show() + focus()`，再回调 `_onShowWindow` → `_navigateToRole`。于是「全尺寸主窗口到前台」是进入悬浮模式的**第一步**（快捷键与托盘「快速输入」都走这里） |
+| ② | `enterOverlayMode` | 在**可见**窗口上逐步改最小尺寸 → 尺寸 → 置顶 → 去任务栏 → 位置。每一步都立刻重绘：用户看到「缩小 → 跳位 → 被页面覆盖」三帧 |
+| ③ | `exitOverlayMode` | **无条件** `show() + focus()`；而且从未快照 `isVisible`，「进入前主窗口在托盘里」这个事实根本不存在 |
+
+#### 修法：先隐藏 → 改属性 → 导航 → 再显示；退出按「进入前的可见性」收尾
+
+| 位置 | 改动 |
+|---|---|
+| `showWindow` | `quickCapture` 且**尚未**处于悬浮模式时跳过预显示（窗口由下面的 reveal 负责出现）。已在悬浮模式时仍然 show+focus——用户再按一次快捷键就是「我要看到它」 |
+| `enterOverlayMode` | 快照新增 `wasVisible` / `wasMinimized`；**第一步 `hide()`**，之后所有属性改写都在隐藏状态下进行；不再 `show()` |
+| `revealOverlayMode`（新） | 导航之后、**等一帧**（`addPostFrameCallback`，120ms 超时兜底）再 `show() + focus()`：窗口一次成型地出现在用户面前 |
+| `exitOverlayMode({showMainWindow})` | 先 `hide()` → 还原属性 → 按进入前状态收尾：可见 → show+focus；最小化 → `minimize()`；隐藏 → **保持隐藏**。`showMainWindow: true` 用于「用户明确要求看某个页面」的路径 |
+
+#### 为什么「不显示」就等于「把焦点还回去」
+
+Windows 把前台窗口的隐藏当作一次激活移交：当前台窗口被隐藏时，系统激活 Z 序上的
+下一个窗口——对悬浮窗来说就是用户按 `Alt+Space` 之前正在用的那个应用。Linux
+（GTK + XFCE/KWin）同样把焦点退回上一个活动窗口。
+
+故**不需要**去抢焦点：既不调 `window_manager.blur()`（它的实现是「Z 序下一个可见
+窗口」，与系统自己做的事重合，还可能选中一个不相干的窗口），也不需要引 `win32` 的
+`SetForegroundWindow`（它有前台锁限制，在窗口已隐藏后常被系统拒绝）。
+
+#### 单窗口模型下做不到的事（别把它当缺口）
+
+**「可见、能打字、但不激活本进程」做不到。** 键盘输入只会送到前台窗口，
+`WS_EX_NOACTIVATE` 那种「不抢焦点的悬浮窗」只能显示不能输入。真要那样只能换
+`desktop_multi_window`——已否决（[§6.5](architecture.md)：每个窗口是独立 isolate，
+Riverpod / Dio / 认证状态都不共享，等于重做一遍装配）。
+
+所以这里的目标是**观感上的不打扰**：不给用户看中间态、退出后不留痕迹。
+
+#### 测试
+
+| 位置 | 钉住 |
+|---|---|
+| `apps/spb_desktop/test/overlay_window_mode_test.dart` | 通道级（mock `window_manager` + `screen_retriever`）：`hide` 早于任何改尺寸/位置；进入阶段**不** `show`；reveal 才 show+focus；退出四态（托盘→保持隐藏、可见→show、最小化→minimize、`showMainWindow:true`→强制 show）；`showWindow(quickCapture)` 未进入时不预显示、已进入时仍 show（11 条） |
+| `apps/spb_desktop/test/desktop_integration_test.dart` | 接线级：**先导航后显示**（时间线断言）；`leaveOverlay` 传 `showMainWindow: false`；切到设置传 `true` |
+
+#### 反向验证（实测）
+
+| 改坏 | 失败用例（实测） |
+|---|---|
+| `showWindow` 恢复无条件预显示 | 通道级 **1** 条 |
+| 进入时不 `hide()`（在可见窗口上改属性） | 通道级 **1** 条 |
+| 退出恢复无条件 `show()+focus()` | 通道级 **2** 条（托盘/最小化） |
+| router 删掉 `revealOverlayMode` 调用 | 接线级 **1** 条 |
+| reveal 挪到导航**之前** | 接线级 **1** 条 |
+| 切页面退出不传 `showMainWindow: true` | 接线级 **1** 条 |
+
+#### 已知边界
+
+- **需真机验证**（本机无 Windows/`DISPLAY`）：①「先隐藏再显示」后，用户是否真的
+  看不到中间态；② 退出后焦点是否回到原应用。诊断线索：日志
+  `退出悬浮输入窗模式 {restore: show|minimize|stay_hidden, was_visible: …}`。
+- **隐藏窗口上是否照常产帧**属引擎/窗口系统细节（Windows 通常照常），故 reveal 前
+  等一帧有 120ms 超时兜底：押死「等帧」的风险是窗口永不出现，那比「一帧旧内容」
+  严重得多。
+- **失败路径仍然会显示窗口**：`enterOverlayMode` 失败时 `_rollbackOverlay()` 无条件
+  `show()`。理由是「按了快捷键什么都没发生」比「意外弹出主窗口」更难排查；
+  进入失败本身已是异常路径。
+- **进入前最小化**的状态还原用 `minimize()`（不经过 `show()`），若某平台对隐藏窗口
+  的 `minimize()` 无效果，结果是「窗口留在托盘里」——仍然是「不打扰」的方向。

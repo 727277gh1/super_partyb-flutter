@@ -70,16 +70,41 @@ class _WiringCapabilities
   Future<bool> enterOverlayMode(WindowSpec spec) async {
     if (_overlayActive) return true;
     enteredSpecs.add(spec);
+    events?.add('enter');
     if (!enterSucceeds) return false;
     _overlayActive = true;
     return true;
   }
 
+  /// 「显示悬浮窗」请求次数（enter 之后、由 router 触发的那次显示）。
+  int revealCalls = 0;
+
+  /// 事件顺序记录（仅在用例注入时写）。
+  ///
+  /// 「先导航、后显示」只能靠**顺序**验证：两个动作单独看都对，顺序反了才会
+  /// 让用户先看到主界面被压成小窗。
+  List<String>? events;
+
   @override
-  Future<void> exitOverlayMode() async {
+  Future<void> revealOverlayMode() async {
+    if (!_overlayActive) return;
+    revealCalls++;
+    events?.add('reveal');
+  }
+
+  /// 每次退出时的 `showMainWindow` 取值（按顺序）。
+  ///
+  /// 「记完了回到原应用」与「用户要求看主窗口」是两条不同语义，接线接错
+  /// 不会有任何报错——只表现为焦点被抢走，故必须钉住。
+  final exitShowMainWindow = <bool>[];
+
+  @override
+  Future<void> exitOverlayMode({bool showMainWindow = false}) async {
     if (!_overlayActive) return;
     _overlayActive = false;
     exitCalls++;
+    exitShowMainWindow.add(showMainWindow);
+    events?.add('exit');
   }
 
   /// 收到的贴合请求（内容高度，按顺序）。
@@ -560,6 +585,66 @@ void main() {
 
       expect(caps.isOverlayModeActive, isFalse);
       expect(caps.exitCalls, 1);
+    });
+
+    testWidgets('先导航到悬浮页、再显示窗口（否则先闪一帧被压小的主界面）', (tester) async {
+      final caps = _WiringCapabilities();
+      final events = <String>[];
+      caps.events = events;
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      // 导航也要进同一条时间线，才能断言「显示晚于导航」。
+      router.routerDelegate.addListener(() {
+        events.add('nav:${router.state.uri.path}');
+      });
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      expect(caps.revealCalls, 1, reason: '进入后必须有人把它显示出来');
+      final navAt = events.indexOf('nav:${SpbRoutes.overlay}');
+      expect(navAt, greaterThanOrEqualTo(0));
+      expect(
+        events.indexOf('reveal'),
+        greaterThan(navAt),
+        reason: '显示早于导航 = 用户先看到主界面被压成 720 宽的小窗（2026-11 报障）',
+      );
+    });
+
+    testWidgets('记完关窗 → 退出时**不**强制显示主窗口（回到原来那个应用）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      final integration = DesktopIntegration(capabilities: caps, router: router)
+        ..attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      await integration.leaveOverlay();
+
+      expect(caps.exitShowMainWindow, [
+        false,
+      ], reason: '从别的应用按 Alt+Space 记一笔的人，不该被主窗口抢走焦点');
+    });
+
+    testWidgets('从悬浮窗切到设置 → 退出时强制显示主窗口（否则「点了没反应」）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      caps.showCallback!(WindowRole.quickCapture);
+      await tester.pumpAndSettle();
+
+      caps.showCallback!(WindowRole.settings);
+      await tester.pumpAndSettle();
+
+      expect(caps.exitShowMainWindow, [true]);
     });
   });
 

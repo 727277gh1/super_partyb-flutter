@@ -322,11 +322,27 @@ class PlatformDesktopCapabilities
     // 不走 Dart catch，若死在 show()/focus() 里，没有这行就分不清
     // 「死在导航前」还是「死在属性改写中」。
     SpbLog.info('窗口显示请求', {'role': role.name});
-    try {
-      await windowManager.show();
-      await windowManager.focus();
-    } catch (e) {
-      SpbLog.warn('显示窗口失败', {'role': role.name, 'error': '$e'});
+
+    // ## 为什么悬浮窗不走这里的 show()
+    //
+    // 悬浮窗自己负责「出现」：`enterOverlayMode` 先把窗口隐藏，`revealOverlayMode`
+    // 在悬浮页布局完成后才显示。若这里先 show()，用户会先看到一个全尺寸的主
+    // 窗口、然后它被压成 720 宽的小窗、再跳到悬浮位置——2026-11 报障的
+    // 「先缩小主窗口再跳成快捷窗口」就是这三帧（快捷键与托盘「快速输入」都走
+    // 这里）。
+    //
+    // 已处于悬浮模式时例外：那种情况窗口本来就是悬浮形态，需要真的把它提到
+    // 前台（用户再按一次 Alt+Space 就是「我要看到它」）。
+    final revealedByOverlay =
+        role == WindowRole.quickCapture && !isOverlayModeActive;
+
+    if (!revealedByOverlay) {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (e) {
+        SpbLog.warn('显示窗口失败', {'role': role.name, 'error': '$e'});
+      }
     }
     // 路由切换由上层负责（本层不依赖 go_router）。
     _onShowWindow?.call(role);
@@ -945,6 +961,24 @@ class PlatformDesktopCapabilities
   bool _preOverlaySkipTaskbar = false;
   bool _preOverlayResizable = true;
 
+  /// 进入悬浮模式前，主窗口是否**可见**。
+  ///
+  /// ## 为什么必须记下来（2026-11 报障的直接根因）
+  ///
+  /// 这个应用默认「关窗即隐藏到托盘」，因此最常见的唤起场景是：主窗口在托盘
+  /// 里，用户正在**别的应用**里，按 `Alt+Space` 记一笔。退出时若无条件
+  /// `show()`，用户会猝不及防地被一个全尺寸的主窗口抢走焦点——那是把「快捷
+  /// 记一笔」变成了「切换应用」，与这个功能的全部意义相反。
+  ///
+  /// 故退出时的默认行为是**回到进入前的可见性**，而不是「总是显示」。
+  bool _preOverlayWasVisible = true;
+
+  /// 进入悬浮模式前，主窗口是否**最小化**（最小化也算可见）。
+  ///
+  /// 最小化时把它 `show()` 出来同样是抢焦点，故退出时用 `minimize()` 还原
+  /// 到最小化态，而不是还原成大窗口。
+  bool _preOverlayWasMinimized = false;
+
   /// 本轮**已成功执行**的改写步骤（失败时据此逆序回滚）。
   ///
   /// ## 为什么必须记下来，而不是「回滚时全部重设一遍」
@@ -995,6 +1029,10 @@ class PlatformDesktopCapabilities
       _preOverlayAlwaysOnTop = await windowManager.isAlwaysOnTop();
       _preOverlaySkipTaskbar = await windowManager.isSkipTaskbar();
       _preOverlayResizable = await windowManager.isResizable();
+      // 可见性/最小化也必须快照：退出时据此决定「显示主窗口」还是
+      // 「留在托盘里把前台还回去」（见 `_preOverlayWasVisible` 的文档）。
+      _preOverlayWasVisible = await windowManager.isVisible();
+      _preOverlayWasMinimized = await windowManager.isMinimized();
       // ## 为什么最小尺寸不做快照
       //
       // `window_manager` 0.5.2 **没有 `getMinimumSize()`**（只有 setter），
@@ -1014,8 +1052,20 @@ class PlatformDesktopCapabilities
 
       // ---- 阶段 2：改写（逐步记账，失败可逆序回滚）----
       //
+      // 第一步先**隐藏**：后面几步（放宽最小尺寸 → 改尺寸 → 置顶 → 去任务栏
+      // → 移动）如果在可见窗口上做，用户会逐帧看到「主界面被压成 720 宽的
+      // 小窗、图标从任务栏消失、窗口跳到另一个位置」，然后才被悬浮页覆盖
+      // ——2026-11 报障的「先缩小主窗口再跳成快捷窗口」就是这个中间态。
+      //
+      // 隐藏后这些改写都不可见，再由 [revealOverlayMode] 一次成型地显示。
+      // 注：`visibility` 在回滚计划里被剔除（不可回滚），而回滚的最后一步
+      // 总会无条件 `show()`，故不会把窗口留在隐藏态。
+      await _applyOverlayStep(
+        OverlayWindowAttribute.visibility,
+        () => windowManager.hide(),
+      );
       // 顺序：先放宽最小尺寸，否则 setSize 会被旧的 min 钳住。
-      // 主窗口 min 是 860×600，而悬浮窗只有 720×360——不先放宽就永远设不小。
+      // 主窗口 min 是 860×600，而悬浮窗只有 720×132——不先放宽就永远设不小。
       await _applyOverlayStep(
         OverlayWindowAttribute.minimumSize,
         () => windowManager.setMinimumSize(const Size(1, 1)),
@@ -1047,16 +1097,13 @@ class PlatformDesktopCapabilities
         }
       });
 
-      // show/focus 不需要还原旧值（见 OverlayWindowAttribute.visibility），
-      // 但仍要记入 `_overlayApplied`，否则日志里的「已执行步骤」会漏掉它们。
-      await _applyOverlayStep(OverlayWindowAttribute.visibility, () async {
-        await windowManager.show();
-        await windowManager.focus();
-      });
-
+      // show/focus 不在这里做：调用方还要导航到悬浮页，此刻显示出来只会让
+      // 用户看到「主界面被压成小窗」的那一两帧。显示统一交给
+      // [revealOverlayMode]（在悬浮页完成首次布局之后）。
       _overlayStep = null;
-      SpbLog.info('进入悬浮输入窗模式', {
+      SpbLog.info('进入悬浮输入窗形态（窗口已隐藏，待 reveal）', {
         'size': '${spec.width.toInt()}x${spec.height.toInt()}',
+        'was_visible': _preOverlayWasVisible,
         'steps': _overlayApplied.map((a) => a.name).join(','),
       });
       return true;
@@ -1158,8 +1205,12 @@ class PlatformDesktopCapabilities
       }
     }
 
-    // 回滚后无条件显示一次：失败路径上窗口可能停在「已隐藏 / 无任务栏图标」
-    // 的状态，而那是用户**唯一**能找回应用的入口。
+    // 回滚后**无条件**显示一次：失败路径上窗口可能停在「已隐藏 / 无任务栏
+    // 图标」的状态，而那是用户**唯一**能找回应用的入口。
+    //
+    // 注意这与正常退出路径不同：那里会尊重「进入前是否可见」（§6.69）。失败
+    // 路径反过来选「露出来」——「按了快捷键什么都没发生」比「意外弹出主窗口」
+    // 更难排查，且这里已经是异常路径。
     try {
       await windowManager.show();
       await windowManager.focus();
@@ -1254,15 +1305,49 @@ class PlatformDesktopCapabilities
   }
 
   @override
-  Future<void> exitOverlayMode() async {
+  Future<void> revealOverlayMode() async {
+    // 未进入悬浮模式（进入失败后被回滚 / 平台不支持）：显示窗口是**别的路径**
+    // 的责任（`showWindow`、托盘菜单）。这里多显示一次会抢走用户的焦点。
+    if (_preOverlayBounds == null) return;
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+      SpbLog.info('悬浮输入窗已显示', {'height': _overlayFitHeight});
+    } catch (e, st) {
+      // 显示失败 = 窗口仍然隐藏，用户会认为「快捷键没反应」。用 error 级并
+      // 带上当前形态，否则这一条报障在日志里无从定位（窗口是隐藏的，连
+      // 「卡住的小窗」都看不到）。
+      SpbLog.error('显示悬浮输入窗失败（窗口可能仍隐藏）', error: e, stackTrace: st);
+    }
+  }
+
+  @override
+  Future<void> exitOverlayMode({bool showMainWindow = false}) async {
     final bounds = _preOverlayBounds;
     if (bounds == null) return; // 未进入过：空操作（可能被重复调用）。
+
+    // 期望的收尾形态：
+    //
+    // | 进入前状态 | showMainWindow | 退出后 |
+    // |---|---|---|
+    // | 图标区可见（普通/最大化） | 任意 | 还原尺寸 + 显示 + 聚焦 |
+    // | 最小化 | false | 还原尺寸 + 最小化（不抢焦点） |
+    // | 隐藏（托盘） | false | 保持隐藏，前台回到原应用 |
+    // | 隐藏 | true | 还原尺寸 + 显示 + 聚焦（用户明确要求看主窗口） |
+    final shouldMinimize =
+        !showMainWindow && _preOverlayWasVisible && _preOverlayWasMinimized;
+    final shouldShow =
+        showMainWindow || (_preOverlayWasVisible && !_preOverlayWasMinimized);
 
     _preOverlayBounds = null;
     _overlayApplied.clear();
     _overlayStep = null;
     _overlayFitHeight = null;
     try {
+      // 先隐藏：还原尺寸/位置的过程（从 720×132 长回 1180×800）如果看得见，
+      // 用户会看到「小窗突然变大、随后消失」——同一种中间态演给人看。
+      // 隐藏在前，还能让 Windows 把前台交还给**原应用**（见下方注释）。
+      await windowManager.hide();
       await windowManager.setAlwaysOnTop(_preOverlayAlwaysOnTop);
       await windowManager.setSkipTaskbar(_preOverlaySkipTaskbar);
       await windowManager.setResizable(_preOverlayResizable);
@@ -1273,9 +1358,25 @@ class PlatformDesktopCapabilities
       await windowManager.setMinimumSize(
         Size(WindowSpec.main.minWidth, WindowSpec.main.minHeight),
       );
-      await windowManager.show();
-      await windowManager.focus();
-      SpbLog.info('退出悬浮输入窗模式');
+
+      // ## 为什么「不显示」就是「把焦点还回去」
+      //
+      // Windows 把前台窗口视为（每窗口队列的）激活目标：当前台窗口被隐藏时，
+      // 系统会激活 Z 序上的下一个窗口——对悬浮窗场景来说，那就是用户按
+      // `Alt+Space` 之前正在用的那个应用。Linux（GTK/WM）同理，XFCE/KWin 都会
+      // 把焦点退回上一个活动窗口。故**不需要**额外去抢焦点，少做一步反而更准。
+      if (shouldShow) {
+        await windowManager.show();
+        await windowManager.focus();
+      } else if (shouldMinimize) {
+        await windowManager.minimize();
+      }
+      SpbLog.info('退出悬浮输入窗模式', {
+        'restore': shouldShow
+            ? 'show'
+            : (shouldMinimize ? 'minimize' : 'stay_hidden'),
+        'was_visible': _preOverlayWasVisible,
+      });
     } catch (e, st) {
       // 用 error 级 + 带栈：还原失败意味着窗口会**停在悬浮形态**（小窗、
       // 置顶、不在任务栏），是用户可见故障，且它发生在一次正常操作后

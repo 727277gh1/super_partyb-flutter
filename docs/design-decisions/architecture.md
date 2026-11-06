@@ -94,15 +94,18 @@ freezed / json_serializable / build_runner / json_annotation / freezed_annotatio
 
 在**单窗口**约束下拿到真正的置顶悬浮输入：按 `Alt+Space` 时
 
-1. 保存当前窗口几何（`getBounds`）；
-2. 改尺寸为主 `quickCaptureWithAttachments` 规格、`alwaysOnTop=true`、
-   `skipTaskbar=true`、居中；
+1. 保存当前窗口几何与**可见性**（`getBounds` / `isVisible` / `isMinimized`）；
+2. **先隐藏**，再改尺寸为主 `quickCaptureWithAttachments` 规格、
+   `alwaysOnTop=true`、`skipTaskbar=true`、按鼠标所在显示器定位；
 3. 导航到 `/overlay`；
-4. 页面首帧把内容自然高度报上来，窗口高度贴合内容（[§6.68](platform.md)）。
+4. 页面首帧把内容自然高度报上来，窗口高度贴合内容（[§6.68](platform.md)）；
+5. 等一帧后 `revealOverlayMode()`：窗口一次成型地显示并聚焦。
 
-提交或 `Esc` 后恢复几何与窗口标志，回到主界面。见
-`PlatformDesktopCapabilities.enterOverlayMode` / `exitOverlayMode` /
-`fitOverlayContentHeight`。
+提交或 `Esc` 后按**进入前的可见性**收尾：原本在托盘里就继续待着（前台交还
+原应用），原本可见就还原尺寸并显示。见
+`PlatformDesktopCapabilities.enterOverlayMode` / `revealOverlayMode` /
+`exitOverlayMode` / `fitOverlayContentHeight`，以及 [§6.69](platform.md)
+（为什么不是「无条件显示主窗口」）。
 
 **已知差异**：悬浮期间主窗口被「顶替」（看不到背后的对话）。对「快速记一笔」
 这个用途可接受，但若将来需要「悬浮窗与主窗同屏」，就得换 `desktop_multi_window`。

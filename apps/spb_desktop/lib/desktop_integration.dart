@@ -5,6 +5,7 @@
 
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_core/spb_core.dart';
@@ -165,9 +166,13 @@ class DesktopIntegration {
     if (role == WindowRole.quickCapture) {
       await _enterOverlayWindow();
     } else {
-      // 从悬浮窗切到其他页面：还原窗口（否则设置页会挤在 720×360 里）。
+      // 从悬浮窗切到其他页面：还原窗口（否则设置页会挤在 720 宽的小窗里）。
       // 未处于悬浮模式时是空操作。
-      await _exitOverlayWindow();
+      //
+      // `showMainWindow: true`：这条分支全是「用户明确要求看某个页面」
+      // （托盘菜单、页面内跳转），窗口必须真的出现在眼前；否则用户点了
+      // 「设置…」却什么都没发生。
+      await _exitOverlayWindow(showMainWindow: true);
     }
 
     // ## 为什么是 info
@@ -177,6 +182,12 @@ class DesktopIntegration {
     // 看「导航有没有发生、去了哪里」。导航是低频操作，不会刷屏。
     SpbLog.info('桌面能力触发导航', {'role': role.name, 'path': target});
     _router.go(target);
+
+    // 显示放在导航**之后**：这样用户看到的第一帧就是悬浮页本身，而不是
+    // 「主界面被压成小窗」的中间态（见 [_revealOverlayWindow]）。
+    if (role == WindowRole.quickCapture) {
+      await _revealOverlayWindow();
+    }
   }
 
   /// 取悬浮窗形态控制器（不支持时为 null）。
@@ -219,19 +230,64 @@ class DesktopIntegration {
     }
   }
 
-  Future<void> _exitOverlayWindow() async {
+  Future<void> _exitOverlayWindow({bool showMainWindow = false}) async {
     final overlay = _overlay;
     if (overlay == null || !overlay.isOverlayModeActive) return;
-    await overlay.exitOverlayMode();
+    await overlay.exitOverlayMode(showMainWindow: showMainWindow);
+  }
+
+  /// 让悬浮窗**出现**（显示 + 聚焦）。
+  ///
+  /// ## 为什么要等悬浮页画出第一帧
+  ///
+  /// 进入悬浮模式时窗口是**隐藏**的（见 [OverlayWindowController.enterOverlayMode]
+  /// 的契约）。此时导航刚发生、悬浮页还没布局，若立刻 `show()`，用户看到的
+  /// 第一帧仍是**主界面被压成 720 宽小窗**——正是报障里那个“先缩小再跳”的
+  /// 中间态。等一帧（且有超时兜底）再显示，窗口就“一次成型”地出现在眼前。
+  ///
+  /// ## 为什么要超时兜底
+  ///
+  /// 隐藏窗口上平台是否照常产帧属于引擎/窗口系统细节（Windows 通常照常，
+  /// 但不能保证）。押死“等帧”的风险是**窗口永不出现**，那比“一帧旧内容”
+  /// 严重得多；故宁可超时后直接显示。
+  Future<void> _revealOverlayWindow() async {
+    final overlay = _overlay;
+    if (overlay == null || !overlay.isOverlayModeActive) return;
+    await _awaitNextFrame(const Duration(milliseconds: 120));
+    await overlay.revealOverlayMode();
+  }
+
+  /// 等下一帧绘制完成，最多等 [timeout]。
+  ///
+  /// 用 `addPostFrameCallback` 而不是 `endOfFrame`：后者在没有帧在排队时会
+  /// 一直挂着，而这里要的是“下一帧”，且必须能取消超时定时器（否则测试结束
+  /// 时会报 pending timer）。
+  Future<void> _awaitNextFrame(Duration timeout) {
+    final done = Completer<void>();
+    Timer? timer;
+    void finish() {
+      timer?.cancel();
+      if (!done.isCompleted) done.complete();
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => finish());
+    timer = Timer(timeout, finish);
+    return done.future;
   }
 
   /// 退出悬浮模式（供悬浮窗页面在提交/取消时调用）。
+  ///
+  /// ## 为什么不强制显示主窗口
+  ///
+  /// 这条路径的语义是「记完了」：应**回到进入前的可见性**——从别的应用唤起
+  /// 的用户要回到那个应用，而不是被主窗口抢走焦点（见
+  /// [OverlayWindowController.exitOverlayMode] 的 `showMainWindow`）。
   ///
   /// ## 为什么页面要显式调它
   ///
   /// `Esc` 清空后关窗、提交成功后关窗——这两条路径都**不经过**
   /// `showWindow`，故不会被 [_navigateToRole] 自动还原。若不显式调用，
-  /// 窗口会一直保持 720×360 置顶，用户回到主界面后窗口再也放不大。
+  /// 窗口会一直保持 720×132 置顶，用户回到主界面后窗口再也放不大。
   Future<void> leaveOverlay() => _exitOverlayWindow();
 
   /// 隐藏某角色的「窗口」。
@@ -242,7 +298,7 @@ class DesktopIntegration {
     if (role == WindowRole.main) return;
     // ## 为什么必须还原窗口
     //
-    // 隐藏悬浮窗若只导航回主界面，窗口会**保持** 720×360 置顶——用户看到的
+    // 隐藏悬浮窗若只导航回主界面，窗口会**保持** 720 宽置顶——用户看到的
     // 是主界面挤在一个小置顶窗里，且再也放不大（除非重启）。
     // 这条路径与 `leaveOverlay` 是两回事，别漏。
     await _exitOverlayWindow();
