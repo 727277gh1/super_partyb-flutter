@@ -132,28 +132,33 @@ authStateProvider.signedIn() → 路由守卫放行
 **两个前置条件都在 IdP 侧，属跨仓库的生产配置变更**（本仓库无法完成）：
 
 1. **注册回调地址**：把 `partyb://oidc/callback` 加进该 client 的
-   `oauth_clients.redirectUris`。当前只有三个网关回调：
+   `oauth_clients.redirectUris`。**✅ 2026-11-06 完成**（生产库
+   `json_insert` 幂等追加，先备份再改）：
    ```console
    $ ssh <deploy-host> 'sqlite3 /opt/<idp>/data/idp.db "SELECT clientId, redirectUris FROM oauth_clients;"'
-   client_PLACEHOLDER_0000000000000000|["http://203.0.113.10:9000/auth/oidc/callback","https://app.example.com/auth/oidc/callback","https://app2.example.com/auth/oidc/callback"]|1
+   client_45f10bfb-0170-4815-b|["http://127.0.0.1/callback","partyb://oidc/callback"]|1
    ```
-2. **需要一个 public client**：当前 client 的
-   `token_endpoint_auth_methods_supported` 只有 `client_secret_basic`/`post`
-   （非 public client），客户端没有 `client_secret` 就**换不到 token**。
-   移动端应新建一个 **public client**（`token_endpoint_auth_method=none`）
-   并**强制 PKCE**（当前 `requirePkce=false`，见 T6 §1.7——服务端不强制，
-   客户端仍会发 S256 challenge，但不能靠服务端兜底）。
+   反向验证：带 PKCE 的 authorize 请求从 `400 invalid_request` 变为
+   **`302` → `/idp/login?redirect_uri=...`**（未登录时的预期跳转；登录完成
+   后 302 到 `partyb://oidc/callback?code=...`，由 App 的 intent-filter 接住）。
+   custom scheme 能通过 fosite 校验是因为 IdP Go 版的 `RedirectSecureChecker`
+   显式信任预注册值；fosite 对非 loopback 的 `redirect_uri` 做**精确匹配**
+   （`authorize_helper.go` 的 `isMatchingRedirectURI`，端口通配仅限
+   loopback），必须逐字符一致。
+2. **需要一个 public client**。—— **✅ 2026-10 已满足**：生产注册了
+   `flutter-client`（`tokenEndpointAuthMethod='none'` + 强制 PKCE），见
+   `docs/known-issues.md` 对应行。
 
-> 推荐做法：在 IdP 新增一个专用于移动端的 public client，注册
-> `partyb://oidc/callback`，`requirePkce=true`。这样与网关用的机密 client
-> 隔离，也不影响现有 Web 登录。
+> 实际采用：未另建 client——桌面与移动共用 `flutter-client`（都是
+> public client + PKCE），只是多注册一条自定义 scheme 回调；与网关用的
+> 机密 client 仍然隔离。
 >
 > **2026-09-30 更新**：IdP Go 版已支持 public client（`oauthclient.Create`
 > 接受 `tokenEndpointAuthMethod=none`，`oidc.Client.GetTokenEndpointAuthMethod`
 > 读真实列值）并强制 public client 使用 PKCE（`EnforcePKCEForPublicClients`）。
 > 桌面端已按此实现 RFC 8252 §7.3 loopback 流程（见
-> `docs/rfc8252-loopback-signin.md`）。移动端注册带 `partyb://oidc/callback`
-> 回调的 public client 后即可用同一套 `OidcClient.exchangeCode` 闭环。
+> `docs/rfc8252-loopback-signin.md`）。移动端与桌面端共用
+> `flutter-client`，用同一套 `OidcClient.exchangeCode` 闭环。
 
 ### 3.1 已知的次要不一致（不阻塞，但要记住）
 
@@ -168,8 +173,9 @@ authStateProvider.signedIn() → 路由守卫放行
 
 ## 4. 本任务**未**做的部分（避免误读）
 
-- ❌ 未改 IdP 的 `oauth_clients`（跨仓库 + 生产配置，且 AGENTS.md 要求
-  「Go API 一行不改」的精神适用于服务端契约）；
+- ~~未改 IdP 的 `oauth_clients`~~ → **2026-11-06 已在 IdP 生产库**给
+  `flutter-client` 追加 `partyb://oidc/callback`（纯数据变更：`json_insert`
+  幂等追加，先 `sqlite3 .backup` 再改；客户端仓库与服务端代码均一行未改）；
 - ❌ 未实现内嵌 webview 方案（理由见 §1.2）；
 - ~~未做跨进程重启的 `PendingAuthRequest` 持久化~~ → 已实现（见 §3.1）；
 - ❌ 未验证真机回跳（本机无 Android 模拟器 `/dev/kvm`、无 iOS 构建环境，
@@ -189,4 +195,10 @@ cd apps/spb_mobile && flutter test
 
 # 构建
 cd apps/spb_mobile && flutter build apk --debug
+
+# IdP 侧回调已注册（期望 302 到 /idp/login；400 = 未注册；
+# state/nonce/challenge 均为假值，只探测授权端点，不涉及凭据）
+CID=client_45f10bfb-0170-4815-b
+curl -sS -o /dev/null -w '%{http_code} -> %{redirect_url}\n' \
+  "https://app.example.com/idp/oauth2/authorize?response_type=code&client_id=$CID&redirect_uri=partyb%3A%2F%2Foidc%2Fcallback&scope=openid+profile+email+offline_access&state=s12345678&nonce=n12345678&code_challenge=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX&code_challenge_method=S256"
 ```
