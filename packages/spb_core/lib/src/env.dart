@@ -101,6 +101,30 @@ class SpbEnv {
     defaultValue: 'http://127.0.0.1/callback',
   );
 
+  // ==================== 微信 OpenSDK（唤起小程序登录） ====================
+  //
+  // 三个值都来自**微信开放平台**，且与小程序 appid 不是同一个东西。
+  // 未注入时客户端判定「不可用」，登录页回落到 URL Scheme / SSO，不会点了没反应。
+  // 流程与账号要求见 `docs/wechat-one-click-login.md` 与 issue #92。
+
+  /// 开放平台「移动应用」AppID（`wx…`，审核通过后才有）。
+  static const String wechatOpenAppId = String.fromEnvironment(
+    'SPB_WECHAT_OPEN_APP_ID',
+    defaultValue: '',
+  );
+
+  /// 小程序**原始 ID**（`gh_…`，不是小程序 appid）。
+  static const String wechatMiniProgramUsername = String.fromEnvironment(
+    'SPB_WECHAT_MINIPROGRAM_USERNAME',
+    defaultValue: '',
+  );
+
+  /// iOS 的 Universal Link（Android 忽略；iOS 缺它无法回调）。
+  static const String wechatUniversalLink = String.fromEnvironment(
+    'SPB_WECHAT_UNIVERSAL_LINK',
+    defaultValue: '',
+  );
+
   /// 是否启用详细日志（含 HTTP 请求体、SSE 原始帧）。
   static const bool verboseLogging = bool.fromEnvironment(
     'SPB_VERBOSE_LOG',

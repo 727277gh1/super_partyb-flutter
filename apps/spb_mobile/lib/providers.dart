@@ -21,6 +21,7 @@ import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
 import 'miniprogram_signin.dart';
+import 'wechat_open_sdk.dart';
 
 /// 移动端没有桌面能力，恒为空实现。
 ///
@@ -657,15 +658,28 @@ final miniProgramLoginClientProvider = Provider<MiniProgramLoginClient>((ref) {
   );
 });
 
+/// 微信小程序唤起器（OpenSDK）。
+///
+/// 未注入 dart-define（`SPB_WECHAT_OPEN_APP_ID` /
+/// `SPB_WECHAT_MINIPROGRAM_USERNAME`）时返回空实现——登录页据此判断这条通道
+/// 是否可用，而不是让用户点了才发现没配。
+final wechatMiniProgramLauncherProvider = Provider<WeChatMiniProgramLauncher>(
+  (ref) => createWeChatMiniProgramLauncher(),
+);
+
 /// 「微信一键登录」动作。
 ///
 /// 编排在 `miniprogram_signin.dart`：唤起小程序 → 轮询 → 兑换授权码 →
 /// 交给与深链回调同一个落盘点（`oidcCallbackHandlerProvider`）。
 final wechatSignInActionProvider = Provider<Future<String?> Function()>((ref) {
+  final launcher = ref.read(wechatMiniProgramLauncherProvider);
   return () => miniProgramSignIn(
     client: ref.read(miniProgramLoginClientProvider),
     store: ref.read(pendingAuthStoreProvider),
     launch: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+    // 优先 OpenSDK：个人主体小程序的 scheme 通道不可用（85407），
+    // OpenSDK 是客户端调用、不受该限制。不可用时自动退回 URL Scheme。
+    launchViaSdk: launcher.isConfigured ? launcher.launchLogin : null,
     onCode: ref.read(oidcCallbackHandlerProvider),
   );
 });

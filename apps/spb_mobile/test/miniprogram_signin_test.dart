@@ -37,8 +37,12 @@ class _FakeClient extends MiniProgramLoginClient {
   int pollCount = 0;
   int exchangeCount = 0;
 
+  /// 记录 createSession 收到的 withScheme（OpenSDK 通道下应为 false）。
+  bool? lastWithScheme;
+
   @override
   Future<MiniProgramSession> createSession({bool withScheme = true}) async {
+    lastWithScheme = withScheme;
     final err = createError;
     if (err != null) throw err;
     return session!;
@@ -84,6 +88,7 @@ void main() {
     bool launchOk = true,
     Duration pollTimeout = const Duration(minutes: 3),
     Future<void> Function(Duration)? sleep,
+    Future<String?> Function(String scene)? launchViaSdk,
   }) {
     return miniProgramSignIn(
       client: client,
@@ -92,6 +97,7 @@ void main() {
         launched.add(uri);
         return launchOk;
       },
+      launchViaSdk: launchViaSdk,
       onCode: (code, pkce) async {
         persisted.add((code: code, pkce: pkce));
         return null;
@@ -249,6 +255,84 @@ void main() {
 
     // consume() 会把进行中的请求取走；再取一次应为空。
     expect(await store.consume(), isNull, reason: '失败路径必须清掉 pending');
+  });
+
+  group('OpenSDK 通道（launchViaSdk）', () {
+    test('走 OpenSDK 时不请求 schemeUrl，直接用 scene 唤起', () async {
+      final client = _FakeClient(
+        session: sessionWith(schemeError: '未开通 URL Scheme'),
+      );
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+      final sdkScenes = <String>[];
+
+      final error = await run(
+        client,
+        launched: launched,
+        persisted: persisted,
+        launchViaSdk: (scene) async {
+          sdkScenes.add(scene);
+          return null;
+        },
+      );
+
+      expect(error, isNull);
+      expect(
+        client.lastWithScheme,
+        isFalse,
+        reason: 'schemeUrl 注定失败（85407），不该再请求',
+      );
+      expect(sdkScenes, ['scene-1']);
+      expect(launched, isEmpty, reason: '不该再走 url_launcher');
+      expect(persisted.single.code, 'ory_ac_test');
+    });
+
+    test('OpenSDK 失败 → 直接返回原因，不轮询、不兑换', () async {
+      final client = _FakeClient(session: sessionWith());
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final error = await run(
+        client,
+        launched: launched,
+        persisted: persisted,
+        launchViaSdk: (_) async => '未检测到微信，请安装微信后重试',
+      );
+
+      expect(error, '未检测到微信，请安装微信后重试');
+      expect(client.pollCount, 0);
+      expect(client.exchangeCount, 0);
+    });
+
+    test('OpenSDK 抛异常 → 兜成可展示文案', () async {
+      final client = _FakeClient(session: sessionWith());
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final error = await run(
+        client,
+        launched: launched,
+        persisted: persisted,
+        launchViaSdk: (_) async => throw StateError('plugin missing'),
+      );
+
+      expect(error, contains('无法唤起微信小程序'));
+      expect(client.pollCount, 0);
+    });
+
+    test('无 OpenSDK 时仍走 URL Scheme（非个人主体小程序的路径）', () async {
+      final client = _FakeClient(
+        session: sessionWith(schemeUrl: 'weixin://dl/business/?t=xyz'),
+      );
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final error = await run(client, launched: launched, persisted: persisted);
+
+      expect(error, isNull);
+      expect(client.lastWithScheme, isTrue);
+      expect(launched.single.toString(), 'weixin://dl/business/?t=xyz');
+    });
   });
 
   group('pollMiniProgramSession', () {

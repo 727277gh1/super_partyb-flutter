@@ -23,12 +23,25 @@ import 'auth_deeplink.dart';
 ///   这样移动端所有登录路径共用同一个落盘点；
 /// - 不导航（由路由守卫根据认证状态决定）。
 ///
+/// ## 两条唤起通道
+///
+/// 1. **OpenSDK**（[launchViaSdk]，`WXLaunchMiniProgram`）：微信服务端方案对
+///    个人主体小程序不可用（`85407`），客户端 SDK 调用不受该限制，是当前唯一
+///    能真正唤起小程序的通道；
+/// 2. **URL Scheme**（[launch] + `session.schemeUrl`）：非个人主体小程序可用。
+///
+/// 有 OpenSDK 时**不再请求 schemeUrl**：那是注定失败的一次微信 API 调用
+/// （多耗配额、多一次等待），且失败时返回的 `schemeError` 会把真正可用的
+/// 通道挡在前面。
+///
 /// 返回错误文案（null = 成功）。
 Future<String?> miniProgramSignIn({
   required MiniProgramLoginClient client,
   required PendingAuthRequestStore store,
   required Future<bool> Function(Uri url) launch,
   required Future<String?> Function(String code, PkcePair pkce) onCode,
+  // OpenSDK 唤起（null = 不可用，退回 URL Scheme）。
+  Future<String?> Function(String scene)? launchViaSdk,
   String Function()? stateGenerator,
   PkcePair Function()? pkceGenerator,
   Duration pollInterval = const Duration(seconds: 1),
@@ -44,9 +57,12 @@ Future<String?> miniProgramSignIn({
   // 这一场景的一致性——两条路径的失败语义保持一致，排查时不必区分。
   await store.put(PendingAuthRequest(state: state, pkce: pkce));
 
+  // 有 OpenSDK 就不要 schemeUrl（见函数文档）。
+  final useSdk = launchViaSdk != null;
+
   final MiniProgramSession session;
   try {
-    session = await client.createSession();
+    session = await client.createSession(withScheme: !useSdk);
   } on AuthError catch (e) {
     await store.consume();
     return e.message;
@@ -55,21 +71,35 @@ Future<String?> miniProgramSignIn({
     return '无法创建微信登录会话：$e';
   }
 
-  if (!session.canLaunchWeChat) {
-    await store.consume();
-    return session.schemeError ?? '当前环境无法直接唤起微信，请改用其他登录方式';
-  }
-
-  try {
-    final ok = await launch(Uri.parse(session.schemeUrl!));
-    if (!ok) {
+  if (useSdk) {
+    String? sdkError;
+    try {
+      sdkError = await launchViaSdk(session.scene);
+    } catch (e) {
+      SpbLog.warn('OpenSDK 唤起小程序异常', {'error': e.toString()});
+      sdkError = '无法唤起微信小程序：$e';
+    }
+    if (sdkError != null) {
       await store.consume();
+      return sdkError;
+    }
+  } else {
+    if (!session.canLaunchWeChat) {
+      await store.consume();
+      return session.schemeError ?? '当前环境无法直接唤起微信，请改用其他登录方式';
+    }
+
+    try {
+      final ok = await launch(Uri.parse(session.schemeUrl!));
+      if (!ok) {
+        await store.consume();
+        return '无法唤起微信，请确认已安装微信后重试';
+      }
+    } catch (e) {
+      await store.consume();
+      SpbLog.warn('唤起微信失败', {'error': e.toString()});
       return '无法唤起微信，请确认已安装微信后重试';
     }
-  } catch (e) {
-    await store.consume();
-    SpbLog.warn('唤起微信失败', {'error': e.toString()});
-    return '无法唤起微信，请确认已安装微信后重试';
   }
 
   SpbLog.info('已唤起微信小程序等待确认', {'scene': session.scene});

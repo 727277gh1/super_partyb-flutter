@@ -536,6 +536,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  fluwx:
+    dependency: transitive
+    description:
+      name: fluwx
+      sha256: ab2c7353ebff38f5f2e2af863a0f0499a703b58447f8fa897913c5e3db5e1a84
+      url: "https://pub.dev"
+    source: hosted
+    version: "6.0.6"
   frontend_server_client:
     dependency: transitive
     description:

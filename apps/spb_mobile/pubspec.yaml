@@ -29,6 +29,16 @@ dependencies:
   # 故必须显式声明，否则 analyzer 报 depend_on_referenced_packages。
   dio: ^5.7.0
 
+  # ---- 微信 OpenSDK（唤起小程序登录，issue #92）----
+  #
+  # 为什么必须放在 App 而不是 spb_platform：插件声明会让**桌面端构建**也把
+  # 它拖进依赖树（见 spb_platform/pubspec.yaml 的同类教训）。spb_platform 只
+  # 定义 `WeChatOpenSdk` 契约，fluwx 的具体桥接在本 App（lib/wechat_open_sdk.dart）。
+  #
+  # 6.x 的 API 与网上老教程不同：唤起是 `open(target: MiniProgram(...))`，
+  # 不是 `launchWeChatMiniProgram(...)`（后者已在 6.0 移除）。
+  fluwx: ^6.0.6
+
   # ---- 状态管理 ----
   flutter_riverpod: ^3.0.0
 

@@ -123,5 +123,10 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+
+        <!-- 微信 OpenSDK：Android 11+ 的包可见性限制下，不声明就查不到微信，
+             `isWeChatInstalled` 恒为 false → 「微信一键登录」永远提示未安装。
+             这也是微信官方 SDK 接入文档要求的声明（issue #92）。 -->
+        <package android:name="com.tencent.mm"/>
     </queries>
 </manifest>

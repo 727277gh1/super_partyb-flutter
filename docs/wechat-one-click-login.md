@@ -178,6 +178,42 @@ fluwx ≥4 自带 `WXEntryActivity`，无需手写。
 **iOS 必做**：Universal Link（Associated Domains）+ `LSApplicationQueriesSchemes`
 + `CFBundleURLTypes`。当前仓库既无 entitlements 也无 AASA，iOS 侧等于从零开始。
 
+### 方案 B 的客户端实现（已完成，issue #92）
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| `spb_platform` | `lib/src/wechat_launcher.dart` | `WeChatMiniProgramLaunchConfig`（配置与**形态校验**）、`WeChatOpenSdk` 桥接契约、`OpenSdkMiniProgramLauncher`（判定顺序与文案）、`NoopWeChatMiniProgramLauncher` |
+| `spb_mobile` | `lib/wechat_open_sdk.dart` | `FluwxOpenSdk`（fluwx 6.0.6 桥接）+ `createWeChatMiniProgramLauncher()` |
+| `spb_mobile` | `lib/miniprogram_signin.dart` | `launchViaSdk` 优先；走 SDK 时**不再请求 schemeUrl** |
+| `spb_core` | `lib/src/env.dart` | `SPB_WECHAT_OPEN_APP_ID` / `SPB_WECHAT_MINIPROGRAM_USERNAME` / `SPB_WECHAT_UNIVERSAL_LINK` |
+
+配置注入（审核通过后）：
+
+```bash
+flutter build apk --release \
+  --dart-define=SPB_WECHAT_OPEN_APP_ID=wx<移动应用appid> \
+  --dart-define=SPB_WECHAT_MINIPROGRAM_USERNAME=gh_<小程序原始ID>
+```
+
+未注入时判定「不可用」并**说明原因**（缺 appid / 缺原始 ID / 前缀不像），登录页
+回落到 URL Scheme 路径——不会出现「点了没反应」。
+
+几个刻意的取舍：
+
+- **插件放在 App，不放 `spb_platform`**：`spb_platform` 声明插件会让桌面端构建也
+  编译它（issue #36 的教训）。`spb_platform` 只留契约，逻辑可无插件单测。
+- **形态校验**：`openAppId` 必须以 `wx` 开头、`userName` 必须以 `gh_` 开头。最常见
+  的错误就是把小程序 appid 填进移动应用 AppID（两者都是 `wx` 开头），填错时微信
+  只回 `bad param`，排查会绕很远。
+- **注册幂等且失败不缓存**：`registerApi` 只调一次，失败下次重试（时序/插件未就绪
+  不该永久失效）。
+- **先判 `isWeChatInstalled`**：不判的话 OpenSDK 静默失败，用户只看到「点了没反应」。
+- **不接 `extMsg` 回调**：回到 App 后继续轮询 `/check/{scene}` 即可，多一条通道就
+  多一处会分叉的实现。
+
+**未做**：iOS（需 Universal Link + Associated Domains + `LSApplicationQueriesSchemes`
++ `CFBundleURLTypes`，本仓库目前都没有）；真机验证（需 HostAppID + release 签名装包）。
+
 **最大风险不在代码，在开放平台审核**：移动应用需要「官网或应用市场下载链接 +
 类目」，且主体信息需与开放平台认证主体一致。本 App 目前没有应用市场上架，
 个人主体审核这一关可能过不了——**建议先确认能否过审，再决定是否投入实现**。
