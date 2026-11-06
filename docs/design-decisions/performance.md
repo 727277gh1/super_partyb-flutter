@@ -381,7 +381,6 @@ clearLiveImages(): size=0 live=0  ← 本模块补的
 
 #### 待议项（只登记，不动）
 
-G8（`_thumbnailMemo` 无界 + 版本覆盖不失效，#70）、
 J1（`isStreaming` 翻转致气泡 remount，`SelectionArea`
 换父节点丢解析状态，#72）、J2（`FileLogSink` 同步写盘——[§6.57](runtime-and-ops.md) 的有意取舍，#73）、
 J3（流式逐字 fade 动画——产品表达，#74）、J4（`_followBottom` 动画被打断重来，#75）
@@ -454,3 +453,96 @@ spb_features +4 = builder 委托结构 / 折叠行不进行集合 / 同对话刷
 （以上是 G6/G7/G9 那一轮的验证。G10/G9′ 的验证在其各自的测试清单里：
 G10 = `markdown_image_test.dart` 11 条；G9′ = `memory_probe_test.dart` +
 `memory_probe_wiring_test.dart` + 报告小节 2–3 条，均全绿。）
+
+### 6.72 G8 收口（缩略图有界 + 版本失效）与内存分解/高水位日志（2026-11）
+
+前两轮的收口方式是「先有界，再谈参数」；这一轮把剩下的**正确性**缺陷修掉，
+并把「内存花在哪」从猜测变成可回收的数据。
+
+#### G8：缓存不失效是正确性问题，无界是容量问题（分开修）
+
+issue #70 给了三条路：（a）服务端在 `agent.file.*` 里带 mtime/etag（跨仓库、
+违反「Go API 一行不改」）；（b）客户端把缓存生命周期绑到文件项（覆盖写/删除
+即逐出）；（c）接受现状。选 **(b)**：它零跨仓库依赖，且不引入「淘汰 ↔ 重复
+请求」的新取舍点。
+
+- **版本令牌**：`AgentFileItem.contentRevision` = `(action, modifiedAt,
+  deletedAt, sizeBytes, mimeType)`。UFS 覆盖写是 `ReplaceContentAndCreateVersion`：
+  **id 不变、内容变**，故键仍是 `ufsFileId`，判据换成令牌。`createdAt` 故意
+  不取（归约时锚定首次出现，覆盖写不变）。
+- **两处判据必须一致**：页面层 `ThumbnailMemo.resolve(id, revision, load)` 与
+  卡片 `didUpdateWidget` 的「重拉」判据都用同一个令牌。只改一边会出现
+  「缓存逐出了但没人来取」或「重拉了但命中旧条目」——两种都表现为「图没变」。
+- **删除事件**：`agent.file.deleted` 的载荷没有 `ufsFileId`，但归约后的项保留
+  创建时的 id，故 `_onItems` 按 id 逐出（只在缓存非空时扫描，避免为无图对话
+  付全表扫描）。
+- **容量**：`kThumbnailMemoMaxEntries = 512` / `kThumbnailMemoMaxBytes = 16MB`，
+  双线取先到者，淘汰「最旧写入」（`LinkedHashMap` 插入序，与 §6.59 的两处
+  缓存同一取向）。**这是安全上界，不是实测最优值**——真实峰值（条目数 / 字节数）
+  由账本读数 `conversation.thumbnails` 从用户机器回收后再校准。淘汰后重新滚动
+  会重新请求一次，这是「有界」的**已知代价**，不是回归。
+- **单条超预算不淘汰自己**：否则一张略超 16MB 的图会陷入「每次 build 都重拉」，
+  比多占几 MB 糟得多（有测试钉住）。
+
+#### 内存分解：把「占了多少」补成「花在谁身上」
+
+`MemoryProbe` 只有进程级数字。新增 `spb_core` 的 `MemoryLedger`：持有方在
+`initState` 登记一个具名读数闭包，`dispose` 注销。
+
+| 读数 | 持有方 | 口径 |
+|---|---|---|
+| `conversation.timeline` | 对话页 | 条目数 + 正文字符数 × 2（UTF-16 估算） |
+| `conversation.bubbles` | 对话页 | 气泡缓存条目数 + 已解析正文字节估算 |
+| `conversation.thumbnails` | 对话页 | `ThumbnailMemo` 条目数 + 已解析字节 |
+| `deliverables.panel` | 交付物面板 | 清单条目 + 可见行数（字节不估） |
+
+约束（都有测试钉住）：
+
+1. **登记/注销必须成对**——读数闭包捕获页面 State，只登记不注销 = 用全局
+   `Map` 把整页钉在内存里，观测本身成了泄漏。
+2. **读数抛错不得带崩报告**：`snapshot()` 逐项兜住并写一条 `warn`
+   （读数挂了本身就是要查的事）。
+3. **同名项求和、阈值取最大**：两端/多页面同时挂账本时不重复计数、告警线
+   也不翻倍。
+
+报告里这些行追加在「## 内存采样」曲线之后（先看涨到多少，再看花在谁身上）；
+纯账本、无采样器时也输出该小节（分解本身就是内存信息）。
+
+#### 高水位日志：用户不导出报告时也有证据
+
+`MemoryWatchdog` 每 5 分钟检查一次，三条触发线任一满足即写一条 `warn`：
+
+- `imageCache ≥ 24MB`（硬上限 32MB，接近即意味着马上要淘汰/重解码）；
+- RSS 相对**本次运行首条读数**增量 ≥ 256MB（RSS 不回落，故看增量不看绝对值）；
+- 任一账本项越过自己声明的 `warnCount` / `warnBytes`（分解里用 `!` 标注）。
+
+两条闸门防「用同一个读数冲掉 500 条环形缓冲」：**30 分钟冷却** +
+**无显著变化不写**（RSS 未涨 10%、imageCache 未涨 20% 就跳过）。
+
+**为什么桌面端不自动清缓存**：`imageCache.clear()` + `clearLiveImages()` 会让
+正在看的图闪一下重解码，而桌面端没有 OS 低内存信号可作依据（移动端有
+§6.60 的 G9）。在拿到真实机器的 `peak=` 与分解数据之前，自动清理是在拿可见
+的界面抖动赌一个未知收益——本期只观测。
+
+#### 仍未闭合（诚实记录）
+
+- **Dart heap 分解**（按类 / external / GC 时机）与 **GPU/ANGLE 占用**仍只能
+  DevTools + 真机（`flutter/flutter#179834`）；账本给的是**我们自己的**持有方，
+  引擎侧那部分仍然只能从 `peak=` 反推。
+- 第三方包内部缓存（gpt_markdown / drift / dio）不在核实范围。
+- 账本的 `bytes` 是估算（UTF-16 字符数、解析后字节长度），用于横向比较，
+  不承诺与 DevTools 逐位一致。
+
+#### 验证
+
+- `spb_core`：`memory_ledger_test.dart` 9 条（注销 / 幂等 / 聚合与阈值取最大 /
+  排序稳定 / 读数抛错兜底 / 越线判定 / 报告格式 / reset）。
+- `spb_features`：`thumbnail_memo_test.dart` 10 条（同版本命中 / 版本逐出 /
+  显式逐出 / 条目淘汰 / 字节淘汰与峰值 / 单条超预算不淘汰自己 / 迟到解析不计账 /
+  失败项缓存 / 同步抛错不写状态 / clear 保留峰值）；`conversation_page_delivery_test`
+  +3（覆盖写后重拉 / 删除事件逐出 / 页面销毁注销）；`agent_file_revision_test`
+  5 条（domain）。
+- `spb_platform`：`memory_watchdog_test.dart` 7 条（阈值 / 基线 / 冷却 / 无变化
+  不写 / 分解与 `!` 标记 / 读数抛错 / 安装幂等）；`memory_probe_wiring_test` +1
+  （两端都装看门狗）；`diagnostics_export_test` +2（分解行 / 纯账本小节）。
+- 守卫全绿（`dart analyze` / `dart format` / 12 个 `check_*.sh` + 自测）。
