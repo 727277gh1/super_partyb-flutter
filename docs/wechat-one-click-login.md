@@ -134,6 +134,54 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 OpenSDK 这条路不受「非个人主体」限制，但需要上面 4 项账号信息才能落地。
 
+### 方案 B 的技术细节（查证结果，2026-11-06）
+
+**原理**：`WXLaunchMiniProgram` 是**客户端 SDK 调用**，不经过服务端 API，
+所以不受 `85407` / 明文 scheme 的「非个人主体」限制。链路是：
+
+```
+App ──WXLaunchMiniProgram(userName=gh_xxx, path=pages/index/index?scene=<scene>)──► 微信小程序
+小程序：wx.login() → POST /idp/api/v1/bindings/mini-program/login {code, scene}
+小程序：<button open-type="launchApp" app-parameter="ok"> ──► 回到 App
+App 收到 WeChatLaunchMiniProgramResponse.extMsg（= app-parameter）
+App：轮询 /check/{scene} → POST /exchange → 换 token（**完全复用现有实现**）
+```
+
+**服务端零改动**：scene 由现有的 `?scheme=1`（去掉 scheme 依赖即可）创建，
+确认状态走现有 `/check/{scene}`，授权码走现有 `/exchange`。OpenSDK 只替换
+「怎么把 scene 带进小程序」和「怎么回来」这两步。
+
+**Flutter 实现（fluwx 6.0.6，API 已核实）**：
+
+```dart
+final fluwx = Fluwx();
+await fluwx.registerApi(appId: 'wx<移动应用appid>', universalLink: 'https://…/app/');
+
+await fluwx.open(target: MiniProgram(
+  username: 'gh_xxxxxxxxxxxx',                    // 小程序**原始 ID**，不是 appid
+  path: 'pages/index/index?scene=$scene',          // 带参路径
+  miniProgramType: WXMiniProgramType.release,      // 联调用 .trial
+));
+
+fluwx.addSubscriber((r) {
+  if (r is WeChatLaunchMiniProgramResponse) {
+    // r.extMsg == 小程序 <button open-type="launchApp" app-parameter="…">
+  }
+});
+// 冷启动（App 被小程序拉回）：先 attemptToResumeMsgFromWx()，再 getExtMsg()
+```
+
+**Android 必做**：在开放平台移动应用里登记 **包名 + 发布签名 MD5**。debug 签名
+不被识别（`errCode = -1`），联调要么登记 debug 签名，要么用 release 签名装包。
+fluwx ≥4 自带 `WXEntryActivity`，无需手写。
+
+**iOS 必做**：Universal Link（Associated Domains）+ `LSApplicationQueriesSchemes`
++ `CFBundleURLTypes`。当前仓库既无 entitlements 也无 AASA，iOS 侧等于从零开始。
+
+**最大风险不在代码，在开放平台审核**：移动应用需要「官网或应用市场下载链接 +
+类目」，且主体信息需与开放平台认证主体一致。本 App 目前没有应用市场上架，
+个人主体审核这一关可能过不了——**建议先确认能否过审，再决定是否投入实现**。
+
 顺带修掉的两个「看不见」问题：
 
 1. **失败原因原本被吞掉**：handler 只回 `{"error":"internal_error"}`，微信的
