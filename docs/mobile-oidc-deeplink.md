@@ -80,15 +80,17 @@ T6 曾建议移动端「内嵌 webview 读 cookie」。本任务未采用，理�
 
 | 位置 | 内容 |
 |---|---|
-| `android/app/src/main/AndroidManifest.xml` | `<intent-filter>` + `<data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>` |
+| `android/app/src/main/AndroidManifest.xml` | 自定义 scheme：`<intent-filter>` + `<data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>`；claimed HTTPS：`<intent-filter android:autoVerify="true">` + `https` + `path="/idp/app/callback"`（见 §2.3） |
 | `ios/Runner/Info.plist` | `CFBundleURLTypes` → `CFBundleURLSchemes` = `["partyb"]` |
-| `lib/../packages/spb_api/lib/src/oidc_callback.dart` | `OidcCallbackUri`（`scheme`/`host`/`path`/`redirectUri`/`matches`/`parse`） |
+| `packages/spb_api/lib/src/oidc_callback.dart` | `OidcCallbackUri`（`scheme`/`host`/`path`/`redirectUri`/`claimedHttpsRedirectUri`/`matches`/`parse`） |
 
 > iOS 的 plist 没有 host/path 的等价声明（只能声明 scheme），
 > 因此 host/path 的校验落在 Dart 侧 `OidcCallbackUri.matches()`。
 >
 > 三处任一不一致的表现都是「登录后应用毫无反应」而**不是报错**，极难排查——
-> 故把常量集中到 `OidcCallbackUri` 并加断言测试。
+> 故把常量集中到 `OidcCallbackUri`，并由
+> `apps/spb_mobile/test/android_manifest_applinks_test.dart` 直接读
+> manifest/plist 断言两边一致（改一边忘另一边 → 测试红灯）。
 
 ### 2.2 接收链路（`apps/spb_mobile/lib/auth_deeplink.dart`）
 
@@ -129,7 +131,49 @@ authStateProvider.signedIn() → 路由守卫放行
   location」（已登录回首页，否则登录页等回调完成），见
   `docs/known-issues.md` 对应行。
 
-### 2.3 一处顺带修复
+### 2.3 claimed HTTPS（Android App Links）双形态
+
+自定义 scheme 没有归属校验——任何声明了 `partyb` 的应用都能抢走回调。
+claimed HTTPS 由操作系统校验域名归属（RFC 8252 §7.2 首选），因此客户端在
+**保留自定义 scheme 的同时**新增一条 `autoVerify` 的 https 过滤器。
+
+| 项 | 位置 | 内容 |
+|---|---|---|
+| Android 过滤器 | `AndroidManifest.xml` | `<intent-filter android:autoVerify="true">`，`https` + `tbcc.atjog.com` / `tbcc6.atjog.com` + `path="/idp/app/callback"` |
+| Dart 常量 | `OidcCallbackUri.claimedHttpsPath` | `/app/callback`（拼在 issuer 的 basePath 之后） |
+| Dart 判定 | `OidcCallbackUri.matches()` | 自定义 scheme **与** issuer 推导的 https 形态都认 |
+| 漂移守卫 | `apps/spb_mobile/test/android_manifest_applinks_test.dart` | 直接读 manifest/plist 断言与 Dart 常量一致 |
+
+**为什么 host 不硬编码**：回调地址永远是「issuer + `/app/callback`」，而
+issuer 已由 `SPB_OIDC_ISSUER` 注入。硬编码域名会让 staging / 双栈构建悄悄
+失配，而失配的表现正是最难查的那种「毫无反应」。
+
+**为什么解析侧现在就同时认两种**：服务端开关（IdP `redirectUris` 注册 +
+网关 `/.well-known` 路由）与客户端发版不同步。两种都认，切换默认值只是
+改一行，不会出现「新版客户端 + 旧服务端」就登不上的窗口。
+
+**当前默认仍是自定义 scheme**：`OidcCallbackUri.redirectUri` 未变。切换前提
+是 IdP 侧把 `https://<host>/idp/app/callback` 注册进 `redirectUris`
+（id-provider#8 的数据变更部分），否则 authorize 会以
+`400 invalid_request` 拒绝。
+
+**服务端前置**（跨仓库，均不在本仓库）：
+
+1. 网关 `configs/gateway.yaml` 的 `verification_files` 返回
+   `/.well-known/assetlinks.json`（`Content-Type: application/json`，
+   含包名 + 签名指纹）—— api-gateway#12，代码已就绪，**未部署**；
+2. IdP 注册 claimed HTTPS 回调 —— id-provider#8，代码已就绪，**未部署**；
+3. 指纹必须对应**实际分发的那份 APK**：换签名密钥后不同步更新，已安装
+   用户的 App Links 会静默失效。
+
+**验证（需真机，当前被 issue #4 阻塞）**：
+
+```bash
+adb shell pm verify-app-links --re-verify com.atjog.spb.spb_mobile
+adb shell pm get-app-links com.atjog.spb.spb_mobile   # 期望 verified
+```
+
+### 2.4 一处顺带修复
 
 `apps/spb_mobile/lib/main.dart` 原先**没有 `ProviderScope`**，而
 `SpbMobileApp` 是 `ConsumerStatefulWidget`——一旦有页面真正读 provider

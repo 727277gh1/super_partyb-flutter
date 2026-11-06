@@ -45,21 +45,50 @@
             <!--
               OIDC 授权回调（自定义 scheme）。
 
-              ⚠️ 与 `lib/auth_deeplink.dart` 的 OidcCallbackUri 常量必须一致：
-              scheme=partyb, host=oidc, pathPrefix=/callback。
-              三处（此处、iOS 的 Info.plist、Dart 常量）任一不一致都会表现为
-              「登录后应用毫无反应」，而不是报错。
+              ⚠️ 与 `packages/spb_api/lib/src/oidc_callback.dart` 的 OidcCallbackUri
+              常量必须一致：scheme=partyb, host=oidc, pathPrefix=/callback。
+              两处（此处、Dart 常量）不一致会表现为「登录后应用毫无反应」而不是报错。
 
-              ⚠️ 当前 IdP 尚未注册该 redirect_uri（实测返回 400，见
-              docs/mobile-oidc-deeplink.md）。此 intent-filter 是**目标形态**的
-              注册，不影响其他功能（未注册的 scheme 只会让系统把链接交给
-              本应用，而本应用会按 matches() 过滤掉非 OIDC 的链接）。
+              已由 IdP 注册（oauth_clients.redirectUris 含 partyb://oidc/callback），
+              实测 authorize 可正常 302 回跳，见 docs/mobile-oidc-deeplink.md。
             -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>
+            </intent-filter>
+            <!--
+              OIDC 授权回调（claimed HTTPS / Android App Links）。
+
+              ## 为什么需要这一条
+
+              自定义 scheme 没有归属校验：任何声明了 partyb scheme 的应用都能抢走回调。
+              autoVerify 让系统去取 `https://<host>/.well-known/assetlinks.json`，
+              校验通过后**只有本应用**能接管该域名的这个路径（RFC 8252 §7.2 首选）。
+
+              ## 三个必须同时成立的条件
+
+              1. 服务端返回 assetlinks.json（api-gateway 的 verification_files，
+                 package_name + 签名指纹 + application/json）；
+              2. 本 intent-filter 的 scheme/host/path 与之完全一致；
+              3. 安装的是**指纹匹配**的那个 APK（换签名密钥后须同步更新服务端）。
+
+              任一不成立都是**静默**失败：链接照常打开浏览器，无任何报错。
+              排查：adb shell pm get-app-links com.atjog.spb.spb_mobile
+
+              ## 为什么两个 host 都写
+
+              双栈：tbcc 走 CDN（IPv4/IPv6 均可）、tbcc6 是源站别名。
+              OIDC issuer 用哪个域名，回调就从哪个域名回来，两个都要能接管。
+              path 与 Dart 侧 OidcCallbackUri.claimedHttpsPath 保持一致（/idp 前缀 + /app/callback）。
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="tbcc.atjog.com" android:path="/idp/app/callback"/>
+                <data android:scheme="https" android:host="tbcc6.atjog.com" android:path="/idp/app/callback"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

@@ -229,7 +229,9 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。仍未闭合的两项：移动端 OIDC 登录闭环（IdP 侧已于 2026-11-06 注册
 `partyb://oidc/callback`，剩真机回跳验证，见 `docs/mobile-oidc-deeplink.md`
-§3）、iOS 出包（需 Apple 账号）。
+§3；claimed HTTPS 回调的**客户端侧**已完成——`autoVerify` 过滤器 + Dart 双形态
+匹配 + manifest 漂移守卫，等 IdP 注册与网关 `assetlinks.json` 部署后才切换默认值，
+见同文 §2.3）、iOS 出包（需 Apple 账号）。
 
 ## 11. 已知问题
 

@@ -2,30 +2,48 @@ import 'package:spb_core/spb_core.dart';
 
 import 'oidc_client.dart';
 
-/// 移动端自定义 scheme 回调地址（`partyb://oidc/callback`）。
+/// 移动端 OIDC 回调地址。
 ///
-/// ## 为什么单独抽一个类
+/// 支持**两种形态**，解析侧必须同时认：
 ///
-/// 「回调地址」这一串字面量同时出现在**四个**地方，任何一处改错都会表现为
-/// 「登录后应用毫无反应」（而不是报错），极难排查：
+/// | 形态 | 地址 | 何时使用 |
+/// |---|---|---|
+/// | 自定义 scheme | `partyb://oidc/callback` | 当前默认；任何 Android/iOS 都能收 |
+/// | claimed HTTPS | `https://<IdP host>/idp/app/callback` | 目标形态（RFC 8252 §7.2 首选） |
+///
+/// ## 为什么自定义 scheme 不够
+///
+/// 自定义 scheme 没有归属校验：任何装了 `partyb` scheme 的应用都能抢走回调。
+/// claimed HTTPS 由操作系统校验域名归属（Android App Links 的
+/// `/.well-known/assetlinks.json`、iOS Universal Links 的
+/// `apple-app-site-association`），只有域名所有者声明的 App 才能接管。
+///
+/// ## 为什么解析侧现在就同时支持两种
+///
+/// 服务端（IdP `redirectUris` 注册 + 网关 `/.well-known` 路由）与客户端发版
+/// 不同步：先发客户端、后开服务端开关时，若客户端只认一种形态，用户会看到
+/// 「登录后应用毫无反应」而不是报错。两种都认，切换就只是改一行默认值。
+///
+/// ## 「回调地址」这一串字面量出现在**四个**地方
+///
+/// 任何一处改错都表现为「登录后应用毫无反应」（而不是报错），极难排查：
 ///
 /// 1. `apps/spb_mobile/android/app/src/main/AndroidManifest.xml` 的
-///    `<data android:scheme android:host android:pathPrefix>`；
-/// 2. `apps/spb_mobile/ios/Runner/Info.plist` 的 `CFBundleURLTypes`；
-/// 3. IdP 侧 `oauth_clients.redirectUris`（**尚未注册**，见下）；
+///    `<data>`（自定义 scheme + `autoVerify` 的 https）；
+/// 2. `apps/spb_mobile/ios/Runner/Info.plist` 的 `CFBundleURLTypes`
+///    与 `Runner.entitlements` 的 Associated Domains；
+/// 3. IdP 侧 `oauth_clients.redirectUris`（**已注册** `partyb://oidc/callback`，
+///    claimed HTTPS 见 id-provider#8）；
 /// 4. 应用内解析回调的代码（本类）。
 ///
-/// 前三处是平台配置文件（无法 import Dart 常量），因此本类把常量集中定义
-/// 并加断言测试，至少保证第 4 处与文档一致。
+/// 前三处是平台配置文件（无法 import Dart 常量），因此本类把常量集中定义，
+/// 并由 `test/android_manifest_applinks_test.dart` 直接读取 manifest 断言两边一致。
 ///
-/// ## ⚠️ 当前状态：已注册但**收不到回调**
+/// ## claimed HTTPS 的 host 从哪来
 ///
-/// 实测（见 `docs/oidc-verification.md` 与 `docs/mobile-oidc-deeplink.md`）：
-/// IdP 对 `redirect_uri` 做**精确匹配**，只认三个预注册的网关回调；
-/// `partyb://oidc/callback` 与 loopback 都被 `400 invalid_request` 拒绝。
-///
-/// 因此本类描述的是**目标形态**：一旦 IdP 侧为该 client 注册了本回调地址
-/// （跨仓库的生产配置变更），下面的解析逻辑即可直接工作，应用侧无需再改。
+/// 不硬编码域名：回调地址永远是「IdP issuer + `/app/callback`」，而 issuer
+/// 已由 `SPB_OIDC_ISSUER` 注入（[SpbEnv.oidcIssuer]）。硬编码会让 staging/
+/// 双栈构建悄悄失配——而且失配的表现正是最难查的那种「毫无反应」。
 class OidcCallbackUri {
   const OidcCallbackUri._();
 
@@ -42,20 +60,52 @@ class OidcCallbackUri {
   /// path 段。
   static const String path = '/callback';
 
+  /// claimed HTTPS 回调在 issuer 之下的路径段（IdP 的落地页，见 id-provider#8）。
+  static const String claimedHttpsPath = '/app/callback';
+
   /// 完整回调地址（用于文档、断言与 IdP 注册）。
   static String get redirectUri => '$scheme://$host$path';
 
-  /// [uri] 是否是本应用的 OIDC 回调。
+  /// claimed HTTPS 形态的回调地址（`<issuer>/app/callback`）。
   ///
-  /// 判定**必须**同时比较 scheme + host + path：只看 scheme 会让
-  /// `partyb://share/evil?code=...` 这种伪造地址也走进 token 交换逻辑。
-  static bool matches(Uri uri) {
-    if (uri.scheme != scheme) return false;
-    if (uri.host != host) return false;
-    final p = uri.path;
-    // 容错一个结尾斜杠：部分平台/工具链会在转发时补上 `/`。
-    return p == path || p == '$path/';
+  /// [issuer] 缺省取 [SpbEnv.oidcIssuer]；测试可显式传入，避免依赖编译期常量。
+  /// issuer 无法解析时返回 `null`（配置缺失应当表现为「收不到回调」而不是崩溃）。
+  static Uri? claimedHttpsRedirectUri({Uri? issuer}) {
+    final base = issuer ?? Uri.tryParse(SpbEnv.oidcIssuer);
+    if (base == null || base.host.isEmpty) return null;
+    // issuer 形如 `https://host/idp`（含 basePath），回调在 `<basePath>/app/callback`。
+    final basePath = base.path.endsWith('/')
+        ? base.path.substring(0, base.path.length - 1)
+        : base.path;
+    return base.replace(path: '$basePath$claimedHttpsPath');
   }
+
+  /// [uri] 是否是本应用的 OIDC 回调（两种形态都认）。
+  ///
+  /// 判定**必须**比较 scheme + host + path 三要素，只看 scheme 会让
+  /// `partyb://share/evil?code=...` 这种伪造地址也走进 token 交换逻辑；
+  /// 只看 path 会让任意域名下的 `/idp/app/callback` 都能投喂授权码。
+  ///
+  /// [issuer] 仅用于测试注入，生产走 [SpbEnv.oidcIssuer]。
+  static bool matches(Uri uri, {Uri? issuer}) {
+    if (uri.scheme == scheme) {
+      if (uri.host != host) return false;
+      // 容错一个结尾斜杠：部分平台/工具链会在转发时补上 `/`。
+      return _samePath(uri.path, path);
+    }
+
+    final claimed = claimedHttpsRedirectUri(issuer: issuer);
+    if (claimed == null) return false;
+    // 逐个字段比：`Uri ==` 还会比 query/fragment，而回调必然带 query。
+    if (uri.scheme != claimed.scheme) return false;
+    if (uri.host != claimed.host) return false;
+    if (uri.port != claimed.port) return false;
+    return _samePath(uri.path, claimed.path);
+  }
+
+  /// 路径相等判定，容忍结尾斜杠。
+  static bool _samePath(String actual, String expected) =>
+      actual == expected || actual == '$expected/';
 
   /// 从回调 URI 取出 `code` 与 `state`（含 state 防 CSRF 校验）。
   ///
@@ -68,10 +118,12 @@ class OidcCallbackUri {
   static ({String code, String? state}) parse(
     Uri uri, {
     required String expectedState,
+    Uri? issuer,
   }) {
-    if (!matches(uri)) {
+    if (!matches(uri, issuer: issuer)) {
       throw AuthError(
-        '不是本应用的 OIDC 回调地址：${uri.scheme}://${uri.host}${uri.path}',
+        '不是本应用的 OIDC 回调地址：${uri.scheme}://${uri.host}${uri.path}'
+        '（期望 $redirectUri 或 ${claimedHttpsRedirectUri()?.toString() ?? "<issuer>/app/callback"}）',
       );
     }
     return OidcPkce.parseCallback(uri, expectedState: expectedState);
