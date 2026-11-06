@@ -121,6 +121,13 @@ authStateProvider.signedIn() → 路由守卫放行
   时找不到 verifier」。
 - **失败原因分流**：非本应用深链 → 静默忽略（用户点了别的链接，不该弹错）；
   本应用回调但 state 不符 / 缺 code → 上报给登录页（可能是 CSRF）。
+- **同一条链接也会进 `Router`**：Flutter 引擎把外部 intent 同时推给
+  `PlatformRouteInformationProvider` → go_router。`partyb://oidc/callback` 的
+  path 是 `/callback`，路由表里没有 → 默认错误页（`Page Not Found` +
+  `GoException: no routes for location: ...`），用户先看到一屏异常、退回首页
+  才发现已登录。故 `buildAuthRedirect` 在匹配前先挡掉「带 scheme 的
+  location」（已登录回首页，否则登录页等回调完成），见
+  `docs/known-issues.md` 对应行。
 
 ### 2.3 一处顺带修复
 

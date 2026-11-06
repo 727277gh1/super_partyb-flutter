@@ -117,6 +117,29 @@ GoRouter createMobileRouter({Listenable? refreshListenable}) {
 GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
   return (context, state) {
     final auth = authState?.call() ?? _authStateFromContext(context);
+
+    // 外部深链（`partyb://oidc/callback?code=...&state=...`）不是站内路由。
+    //
+    // WHY 必须在这里拦：回调已由 `AuthDeepLinkReceiver`（`app_links`）独立
+    // 处理，但 Flutter 引擎**同时**把同一个 intent 交给 `Router`；go_router
+    // 匹配不到就把匹配失败转成一屏错误页，用户看到的是
+    // 「GoException: no routes for location: partyb://oidc/callback?...」，
+    // 退回首页后才发现其实已登录。
+    //
+    // 判据用「有 scheme」而不是硬编码 `partyb`：站内导航的 location 永远
+    // 是 path-only（`/chat/grp_x`），带 scheme 的一定是外部入口——
+    // `partyb://share/...`、`https://...` 同理不该进路由表。
+    //
+    // 目标按会话状态给：已登录（旧回调链接被重复点开）回首页；未判定 /
+    // 未登录停在登录页——回调换 token 完成后 `refreshListenable` 会重跑
+    // 守卫把用户送出。桌面端不需要这条：它的回调是 loopback HTTP，
+    // 从不经 `Router` 进入（见 `docs/rfc8252-loopback-signin.md`）。
+    if (state.uri.scheme.isNotEmpty) {
+      return auth != null && auth.isAuthenticated
+          ? SpbRoutes.conversations
+          : SpbRoutes.login;
+    }
+
     if (auth == null || auth.status == AuthStatus.unknown) return null;
 
     return resolveAuthRedirect(
