@@ -345,12 +345,15 @@ final _credentialPairRe = RegExp(
 ///
 /// [logs] 默认取 [SpbLog.recentLogs]。显式传入主要供测试构造确定内容。
 ///
-/// 返回的文本**必定**经过 [redactSecrets]，调用方无需（也不应）自行拼接——
-/// 见该函数的说明。
+/// [memory] 是「内存采样」小节的**已格式化行**（`MemoryProbe.reportLines()`）。
+/// 与 [timeline] 同一取向：本包（纯 Dart）拿不到 `dart:io` 的 RSS 与 Flutter 侧
+/// 的 imageCache 读数，故由调用方拍平成行传入；为空时整个小节省略——
+/// 「启动就导出、一条采样都没来得及采」时写一个空小节，读者会以为采样挂了。
 String buildDiagnosticsReport({
   required Map<String, String> environment,
   List<LogRecord>? logs,
   List<String>? timeline,
+  List<String>? memory,
   DateTime? generatedAt,
 }) {
   final entries = logs ?? SpbLog.recentLogs;
@@ -377,6 +380,17 @@ String buildDiagnosticsReport({
       ..writeln()
       ..writeln('## 时间线快照');
     for (final line in timeline) {
+      buf.writeln(_escapeNewlines(line));
+    }
+  }
+
+  // 内存采样放在日志之前、时间线之后：报障时「涨到多少」与「正文在不在」
+  // 都是靠 500 条日志回答不了的问题，得摆在翻日志之前。
+  if (memory != null && memory.isNotEmpty) {
+    buf
+      ..writeln()
+      ..writeln('## 内存采样');
+    for (final line in memory) {
       buf.writeln(_escapeNewlines(line));
     }
   }

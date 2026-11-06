@@ -737,5 +737,49 @@ void _diagnosticsReportTests() {
         expect(report, isNot(contains('eyJhbGciOiJIUzI1NiJ9')));
       });
     });
+
+    group('内存采样小节', () {
+      test('有采样时排在「最近日志」**之前**、时间线之后', () {
+        final report = buildDiagnosticsReport(
+          environment: const {'app': 'x'},
+          timeline: const ['缓冲事件: 1 / 2000'],
+          memory: const ['14:03:11 rss=182.4MB peak=240.9MB'],
+          logs: const [],
+        );
+
+        expect(report, contains('## 内存采样'));
+        expect(report, contains('14:03:11 rss=182.4MB peak=240.9MB'));
+        expect(
+          report.indexOf('## 时间线快照'),
+          lessThan(report.indexOf('## 内存采样')),
+          reason: '「正文在不在」优先于「涨到多少」：前者决定能不能复现',
+        );
+        expect(
+          report.indexOf('## 内存采样'),
+          lessThan(report.indexOf('## 最近日志')),
+          reason: '「涨到多少」靠 500 条日志回答不了，得摆在翻日志之前',
+        );
+      });
+
+      test('无采样时整个小节省略（不写空节）', () {
+        // 空节会被读成「采样挂了」，而实际只是「启动就导出、还没来得及采」。
+        final report = buildDiagnosticsReport(
+          environment: const {'app': 'x'},
+          logs: const [],
+        );
+
+        expect(report, isNot(contains('## 内存采样')));
+      });
+
+      test('空列表与 null 同义（调用方不必自己判空）', () {
+        final report = buildDiagnosticsReport(
+          environment: const {'app': 'x'},
+          memory: const [],
+          logs: const [],
+        );
+
+        expect(report, isNot(contains('## 内存采样')));
+      });
+    });
   });
 }

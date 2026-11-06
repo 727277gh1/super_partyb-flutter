@@ -320,6 +320,46 @@ void main() {
         expect(captured, contains('缓冲事件: 1 / 2000'));
       });
     });
+
+    group('内存采样：从进程级探针取（docs/memory-audit.md §四）', () {
+      tearDown(uninstallMemoryProbe);
+
+      test('装了采样器 → 报告出现「## 内存采样」且含采样行', () async {
+        installMemoryProbe(
+          probe: MemoryProbe(
+            readRss: () => 200 * 1024 * 1024,
+            readPeakRss: () => 260 * 1024 * 1024,
+            readImageCacheBytes: () => 8 * 1024 * 1024,
+            readImageCacheEntries: () => 3,
+            readLiveImages: () => 1,
+          ),
+          interval: const Duration(hours: 1),
+        );
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, contains('## 内存采样'));
+        // 导出时会 force 采一次，故行里是「点导出那一刻」的值而不是旧值。
+        expect(captured, contains('rss=200.0MB peak=260.0MB'));
+        expect(captured, contains('imageCache=8.0MB(3 张)'));
+      });
+
+      test('未装采样器（如移动端未接线）→ 小节不出现，而不是空节', () async {
+        expect(installedMemoryProbe, isNull);
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, isNot(contains('## 内存采样')));
+      });
+    });
   });
 }
 

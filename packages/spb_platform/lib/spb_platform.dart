@@ -34,6 +34,9 @@ library;
 ///                                  （docs/memory-audit.md G4）
 ///   installMemoryPressureHandler —— 系统内存压力信号 → 清 imageCache +
 ///                                  app 层可再生态（docs/memory-audit.md G9）
+///   MemoryProbe / MemorySample / installMemoryProbe
+///                               —— 进程内存采样（RSS / 峰值 / imageCache 占用
+///                                  → 有界环形缓冲 → 导出诊断日志）
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
@@ -45,6 +48,7 @@ export 'src/image_cache_config.dart';
 export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
 export 'src/memory_pressure.dart';
+export 'src/memory_probe.dart';
 export 'src/overlay_files.dart';
 export 'src/overlay_window_state.dart';
 export 'src/system_open.dart';

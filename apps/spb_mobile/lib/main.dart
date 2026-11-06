@@ -47,6 +47,13 @@ void main() {
     // 紧张，显式收紧到字节驱动。必须在 ensureInitialized 之后。
     configureImageCache();
 
+    // 内存采样（docs/memory-audit.md §四）：进程 RSS / OS 高水位 / imageCache
+    // 占用按分钟进一个有界环形缓冲，随「导出诊断日志」交给用户报障。
+    // 移动端的内存最紧张，而这正是之前完全没有数据的一维。
+    //
+    // 必须在 configureImageCache 之后：首条采样就是基线。
+    installMemoryProbe();
+
     // 系统内存压力信号（docs/memory-audit.md G9）：Android/iOS 引擎在内存
     // 吃紧时派发 `memoryPressure`，此前全仓无接收方。收到后清空全局解码缓存
     // （可再生：下次显示时重解码，不丢任何数据）。
@@ -55,7 +62,11 @@ void main() {
     // 是对话页 State 的私有字段，跨层清空需要新管路；两者合计只有 KB~MB
     // 级，而 imageCache 是最大头的可再生态（单张大图可达几十 MB）。
     installMemoryPressureHandler(
-      onRelease: () => SpbLog.info('系统内存压力：已清空图片解码缓存'),
+      onRelease: () {
+        // 压力时刻的值最值得留一笔：它往往就是峰值。
+        installedMemoryProbe?.sample(force: true);
+        SpbLog.info('系统内存压力：已清空图片解码缓存');
+      },
     );
 
     // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。

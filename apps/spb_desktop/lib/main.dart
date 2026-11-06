@@ -59,11 +59,24 @@ void main() {
     // 解码位图。必须在 ensureInitialized 之后（本函数已在其中）。
     configureImageCache();
 
+    // 内存采样（docs/memory-audit.md §四）：进程 RSS / OS 高水位 / imageCache
+    // 占用按分钟进一个有界环形缓冲，随「导出诊断日志」交给用户报障。这是
+    // 本仓库唯一能在无 DISPLAY 的开发机之外拿到**真实内存曲线**的通道
+    // （DevTools 需 profile 模式与环境，用户机器上没有）。
+    //
+    // 必须在 configureImageCache 之后：首条采样就是基线，缓存配置之前采到
+    // 的 imageCache 值没有参照意义。
+    installMemoryProbe();
+
     // 系统内存压力信号（docs/memory-audit.md G9）：桌面端引擎不派发这条信号
     // （Linux/Windows/macOS 无此系统回调），注册后零效果、无副作用——两端
     // 无差别接线，将来若引擎补齐也无需改这里。
     installMemoryPressureHandler(
-      onRelease: () => SpbLog.info('系统内存压力：已清空图片解码缓存'),
+      onRelease: () {
+        // 压力时刻的值最值得留一笔：它往往就是峰值。
+        installedMemoryProbe?.sample(force: true);
+        SpbLog.info('系统内存压力：已清空图片解码缓存');
+      },
     );
 
     // 帧耗时观测（可选，`--dart-define=SPB_FRAME_TIMING=true` 开启）。

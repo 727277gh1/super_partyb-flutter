@@ -6,6 +6,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 
 import 'desktop_capabilities.dart';
+import 'memory_probe.dart';
 
 /// 把诊断报告写入用户选定的文件（issue #40）。
 ///
@@ -197,6 +198,10 @@ Map<String, String> diagnosticsEnvironment() {
 ///
 /// [timeline] 默认取 [TimelineProbe.latest]（最近一份「数据面」快照）。
 ///
+/// [memory] 默认取 [installedMemoryProbe] 的采样行。导出这一刻先**强制**
+/// 采一次（绕过 `minInterval`），于是报告末尾那一行就是「用户点导出时」的
+/// 真实数值，而不是最多一分钟前的旧值。
+///
 /// ## 为什么要从静态探针取，而不是从页面传
 ///
 /// 导出发生时用户在**设置页**，对话页已经卸载；`ChatStreamController` 是
@@ -210,11 +215,16 @@ Future<DiagnosticsExportOutcome> exportDiagnosticsReport(
   DesktopCapabilities capabilities, {
   DateTime? now,
   List<String>? timeline,
+  List<String>? memory,
 }) {
   final at = now ?? DateTime.now();
+  // 采样器未安装（移动端不装、或单元测试）：保持 null，报告里整个小节省略。
+  final probe = installedMemoryProbe;
+  probe?.sample(force: true);
   final text = buildDiagnosticsReport(
     environment: diagnosticsEnvironment(),
     timeline: timeline ?? TimelineProbe.latest?.toReportLines(),
+    memory: memory ?? probe?.reportLines(),
     generatedAt: at,
   );
   return capabilities.saveDiagnostics(
