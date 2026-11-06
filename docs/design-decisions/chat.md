@@ -1242,7 +1242,7 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 |---|---|---|
 | 点选 agent | 只改本地 `_selectedAgentId`，**不发请求、不弹确认**；AppBar 标签立刻跟着变 | 什么都不发生 |
 | 发消息 | `agent_id` + `routing.mode=manual`（未选时为 `auto`），**每条都带**（选择是持久的） | 入队事务里重绑（见上） |
-| 「同 Agent 开新会话」 | 调 `/sessions/switch`（`force_new_session: true`），**不弹确认**，成功弹「已开始新会话」 | 立即归档 + 新绑定 |
+| 「同 Agent 开新会话（清空上下文）」 | 调 `/sessions/switch`（`force_new_session: true`），**不弹确认**，成功弹「已开始新会话」 | 立即归档 + 新绑定，`session_id` 置空 |
 
 判据落在两处：
 
@@ -1259,6 +1259,10 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
    顶部那行说明是「选择后随下一条消息生效（沿用当前对话上下文）」，只有
    「同 Agent 开新会话」入口才会真正断开。这是 webapp 既有的事实行为；客户端
    不做单方面的二次确认——点选本身没有产生任何不可逆动作。
+
+   ⚠️ 正因为顶部写着「沿用当前对话上下文」，菜单里那条**破坏性**入口必须自带
+   代价：标签是「同 Agent 开新会话（**清空上下文**）」。它是唯一的断点，又没有
+   确认框（对齐 webapp 的「新对话」按钮），代价只剩标签这一个位置可以写。
 2. **建议卡的 agent 标注从「一次性」变成「持久」**。两者现在共用同一个本地值
    （webapp 同样如此：`FollowUpSuggestCard` 写的也是 `agentByGroup[groupId]`）。
    副作用是点过一次建议卡之后，后续消息仍由该 agent 回答——直到用户改选或换对话。

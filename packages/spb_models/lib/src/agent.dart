@@ -205,9 +205,16 @@ class GroupSession {
 
 /// `POST /chat/groups/:gid/sessions/switch` 的响应。
 ///
-/// 注意 `session_id` 为 null 是**预期**的：服务端 lazy 激活，上游 session 由
-/// 下一轮 turn 自产回填（`sessions.go` 的 `"session_id": nullStr(sess.SessionID)
-/// // null：lazy，待 turn 执行回填`）。故 UI 不能把「session_id 为空」当成失败。
+/// 注意 `session_id` 的两种取值都是**正常**的，UI 不得据此判成败：
+///
+/// - **非 null**：这个 group 之前跑过，服务端把旧 owner 的 session **继承**给了新
+///   绑定（`chatbinding.Bind` 的 `ResetKeepSession` / `Ensure` 顶替分支，2026-11-06
+///   起），pigo 用 `-r` 续接同一段对话——换 agent 只换人设，不断开上下文；
+/// - **null**：这个 group 还没跑过（lazy，上游 session 由下一轮 turn 自产回填），
+///   或本次是 `forceNewSession: true` / `POST /sessions/managed` 的「新会话」语义。
+///
+/// 旧文档写「null 是预期的（lazy 激活）」，那在 2026-11-06 之前恒成立；现在只有
+/// 上面第二种情况才为 null。
 class GroupAgentSwitchResult {
   const GroupAgentSwitchResult({
     required this.groupId,

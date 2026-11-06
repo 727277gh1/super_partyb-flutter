@@ -313,12 +313,16 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       // 同 agent 开新会话：单独一条，语义是「清空上下文但保留这个 agent」。
       // 与 webapp 输入栏的「新对话」按钮同义——它是唯一**立即**触发服务端
       // 动作的入口，因为它没有「下一条消息」可以搭载。
+      //
+      // 2026-11-06 起它是**唯一**会断开上下文的入口（换 agent 已改为继承
+      // session），而它没有确认框（对齐 webapp）——代价只能写在标签里，
+      // 否则菜单顶部那句「沿用当前对话上下文」会让人以为整张菜单都是安全的。
       if ((widget.currentAgentId ?? '').isNotEmpty) ...[
         const PopupMenuDivider(),
         const PopupMenuItem<_SwitcherAction>(
           key: ValueKey('agent-new-session'),
           value: _NewSession(),
-          child: Text('同 Agent 开新会话'),
+          child: Text('同 Agent 开新会话（清空上下文）'),
         ),
       ],
     ];
