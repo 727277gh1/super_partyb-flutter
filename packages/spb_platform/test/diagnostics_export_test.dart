@@ -21,10 +21,16 @@ import 'package:spb_platform/spb_platform.dart';
 void main() {
   // 静音：本文件会故意触发多条 warn 日志（对话框抛异常、写文件失败），
   // 而 `ConsoleLogSink` 会把它们打进测试输出，淹没断言失败信息。
-  setUp(
-    () => SpbLog.configure(sink: const NullLogSink(), minLevel: LogLevel.debug),
-  );
-  tearDown(SpbLog.clearRecentLogs);
+  setUp(() {
+    SpbLog.configure(sink: const NullLogSink(), minLevel: LogLevel.debug);
+    // 账本是进程级单例：用例之间会累积，否则「只提供账本」的用例会看到
+    // 上一条用例遗留的登记项。
+    MemoryLedger.reset();
+  });
+  tearDown(() {
+    SpbLog.clearRecentLogs();
+    MemoryLedger.reset();
+  });
 
   group('DiagnosticsExporter.save：四态', () {
     test('写入成功 → saved', () async {
@@ -358,6 +364,45 @@ void main() {
         await exportDiagnosticsReport(caps);
 
         expect(captured, isNot(contains('## 内存采样')));
+      });
+
+      test('账本分解行追加在曲线之后（回答「花在谁身上」）', () async {
+        final token = MemoryLedger.register(
+          name: 'conversation.timeline',
+          label: '对话页时间线',
+          read: () => const MemoryGauge(count: 1200, bytes: 3 * 1024 * 1024),
+        );
+        addTearDown(() => MemoryLedger.unregister(token));
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, contains('## 内存采样'));
+        expect(
+          captured,
+          contains('对话页时间线: 1200 项 / 3.0MB'),
+          reason: '只有 RSS 曲线时「占了多少」回答了、「花在谁身上」没回答',
+        );
+      });
+
+      test('只有账本、没有采样器时也输出小节（分解本身就是内存信息）', () async {
+        final token = MemoryLedger.register(
+          name: 'deliverables.panel',
+          label: '交付物面板清单',
+          read: () => const MemoryGauge(count: 5666, bytes: 0),
+        );
+        addTearDown(() => MemoryLedger.unregister(token));
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, contains('交付物面板清单: 5666 项 / 0B'));
       });
     });
   });

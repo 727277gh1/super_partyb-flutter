@@ -198,7 +198,8 @@ Map<String, String> diagnosticsEnvironment() {
 ///
 /// [timeline] 默认取 [TimelineProbe.latest]（最近一份「数据面」快照）。
 ///
-/// [memory] 默认取 [installedMemoryProbe] 的采样行。导出这一刻先**强制**
+/// [memory] 默认取 [installedMemoryProbe] 的采样行，**后面追加**
+/// [MemoryLedger] 的内存分解行（谁占的）。导出这一刻先**强制**
 /// 采一次（绕过 `minInterval`），于是报告末尾那一行就是「用户点导出时」的
 /// 真实数值，而不是最多一分钟前的旧值。
 ///
@@ -221,10 +222,22 @@ Future<DiagnosticsExportOutcome> exportDiagnosticsReport(
   // 采样器未安装（移动端不装、或单元测试）：保持 null，报告里整个小节省略。
   final probe = installedMemoryProbe;
   probe?.sample(force: true);
+  List<String>? memoryLines;
+  if (memory != null) {
+    memoryLines = memory;
+  } else {
+    // 分解行追加在曲线之后：先看「涨到多少」，再看「花在谁身上」。
+    // 账本为空（还没有持有方登记）时仅保留曲线，整节省略逻辑不变。
+    final lines = <String>[
+      ...?probe?.reportLines(),
+      ...MemoryLedger.reportLines(),
+    ];
+    memoryLines = lines.isEmpty ? null : lines;
+  }
   final text = buildDiagnosticsReport(
     environment: diagnosticsEnvironment(),
     timeline: timeline ?? TimelineProbe.latest?.toReportLines(),
-    memory: memory ?? probe?.reportLines(),
+    memory: memoryLines,
     generatedAt: at,
   );
   return capabilities.saveDiagnostics(

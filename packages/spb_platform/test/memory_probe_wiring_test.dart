@@ -55,4 +55,24 @@ void main() {
       );
     }
   });
+
+  test('两端都装了内存高水位日志（带 MemoryLedger 分解）', () {
+    // 采样器只记曲线不落日志；而用户只在出问题时才导出报告——高水位日志是
+    // 「没导出时也留下证据」的那条通道。漏装是静默的：报告里只是少了几条
+    // warn，任何页面测试都不会红。
+    for (final app in ['spb_desktop', 'spb_mobile']) {
+      final source = entryOf(app).readAsStringSync();
+
+      expect(
+        source.contains('installMemoryWatchdog()'),
+        isTrue,
+        reason: '$app 没装高水位日志：越线时不会留下任何可回收的证据',
+      );
+      expect(
+        source.indexOf('installMemoryWatchdog()'),
+        greaterThan(source.indexOf('installMemoryProbe()')),
+        reason: '先有采样基线（与 imageCache 配置），再有高水位判定',
+      );
+    }
+  });
 }

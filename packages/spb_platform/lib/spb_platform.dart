@@ -48,6 +48,9 @@ library;
 ///   MemoryProbe / MemorySample / installMemoryProbe
 ///                               —— 进程内存采样（RSS / 峰值 / imageCache 占用
 ///                                  → 有界环形缓冲 → 导出诊断日志）
+///   MemoryWatchdog / installMemoryWatchdog
+///                               —— 内存高水位日志（低频、边沿触发，带
+///                                  MemoryLedger 分解；见 memory-audit §四）
 export 'src/biometric_gate.dart';
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
@@ -61,6 +64,7 @@ export 'src/local_notification_sink.dart';
 export 'src/local_prune.dart';
 export 'src/memory_pressure.dart';
 export 'src/memory_probe.dart';
+export 'src/memory_watchdog.dart';
 export 'src/overlay_files.dart';
 export 'src/overlay_window_state.dart';
 export 'src/system_open.dart';

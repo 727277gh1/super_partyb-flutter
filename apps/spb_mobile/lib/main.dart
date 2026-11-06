@@ -54,6 +54,11 @@ void main() {
     // 必须在 configureImageCache 之后：首条采样就是基线。
     installMemoryProbe();
 
+    // 内存高水位日志（带 MemoryLedger 分解）。移动端另有内存压力信号会清
+    // imageCache（见下），但压力信号只在真正吃紧时来；高水位日志记录的是
+    // 「离上限还有多远」以及**谁占的**（时间线 / 缩略图 / 气泡缓存 / 清单）。
+    installMemoryWatchdog();
+
     // 系统内存压力信号（docs/memory-audit.md G9）：Android/iOS 引擎在内存
     // 吃紧时派发 `memoryPressure`，此前全仓无接收方。收到后清空全局解码缓存
     // （可再生：下次显示时重解码，不丢任何数据）。
