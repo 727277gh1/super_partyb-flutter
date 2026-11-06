@@ -381,15 +381,66 @@ clearLiveImages(): size=0 live=0  ← 本模块补的
 
 #### 待议项（只登记，不动）
 
-G8（`_thumbnailMemo` 无界 + 版本覆盖不失效，#70）、G10（gpt_markdown `imageBuilder`
-未传，绕过降采样，#71——写 issue 时已核实插件默认路径**不带** `cacheWidth`/`ResizeImage`，
-见 `gpt_markdown` 1.3.0 `shared_render.dart` 的 `imageSpan` 默认分支 `NetworkImage(url)`）、
+G8（`_thumbnailMemo` 无界 + 版本覆盖不失效，#70）、
 J1（`isStreaming` 翻转致气泡 remount，`SelectionArea`
 换父节点丢解析状态，#72）、J2（`FileLogSink` 同步写盘——[§6.57](runtime-and-ops.md) 的有意取舍，#73）、
 J3（流式逐字 fade 动画——产品表达，#74）、J4（`_followBottom` 动画被打断重来，#75）
 ——逐条证据与「为什么这轮不动」见对账单 [§6.2](architecture.md)，后续讨论以各 issue 为准。共同前提：本机无 `DISPLAY`
 无真机，拿不到 `SPB_FRAME_TIMING` 慢帧数据；**没有实测数据就调参，是把
 K1–K3 那类已论证的取舍推翻重来**。
+
+（G10 原本也在这里。它的「需实测确认默认 builder 是否自带降采样」已在插件
+源码里得到确定答案，故已修——见下节。）
+
+#### G10 图片降采样 + 内存采样通道（后续四项之二，2026-11）
+
+G10 与「拿不到绝对内存曲线」是第二轮剩下的两个**不靠猜测就能推进**的项，
+已同时收口。细节与证据以对账单 `docs/memory-audit.md` §6.1 / §四 为准。
+
+**G10：Markdown 图片走我们自己的 `imageBuilder`。** 判据不是猜测，而是插件
+源码：`gpt_markdown` 1.3.4 `shared_render.dart` 的 `imageSpan` 默认分支是
+`Image(image: NetworkImage(url))`——**没有** `ResizeImage`/`cacheWidth`。于是
+agent 回复里一张 4000×3000 的截图就按原图解码 ≈ 48MB 位图进全局 imageCache，
+而它在气泡里最多 1024dp 宽；这是全仓最后一处未降采样的 `Image`。
+
+接管 `imageBuilder` 是**替换整个图片 widget**，不是只换 provider，故
+`spb_features/lib/src/chat/markdown_image.dart` 复刻默认实现的三件事，否则
+是「修了内存改了行为」：
+
+1. 尺寸盒子 `SizedBox(width, height)`——Markdown alt 里的 `=宽x高` 是逻辑像素；
+2. `fit: BoxFit.fill`——默认实现的 `imageStyle.fit ?? BoxFit.fill`（本仓库
+   `_styleSheet` 未设 `ImageStyle`；**若将来设了 fit，builder 必须同步改**）；
+3. loading / error 占位用插件自己的 `CustomImageLoading` / `CustomImageError`
+   （深 import 自 `custom_widgets/custom_error_image.dart`，未从主入口导出——
+   好处是视觉与默认路径完全一致，代价是插件挪文件时会编译期报错，不会静默）。
+
+`data:` URL 必须自己补缓存：插件的那份（32 条 / 32MB）是**私有**的，接管
+builder 就等于接管这条路径。`MemoryImage` 的相等性是字节列表**同一性**，每帧
+重 `base64Decode` 会得到全新 provider（缓存永不命中，流式回复里逐帧重解码并
+闪一下）。故补一份同级的 LRU（`kDataUrlMemoMaxEntries` / `kDataUrlMemoMaxBytes`）。
+
+**折衷（诚实记录）**：只限宽不限高（限高会改图片的**显示尺寸**，那是改行为不是
+优化；极端长图由 imageCache 的 32MB 上限兜底）；解码宽封顶 1024dp（`
+kImageDecodeCeilingLogicalWidth`，与 G4 预览图同一取舍：超宽窗口略糊）；DPR
+变化会重解码一次（`ResizeImage` 的缓存键含解码宽）。
+
+**内存采样：把 openQuestion 变成用户机器可回收的数据。** 新增
+`spb_platform` 的 `MemoryProbe`：每 60s 取 `ProcessInfo.currentRss` /
+`ProcessInfo.maxRss`（OS 高水位）与 imageCache 的字节/张数/live 张数，进 12 槽
+环形缓冲；`exportDiagnosticsReport` 导出那一刻**强制再采一次**，并在报告里
+新增「## 内存采样」小节（排在「## 最近日志」之前——「涨到多少」是靠 500 条日志
+回答不了的，同 G7 之后时间线快照的摆放理由）。
+
+为什么不需要 `SPB_FRAME_TIMING` 那样的编译期开关：帧回调是**每帧**，本模块是
+每分钟一次、6 个整数、一个有界环形缓冲；而它换来的恰恰是「用户报障时报告里
+有没有内存数据」。**关键**：采样**不写日志**——一条/分钟会在 8 小时内把 500 条
+环形缓冲冲干净（`FrameTimingReporter` 的批次汇总就是这个教训）。
+
+⚠️ 读采样时的两条前提（本仓库改不到）：RSS **不会回落到基线**（Dart GC 在
+「堆大小看起来合适」时不回收，而桌面端没有 OS 低内存信号；Windows 上还有
+ANGLE 保留 GPU 侧数据——flutter/flutter#179834，独显比核显水位低）。故只看
+**峰值（`peak=`）与斜率**，不看是否回落。仍未闭合的只剩「Dart heap 分解」与
+「GPU/ANGLE 占用」两维，它们确实只能 DevTools + 真机。
 
 #### 验证
 
@@ -399,3 +450,7 @@ spb_desktop 212 / spb_mobile 120 全绿（spb_domain +3 = `contentHashOfAsync`
 等价性 / 已知向量 / 非 `Uint8List` 输入；spb_platform +4 = 内存压力接线；
 spb_features +4 = builder 委托结构 / 折叠行不进行集合 / 同对话刷新保留 /
 切对话重置）。
+
+（以上是 G6/G7/G9 那一轮的验证。G10/G9′ 的验证在其各自的测试清单里：
+G10 = `markdown_image_test.dart` 11 条；G9′ = `memory_probe_test.dart` +
+`memory_probe_wiring_test.dart` + 报告小节 2–3 条，均全绿。）
