@@ -40,6 +40,18 @@ import 'dart:ui' show FlutterView;
 import 'package:flutter/painting.dart' show ImageCache, PaintingBinding;
 import 'package:flutter/widgets.dart' show WidgetsBinding;
 
+/// 解码宽度的**基准上限**：1024dp（逻辑像素）。
+///
+/// 最终解码宽 = `本值 × devicePixelRatio`（见 [imageDecodeCeilingFor]）。
+/// 取 1024 而不是实际视口宽：解码宽只影响内存不影响显示（`BoxFit` 自己缩），
+/// 而 1024dp 已宽于本客户端的任何气泡/卡片；1024×2（常见 DPR）≈ 2048 物理
+/// 像素，是「高清阅读与内存占用」的折衷点（docs/memory-audit.md G4b/G10）。
+///
+/// **折衷（诚实记录）**：窗口宽于 1024dp（4K 屏不缩放）时，全幅图片会被
+/// 插值放大一点点；放大细看不如原图锐利。要两者兼得需按实际显示尺寸分级
+/// 重解码，那是独立的复杂度。
+const double kImageDecodeCeilingLogicalWidth = 1024;
+
 /// 默认上限：32MB 解码位图。
 ///
 /// 依据：聊天场景的解码位图 = 时间线缩略图（~256px 级）+ 偶发单张预览大图。

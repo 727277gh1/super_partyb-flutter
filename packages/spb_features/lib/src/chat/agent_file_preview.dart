@@ -13,7 +13,9 @@ import 'package:spb_platform/spb_platform.dart';
 import 'map_spec_card.dart';
 import 'spec_ui_card.dart';
 
-/// 预览图的解码上限基准：**逻辑宽度上限 1024dp**。
+/// 预览图的解码上限基准：**逻辑宽度上限 1024dp**（与全局基准
+/// [kImageDecodeCeilingLogicalWidth] 同一个值，此处保留专属名字是因为调用点
+/// 的语义是「预览大图」，与缩略图/头像/Markdown 图片各自不同）。
 ///
 /// 最终解码宽 = `1024 × devicePixelRatio`（`imageDecodeCeilingFor`）。
 /// 取 1024 而不是实际视口宽：预览对话框在窄屏手机上不足 1024，但解码
@@ -21,7 +23,8 @@ import 'spec_ui_card.dart';
 /// 可能接近这个量级。1024×2（常见 DPR）≈ 2048 物理像素，是「高清阅读
 /// 与内存占用」的折衷点（docs/memory-audit.md G4b 的 2048px 上限）。
 /// 放大看细节时超过此宽的部分会被插值放大（见 `_imageBody` 内注释）。
-const double kImagePreviewDecodeCeilingLogicalWidth = 1024;
+const double kImagePreviewDecodeCeilingLogicalWidth =
+    kImageDecodeCeilingLogicalWidth;
 
 /// 取文件**原始字节**（预览用）。null 表示取不到（无 id / 已删除 / 下载失败）。
 ///

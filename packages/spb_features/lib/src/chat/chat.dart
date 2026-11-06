@@ -54,6 +54,7 @@ export 'group_gate_panel.dart';
 export 'group_todos_panel.dart';
 export 'group_tool_calls_panel.dart';
 export 'map_spec_card.dart';
+export 'markdown_image.dart';
 export 'group_management.dart';
 export 'group_settings.dart';
 export 'group_settings_panel.dart';

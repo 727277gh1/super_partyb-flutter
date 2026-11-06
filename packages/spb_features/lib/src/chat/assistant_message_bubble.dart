@@ -4,6 +4,7 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_ui/spb_ui.dart';
 
+import 'markdown_image.dart';
 import 'perf_probe.dart';
 
 /// Agent 回复气泡（左对齐），用 [GptMarkdown] 渲染 Markdown。
@@ -29,6 +30,12 @@ import 'perf_probe.dart';
 /// 默认 `$...$` **不**当 LaTeX（`useDollarSignsForLatex` 留 false）——agent
 /// 回复里 `$HOME` 这类 shell 变量远比公式常见，误判代价更高。`\(...\)` /
 /// `\[...\]` 仍按数学渲染（解析失败自动回退为原文本）。
+///
+/// ## 图片
+///
+/// Markdown 里的图片走 [markdownImageBuilder]（docs/memory-audit.md G10）：
+/// 插件的默认实现不传 `cacheWidth`，一张 4000×3000 的截图就按原图分辨率
+/// 解码 ≈ 48MB 位图进全局 imageCache，而它在气泡里最多占 1024dp 宽。
 ///
 /// 链接默认**不**打开：打开 URL 属平台 IO，应由 app 层注入 [onLinkTap]
 /// （与 [onDownloadAgentFile] 同一原则：页面只收集意图）。为 null 时链接
@@ -167,6 +174,9 @@ class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
       textDirection: dir,
       style: textTheme.bodyMedium?.copyWith(color: scheme.onSurface),
       styleSheet: _styleSheet(scheme),
+      // 图片解码降采样（docs/memory-audit.md G10）。不传时插件用
+      // `Image(image: NetworkImage(url))`——无 ResizeImage，按原图分辨率解码。
+      imageBuilder: markdownImageBuilder,
       onLinkTap: onLinkTap == null
           ? null
           : (url, title) => onLinkTap(url, title),
