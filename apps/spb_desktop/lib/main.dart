@@ -121,14 +121,10 @@ void main() {
 
     runApp(
       ProviderScope(
-        overrides: [
-          desktopCapabilitiesProvider.overrideWithValue(capabilities),
-          // 拖拽能力仅在桌面端真实可用：移动端保留 Provider 默认的
-          // NoopDragDropCapability（见 providers.dart），UI 只需判 supports。
-          dragDropCapabilityProvider.overrideWithValue(
-            const DesktopDragDropCapability(),
-          ),
-        ],
+        // 清单在 `providers.dart` 的 `buildProductionOverrides`（**唯一**来源）：
+        // 写在这里的 override 没有任何测试能看见，漏挂一条就是静默失效——
+        // 通知 sink 就这样丢过一次（见 `production_overrides_test.dart`）。
+        overrides: buildProductionOverrides(capabilities: capabilities),
         child: const SpbDesktopApp(),
       ),
     );

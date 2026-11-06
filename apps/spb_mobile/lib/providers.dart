@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+// 见桌面端同名 import：`Override` 在 Riverpod 3 只从 misc.dart 导出。
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -30,10 +32,10 @@ final desktopCapabilitiesProvider = Provider<DesktopCapabilities>((ref) {
 
 /// 本地通知发送能力（issue #21）。
 ///
-/// 默认 [NoopNotificationSink]；生产在 `main.dart` 覆盖为
+/// 默认 [NoopNotificationSink]；生产由 [buildProductionOverrides] 覆盖为
 /// [LocalNotificationSink]（Android 走 `NotificationManager` + 运行时权限，
-/// iOS 走 `UNUserNotificationCenter`）。见 [notificationSinkProvider] 的桌面端
-/// 同名字段文档（两侧保持同构）。
+/// iOS 走 `UNUserNotificationCenter`）。见桌面端同名字段文档（两侧保持同构）——
+/// 也包括「这个默认值曾经静默吃掉整个通知功能」那段。
 final notificationSinkProvider = Provider<NotificationSink>((ref) {
   return const NoopNotificationSink();
 });
@@ -69,6 +71,17 @@ final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
     isWindowFocused: () => ref.read(windowFocusedProvider),
   );
 });
+
+/// 生产装配的 Provider override 清单——**唯一**来源。
+///
+/// `main.dart` 只负责把它传给 `ProviderContainer`，不再自己列条目。
+/// 理由见桌面端同名函数（「漏挂 override 是零报错的静默失效」）。
+List<Override> buildProductionOverrides() {
+  return [
+    // 本地通知（issue #21）。漏了这一行 = 通知功能整条静默失效。
+    notificationSinkProvider.overrideWithValue(LocalNotificationSink()),
+  ];
+}
 
 // ==================== 传输层 ====================
 

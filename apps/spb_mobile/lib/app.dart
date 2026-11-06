@@ -79,6 +79,10 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
 
     if (sink is LocalNotificationSink) {
       unawaited(sink.initialize());
+      // 启动就请求一次权限（幂等）。等「确认卡在后台到达」才请求的话，Android
+      // 会在后台弹框（用户回到应用才看得到），而那条通知已经因未授权被丢弃——
+      // 详见桌面端 `_installNotifications` 同一处的注释。
+      unawaited(notifier.ensurePermission());
     }
 
     // 点击通知 → 跳到该对话（payload 是 `/chat/{groupId}`）。

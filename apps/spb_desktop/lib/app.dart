@@ -210,6 +210,16 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     // `LocalNotificationSink.initialize`），故不需要 await 后再判断。
     if (sink is LocalNotificationSink) {
       unawaited(sink.initialize());
+      // 启动就请求一次权限（`ensurePermission` 幂等，只有第一次真的问）。
+      //
+      // ## 为什么不能等到「确认卡在后台到达」那一刻再请求
+      //
+      // 判定流程是「先 `ensurePermission()`，false 就直接不发」，而 Android 13+
+      // 在**后台**发起的权限请求会等到用户回到应用才弹框——于是首条确认卡通知
+      // 会在用户看见权限框之前就被丢弃，且不会重发（id 已记入判重集合）。启动后
+      // 在用户看得见应用时问，才是 `ConfirmationNotifier` 文档里说的「可解释的
+      // 时机」。Linux/Windows 无权限概念（同步返回 true），零成本。
+      unawaited(notifier.ensurePermission());
     }
 
     // 点击通知 → 跳到该对话。用 `go`（不是 `push`）：用户点通知的意图是

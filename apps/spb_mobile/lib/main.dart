@@ -76,7 +76,10 @@ void main() {
     // 默认关闭时不注册回调，零开销。
     if (SpbEnv.frameTiming) installFrameTimingReporter();
 
-    final container = ProviderContainer();
+    // override 清单在 `providers.dart` 的 `buildProductionOverrides`（**唯一**
+    // 来源）：本项目此前从未在这里挂过通知 sink，导致生产一直跑 Noop 实现、
+    // 通知功能静默失效。
+    final container = ProviderContainer(overrides: buildProductionOverrides());
     // 监听自定义 scheme 回跳（`partyb://oidc/callback`），把授权码交给
     // OIDC 客户端换取会话。见 `auth_deeplink.dart`。
     //

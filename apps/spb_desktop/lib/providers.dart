@@ -4,6 +4,9 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+// Riverpod 3 把 `Override` 移出了主 barrel（flutter_riverpod.dart），只从
+// misc.dart 导出——而 override 清单需要它作返回类型。
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -33,7 +36,17 @@ final desktopCapabilitiesProvider = Provider<DesktopCapabilities>((ref) {
 ///
 /// 默认是 [NoopNotificationSink]：`flutter test` 里没有平台通道，
 /// 真实实现会在 `initialize()` 时抛 `MissingPluginException`（已捕获并降级，
-/// 但默认 Noop 更明确）。生产在 `main.dart` 覆盖为 [LocalNotificationSink]。
+/// 但默认 Noop 更明确）。生产由 [buildProductionOverrides] 覆盖为
+/// [LocalNotificationSink]——**不要**在 `main.dart` 里另写一份 override 清单。
+///
+/// ## 这个默认值曾经静默吃掉了整个通知功能
+///
+/// 注释原先写着「生产在 `main.dart` 覆盖」，而 `main.dart` 从来没有覆盖过：
+/// 生产一直用 Noop → `requestPermission()` 恒 false → `handleItems` 恒返回空，
+/// 一条通知都发不出去，且**没有任何报错**（Noop 是合法实现，`if (sink is
+/// LocalNotificationSink)` 的分支只是不执行）。单测全绿，因为 harness 自己注入
+/// `RecordingNotificationSink`。故 override 清单收敛成一个**可测的函数**
+/// （[buildProductionOverrides]），由 `production_overrides_test.dart` 钉住。
 ///
 /// ## 为什么非 autoDispose
 ///
@@ -81,6 +94,36 @@ final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
     isWindowFocused: () => ref.read(windowFocusedProvider),
   );
 });
+
+/// 生产装配的 Provider override 清单——**唯一**来源。
+///
+/// `main.dart` 只负责把它挂到 `ProviderScope(overrides: ...)` 上，不再自己列条目。
+///
+/// ## 为什么抽成函数
+///
+/// 「override 漏挂」是**编译器不管、页面测试也测不到**的静默失效：provider 有
+/// 一个合理的默认值（Noop），漏挂后功能整条不再执行、却零报错。通知 sink 就
+/// 这么丢过一次（见 [notificationSinkProvider] 的文档）。抽成函数后，测试能
+/// 拿到「生产实际会用的那套 override」并断言里面到底是什么实现。
+///
+/// ## 为什么 `capabilities` 是参数而不是在这里构造
+///
+/// 桌面能力依赖平台通道，必须在 `WidgetsFlutterBinding` 就绪之后异步初始化
+/// （`bootstrapDesktop`），拿不到就不该被 provider 惰性构造。
+List<Override> buildProductionOverrides({
+  required DesktopCapabilities capabilities,
+}) {
+  return [
+    desktopCapabilitiesProvider.overrideWithValue(capabilities),
+    // 拖拽能力仅在桌面端真实可用：移动端保留 provider 的默认
+    // `NoopDragDropCapability`，UI 只需判 supports。
+    dragDropCapabilityProvider.overrideWithValue(
+      const DesktopDragDropCapability(),
+    ),
+    // 本地通知（issue #21）。漏了这一行 = 通知功能整条静默失效。
+    notificationSinkProvider.overrideWithValue(LocalNotificationSink()),
+  ];
+}
 
 // ==================== 传输层 ====================
 
