@@ -110,7 +110,19 @@ class MiniProgramLoginClient {
       queryParameters: withScheme ? {'scheme': '1'} : null,
     );
 
-    final res = await _request(() => _dio.post<dynamic>(uri.toString()));
+    // 必须声明 Content-Type：网关对**无 Content-Type 的 POST** 直接 400
+    // （`Content-Type header is required for POST requests`），而这条请求本来
+    // 就没有请求体。实测踩过：不声明时前端只看到「小程序登录失败」，真正的
+    // 拒绝发生在网关。
+    //
+    // 只设 header 不加空 body：加 `data: {}` 会让请求多出一个 `{}` 载荷，
+    // 服务端不读它，却让「这条 POST 没有请求体」这个事实变得含糊。
+    final res = await _request(
+      () => _dio.post<dynamic>(
+        uri.toString(),
+        options: Options(contentType: Headers.jsonContentType),
+      ),
+    );
     final data = _asMap(res.data);
     final scene = _str(data['scene']);
     if (scene == null) {

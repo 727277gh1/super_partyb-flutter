@@ -119,6 +119,31 @@ void main() {
       expect(session.canLaunchWeChat, isFalse);
     });
 
+    test('POST 必须带 Content-Type（网关对无 Content-Type 的 POST 直接 400）', () async {
+      // 回归：实测线上 `POST .../qrcode-session` 不带 Content-Type 时，
+      // 网关返回 400 `Content-Type header is required for POST requests`，
+      // 前端只能看到「小程序登录失败」，很难追到网关头上。
+      String? contentType;
+      dio.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) {
+            contentType = options.headers['Content-Type']?.toString();
+            handler.next(options);
+          },
+        ),
+      );
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        (server) => server.reply(200, {
+          'scene': 'abc123',
+          'qrCodeUrl': 'data:image/png;base64,AAA',
+        }),
+      );
+
+      await client.createSession();
+      expect(contentType, contains('application/json'));
+    });
+
     test('响应缺 scene 时抛 AuthError 而不是空指针', () async {
       adapter.onPost(
         '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
