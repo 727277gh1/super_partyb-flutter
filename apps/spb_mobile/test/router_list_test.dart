@@ -326,6 +326,22 @@ void main() {
     );
     expect(body.containsKey('agent_id'), isFalse);
     expect(body['force_new_session'], isTrue);
+
+    // 「自动路由」：把本地选择清回 null。它必须**盖过** group 已有的绑定
+    // （`active_session.agent_id`），否则标签写着旧 agent 而下一条消息却按
+    // auto 发出去——界面在撒谎。
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+          .data,
+      '自动路由',
+      reason: '显式自动路由优先于服务端绑定（_autoRouting 短路 _effectiveAgentId）',
+    );
   });
 
   testWidgets('对话页交付物入口：AppBar 按钮打开弹层并按 path_prefix 拉本对话清单', (tester) async {

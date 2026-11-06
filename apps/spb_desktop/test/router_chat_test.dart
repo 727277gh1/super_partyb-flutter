@@ -803,6 +803,9 @@ void main() {
     //    进 body（写成 `agent_id` 会 400「agentId 不能为空」），用的 agent
     //    是刚刚本地选中的那个。
     final hit = <({String path, Object? body})>[];
+
+    /// 发消息的请求体（`POST /users/:uid/chat/messages`）。
+    final sendHit = <Map<String, dynamic>>[];
     await pumpApp(
       tester,
       initialLocation: SpbRoutes.chat('grp_x'),
@@ -850,6 +853,14 @@ void main() {
           '/users/usr_REAL/chat/messages/pending',
           (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
           queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+        adapter.onPost(
+          '/users/usr_REAL/chat/messages',
+          (server) => server.replyCallback(200, (options) {
+            sendHit.add(options.data! as Map<String, dynamic>);
+            return {'id': 'turn_1', 'group_id': 'grp_x', 'status': 'queued'};
+          }),
+          data: Matchers.any,
         );
         adapter.onPost(
           '/chat/groups/grp_x/sessions/switch',
@@ -922,6 +933,56 @@ void main() {
     );
     expect(body.containsKey('agent_id'), isFalse);
     expect(body['force_new_session'], isTrue);
+
+    // 上一段「开新会话」会弹一条 SnackBar，它盖住底部输入栏——不清掉，
+    // 后面点发送会打到 SnackBar 上（tap 静默无效，输入框里的字还在）。
+    ScaffoldMessenger.of(tester.element(find.byType(ConversationPage)))
+        .clearSnackBars();
+    await tester.pumpAndSettle();
+
+    // ── 「自动路由」：把本地选择清回 null ───────────────────────────────
+    //
+    // webapp 的首项「自动路由（AI 选择）」、小程序抽屉的 null 项都是它。
+    // 关键：它必须**盖过** `group.active_session` 的绑定——否则点完标签
+    // 仍写着旧 agent，而下一条消息却按 auto 发出去（界面在撒谎）。
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+          .data,
+      '自动路由',
+      reason: '显式自动路由优先于服务端绑定（_autoRouting 短路 _effectiveAgentId）',
+    );
+
+    // ── 「标签写谁就发给谁」─────────────────────────────────────────
+    //
+    // 自动路由下一条消息必须**不带** agent_id、且 routing.mode=auto。若
+    // onSend 发的是原始本地值而标签用的是 `_effectiveAgentId`，两者就会
+    // 分叉（新打开的对话标签写着某个 agent，发出去却是 auto——服务端
+    // `auto_agent` 可能换个人回答，而那个人没有绑定行 → 拿不到 session）。
+    await tester.enterText(find.byType(TextField).last, '你好');
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+
+    expect(sendHit, hasLength(1), reason: '发送必须真的发出一次请求');
+    expect(
+      sendHit.single.containsKey('agent_id'),
+      isFalse,
+      reason: '自动路由不带 agent_id（服务端据此走 auto_agent 匹配）',
+    );
+    expect(
+      (sendHit.single['routing']! as Map)['mode'],
+      'auto',
+      reason: '自动路由必须发 auto；发 manual 会强制用 group 绑定，等于没切',
+    );
   });
   group('登录后回跳（消费 from 参数）', () {
     testWidgets('未认证访问 /settings → 落在 /login?from=%2Fsettings', (tester) async {

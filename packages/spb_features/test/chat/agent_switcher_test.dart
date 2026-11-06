@@ -11,6 +11,8 @@ import 'package:spb_models/spb_models.dart';
 /// 不发请求，选中的 agent 随**下一条消息**的 `agent_id` 交给服务端，由入队事务
 /// 里的 `ReplaceBinding` 归档旧绑定。故：
 /// - 点选必须**只回调** `selectAgent`，不得有 HTTP 请求、不得再要求二次确认；
+/// - 「自动路由」是唯一能把本地选择清回 null 的入口（webapp / 小程序都有）：
+///   清成 null 后下一条消息发 `routing.mode=auto`，服务端按内容挑执行者；
 /// - 「同 Agent 开新会话」是另一条路径（`forceNewSession: true` 的
 ///   `/sessions/switch`），不能被和「换 agent」混成一个动作（否则用户点
 ///   「开新会话」只会改一下本地选择，旧会话根本没有被归档）。
@@ -24,8 +26,12 @@ void main() {
   Agent agent(String id, String name, {String status = 'active'}) =>
       Agent(id: id, name: name, status: status);
 
-  /// 最近一次本地选择（`null` = 没有选择发生）。
+  /// 最近一次本地选择（`null` = 没有选择发生**或**选了自动路由，故配合
+  /// [selectCalls] 区分——自动路由本身就是一个合法选择）。
   late String? lastSelected;
+
+  /// `selectAgent` 被调用的次数（区分「没选」与「选了自动路由」）。
+  late int selectCalls;
 
   /// 「同 Agent 开新会话」被触发的次数。
   late int newSessionCalls;
@@ -39,6 +45,7 @@ void main() {
     bool busy = false,
   }) async {
     lastSelected = null;
+    selectCalls = 0;
     newSessionCalls = 0;
     await tester.pumpWidget(
       MaterialApp(
@@ -51,7 +58,10 @@ void main() {
                   if (loadError != null) throw loadError;
                   return agents ?? [agent('a1', '写作助手')];
                 },
-                selectAgent: (agentId) => lastSelected = agentId,
+                selectAgent: (agentId) {
+                  lastSelected = agentId;
+                  selectCalls++;
+                },
                 startNewSession: () async {
                   newSessionCalls++;
                 },
@@ -100,11 +110,14 @@ void main() {
       expect(find.byIcon(Icons.warning_amber_outlined), findsOneWidget);
     });
 
-    testWidgets('未绑定（activeSession 为空）时显示「未绑定」', (tester) async {
+    testWidgets('未绑定时显示「自动路由」（不是「未绑定」）', (tester) async {
       await pumpSwitcher(tester, currentAgentId: null);
 
-      expect(find.text('未绑定'), findsOneWidget);
-      // 未绑定时不该出现「同 Agent 开新会话」（没有 agent 可开）。
+      // null 的语义是「让平台挑」（`routing.mode=auto`），不是「没有」——
+      // webapp 的 `selectedName || t("autoRouting")` 同此。
+      expect(find.text('自动路由'), findsOneWidget);
+      expect(find.text('未绑定'), findsNothing);
+      // 没有 agent 可开新会话。
       await openMenu(tester);
       expect(find.byKey(const ValueKey('agent-new-session')), findsNothing);
     });
@@ -252,7 +265,25 @@ void main() {
         find.byKey(const ValueKey('agent-option-a1')),
       );
       expect(current.enabled, isFalse);
-      expect(lastSelected, isNull);
+      expect(selectCalls, 0);
+    });
+
+    testWidgets('点「自动路由」把本地选择清回 null（唯一回退入口）', (tester) async {
+      // 选过 agent 之后服务端绑定不会自动回退，只有清成 null 才会让下一条
+      // 消息重新走 auto_agent 匹配。webapp 的「自动路由（AI 选择）」首项、
+      // 小程序的 null 项都是这个作用。
+      await pumpSwitcher(
+        tester,
+        agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
+        currentAgentId: 'a1',
+      );
+
+      await openMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+      await tester.pumpAndSettle();
+
+      expect(selectCalls, 1);
+      expect(lastSelected, isNull, reason: 'null = 自动路由');
     });
 
     testWidgets('菜单头部说明“随下一条消息生效”（而不是要求确认）', (tester) async {
@@ -297,7 +328,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(newSessionCalls, 1);
-      expect(lastSelected, isNull, reason: '开新会话不换 agent');
+      expect(selectCalls, 0, reason: '开新会话不换 agent');
       expect(find.text('开新会话？'), findsNothing);
     });
   });
@@ -583,6 +614,21 @@ void main() {
       expect(find.byKey(const ValueKey('agent-picker')), findsNothing);
       expect(find.byKey(const ValueKey('agent-switch-confirm')), findsNothing);
       expect(lastSelected, 'a2');
+    });
+
+    testWidgets('弹层首行也是自动路由（大列表同样能清回 null）', (tester) async {
+      await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
+
+      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('agent-option-auto')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+      await tester.pumpAndSettle();
+
+      expect(selectCalls, 1);
+      expect(lastSelected, isNull);
+      expect(find.byKey(const ValueKey('agent-picker')), findsNothing);
     });
   });
 }

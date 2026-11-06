@@ -14,7 +14,11 @@ typedef LoadAgents = Future<List<Agent>> Function();
 ///
 /// 选中的语义是「本对话接下来由谁回答」：装配层把它记在本地，随**下一条消息**
 /// 的 `agent_id` 发出，服务端在入队时归档旧绑定并重新绑定（见类文档）。
-typedef SelectAgent = void Function(String agentId);
+///
+/// 传 `null` = 用户显式选了「自动路由」（把选择交回服务端 `auto_agent`）。
+/// 注意这与「没选过」（未覆盖、沿用绑定）不是同一件事，装配层用三态区分
+/// ——见两端 router 的 `_autoRouting`。
+typedef SelectAgent = void Function(String? agentId);
 
 /// 同 Agent 开新会话（装配层调 `AgentsApi.switchGroupAgent`，`forceNewSession: true`）。
 typedef StartNewSession = Future<void> Function();
@@ -29,6 +33,7 @@ typedef StartNewSession = Future<void> Function();
 /// | 动作 | 客户端 | 服务端 |
 /// |---|---|---|
 /// | 点选 agent | 记本地（本组件只回调 [selectAgent]） | **什么都不发生** |
+/// | 点「自动路由」 | 同上，回调 `selectAgent(null)` | **什么都不发生** |
 /// | 发下一条消息 | 请求体带 `agent_id` | 入队事务里 `ReplaceBinding`：归档该 group 的旧 owner 绑定，写新绑定，**继承旧绑定的 `session_id`**（对话接着聊） |
 /// | 点「同 Agent 开新会话」 | 调 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`） | 立即归档 + 新绑定（`session_id` 置空） |
 ///
@@ -101,8 +106,10 @@ class AgentSwitcher extends StatefulWidget {
   /// 「本对话当前由谁回答」的**有效**值——装配层传的是
   /// 「本地选择 ?? 服务端 active binding」（`ChatGroup.activeSession?.agentId`）。
   ///
-  /// 为空表示两端都没有：还没绑定（服务端懒激活或异常数据），此时仍展示入口，
-  /// 标签显示「未绑定」，让用户能主动选一个。
+  /// 为空 = 自动路由（`routing.mode=auto`，服务端按消息内容挑执行者），
+  /// 标签显示「自动路由」——与 webapp `AgentSelector.tsx` 的
+  /// `selectedName || t("autoRouting")`、小程序 `work-detail` 抽屉的
+  /// `selectedAgentId: null` 同一语义。
   final String? currentAgentId;
 
   /// 开新会话是否在途（装配层传入）。为真时禁用入口，防重复触发。
@@ -187,7 +194,7 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
   /// 回退 id 而非空串：显示空白会让用户不知道当前绑的是谁。
   String get _currentLabel {
     final id = widget.currentAgentId;
-    if (id == null || id.isEmpty) return '未绑定';
+    if (id == null || id.isEmpty) return '自动路由';
     for (final a in _agents ?? const <Agent>[]) {
       if (a.id == id) return a.label;
     }
@@ -284,6 +291,19 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
         child: Text('选择后随下一条消息生效（沿用当前对话上下文）', style: TextStyle(fontSize: 12)),
       ),
       const PopupMenuDivider(),
+      // 自动路由：**唯一**能把本地选择清回去的入口。选过某个 agent 之后
+      // 服务端绑定不会自动回退，只有清成 null 才会让下一条消息重新走
+      // `auto_agent` 匹配（webapp `AgentSelector.tsx` 的「自动路由（AI 选择）」
+      // 首项、小程序 `work-detail` 抽屉的 null 项，语义一致）。
+      CheckedPopupMenuItem<_SwitcherAction>(
+        key: const ValueKey('agent-option-auto'),
+        value: const _SwitchTo(null),
+        checked: widget.currentAgentId == null,
+        // 已经是自动路由时不可选（同当前 agent 的置灰理由）。
+        enabled: widget.currentAgentId != null,
+        child: const Text('自动路由'),
+      ),
+      const PopupMenuDivider(),
       for (final g in groups) ...[
         // 组头：只在真的分组时出现。全是未分组时它只是噪音。
         if (g.name != ungroupedAgentLabel || groups.length > 1)
@@ -341,18 +361,19 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       groups: groupAgents(agents),
       currentAgentId: widget.currentAgentId,
     );
-    final agentId = SpbEnv.isDesktop
-        ? await showDialog<String>(
+    final pick = SpbEnv.isDesktop
+        ? await showDialog<AgentPick>(
             context: context,
             builder: (dialogContext) => picker,
           )
-        : await showModalBottomSheet<String>(
+        : await showModalBottomSheet<AgentPick>(
             context: context,
             isScrollControlled: true,
             builder: (sheetContext) => SafeArea(child: picker),
           );
-    if (agentId == null || !mounted) return;
-    await _onSelected(_SwitchTo(agentId));
+    // null = 用户取消（`pop` 不传值）；`AgentPick` 本身才代表「选了什么」。
+    if (pick == null || !mounted) return;
+    await _onSelected(_SwitchTo(pick.agentId));
   }
 
   Future<void> _onSelected(_SwitcherAction action) async {
@@ -392,7 +413,9 @@ sealed class _SwitcherAction {
 
 class _SwitchTo extends _SwitcherAction {
   const _SwitchTo(this.agentId);
-  final String agentId;
+
+  /// null = 自动路由。
+  final String? agentId;
 }
 
 class _NewSession extends _SwitcherAction {

@@ -820,12 +820,24 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 换对话后回落到新 group 的 `activeSession.agentId`。
   String? _selectedAgentId;
 
-  /// 「本对话当前由谁回答」的**有效**值：本地选择优先，否则服务端绑定。
+  /// 用户是否**显式**选了「自动路由」（把选择交回服务端 `auto_agent`）。
   ///
-  /// AppBar 标签、菜单勾选、「同 Agent 开新会话」都用它——三者必须同源，
-  /// 否则会出现「标签写着 A，点开菜单勾的是 B」这类自相矛盾。
-  String? get _effectiveAgentId =>
-      _selectedAgentId ?? _group?.activeSession?.agentId;
+  /// 必须与 `_selectedAgentId == null`（未覆盖）区分：两者都没有具体 agent，
+  /// 但语义相反——前者是「让平台挑」（`routing.mode=auto`、不带 `agent_id`），
+  /// 后者是「沿用这个对话已有的绑定」。一个 `String?` 表达不了三态
+  /// （未覆盖 / 显式自动 / 具体 agent），webapp 的 `agentByGroup[groupId]`
+  /// 正是 `undefined | null | string` 三态同构。
+  bool _autoRouting = false;
+
+  /// 「本对话当前由谁回答」的**有效**值：显式自动路由 → null；否则本地
+  /// 选择优先，再否则服务端绑定。
+  ///
+  /// AppBar 标签、菜单勾选、发送的 `agent_id`、「同 Agent 开新会话」都用它
+  /// ——四者必须同源，否则会出现「标签写着 A，发出去的是自动路由」这类
+  /// 自相矛盾。
+  String? get _effectiveAgentId => _autoRouting
+      ? null
+      : (_selectedAgentId ?? _group?.activeSession?.agentId);
 
   /// controller.items 的订阅（dispose 时释放）。
   StreamSubscription<List<ConversationItem>>? _itemsSub;
@@ -988,6 +1000,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 的绑定，见 [_selectedAgentId] 的说明）。清掉后回落到新 group 的
       // `activeSession.agentId`（[_effectiveAgentId]）。
       _selectedAgentId = null;
+      _autoRouting = false;
       _resolveUserAndFocus();
       _loadGroup();
     }
@@ -1566,14 +1579,19 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         // 放在 AppBar 而非侧边栏 tab：它是「这段对话由谁回答」的全局属性，
         // 用户在对话过程中随时可能要换，不该先展开侧边栏再切 tab。
         //
-        // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「未绑定」——
-        // 这与真实状态（尚未拉取）不符，但切换本身仍可用（服务端以 agentId
-        // 为准），且比隐藏入口让用户以为「本端不支持切 agent」要好。
+        // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「自动路由」
+        // ——这与真实状态（尚未拉取）可能不符，但两种情形下下一条消息确实都
+        // 走 `routing.mode=auto`，且比隐藏入口让用户以为「本端不支持切 agent」
+        // 要好。
         AgentSwitcher(
           loadAgents: ref.watch(loadAgentsProvider),
           // 选 agent = 纯本地（对齐 webapp 的 `setAgentForGroup`）：不发请求、
           // 不弹确认，随下一条消息的 `agent_id` 生效。
-          selectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
+          selectAgent: (agentId) => setState(() {
+            // null = 用户明确选了自动路由（见 [_autoRouting]）。
+            _autoRouting = agentId == null;
+            _selectedAgentId = agentId;
+          }),
           startNewSession: _startNewSession,
           currentAgentId: _effectiveAgentId,
           busy: _switchingAgent,
@@ -1741,12 +1759,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 发完**不清**（对齐 webapp 的 `agentByGroup[groupId]`）：清了就等于
       // 「每条消息都要重新选一次 Agent」，而 AppBar 上明明写着当前是谁。
       // 清除点只有换对话（见 [_selectedAgentId] 的文档）。
+      //
+      // 发的是 `_effectiveAgentId` 而不是原始本地值：AppBar 标签显示的就是它
+      // ——「标签写谁就发给谁」。若发原始值，新打开的对话（本地值仍为 null）
+      // 会在标签写着「写作助手」时以 `routing.mode=auto` 发出去，服务端
+      // `auto_agent` 可能换个人回答，且那个 agent 没有绑定行 → 拿不到 session
+      // （见 super_partyb AGENTS.md 的「自动路由的代价」）。
       onSend: (text) => ref
           .read(chatStreamControllerProvider(userId))
           .send(
             input: text,
-            agentId: _selectedAgentId,
-            routingMode: _selectedAgentId == null ? 'auto' : 'manual',
+            agentId: _effectiveAgentId,
+            routingMode: _effectiveAgentId == null ? 'auto' : 'manual',
           ),
       // 失败 turn 的重发：锁定**原 group + 原 agent**，`routingMode: manual`
       // 避免再次触发归属歧义确认。
@@ -1762,7 +1786,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           .send(
             input: text,
             groupId: widget.groupId,
-            agentId: agentId ?? _selectedAgentId,
+            agentId: agentId ?? _effectiveAgentId,
             routingMode: 'manual',
           )
           .then((_) => null),
@@ -1775,7 +1799,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           unawaited(
             ref
                 .read(chatStreamControllerProvider(userId))
-                .send(input: action.nextInput, agentId: _selectedAgentId)
+                .send(input: action.nextInput, agentId: _effectiveAgentId)
                 .then((_) => null)
                 .catchError((Object e) {
                   debugPrint('spec 动作发送失败: $e');
@@ -1787,7 +1811,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 建议卡标注了 agent_id：把它写进**同一个**本地选择（AppBar 的 agent
       // 标签随后就会跟着变）——对齐 webapp FollowUpSuggestCard 的「先切人再追加」，
       // 那边也是写 `agentByGroup[groupId]`，与选择器共用同一个值。
-      onSelectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
+      onSelectAgent: (agentId) => setState(() {
+        _autoRouting = false;
+        _selectedAgentId = agentId;
+      }),
       // 对话内搜索（搜的是**已加载的时间线**，含 agent 回复）。
       //
       // ## 为什么显式打开

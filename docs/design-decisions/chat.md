@@ -1241,16 +1241,25 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 | 动作 | 现在的客户端行为 | 服务端 |
 |---|---|---|
 | 点选 agent | 只改本地 `_selectedAgentId`，**不发请求、不弹确认**；AppBar 标签立刻跟着变 | 什么都不发生 |
-| 发消息 | `agent_id` + `routing.mode=manual`（未选时为 `auto`），**每条都带**（选择是持久的） | 入队事务里重绑（见上） |
+| 点选「自动路由」 | 同上，但清成 null 并置 `_autoRouting`；标签变「自动路由」 | 什么都不发生 |
+| 发消息 | `agent_id` = **有效值**（标签上那个）+ `routing.mode=manual`；有效值为 null 时不带 `agent_id`、`mode=auto` | 入队事务里重绑（见上） |
 | 「同 Agent 开新会话（清空上下文）」 | 调 `/sessions/switch`（`force_new_session: true`），**不弹确认**，成功弹「已开始新会话」 | 立即归档 + 新绑定，`session_id` 置空 |
 
 判据落在两处：
 
-- `packages/spb_features/lib/src/chat/agent_switcher.dart`：`selectAgent`（纯本地）
-  与 `startNewSession`（唯一立即调端点的入口）是两个回调，**不能合并**——合并后
-  「开新会话」会退化成只改本地值，旧会话根本没被归档。
-- 两端 router 的 `_effectiveAgentId = _selectedAgentId ?? _group.activeSession.agentId`：
-  AppBar 标签、菜单勾选、开新会话三者必须同源，否则会「标签写 A、菜单勾 B」。
+- `packages/spb_features/lib/src/chat/agent_switcher.dart`：`selectAgent`（纯本地，
+  可传 null）与 `startNewSession`（唯一立即调端点的入口）是两个回调，**不能合并**
+  ——合并后「开新会话」会退化成只改本地值，旧会话根本没被归档。
+- 两端 router 的三态：`_selectedAgentId`（`String?`，null = 未覆盖）+ `_autoRouting`
+  （bool，显式自动路由），合并成 `_effectiveAgentId`：显式自动 → null；否则本地
+  选择；再否则服务端绑定。AppBar 标签、菜单勾选、发送的 `agent_id`、开新会话
+  **四者同源**，否则会「标签写 A、发出去的是自动路由」。
+
+> 为什么必须三态：webapp 的 `agentByGroup[groupId]` 就是 `undefined | null | string`
+> ——`undefined`（未选）与 `null`（显式自动路由）**发出去的请求不一样**吗？
+> 两者都不带 `agent_id`、都是 `mode=auto`，但标签/勾选不同：前者该显示「沿用绑定」，
+> 后者该显示「自动路由」。Flutter 若用一个 `String?` 兼两者，点完「自动路由」标签
+> 会回落到 `active_session` 的绑定，而消息实际按 auto 发出——界面在撒谎。
 
 #### 代价（明说）
 
@@ -1273,24 +1282,37 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 
 #### 有意**不**做的（避免下轮又提）
 
-- **不加「自动路由」菜单项**（webapp 选择器第一项，`onSelectAgent(null)`）。
-  webapp 的默认状态就是 `null`（平台路由），而 Flutter 对话页始终带 `group_id`
-  （服务端 `GroupBinding: GroupFixed`）、首轮之后必有绑定；用户要「换回绑定」直接
-  在列表里选它即可（它是可点的一项）。加这一项需要在本地引入三态
-  （未选 / 显式自动 / 指定），收益不抵复杂度。
 - **不接 Tool Agent**（webapp 的 `agent_type=tool_agent` + `tool-agent:<name>` 虚拟
   ID）：Go 的 `switchAgent` 结构体没有 `agent_type` 字段，`chatbinding.Bind` 还会
   `GetAgent` 校验 id 存在 → 虚拟 ID 必然 404。属 §6.9 一族，前置是服务端先支持。
-- **不给发消息补 e2e 断言**：`send` → `agent_id` 的 body 契约已由
-  `spb_api/test/chat_api_contract_test.dart`（路径 + 键名 + `routing.mode`）钉住；
-  router 层只验证「点选不发请求」与「开新会话用本地选中的 agent」。
+  补一条证据：Go 的 `sendChatToAgentRequest.AgentType`（`server/chat_stream.go:151`）
+  赋值后**从未使用**——webapp 那条路径在 Go 后端根本没有接线，对齐它等于对齐一个 bug。
+
+#### 已补：自动路由（2026-11-06）
+
+上一版把「自动路由」判成「有意不做」，理由是「用户要换回绑定，直接在列表里选它
+即可」。**这个理由站不住**：选回绑定 agent ≠ 自动路由——前者带 `agent_id` →
+`mode=manual`，`resolveGroupAgent` 第 1 步直接返回它，`auto_agent` 永不参与；
+后者不带 `agent_id` → `mode=auto`，服务端按消息内容匹配（可能换人）。webapp 的
+首项「自动路由（AI 选择）」、小程序 `work-detail` 抽屉的 `selectedAgentId: null`
+都是这个语义，故本轮补齐：菜单/弹层首行加「自动路由」，它是**唯一**能把选择清
+回去的入口（`_autoRouting` 三态见上表下方）。
+
+同时修掉一个由此暴露的**既有缺陷**：`onSend` 原本发的是原始本地值
+（`_selectedAgentId`），而标签显示的是 `_effectiveAgentId`。新打开一个已有绑定的
+对话（本地值仍为 null）时，标签写着「写作助手」，消息却以 `mode=auto` 发出——
+服务端 `auto_agent` 可能换个人回答，而那个 agent 没有绑定行 → 拿不到 `session_id`
+（见 super_partyb AGENTS.md「自动路由的代价」）。现在发的一律是有效值：
+**标签写谁就发给谁**。
 
 #### 测试
 
 - `packages/spb_features/test/chat/agent_switcher_test.dart`：点选**不弹确认框**、
-  直接回调；选当前项无回调；「同 Agent 开新会话」直接调 `startNewSession`（不改
-  agent）；大列表弹层同样不弹确认。
+  直接回调；选当前项无回调；点「自动路由」回调 `selectAgent(null)`（小列表与搜索
+  弹层两条路径都测）；「同 Agent 开新会话」直接调 `startNewSession`（不改 agent）。
 - `apps/spb_desktop/test/router_chat_test.dart` / `apps/spb_mobile/test/router_list_test.dart`：
   点选后 `hit` 为空（无 HTTP）+ 标签变成所选 agent；再点「同 Agent 开新会话」时
   `sessions/switch` 的 body 是 `agentId`（camelCase，**不是** `agent_id`，写错 400
-  「agentId 不能为空」）+ `force_new_session: true` + 刚选中的 agent。
+  「agentId 不能为空」）+ `force_new_session: true` + 刚选中的 agent；桌面端额外
+  点「自动路由」后标签回到「自动路由」，且下一条消息的 body **不带** `agent_id`、
+  `routing.mode=auto`（「标签写谁就发给谁」的回归防线）。
