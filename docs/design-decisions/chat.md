@@ -1308,6 +1308,11 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 确认框与在途禁用都在 `MessageComposer` 里（拥有按钮的那个组件），不放在两个
 router：它是 UI 决策，放两处就变成两份实现、两份测试。
 
+一处**有意**保留的不对称：webapp 画布（`WorkbenchGroupCanvas`）里的草稿节点也有
+一个「清空后发送」模式，它**不**弹确认框——那里模式是用户在图节点上显式选的，且与
+「发送」合并成一个动作，再确认一次就是双重确认。它与输入栏那个独立按钮不是同一个
+入口，别为了「统一」给它加确认框。
+
 #### 有意**不**做的（避免下轮又提）
 
 - **不接 Tool Agent**（webapp 的 `agent_type=tool_agent` + `tool-agent:<name>` 虚拟
