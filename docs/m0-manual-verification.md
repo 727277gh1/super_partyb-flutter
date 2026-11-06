@@ -279,8 +279,7 @@ xvfb-run -a timeout 15 ./build/linux/x64/release/bundle/spb_desktop
 - **操作**：设置里选一个同步目录 → 触发同步 → 确认文件真的落盘。
 - **期望**：
   - [ ] 能选中目录且**写入成功**（不是「同步报写入失败」）。
-  - [ ] 同步语义与 Tauri 迁移版一致（见 `AGENTS.md` §10「交付物同步的既有
-        语义」）：单向 UFS→本地、`updated_since` 增量、感知 `deleted_at`
+  - [ ] 同步语义与 Tauri 迁移版一致（见 `AGENTS.md` §6.42 / `docs/design-decisions/sync.md`）：单向 UFS→本地、`updated_since` 增量、感知 `deleted_at`
         远端删除、`.part` + rename 原子写入、路径穿越防御、失败项不写状态。
   - [ ] 「全部 group」与「选中若干」共用状态键 `__workspace__`：切换范围
         **不**全量重拉；**换目录才重置**状态。

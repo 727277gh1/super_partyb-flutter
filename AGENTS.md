@@ -164,8 +164,10 @@ spb_design / spb_models / spb_core → 无包内依赖
 **编号永久稳定**：`§6.43` 永远指同一件事，只是换了文件——代码、`tools/`、`docs/` 里大量 `§6.x`
 引用因此不失效：按上表找到主题文件、再按编号定位小节即可。
 
-> ⚠️ **新增决策写进 `docs/design-decisions/<主题>.md`；本文件只在下表加一行索引（≤ 1 行），
-> 正文一律不进本文。** 它每次请求都被全文注入，体积就是上下文预算（`tools/check_agents_size.sh` 守着）。
+> ⚠️ **新增决策写进 `docs/design-decisions/<主题>.md`，正文一律不进本文。** 本文件每次请求
+> 都被全文注入，体积就是上下文预算（`tools/check_agents_size.sh` 守着）。**只有新增主题文件（新 `.md`）
+> 才在 §6.1 加一行；在既有主题下新增 §6.x 小节、记录进展或状态，都不改本文件**——状态写
+> `docs/roadmap.md` 与 issue 跟踪器。
 
 ### 6.0 仍然约束写代码的硬规则
 
@@ -227,13 +229,9 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 10. 待办与里程碑
 
-见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。仍未闭合的两项：移动端 OIDC 登录闭环（IdP 侧已于 2026-11-06 注册
-`partyb://oidc/callback`，剩真机回跳验证，见 `docs/mobile-oidc-deeplink.md`
-§3；App 内「微信一键登录」客户端与服务端已上线，另已接入微信 OpenSDK 唤起
-小程序（个人主体小程序唯一可行通道，待开放平台 appid 与真机，见 issue #92），
-见 `docs/wechat-one-click-login.md`；claimed HTTPS 回调的**客户端侧**已完成——`autoVerify` 过滤器 + Dart 双形态
-匹配 + manifest 漂移守卫，等 IdP 注册与网关 `assetlinks.json` 部署后才切换默认值，
-见同文 §2.3）、iOS 出包（需 Apple 账号）。
+见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。**本节只放指针**：
+进展、闭环状态、待验证项都写 roadmap 与对应 issue，不在这里留散文——写了就要维护，
+而它每次请求都被全文注入（同一个道理见 §6 前言）。
 
 ## 11. 已知问题
 
@@ -269,6 +267,9 @@ docs: 补充 Windows 构建限制
 - `build/`、`.dart_tool/`、`*.g.dart`（生成物）— 见 `.gitignore`
 - `--dart-define` 的生产密钥（走 CI secrets）
 - `apps/*/android/key.properties`、`*.jks`、`*.keystore`
+
+**不要**因为「记录进展/记下这次做了什么」而改 `AGENTS.md`：根因写 `docs/design-decisions/` 对应 §6.x，
+状态写 `docs/roadmap.md` 与 issue。只有「新增一条会约束未来写码的判据」才动它（§6 前言）。
 
 ---
 

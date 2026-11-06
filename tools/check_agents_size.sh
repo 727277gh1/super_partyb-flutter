@@ -30,7 +30,7 @@
 # ## 为什么阈值是 40 KB
 #
 # 拆分后是 ~24 KB（约 7k tokens，占 200k 窗口的 3.5%），留 16 KB 余量给正常
-# 增补（新增一条 §6.x 索引行约 100 B，即 ~160 条）。40 KB 时约 12k tokens，
+# 增补（新增一个主题文件的索引行约 100 B，即 ~160 条）。40 KB 时约 12k tokens，
 # 仍在「便宜」的区间；一旦超过，就说明又有人在里面写复盘了。
 #
 # ## 第二条判定：决策索引不得漏项
@@ -59,7 +59,7 @@ failed=0
 if [ "$size" -gt "$LIMIT" ]; then
   echo "❌ $DOC 体积 ${size} B 超过上限 ${LIMIT} B"
   echo "   它每次请求都被全文注入——体积就是上下文预算（见脚本头）。"
-  echo "   请把新增内容写进 docs/design-decisions/<主题>.md，本文只加一行索引。"
+  echo "   请把新增内容写进 docs/design-decisions/<主题>.md；本文只在新增主题文件时加一行索引。"
   failed=1
 fi
 
