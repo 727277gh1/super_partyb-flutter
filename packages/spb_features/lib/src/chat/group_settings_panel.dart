@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 保存目标文本（空串 = 清除目标）。
 typedef SaveGroupGoal = Future<void> Function(String goalText);
@@ -182,6 +183,13 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
         _goalGateSection(context, theme),
         const Divider(height: SpbSpacing.lg),
         _ttsSection(context, theme),
+        // 对话 ID：**放在最后**——它是低频的调试/报障信息，不该把常用设置
+        // 挤到更下面。id 为空（占位 group、列表事件快照缺字段）时整节省略，
+        // 渲染一行空白 + 一个复制空串的按钮比不渲染更糟。
+        if (widget.group.id.isNotEmpty) ...[
+          const Divider(height: SpbSpacing.lg),
+          _idSection(context, theme),
+        ],
       ],
     );
   }
@@ -455,6 +463,61 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
           onChanged: _busy ? null : (v) => onSave(fileSummary: v),
         ),
         _hint(context, '思考播报与文件播报还需服务端已启用对应能力才会生效'),
+      ],
+    );
+  }
+
+  // ==================== 对话 ID ====================
+
+  /// 对话 ID 行：可读 + 可选中 + 一键复制。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `group_id` 是**唯一能把客户端现象与服务端对上号**的标识：日志里
+  /// （`对话历史回填完成 groupId=…`）、导出诊断报告的「时间线快照」小节、
+  /// 服务端 slog 字段、UFS 工作区路径 `/workspace/groups/{gid}/` 全都用它。
+  /// 但它在本客户端此前**任何界面都不显示**——用户报障时只能口述「那个对话」，
+  /// 开发者要拿 id 只能去翻本地 `app.log`。
+  ///
+  /// ## 为什么放这里（而不是列表页 / AppBar / 新的调试面板）
+  ///
+  /// - 面板已经持有**权威** [ChatGroup]（`group.id`），不需要新回调、不需要新
+  ///   provider，两端 router 现有的接线就能带出来——于是也没有 §6.17「两端接线
+  ///   不一致」的失败面。
+  /// - 原 `GroupDebugPanel` 已删（§6.54），不要为一条只读文本重开一个面板。
+  ///
+  /// ## 为什么复制 + 可选中两者都给
+  ///
+  /// id 是长随机串：截断显示下「选中复制」容易漏字符，故给显式复制按钮；
+  /// 但 `SelectableText` 保留——只想肉眼核对前缀的人不该被迫点按钮。
+  /// 复制走 [CopyIconButton]（纯剪贴板，不发请求），不新增注入参数。
+  Widget _idSection(BuildContext context, ThemeData theme) {
+    return _section(
+      context,
+      children: [
+        _label(context, '对话 ID'),
+        const SizedBox(height: SpbSpacing.xxs),
+        Row(
+          children: [
+            Expanded(
+              child: SelectableText(
+                key: const ValueKey('group-id-value'),
+                widget.group.id,
+                maxLines: 1,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.xxs),
+            CopyIconButton(
+              key: const ValueKey('group-id-copy'),
+              text: widget.group.id,
+              tooltip: '复制对话 ID',
+            ),
+          ],
+        ),
+        _hint(context, '报障或对照服务端日志时用这个 ID'),
       ],
     );
   }

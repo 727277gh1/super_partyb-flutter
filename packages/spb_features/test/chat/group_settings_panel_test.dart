@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -643,6 +645,88 @@ void main() {
       );
       expect(btn.onPressed, isNull);
       expect(regenerateTitleCalls, 0);
+    });
+  });
+
+  group('对话 ID', () {
+    /// 滚到底部把 ID 区块建出来。
+    ///
+    /// 面板是 `ListView(children:)`，而 `SliverChildListDelegate` **懒建**：
+    /// 折叠线以下的子项根本不在树里，直接 `find.byKey` 会拿到「没有元素」。
+    /// 不能用 `ensureVisible`——它同样要求目标已建。
+    Future<void> revealIdSection(WidgetTester tester) async {
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('group-id-copy')),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('展示 group.id 且可一键复制（报障时唯一能对上号的标识）', (tester) async {
+      // 拦截平台通道，捕获 `Clipboard.setData` 的入参。
+      //
+      // 不能回读 `Clipboard.getData`：测试环境没有真实剪贴板后端，回读恒为
+      // null，「到底写没写」就无法断言（同 `item_widgets_test` 的做法）。
+      String? copied;
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      await pumpPanel(tester, group: ChatGroup.fromJson(groupJson()));
+      await revealIdSection(tester);
+
+      final value = tester.widget<SelectableText>(
+        find.byKey(const ValueKey('group-id-value')),
+      );
+      expect(value.data, 'grp_1');
+
+      await tester.tap(find.byKey(const ValueKey('group-id-copy')));
+      await tester.pumpAndSettle();
+      expect(copied, 'grp_1', reason: '复制的必须是完整 id，不能是省略号截断后的显示文本');
+
+      // 「已复制」反馈靠一个延迟定时器复位。不推进时间的话测试结束时它仍是
+      // pending，flutter_test 会报「A Timer is still pending...」。
+      await tester.pump(SpbDuration.copyFeedback);
+    });
+
+    testWidgets('id 为空时整节省略（不渲染复制空串的按钮）', (tester) async {
+      await pumpPanel(
+        tester,
+        group: ChatGroup.fromJson({...groupJson(), 'id': ''}),
+      );
+
+      // 滚到底（区块若存在，此时必然已建），仍找不到才能证明是「不渲染」。
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('group-id-copy')), findsNothing);
+      expect(find.byKey(const ValueKey('group-id-value')), findsNothing);
+    });
+
+    testWidgets('busy 时仍可复制（只读操作不受写操作在途影响）', (tester) async {
+      await pumpPanel(
+        tester,
+        busy: true,
+        group: ChatGroup.fromJson(groupJson()),
+      );
+      await revealIdSection(tester);
+
+      final btn = tester.widget<IconButton>(
+        find.descendant(
+          of: find.byKey(const ValueKey('group-id-copy')),
+          matching: find.byType(IconButton),
+        ),
+      );
+      expect(btn.onPressed, isNotNull);
     });
   });
 

@@ -855,3 +855,46 @@ overflow，故门禁全绿而界面不可用——与 §6.16（窄屏 AppBar 溢
 - **`showKeyboardHints` 是宿主注入而非能力探测**：Flutter 没有「是否接了外接
   键盘」的查询（`HardwareKeyboard` 只在按键事件里可见），故带外接键盘的平板
   也看不到键位说明——这是有意的取舍（宁可少提示，也不要给手机用户看 `Esc`）。
+
+### 6.73 对话设置面板露出 `group_id`（可选中 + 一键复制，2026-11）
+
+`group_id` 是**唯一能把客户端现象与服务端对上号**的标识：日志（`对话历史回填完成 groupId=…`）、
+导出诊断报告的「时间线快照」小节、服务端 slog 字段、UFS 工作区路径 `/workspace/groups/{gid}/`
+全都用它。而它在客户端此前**任何界面都不显示**——用户报障只能口述「那个对话」，开发者要拿 id
+只能去翻本地 `app.log` 或 `sync.db`。
+
+#### 放在哪、为什么
+
+| 候选 | 判定 |
+|---|---|
+| **`GroupSettingsPanel` 末尾（采用）** | 面板已持有**权威** `ChatGroup`（`group.id`）→ 不加参数、不加 provider；两端 router 现有接线直接带出，故没有 §6.17「两端接线不一致」的失败面 |
+| 对话列表项的长按菜单 | 需要新回调 + 两端各接一次，且「在哪个对话里」与「列表里哪一项」是两处状态，容易复制到别 group 的 id |
+| AppBar 标题长按 / 点击 | 不可发现：没有任何视觉线索，用户不会去长按标题 |
+| 重开调试面板 | `GroupDebugPanel` 已删（§6.54）：为一条只读文本恢复一个面板，把删掉的东西又装回来 |
+
+排在面板**最后**（`_ttsSection` 之后）：它是低频调试信息，不该把「目标 / 自动续跑 / 语音」这些
+常用设置往下挤。`id` 为空（占位 group、事件快照缺字段）时**整节省略**——渲染一行空白加一个
+「复制空串」的按钮比不渲染更糟。
+
+#### 交互
+
+- `SelectableText`（单行，**不**省略成 `…` 之外还保留选中能力）：只想肉眼核对前缀的人不必点按钮；
+  复制走 `CopyIconButton`（`spb_ui`），写入的是**完整 `widget.group.id`** 而不是显示文本。
+- `busy`（有写操作在途）时**不禁用**：复制是只读操作，与 CAS 写并发无关。
+
+#### 测试（`group_settings_panel_test.dart` 新增 group，3 条）
+
+| 用例 | 钉住 |
+|---|---|
+| 展示 `group.id` 且点击复制写入完整 id | 平台通道拦截 `Clipboard.setData`，断言参数是 `grp_1` 而非截断显示值 |
+| `id` 为空时整节省略 | 滚到底后 `group-id-copy` / `group-id-value` 均 `findsNothing` |
+| `busy` 时仍可复制 | `CopyIconButton` 内的 `IconButton.onPressed != null` |
+
+⚠️ 面板是 `ListView(children:)` 而 `SliverChildListDelegate` **懒建**：新用例必须先
+`scrollUntilVisible`，否则 `find.byKey` 拿到「没有元素」（`ensureVisible` 也不行，它同样要求已建）。
+
+#### 有意不做
+
+- **不在列表页 / AppBar 再放一份**：同一事实两处入口 = 两处状态要同步，而设置面板这一处已覆盖
+  「我就在这个对话里，要拿它的 id」这个唯一真实场景。
+- **不显示 `user_id` / `turn_id`**：用户侧报障场景用不到；`turn_id` 已在动态面板的工具调用里可见。
