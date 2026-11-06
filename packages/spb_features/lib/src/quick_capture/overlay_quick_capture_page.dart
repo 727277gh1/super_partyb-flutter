@@ -76,6 +76,7 @@ class OverlayQuickCapturePage extends StatefulWidget {
     super.key,
     required this.submit,
     required this.dragDrop,
+    this.onContentHeight,
     this.onClose,
     this.hintText,
     this.autofocus = true,
@@ -100,6 +101,25 @@ class OverlayQuickCapturePage extends StatefulWidget {
 
   /// 是否自动聚焦。悬浮窗应自动聚焦（唤起即可打字）。
   final bool autofocus;
+
+  /// 内容自然高度变化回调（逻辑像素）。
+  ///
+  /// ## 为什么有这个回调（桌面悬浮窗贴合窗口高度）
+  ///
+  /// 悬浮窗的高度不能再按最坏情况（附件 chip + 四行输入）写死——那会在
+  /// 默认状态（一行输入）下留出一大片空白（2026-11 报障「快捷对话窗口
+  /// 为什么有一大片空白」）。内容高度只有页面自己知道，故在布局后上报，
+  /// 宿主（桌面端）据此把窗口高度贴合到内容高度
+  /// （见 `OverlayWindowController.fitOverlayContentHeight`）。
+  ///
+  /// ## 隐含的布局约定（不要把回调和布局拆开）
+  ///
+  /// 本回调**非空**意味着宿主会贴合窗口，页面随之切换到「卡片高度 = 内容
+  /// 高度」的布局（内容超出上限时滚动，不引入 `Expanded`/`Spacer`）；
+  /// **为空**则按全屏页面布局（卡片铺满视口、按钮行贴底）。两端接线差异
+  /// 由此而来：桌面端传、移动端不传——移动端没有窗口尺寸可贴合，这是
+  /// **有意差异**（`tools/check_wiring_parity.sh` 不覆盖本页）。
+  final ValueChanged<double>? onContentHeight;
 
   @override
   State<OverlayQuickCapturePage> createState() =>
@@ -382,48 +402,95 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   Widget _buildContent(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
+    // ## 两种宿主、两种布局（见 [OverlayQuickCapturePage.onContentHeight]）
+    //
+    // 有回调 = 悬浮窗贴合模式：卡片高度就是内容高度，桌面端把窗口缩到
+    // 同一高度，多余空间根本不存在。此时**不能**用 `Expanded`/`Spacer`
+    // （外层滚动视图给的是**无界**高度，flex 子节点会直接抛），也不能让
+    // 卡片铺满视口（那会让「内容高度」永远等于窗口高度，窗口再也缩不回去）。
+    //
+    // 无回调 = 全屏页面（移动端）：卡片铺满视口、按钮行贴底。
+    if (widget.onContentHeight != null) {
+      return Scaffold(
+        // 贴合完成后窗口高度 == 卡片高度，这层背景看不见；贴合前的一两帧
+        // 里窗口可能比内容高一点——用不透明底色而不是 transparent，
+        // 否则会透出窗口的原生背景色（闪一下白/黑）。
+        backgroundColor: scheme.surface,
+        body: SingleChildScrollView(
+          child: _ContentHeightReporter(
+            onHeight: widget.onContentHeight!,
+            child: _buildCard(scheme, fitContent: true),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: DecoratedBox(
-        // 拖拽悬停时整窗高亮：让用户确认「松手就会加进来」。
-        decoration: BoxDecoration(
-          color: scheme.surface,
-          border: Border.all(
-            color: _dragging ? scheme.primary : scheme.outlineVariant,
-            width: _dragging ? 2 : 1,
-          ),
-          borderRadius: SpbRadius.bubbleAll,
+      body: _buildCard(scheme, fitContent: false),
+    );
+  }
+
+  /// 卡片（背景 + 边框 + 内边距 + 内容）。
+  ///
+  /// [fitContent] 决定卡片是否随内容长高：
+  /// - true（悬浮窗）：`mainAxisSize.min`，高度 = 内容高度；
+  /// - false（全屏页面）：铺满视口，按钮行用 `Expanded` 贴底。
+  Widget _buildCard(ColorScheme scheme, {required bool fitContent}) {
+    return DecoratedBox(
+      // 拖拽悬停时整窗高亮：让用户确认「松手就会加进来」。
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border.all(
+          color: _dragging ? scheme.primary : scheme.outlineVariant,
+          width: _dragging ? 2 : 1,
         ),
-        child: Padding(
-          padding: const EdgeInsets.all(SpbSpacing.md),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (_attachments.isNotEmpty) _buildAttachmentList(scheme),
-              Focus(
-                onKeyEvent: _onKey,
-                child: TextField(
-                  key: const ValueKey('overlay-input'),
-                  controller: _controller,
-                  focusNode: _focusNode,
-                  autofocus: widget.autofocus,
-                  enabled: !_busy,
-                  // 多行 + 限高：输入长内容时最多长到 4 行，之后内部滚动。
-                  minLines: 1,
-                  maxLines: 4,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  decoration: InputDecoration(
-                    hintText: _hintText,
-                    prefixIcon: const Icon(Icons.bolt_outlined),
-                    suffixIcon: _buildSuffixIcon(),
-                  ),
+        borderRadius: SpbRadius.bubbleAll,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(SpbSpacing.md),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: fitContent ? MainAxisSize.min : MainAxisSize.max,
+          children: [
+            if (_attachments.isNotEmpty) _buildAttachmentList(scheme),
+            Focus(
+              onKeyEvent: _onKey,
+              child: TextField(
+                key: const ValueKey('overlay-input'),
+                controller: _controller,
+                focusNode: _focusNode,
+                autofocus: widget.autofocus,
+                enabled: !_busy,
+                // 多行 + 限高：输入长内容时最多长到 4 行，之后内部滚动。
+                minLines: 1,
+                maxLines: 4,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                decoration: InputDecoration(
+                  hintText: _hintText,
+                  prefixIcon: const Icon(Icons.bolt_outlined),
+                  suffixIcon: _buildSuffixIcon(),
                 ),
               ),
-              const SizedBox(height: SpbSpacing.sm),
-              Expanded(child: _buildFooter(scheme)),
-            ],
-          ),
+            ),
+            const SizedBox(height: SpbSpacing.sm),
+            if (fitContent)
+              _buildFooter(scheme)
+            else
+              // 全屏页面：按钮行贴底。
+              //
+              // 此前这里是 `Expanded(child: footer)` —— 直接把 footer 的
+              // Row 撑满剩余高度，而 Row 默认垂直居中，于是「取消/发送」
+              // 浮在屏幕正中、上下各一大片空白（与悬浮窗的空白同一根因，
+              // 只是这里没有窗口可缩）。
+              Expanded(
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: _buildFooter(scheme),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -517,6 +584,71 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
       'Enter 提交 · Shift+Enter 换行 · Esc 清空',
       style: textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
     );
+  }
+}
+
+/// 把内容自然高度上报给宿主（桌面悬浮窗据此把窗口贴合内容）。
+///
+/// ## 为什么用布局通知，而不是在每个 setState 处手动上报
+///
+/// 内容高度会因很多事变化：打字换行、加/删附件 chip、提示行出现或消失、
+/// 上传进度行出现、系统字体/DPI 变化……手动上报必然漏一处，而漏掉的表现是
+/// 「窗口比内容矮，底部按钮被裁掉」或「窗口比内容高，卡片里又出现空白」。
+/// 尺寸通知是布局的**结果**，只认「实际变了」。
+class _ContentHeightReporter extends StatefulWidget {
+  const _ContentHeightReporter({required this.onHeight, required this.child});
+
+  final ValueChanged<double> onHeight;
+  final Widget child;
+
+  @override
+  State<_ContentHeightReporter> createState() => _ContentHeightReporterState();
+}
+
+class _ContentHeightReporterState extends State<_ContentHeightReporter> {
+  final _childKey = GlobalKey();
+
+  /// 上一次上报的高度。
+  ///
+  /// 去重是**必需**的，不是优化：窗口高度被改后本子树会重新布局，若此时
+  /// 再上报一次同样的高度，就形成「上报 → 改窗口 → 再上报」的循环。
+  double? _lastReported;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首帧必须自己上报一次：[SizeChangedLayoutNotifier] **明确不在首次布局
+    // 派发通知**（见其文档），只靠它的话窗口永远不会贴合内容。
+    // 这里的回调在首帧布局/绘制完成后才执行，此时读 RenderBox 是安全的。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _report());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return NotificationListener<SizeChangedLayoutNotification>(
+      onNotification: (_) {
+        // 通知是在 `performLayout` **里面**派发的（布局中途），故不能在这里
+        // 直接上报（上层会据此改窗口尺寸/走平台通道）：延后到本帧结束后。
+        WidgetsBinding.instance.addPostFrameCallback((_) => _report());
+        return false;
+      },
+      child: SizeChangedLayoutNotifier(
+        child: KeyedSubtree(key: _childKey, child: widget.child),
+      ),
+    );
+  }
+
+  void _report() {
+    if (!mounted) return;
+    final renderObject = _childKey.currentContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) return;
+    final height = renderObject.size.height;
+    // 高度为 0（子树还没布局 / 被折叠）时不上报：那会把窗口缩到下限。
+    if (height <= 0) return;
+    final last = _lastReported;
+    if (last != null && (last - height).abs() < 0.5) return;
+    _lastReported = height;
+    widget.onHeight(height);
   }
 }
 

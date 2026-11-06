@@ -13,6 +13,43 @@
 /// 一次 `windowManager` 调用。
 library;
 
+/// 悬浮输入窗的窗口高度**下限**：一行输入 + 状态/按钮行
+/// （与 `WindowSpec.quickCapture.height` 一致）。
+///
+/// 内容比它还矮时不再继续缩：更矮会让标题栏占掉可观比例，窗口看起来像被
+/// 压扁的对话框。
+const double kOverlayMinWindowHeight = 132;
+
+/// 悬浮输入窗的窗口高度**上限**：内容超过它就滚动，而不是让窗口继续长高。
+///
+/// 480 ≈ 一屏内能舒服看完的最大高度（多附件 chip 换行 + 四行输入 + 提示行）。
+/// 不设上限的话，拖入十几个附件会把悬浮窗拉长到盖住半个屏幕——那是把
+/// 「一小片空白」换成了「一大块遮挡」。
+const double kOverlayMaxWindowHeight = 480;
+
+/// 把「内容自然高度」换算成**窗口高度**，并夹到 [min]/[max]。
+///
+/// ## 为什么需要这一步，而不是直接把内容高度当窗口高度
+///
+/// 内容高度是 Flutter **视图**（client area）里的逻辑像素；而
+/// `window_manager.setSize` 在两个平台上语义不同：Linux 走 `gtk_window_resize`
+/// （client area），Windows 走 `SetWindowPos`（含标题栏与边框的**外框**）。
+/// 两者的差值由调用方实测后加进 [contentHeight]（见 `bootstrap.dart` 的
+/// `_windowChromeHeight`）——本函数只做「向上取整 + 夹取」这类纯逻辑，
+/// 因而可以无头单测。
+///
+/// 向上取整而不是四舍五入：宁可多 0.4px，也不要因为取整把底部按钮裁掉。
+double fitOverlayWindowHeight(
+  double contentHeight, {
+  double min = kOverlayMinWindowHeight,
+  double max = kOverlayMaxWindowHeight,
+}) {
+  // NaN 无法夹取（比较全为 false，clamp 会把它原样吐出来，窗口高度就成了
+  // NaN）。按「最小值」处理：下一帧内容尺寸变化会自我纠正。
+  if (contentHeight.isNaN) return min;
+  return contentHeight.ceilToDouble().clamp(min, max);
+}
+
 /// 进入悬浮模式时按顺序改写的窗口属性。
 enum OverlayWindowAttribute {
   /// 最小尺寸（主窗口 860×600 → 1×1，否则 `setSize` 被钳住）。

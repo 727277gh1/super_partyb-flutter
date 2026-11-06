@@ -1,5 +1,7 @@
 import 'package:spb_core/spb_core.dart';
 
+import 'overlay_window_state.dart';
+
 /// 应用窗口的逻辑角色。
 ///
 /// 桌面端有 3 个窗口，各自生命周期与行为不同；移动端只有 [main]。
@@ -67,30 +69,32 @@ class WindowSpec {
   ///
   /// # 为什么需要单独一个 spec 而不是把 quickCapture 改高
   ///
-  /// [quickCapture] 的高度（132）是按「一行输入 + 一行提示」算出来的，
-  /// 且该尺寸被 `quick_capture_page_test.dart` 断言为「输入框必须单行」。
-  /// 带附件的窗口需要额外容纳：
-  ///   - 附件 chip 行（至少一行，约 32px）
-  ///   - 多行输入（最多 4 行，约 96px）
-  /// 直接改 quickCapture 会让那条断言失效，也会让不需要附件的场景白白占屏幕。
+  /// 宽度（720 vs 640）与「高度随内容增长」这两点不同：宽 720 让附件 chip
+  /// 能并排放下两个，而 [quickCapture] 的尺寸被 `quick_capture_page_test.dart`
+  /// 断言为「输入框必须单行」，不能就地改。
   ///
-  /// # 尺寸取值的依据
+  /// # 高度：进入时给**最小值**，之后按内容贴合
   ///
-  /// 高 320：一行 chip（32）+ 四行输入（约 96）+ 状态行（20）+ 按钮行（36）
-  /// + 内边距（约 40）+ 余量。留余量是因为字体/DPI 缩放会让实际高度浮动
-  /// （Flutter 的逻辑像素在不同 DPI 下对应的物理高度不同）。
-  /// 高 360 允许窗口被用户拖高一点；宽 720 让附件 chip 能并排放下两个。
+  /// 早期这里写死 360（按最坏情况：一行 chip + 四行输入 + 状态/按钮行）。
+  /// 结果纯文本场景下窗口里 2/3 是空白，「快捷对话窗口为什么有一大片空白」
+  /// 就是这么来的（2026-11 报障）。
+  ///
+  /// 现在：进入时用 [kOverlayMinWindowHeight]，页面首帧把内容自然高度报上来，
+  /// 由 `OverlayWindowController.fitOverlayContentHeight` 贴合到
+  /// `[kOverlayMinWindowHeight, kOverlayMaxWindowHeight]`，超出则内容区滚动。
+  ///
+  /// 因此 `resizable` 改为 false：自动贴合下用户拖出来的高度会被下一次内容
+  /// 变化改回去，表现得像「窗口自己乱跳」。需要看到更多内容时由页面滚动承担。
   static const quickCaptureWithAttachments = WindowSpec(
     role: WindowRole.quickCapture,
     title: '快速输入',
     width: 720,
-    height: 360,
+    height: kOverlayMinWindowHeight,
     minWidth: 560,
-    minHeight: 240,
+    minHeight: kOverlayMinWindowHeight,
     alwaysOnTop: true,
     skipTaskbar: true,
-    // 允许用户拖高：附件多时 chip 会换行，固定高度会把输入框挤没。
-    resizable: true,
+    resizable: false,
   );
 
   /// 设置窗配置（单实例，固定尺寸）。
@@ -427,6 +431,24 @@ abstract interface class OverlayWindowController {
   /// 未进入过时调用应为空操作（不抛异常）——`Esc` 与「提交成功」两条路径都会
   /// 调它，可能重复触发。
   Future<void> exitOverlayMode();
+
+  /// 让窗口高度贴合悬浮窗页面的**内容**（无内容时不再留一大片空白）。
+  ///
+  /// ## 为什么需要它（本次修复的真实缺陷）
+  ///
+  /// 进入悬浮模式时窗口高度是**按最坏情况**给的（附件 chip + 四行输入），
+  /// 而默认状态只有一行输入 + 一行按钮——多出来的 200 多像素就是用户看到的
+  /// 「快捷对话窗口里一大片空白」。内容高度只有页面自己知道，故由页面在布局
+  /// 后上报，实现方据此改窗口高度。
+  ///
+  /// ## 契约
+  ///
+  /// - 未处于悬浮模式时**空操作**（页面在移动端/主窗口里也会 build）。
+  /// - 实现方自行夹取量程、去重（页面每次布局都会上报）。
+  /// - [contentHeight] 是**内容**在视图坐标系里的逻辑高度；实现方负责换算成
+  ///   该平台 `setSize` 需要的值（Windows 含标题栏外框，Linux 是 client area）。
+  /// - 失败只记日志，不抛：这只是观感，不能让快速输入不可用。
+  Future<void> fitOverlayContentHeight(double contentHeight);
 
   /// 当前是否处于悬浮输入窗形态。
   ///

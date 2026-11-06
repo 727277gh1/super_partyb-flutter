@@ -957,6 +957,22 @@ class PlatformDesktopCapabilities
   /// 当前正在执行的步骤（失败日志用：`failed_step`）。
   OverlayWindowAttribute? _overlayStep;
 
+  /// 本轮悬浮模式里最后一次贴合的窗口高度（去重用；null 表示还没贴合过）。
+  double? _overlayFitHeight;
+
+  /// 「窗口外框」比「内容区」多出来的高度（逻辑像素）。
+  ///
+  /// ## 为什么必须实测，而不能写死「标题栏约 32px」
+  ///
+  /// `window_manager.setSize` 在两个平台上语义不同：Linux 走
+  /// `gtk_window_resize`（client area），Windows 走 `SetWindowPos` 作用于
+  /// 顶层 HWND（**含标题栏与边框**）。写死一个值在另一个平台上就会多留／
+  /// 少留一条空白——正是本次要修的观感问题。
+  ///
+  /// 故在第一次贴合时实测：`getSize()` 与 Flutter 视图尺寸都是逻辑像素，
+  /// 两者之差就是外框（`window_manager` 已按 DPR 换算过，差值可直接用）。
+  double? _windowChromeHeight;
+
   @override
   Future<bool> enterOverlayMode(WindowSpec spec) async {
     // 幂等：已在悬浮模式时不重复保存（否则会把悬浮态当成「原状态」，
@@ -965,6 +981,9 @@ class PlatformDesktopCapabilities
 
     _overlayApplied.clear();
     _overlayStep = null;
+    _overlayFitHeight = null;
+    // 外框高度**不**在这里置空：它是窗口属性（平台/主题决定），与「第几次
+    // 进入悬浮模式」无关，而重测一次要额外一次平台通道往返。
 
     // 注：Windows 原生 taskbar_（ITaskbarList3）已在 initialize() 里经裸
     // waitUntilReadyToShow 初始化——setSkipTaskbar 对它调 HrInit() 且
@@ -1151,6 +1170,7 @@ class PlatformDesktopCapabilities
     _overlayApplied.clear();
     _overlayStep = null;
     _preOverlayBounds = null;
+    _overlayFitHeight = null;
 
     if (failed.isEmpty) {
       SpbLog.info('悬浮窗属性已回滚', {'steps': plan.map((a) => a.name).join(',')});
@@ -1169,6 +1189,71 @@ class PlatformDesktopCapabilities
   bool get isOverlayModeActive => _preOverlayBounds != null;
 
   @override
+  Future<void> fitOverlayContentHeight(double contentHeight) async {
+    // 不在悬浮模式（平台不支持形态切换、或只做了导航）：窗口属于主界面，
+    // 不能按悬浮输入框的内容去改大小。
+    if (_preOverlayBounds == null) return;
+
+    try {
+      final (chrome, currentSize) = await _measureWindowChrome();
+      final target = fitOverlayWindowHeight(contentHeight + chrome);
+
+      // 去重：页面每次内容尺寸变化都会上报，重复 setSize 会让窗口抖动；
+      // 当前高度已经等于目标值时也不必再走一次平台通道。
+      final fit = _overlayFitHeight;
+      if (fit != null && (fit - target).abs() < 1) return;
+      _overlayFitHeight = target;
+      if ((currentSize.height - target).abs() < 1) return;
+
+      await windowManager.setSize(Size(currentSize.width, target));
+      SpbLog.debug('悬浮窗高度贴合内容', {
+        'content': contentHeight.toStringAsFixed(1),
+        'chrome': chrome.toStringAsFixed(1),
+        'height': target.toStringAsFixed(1),
+      });
+    } catch (e) {
+      // 贴合失败只影响观感（窗口比内容高或矮），不阻断输入与提交——
+      // 这正是它能与「进入悬浮模式」分开、不进回滚事务的原因。
+      SpbLog.warn('悬浮窗高度贴合失败', {'error': '$e'});
+    }
+  }
+
+  /// 实测「窗口外框比内容区多出来的高度」与当前窗口尺寸（逻辑像素）。
+  ///
+  /// ## 为什么用「窗口高 − Flutter 视图高」而不是读平台 API
+  ///
+  /// `window_manager` 没有暴露「客户区 / 外框」的区分（`getSize` 在两个平台上
+  /// 分别返回 client area 与外框），故用同一时刻的两个可观测量相减：
+  /// `windowManager.getSize()`（平台相关）与 Flutter 视图的逻辑高度（永远是
+  /// 客户区）。Linux 上两者相等，差为 0；Windows 上差就是标题栏 + 边框。
+  ///
+  /// 取不到合理值时退回 `(0, 当前尺寸)`：贴合结果偏矮一个标题栏高度，
+  /// 下一次内容变化会自我纠正（比抛异常、或把窗口改到异常尺寸都好）。
+  Future<(double chrome, Size windowSize)> _measureWindowChrome() async {
+    final size = await windowManager.getSize();
+    final cached = _windowChromeHeight;
+    if (cached != null) return (cached, size);
+
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) return (0.0, size);
+    final view = views.first;
+    final ratio = view.devicePixelRatio;
+    if (!ratio.isFinite || ratio <= 0) return (0.0, size);
+    final contentHeight = view.physicalSize.height / ratio;
+    if (!contentHeight.isFinite || contentHeight <= 0) return (0.0, size);
+
+    final chrome = size.height - contentHeight;
+    // 上限 200：超过它说明两个量根本不是同一个窗口（例如窗口尚未布局
+    // 完成时的陈旧视图尺寸），此时按「无外框」处理且不缓存，下次重测。
+    if (!chrome.isFinite || chrome < 0 || chrome > 200) return (0.0, size);
+
+    // 0 也要缓存：Linux 上「无外框」是常态，不缓存就每次上报都多一次
+    // 视图测量。
+    _windowChromeHeight = chrome;
+    return (chrome, size);
+  }
+
+  @override
   Future<void> exitOverlayMode() async {
     final bounds = _preOverlayBounds;
     if (bounds == null) return; // 未进入过：空操作（可能被重复调用）。
@@ -1176,6 +1261,7 @@ class PlatformDesktopCapabilities
     _preOverlayBounds = null;
     _overlayApplied.clear();
     _overlayStep = null;
+    _overlayFitHeight = null;
     try {
       await windowManager.setAlwaysOnTop(_preOverlayAlwaysOnTop);
       await windowManager.setSkipTaskbar(_preOverlaySkipTaskbar);

@@ -590,3 +590,82 @@ Win32 的 `TrackPopupMenu` 要求**调用窗口处于前台**，否则菜单弹�
 - **`_trayAvailable` 在 Windows 上可能误置 true**：`tray_manager` 的 `setIcon`
   恒返回 true（§6.55 已记录），故图标资源形态错时 hide-on-close 仍会启用而
   图标不显示。防御手段是资源本身（`.ico` 由生成脚本落盘），不是运行时检测。
+
+### 6.68 悬浮输入窗「一大片空白」：窗口高度按最坏情况写死 + 按钮行被 Expanded 撑开（2026-11）
+
+**症状**：桌面端按 `Alt+Space` 唤出快速输入窗，窗口是 720×360，而内容只有
+一行输入 + 一行按钮——中间和下方各留一大片空白，按钮悬在空白正中。移动端
+同一页面占满全屏时，「取消/发送」也浮在屏幕中部。
+
+#### 根因：两个独立成因叠加
+
+| # | 层 | 事实 |
+|---|---|---|
+| ① | 窗口尺寸 | `WindowSpec.quickCaptureWithAttachments.height` 写死 **360**，按「附件 chip 一行 + 四行输入 + 状态/按钮行」的**最坏情况**预留。纯文本场景内容只有约 **130** → 2/3 是空白 |
+| ② | 页面布局 | `overlay_quick_capture_page.dart` 的 `Expanded(child: _buildFooter(...))` 把 footer 的 `Row` 本身撑满剩余高度，而 `Row` 默认 `crossAxisAlignment.center` → 按钮行浮在剩余空间的正中，上下各一大片空白 |
+
+②让空白**可见**：`DecoratedBox` 用 `scheme.surface` 铺满整个窗口（Scaffold 的
+`transparent` 被它盖住），于是那片空白是一块实心卡片色，而不是「透明的窗口」。
+
+#### 修法：窗口贴合内容（页面报高度 + 能力层改窗口高度）
+
+| 位置 | 改动 |
+|---|---|
+| `spb_features` 页面 | 新增 `onContentHeight` 回调。接线时布局切成「卡片高度 = 内容高度」：`Column(mainAxisSize.min)` 外面套 `SingleChildScrollView`（给**无界**高度，才量得到自然高度，也才能在超过上限时滚动），由 `_ContentHeightReporter` 上报 |
+| `spb_platform` | 新增 `fitOverlayWindowHeight`（向上取整 + 夹 `[kOverlayMinWindowHeight=132, kOverlayMaxWindowHeight=480]`）与 `OverlayWindowController.fitOverlayContentHeight` |
+| `spb_desktop` bootstrap | 实现 `fitOverlayContentHeight`：实测「外框 − 客户区」高度差（Linux `gtk_window_resize` 是 client area，Windows `SetWindowPos` 是含标题栏的外框），加进内容高度后再夹取；按目标高度去重，避免每次上报都 `setSize` |
+| `spb_desktop` router | `/overlay` 把页面的 `onContentHeight` 转给能力层（fire-and-forget，失败只影响观感） |
+| `WindowSpec` | 进入时高度改为**最小值**（132），`resizable: false`——自动贴合下用户拖出来的高度会被下一次内容变化改回去，表现像「窗口自己乱跳」 |
+
+未接线（移动端 / 主窗口内的调试入口）时保持「卡片铺满视口」的全屏布局，
+但按钮行改为 `Expanded(Align(bottomCenter))` **贴底**——`Expanded` 直接包 Row
+正是 ② 的来源。
+
+#### 为什么高度要「实测外框」而不是写死标题栏高度
+
+`window_manager.setSize` 的语义按平台分裂（见上表）。写死「标题栏约 32px」在
+Linux 上就多留 32px 空白——**正是本次要修的那个观感问题**。故用同一时刻的
+两个可观测量相减：`windowManager.getSize()` 与 Flutter 视图的逻辑高度
+（`physicalSize / devicePixelRatio`）。Linux 上差为 0，Windows 上差就是标题栏
++ 边框；取不到合理值（> 200 或负数）时按 0 处理且不缓存，下次重测。
+
+#### 为什么用「布局通知 + 首帧自报」而不是在每个 `setState` 处上报
+
+内容高度会因打字换行、增删附件 chip、提示行/进度行出现、系统字体与 DPI 变化
+而变。逐处手动上报必然漏一处，漏掉的表现是「窗口比内容矮，底部按钮被裁掉」
+或「窗口比内容高，卡片里又出现空白」。
+
+⚠️ `SizeChangedLayoutNotifier` **明确不在首次布局派发通知**（其源码注释：
+「Don't send the initial notification」），只靠它窗口永远不会贴合。故
+`_ContentHeightReporter` 在 `initState` 里另排一次 post-frame 上报。
+
+#### 测试
+
+| 位置 | 钉住 |
+|---|---|
+| `packages/spb_platform/test/overlay_window_state_test.dart` | 取整方向、上下限夹取、NaN/∞ 不产生异常窗口高度、量程可覆盖（5 条） |
+| `packages/spb_features/test/quick_capture/overlay_quick_capture_page_test.dart` | 首帧就上报且报的是**内容**高度（< 400，不是 600 的视口）；加附件后上报变大；矮窗口（600×100）不溢出且仍报真实高度；未接线时按钮贴底（4 条） |
+| `apps/spb_desktop/test/router_overlay_test.dart` | **从路由进入** `/overlay`，断言能力层收到合理的内容高度（页面自己的测试传自己的回调，测不到 router 漏接线） |
+| `apps/spb_desktop/test/desktop_integration_test.dart` | 进入用的 spec 宽度 720（带附件规格）且高度 ≤ 下限 |
+
+#### 反向验证（实测）
+
+| 改坏 | 失败用例（实测） |
+|---|---|
+| router 删掉 `onContentHeight` 接线（页面照旧上报，但没人转发） | `router_overlay_test` **1** 条 |
+| fit 分支改回「卡片铺满视口」（`mainAxisSize.max` + 无滚动视图，即修复前的布局） | 页面 **3** 条（上报变成 576 的视口高度、加附件不再变大、矮窗口溢出）+ `router_overlay_test` **1** 条 |
+| 页面恢复 `Expanded(child: footer)`（不贴底） | 页面「按钮行贴底」**1** 条 |
+| 去掉 `initState` 里的首帧上报（只留 `SizeChangedLayoutNotifier`） | 页面 **3** 条 + `router_overlay_test` **1** 条 |
+
+#### 已知边界
+
+- **需真机验证**（本机无 `DISPLAY`，[§9](../development.md)）：`xvfb-run` 只能证明窗口能创建，
+  证明不了「贴合后的高度看起来对」；Windows 的外框实测（`getSize` 与视图尺寸
+  同一时刻）需在 Windows 上确认。
+- **贴合是「一帧后」生效**：窗口先按最小值出现，首帧布局完成后长到内容高度。
+  这一两帧内底部按钮可能被裁，或下方露出一条底色（故贴合模式下 Scaffold 用
+  不透明 `scheme.surface`，不透出窗口原生背景）。
+- **上限 480 是产品判断**：超过后内容区滚动而不是继续长高——否则拖入十几个
+  附件会把悬浮窗拉长到盖住半个屏幕。
+- **不引入 `IntrinsicHeight`**：那能在一个布局 pass 内既「铺满视口」又「贴底」，
+  但代价是额外测量与它的已知性能坑；这里用「两套布局 + 回调」换掉它。

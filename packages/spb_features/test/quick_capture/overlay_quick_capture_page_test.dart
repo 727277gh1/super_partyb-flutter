@@ -383,4 +383,92 @@ void main() {
       expect(find.textContaining('可拖入文件'), findsNothing);
     });
   });
+
+  /// 内容高度上报（桌面悬浮窗据此把窗口贴合内容）。
+  ///
+  /// ## 这组用例防的是什么
+  ///
+  /// 悬浮窗高度曾写死 360（按「附件 chip + 四行输入」的最坏情况算），而默认
+  /// 状态只有一行输入——多出来的 200 多像素就是用户看到的「快捷对话窗口
+  /// 里一大片空白」（2026-11 报障）。修复的前一半是**页面把内容自然高度
+  /// 报上来**，后一半（桌面端改窗口高度）由 `apps/spb_desktop` 的接线与
+  /// `spb_platform` 的 `fitOverlayWindowHeight` 覆盖。
+  group('内容高度上报（悬浮窗贴合窗口）', () {
+    Widget buildReporting(List<double> heights) => _host(
+      OverlayQuickCapturePage(
+        submit: submit.call,
+        dragDrop: dragDrop,
+        onContentHeight: heights.add,
+      ),
+    );
+
+    testWidgets('首帧就上报，且报的是**内容**高度而不是视口高度', (tester) async {
+      final heights = <double>[];
+      await tester.pumpWidget(buildReporting(heights));
+      await tester.pumpAndSettle();
+
+      expect(
+        heights,
+        isNotEmpty,
+        reason: 'SizeChangedLayoutNotifier 不在首次布局派发通知，首帧必须自己上报一次',
+      );
+      // 默认测试视口 800×600。报的必须是内容高度（约 130）：若报了视口高度，
+      // 桌面端就会把窗口「贴合」回它本来的高度，永远缩不回去。
+      expect(heights.last, lessThan(400), reason: '上报的必须是内容自然高度；报视口高度等于没修');
+      expect(heights.last, greaterThan(0));
+    });
+
+    testWidgets('加附件后内容变高 → 上报高度跟着变大（窗口才能长高）', (tester) async {
+      final heights = <double>[];
+      await tester.pumpWidget(buildReporting(heights));
+      await tester.pumpAndSettle();
+      final empty = heights.last;
+
+      dragDrop.captured!([_file('report.pdf')]);
+      await tester.pumpAndSettle();
+
+      expect(
+        heights.last,
+        greaterThan(empty),
+        reason: '附件 chip 多了一行，内容高度必须变大（否则 chip 会被窗口裁掉）',
+      );
+    });
+
+    testWidgets('窗口比内容矮时不溢出（内容可滚动，不报 flex 异常）', (tester) async {
+      // 悬浮窗在贴合完成前的那一两帧里可能比内容矮（进入时按最小值出现）。
+      // 此时布局必须仍然合法：滚动视图给无界高度，故不能用 Expanded/Spacer。
+      tester.view.physicalSize = const Size(600, 100);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final heights = <double>[];
+      await tester.pumpWidget(buildReporting(heights));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      // 矮窗口里仍应报出**真实**内容高度（而不是被窗口高度钳住的 100）
+      // ——否则窗口永远长不高。
+      expect(heights.last, greaterThan(100));
+    });
+  });
+
+  group('全屏页面布局（未接线 onContentHeight）', () {
+    testWidgets('按钮行贴底，不再浮在剩余空间正中', (tester) async {
+      // 移动端（以及主窗口内的调试入口）走这条路：卡片铺满视口。此前
+      // `Expanded(child: footer)` 把 Row 撑满剩余高度、Row 默认垂直居中，
+      // 于是「取消/发送」落在屏幕中部，上下各一大片空白。
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+
+      final button = tester.getRect(
+        find.byKey(const ValueKey('overlay-submit')),
+      );
+      // 测试视口 800×600，底部内边距 12 → 按钮中心必须落在下半屏底部区域。
+      expect(
+        button.center.dy,
+        greaterThan(500),
+        reason: '按钮行必须贴底（浮在中间是这次要修掉的观感问题）',
+      );
+    });
+  });
 }

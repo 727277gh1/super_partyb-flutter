@@ -86,4 +86,42 @@ void main() {
     applied.clear();
     expect(plan, [OverlayWindowAttribute.alwaysOnTop]);
   });
+
+  /// [fitOverlayWindowHeight] 的契约测试。
+  ///
+  /// ## 这个测试防的是什么
+  ///
+  /// 悬浮窗高度以前是写死的 360（按「chip + 四行输入」的最坏情况算），
+  /// 纯文本场景下窗口里 2/3 是空白。改成「按内容贴合」后，换算规则的三个
+  /// 边界都是用户可见的：
+  /// - 取整方向错了 → 底部按钮被裁掉 0.5px（或闪烁）；
+  /// - 没有下限 → 窗口比标题栏还矮，看起来像坏了；
+  /// - 没有上限 → 拖入十几个附件后悬浮窗长到盖住半个屏幕；
+  /// - NaN 没处理 → `clamp` 原样吐回 NaN，`setSize` 收到 NaN 尺寸。
+  group('fitOverlayWindowHeight', () {
+    test('向上取整（宁可多 0.4px，也不要裁掉底部按钮）', () {
+      // 取值在量程中间，避开上下限的夹取（下限 132 / 上限 480）。
+      expect(fitOverlayWindowHeight(150.1), 151);
+      expect(fitOverlayWindowHeight(150), 150);
+    });
+
+    test('低于下限夹到下限（窗口不会被压得比一行还矮）', () {
+      expect(fitOverlayWindowHeight(40), kOverlayMinWindowHeight);
+    });
+
+    test('超过上限夹到上限（之后由内容区滚动接管）', () {
+      expect(fitOverlayWindowHeight(900), kOverlayMaxWindowHeight);
+    });
+
+    test('NaN 不产生 NaN 窗口高度', () {
+      expect(fitOverlayWindowHeight(double.nan), kOverlayMinWindowHeight);
+      // 无穷大是「内容无界」的退化值：夹到上限，而不是让 setSize 收到 infinity。
+      expect(fitOverlayWindowHeight(double.infinity), kOverlayMaxWindowHeight);
+    });
+
+    test('量程可以显式覆盖（调用方按平台外框余量放宽）', () {
+      expect(fitOverlayWindowHeight(500, max: 800), 500);
+      expect(fitOverlayWindowHeight(10, min: 60), 60);
+    });
+  });
 }

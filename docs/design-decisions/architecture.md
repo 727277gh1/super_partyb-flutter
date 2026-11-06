@@ -97,10 +97,12 @@ freezed / json_serializable / build_runner / json_annotation / freezed_annotatio
 1. 保存当前窗口几何（`getBounds`）；
 2. 改尺寸为主 `quickCaptureWithAttachments` 规格、`alwaysOnTop=true`、
    `skipTaskbar=true`、居中；
-3. 导航到 `/overlay`。
+3. 导航到 `/overlay`；
+4. 页面首帧把内容自然高度报上来，窗口高度贴合内容（[§6.68](platform.md)）。
 
 提交或 `Esc` 后恢复几何与窗口标志，回到主界面。见
-`PlatformDesktopCapabilities.enterOverlayMode` / `exitOverlayMode`。
+`PlatformDesktopCapabilities.enterOverlayMode` / `exitOverlayMode` /
+`fitOverlayContentHeight`。
 
 **已知差异**：悬浮期间主窗口被「顶替」（看不到背后的对话）。对「快速记一笔」
 这个用途可接受，但若将来需要「悬浮窗与主窗同屏」，就得换 `desktop_multi_window`。

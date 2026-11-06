@@ -2884,10 +2884,29 @@ void _exitOverlayWindow(WidgetRef ref) {
   }
 }
 
+/// 把悬浮窗高度贴合到内容高度。
+///
+/// ## 为什么 fire-and-forget
+///
+/// 这是布局回调（每次内容尺寸变化都会来一次），等待平台通道会让输入卡顿；
+/// 失败已在能力层记日志（且只影响观感）。与 [_exitOverlayWindow] 同一取向。
+///
+/// 能力接口未实现该契约时（移动端/测试桩）静默跳过。
+void _fitOverlayWindow(WidgetRef ref, double contentHeight) {
+  final caps = ref.read(desktopCapabilitiesProvider);
+  if (caps is OverlayWindowController) {
+    unawaited(
+      (caps as OverlayWindowController).fitOverlayContentHeight(contentHeight),
+    );
+  }
+}
+
 /// 全局悬浮输入窗（带附件）。
 ///
-/// 生产环境的真实悬浮窗是**独立窗口**（`WindowSpec.quickCapture`）；
-/// 此路由用于在无多窗口能力时（或作为主窗口内的调试入口）渲染同一页面。
+/// 桌面端没有多窗口（见 `bootstrap.dart` 的类文档）：按 `Alt+Space` 时主窗口
+/// **临时变身**成 720×宽度的小置顶窗并导航到这里（`OverlayWindowController`），
+/// 退出时还原。高度不是固定的——本页把内容高度上报给能力层，由它把窗口贴合
+/// 到内容（见 [OverlayQuickCapturePage.onContentHeight]）。
 ///
 /// ## 为什么用 enqueue 而非 quick-capture
 ///
@@ -2914,10 +2933,13 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
             onUploadProgress: onUploadProgress,
           ),
       dragDrop: ref.watch(dragDropCapabilityProvider),
+      // 内容高度上报 → 把窗口高度贴合内容（否则固定高度会留一大片空白，
+      // 见 `OverlayQuickCapturePage.onContentHeight` 的说明）。
+      onContentHeight: (height) => _fitOverlayWindow(ref, height),
       onClose: () {
         // ## 为什么这里直接调能力接口，而不是经 DesktopIntegration
         //
-        // 悬浮模式把窗口改成了 720×360 置顶（见 `OverlayWindowController`）。
+        // 悬浮模式把窗口改成了 720 宽的小置顶窗（见 `OverlayWindowController`）。
         // 这条路径（Esc 清空后关窗 / 提交成功）**不经过** `showWindow`，故不会
         // 被 DesktopIntegration 自动还原——不还原的话窗口会一直保持悬浮尺寸
         // 置顶，用户回到主界面后窗口再也放不大。

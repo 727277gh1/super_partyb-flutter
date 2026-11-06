@@ -82,6 +82,20 @@ class _WiringCapabilities
     exitCalls++;
   }
 
+  /// 收到的贴合请求（内容高度，按顺序）。
+  ///
+  /// 本文件的 router 用 stub 页面（`_testRouter`），故这里始终为空——
+  /// 「页面上报 → 能力层贴合」的**整条接线**由 `router_overlay_test.dart`
+  /// 用真实 router 钉住（那里需要真实 `OverlayQuickCapturePage`）。
+  /// 保留记录字段是为了让契约可观测，而不是为了在本文件断言。
+  final fittedHeights = <double>[];
+
+  @override
+  Future<void> fitOverlayContentHeight(double contentHeight) async {
+    if (!_overlayActive) return;
+    fittedHeights.add(contentHeight);
+  }
+
   // ---- 被托盘菜单触发的动作 ----
   final shown = <WindowRole>[];
 
@@ -402,7 +416,7 @@ void main() {
       expect(
         caps.isOverlayModeActive,
         isFalse,
-        reason: '只导航不还原的话，窗口会一直保持 720x360 置顶且再也放不大',
+        reason: '只导航不还原的话，窗口会一直保持 720 宽的小置顶窗且再也放不大',
       );
     });
 
@@ -432,9 +446,19 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(caps.enteredSpecs, hasLength(1));
-      // 必须是**带附件**的规格：纯文本规格只有 132px 高，装不下附件 chip。
+      // 必须是**带附件**的规格：宽 720（纯文本规格是 640，chip 并排放不下）。
+      // 高度不再是「最坏情况」的 360——进入时按最小值出现，首帧由页面把
+      // 内容高度报给 `fitOverlayContentHeight` 贴合（2026-11 「一大片空白」
+      // 的修复）。故这里不再断言 height > 200，改为断言宽度与高度下限。
       expect(caps.enteredSpecs.single.role, WindowRole.quickCapture);
-      expect(caps.enteredSpecs.single.height, greaterThan(200));
+      expect(
+        caps.enteredSpecs.single.width,
+        greaterThan(WindowSpec.quickCapture.width),
+      );
+      expect(
+        caps.enteredSpecs.single.height,
+        lessThanOrEqualTo(kOverlayMinWindowHeight),
+      );
       expect(caps.isOverlayModeActive, isTrue);
     });
 
@@ -458,7 +482,7 @@ void main() {
       );
     });
 
-    testWidgets('从悬浮窗切到设置 → 还原窗口（否则设置页挤在 720x360）', (tester) async {
+    testWidgets('从悬浮窗切到设置 → 还原窗口（否则设置页挤在 720 宽的小置顶窗里）', (tester) async {
       final caps = _WiringCapabilities();
       final router = _testRouter();
       addTearDown(router.dispose);
@@ -730,7 +754,7 @@ void main() {
       expect(
         caps.isOverlayModeActive,
         isFalse,
-        reason: '不还原的话，设置页会挤在 720x360 置顶窗里且再也放不大',
+        reason: '不还原的话，设置页会挤在 720 宽的小置顶窗里且再也放不大',
       );
     });
 
@@ -823,7 +847,7 @@ void main() {
       expect(
         caps.isOverlayModeActive,
         isFalse,
-        reason: '不还原的话，设置页会挤在 720x360 置顶窗里且再也放不大',
+        reason: '不还原的话，设置页会挤在 720 宽的小置顶窗里且再也放不大',
       );
     });
   });
