@@ -1163,6 +1163,18 @@ class EventReducer {
   static LastTurnRunState lastTurnRunState(
     Iterable<ConversationItem> items, {
     Set<String> terminalTurnIds = const {},
+  }) => lastTurnRun(items, terminalTurnIds: terminalTurnIds).state;
+
+  /// 一次扫描同时给出「最后一个 turn 的运行态」与**那个 turn 的 id**。
+  ///
+  /// [lastTurnRunState] 与 [lastRunningTurnId] 都是它的投影。需要两者时用本
+  /// 函数，别连着调那两个：同一份时间线会被扫两遍（2000 项的时间线在一次
+  /// build 里扫两遍，是 §6.47 明令要避免的那类浪费）。
+  ///
+  /// `state == idle` 时 `turnId` 为空串（没有可归属的 turn）。
+  static ({LastTurnRunState state, String turnId}) lastTurnRun(
+    Iterable<ConversationItem> items, {
+    Set<String> terminalTurnIds = const {},
   }) {
     // 1) 最后一个非空 turnId。
     //
@@ -1175,7 +1187,9 @@ class EventReducer {
       lastTurnId = it.turnId;
       break;
     }
-    if (lastTurnId.isEmpty) return LastTurnRunState.idle;
+    if (lastTurnId.isEmpty) {
+      return (state: LastTurnRunState.idle, turnId: '');
+    }
 
     var hasAgentSide = false;
     var hasUserSide = false;
@@ -1199,13 +1213,17 @@ class EventReducer {
 
     // 2) 终态优先：有终态事件即「本轮不会再产出」。
     if (terminalTurnIds.contains(lastTurnId)) {
-      return LastTurnRunState.terminal;
+      return (state: LastTurnRunState.terminal, turnId: lastTurnId);
     }
     // 3) 已有 agent 产物且无终态 → 可能仍在跑（这正是重开对话的场景）。
-    if (hasAgentSide) return LastTurnRunState.streaming;
+    if (hasAgentSide) {
+      return (state: LastTurnRunState.streaming, turnId: lastTurnId);
+    }
     // 4) 只有用户消息 → 已提交，agent 尚未动。
-    if (hasUserSide) return LastTurnRunState.preparing;
-    return LastTurnRunState.idle;
+    if (hasUserSide) {
+      return (state: LastTurnRunState.preparing, turnId: lastTurnId);
+    }
+    return (state: LastTurnRunState.idle, turnId: lastTurnId);
   }
 
   /// 最后一个 turn 是否**可能仍在服务端运行**（重开对话场景的看门狗判据）。
@@ -1241,16 +1259,12 @@ class EventReducer {
     Iterable<ConversationItem> items, {
     Set<String> terminalTurnIds = const {},
   }) {
-    final state = lastTurnRunState(items, terminalTurnIds: terminalTurnIds);
-    if (state != LastTurnRunState.streaming &&
-        state != LastTurnRunState.preparing) {
+    final run = lastTurnRun(items, terminalTurnIds: terminalTurnIds);
+    if (run.state != LastTurnRunState.streaming &&
+        run.state != LastTurnRunState.preparing) {
       return '';
     }
-    for (final it in items.toList().reversed) {
-      if (it.turnId.isEmpty || it.turnId == 'router') continue;
-      return it.turnId;
-    }
-    return '';
+    return run.turnId;
   }
 
   /// 把仍在 streaming 的段落标记为完成（收到 done 或流中断时调用）。

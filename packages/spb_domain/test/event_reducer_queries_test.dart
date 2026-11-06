@@ -457,4 +457,112 @@ void main() {
       );
     });
   });
+
+  /// [EventReducer.lastTurnRun]：一次扫描同时给出运行态与 turnId。
+  ///
+  /// 它是 [EventReducer.lastTurnRunState] / [EventReducer.lastRunningTurnId] 的
+  /// 共同底座，而对话页要用它同时做两件事：判「要不要显示等待细条」、查该 turn
+  /// 是否已在 stale 集合里。两个投影各调一次就是两次全量扫描（§6.47），故必须
+  /// 钉住「一次调用给出两者」且与投影**逐例一致**。
+  group('lastTurnRun（运行态 + turnId 一次给出）', () {
+    test('preparing：只有用户项、无终态 → 给出该 turnId', () {
+      final r = EventReducer.reduce([
+        ev(EventTypes.userMessage, payload: {'input': '发出去'}, globalSeq: 1),
+      ]);
+
+      final run = EventReducer.lastTurnRun(
+        r.items,
+        terminalTurnIds: r.terminalTurnIds,
+      );
+      expect(run.state, LastTurnRunState.preparing);
+      expect(run.turnId, 'turn_1');
+    });
+
+    test('streaming / terminal 也带 turnId（UI 要拿它查 stale 集合）', () {
+      final streaming = EventReducer.reduce([
+        ev(EventTypes.userMessage, payload: {'input': 'x'}, globalSeq: 1),
+        ev(EventTypes.message, payload: {'text': '回复'}, globalSeq: 2),
+      ]);
+      expect(
+        EventReducer.lastTurnRun(
+          streaming.items,
+          terminalTurnIds: streaming.terminalTurnIds,
+        ).turnId,
+        'turn_1',
+      );
+
+      final terminal = EventReducer.reduce([
+        ev(EventTypes.userMessage, payload: {'input': 'x'}, globalSeq: 1),
+        ev(EventTypes.done, payload: {'status': 'completed'}, globalSeq: 2),
+      ]);
+      final run = EventReducer.lastTurnRun(
+        terminal.items,
+        terminalTurnIds: terminal.terminalTurnIds,
+      );
+      expect(run.state, LastTurnRunState.terminal);
+      expect(run.turnId, 'turn_1');
+    });
+
+    test('空时间线 / 全是无 turnId 项 → idle + 空串', () {
+      expect(EventReducer.lastTurnRun(const []), (
+        state: LastTurnRunState.idle,
+        turnId: '',
+      ));
+      final r = EventReducer.reduce([
+        ev(EventTypes.message, turnId: '', payload: {'text': '异常载荷'}),
+      ]);
+      expect(
+        EventReducer.lastTurnRun(r.items, terminalTurnIds: r.terminalTurnIds),
+        (state: LastTurnRunState.idle, turnId: ''),
+      );
+    });
+
+    test('⭐ 与两个投影一致（防止三处判据漂移）', () {
+      final cases = <List<ChatEvent>>[
+        const [],
+        [
+          ev(EventTypes.userMessage, payload: {'input': 'x'}, globalSeq: 1),
+        ],
+        [
+          ev(EventTypes.userMessage, payload: {'input': 'x'}, globalSeq: 1),
+          ev(EventTypes.message, payload: {'text': '回复'}, globalSeq: 2),
+        ],
+        [
+          ev(EventTypes.userMessage, payload: {'input': 'x'}, globalSeq: 1),
+          ev(EventTypes.message, payload: {'text': '回复'}, globalSeq: 2),
+          ev(EventTypes.done, payload: {'status': 'completed'}, globalSeq: 3),
+        ],
+      ];
+
+      for (final events in cases) {
+        final r = EventReducer.reduce(events);
+        final run = EventReducer.lastTurnRun(
+          r.items,
+          terminalTurnIds: r.terminalTurnIds,
+        );
+        expect(
+          run.state,
+          EventReducer.lastTurnRunState(
+            r.items,
+            terminalTurnIds: r.terminalTurnIds,
+          ),
+        );
+        // `lastRunningTurnId` 只对「可能在跑」返回 id（看门狗用它武装计时器）；
+        // `lastTurnRun.turnId` 是「那个 turn 是谁」，终态时也有值。故只在
+        // 前两态上逐例对齐，终态/idle 另行断言。
+        final mayBeRunning =
+            run.state == LastTurnRunState.streaming ||
+            run.state == LastTurnRunState.preparing;
+        expect(
+          run.turnId,
+          mayBeRunning
+              ? EventReducer.lastRunningTurnId(
+                  r.items,
+                  terminalTurnIds: r.terminalTurnIds,
+                )
+              : (run.state == LastTurnRunState.idle ? '' : 'turn_1'),
+        );
+      }
+    });
+  });
 }
