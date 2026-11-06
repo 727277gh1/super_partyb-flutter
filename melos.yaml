@@ -1,0 +1,65 @@
+name: melos
+
+# Melos 只负责「跑脚本」，依赖解析交给 Dart Pub Workspaces（单一 lockfile）。
+# 因此这里不声明 packages 列表——workspace 成员由根 pubspec.yaml 的 workspace 字段定义。
+packages:
+  - apps/*
+  - packages/*
+
+command:
+  bootstrap:
+    usePubspecOverrides: true
+
+scripts:
+  analyze:
+    description: 全量静态分析（含分层规则检查）
+    run: dart analyze --fatal-infos .
+  test:
+    description: 全量测试
+    run: dart test
+  format:
+    description: 格式化
+    run: dart format .
+  format:check:
+    description: 格式化检查（CI 用）
+    run: dart format --output=none --set-exit-if-changed .
+  layering:
+    description: 分层规则检查（core/api/domain 禁止依赖 Flutter）
+    run: bash tools/check_layering.sh
+  workflow-steps:
+    description: workflow 的 step 不能被注释吞掉（issue #32/#47）
+    run: bash tools/check_workflow_steps.sh
+  silent-catches:
+    description: 静默吞异常的 catch 必须有说明或日志（issue #45）
+    run: bash tools/check_silent_catches.sh
+  build-defines:
+    description: 发布构建必须传 --dart-define，且产物不残留 127.0.0.1（§6.33）
+    run: bash tools/check_build_defines.sh
+  agents-refs:
+    description: AGENTS.md 引用的标识符存在，且 tools/ 脚本都被列出（issue #37/#47）
+    run: bash tools/check_agents_refs.sh
+  agents-numbers:
+    description: AGENTS.md 里标注了复现命令的数字不得漂移（issue #46）
+    run: bash tools/check_agents_numbers.sh
+  gen:
+    description: 代码生成（drift；spb_models 为手写 fromJson，见 AGENTS.md §6.2）
+    # ⚠️ **必须 cd 进包目录**。在仓库根跑 `dart run build_runner build` 是
+    # **静默空转**：根 pubspec.yaml 没有 build_runner 依赖、没有 build.yaml、
+    # 没有任何 builder 声明，实测输出 `wrote 0 outputs`。
+    #
+    # 也不加 `--delete-conflicting-outputs`：该 flag 在 build_runner 2.5+ 已被
+    # **静默忽略**（`W These options have been removed and were ignored`）。
+    # 详见 tools/check_codegen.sh 的文件头与 issue #43。
+    run: cd packages/spb_data && dart run build_runner build && cd ../.. && dart format packages/spb_data/lib
+  gen:watch:
+    description: 代码生成（监听模式；同上）
+    run: cd packages/spb_data && dart run build_runner watch
+  build:linux:
+    description: 构建 Linux 桌面端
+    run: cd apps/spb_desktop && flutter build linux --release
+  build:android:
+    description: 构建 Android APK
+    run: cd apps/spb_mobile && flutter build apk --release
+  build:windows:
+    description: 构建 Windows 桌面端（仅 Windows 主机）
+    run: cd apps/spb_desktop && flutter build windows --release
