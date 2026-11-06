@@ -141,6 +141,33 @@ void main() {
       await c.dispose();
     });
 
+    test('转正记下 lastSentTurnId，且结构推断为 preparing（对话页据此提示）', () async {
+      // 「请求在飞 → 转正」这一段是**唯一**能把 turnId 交给界面的时机，而对话页
+      // 的「正在准备响应」细条完全依赖它：pending 期间 turnId 为空（无从判断），
+      // 转正后才知道该盯哪个 turn。两件事必须在同一条路径上落定，否则界面会
+      // 一直等到首个增量帧——那正是用户报障的空窗。
+      final hang = _HangAdapter();
+      final c = _controllerWith(hang);
+
+      final sending = c.send(input: '发出去', groupId: 'grp_1');
+      c.flushEmit();
+      expect(c.lastSentTurnId, isEmpty, reason: '请求在飞时还不知道 turnId');
+
+      await hang.waitForRequest();
+      hang.resolve({'turn_id': 'turn_9', 'group_id': 'grp_1'});
+      await sending;
+      c.flushEmit();
+
+      expect(c.lastSentTurnId, 'turn_9');
+      // 同一时刻的结构推断：只有用户项、无终态 → preparing（与看门狗武装
+      // 计时器同一判据，故「界面说在等」与「超时兜底」不会互相矛盾）。
+      final run = c.lastTurnRunSnapshot;
+      expect(run.state, LastTurnRunState.preparing);
+      expect(run.turnId, 'turn_9');
+
+      await c.dispose();
+    });
+
     test('权威 user_message 帧随后到达：仍只有一条（按 turnId 原位合并）', () async {
       final hang = _HangAdapter();
       final c = _controllerWith(hang);

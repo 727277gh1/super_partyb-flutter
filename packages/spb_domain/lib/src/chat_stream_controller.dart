@@ -162,6 +162,13 @@ class ChatStreamController {
   /// 乐观回显 eventId 的单调计数（见 [injectLocalUserMessage] 里的碰撞说明）。
   int _echoSeq = 0;
 
+  /// 本会话最近一次**本地投递成功**的 turnId；空串 = 还没发过。
+  ///
+  /// 用途：对话页的兵底细条只对该 turn 显示「正在准备响应」（见
+  /// [lastSentTurnId]）。为何不用「最后一个 turn 是 preparing」直接判，见 getter
+  /// 的说明。
+  String _lastSentTurnId = '';
+
   /// 「曾经加载到过的最早落库事件」的 globalSeq（跨裁剪保持，不因丢头部而抬高）。
   ///
   /// ## 为什么不能用「当前缓冲区的最小 globalSeq」当翻页游标
@@ -373,6 +380,51 @@ class ChatStreamController {
   /// 当前语音播报状态；无播报事件时为 [TtsPhase.idle]（非空）。
   TtsStatus get ttsStatusSnapshot => _reduction.ttsStatus;
 
+  /// 最后一个 turn 的运行态 + 它的 turnId（**结构推断**，判据见
+  /// [EventReducer.lastTurnRun]）。
+  ///
+  /// ## 它解决什么
+  ///
+  /// 「请求已落地、agent 还没产出任何东西」这段空窗期既没有流式标记（增量
+  /// 帧还没来）、也没有 `queue_state` / `turn_activity`——归约结果看起来与
+  /// 「什么都没发生」一样。唯一能说出「它可能还在跑」的是结构推断（与看门狗
+  /// 武装计时器用的是**同一个**判据，见 `_syncStaleWatch`）。
+  ///
+  /// 故它必须是**派生的只读查询**：不写库、不改归约结果（§5.8 三条不变式）。
+  ///
+  /// ## 为什么按 `identical` 缓存
+  ///
+  /// 对话页每次 build 都会读它（→ 底部细条）。一次扫描是 O(n)，而流式期间
+  /// 状态条每几秒变一次、每次都是一次完整 build（§6.47）。归约结果只在事件
+  /// 到达后变化，故键就取它：同一份归约最多扫一遍。
+  ({LastTurnRunState state, String turnId}) get lastTurnRunSnapshot {
+    final reduction = _reduction;
+    if (!identical(_cachedRunFor, reduction)) {
+      _cachedRun = EventReducer.lastTurnRun(
+        reduction.items,
+        terminalTurnIds: reduction.terminalTurnIds,
+      );
+      _cachedRunFor = reduction;
+    }
+    return _cachedRun!;
+  }
+
+  /// 本会话最近一次**本地投递成功**的 turnId；空串 = 本会话还没发过。
+  ///
+  /// ## 它解决什么（为何不直接用「最后一个 turn 是 preparing」）
+  ///
+  /// `preparing` 在两种情形下都成立：
+  /// 1. 我刚发了一条，等服务端开吐（要提示）；
+  /// 2. 很久以前那个 turn 没收到 `done`、也没产出任何东西（历史里留下的破碎
+  ///    状态，重开对话时会重现）。
+  ///
+  /// 情形 2 假设界面说「正在准备响应」就是**编造**：那是几小时前的事，而客户端
+  /// 唯一的证据只是「没有终态」（看门狗自己也知道这一点，故它等超时才说
+  /// 「可能仍在后台运行」）。故兵底细条只认本会话真正发出去的那个 turn——
+  /// 控制器的生命周期是 `autoDispose.family`（离开对话页即释放），重开对话
+  /// 时本字段自然为空，情形 2 不会误报。
+  String get lastSentTurnId => _lastSentTurnId;
+
   /// 缓冲区当前事件数（仅测试用）。
   ///
   /// ## 为什么需要它
@@ -404,6 +456,13 @@ class ChatStreamController {
   /// 在那之前若有同步读（如 `_syncStaleWatch` 在 `await` 后恢复、或调用方
   /// 直接读 [snapshot]），不能拿到旧结果——故置脏，让 [_reduction] 现场重算。
   bool _reductionDirty = false;
+
+  /// [lastTurnRunSnapshot] 的缓存：上一次算过的归约结果与它对应的答案。
+  ///
+  /// 键用 `identical` 而不是「内容相等」：[ReductionResult] 每个事件批次都是
+  /// 新建的，且逐字段比较比扫描本身还贵（与 `_displayRows` 的缓存同一取向）。
+  ({LastTurnRunState state, String turnId})? _cachedRun;
+  ReductionResult? _cachedRunFor;
 
   ReductionResult get _reduction {
     if (_reductionDirty || _cachedReduction == null) {
@@ -900,6 +959,10 @@ class ChatStreamController {
     // 乐观回显在尾部，裁剪只丢头部，故它不会被丢；这里仍调用以维持
     // 「所有 _buffer 变更点都裁剪」这一不变式。
     _trimBuffer();
+    // 记住「本会话刚投递出去的 turn」：对话页据此判断要不要报「正在准备响应」
+    // （见 [lastSentTurnId]）。turnId 为空（请求在飞 / 反馈类响应不建 turn）
+    // 时**不**覆盖——上一次发送的值仍然有效。
+    if ((turnId ?? '').isNotEmpty) _lastSentTurnId = turnId!;
     _emit();
     return echoId;
   }
@@ -2061,6 +2124,12 @@ class ChatStreamController {
       payload: {'input': input, if (agentId != null) 'agent_id': agentId},
       transient: true,
     );
+    // 转正是「本会话真正发出去了」的确切时刻（也是 `preparing` 成立的前提）：
+    // 对话页据此显示「正在准备响应」，见 [lastSentTurnId]。
+    //
+    // ⚠️ 不能只写在 [injectLocalUserMessage] 里：本方法**原位替换**缓冲事件，
+    // 不走那个入口（pending 阶段 turnId 还是空的，那时也无从判断）。
+    if (turnId.isNotEmpty) _lastSentTurnId = turnId;
     _trimBuffer();
     _emit();
   }
