@@ -38,6 +38,9 @@ enum TurnStatusKind {
   /// 已起跑，还没有正文，也没有工具调用。
   running,
 
+  /// 已送达服务端、agent 尚未产出任何东西（`preparing`，见 [deriveTurnStatus]）。
+  preparing,
+
   /// 已起跑且已在调用工具（本模块新增的一档，见 [deriveTurnStatus]）。
   runningWithTools,
 
@@ -87,7 +90,8 @@ final class TurnStatusSummary {
 ///    优先于「已经在跑」的证据（与 [ExecutionStatus] 类文档的分工一致）。
 /// 3. 有工具调用 → [TurnStatusKind.runningWithTools]。
 /// 4. [TurnActivitySnapshot] → [TurnStatusKind.running]。
-/// 5. 都没有 → null（流式正文本身在动，再加一条状态只是噪声——这是既有
+/// 5. [isPreparing]（已送达、agent 未动）→ [TurnStatusKind.preparing]。
+/// 6. 都没有 → null（流式正文本身在动，再加一条状态只是噪声——这是既有
 ///    `_visibleActivityFor` 的取舍，本轮保留）。
 ///
 /// ## 关于 [toolCount] 为什么可以不传
@@ -102,6 +106,7 @@ TurnStatusSummary? deriveTurnStatus({
   bool isStale = false,
   int toolCount = 0,
   String? lastToolName,
+  bool isPreparing = false,
 }) {
   if (!isStreaming) return null;
 
@@ -143,6 +148,22 @@ TurnStatusSummary? deriveTurnStatus({
       kind: TurnStatusKind.running,
       text: '执行中 · 已运行 ${formatTurnElapsed(activity.elapsedMs)}',
       detail: _lastEventLabel(activity),
+    );
+  }
+
+  // 兵底：结构上这一轮尚未结束，但拿不到任何正面证据（与看门狗武装计时器
+  // 同一判据：`LastTurnRunState.preparing`）。
+  //
+  // 文案逐字对齐 webapp `Workbench.streamInitialPreparingTitle`（"正在准备响应"）：
+  // 两端口径一致，用户跨端对照时不会以为是两件事。
+  //
+  // 注意它**不是** `ExecutionStatus` 的兵底：那一条只在服务端发了
+  // `queue_state` / `retry_scheduled` 时才有值，而这里覆盖的是「连那条都没
+  // 有」的空窗（排队事件缺失 / 服务端还没开始排队）。
+  if (isPreparing) {
+    return const TurnStatusSummary(
+      kind: TurnStatusKind.preparing,
+      text: '正在准备响应',
     );
   }
 

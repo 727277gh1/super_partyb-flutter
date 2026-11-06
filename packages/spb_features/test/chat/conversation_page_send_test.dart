@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:spb_ui/spb_ui.dart';
@@ -56,7 +57,13 @@ void main() {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
-      await tester.pumpAndSettle();
+      // ⚠️ 不能用 pumpAndSettle：转正后 turn 处于 preparing（issue #9 起），
+      // 「首字等待」细条的转圈指示器永远在动（见「首字等待提示」组），
+      // settle 不下来。改用手动泵，每帧带步进（无时长的 pump 不推进
+      // FakeAsync 时钟，烧不掉 dio / 归约合并的零延迟 Timer，实测残留）。
+      await tester.pump(const Duration(milliseconds: 20));
+      await tester.pump(const Duration(milliseconds: 20));
+      await tester.pump(const Duration(milliseconds: 20));
 
       // 乐观回显：用户气泡立刻出现（不等 SSE）。
       expect(find.text('走控制器'), findsOneWidget);
@@ -400,6 +407,167 @@ void main() {
         findsNothing,
         reason: '只读时间线用法下不应出现点了没反应的按钮',
       );
+    });
+  });
+
+  /// 「已送达、agent 未动」那段空窗的底部细条（用户报障）。
+  ///
+  /// 为什么必须用 widget 用例钉：判据横跨三层（归约器派生 `preparing`、
+  /// 控制器记下 `lastSentTurnId`、页面四档让位），任一层接线漏了，单测
+  /// 全绿而界面上依然空无一物（§6.17 同一失败模式）。
+  ///
+  /// ## 为什么不用真实 `send` 的时序
+  ///
+  /// `send` 的转正（`_settleLocalEcho`）要等 HTTP 响应，而 HTTP 在真实时区、
+  /// 等待它的 `await` 在 FakeAsync 时区——把两个时区拼到一个断言里只会得到
+  /// 一个偶发失败的用例（本文件前几条为此已写明堆时区陷阱）。
+  ///
+  /// 故这里直接走 [ChatStreamController.injectLocalUserMessage]（带 turnId、
+  /// 不带 pending）——那正是 `send` 转正后、以及离线队列投递成功时注入的
+  /// **同一个形态**，且同一条代码路径就会置上 `lastSentTurnId`。
+  /// 「请求在飞 → 转正会记下 turnId」本身在
+  /// `spb_domain/test/chat_stream_controller_send_pending_test.dart` 里钉。
+  group('ConversationPage 首字等待提示', () {
+    /// 注入一条「已投递成功」的用户消息（等价于 `send` 转正后的形态）。
+    Future<void> injectSent(WidgetTester tester) async {
+      await tester.runAsync(() async {
+        controller.injectLocalUserMessage(
+          input: '发出去',
+          groupId: 'grp_1',
+          turnId: 'turn_1',
+        );
+        // 归约被合并到事件循环任务；测试里手动刷一次，不依赖哪个时区的
+        // 零延迟 Timer。
+        controller.flushEmit();
+      });
+      // ⚠️ 用 pump 而非 pumpAndSettle：细条里的 CircularProgressIndicator
+      // 永远在转，`pumpAndSettle` 会一直等到超时。
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('发送后、首字到达前就给出「正在准备响应」', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-status')),
+        findsNothing,
+        reason: '还没发消息，不该有等待条',
+      );
+
+      await injectSent(tester);
+
+      expect(
+        find.byKey(const ValueKey('conversation-turn-status')),
+        findsOneWidget,
+        reason: '这段空窗此前既无气泡指示也无底部提示，与「点了没反应」无法区分',
+      );
+      expect(
+        find.text('正在准备响应'),
+        findsOneWidget,
+        reason: '文案与 webapp streamInitialPreparingTitle 逐字一致',
+      );
+
+      // 看门狗会为 preparing 的 turn 武装计时器（issue #9 既有行为）：
+      // 在 runAsync 里释放控制器，否则 `!timersPending` 不变式会检出它。
+      await tester.runAsync(() => controller.dispose());
+    });
+
+    testWidgets('首字到达 → 等待条让位给正文', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await injectSent(tester);
+      expect(find.text('正在准备响应'), findsOneWidget);
+
+      // 增量帧建项（空文本帧被归约层丢弃）→ 本轮已有 agent 侧产物，
+      // `preparing` 不成立。
+      await pushStreamingMessage(tester, id: 'e_delta', text: '收到');
+
+      expect(
+        find.text('正在准备响应'),
+        findsNothing,
+        reason: '正文已在流式，再留一条「正在准备」就是过期信息',
+      );
+      expect(find.textContaining('收到'), findsOneWidget);
+
+      await tester.runAsync(() => controller.dispose());
+    });
+
+    testWidgets('done 到达后不再提示（不把已结束的对话说成在等）', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      await injectSent(tester);
+      expect(find.text('正在准备响应'), findsOneWidget);
+
+      await pushEvent(
+        tester,
+        EventTypes.done,
+        sseEvent(
+          EventTypes.done,
+          id: 'e_done',
+          seq: 5,
+          payload: {'status': 'completed'},
+        ),
+      );
+
+      expect(
+        find.text('正在准备响应'),
+        findsNothing,
+        reason: '终态事件不产出 item，只能靠 terminalTurnIds 派生——漏了就永远转圈',
+      );
+
+      await tester.runAsync(() => controller.dispose());
+    });
+
+    testWidgets('本会话没发过（重开对话）时不提示', (tester) async {
+      // 回填一个「只有用户消息、无终态」的历史 turn：它确实是 preparing，
+      // 但客户端没有任何证据说它「正在」准备——那是编造（取舍见
+      // ChatStreamController.lastSentTurnId）。
+      adapter.onGet(
+        '/chat/groups/grp_1/timeline',
+        (server) => server.reply(200, {
+          'items': [
+            {
+              'eventId': 'srv_old',
+              'userId': 'usr_1',
+              'groupId': 'grp_1',
+              'turnId': 'turn_old',
+              'eventType': 'user_message',
+              'seq': 1,
+              'globalSeq': 1,
+              'source': 'test',
+              'payload': {'input': '几小时前发的'},
+              'createdAt': '2024-03-05T08:09:10Z',
+            },
+          ],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+      adapter.onGet(
+        '/api/chat/turn-runtime',
+        (server) => server.reply(200, {
+          'request_timeout_seconds': 300,
+          'inactivity_timeout_seconds': 0,
+          'client_turn_timeout_seconds': 300,
+        }),
+      );
+      await tester.runAsync(() => controller.start(groupId: 'grp_1'));
+      // 回填确实把它判成 preparing（否则本用例在测一件不存在的事）。
+      expect(controller.lastTurnRunSnapshot.state, LastTurnRunState.preparing);
+      await pumpPage(tester);
+
+      expect(
+        find.text('正在准备响应'),
+        findsNothing,
+        reason: '那个 turn 不是本会话发出去的，说「正在准备」就是编造',
+      );
+
+      await tester.runAsync(() => controller.dispose());
     });
   });
 

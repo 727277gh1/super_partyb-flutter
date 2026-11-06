@@ -1766,6 +1766,44 @@ class _ConversationPageState extends State<ConversationPage> {
     return _activities[turnId];
   }
 
+  /// 「已送达服务端、agent 还没产出任何东西」的 turnId；空串 = 不显示细条。
+  ///
+  /// ## 它补的是哪段空窗（用户报障）
+  ///
+  /// 发送后到首字返回之间，用户此前**看不到任何东西**：气泡里的「发送中」
+  /// 在响应落地那一刻就消失了（`UserMessageItem.pending`），而底部槽位原有
+  /// 四档全靠**服务端主动发来的事件**（`queue_state` / `turn_activity` /
+  /// 增量帧）——服务端还在建执行上下文时一个都没有。于是「它在跑」与
+  /// 「点了没反应」在 UI 上完全无法区分。
+  ///
+  /// ## 判据（与看门狗同一个）
+  ///
+  /// [EventReducer.lastTurnRun] 的 `preparing`：最后一个 turn 只有用户侧项、
+  /// 没有终态。同一个判据也用于武装看门狗计时器，故「界面说在等」与
+  /// 「超时提示判定无进展」永远不会自相矛盾。
+  ///
+  /// ## 三个「不显示」
+  ///
+  /// - **本会话没发过这个 turn**（[ChatStreamController.lastSentTurnId]）：
+  ///   重开一个历史里带破碎状态的对话时，不能把「几小时前那个没有终态的
+  ///   turn」说成「正在准备响应」——那是编造（详细取舍见该 getter）。
+  /// - **已有流式项**：agent 已开始吐字（空文本帧被归约层丢弃，故有项即有
+  ///   内容），让位给正文/思考。
+  /// - **时间线来自本地缓存**：那是「你看到的是旧历史」，不是「正在等回复」，
+  ///   顶部已有 `_OfflineTimelineNotice`；再报一条就是自相矛盾。
+  String _awaitingReplyTurnId(ConversationItem? streaming) {
+    if (streaming != null) return '';
+    if (_timelineFromCache) return '';
+    final controller = widget.controller;
+    final sentTurnId = controller.lastSentTurnId;
+    if (sentTurnId.isEmpty) return '';
+    final run = controller.lastTurnRunSnapshot;
+    if (run.state != LastTurnRunState.preparing) return '';
+    // 只认「刚发的那一轮」：若之后又发了新的一条（lastSentTurnId 已变），
+    // 旧 turn 的 preparing 不再代表当前等待。
+    return run.turnId == sentTurnId ? run.turnId : '';
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = widget.title;
@@ -1788,6 +1826,9 @@ class _ConversationPageState extends State<ConversationPage> {
     final canCancelTurn = _canCancelTurnFor(streaming);
     final progress = _turnProgressFor(streaming);
     final visibleActivity = _activityFor(progress);
+    // 「已送达、agent 未动」的空窗（用户报障：发了消息，底部什么都不说）。
+    // 判据与看门狗武装计时器同一个，详见 [_awaitingReplyTurnId]。
+    final awaitingTurnId = _awaitingReplyTurnId(streaming);
 
     return Scaffold(
       appBar: title == null
@@ -1912,7 +1953,31 @@ class _ConversationPageState extends State<ConversationPage> {
               )!,
             )
           else if (visibleActivity != null)
-            _TurnActivityIndicator(activity: visibleActivity),
+            _TurnActivityIndicator(activity: visibleActivity)
+          // 空窗兵底：消息已送达、agent 还没产出任何东西（见
+          // [_awaitingReplyTurnId]）。
+          //
+          // ## 为什么排在最后一档
+          //
+          // 上面四档都是**服务端给出了证据**的状态（stale 判定 / 排队原因 /
+          // 工具进度 / 活动心跳）。本档只是「没有任何证据、但结构上这一轮
+          // 还没结束」的兵底，有证据时当然不能盖过它。
+          //
+          // ## 为何 stale 时让位
+          //
+          // 看门狗已判定「很久没收到进展」时，「正在准备响应」就是过期信息
+          // （与工具数那一档同一条理由）。注意此时 `staleTurnItem` 为 null
+          // （没有流式项），故必须在这里单独判一次，否则用户会看到一条
+          // 永不消失的「正在准备响应」。
+          else if (awaitingTurnId.isNotEmpty &&
+              _staleTurnIds.contains(awaitingTurnId))
+            const _StaleTurnNotice()
+          else if (awaitingTurnId.isNotEmpty)
+            // `isStreaming: true` + `isPreparing: true` 必定非 null（首行
+            // 才判 isStreaming），故用 `!` 而不再造一个兵底文案。
+            TurnStatusStrip(
+              summary: deriveTurnStatus(isStreaming: true, isPreparing: true)!,
+            ),
           // 离线队列（issue #30）：紧贴待处理栏**上方**。
           //
           // ## 为什么两条并存而不是合并

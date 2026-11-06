@@ -178,6 +178,60 @@ void main() {
     });
   });
 
+  /// 「已送达、agent 未动」的兵底档（`isPreparing`）。
+  ///
+  /// 它补的是「发送后到首字返回之间底部什么都不说」那段空窗：此前四档
+  /// 全靠服务端主动发来的事件，而这段一个都没有。
+  group('deriveTurnStatus：preparing 兵底', () {
+    test('只有 isPreparing → 「正在准备响应」（与 webapp 逐字一致）', () {
+      final s = deriveTurnStatus(isStreaming: true, isPreparing: true)!;
+      expect(s.kind, TurnStatusKind.preparing);
+      expect(s.text, '正在准备响应');
+      // 仍在等，转圈不能停。
+      expect(s.spinner, isTrue);
+      expect(s.detail, isNull);
+    });
+
+    test('isStreaming 为 false → 仍是 null（没轮次就不画状态条）', () {
+      expect(deriveTurnStatus(isStreaming: false, isPreparing: true), isNull);
+    });
+
+    test('stale / 排队 / 工具 / 活动 都压过它（它们是更强的证据）', () {
+      expect(
+        deriveTurnStatus(
+          isStreaming: true,
+          isPreparing: true,
+          isStale: true,
+        )!.kind,
+        TurnStatusKind.stalled,
+      );
+      expect(
+        deriveTurnStatus(
+          isStreaming: true,
+          isPreparing: true,
+          executionStatus: exec(ExecutionStatusKind.queued),
+        )!.kind,
+        TurnStatusKind.queued,
+      );
+      expect(
+        deriveTurnStatus(
+          isStreaming: true,
+          isPreparing: true,
+          toolCount: 1,
+        )!.kind,
+        TurnStatusKind.runningWithTools,
+      );
+      expect(
+        deriveTurnStatus(
+          isStreaming: true,
+          isPreparing: true,
+          activity: activity(),
+        )!.kind,
+        TurnStatusKind.running,
+      );
+    });
+  });
+
   group('executionStatusLabel', () {
     test('排队原因逐条映射（与 webapp 同一批文案）', () {
       expect(
