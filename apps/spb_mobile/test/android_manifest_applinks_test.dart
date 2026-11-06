@@ -93,6 +93,25 @@ void main() {
       }
     });
 
+    test('每个 host 独占一条 autoVerify filter（不能合并）', () {
+      // WHY: Android 11 及以下，一条 filter 里**任一** host 验证失败会导致整条
+      // filter 失效。tbcc6 目前没有 HTTPS 监听（TLS 只在 EdgeOne 上且只前置
+      // tbcc），若与 tbcc 合并在一条 filter 里，会让旧设备上 tbcc 也收不到回调。
+      final filters = RegExp(
+        r'<intent-filter[^>]*android:autoVerify="true"[^>]*>[\s\S]*?</intent-filter>',
+      ).allMatches(xml).map((m) => m.group(0)!).toList();
+
+      expect(filters, hasLength(2), reason: '应为两个域名各一条 autoVerify filter');
+
+      for (final filter in filters) {
+        final hosts = RegExp(r'android:host="([^"]+)"')
+            .allMatches(filter)
+            .map((m) => m.group(1))
+            .toList();
+        expect(hosts, hasLength(1), reason: '一条 filter 只能有一个 host，实际 = $hosts');
+      }
+    });
+
     test('自定义 scheme 的 intent-filter 没有被 autoVerify 误伤', () {
       // autoVerify 只对 http/https 有意义；给 partyb 加 autoVerify 会让
       // Android 尝试校验失败并静默禁用该 filter。

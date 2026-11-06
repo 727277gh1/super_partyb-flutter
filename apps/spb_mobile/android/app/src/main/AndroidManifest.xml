@@ -77,10 +77,21 @@
               任一不成立都是**静默**失败：链接照常打开浏览器，无任何报错。
               排查：adb shell pm get-app-links com.atjog.spb.spb_mobile
 
+              ## 为什么一个 host 一个 intent-filter（不能合并）
+
+              Android 12+ 按 host 分别判定：任一 host 验证通过，该 host 的链接就归本应用；
+              但 **Android 11 及以下是一条 filter 内任一 host 失败则整条 filter 失效**。
+              本应用 minSdk=24（Android 7.0），旧设备仍占相当比例，故拆成两条：
+              一个域名没配好，不会连带另一个域名也收不到回调。
+
               ## 为什么两个 host 都写
 
               双栈：tbcc 走 CDN（IPv4/IPv6 均可）、tbcc6 是源站别名。
               OIDC issuer 用哪个域名，回调就从哪个域名回来，两个都要能接管。
+              ⚠️ tbcc6 目前**没有 HTTPS 监听**（TLS 只在 EdgeOne 上，而 EdgeOne 只前置 tbcc），
+              所以它的验证会失败——拆成两条后这只影响它自己。等 tbcc6 也上 CDN/证书后
+              无需再改 APK 即可生效。
+
               path 与 Dart 侧 OidcCallbackUri.claimedHttpsPath 保持一致（/idp 前缀 + /app/callback）。
             -->
             <intent-filter android:autoVerify="true">
@@ -88,6 +99,11 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="tbcc.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="tbcc6.atjog.com" android:path="/idp/app/callback"/>
             </intent-filter>
         </activity>
