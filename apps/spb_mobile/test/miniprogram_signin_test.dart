@@ -1,7 +1,7 @@
+import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_mobile/miniprogram_signin.dart';
-import 'package:test/test.dart';
 
 /// 小程序登录编排（App 内「微信一键」）的测试。
 ///
@@ -107,6 +107,8 @@ void main() {
     final client = _FakeClient(
       session: sessionWith(schemeUrl: 'weixin://dl/business/?t=xyz'),
       states: [MiniProgramPollState.pending, MiniProgramPollState.done],
+      // 不用默认值：证明落盘的是**兑换返回的** code，而不是任何硬编码常量。
+      exchangeCode: 'ory_ac_from_idp',
     );
     final launched = <Uri>[];
     final persisted = <({String code, PkcePair pkce})>[];
@@ -116,9 +118,43 @@ void main() {
     expect(error, isNull);
     expect(launched.single.toString(), 'weixin://dl/business/?t=xyz');
     expect(client.exchangeCount, 1, reason: '确认后必须兑换授权码');
-    expect(persisted.single.code, 'ory_ac_test');
+    expect(persisted.single.code, 'ory_ac_from_idp');
     // 兑换用的 PKCE 必须与发起时一致，否则 IdP 会 invalid_grant。
     expect(persisted.single.pkce.verifier.length, greaterThanOrEqualTo(43));
+  });
+
+  group('创建会话失败', () {
+    test('AuthError → 透出服务端文案，不唤起、不轮询、不留 pending', () async {
+      final client = _FakeClient(
+        createError: const AuthError('微信登录暂不可用，请改用其他登录方式'),
+      );
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final error = await run(client, launched: launched, persisted: persisted);
+
+      expect(error, '微信登录暂不可用，请改用其他登录方式');
+      expect(launched, isEmpty, reason: '没拿到 scene 就无从唤起');
+      expect(client.pollCount, 0);
+      expect(client.exchangeCount, 0);
+      // 不清理会留下一个永远等不到回调的 pending，下次深链回调误判
+      // 「有进行中的登录」而直接走兑换。
+      expect(await store.consume(), isNull);
+    });
+
+    test('非 AuthError（网络/序列化）→ 包一层可读文案，同样不留 pending', () async {
+      final client = _FakeClient(createError: StateError('connection reset'));
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final error = await run(client, launched: launched, persisted: persisted);
+
+      // 直接把 StateError.toString() 抛给用户会看到「Bad state: ...」。
+      expect(error, contains('无法创建微信登录会话'));
+      expect(launched, isEmpty);
+      expect(client.pollCount, 0);
+      expect(await store.consume(), isNull);
+    });
   });
 
   test('无法唤起微信（未安装）→ 立即报错，不进入轮询', () async {
