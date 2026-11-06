@@ -1,11 +1,18 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 
-import 'auth_deeplink.dart';
-
-/// App 内「微信一键登录」：唤起小程序 → 轮询确认 → 兑换授权码 → 落盘。
+/// 微信小程序登录编排（移动端唤起 / 桌面端手输码）：轮询确认 → 兑换授权码 → 落盘。
+///
+/// ## 为什么放在 spb_features 而不是某个 app
+///
+/// 移动端（唤起小程序）与桌面端（PC 显示 6 位码、手机输码）**只有「怎么把
+/// scene 送到用户眼前」不同**，从「等确认」往后完全一致。放共享包是为了让
+/// 「兑换时少传 pkce」这类错误不会只修在一条路径上。
+///
+/// app 只注入平台能力（[launch] / [launchViaSdk] / [onShortCode]）与落盘点。
 ///
 /// ## 为什么 App 里要另开一条路
 ///
@@ -48,7 +55,9 @@ import 'auth_deeplink.dart';
 Future<String?> miniProgramSignIn({
   required MiniProgramLoginClient client,
   required PendingAuthRequestStore store,
-  required Future<bool> Function(Uri url) launch,
+  // 用系统浏览器/scheme 唤起微信。null = 本平台没有这条通道（桌面端），
+  // 此时直接走短码，不浪费一次注定失败的微信 API 调用。
+  Future<bool> Function(Uri url)? launch,
   required Future<String?> Function(String code, PkcePair pkce) onCode,
   // OpenSDK 唤起（null = 不可用，退回 URL Scheme）。
   Future<String?> Function(String scene)? launchViaSdk,
@@ -61,13 +70,40 @@ Future<String?> miniProgramSignIn({
   Duration pollTimeout = const Duration(minutes: 3),
   Future<void> Function(Duration)? sleep,
 }) async {
-  final state = (stateGenerator ?? defaultAuthState)();
+  final state = (stateGenerator ?? _defaultAuthState)();
   final pkce = (pkceGenerator ?? OidcPkce.generatePair)();
 
   // 与浏览器流程一致：先把 state+verifier 落盘再发起。
   // 兑换时用的是内存里的 pkce，落盘是为了「应用被系统回收后仍能完成回调」
-  // 这一场景的一致性——两条路径的失败语义保持一致，排查时不必区分。
+  // 这一场景的一致性——三条路径的失败语义保持一致，排查时不必区分。
+  // （落盘必须在下面任何分支之前：落盘点 `onCode` 会读它校验 state。）
   await store.put(PendingAuthRequest(state: state, pkce: pkce));
+
+  // 平台完全唤不起微信（桌面端没有小程序可唤起）：直接发短码。
+  // Why 不是「先建 scheme 会话再失败」：`generatescheme` 对个人主体返回 85407，
+  // 每次点击白花一次微信 API 配额，还多等一个网络往返。
+  if (launch == null && launchViaSdk == null) {
+    final start = await _startShortCode(
+      client: client,
+      store: store,
+      onShortCode: onShortCode,
+      originalError: '当前平台无法唤起微信小程序',
+    );
+    if (start.error != null) return start.error;
+    SpbLog.info('已创建登录码等待手输确认', {'scene': start.scene});
+    return _awaitAndExchange(
+      client: client,
+      store: store,
+      scene: start.scene!,
+      state: state,
+      pkce: pkce,
+      onCode: onCode,
+      pollInterval: pollInterval,
+      pollMaxInterval: pollMaxInterval,
+      pollTimeout: pollTimeout,
+      sleep: sleep,
+    );
+  }
 
   // 有 OpenSDK 就不要 schemeUrl（见函数文档）。
   final useSdk = launchViaSdk != null;
@@ -107,7 +143,9 @@ Future<String?> miniProgramSignIn({
     fallbackReason = session.schemeError ?? '当前环境无法直接唤起微信，请改用其他登录方式';
   } else {
     try {
-      final ok = await launch(Uri.parse(session.schemeUrl!));
+      // 走到这里 launch 一定非空（launch 与 launchViaSdk 都为 null 时已在
+      // 函数开头直接走短码）。
+      final ok = await launch!(Uri.parse(session.schemeUrl!));
       if (!ok) {
         await store.consume();
         return '无法唤起微信，请确认已安装微信后重试';
@@ -269,4 +307,19 @@ Future<MiniProgramPollState> pollMiniProgramSession({
     delay = next > maxInterval ? maxInterval : next;
   }
   return MiniProgramPollState.pending;
+}
+
+/// 默认 `state` 生成（32 字符）。
+///
+/// 与 `magic_link_signin.dart` / app 装配层的生成器同形态：几条登录路径的
+/// state 不该有长度或字符集差异，否则排查 CSRF 类问题时要分别确认。
+String _defaultAuthState() {
+  const alphabet =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  final rng = Random.secure();
+  final buf = StringBuffer();
+  for (var i = 0; i < 32; i++) {
+    buf.write(alphabet[rng.nextInt(alphabet.length)]);
+  }
+  return buf.toString();
 }

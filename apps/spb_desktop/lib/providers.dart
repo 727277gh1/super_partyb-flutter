@@ -559,6 +559,36 @@ final emailSignInActionProvider =
       );
     });
 
+/// 微信小程序登录客户端（桌面端只用它的短码通道）。
+///
+/// 端点由 issuer 推导（`{issuer}/api/v1/bindings/mini-program`），不硬编码域名。
+/// `redirect_uri` 与 SSO/magic link 共用同一个配置值——兑换出的授权码绑定的
+/// 就是它，不一致会被 fosite 以 `invalid_request` 拒绝。
+final miniProgramLoginClientProvider = Provider<MiniProgramLoginClient>((ref) {
+  final config = ref.watch(oidcConfigProvider);
+  return MiniProgramLoginClient(
+    issuer: Uri.parse(config.issuer),
+    clientId: config.clientId,
+    redirectUri: config.redirectUri,
+  );
+});
+
+/// 「微信登录码」动作：桌面端只走短码（不传 launch / launchViaSdk）。
+final wechatSignInActionProvider =
+    Provider<
+      Future<String?> Function([
+        void Function(MiniProgramShortCode code)? onShortCode,
+      ])
+    >((ref) {
+      return ([onShortCode]) => miniProgramSignIn(
+        client: ref.read(miniProgramLoginClientProvider),
+        store: ref.read(pendingAuthStoreProvider),
+        // 桌面没有可唤起的微信：两个唤起参数都留空，编排层会直接发短码。
+        onShortCode: onShortCode,
+        onCode: ref.read(oidcCallbackHandlerProvider),
+      );
+    });
+
 final signInActionProvider = Provider<Future<String?> Function()>((ref) {
   return () async {
     final result = await ref.read(loopbackSignInProvider)(
@@ -730,6 +760,36 @@ class AuthStateNotifier extends Notifier<AuthState> {
     state = AuthState.unauthenticated;
   }
 
+  /// 微信登录码登录（桌面端**只**走短码通道）。
+  ///
+  /// 桌面没有「唤起小程序」这回事，所以 `miniProgramSignIn` 会被要求在
+  /// `launch`/`launchViaSdk` 都为 null 时直接发短码：用户拿手机打开小程序，
+  /// 在「我的 → 输入登录码」里填入本窗口显示的 6 位码。
+  ///
+  /// 为什么桌面值得专门做一条：PC 上不装微信也能登录，手机不用在两块屏之间
+  /// 来回切（扫码在这里反而别扭——手机要对着显示器）。
+  Future<String?> wechatSignIn([
+    void Function(MiniProgramShortCode code)? onShortCode,
+  ]) async {
+    final action = ref.read(wechatSignInActionProvider);
+    String? error;
+    try {
+      error = await action(onShortCode);
+    } on SpbError catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '微信登录失败：$e';
+    }
+    if (error != null) {
+      state = AuthState.failed(error);
+      return error;
+    }
+    // 落盘点（oidcCallbackHandlerProvider）内部已调 signedIn()；这里只在
+    // 「没被推进」时兜底，避免把已登录覆盖成 unknown。
+    if (!state.isAuthenticated) state = AuthState.unauthenticated;
+    return null;
+  }
+
   /// 邮箱 magic link 登录（与移动端同构，编排在 `magicLinkSignIn`）。
   Future<String?> emailSignIn(String email, void Function() onSent) async {
     final action = ref.read(emailSignInActionProvider);
@@ -768,6 +828,8 @@ final authControllerProvider = Provider<AuthActions>((ref) {
     signOut: () => ref.read(authStateProvider.notifier).signOut(),
     importSession: (raw) =>
         ref.read(authStateProvider.notifier).importSession(raw),
+    wechatSignIn: ([onShortCode]) =>
+        ref.read(authStateProvider.notifier).wechatSignIn(onShortCode),
     emailSignIn: (email, onSent) =>
         ref.read(authStateProvider.notifier).emailSignIn(email, onSent),
   );
@@ -779,6 +841,7 @@ class AuthActions {
     required this.signIn,
     required this.signOut,
     required this.importSession,
+    required this.wechatSignIn,
     required this.emailSignIn,
   });
 
@@ -787,6 +850,13 @@ class AuthActions {
 
   /// 粘贴导入已有会话，见 [AuthStateNotifier.importSession]。
   final Future<String?> Function(String raw) importSession;
+
+  /// 微信登录码登录（桌面展示 6 位码 → 手机小程序里输入），
+  /// 见 [AuthStateNotifier.wechatSignIn]。
+  final Future<String?> Function([
+    void Function(MiniProgramShortCode code)? onShortCode,
+  ])
+  wechatSignIn;
 
   /// 邮箱 magic link 登录，见 [AuthStateNotifier.emailSignIn]。
   final Future<String?> Function(String email, void Function() onSent)

@@ -21,7 +21,6 @@ import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
 import 'biometric_gate.dart';
-import 'miniprogram_signin.dart';
 import 'wechat_open_sdk.dart';
 
 /// 移动端没有桌面能力，恒为空实现。

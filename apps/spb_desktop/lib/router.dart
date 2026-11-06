@@ -319,6 +319,12 @@ class _LoginPage extends ConsumerWidget {
       // 送回进程，不需要用户手工搬运凭证。
       onImportSession: (raw) =>
           ref.read(authControllerProvider).importSession(raw),
+      // 微信登录码：PC 显示 6 位码 → 手机打开小程序「我的 → 输入登录码」填入。
+      //
+      // 桌面端**只**走短码通道（没有可唤起的小程序）：它的价值是「PC 不装
+      // 微信也能登录，手机不用对着显示器扫码」。需要手机上有可用的微信小程序。
+      onWeChatSignIn: (onShortCode) =>
+          ref.read(authControllerProvider).wechatSignIn(onShortCode),
       // 邮箱 magic link：不要求用户在浏览器与本进程之间搬运凭证，是粘贴导入
       // 之外的「无摩擦」路径（邮件可达时优先用它）。
       onEmailSignIn: (email, onSent) =>

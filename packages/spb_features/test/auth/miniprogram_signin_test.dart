@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
-import 'package:spb_mobile/miniprogram_signin.dart';
+import 'package:spb_features/spb_features.dart';
 
 /// 小程序登录编排（App 内「微信一键」）的测试。
 ///

@@ -17,3 +17,4 @@ export 'auth_state.dart';
 export 'lock_page.dart';
 export 'login_page.dart';
 export 'magic_link_signin.dart';
+export 'miniprogram_signin.dart';
