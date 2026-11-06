@@ -8,19 +8,19 @@ import 'package:test/test.dart';
 ///
 /// ## 这个测试防的是什么
 ///
-/// `POST /chat/groups/:gid/sessions/switch` 的请求体是**手写的匿名结构体**
-/// （`sessions.go:155`），字段名不完全一致：
+/// `POST /chat/groups/:gid/sessions/switch` 的请求体键名**历史上**是 camelCase
+/// （`sessions.go` 曾用 `json:"agentId"`，而全仓其余端点的 agent 字段都是
+/// `agent_id`）。2026-11-06 服务端改成 snake_case tag + `bindJSONCompat`，
+/// **两套都收**；本客户端仍发 `agentId`（线格式不动）。
 ///
-/// ```go
-/// AgentID         string `json:"agentId"`          // ← camelCase
-/// Role            string `json:"role"`
-/// ForceNewSession bool   `json:"force_new_session"`
-/// ```
+/// 于是这里的断言只剩两条**仍然必要**的性质：
 ///
-/// 只有 `agentId` 是 camelCase，而它恰好是最容易写成 `agent_id` 的那个
-/// （全仓其余端点的 agent 字段都是 `agent_id`）。写错的失败方式很隐蔽：
-/// 服务端 `AgentID` 保持空串 → 400 `agentId 不能为空`——文案不会提示
-/// 「你的键名写错了」，排障者会以为 agent 真的不存在。
+/// 1. 键名必须落在服务端实际接受的形态里。写错的失败方式很隐蔽：服务端
+///    `AgentID` 保持空串 → 400 `agentId 不能为空`——文案不会提示「你的键名
+///    写错了」，排障者会以为 agent 真的不存在。
+/// 2. **不得同时**下发 `agentId` 与 `agent_id`。服务端 `bindJSONCompat` 用 map
+///    合并 camel→snake 别名，两个键并存时谁赢取决于 Go 的 map 遍历顺序（随机），
+///    发一种才可预测。
 ///
 /// 故本文件对 body 键名做**字面量**断言（而不是「包含某值」）。
 ///
@@ -343,9 +343,9 @@ void main() {
       'switched': true,
     };
 
-    test('body 键名是 agentId（camelCase），不是 agent_id', () async {
-      // ⚠️ 这是本文件最重要的一条断言。写成 agent_id 会 400
-      // 「agentId 不能为空」，而错误文案不会提示键名写错了。
+    test('body 键名用 agentId，且不同时发 agent_id', () async {
+      // 服务端两套都收（bindJSONCompat），但仍只发一种：两键并存时服务端
+      // 取哪个取决于 map 遍历顺序，发一种才可预测。
       adapter.onPost(
         '/chat/groups/grp_1/sessions/switch',
         (server) => server.reply(200, switchJson()),
@@ -360,7 +360,7 @@ void main() {
       expect(
         calls.single.body!.containsKey('agent_id'),
         isFalse,
-        reason: '写成 agent_id 会让服务端 AgentID 保持空串 → 400',
+        reason: '与 agentId 并存时服务端取哪个取决于 map 遍历顺序（随机）',
       );
       expect(calls.single.body!['agentId'], 'agent_2');
     });

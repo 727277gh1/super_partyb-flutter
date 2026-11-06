@@ -156,8 +156,10 @@ Go API 返回**裸 JSON**（如 `{items: [...]}`），**不是** Python 时代�
 |---|---|
 | `GET /chat/groups` | **snake_case**（`user_id` / `created_at` / `active_session`） |
 | SSE 事件 | **camelCase**（`eventId` / `eventType` / `globalSeq`） |
+| `POST /chat/groups/:gid/sessions/*`（**请求体**） | **两套都收**：`bindJSONCompat` 把 camelCase 补成 snake_case 别名（嵌套数组元素由 `BindSessionItem.UnmarshalJSON` 兼容）。同一请求里**只能发一种** —— 两键并存时服务端取哪个取决于 Go map 遍历顺序 |
 
-各自照抄服务端，映射在 `spb_models` 里做。
+各自照抄服务端，映射在 `spb_models` 里做。**新增端点一律 snake_case**（服务端 tag 与全仓 REST 约定）；
+`sessions/*` 两套都收是历史兼容，不是新约定——不要据此推理其他端点也收 camelCase。
 
 ### 5.4 SSE 事件契约
 

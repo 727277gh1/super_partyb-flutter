@@ -73,20 +73,27 @@ class AgentsApi {
 
   /// `POST /chat/groups/:gid/sessions/switch` —— 把 group 切到另一个 agent。
   ///
-  /// ## ⚠️ 请求体键名是 **camelCase**，且 `agentId` 不是 `agent_id`
+  /// ## 请求体键名：服务端两套都收，本客户端发 `agentId`
   ///
-  /// 服务端 `sessions.go` 的匿名结构体 tag 是：
+  /// 服务端（`super_partyb/apps/go-api/internal/server/sessions.go` 的
+  /// `switchAgent`）是 snake_case tag + `bindJSONCompat`：
   ///
   /// ```go
-  /// AgentID         string `json:"agentId"`
+  /// AgentID         string `json:"agent_id"` // ← helper 把 agentId 补成 agent_id
   /// Role            string `json:"role"`
   /// ForceNewSession bool   `json:"force_new_session"`
   /// ```
   ///
-  /// 只有 `agentId` 是 camelCase（其余字段名本来就无下划线），且**没有**
-  /// `bindJSONCompat` 的双形态兜底（那是 `/api/*` 的 helper）。写成
-  /// `agent_id` 会让 `AgentID` 保持空串 → 400 `agentId 不能为空`，而错误
-  /// 文案不会提示「你的键名写错了」。
+  /// 即 `agentId` 与 `agent_id` **都能通过**（2026-11-06 修复；此前只认
+  /// camelCase，而 webapp 按全仓约定发 `agent_id`，导致它的「新对话」按钮
+  /// 100% 返回 400「agentId 不能为空」）。
+  ///
+  /// 本客户端继续发 `agentId`：两种都合法，没有理由为对齐风格去动已验证过的
+  /// 线格式（收益为零，风险是回归）。**但只能发一种** —— `bindJSONCompat`
+  /// 用 map 合并别名，两个键同时出现时谁赢取决于 Go 的 map 遍历顺序（随机），
+  /// 故 `test/agents_api_test.dart` 把「不得同时出现」钉死了。
+  ///
+  /// 新端点一律 snake_case（服务端 tag 与全仓 REST 约定）。
   ///
   /// ## 副作用：旧绑定被归档，历史上下文断开
   ///
@@ -111,7 +118,8 @@ class AgentsApi {
     final res = await _post(
       '/chat/groups/$groupId/sessions/switch',
       body: {
-        // ⚠️ camelCase：写错成 agent_id 会 400「agentId 不能为空」。
+        // camelCase 仍合法（服务端 bindJSONCompat 补别名）；切勿同时再发
+        // agent_id —— 两键并存时服务端取哪个取决于 map 遍历顺序。
         'agentId': agentId,
         if (role != null && role.isNotEmpty) 'role': role,
         'force_new_session': forceNewSession,
