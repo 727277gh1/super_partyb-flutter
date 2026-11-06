@@ -67,7 +67,11 @@ Future<String?> miniProgramSignIn({
   PkcePair Function()? pkceGenerator,
   Duration pollInterval = const Duration(seconds: 1),
   Duration pollMaxInterval = const Duration(seconds: 5),
-  Duration pollTimeout = const Duration(minutes: 3),
+  // 比服务端会话 TTL（5 分钟）**长**：客户端绝不能比服务端先放弃。
+  // 曾经是 3 分钟，结果码还有 2 分钟有效期时 App 已经报「超时」——用户明明
+  // 还能确认，却被告知要重新发起。真正的结束由服务端 `expired` 说了算，
+  // 这里的上限只是防止「用户切走后 Future 永远挂着」。
+  Duration pollTimeout = const Duration(minutes: 6),
   Future<void> Function(Duration)? sleep,
 }) async {
   final state = (stateGenerator ?? _defaultAuthState)();

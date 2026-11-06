@@ -234,6 +234,9 @@ void main() {
       expect(find.text('05:00 内有效'), findsOneWidget);
       // 说明文案要跟着切换：这时候「将打开微信」已经不成立了
       expect(find.textContaining('输入登录码'), findsOneWidget);
+      // 小程序名必须出现在文案里：App 唤不起小程序，用户得自己去微信里找它，
+      // 只说「打开小程序」等于把「哪个、在哪」留给用户猜。
+      expect(find.textContaining('成蹊'), findsWidgets);
 
       // 倒计时会走：3 秒后应为 04:57
       await tester.pump(const Duration(seconds: 1));

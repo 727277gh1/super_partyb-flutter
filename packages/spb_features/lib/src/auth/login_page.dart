@@ -46,6 +46,7 @@ class LoginPage extends StatefulWidget {
     this.onEmailSignIn,
     this.title = '登录 Super PartyB',
     this.subtitle = '使用统一身份认证中心（SSO）登录',
+    this.miniProgramName = '成蹊',
   });
 
   /// 发起登录。返回 null 表示已成功发起（等待外部回调），
@@ -123,6 +124,13 @@ class LoginPage extends StatefulWidget {
 
   /// 当前认证状态（错误消息从这里读）。
   final AuthState state;
+
+  /// 微信小程序的名称（短码文案里要写出来）。
+  ///
+  /// 必须写出名字：短码这条路上 App **唤不起**小程序，用户得自己去微信里找它。
+  /// 只说「打开小程序」等于把「哪个小程序、在哪找」全留给用户猜，而搜索框里
+  /// 猜错名字是这条路径最常见的断点。
+  final String miniProgramName;
 
   final String title;
   final String subtitle;
@@ -441,6 +449,7 @@ class _LoginPageState extends State<LoginPage> {
                         key: const ValueKey('login-short-code'),
                         code: _shortCode!,
                         remaining: _shortCodeRemaining(),
+                        miniProgramName: widget.miniProgramName,
                       ),
                       const SizedBox(height: SpbSpacing.lg),
                     ],
@@ -464,7 +473,7 @@ class _LoginPageState extends State<LoginPage> {
                     Text(
                       _shortCode == null
                           ? '将打开微信小程序，确认后自动返回本应用。'
-                          : '打不开微信的话：打开小程序，在「我的 → 输入登录码」填入上面的码。',
+                          : '打开微信 → 搜索或「发现 → 小程序」进入「${widget.miniProgramName}」→「我的 → 输入登录码」，填入上面的码。',
                       textAlign: TextAlign.center,
                       style: textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
@@ -649,12 +658,16 @@ class _ShortCodeCard extends StatelessWidget {
     super.key,
     required this.code,
     required this.remaining,
+    required this.miniProgramName,
   });
 
   final MiniProgramShortCode code;
 
   /// 剩余有效时长（由父级每秒重算）。
   final Duration remaining;
+
+  /// 小程序名称（见 [LoginPage.miniProgramName]）。
+  final String miniProgramName;
 
   @override
   Widget build(BuildContext context) {
