@@ -28,6 +28,26 @@
 				<string>partyb</string>
 			</array>
 		</dict>
+		<!--
+		  微信 OpenSDK 回跳 scheme（`wx<开放平台移动应用 AppID>`）——
+		  **拿到 HostAppID 后必须补上，否则微信里点「返回App」不会有反应**。
+
+		  为什么没直接写在这里：AppID 来自开放平台审核结果（issue #92 ① 账号侧），
+		  仓库里无法预先知道；而 Flutter 的 dart-define 只注入 Dart 侧，
+		  不会替换 Info.plist 里的变量。补法（Xcode 里操作等价）：
+
+		  <dict>
+		    <key>CFBundleTypeRole</key><string>Editor</string>
+		    <key>CFBundleURLName</key><string>weixin</string>
+		    <key>CFBundleURLSchemes</key>
+		    <array><string>wx1234567890abcdef</string></array>
+		  </dict>
+
+		  漏了它的表现是**静默的**：小程序确认后 App 不会被拉回前台，
+		  用户需要手动切回（轮询仍在跑，所以登录最终仍会完成，只是体验降级）。
+		  由 `test/ios_platform_config_test.dart` 在注入了 `SPB_WECHAT_OPEN_APP_ID`
+		  时提醒补全。
+		-->
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
@@ -45,6 +65,32 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!--
+	  微信 OpenSDK（fluwx）要求的 scheme 白名单。
+
+	  ## 为什么必须有
+
+	  iOS 9+ 起 `canOpenURL:` 只对 Info.plist 里声明过的 scheme 返回 true。
+	  漏声明的后果是 `fluwx.isWeChatInstalled` **恒为 false** —— 登录页因此
+	  判定「微信未安装」并降级到 SSO，而用户手机上明明装着微信（issue #92）。
+
+	  ## 四个值分别管什么
+
+	  - `weixin`：微信主 App（安装检测、`WXApi` 回调）；
+	  - `weixinULAPI`：微信 Universal Link 的跳转中转（iOS 13+ 必需，漏了会
+	    「唤起成功但回不来」）；
+	  - `weixinURLParamsAPI`：微信 SDK 内部用于带参跳转的私有 scheme；
+	  - `wechat`：老版本微信的 scheme，仍有极少数设备在用。
+
+	  这四个是微信官方 iOS 接入文档与 fluwx README 的同一份清单。
+	-->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>weixin</string>
+		<string>weixinULAPI</string>
+		<string>weixinURLParamsAPI</string>
+		<string>wechat</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

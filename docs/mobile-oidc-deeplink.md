@@ -82,15 +82,20 @@ T6 曾建议移动端「内嵌 webview 读 cookie」。本任务未采用，理�
 |---|---|
 | `android/app/src/main/AndroidManifest.xml` | 自定义 scheme：`<intent-filter>` + `<data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>`；claimed HTTPS：`<intent-filter android:autoVerify="true">` + `https` + `path="/idp/app/callback"`（见 §2.3） |
 | `ios/Runner/Info.plist` | `CFBundleURLTypes` → `CFBundleURLSchemes` = `["partyb"]` |
+| `ios/Runner/Runner.entitlements` | `com.apple.developer.associated-domains` = `applinks:tbcc.atjog.com` / `applinks:tbcc6.atjog.com`（claimed HTTPS 的 iOS 半边，与微信 Universal Link 共用） |
 | `packages/spb_api/lib/src/oidc_callback.dart` | `OidcCallbackUri`（`scheme`/`host`/`path`/`redirectUri`/`claimedHttpsRedirectUri`/`matches`/`parse`） |
 
 > iOS 的 plist 没有 host/path 的等价声明（只能声明 scheme），
 > 因此 host/path 的校验落在 Dart 侧 `OidcCallbackUri.matches()`。
+> claimed HTTPS 在 iOS 靠 `Runner.entitlements` 声明域名，且必须通过
+> `CODE_SIGN_ENTITLEMENTS` 挂到 Runner target（三个构建配置都要）才生效。
 >
 > 三处任一不一致的表现都是「登录后应用毫无反应」而**不是报错**，极难排查——
 > 故把常量集中到 `OidcCallbackUri`，并由
-> `apps/spb_mobile/test/android_manifest_applinks_test.dart` 直接读
-> manifest/plist 断言两边一致（改一边忘另一边 → 测试红灯）。
+> `apps/spb_mobile/test/android_manifest_applinks_test.dart`（Android manifest +
+> plist scheme）与 `apps/spb_mobile/test/ios_platform_config_test.dart`
+> （iOS entitlements 与 Android 域名一致性 + entitlements 是否真挂上）
+> 直接读配置文件断言（改一边忘另一边 → 测试红灯）。
 
 ### 2.2 接收链路（`apps/spb_mobile/lib/auth_deeplink.dart`）
 

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Associated Domains（iOS 的 claimed HTTPS）。
+
+	  两个用途共用同一组域名：
+	  1. **OIDC 回调**（issue #77 的 iOS 半边）：`https://<host>/idp/app/callback`
+	     交给本 App 而不是 Safari（Android 侧对应 AndroidManifest 里的
+	     `autoVerify` intent-filter）；
+	  2. **微信 OpenSDK 的 Universal Link**（issue #92）：`fluwx.registerApi`
+	     传入的 universalLink 必须属于这里声明的域名，否则微信无法把用户
+	     从微信带回 App。
+
+	  ## 为什么是这两个域名
+
+	  与 Android manifest、`OidcCallbackUri` 的双栈保持一致：tbcc 走 CDN
+	  （IPv4/IPv6 均可），tbcc6 是源站别名。issuer 用哪个域名，回调就从哪个
+	  域名回来，两个都要能接管。
+
+	  ## 生效前提（缺一即静默失败）
+
+	  - 服务端在该域名上提供 `/.well-known/apple-app-site-association`
+	    （无 `.json` 后缀、`Content-Type: application/json`，由 api-gateway 出；
+	    见 api-gateway#12 / id-provider#8）；
+	  - AASA 里的 `appID` 是 `<TeamID>.com.atjog.spb.spbMobile`
+	    （TeamID 在 Apple 开发者账号里查，仓库内没有也不该有）；
+	  - 用**同一个 Team** 签名的包安装到设备上（未签名的模拟器/本地包不校验，
+	    所以本机无法验证这一项）。
+
+	  ## 注意
+
+	  - 该文件必须通过 `CODE_SIGN_ENTITLEMENTS` 挂到 Runner target 上才生效
+	    （见 project.pbxproj 的三个配置），否则「文件存在但没有任何作用」，
+	    而表现是「点了登录没反应」——不是报错。
+	  - 由 `apps/spb_mobile/test/ios_platform_config_test.dart` 守卫以上两点。
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:tbcc.atjog.com</string>
+		<string>applinks:tbcc6.atjog.com</string>
+	</array>
+</dict>
+</plist>

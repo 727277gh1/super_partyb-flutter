@@ -176,7 +176,37 @@ fluwx.addSubscriber((r) {
 fluwx ≥4 自带 `WXEntryActivity`，无需手写。
 
 **iOS 必做**：Universal Link（Associated Domains）+ `LSApplicationQueriesSchemes`
-+ `CFBundleURLTypes`。当前仓库既无 entitlements 也无 AASA，iOS 侧等于从零开始。
++ `CFBundleURLTypes`。这三项已在仓库内落地（见下节），但**未经任何构建验证**
+（本机无 Xcode / macOS），且仍缺两项外部前提（AASA 与 `wx<AppID>` scheme）。
+
+#### iOS 平台配置（2026-11-06 落地，未构建验证）
+
+| 位置 | 内容 | 作用 |
+|---|---|---|
+| `ios/Runner/Runner.entitlements` | `applinks:tbcc.atjog.com`、`applinks:tbcc6.atjog.com` | 微信 Universal Link + OIDC claimed HTTPS 回调（issue #77 的 iOS 半边） |
+| `ios/Runner.xcodeproj/project.pbxproj` | 三个构建配置均 `CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements` | 只挂 Debug 是最常见的漏法：本地正常、Release 包上线后静默失效 |
+| `ios/Runner/Info.plist` | `LSApplicationQueriesSchemes` = `weixin` / `weixinULAPI` / `weixinURLParamsAPI` / `wechat` | 缺 `weixin` → `isWeChatInstalled` 恒 false；缺 `weixinULAPI` → 「唤起成功但回不来」 |
+
+**不需要改 `AppDelegate.swift`**：fluwx 6.x 自带 scene 生命周期转发
+（`scene:openURLContexts:` / `scene:continueUserActivity:`），本工程用的是
+`FlutterSceneDelegate`，插件注册后即可收到回调。
+
+**仍缺的两项（都不在客户端仓库内）**：
+
+1. **`wx<HostAppID>` 回跳 scheme**：AppID 来自开放平台审核结果，且
+   `--dart-define` 只注入 Dart 侧、不会替换 Info.plist 变量，所以只能拿到
+   AppID 后人工补进 `CFBundleURLTypes`（plist 里有注释写明补法）。漏了它的
+   后果是「小程序确认后不会被拉回前台」——轮询仍在跑，登录最终仍会完成，
+   只是体验降级。
+2. **AASA 文件**：`https://tbcc.atjog.com/.well-known/apple-app-site-association`
+   （无 `.json` 后缀、`Content-Type: application/json`），`appID` 形如
+   `<TeamID>.com.atjog.spb.spbMobile`。由 api-gateway 提供，见 api-gateway#12 /
+   id-provider#8。**未签名/模拟器不校验**，所以本机无法验证这一项。
+
+守卫：`apps/spb_mobile/test/ios_platform_config_test.dart` 断言
+entitlements 与 Android manifest 声明**同一组**域名、三个构建配置都挂了
+entitlements、微信 scheme 白名单齐全；注入了 `SPB_WECHAT_OPEN_APP_ID` 时
+还会要求 plist 里已补上该 scheme（把人工步骤变成红灯）。
 
 ### 方案 B 的客户端实现（已完成，issue #92）
 
@@ -211,8 +241,8 @@ flutter build apk --release \
 - **不接 `extMsg` 回调**：回到 App 后继续轮询 `/check/{scene}` 即可，多一条通道就
   多一处会分叉的实现。
 
-**未做**：iOS（需 Universal Link + Associated Domains + `LSApplicationQueriesSchemes`
-+ `CFBundleURLTypes`，本仓库目前都没有）；真机验证（需 HostAppID + release 签名装包）。
+**未做**：iOS 的构建与真机验证（配置已落地，见上表；缺 Xcode/macOS）；
+真机验证（需 HostAppID + release 签名装包）。
 
 **最大风险不在代码，在开放平台审核**：移动应用需要「官网或应用市场下载链接 +
 类目」，且主体信息需与开放平台认证主体一致。本 App 目前没有应用市场上架，
