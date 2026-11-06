@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cross_file/cross_file.dart';
@@ -449,6 +450,150 @@ void main() {
       // 矮窗口里仍应报出**真实**内容高度（而不是被窗口高度钳住的 100）
       // ——否则窗口永远长不高。
       expect(heights.last, greaterThan(100));
+    });
+  });
+
+  group('离开与提示文案（移动端：没有物理键盘）', () {
+    /// 有 `showKeyboardHints` 的宿主（桌面端接线形态）。
+    Widget buildWithHints({VoidCallback? onClose}) => _host(
+      OverlayQuickCapturePage(
+        submit: submit.call,
+        dragDrop: dragDrop,
+        onClose: onClose,
+        showKeyboardHints: true,
+      ),
+    );
+
+    /// 提交永不返回的宿主（用来把页面卡在 `_busy`）。
+    Widget buildPending({VoidCallback? onClose}) => _host(
+      OverlayQuickCapturePage(
+        submit: ({required input, required attachments, onUploadProgress}) =>
+            Completer<QuickCaptureEnqueueResult>().future,
+        dragDrop: dragDrop,
+        onClose: onClose,
+      ),
+    );
+
+    testWidgets('状态行默认不显示「Enter 提交 · Shift+Enter 换行 · Esc 清空」', (tester) async {
+      // 手机上没有这些键：写出来只会让用户去找 Esc 键。
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Shift+Enter'), findsNothing);
+      expect(find.textContaining('Esc 清空'), findsNothing);
+    });
+
+    testWidgets('showKeyboardHints: true → 显示快捷键说明（桌面端）', (tester) async {
+      await tester.pumpWidget(buildWithHints());
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Shift+Enter'), findsOneWidget);
+    });
+
+    testWidgets('状态行的提示/进度仍然显示（只是那条键盘提示被省掉）', (tester) async {
+      // 关掉的必须只是「无状态时的兜底文案」：错误提示与上传进度都靠这一行。
+      submit.result = const QuickCaptureEnqueueResult(
+        delivered: false,
+        error: NetworkError('网络不可用'),
+      );
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byKey(const Key('overlay-input')), 'hi');
+      // 必须先 pump 一帧：`发送` 的 onPressed 是**构建时**算的
+      // （`_canSubmit` 依赖 text），不 pump 就还是 null，tap 等于点了个死按钮。
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('overlay-submit')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('网络不可用'), findsOneWidget);
+    });
+
+    testWidgets('系统返回 + 有草稿 → 弹框确认；「丢弃」后关窗', (tester) async {
+      var closed = 0;
+      await tester.pumpWidget(build(onClose: () => closed++));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('overlay-input')), '刚打了一半');
+
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('overlay-discard-dialog')),
+        findsOneWidget,
+        reason: '静默丢弃 = 用户「白打一遍」，必须让他确认',
+      );
+      expect(closed, 0, reason: '确认之前不能关窗');
+
+      await tester.tap(find.byKey(const ValueKey('overlay-discard-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('overlay-discard-dialog')),
+        findsNothing,
+      );
+      expect(closed, 1);
+    });
+
+    testWidgets('系统返回 + 有草稿 → 「继续编辑」留在页面且草稿还在', (tester) async {
+      var closed = 0;
+      await tester.pumpWidget(build(onClose: () => closed++));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('overlay-input')), '刚打了一半');
+
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('overlay-discard-cancel')));
+      await tester.pumpAndSettle();
+
+      expect(closed, 0);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('overlay-input')))
+            .controller
+            ?.text,
+        '刚打了一半',
+      );
+    });
+
+    testWidgets('系统返回 + 无草稿 → 不弹框，直接关窗', (tester) async {
+      var closed = 0;
+      await tester.pumpWidget(build(onClose: () => closed++));
+      await tester.pumpAndSettle();
+
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('overlay-discard-dialog')),
+        findsNothing,
+      );
+      expect(closed, 1, reason: '没什么可丢的，弹框只会多一次点击');
+    });
+
+    testWidgets('提交中按返回 → 不弹框、不关窗，给出「正在发送」提示', (tester) async {
+      var closed = 0;
+      await tester.pumpWidget(buildPending(onClose: () => closed++));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('overlay-input')), 'hi');
+      // 同上：不 pump 一帧，`发送` 仍是禁用态，页面进不了 `_busy`。
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('overlay-submit')));
+      await tester.pump();
+
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+
+      expect(closed, 0, reason: '请求已发出，关页面不会撤销它');
+      expect(
+        find.byKey(const ValueKey('overlay-discard-dialog')),
+        findsNothing,
+      );
+      expect(
+        find.textContaining('正在发送'),
+        findsOneWidget,
+        reason: '「按了返回没反应」是最难排查的表现，必须给可见反馈',
+      );
     });
   });
 

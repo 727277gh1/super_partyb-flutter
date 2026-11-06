@@ -124,6 +124,9 @@ void main() {
     expect(h.router.state.uri.path, SpbRoutes.overlay);
     expect(find.byKey(const ValueKey('overlay-input')), findsOneWidget);
     expect(find.byKey(const ValueKey('overlay-attach')), findsOneWidget);
+    // 手机上没有 Enter/Shift+Enter/Esc 这些键：状态行不该出现桌面键盘说明
+    // （用户会去找一个不存在的 Esc 键）。桌面端接线传 `showKeyboardHints: true`。
+    expect(find.textContaining('Shift+Enter'), findsNothing);
   });
 
   testWidgets('对话列表新建入口：POST /chat/groups 后进入新对话', (tester) async {

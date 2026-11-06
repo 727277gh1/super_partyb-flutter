@@ -187,6 +187,7 @@ spb_design / spb_models / spb_core → 无包内依赖
 | 6.13 | golden 只给「稳定 + 纯展示 + 改错代价高」的组件加 |
 | 6.42 | 交付物同步的既有语义**必须保持**：单向 / 增量游标 / 只凭 `deleted_at` 感知远端删除 / `.part` + rename 原子写 / 路径穿越防御 / 失败项不写状态 / 全 group 与选中共用 `__workspace__` 单状态键（见 sync.md） |
 | 6.66 | 选 Agent 是**纯本地**的（对齐 webapp）：点选不发请求、不弹确认，`agent_id` 随下一条消息发出；`/sessions/switch` 只给「同 Agent 开新会话」（见 chat.md） |
+| 6.70 | 无归属输入页：系统返回键**有草稿必须确认**（`PopScope(canPop:false)` + 走宿主的 `onClose`）；键位说明只在 `showKeyboardHints` 时显示（桌面端传 true）（见 ui.md） |
 
 ### 6.1 主题索引
 

@@ -2936,6 +2936,9 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
       // 内容高度上报 → 把窗口高度贴合内容（否则固定高度会留一大片空白，
       // 见 `OverlayQuickCapturePage.onContentHeight` 的说明）。
       onContentHeight: (height) => _fitOverlayWindow(ref, height),
+      // 桌面端有真键盘（`Alt+Space` 唤起就是为了「打字即发」），故显示
+      // 「Enter 提交 · Shift+Enter 换行 · Esc 清空」；移动端不传，见该参数的说明。
+      showKeyboardHints: true,
       onClose: () {
         // ## 为什么这里直接调能力接口，而不是经 DesktopIntegration
         //

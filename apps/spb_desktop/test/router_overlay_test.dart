@@ -43,6 +43,11 @@ void main() {
       reason: '上报的必须是内容自然高度；报视口高度等于没修',
     );
     expect(caps.fittedHeights.last, greaterThan(0));
+
+    // 桌面端有真键盘（Alt+Space 唤起就是为了「打字即发」），故状态行要显示
+    // 快捷键说明；移动端不传这个参数（手机上没有 Esc 键，见页面参数文档）。
+    // 页面自己的测试给两种宿主各传一次，测不到 router 漏接线。
+    expect(find.textContaining('Shift+Enter'), findsOneWidget);
   });
 }
 
@@ -69,7 +74,11 @@ class _OverlayCapabilities extends FakeDesktopCapabilities
   }
 
   @override
-  Future<void> exitOverlayMode() async => _active = false;
+  Future<void> revealOverlayMode() async {}
+
+  @override
+  Future<void> exitOverlayMode({bool showMainWindow = false}) async =>
+      _active = false;
 
   @override
   Future<void> fitOverlayContentHeight(double contentHeight) async {

@@ -67,6 +67,20 @@ const int kOverlayMaxAttachmentBytes = 50 * 1024 * 1024;
 /// `Esc` 的两段语义是有意的：悬浮窗最常见的误触是「按 Esc 想清掉刚打的字，
 /// 结果窗关了」。空输入时才关窗让这个操作可预期。
 ///
+/// 这些键只在**有物理键盘**的宿主上成立，故状态行是否展示它们由
+/// [showKeyboardHints] 决定（桌面端开、移动端关）。
+///
+/// ## 离开的两条路径（语义不同，别合并）
+///
+/// | 路径 | 有草稿时 | 无草稿时 |
+/// |---|---|---|
+/// | 页面内「取消」/ `Esc` | **清空**草稿（再按一次才关） | 关窗 |
+/// | 系统返回键 / 返回手势 | **弹框确认**丢弃 | 关窗 |
+///
+/// 为什么返回键不照搬 `Esc` 的两段语义：手机上返回手势是高频误触动作，
+/// 「第一次返回只是清空」会让用户以为返回无效；而静默丢弃又会「白打一遍」。
+/// 明确的「丢弃 / 继续编辑」二选一没有歧义。
+///
 /// ## 页面不导航
 ///
 /// 投递是异步的（worker 消费后才建 turn），本页拿不到 groupId，故**不导航**。
@@ -80,6 +94,7 @@ class OverlayQuickCapturePage extends StatefulWidget {
     this.onClose,
     this.hintText,
     this.autofocus = true,
+    this.showKeyboardHints = false,
   });
 
   /// 提交实现。生产传 `QuickCaptureEnqueueUseCase.submit` 的适配闭包。
@@ -101,6 +116,19 @@ class OverlayQuickCapturePage extends StatefulWidget {
 
   /// 是否自动聚焦。悬浮窗应自动聚焦（唤起即可打字）。
   final bool autofocus;
+
+  /// 状态行是否显示物理键盘的快捷键说明（默认**不显示**）。
+  ///
+  /// ## 为什么默认关，且必须由接线方显式打开
+  ///
+  /// 这段文案是「Enter 提交 · Shift+Enter 换行 · Esc 清空」——手机上**没有
+  /// 这些键**，写出来只会让用户去找 Esc。而「有没有键盘」不是平台能力能问出来
+  /// 的（`HardwareKeyboard` 只在按键事件里可见，没有「是否接了外接键盘」这种
+  /// 查询），故按宿主显式注入：桌面悬浮窗传 true，全屏页（移动端）不传。
+  ///
+  /// 与 [onContentHeight] 同一类**有意差异**（`tools/check_wiring_parity.sh`
+  /// 不覆盖本页）：它们都是「同一个页面被两种宿主复用」时的差异点。
+  final bool showKeyboardHints;
 
   /// 内容自然高度变化回调（逻辑像素）。
   ///
@@ -196,8 +224,15 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
       widget.hintText ??
       (widget.dragDrop.isSupported ? '说点什么…（可拖入文件）' : '说点什么…');
 
-  bool get _canSubmit =>
-      !_busy && (_controller.text.trim().isNotEmpty || _attachments.isNotEmpty);
+  /// 是否有未提交的内容（文本或附件）。
+  ///
+  /// 「草稿」的判据同时用于两处：`Esc` 的两段语义（先清空再关窗）与系统返回键
+  /// 的确认框。两处若各写一遍，迟早会出现「Esc 认为有草稿、返回键认为没有」
+  /// 的不一致——表现就是其中一条路径静默丢掉用户刚打的东西。
+  bool get _hasDraft =>
+      _controller.text.trim().isNotEmpty || _attachments.isNotEmpty;
+
+  bool get _canSubmit => !_busy && _hasDraft;
 
   /// 是否有附件超限（超限时禁止提交并给出明确提示）。
   bool get _hasOversizedAttachment =>
@@ -307,7 +342,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     // 提交中不允许取消：请求已发出，关窗不会撤销它，反而让用户以为没提交。
     if (_busy) return;
     // 两段语义：有内容先清内容，空了才关窗（见类文档）。
-    if (_controller.text.isNotEmpty || _attachments.isNotEmpty) {
+    if (_hasDraft) {
       setState(() {
         _controller.clear();
         _attachments.clear();
@@ -342,8 +377,11 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   }
 
   Future<void> _pickFiles() async {
-    // 桌面端用 file_selector 的文件选择器（与拖拽互补：有些用户不习惯拖）。
-    // 走 spb_platform 的能力接口，移动端会静默返回空。
+    // 走 `spb_platform` 的文件选择器（与拖拽互补：有些用户不习惯拖）。
+    //
+    // 两端都用它：`file_selector` 在 Android/iOS 上同样已实现，手机上「拍照/
+    // 选图再问」比桌面更常见。只有**拖拽**是移动端没有的（注入 Noop 能力）。
+    // `pickFilesForOverlay` 在平台不支持或用户取消时静默返回空。
     final files = await pickFilesForOverlay();
     if (files.isEmpty) return;
     await _addFiles(files);
@@ -385,17 +423,102 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     return KeyEventResult.handled;
   }
 
+  /// 系统返回（Android 返回键 / 预测性返回手势）的处理。
+  ///
+  /// ## 为什么需要它（2026-11）
+  ///
+  /// 桌面端的 `Esc` 是**两段语义**（有内容先清空、空了才关），所以误触不会
+  /// 丢草稿。移动端此前没有等价保护：页面用 `push` 打开，系统返回直接弹出
+  /// 路由，用户刚打的字**静默消失**——而且没有任何提示，看起来像「白打了」。
+  ///
+  /// 这里选择**弹框确认**（而不是照搬 Esc 的清空语义）：手机上的返回手势是
+  /// 高频误触动作，「先清空、再按一次才关」会让用户以为第一次返回无效。
+  /// 明确的「丢弃 / 继续编辑」二选一没有歧义。
+  ///
+  /// 空输入时不弹框（与「取消」按钮同一语义：没什么可丢的，直接走）。
+  Future<void> _handleSystemBack() async {
+    // 提交中不允许离开：请求已发出，关页面不会撤销它，反而让用户以为没提交。
+    // 与 `_handleCancel` 的判断一致，但这里要给出**可见**反馈——「按了返回
+    // 没反应」是最难排查的一种表现。
+    if (_busy) {
+      setState(() => _hint = const Hint('正在发送，请稍候…', HintKind.info));
+      return;
+    }
+
+    if (_hasDraft) {
+      final discard = await _confirmDiscard();
+      if (!discard || !mounted) return;
+    }
+    _close();
+  }
+
+  /// 关窗：优先走宿主注入的关闭动作，没有时退回 `Navigator.pop`。
+  ///
+  /// ## 为什么不直接 `Navigator.pop`
+  ///
+  /// 移动端用 `context.push('/overlay')` 进入，`onClose` 是「回对话列表」；
+  /// 桌面端则要**先退出悬浮窗形态**再导航——那条逻辑在装配层，本页看不见。
+  /// 本页只负责「用户要关」，怎么关由宿主决定（与「取消」按钮同一出口）。
+  void _close() {
+    final onClose = widget.onClose;
+    if (onClose != null) {
+      onClose();
+      return;
+    }
+    final navigator = Navigator.maybeOf(context);
+    if (navigator != null && navigator.canPop()) navigator.pop();
+  }
+
+  /// 丢掉草稿前的确认框。返回 true 表示用户确认丢弃。
+  Future<bool> _confirmDiscard() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const ValueKey('overlay-discard-dialog'),
+        title: const Text('丢弃这次的输入？'),
+        content: const Text('已输入的文字和已添加的附件都不会保留。'),
+        actions: [
+          TextButton(
+            key: const ValueKey('overlay-discard-cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('继续编辑'),
+          ),
+          FilledButton(
+            key: const ValueKey('overlay-discard-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('丢弃'),
+          ),
+        ],
+      ),
+    );
+    // 点遮罩/返回键关掉对话框 = 不丢弃（默认安全）。
+    return confirmed ?? false;
+  }
+
   @override
   Widget build(BuildContext context) {
     final content = _buildContent(context);
     // 不支持拖拽的平台原样返回 child（不产生额外 widget 层级）。
-    return widget.dragDrop.buildDropZone(
+    final dropZone = widget.dragDrop.buildDropZone(
       onFiles: _addFiles,
       onHoverChanged: (hovering) {
         if (!mounted || _dragging == hovering) return;
         setState(() => _dragging = hovering);
       },
       child: content,
+    );
+
+    return PopScope(
+      // 恒为 false：要区分「有草稿 → 确认」与「空 → 直接走」，而 `canPop`
+      // 只是一个布尔，表达不了这层判断。真正的放行在 [_handleSystemBack]
+      // 里经 [_close]（走宿主出口，不是 `Navigator.pop`，故不会二次触发本回调）。
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        // didPop 恒为 false（canPop 恒为 false），保留判断只为穷尽语义。
+        if (didPop) return;
+        _handleSystemBack();
+      },
+      child: dropZone,
     );
   }
 
@@ -579,6 +702,12 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
         style: textTheme.labelSmall?.copyWith(color: scheme.primary),
       );
     }
+
+    // 无状态可显示时的兜底文案。
+    //
+    // 关掉时返回空占位（而不是删掉这段）：状态行还承担 `_hint`（错误/警告）
+    // 与上传进度的显示，整块不能省——只省这一条键盘提示。
+    if (!widget.showKeyboardHints) return const SizedBox.shrink();
 
     return Text(
       'Enter 提交 · Shift+Enter 换行 · Esc 清空',
