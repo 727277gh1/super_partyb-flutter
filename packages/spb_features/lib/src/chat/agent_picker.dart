@@ -157,7 +157,7 @@ class _AgentPickerDialogState extends State<AgentPickerDialog> {
                   children: [
                     Expanded(
                       child: Text(
-                        '选择后随下一条消息生效（旧会话上下文会断开）',
+                        '选择后随下一条消息生效（沿用当前对话上下文）',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),

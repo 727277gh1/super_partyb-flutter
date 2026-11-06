@@ -264,10 +264,10 @@ void main() {
 
       await openMenu(tester);
 
-      // 代价仍然真实（旧会话上下文会断开），只是它发生在下一条消息，
-      // 而不是点选的那一刻。
+      // 服务端换 agent 时继承当前 session（顶替归属、不顶替对话），故这里不再
+      // 提「上下文会断开」——只有「同 Agent 开新会话」才会断开。
       expect(find.textContaining('随下一条消息生效'), findsOneWidget);
-      expect(find.textContaining('上下文会断开'), findsOneWidget);
+      expect(find.textContaining('沿用当前对话上下文'), findsOneWidget);
     });
   });
 

@@ -29,16 +29,17 @@ typedef StartNewSession = Future<void> Function();
 /// | 动作 | 客户端 | 服务端 |
 /// |---|---|---|
 /// | 点选 agent | 记本地（本组件只回调 [selectAgent]） | **什么都不发生** |
-/// | 发下一条消息 | 请求体带 `agent_id` | 入队事务里 `ReplaceBinding`：归档该 group 的旧 owner 绑定，写新绑定，`session_id` 留 NULL（lazy） |
-/// | 点「同 Agent 开新会话」 | 调 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`） | 立即归档 + 新绑定 |
+/// | 发下一条消息 | 请求体带 `agent_id` | 入队事务里 `ReplaceBinding`：归档该 group 的旧 owner 绑定，写新绑定，**继承旧绑定的 `session_id`**（对话接着聊） |
+/// | 点「同 Agent 开新会话」 | 调 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`） | 立即归档 + 新绑定（`session_id` 置空） |
 ///
-/// 两种做法在**是否断开上下文**上等价（服务端 `chatbinding.Ensure` 对新 agent
-/// 没有 active binding 时一律新开会话，pigo 首轮自产 session），差别只在时机与
-/// 可见性：这里跟 webapp 一样把断开推迟到「下一条消息」，因此**不再弹确认框**
-/// ——点选本身没有产生任何不可逆动作，弹窗只会变成每次切人都要点一下的形式主义。
+/// 换 agent **不再断开上下文**（2026-11-06 服务端改为顶替归属、继承 session）：
+/// `chatbinding.Ensure` 归档旧 owner 时把它的 `session_id` 写给新行，pigo 用
+/// `-r` 续接同一段对话，只是人设换成新 agent（人设来自 group 工作区的
+/// `AGENTS.md` 软链接，每轮重指）。真正开新会话只有两条路径：「同 Agent 开新
+/// 会话」入口（`force_new_session: true`）与上下文超窗后的自动重试。
 ///
-/// 代价（明说）：上下文真正断开的那一刻用户看不到提示，只保留菜单顶部与搜索
-/// 弹层顶部的那行说明。这是 webapp 既有的事实行为，客户端不做单方面的二次确认。
+/// 因此**不弹确认框**：点选本身没有产生任何不可逆动作，弹窗只会变成每次切人
+/// 都要点一下的形式主义。
 ///
 /// ## 为什么「同 Agent 开新会话」仍然调服务端
 ///
@@ -280,7 +281,7 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       const PopupMenuItem<_SwitcherAction>(
         enabled: false,
         height: 36,
-        child: Text('选择后随下一条消息生效（旧会话上下文会断开）', style: TextStyle(fontSize: 12)),
+        child: Text('选择后随下一条消息生效（沿用当前对话上下文）', style: TextStyle(fontSize: 12)),
       ),
       const PopupMenuDivider(),
       for (final g in groups) ...[

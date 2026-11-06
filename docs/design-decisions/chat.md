@@ -1225,6 +1225,10 @@ webapp 自 `a1f9bcad`（2026-08-10）起把选择器改成纯本地：点选只�
 `ReplaceBinding: req.AgentID != ""` → `chatbinding.Ensure`：归档该 group 的其余
 owner 绑定、写一条新绑定，`session_id` 留 NULL 由 pigo 首轮自产）。
 
+> 后续变更（2026-11-06）：服务端不再留 NULL，而是**继承旧 owner 的 `session_id`**
+> （`chatbinding.Ensure` / `Bind(ResetKeepSession)`），即换 agent 只换归属与人设、
+> 不断开对话。下文「上下文会断开」的描述仅适用于该日期之前的行为。
+
 Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，并为它加了
 一个「上下文会断开」的确认弹窗。同一个服务端语义，两个客户端表现不同：webapp 的
 断开会**静默**发生在下一条消息，Flutter 的断开发生在点选那一刻并要求点确认。
@@ -1250,10 +1254,11 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 
 #### 代价（明说）
 
-1. **上下文真正断开的那一刻没有提示**。只保留菜单顶部/搜索弹层顶部的一行说明
-   （「选择后随下一条消息生效（旧会话上下文会断开）」）。这是 webapp 既有的事实
-   行为；客户端不再做单方面的二次确认——点选本身没有产生任何不可逆动作，为它弹窗
-   只会变成每次切人都要点一下的形式主义。
+1. **上下文在换 agent 时不断开**（2026-11-06 起）。服务端顶替 owner 绑定时
+   继承旧 `session_id`，pigo 用 `-r` 续接同一段对话，只换人设。故菜单/搜索弹层
+   顶部那行说明是「选择后随下一条消息生效（沿用当前对话上下文）」，只有
+   「同 Agent 开新会话」入口才会真正断开。这是 webapp 既有的事实行为；客户端
+   不做单方面的二次确认——点选本身没有产生任何不可逆动作。
 2. **建议卡的 agent 标注从「一次性」变成「持久」**。两者现在共用同一个本地值
    （webapp 同样如此：`FollowUpSuggestCard` 写的也是 `agentByGroup[groupId]`）。
    副作用是点过一次建议卡之后，后续消息仍由该 agent 回答——直到用户改选或换对话。

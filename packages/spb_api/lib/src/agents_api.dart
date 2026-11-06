@@ -95,20 +95,24 @@ class AgentsApi {
   ///
   /// 新端点一律 snake_case（服务端 tag 与全仓 REST 约定）。
   ///
-  /// ## 副作用：旧绑定被归档，历史上下文断开
+  /// ## 副作用：旧绑定被归档，但**对话上下文接着聊**（2026-11-06 起）
   ///
-  /// 服务端先 `ArchiveChatGroupSessionsByGroup`（归档该 group 全部旧绑定），
-  /// 再写一条新 active binding。故**切换 agent 会断开与历史对话的上下文链路**
-  /// ——UI 必须提示这一点，否则用户会以为「换个 agent 接着聊」而实际是新开
-  /// 一段上下文。
+  /// 服务端归档该 group 全部旧绑定，再写一条新 active binding，并把旧 owner 的
+  /// `session_id` **继承**给新行（`chatbinding.Bind` 的 `ResetKeepSession`）。
+  /// pigo 因此用 `-r` 续接同一段对话，只换人设（来自 group 工作区 `AGENTS.md`
+  /// 软链接，每轮重指）。
   ///
-  /// ## `session_id` 为 null 是正常的
+  /// 真正开新会话只有两条路径：本端点的 `forceNewSession: true`（`ResetNewSession`）
+  /// 与上下文超窗后的服务端自动重试。
   ///
-  /// 服务端 lazy 激活：新 binding 的 `session_id` 留 NULL，由下一轮 turn 让
-  /// executor 自产回填。不要据此判断失败。
+  /// ## `session_id` 非 null 是继承的结果
+  ///
+  /// 旧文档写「新 binding 的 `session_id` 留 NULL 是正常的」——那已不再成立：
+  /// group 之前跑过就有值（继承的旧 session id），没跑过（或 `forceNewSession`）
+  /// 才是 null（lazy，由下一轮 turn 自产回填）。客户端**不要**据此判断成功/失败。
   ///
   /// [role] 缺省时服务端取 `owner`（`firstNonEmpty(req.Role, "owner")`）。
-  /// [forceNewSession] = 同 agent 开新会话（断开旧 session 上下文）。
+  /// [forceNewSession] = 断开当前对话上下文，开一段新会话（默认 false = 接着聊）。
   Future<GroupAgentSwitchResult> switchGroupAgent(
     String groupId, {
     required String agentId,
