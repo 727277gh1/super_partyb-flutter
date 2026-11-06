@@ -329,6 +329,13 @@ class _LoginPage extends ConsumerWidget {
       // 之外的「无摩擦」路径（邮件可达时优先用它）。
       onEmailSignIn: (email, onSent) =>
           ref.read(authControllerProvider).emailSignIn(email, onSent),
+      // 反向登录码（#21）：手机小程序出码 → 本窗口输码。
+      //
+      // 桌面端最缺的就是这一条：loopback 需要 IdP 注册 public client（#6 未闭环），
+      // 邮件通道需要运维配 mailer。而用户手机上通常已经登录着小程序，出一个码
+      // 就能把会话搬过来，全程不需要任何服务端配置。
+      onHandoffSignIn: (code) =>
+          ref.read(authControllerProvider).handoffSignIn(code),
     );
   }
 }

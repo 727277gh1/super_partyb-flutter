@@ -589,6 +589,21 @@ final wechatSignInActionProvider =
       );
     });
 
+/// 「用登录码登录」动作：**手机小程序出码 → 本设备输码**（id-provider#21）。
+///
+/// 与 [wechatSignInActionProvider] 方向相反：那条是「本设备出码、小程序确认」，
+/// 这条是「小程序出码、本设备兑换」。桌面端尤其重要——它不依赖 public client
+/// 注册（loopback 走不通时）也不依赖邮件通道，是唯一纯客户端的无摩擦路径。
+final handoffSignInActionProvider =
+    Provider<Future<String?> Function(String code)>((ref) {
+      return (code) => miniProgramHandoffSignIn(
+        client: ref.read(miniProgramLoginClientProvider),
+        store: ref.read(pendingAuthStoreProvider),
+        code: code,
+        onCode: ref.read(oidcCallbackHandlerProvider),
+      );
+    });
+
 final signInActionProvider = Provider<Future<String?> Function()>((ref) {
   return () async {
     final result = await ref.read(loopbackSignInProvider)(
@@ -790,6 +805,28 @@ class AuthStateNotifier extends Notifier<AuthState> {
     return null;
   }
 
+  /// 反向登录码登录（手机小程序出码 → 本设备输码）。
+  ///
+  /// 与 [wechatSignIn] 的差别不只是方向：这条路径**没有等待阶段**，提交即
+  /// 出结果（成功直接进应用，失败给可操作文案）。
+  Future<String?> handoffSignIn(String code) async {
+    final action = ref.read(handoffSignInActionProvider);
+    String? error;
+    try {
+      error = await action(code);
+    } on SpbError catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '登录码登录失败：$e';
+    }
+    if (error != null) {
+      state = AuthState.failed(error);
+      return error;
+    }
+    if (!state.isAuthenticated) state = AuthState.unauthenticated;
+    return null;
+  }
+
   /// 邮箱 magic link 登录（与移动端同构，编排在 `magicLinkSignIn`）。
   Future<String?> emailSignIn(String email, void Function() onSent) async {
     final action = ref.read(emailSignInActionProvider);
@@ -832,6 +869,8 @@ final authControllerProvider = Provider<AuthActions>((ref) {
         ref.read(authStateProvider.notifier).wechatSignIn(onShortCode),
     emailSignIn: (email, onSent) =>
         ref.read(authStateProvider.notifier).emailSignIn(email, onSent),
+    handoffSignIn: (code) =>
+        ref.read(authStateProvider.notifier).handoffSignIn(code),
   );
 });
 
@@ -843,6 +882,7 @@ class AuthActions {
     required this.importSession,
     required this.wechatSignIn,
     required this.emailSignIn,
+    required this.handoffSignIn,
   });
 
   final Future<String?> Function() signIn;
@@ -861,6 +901,10 @@ class AuthActions {
   /// 邮箱 magic link 登录，见 [AuthStateNotifier.emailSignIn]。
   final Future<String?> Function(String email, void Function() onSent)
   emailSignIn;
+
+  /// 反向登录码登录（手机小程序出码 → 本设备输码），
+  /// 见 [AuthStateNotifier.handoffSignIn]。
+  final Future<String?> Function(String code) handoffSignIn;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。

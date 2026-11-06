@@ -29,6 +29,7 @@ void main() {
     onWeChatSignIn,
     Future<String?> Function(String email, void Function() onSent)?
     onEmailSignIn,
+    Future<String?> Function(String code)? onHandoffSignIn,
     Size? size,
   }) async {
     // 窗口尺寸：默认 800×600。改小可复现「内容过高溢出」这类布局问题
@@ -47,6 +48,7 @@ void main() {
           onImportSession: onImportSession,
           onWeChatSignIn: onWeChatSignIn,
           onEmailSignIn: onEmailSignIn,
+          onHandoffSignIn: onHandoffSignIn,
         ),
       ),
     );
@@ -532,6 +534,98 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('邮箱登录失败'), findsOneWidget);
+    });
+  });
+
+  group('登录页：反向登录码（手机小程序出码）', () {
+    testWidgets('不传回调时不渲染该区域（移动端/未配置时不占位）', (tester) async {
+      await pumpLogin(tester, onSignIn: () async => null);
+      expect(find.byKey(const ValueKey('login-handoff-field')), findsNothing);
+      expect(find.byKey(const ValueKey('login-handoff-button')), findsNothing);
+    });
+
+    testWidgets('渲染输入框与按钮，并把用户输入的码交给回调', (tester) async {
+      final received = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onHandoffSignIn: (code) async {
+          received.add(code);
+          return null;
+        },
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-handoff-field')),
+        'AB2C-3D4E',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+      await tester.pump();
+
+      // 原样交给编排层：归一化在 `miniProgramHandoffSignIn` 里统一做，
+      // 页面再归一化一次会让「本地丢字符」与「服务端丢字符」出现两套规则。
+      expect(received, ['AB2C-3D4E']);
+    });
+
+    testWidgets('空输入不发请求，直接提示', (tester) async {
+      var calls = 0;
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onHandoffSignIn: (_) async {
+          calls++;
+          return null;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+      await tester.pump();
+
+      expect(calls, 0);
+      expect(find.text('请先输入登录码'), findsOneWidget);
+    });
+
+    testWidgets('失败原因展示给用户（码错了要能改，不是白按一次）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onHandoffSignIn: (_) async => '登录码无效或已被使用，请核对后重新输入',
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-handoff-field')),
+        'AB2C3D4E',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+      await tester.pump();
+
+      expect(find.text('登录码无效或已被使用，请核对后重新输入'), findsOneWidget);
+    });
+
+    testWidgets('成功后清空输入框（码就是凭据，不该留在控件里）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onHandoffSignIn: (_) async => null,
+      );
+
+      final field = find.byKey(const ValueKey('login-handoff-field'));
+      await tester.enterText(field, 'AB2C3D4E');
+      await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+      await tester.pump();
+
+      expect(tester.widget<TextField>(field).controller?.text, isEmpty);
+    });
+
+    testWidgets('页面写明「2 分钟 / 一次性 / 别发给别人」', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onHandoffSignIn: (_) async => null,
+      );
+      // 码是持有即授权的凭据：不写清楚，用户会截图发微信求助，拿到截图的人
+      // 就能登录他的账号。
+      expect(find.text('登录码 2 分钟内有效、只能用一次。请勿把码发给任何人。'), findsOneWidget);
     });
   });
 

@@ -254,18 +254,64 @@ class MiniProgramLoginClient {
     return code;
   }
 
+  /// 用**反向登录码**（小程序出码、本设备输码）兑换 OIDC 授权码。
+  ///
+  /// ## 与 [exchange] 的区别
+  ///
+  /// - [exchange] 消费的是「小程序已确认的 scene」（正向：App 出码 → 小程序确认）；
+  /// - 本方法消费的是「小程序已登录后自己发出的 8 位码」（反向），
+  ///   谁拿到码谁就能兑换，所以服务端做了 8 位长度、2 分钟 TTL、单次消费、
+  ///   同码错 5 次作废、按来源限流。
+  ///
+  /// 两条路径**端点与存储都隔离**：反向码进 `/exchange` 会 404，正向 scene 进
+  /// `/handoff/redeem` 会 400（格式），所以这里不会误消费别的会话。
+  ///
+  /// 返回的 code 交给 `OidcClient.exchangeCode`（同一个 [pkce]）换 token，
+  /// 与浏览器/正向登录完全一致。
+  Future<String> redeemHandoffCode({
+    required String code,
+    required PkcePair pkce,
+    required String state,
+  }) async {
+    final uri = endpointBase.replace(
+      path: '${endpointBase.path}/handoff/redeem',
+    );
+    final res = await _request(
+      handoff: true,
+      () => _dio.post<dynamic>(
+        uri.toString(),
+        data: {
+          // 字段名与正向 exchange 一致（服务端复用同一个请求结构），语义是
+          // 「用户手抄的码」。带不带横线都行：服务端会归一化。
+          'scene': code,
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+          'state': state,
+          'code_challenge': pkce.challenge,
+          'code_challenge_method': 'S256',
+        },
+      ),
+    );
+    final authCode = _str(_asMap(res.data)['code']);
+    if (authCode == null) {
+      throw const AuthError('登录码兑换失败（响应缺少 code）');
+    }
+    return authCode;
+  }
+
   /// 统一错误映射：把服务端的 `error` 码翻成用户能读懂的原因。
   Future<Response<dynamic>> _request(
-    Future<Response<dynamic>> Function() send,
-  ) async {
+    Future<Response<dynamic>> Function() send, {
+    bool handoff = false,
+  }) async {
     try {
       return await send();
     } on DioException catch (e) {
-      throw AuthError(_messageFor(e));
+      throw AuthError(_messageFor(e, handoff: handoff));
     }
   }
 
-  String _messageFor(DioException e) {
+  String _messageFor(DioException e, {bool handoff = false}) {
     final data = e.response?.data;
     final code = data is Map ? _str(data['error']) : null;
     switch (code) {
@@ -276,9 +322,20 @@ class MiniProgramLoginClient {
       case 'not_found':
       case 'expired':
       case 'already_used':
+        // 反向码的语义完全不同：码是持有即授权的凭据，`not_found` 意味着
+        // 用户抄错了或已被别人用掉，出路是「核对」或「回小程序重新出码」，
+        // 而不是「重新发起 App 侧会话」（那是正向的说法）。
+        if (handoff) {
+          return code == 'expired'
+              ? '登录码已过期，请在小程序里重新生成'
+              : '登录码无效或已被使用，请核对后重新输入';
+        }
         // 短码确认侧（小程序）才会拿到这三个码；App 侧只在兑换过期 scene 时
         // 可能碰到，统一提示重新发起。
         return '登录码已失效，请重新发起';
+      case 'too_many_attempts':
+        // 同一个码错够次数就被作废：不能再让用户继续试，只能重新出码。
+        return '这个登录码尝试次数过多已作废，请在小程序里重新生成';
       case 'scene_pending':
         return '微信里还没确认，请在小程序中完成登录';
       case 'scene_expired':

@@ -189,6 +189,89 @@ Future<String?> miniProgramSignIn({
   );
 }
 
+/// 反向短码登录：**小程序出码、本设备输码**（id-provider#21）。
+///
+/// ## 这是与 [miniProgramSignIn] 相反的方向
+///
+/// - [miniProgramSignIn]：App/网页出码 → 用户在小程序里**确认** → App 轮询取结果。
+///   码是**授权句柄**：光有码没用，必须有账号主人确认。
+/// - 本函数：用户在已登录的小程序里出码 → 抄到本设备 → 本设备直接换会话。
+///   码是**持有即授权的凭据**（8 位、2 分钟、一次性）。
+///
+/// ## 为什么桌面端比「SAA 跳浏览器」更值得试
+///
+/// 桌面端的无摩擦路径一直缺一块：public client 未注册时 loopback 走不通，
+/// 邮件通道要运维配好 mailer。而用户手机上大概率已经登录着小程序——让那台
+/// 已登录的设备吐一个码出来，是唯一不依赖任何服务端资质/配置的通路。
+///
+/// ## 不做的事
+///
+/// - **不轮询**：反向码没有「等待确认」阶段，提交即出结果；
+/// - **不发起新会话**：码由用户在另一台设备上生成，本端只是消费它；
+/// - 仍要落盘 state/pkce：兑换出来的是 fosite 标准授权码，交给 [onCode] 后
+///   与浏览器/magic link 走同一个落盘点（校验 state、换 token、写安全存储）。
+///
+/// 返回错误文案（null = 成功）。
+Future<String?> miniProgramHandoffSignIn({
+  required MiniProgramLoginClient client,
+  required PendingAuthRequestStore store,
+  // 用户手抄的码：可能带横线/空格/小写（服务端会归一化，这里只做长度前置校验）。
+  required String code,
+  required Future<String?> Function(String code, PkcePair pkce) onCode,
+  String Function()? stateGenerator,
+  PkcePair Function()? pkceGenerator,
+}) async {
+  final normalized = normalizeHandoffInput(code);
+  if (normalized.length != handoffCodeLength) {
+    // 本地就能判定的错误不发请求：省一次往返，也避免把「抄错」记成服务端失败。
+    return '登录码应为 $handoffCodeLength 位，请核对后重新输入';
+  }
+
+  final state = (stateGenerator ?? _defaultAuthState)();
+  final pkce = (pkceGenerator ?? OidcPkce.generatePair)();
+  // 与其他登录路径一致：先落盘再兑换（落盘点 onCode 会读它校验 state）。
+  await store.put(PendingAuthRequest(state: state, pkce: pkce));
+
+  final String authCode;
+  try {
+    authCode = await client.redeemHandoffCode(
+      code: normalized,
+      pkce: pkce,
+      state: state,
+    );
+  } on AuthError catch (e) {
+    await store.consume();
+    return e.message;
+  } catch (e) {
+    await store.consume();
+    SpbLog.warn('反向登录码兑换失败', {'error': e.toString()});
+    return '登录码兑换失败：$e';
+  }
+
+  return onCode(authCode, pkce);
+}
+
+/// 反向码长度（与服务端 `handoffCodeLength` 一致）。
+const handoffCodeLength = 8;
+
+/// 反向码字符集（与服务端一致：Crockford base32 去掉 `0/O/1/I/L/U`）。
+///
+/// 用同一套字符集是为了「本地丢字符」与「服务端丢字符」结果一致：
+/// 用户在手机键盘上打出 `I` 时两边都当成没打，而不是本地报错、服务端却接受。
+const _handoffAlphabet = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/// 归一化用户输入的登录码：去空白/分隔符、转大写、只保留字符集内字符。
+///
+/// **不做模糊替换**（`O`→`0`、`I`→`1`）：猜错方向比让用户重抄一次更糟——
+/// 那会把「抄错」变成「登进别人的账号」。
+String normalizeHandoffInput(String raw) {
+  final buf = StringBuffer();
+  for (final ch in raw.toUpperCase().split('')) {
+    if (ch.length == 1 && _handoffAlphabet.contains(ch)) buf.write(ch);
+  }
+  return buf.toString();
+}
+
 /// 轮询确认 → 兑换授权码 → 交给落盘点（三条通道共用）。
 ///
 /// 抽出来的原因：扫码/唤起/短码的差别**只在 scene 怎么来**，从「等确认」

@@ -44,6 +44,7 @@ class LoginPage extends StatefulWidget {
     this.onImportSession,
     this.onWeChatSignIn,
     this.onEmailSignIn,
+    this.onHandoffSignIn,
     this.title = '登录 Super PartyB',
     this.subtitle = '使用统一身份认证中心（SSO）登录',
     this.miniProgramName = '成蹊',
@@ -98,6 +99,23 @@ class LoginPage extends StatefulWidget {
     void Function(MiniProgramShortCode code)? onShortCode,
   )?
   onWeChatSignIn;
+
+  /// 反向登录码：在已登录的小程序里出码 → 抄到本设备 → 直接登录。
+  ///
+  /// 返回 null 表示成功（已登录），字符串是失败原因（与 [onSignIn] 同语义）。
+  ///
+  /// ## 与 [onWeChatSignIn] 的方向相反
+  ///
+  /// [onWeChatSignIn] 是「本设备出码、手机小程序确认」；这里是「手机小程序出码、
+  /// 本设备输码」。后者不依赖任何微信「打开能力」（URL Scheme 需要主体资质），
+  /// 也不依赖 IdP 的 public client 注册或邮件通道——是**桌面端**唯一一条
+  /// 不靠运维配置就能走通的无摩擦路径。
+  ///
+  /// 代价：码是「持有即授权的凭据」（8 位、2 分钟、一次性），所以页面必须
+  /// 明确写出「别把码发给别人」，并只让用户自己抄。
+  ///
+  /// 为 null 时不展示。
+  final Future<String?> Function(String code)? onHandoffSignIn;
 
   /// 邮箱 magic link 登录：输邮箱 → 收信 → 点链接确认 → 自动登录。
   ///
@@ -183,11 +201,18 @@ class _LoginPageState extends State<LoginPage> {
   /// 邮箱输入控制器。
   final TextEditingController _emailController = TextEditingController();
 
+  /// 反向登录码输入控制器。
+  final TextEditingController _handoffController = TextEditingController();
+
+  /// 是否正在兑换反向登录码（防重复提交）。
+  bool _handoffBusy = false;
+
   @override
   void dispose() {
     _shortCodeTicker?.cancel();
     _importController.dispose();
     _emailController.dispose();
+    _handoffController.dispose();
     super.dispose();
   }
 
@@ -347,6 +372,42 @@ class _LoginPageState extends State<LoginPage> {
       _emailBusy = false;
       _emailSent = false;
       _localError = error;
+    });
+  }
+
+  /// 反向登录码：把手机上小程序里显示的 8 位码提交给 IdP。
+  ///
+  /// 与邮箱入口一样**当场**就能出结果（成功直接进应用，失败给可操作文案），
+  /// 所以不需要「等待中」的中间态。
+  Future<void> _handleHandoffSignIn() async {
+    final handler = widget.onHandoffSignIn;
+    if (handler == null || _handoffBusy) return;
+
+    final code = _handoffController.text.trim();
+    if (code.isEmpty) {
+      setState(() => _localError = '请先输入登录码');
+      return;
+    }
+
+    setState(() {
+      _handoffBusy = true;
+      _localError = null;
+    });
+
+    String? error;
+    try {
+      error = await handler(code);
+    } catch (e) {
+      SpbLog.warn('反向登录码登录时异常', {'error': e.toString()});
+      error = '登录码登录失败：$e';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _handoffBusy = false;
+      _localError = error;
+      // 成功后清空输入框：码就是凭据，留在控制器里没有任何用处。
+      if (error == null) _handoffController.clear();
     });
   }
 
@@ -512,6 +573,10 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(height: SpbSpacing.lg),
                     _buildEmailSection(context),
                   ],
+                  if (widget.onHandoffSignIn != null) ...[
+                    const SizedBox(height: SpbSpacing.lg),
+                    _buildHandoffSection(context),
+                  ],
                   if (widget.onImportSession != null) ...[
                     const SizedBox(height: SpbSpacing.lg),
                     _buildImportSection(context),
@@ -522,6 +587,79 @@ class _LoginPageState extends State<LoginPage> {
           ),
         ),
       ),
+    );
+  }
+
+  /// 反向登录码区域（手机小程序出码 → 本设备输码）。
+  ///
+  /// 与邮箱区域一样**始终可见**：它是一条对等的登录路径，不是补救措施。
+  /// 收起会让「手机上没有微信/桌面没有 public client」的用户永远发现不了它。
+  Widget _buildHandoffSection(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final locked = _busy || _wechatBusy || _emailBusy || _handoffBusy;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const Expanded(child: Divider()),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: SpbSpacing.sm),
+              child: Text(
+                '或用手机小程序登录',
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const Expanded(child: Divider()),
+          ],
+        ),
+        const SizedBox(height: SpbSpacing.md),
+        TextField(
+          key: const ValueKey('login-handoff-field'),
+          controller: _handoffController,
+          enabled: !locked,
+          // 码是大写字母+数字：默认大写键盘，且关掉自动纠正/建议
+          // （输入法把 `AB2C` 改成 `AB2c` 之类会让用户看不出哪里错了）。
+          textCapitalization: TextCapitalization.characters,
+          autocorrect: false,
+          enableSuggestions: false,
+          maxLength: 9, // 8 位 + 一个分隔符
+          decoration: InputDecoration(
+            labelText: '登录码',
+            hintText: 'AB2C-3D4E',
+            counterText: '',
+            helperText: '在手机微信里打开「${widget.miniProgramName}」→ 我的 → 在别的设备上登录',
+            helperMaxLines: 2,
+          ),
+          // 服务端会归一化（去横线/小写），这里只做长度与可读性提示。
+          style: const TextStyle(fontFamily: 'monospace', letterSpacing: 2),
+          onSubmitted: (_) => _handleHandoffSignIn(),
+        ),
+        const SizedBox(height: SpbSpacing.sm),
+        FilledButton.tonal(
+          key: const ValueKey('login-handoff-button'),
+          onPressed: locked ? null : _handleHandoffSignIn,
+          child: _handoffBusy
+              ? const SizedBox(
+                  width: SpbSpacing.lg,
+                  height: SpbSpacing.lg,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('用登录码登录'),
+        ),
+        const SizedBox(height: SpbSpacing.sm),
+        Text(
+          // 码是「持有即授权」的一次性凭据：不写清楚，用户会截图发微信求助，
+          // 而拿到截图的人就能登录他的账号。
+          '登录码 2 分钟内有效、只能用一次。请勿把码发给任何人。',
+          textAlign: TextAlign.center,
+          style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+      ],
     );
   }
 

@@ -1444,6 +1444,14 @@ void main() {
       // 默认收起：SSO 是主路径，导入是备选。
       expect(find.byKey(const ValueKey('login-import-field')), findsNothing);
 
+      // 登录页条目随功能增加而变长（微信登录码 / 邮箱 / 反向登录码…），
+      // 800×600 的窗口里导入入口已在折叠线以下。它是滚动区内的正常内容，
+      // 所以先滚到可见处再点——不能因为它「默认不可见」就删掉这条断言。
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-import-session')),
+      );
+      await tester.pumpAndSettle();
+
       await tester.tap(find.byKey(const ValueKey('login-import-session')));
       await tester.pumpAndSettle();
 

@@ -541,6 +541,13 @@ void main() {
 
       // 导入区默认收起（它是备选路径，展开着会让登录页看起来有两条对等入口）
       // ——必须先展开才能断言输入框存在。
+      //
+      // 登录页条目随功能增加而变长（微信登录码 / 邮箱 / 反向登录码…），
+      // 导入入口在默认窗口里已在折叠线以下：先滚到可见处再点。
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-import-session')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('login-import-session')));
       await tester.pumpAndSettle();
 

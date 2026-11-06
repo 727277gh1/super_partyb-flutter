@@ -299,6 +299,94 @@ void main() {
     });
   });
 
+  group('redeemHandoffCode（反向登录码）', () {
+    test('请求 /handoff/redeem，字段名与正向 exchange 一致，取出授权码', () async {
+      final pkce = OidcPkce.generatePair();
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/handoff/redeem',
+        (server) => server.reply(200, {
+          'success': true,
+          'code': 'ory_ac_handoff',
+          'state': 'st',
+        }),
+        data: {
+          // 服务端复用正向 exchange 的请求结构：`scene` 语义上是「用户输的码」。
+          'scene': 'AB2C-3D4E',
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+          'state': 'st',
+          'code_challenge': pkce.challenge,
+          'code_challenge_method': 'S256',
+        },
+      );
+
+      final code = await client.redeemHandoffCode(
+        code: 'AB2C-3D4E',
+        pkce: pkce,
+        state: 'st',
+      );
+      expect(code, 'ory_ac_handoff');
+    });
+
+    test('缺 code 时抛 AuthError（而不是把 null 当授权码交给下游）', () async {
+      final pkce = OidcPkce.generatePair();
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/handoff/redeem',
+        (server) => server.reply(200, {'success': true}),
+        data: {
+          'scene': 'AB2C-3D4E',
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+          'state': 'st',
+          'code_challenge': pkce.challenge,
+          'code_challenge_method': 'S256',
+        },
+      );
+
+      await expectLater(
+        client.redeemHandoffCode(code: 'AB2C-3D4E', pkce: pkce, state: 'st'),
+        throwsA(isA<AuthError>()),
+      );
+    });
+
+    // 反向码的错误语义与正向**不同**：码是持有即授权的凭据，「无效」的出路是
+    // 「核对」或「回小程序重新出码」，不是「重新发起 App 侧会话」。
+    for (final c in const [
+      ('not_found', '核对'),
+      ('expired', '重新生成'),
+      ('too_many_attempts', '作废'),
+      ('rate_limited', '稍后再试'),
+      ('bad_request', '参数'),
+    ]) {
+      test('服务端 ${c.$1} → 可读原因（含「${c.$2}」）', () async {
+        final pkce = OidcPkce.generatePair();
+        adapter.onPost(
+          '$issuer/api/v1/bindings/mini-program/handoff/redeem',
+          (server) => server.reply(400, {'success': false, 'error': c.$1}),
+          data: {
+            'scene': 'AB2C-3D4E',
+            'client_id': clientId,
+            'redirect_uri': redirectUri,
+            'state': 'st',
+            'code_challenge': pkce.challenge,
+            'code_challenge_method': 'S256',
+          },
+        );
+
+        await expectLater(
+          client.redeemHandoffCode(code: 'AB2C-3D4E', pkce: pkce, state: 'st'),
+          throwsA(
+            isA<AuthError>().having(
+              (e) => e.message,
+              'message',
+              contains(c.$2),
+            ),
+          ),
+        );
+      });
+    }
+  });
+
   group('exchange', () {
     test('提交 scene/client_id/redirect_uri/state/PKCE，并取出 code', () async {
       final pkce = OidcPkce.generatePair();

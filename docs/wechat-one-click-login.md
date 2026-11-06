@@ -161,6 +161,48 @@ curl -s -X POST -H 'Content-Type: application/json' \
 | 限流 | 创建 10 次/小时/IP + 300 次/小时全局；确认 10 次/10 分钟/IP + 200 次/10 分钟全局 |
 | 反钓鱼 | 确认页必须展示发起方（IP/平台/浏览器），否则可被「自己生成码骗别人确认」 |
 
+### 方案 D：反向登录码（**方向相反，已实现**）
+
+方案 C 的码从 App 流向小程序；反向码从小程序流向 App：**手机上小程序已登录，
+桌面/平板没有微信也唤不起小程序时，由那台已登录的机器出一个 8 位码，抄到目标
+设备上直接登录**（id-provider#21）。
+
+```
+① 手机 小程序 → 我的 → 在别的设备上登录
+        POST {idp}/api/v1/bindings/mini-program/handoff   （Bearer：小程序已登录）
+        → { code:"AB2C3D4E", displayCode:"AB2C-3D4E", expiresInSeconds:120 }
+② 电脑 App 登录页 →「或用手机小程序登录」→ 输入 AB2C-3D4E
+        POST {idp}/.../handoff/redeem {scene:"AB2C-3D4E", client_id, redirect_uri,
+                                       state, code_challenge, code_challenge_method}
+        → { code:"<fosite 授权码>" } → PKCE 换 token（与 SSO/magic link 同一落盘点）
+③ 手机 页面轮询 /handoff/recent → 显示「刚才 5.6.7.8 · Windows · Chrome 登录了你的账号」
+```
+
+**为什么它与方案 C 的安全模型完全不同**（这是实现上的关键区别，不是风格问题）：
+
+| | 方案 C（App 出码 → 小程序确认） | 方案 D（小程序出码 → App 输码） |
+|---|---|---|
+| 码的性质 | **授权句柄**：光有码没用，必须有账号主人确认 | **持有即授权的凭据**：谁拿到谁能登录 |
+| 码长 | 6 位（`30^6 ≈ 7.3e8`） | **8 位**（`30^8 ≈ 6.6e11`）——6 位在未认证入口 + 分布式尝试下约 2.7 天可撞中一次，8 位约 3 年 |
+| TTL | 5 分钟 | **2 分钟**（用户就在两步之间） |
+| 消费 | 确认后单次 | 单次 + 同用户只留一个码（出码即作废旧码） |
+| 错误尝试 | 端到端限流 | 同码错 5 次即作废 + 按来源/全局限流 |
+| 审计 | 无（授权句柄不值得记） | 出码/兑换都记，但**只存码的 sha256 前 12 位** |
+| 事后可见性 | 无 | 出码人能看到「刚才哪台设备登录了」+ 作废入口 |
+
+由于反向码是凭据，服务端把它与正向 `sessions/completed` **分开存储、分开展示端点**
+（`/handoff/redeem` vs `/exchange`）：否则反向入口能吃掉「未确认」的正向 scene，
+等于绕过「账号主人确认」这一步。
+
+**客户端位置**：
+- 出码端（小程序）：`super_partyb/apps/miniapp/src/pages/handoff/`；
+- 输码端（App）：登录页「或用手机小程序登录」区域 →
+  `miniProgramHandoffSignIn` → `MiniProgramLoginClient.redeemHandoffCode`；
+  桌面与移动共用同一段编排（`spb_features`），平台差异只在入口文案。
+
+**代价**：码是凭据，所以登录页必须写「2 分钟有效、只能用一次、别发给别人」，
+且**不做模糊替换**（`O`→`0` 之类会把「抄错」变成「登进别人的账号」）。
+
 ### 剩下两条路（都需账号侧操作）
 
 | 方案 | 需要什么 | 代码改动 |

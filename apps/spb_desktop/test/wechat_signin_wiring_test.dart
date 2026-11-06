@@ -72,6 +72,25 @@ class _FakeMiniProgramClient extends MiniProgramLoginClient {
     exchangedScenes.add(scene);
     return 'ory_ac_desktop';
   }
+
+  /// 反向码兑换（#21）。桌面端的主路径之一：不需要 public client 注册、
+  /// 不需要邮件通道，只要手机上的小程序能出一个码。
+  final List<String> redeemedCodes = [];
+  final List<String> redeemedStates = [];
+  Object? redeemError;
+
+  @override
+  Future<String> redeemHandoffCode({
+    required String code,
+    required PkcePair pkce,
+    required String state,
+  }) async {
+    redeemedCodes.add(code);
+    redeemedStates.add(state);
+    final err = redeemError;
+    if (err != null) throw err;
+    return 'ory_ac_handoff';
+  }
 }
 
 void main() {
@@ -137,5 +156,32 @@ void main() {
     expect(shown, isEmpty, reason: '没拿到码就不该切到「请输码」状态');
     expect(client.pollCount, 0);
     expect(client.exchangedScenes, isEmpty);
+  });
+
+  test('桌面端反向登录码：只发一次兑换请求，不建任何会话、不轮询', () async {
+    final error = await container.read(handoffSignInActionProvider)(
+      'AB2C-3D4E',
+    );
+
+    expect(error, isNull);
+    // 反向路径的全部价值就是「不依赖微信打开能力」：建会话/轮询都不该发生。
+    expect(client.schemeSessionRequested, isFalse);
+    expect(client.shortCodeCount, 0);
+    expect(client.pollCount, 0);
+    // 兑换的码要归一化后发（服务端也归一化，但本地先对齐能省一次往返）。
+    expect(client.redeemedCodes, ['AB2C3D4E']);
+    // 授权码交给与 SSO/magic link 同一个落盘点。
+    expect(persisted.single.code, 'ory_ac_handoff');
+  });
+
+  test('桌面端反向登录码失败：返回可展示文案且不留 pending auth', () async {
+    client.redeemError = const AuthError('登录码已过期，请在小程序里重新生成');
+    final store = container.read(pendingAuthStoreProvider);
+
+    final error = await container.read(handoffSignInActionProvider)('AB2C3D4E');
+
+    expect(error, contains('已过期'));
+    expect(persisted, isEmpty);
+    expect((store as InMemoryPendingAuthStore).hasPending, isFalse);
   });
 }

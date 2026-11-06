@@ -71,6 +71,25 @@ class _FakeClient extends MiniProgramLoginClient {
     );
   }
 
+  /// 反向码兑换（#21）：记录收到的码，按需抛错。
+  final List<String> redeemedCodes = [];
+  final List<String> redeemedStates = [];
+  Object? redeemError;
+  String handoffAuthCode = 'ory_ac_handoff';
+
+  @override
+  Future<String> redeemHandoffCode({
+    required String code,
+    required PkcePair pkce,
+    required String state,
+  }) async {
+    redeemedCodes.add(code);
+    redeemedStates.add(state);
+    final err = redeemError;
+    if (err != null) throw err;
+    return handoffAuthCode;
+  }
+
   @override
   Future<MiniProgramPollState> poll(String scene) async {
     polledScenes.add(scene);
@@ -489,6 +508,95 @@ void main() {
         ),
         throwsA(isA<StateError>()),
       );
+    });
+  });
+
+  group('反向登录码（小程序出码 → 本设备输码）', () {
+    Future<String?> runHandoff(
+      _FakeClient client, {
+      required String code,
+      required List<({String code, PkcePair pkce})> persisted,
+      String Function()? stateGenerator,
+    }) {
+      return miniProgramHandoffSignIn(
+        client: client,
+        store: store,
+        code: code,
+        stateGenerator: stateGenerator,
+        onCode: (authCode, pkce) async {
+          persisted.add((code: authCode, pkce: pkce));
+          return null;
+        },
+      );
+    }
+
+    test('兑换出的授权码交给落盘点（否则拿不到 token，界面毫无变化）', () async {
+      final client = _FakeClient();
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final err = await runHandoff(
+        client,
+        code: 'AB2C-3D4E',
+        persisted: persisted,
+      );
+
+      expect(err, isNull);
+      expect(client.redeemedCodes, ['AB2C3D4E'], reason: '应把归一化后的码发给服务端');
+      expect(persisted.single.code, 'ory_ac_handoff');
+      // 落盘点的 pkce 必须与兑换时用的是同一个（否则换 token 时 verifier 对不上）。
+      expect(persisted.single.pkce.verifier.isNotEmpty, isTrue);
+    });
+
+    test('先落盘 state/pkce 再兑换：落盘点要靠它校验 state', () async {
+      final client = _FakeClient();
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      await runHandoff(
+        client,
+        code: 'AB2C3D4E',
+        persisted: persisted,
+        stateGenerator: () => 'fixed-state-1234567890',
+      );
+
+      expect(client.redeemedStates, ['fixed-state-1234567890']);
+    });
+
+    test('长度不对时不发请求（本地就能判定的错误不该记成服务端失败）', () async {
+      final client = _FakeClient();
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final err = await runHandoff(client, code: 'ABC', persisted: persisted);
+
+      expect(err, contains('8 位'));
+      expect(client.redeemedCodes, isEmpty);
+      expect(persisted, isEmpty);
+      // 没有发起就不该留下待完成请求：否则下次回调会误判「有进行中的登录」。
+      expect(store.hasPending, isFalse);
+    });
+
+    test('兑换失败时清理 pending auth（不留下永远完成不了的请求）', () async {
+      final client = _FakeClient()
+        ..redeemError = const AuthError('登录码已过期，请在小程序里重新生成');
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final err = await runHandoff(
+        client,
+        code: 'AB2C3D4E',
+        persisted: persisted,
+      );
+
+      expect(err, '登录码已过期，请在小程序里重新生成');
+      expect(persisted, isEmpty);
+      expect(store.hasPending, isFalse);
+    });
+
+    test('输入里的横线/空格/小写都能被归一化（用户抄码不会因为格式失败）', () async {
+      final client = _FakeClient();
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      await runHandoff(client, code: ' ab2c-3d4e ', persisted: persisted);
+
+      expect(client.redeemedCodes, ['AB2C3D4E']);
     });
   });
 }

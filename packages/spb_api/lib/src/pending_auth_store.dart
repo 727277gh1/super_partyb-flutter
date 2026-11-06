@@ -50,6 +50,9 @@ class InMemoryPendingAuthStore implements PendingAuthRequestStore {
   @override
   Future<void> put(PendingAuthRequest request) async => _pending = request;
 
+  /// 是否有未完成的请求（测试断言用：验证失败路径确实清理了）。
+  bool get hasPending => _pending != null;
+
   @override
   Future<PendingAuthRequest?> consume() async {
     final p = _pending;
