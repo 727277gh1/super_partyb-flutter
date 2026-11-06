@@ -354,7 +354,9 @@ class _LoginPage extends ConsumerWidget {
       onImportSession: (raw) =>
           ref.read(authControllerProvider).importSession(raw),
       // 微信一键登录：手机上唯一能「一步到位」的路径（同机无法扫码）。
-      onWeChatSignIn: () => ref.read(authControllerProvider).wechatSignIn(),
+      // 回调把短码回退交回给登录页展示（唤起不可用时的兜底）。
+      onWeChatSignIn: (onShortCode) =>
+          ref.read(authControllerProvider).wechatSignIn(onShortCode),
       // 邮箱 magic link：不依赖微信、也不要求走完浏览器 SSO 跳转。
       onEmailSignIn: (email, onSent) =>
           ref.read(authControllerProvider).emailSignIn(email, onSent),

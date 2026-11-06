@@ -859,11 +859,15 @@ class AuthStateNotifier extends Notifier<AuthState> {
   /// 与 [signIn] 的区别：这条路**当场**就能完成（拿到授权码 → 换 token），
   /// 不依赖深链回跳，所以成功时直接把状态推进到已登录；失败则把原因写进
   /// state（登录页展示）。
-  Future<String?> wechatSignIn() async {
+  /// [onShortCode] 由登录页提供：唤起通道运行期不可用时，编排层改发 6 位码，
+  /// 通过它交给页面展示（见 `miniprogram_signin.dart` 的「第三条通道」）。
+  Future<String?> wechatSignIn([
+    void Function(MiniProgramShortCode code)? onShortCode,
+  ]) async {
     final action = ref.read(wechatSignInActionProvider);
     String? error;
     try {
-      error = await action();
+      error = await action(onShortCode);
     } on SpbError catch (e) {
       error = e.message;
     } catch (e) {
@@ -938,18 +942,25 @@ final wechatMiniProgramLauncherProvider = Provider<WeChatMiniProgramLauncher>(
 ///
 /// 编排在 `miniprogram_signin.dart`：唤起小程序 → 轮询 → 兑换授权码 →
 /// 交给与深链回调同一个落盘点（`oidcCallbackHandlerProvider`）。
-final wechatSignInActionProvider = Provider<Future<String?> Function()>((ref) {
-  final launcher = ref.read(wechatMiniProgramLauncherProvider);
-  return () => miniProgramSignIn(
-    client: ref.read(miniProgramLoginClientProvider),
-    store: ref.read(pendingAuthStoreProvider),
-    launch: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
-    // 优先 OpenSDK：个人主体小程序的 scheme 通道不可用（85407），
-    // OpenSDK 是客户端调用、不受该限制。不可用时自动退回 URL Scheme。
-    launchViaSdk: launcher.isConfigured ? launcher.launchLogin : null,
-    onCode: ref.read(oidcCallbackHandlerProvider),
-  );
-});
+final wechatSignInActionProvider =
+    Provider<
+      Future<String?> Function([
+        void Function(MiniProgramShortCode code)? onShortCode,
+      ])
+    >((ref) {
+      final launcher = ref.read(wechatMiniProgramLauncherProvider);
+      return ([onShortCode]) => miniProgramSignIn(
+        client: ref.read(miniProgramLoginClientProvider),
+        store: ref.read(pendingAuthStoreProvider),
+        launch: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+        // 优先 OpenSDK：个人主体小程序的 scheme 通道不可用（85407），
+        // OpenSDK 是客户端调用、不受该限制。不可用时自动退回 URL Scheme。
+        launchViaSdk: launcher.isConfigured ? launcher.launchLogin : null,
+        // 两条唤起通道都不可用时改发 6 位码（个人主体小程序的现实路径）。
+        onShortCode: onShortCode,
+        onCode: ref.read(oidcCallbackHandlerProvider),
+      );
+    });
 
 /// 邮箱 magic link 客户端。
 ///
@@ -990,7 +1001,8 @@ final authControllerProvider = Provider<AuthActions>((ref) {
     signOut: () => ref.read(authStateProvider.notifier).signOut(),
     importSession: (raw) =>
         ref.read(authStateProvider.notifier).importSession(raw),
-    wechatSignIn: () => ref.read(authStateProvider.notifier).wechatSignIn(),
+    wechatSignIn: ([onShortCode]) =>
+        ref.read(authStateProvider.notifier).wechatSignIn(onShortCode),
     emailSignIn: (email, onSent) =>
         ref.read(authStateProvider.notifier).emailSignIn(email, onSent),
     unlock: () => ref.read(authStateProvider.notifier).unlock(),
@@ -1015,7 +1027,12 @@ class AuthActions {
   final Future<String?> Function(String raw) importSession;
 
   /// 微信一键登录（唤起小程序 → 确认 → 兑换授权码 → 落盘）。
-  final Future<String?> Function() wechatSignIn;
+  ///
+  /// 可选参数是短码回退的展示回调：唤起不可用时编排层发 6 位码，页面据此显示。
+  final Future<String?> Function([
+    void Function(MiniProgramShortCode code)? onShortCode,
+  ])
+  wechatSignIn;
 
   /// 邮箱 magic link 登录，见 [AuthStateNotifier.emailSignIn]。
   final Future<String?> Function(String email, void Function() onSent)

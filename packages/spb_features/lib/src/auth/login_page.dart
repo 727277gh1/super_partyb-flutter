@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_ui/spb_ui.dart';
@@ -80,8 +83,20 @@ class LoginPage extends StatefulWidget {
   /// 这一台手机，扫不了自己屏幕上的码）。这条路径是移动端唯一能「一步到位」
   /// 的登录方式：唤起小程序 → 在微信里确认 → 回到 App 已登录。
   ///
+  /// ## 短码回退
+  ///
+  /// 唤起小程序的两条通道都可能**运行期**不可用（OpenSDK 未配置 / 个人主体
+  /// 小程序拿不到 URL Scheme）。此时编排层会改发一个 6 位码，通过 [onShortCode]
+  /// 回调交给本页展示：用户自己打开小程序输入它，登录照样完成。
+  ///
+  /// 本页只负责**把码显示清楚**（大字号 + 分组 + 倒计时），是否走这条路、
+  /// 何时结束，全在编排层。传 null 表示不支持回退（保持旧的失败行为）。
+  ///
   /// 为 null 时不展示（桌面端没有微信小程序场景）。
-  final Future<String?> Function()? onWeChatSignIn;
+  final Future<String?> Function(
+    void Function(MiniProgramShortCode code)? onShortCode,
+  )?
+  onWeChatSignIn;
 
   /// 邮箱 magic link 登录：输邮箱 → 收信 → 点链接确认 → 自动登录。
   ///
@@ -135,6 +150,22 @@ class _LoginPageState extends State<LoginPage> {
   /// 是否正在等待微信确认（唤起小程序后轮询期间）。
   bool _wechatBusy = false;
 
+  /// 短码回退时拿到的 6 位码（null = 没走短码这条路）。
+  MiniProgramShortCode? _shortCode;
+
+  /// 短码失效的墙钟时刻。
+  ///
+  /// 只用「每秒自减」的话，应用被切到后台时 Timer 会停走，回到前台显示的
+  /// 剩余时间是错的（比真实值大）；只读墙钟的话，测试里推进的假时钟对不上。
+  /// 所以两者取**较小值**：自减负责帧内平滑，墙钟负责后台/卡顿后的纠偏。
+  DateTime? _shortCodeDeadline;
+
+  /// 按 Timer 跳动自减的剩余秒数（见 [_shortCodeDeadline]）。
+  int _shortCodeSecondsLeft = 0;
+
+  /// 短码倒计时的秒表（只在展示短码时跑，归零或流程结束时立刻停）。
+  Timer? _shortCodeTicker;
+
   /// 是否正在等待邮件确认（已发信 → 轮询期间）。
   bool _emailBusy = false;
 
@@ -146,9 +177,66 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   void dispose() {
+    _shortCodeTicker?.cancel();
     _importController.dispose();
     _emailController.dispose();
     super.dispose();
+  }
+
+  /// 接住编排层给出的短码并开始倒计时。
+  ///
+  /// 倒计时不是装饰：码 5 分钟就失效，用户看不到剩余时间就会在失败后反复抄
+  /// 同一个过期码。`setState` 每秒一次，只在码还在显示时跑。
+  void _showShortCode(MiniProgramShortCode code) {
+    if (!mounted) return;
+    _shortCodeTicker?.cancel();
+    setState(() {
+      _shortCode = code;
+      _shortCodeDeadline = DateTime.now().add(code.ttl);
+      _shortCodeSecondsLeft = code.ttl.inSeconds;
+    });
+    _shortCodeTicker = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      // 归零就停表：否则登录页会带着一个空转的 Timer 一直到流程结束，
+      // 测试里的 pumpAndSettle 也会因为「永远有下一帧」而超时。
+      setState(() {
+        if (_shortCodeSecondsLeft > 0) _shortCodeSecondsLeft--;
+      });
+      if (_shortCodeRemaining() <= Duration.zero) {
+        t.cancel();
+        _shortCodeTicker = null;
+      }
+    });
+  }
+
+  Duration _shortCodeRemaining() {
+    final deadline = _shortCodeDeadline;
+    if (deadline == null) return Duration.zero;
+    final wall = deadline.difference(DateTime.now());
+    // 向上取整：刚拿到码时真实剩余是 299.98s，`inSeconds` 会截成 299，
+    // 用户第一眼看到「04:59」会以为已经过了一秒。
+    final wallSeconds = wall.isNegative
+        ? 0
+        : (wall.inMilliseconds + 999) ~/ 1000;
+    final seconds = _shortCodeSecondsLeft < wallSeconds
+        ? _shortCodeSecondsLeft
+        : wallSeconds;
+    return Duration(seconds: seconds);
+  }
+
+  void _clearShortCode() {
+    _shortCodeTicker?.cancel();
+    _shortCodeTicker = null;
+    if (_shortCode != null) {
+      setState(() {
+        _shortCode = null;
+        _shortCodeDeadline = null;
+        _shortCodeSecondsLeft = 0;
+      });
+    }
   }
 
   @override
@@ -198,13 +286,16 @@ class _LoginPageState extends State<LoginPage> {
 
     String? error;
     try {
-      error = await handler();
+      error = await handler(_showShortCode);
     } catch (e) {
       SpbLog.warn('微信登录时异常', {'error': e.toString()});
       error = '微信登录失败：$e';
     }
 
     if (!mounted) return;
+    // 流程结束（成功或失败）后短码已无意义：留在屏幕上只会让人继续抄一个
+    // 已经失效/已用掉的码。
+    _clearShortCode();
     setState(() {
       _wechatBusy = false;
       _localError = error;
@@ -345,6 +436,14 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(height: SpbSpacing.lg),
                   ],
                   if (widget.onWeChatSignIn != null) ...[
+                    if (_shortCode != null) ...[
+                      _ShortCodeCard(
+                        key: const ValueKey('login-short-code'),
+                        code: _shortCode!,
+                        remaining: _shortCodeRemaining(),
+                      ),
+                      const SizedBox(height: SpbSpacing.lg),
+                    ],
                     FilledButton.icon(
                       key: const ValueKey('login-wechat-button'),
                       // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
@@ -363,7 +462,9 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                     const SizedBox(height: SpbSpacing.sm),
                     Text(
-                      '将打开微信小程序，确认后自动返回本应用。',
+                      _shortCode == null
+                          ? '将打开微信小程序，确认后自动返回本应用。'
+                          : '打不开微信的话：打开小程序，在「我的 → 输入登录码」填入上面的码。',
                       textAlign: TextAlign.center,
                       style: textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
@@ -532,3 +633,78 @@ class _LoginPageState extends State<LoginPage> {
 }
 
 /// 错误提示条。
+
+/// 6 位短码展示卡（微信一键登录的兜底通道）。
+///
+/// ## 为什么要这么大
+///
+/// 用户要**手抄**这 6 个字符到另一个界面，抄错一位就得到「码无效」。所以：
+/// - 字号大、字距宽，分段显示（`A3F-9K2`，服务端给的 displayCode 就是这个形态）；
+/// - 等宽字体：`I`/`1`、`O`/`0` 这类混淆在比例字体里更容易看错（字符集本身
+///   已排除它们，等宽是第二道保险）；
+/// - 可长按选中（`SelectableText`）：支持复制的人不必手抄；
+/// - 显示剩余时间：码 5 分钟失效，看不到时限的人会反复抄同一个过期码。
+class _ShortCodeCard extends StatelessWidget {
+  const _ShortCodeCard({
+    super.key,
+    required this.code,
+    required this.remaining,
+  });
+
+  final MiniProgramShortCode code;
+
+  /// 剩余有效时长（由父级每秒重算）。
+  final Duration remaining;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final seconds = remaining.inSeconds;
+    final expired = seconds <= 0;
+    final mm = (seconds ~/ 60).toString().padLeft(2, '0');
+    final ss = (seconds % 60).toString().padLeft(2, '0');
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(
+        horizontal: SpbSpacing.lg,
+        vertical: SpbSpacing.md,
+      ),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(SpbRadius.md),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        children: [
+          Text(
+            '在微信小程序里输入这个码',
+            style: textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.sm),
+          SelectableText(
+            code.displayCode,
+            key: const ValueKey('login-short-code-value'),
+            style: textTheme.headlineMedium?.copyWith(
+              fontFamily: 'monospace',
+              fontWeight: FontWeight.w700,
+              letterSpacing: 6,
+              color: scheme.onSurface,
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.sm),
+          Text(
+            expired ? '已过期，请重新发起' : '$mm:$ss 内有效',
+            key: const ValueKey('login-short-code-ttl'),
+            style: textTheme.bodySmall?.copyWith(
+              color: expired ? scheme.error : scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

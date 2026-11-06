@@ -183,6 +183,83 @@ void main() {
     });
   });
 
+  group('createShortCodeSession', () {
+    test('请求 ?code=1 并解析 displayCode/剩余秒数', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'A3F9K2',
+          'userCode': 'A3F9K2',
+          'displayCode': 'A3F-9K2',
+          'expiresInSeconds': 300,
+          'expiresAt': '2026-11-06T12:00:00Z',
+        }),
+      );
+
+      final session = await client.createShortCodeSession();
+      expect(session.scene, 'A3F9K2');
+      expect(session.isShortCode, isTrue);
+      expect(session.shortCode!.displayCode, 'A3F-9K2');
+      expect(session.shortCode!.ttl, const Duration(seconds: 300));
+      // 短码路径不产出小程序码：留空而不是占位串，避免 UI 误当成可展示的图
+      expect(session.qrCodeUrl, isEmpty);
+      expect(session.canLaunchWeChat, isFalse);
+    });
+
+    test('displayCode 缺失时退回 userCode，再退回 scene（不展示空码）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        (server) => server.reply(200, {'success': true, 'scene': 'A3F9K2'}),
+      );
+
+      final session = await client.createShortCodeSession();
+      expect(session.shortCode!.displayCode, 'A3F9K2');
+      // 服务端没给 TTL 时按 5 分钟兜底：宁可早一点提示过期，也不要显示负数
+      expect(session.shortCode!.expiresInSeconds, 300);
+    });
+
+    test('缺 scene 视为失败（不能拿空串去轮询/兑换）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        (server) => server.reply(200, {'success': true}),
+      );
+
+      await expectLater(
+        client.createShortCodeSession(),
+        throwsA(
+          isA<AuthError>().having(
+            (e) => e.message,
+            'message',
+            contains('登录码创建失败'),
+          ),
+        ),
+      );
+    });
+
+    test('限流 429 翻译成「稍后再试」（而不是 DioException 原文）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        (server) => server.reply(429, {
+          'success': false,
+          'error': 'rate_limited',
+          'message': '尝试次数过多，请稍后再试',
+        }),
+      );
+
+      await expectLater(
+        client.createShortCodeSession(),
+        throwsA(
+          isA<AuthError>().having(
+            (e) => e.message,
+            'message',
+            contains('尝试次数过多'),
+          ),
+        ),
+      );
+    });
+  });
+
   group('poll', () {
     test('bound=true → done', () async {
       adapter.onGet(

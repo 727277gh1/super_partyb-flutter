@@ -48,6 +48,8 @@ App                      IdP (id-provider)                微信
 | 接口 | 作用 | 是否带凭证 |
 |---|---|---|
 | `POST /api/v1/bindings/mini-program/qrcode-session?scheme=1` | 创建 scene；`scheme=1` 时顺带生成可直接打开的链接 | 否 |
+| `POST /api/v1/bindings/mini-program/qrcode-session?code=1` | 创建 **6 位短码**（不调任何微信 API，见「方案 C」） | 否 |
+| `GET  /api/v1/bindings/mini-program/code/{code}` | 短码预览（发起方 + 剩余秒数，**不消费**） | 否 |
 | `GET  /api/v1/bindings/mini-program/check/{scene}` | 轮询「用户确认了没有」 | **否**（公开接口，绝不能在这里发凭证） |
 | `POST /api/v1/bindings/mini-program/exchange` | scene → OIDC 授权码（**单次消费**） | 返回 code |
 
@@ -124,6 +126,40 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 网页端（跨设备扫码）仍然要图，所以 `POST .../qrcode-session`（不带 scheme）
 依旧 500 —— 那是 85412，等主体问题解决才恢复。
+
+### 方案 C：6 位短码（**零资质，已实现**）
+
+上面两条路都要账号侧操作（企业主体认证 / 开放平台审核）。短码不需要任何微信
+「打开能力」：**App 自己把 6 位码显示出来，用户打开小程序手输**。
+
+```
+① App  POST {idp}/api/v1/bindings/mini-program/qrcode-session?code=1
+        → { scene:"A3F9K2", displayCode:"A3F-9K2", expiresInSeconds:300 }
+        ★ 不调任何微信 API：不生成小程序码（85412）、不生成 URL Scheme（85407）
+② App  界面显示 A3F-9K2 + 倒计时，同时轮询 /check/A3F9K2
+③ 手机 打开小程序 → 我的 → 输入登录码 → 输入 a3f-9k2
+        GET  /code/A3F9K2   → 预览「来自 203.0.113.7 · Windows · Chrome，剩余 4:00」
+        POST /login {code:<wx.login>, scene:"A3F9K2"} → openid → 账号 → 写入完成态
+④ App  /exchange → fosite 授权码 → PKCE 换 token（与扫码/唤起完全同一段代码）
+```
+
+服务端见 id-provider#18（短码即 scene，确认/轮询/兑换全复用）。
+
+**App 侧编排（`miniprogram_signin.dart`）**：两条唤起通道**运行期**不可用时
+（无 OpenSDK / scheme 生成失败 / SDK 返回 85407）自动改发短码，不把用户卡在
+错误上；短码通过 `onShortCode` 回调交给登录页渲染（`_ShortCodeCard`：大字号
+分组码 + 倒计时 + 可长按复制）。
+
+**为什么这条路径对 openid-only 账号特别重要**：身份锚点是 openid，全程不碰
+邮箱/密码；而 `85412`/`85407` 恰恰让扫码与唤起都不可用。之前这类用户在同机
+场景下**没有任何登录方式**。
+
+| 限制 | 说明 |
+|---|---|
+| 必须能打开小程序 | 小程序本身要已发布/可用（体验版同样算） |
+| 5 分钟有效 | 与服务端会话 TTL 一致，过期要重新发起 |
+| 限流 | 创建 10 次/小时/IP + 300 次/小时全局；确认 10 次/10 分钟/IP + 200 次/10 分钟全局 |
+| 反钓鱼 | 确认页必须展示发起方（IP/平台/浏览器），否则可被「自己生成码骗别人确认」 |
 
 ### 剩下两条路（都需账号侧操作）
 

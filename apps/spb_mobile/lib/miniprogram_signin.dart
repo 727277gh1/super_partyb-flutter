@@ -34,6 +34,16 @@ import 'auth_deeplink.dart';
 /// （多耗配额、多一次等待），且失败时返回的 `schemeError` 会把真正可用的
 /// 通道挡在前面。
 ///
+/// ## 第三条通道：6 位短码（id-provider#18）
+///
+/// 两条唤起通道都可能**在运行时**不可用：OpenSDK 未编译进包（`85407`/未配置）、
+/// 或 scheme 生成被微信拒绝（个人主体小程序）。此时不再直接失败，而是改成
+/// 「App 展示 6 位码 → 用户自己打开小程序输入 → 回到 App 已登录」：
+/// 零资质、零费用，也不需要任何微信「打开能力」。
+///
+/// 短码会话与扫码会话共用同一套轮询与兑换（`scene` 语义一致），所以这里只是
+/// 换一个 scene 来源，后续流程一行不改。
+///
 /// 返回错误文案（null = 成功）。
 Future<String?> miniProgramSignIn({
   required MiniProgramLoginClient client,
@@ -42,6 +52,8 @@ Future<String?> miniProgramSignIn({
   required Future<String?> Function(String code, PkcePair pkce) onCode,
   // OpenSDK 唤起（null = 不可用，退回 URL Scheme）。
   Future<String?> Function(String scene)? launchViaSdk,
+  // 短码回退：拿到 6 位码后由 UI 展示给用户（null = 不支持，保持旧的失败行为）。
+  void Function(MiniProgramShortCode code)? onShortCode,
   String Function()? stateGenerator,
   PkcePair Function()? pkceGenerator,
   Duration pollInterval = const Duration(seconds: 1),
@@ -71,6 +83,11 @@ Future<String?> miniProgramSignIn({
     return '无法创建微信登录会话：$e';
   }
 
+  // 各通道最终使用的 scene（短码回退会换掉它）。
+  var scene = session.scene;
+  // 唤起通道运行期不可用时的原因；非空则改走短码。
+  String? fallbackReason;
+
   if (useSdk) {
     String? sdkError;
     try {
@@ -80,15 +97,15 @@ Future<String?> miniProgramSignIn({
       sdkError = '无法唤起微信小程序：$e';
     }
     if (sdkError != null) {
-      await store.consume();
-      return sdkError;
+      // 运行期才失败（未配置 / 85407 / 微信未安装）：不再让用户卡在错误上，
+      // 改走短码。SDK 调用失败不消耗任何服务端状态，换一个码是安全的。
+      SpbLog.warn('OpenSDK 唤起失败，尝试改用短码', {'error': sdkError});
+      fallbackReason = sdkError;
     }
+  } else if (!session.canLaunchWeChat) {
+    // scheme 生成失败 = 个人主体小程序拿不到权限（85412）。短码是唯一剩下的通道。
+    fallbackReason = session.schemeError ?? '当前环境无法直接唤起微信，请改用其他登录方式';
   } else {
-    if (!session.canLaunchWeChat) {
-      await store.consume();
-      return session.schemeError ?? '当前环境无法直接唤起微信，请改用其他登录方式';
-    }
-
     try {
       final ok = await launch(Uri.parse(session.schemeUrl!));
       if (!ok) {
@@ -102,10 +119,52 @@ Future<String?> miniProgramSignIn({
     }
   }
 
-  SpbLog.info('已唤起微信小程序等待确认', {'scene': session.scene});
+  if (fallbackReason != null) {
+    final fallback = await _startShortCode(
+      client: client,
+      store: store,
+      onShortCode: onShortCode,
+      originalError: fallbackReason,
+    );
+    if (fallback.error != null) return fallback.error;
+    scene = fallback.scene!;
+    SpbLog.info('已改为短码确认', {'scene': scene});
+  } else {
+    SpbLog.info('已唤起微信小程序等待确认', {'scene': scene});
+  }
 
+  return _awaitAndExchange(
+    client: client,
+    store: store,
+    scene: scene,
+    state: state,
+    pkce: pkce,
+    onCode: onCode,
+    pollInterval: pollInterval,
+    pollMaxInterval: pollMaxInterval,
+    pollTimeout: pollTimeout,
+    sleep: sleep,
+  );
+}
+
+/// 轮询确认 → 兑换授权码 → 交给落盘点（三条通道共用）。
+///
+/// 抽出来的原因：扫码/唤起/短码的差别**只在 scene 怎么来**，从「等确认」
+/// 往后一模一样。复制三段会让「兑换时少传 pkce」这类错误只在某一条路径上出现。
+Future<String?> _awaitAndExchange({
+  required MiniProgramLoginClient client,
+  required PendingAuthRequestStore store,
+  required String scene,
+  required String state,
+  required PkcePair pkce,
+  required Future<String?> Function(String code, PkcePair pkce) onCode,
+  required Duration pollInterval,
+  required Duration pollMaxInterval,
+  required Duration pollTimeout,
+  Future<void> Function(Duration)? sleep,
+}) async {
   final polled = await pollMiniProgramSession(
-    poll: () => client.poll(session.scene),
+    poll: () => client.poll(scene),
     interval: pollInterval,
     maxInterval: pollMaxInterval,
     timeout: pollTimeout,
@@ -123,11 +182,7 @@ Future<String?> miniProgramSignIn({
 
   final String code;
   try {
-    code = await client.exchange(
-      scene: session.scene,
-      pkce: pkce,
-      state: state,
-    );
+    code = await client.exchange(scene: scene, pkce: pkce, state: state);
   } on AuthError catch (e) {
     await store.consume();
     return e.message;
@@ -139,6 +194,48 @@ Future<String?> miniProgramSignIn({
   // 落盘点与深链回调共用（`oidcCallbackHandlerProvider`）：
   // 换 token、写安全存储、推进认证状态都在那里，两条路径行为一致。
   return onCode(code, pkce);
+}
+
+/// 短码回退的结果：要么拿到新 scene，要么带着「该显示给用户的错误」返回。
+class _ShortCodeStart {
+  const _ShortCodeStart({this.scene, this.error});
+  final String? scene;
+  final String? error;
+}
+
+/// 发起短码会话并把码交给 UI 展示。
+///
+/// 调用方已经落盘了 state/pkce（短码与扫码共用同一个待完成请求），所以这里
+/// 失败必须 `store.consume()`——否则下次启动会带着一个永远不会完成的请求。
+Future<_ShortCodeStart> _startShortCode({
+  required MiniProgramLoginClient client,
+  required PendingAuthRequestStore store,
+  required void Function(MiniProgramShortCode code)? onShortCode,
+  required String originalError,
+}) async {
+  if (onShortCode == null) {
+    // 没有 UI 承接展示：保持旧行为（返回原始错误），不要让用户看到
+    // 「正在等待确认」却根本没有任何码可看。
+    await store.consume();
+    return _ShortCodeStart(error: originalError);
+  }
+  try {
+    final session = await client.createShortCodeSession();
+    final shortCode = session.shortCode;
+    if (shortCode == null) {
+      await store.consume();
+      return const _ShortCodeStart(error: '登录码创建失败，请重试');
+    }
+    onShortCode(shortCode);
+    return _ShortCodeStart(scene: session.scene);
+  } on AuthError catch (e) {
+    await store.consume();
+    return _ShortCodeStart(error: e.message);
+  } catch (e) {
+    await store.consume();
+    SpbLog.warn('创建短码会话失败', {'error': e.toString()});
+    return _ShortCodeStart(error: '无法创建登录码：$e');
+  }
 }
 
 /// 轮询扫码状态，带退避与总超时。

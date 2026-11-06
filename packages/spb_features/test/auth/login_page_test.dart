@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:spb_api/spb_api.dart';
 import 'package:spb_features/spb_features.dart';
 
 /// 登录页测试。
@@ -22,7 +23,10 @@ void main() {
     required Future<String?> Function() onSignIn,
     AuthState state = const AuthState(),
     Future<String?> Function(String raw)? onImportSession,
-    Future<String?> Function()? onWeChatSignIn,
+    Future<String?> Function(
+      void Function(MiniProgramShortCode code)? onShortCode,
+    )?
+    onWeChatSignIn,
     Future<String?> Function(String email, void Function() onSent)?
     onEmailSignIn,
     Size? size,
@@ -198,6 +202,91 @@ void main() {
     });
   });
 
+  group('登录页：微信一键登录的短码回退', () {
+    testWidgets('编排层回调短码 → 展示分组码与倒计时，流程结束后收掉', (tester) async {
+      // 注意：短码展示期间有个 1s 的倒计时 Timer，`pumpAndSettle` 会一直等它，
+      // 所以这里用显式 pump 推进时间。
+      final gate = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: ([onShortCode]) {
+          onShortCode?.call(
+            const MiniProgramShortCode(
+              scene: 'A3F9K2',
+              displayCode: 'A3F-9K2',
+              expiresInSeconds: 300,
+            ),
+          );
+          return gate.future;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('login-short-code')), findsOneWidget);
+      expect(
+        find.text('A3F-9K2'),
+        findsOneWidget,
+        reason: '必须展示分组形态（服务端 displayCode），不是裸 scene',
+      );
+      expect(find.text('05:00 内有效'), findsOneWidget);
+      // 说明文案要跟着切换：这时候「将打开微信」已经不成立了
+      expect(find.textContaining('输入登录码'), findsOneWidget);
+
+      // 倒计时会走：3 秒后应为 04:57
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('04:57 内有效'), findsOneWidget);
+
+      // 流程结束后（成功/失败一样）短码必须消失：留着只会让人继续抄旧码
+      gate.complete(null);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('login-short-code')), findsNothing);
+    });
+
+    testWidgets('短码归零后显示已过期（而不是负数）', (tester) async {
+      final gate = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: ([onShortCode]) {
+          onShortCode?.call(
+            const MiniProgramShortCode(
+              scene: 'A3F9K2',
+              displayCode: 'A3F-9K2',
+              expiresInSeconds: 2,
+            ),
+          );
+          return gate.future;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.text('已过期，请重新发起'), findsOneWidget);
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('走正常唤起路径时完全不出现短码卡', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: ([_]) async => null,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('login-short-code')), findsNothing);
+    });
+  });
+
   group('登录页：微信一键登录', () {
     testWidgets('未注入回调时不展示按钮（桌面端没有这条路径）', (tester) async {
       await pumpLogin(tester, onSignIn: () async => null);
@@ -209,7 +298,7 @@ void main() {
       await pumpLogin(
         tester,
         onSignIn: () async => null,
-        onWeChatSignIn: () async {
+        onWeChatSignIn: ([_]) async {
           calls++;
           return null;
         },
@@ -227,7 +316,7 @@ void main() {
       await pumpLogin(
         tester,
         onSignIn: () async => null,
-        onWeChatSignIn: () async => '无法唤起微信，请确认已安装微信后重试',
+        onWeChatSignIn: ([_]) async => '无法唤起微信，请确认已安装微信后重试',
       );
 
       await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
@@ -247,7 +336,7 @@ void main() {
           ssoCalls++;
           return null;
         },
-        onWeChatSignIn: () => gate.future,
+        onWeChatSignIn: ([_]) => gate.future,
       );
 
       await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
@@ -274,7 +363,7 @@ void main() {
       await pumpLogin(
         tester,
         onSignIn: () async => null,
-        onWeChatSignIn: () async =>
+        onWeChatSignIn: ([_]) async =>
             throw StateError('platform channel missing'),
       );
 
@@ -380,7 +469,7 @@ void main() {
       await pumpLogin(
         tester,
         onSignIn: () async => null,
-        onWeChatSignIn: () async => null,
+        onWeChatSignIn: ([_]) async => null,
         onEmailSignIn: (email, onSent) => completer.future,
       );
 

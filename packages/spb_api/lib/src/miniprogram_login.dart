@@ -34,6 +34,7 @@ class MiniProgramSession {
     this.schemeUrl,
     this.schemeError,
     this.expiresAt,
+    this.shortCode,
   });
 
   /// 本次扫码会话的 scene（32 位十六进制）。
@@ -53,12 +54,53 @@ class MiniProgramSession {
 
   final DateTime? expiresAt;
 
+  /// 6 位短码（只有 `?code=1` 创建的会话才有，见 [MiniProgramLoginClient.createShortCodeSession]）。
+  final MiniProgramShortCode? shortCode;
+
   /// 是否可以自己唤起微信（否则只能展示小程序码给另一台设备扫）。
   bool get canLaunchWeChat => schemeUrl != null && schemeUrl!.trim().isNotEmpty;
+
+  /// 本次会话靠「让用户手输短码」完成（而不是唤起/扫码）。
+  bool get isShortCode => shortCode != null;
 
   @override
   String toString() =>
       'MiniProgramSession(scene: $scene, canLaunch: $canLaunchWeChat)';
+}
+
+/// 6 位登录码（`A3F-9K2`）。
+///
+/// ## 为什么需要它
+///
+/// 个人主体小程序拿不到 URL Scheme 权限（`85407`），OpenSDK 也没配时，
+/// App 内就没有任何办法把用户送进小程序。此时唯一还剩的通道是**让用户自己
+/// 打开小程序、手输一个码**——零资质、零费用，见 id-provider#18。
+///
+/// ## 为什么要展示 `displayCode` 而不是 `scene`
+///
+/// `scene` 是服务端会话键（短码形态下两者同值），`displayCode` 是分组形态
+/// `A3F-9K2`：分组让人能逐段核对，长串裸字符容易抄错一位而毫无察觉。
+class MiniProgramShortCode {
+  const MiniProgramShortCode({
+    required this.scene,
+    required this.displayCode,
+    required this.expiresInSeconds,
+  });
+
+  /// 会话键（与 [MiniProgramSession.scene] 同值，兑换时用它）。
+  final String scene;
+
+  /// 展示形态：`A3F-9K2`。
+  final String displayCode;
+
+  /// 剩余有效秒数（服务端 TTL，通常 300）。
+  final int expiresInSeconds;
+
+  /// 剩余有效时长（倒计时展示用）。
+  Duration get ttl => Duration(seconds: expiresInSeconds);
+
+  @override
+  String toString() => 'MiniProgramShortCode($displayCode, ${ttl.inSeconds}s)';
 }
 
 /// 轮询结果。
@@ -137,6 +179,42 @@ class MiniProgramLoginClient {
     );
   }
 
+  /// 创建「手输 6 位码」会话（不生成小程序码、不生成 URL Scheme）。
+  ///
+  /// 这条路径服务的是「小程序唤不起来」的场景：服务端只发一个 6 位码，用户
+  /// 自己打开小程序输入它。返回的 [MiniProgramSession.scene] 与扫码路径同值
+  /// 语义，后续 [poll] / [exchange] 完全复用，不需要第二套状态机。
+  Future<MiniProgramSession> createShortCodeSession() async {
+    final uri = endpointBase.replace(
+      path: '${endpointBase.path}/qrcode-session',
+      queryParameters: {'code': '1'},
+    );
+    final res = await _request(
+      () => _dio.post<dynamic>(
+        uri.toString(),
+        options: Options(contentType: Headers.jsonContentType),
+      ),
+    );
+    final data = _asMap(res.data);
+    final scene = _str(data['scene']);
+    if (scene == null) {
+      throw const AuthError('登录码创建失败（响应缺少 scene）');
+    }
+    final display =
+        _str(data['displayCode']) ?? _str(data['userCode']) ?? scene;
+    return MiniProgramSession(
+      scene: scene,
+      // 短码路径不产出小程序码；留空而不是塞占位串，避免 UI 误当成可展示的图。
+      qrCodeUrl: '',
+      expiresAt: DateTime.tryParse(_str(data['expiresAt']) ?? ''),
+      shortCode: MiniProgramShortCode(
+        scene: scene,
+        displayCode: display,
+        expiresInSeconds: _int(data['expiresInSeconds']) ?? 300,
+      ),
+    );
+  }
+
   /// 轮询扫码状态（不携带凭证）。
   Future<MiniProgramPollState> poll(String scene) async {
     final uri = endpointBase.replace(path: '${endpointBase.path}/check/$scene');
@@ -191,6 +269,16 @@ class MiniProgramLoginClient {
     final data = e.response?.data;
     final code = data is Map ? _str(data['error']) : null;
     switch (code) {
+      case 'rate_limited':
+        // 短码只有 6 位，服务端按来源限流（10 次/10 分钟）。这条文案必须
+        // 说明「过一会儿再试」，否则用户会以为是自己码抄错了。
+        return '尝试次数过多，请稍后再试';
+      case 'not_found':
+      case 'expired':
+      case 'already_used':
+        // 短码确认侧（小程序）才会拿到这三个码；App 侧只在兑换过期 scene 时
+        // 可能碰到，统一提示重新发起。
+        return '登录码已失效，请重新发起';
       case 'scene_pending':
         return '微信里还没确认，请在小程序中完成登录';
       case 'scene_expired':
@@ -216,6 +304,13 @@ class MiniProgramLoginClient {
     if (data is Map<String, dynamic>) return data;
     if (data is Map) return data.map((k, v) => MapEntry(k.toString(), v));
     return const {};
+  }
+
+  int? _int(Object? v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v.trim());
+    return null;
   }
 
   String? _str(Object? v) {

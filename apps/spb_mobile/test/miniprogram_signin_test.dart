@@ -19,6 +19,7 @@ class _FakeClient extends MiniProgramLoginClient {
   _FakeClient({
     this.session,
     this.createError,
+    this.shortCodeError,
     this.states = const [MiniProgramPollState.done],
     this.exchangeCode = 'ory_ac_test',
     this.exchangeError,
@@ -30,12 +31,18 @@ class _FakeClient extends MiniProgramLoginClient {
 
   final MiniProgramSession? session;
   final Object? createError;
+  final Object? shortCodeError;
   final List<MiniProgramPollState> states;
   final String exchangeCode;
   final Object? exchangeError;
 
   int pollCount = 0;
   int exchangeCount = 0;
+  int shortCodeCount = 0;
+
+  /// 轮询与兑换实际用的 scene（短码回退时必须换成新码，否则会一直等旧场景）。
+  final List<String> polledScenes = [];
+  final List<String> exchangedScenes = [];
 
   /// 记录 createSession 收到的 withScheme（OpenSDK 通道下应为 false）。
   bool? lastWithScheme;
@@ -49,7 +56,24 @@ class _FakeClient extends MiniProgramLoginClient {
   }
 
   @override
+  Future<MiniProgramSession> createShortCodeSession() async {
+    shortCodeCount++;
+    final err = shortCodeError;
+    if (err != null) throw err;
+    return const MiniProgramSession(
+      scene: 'A3F9K2',
+      qrCodeUrl: '',
+      shortCode: MiniProgramShortCode(
+        scene: 'A3F9K2',
+        displayCode: 'A3F-9K2',
+        expiresInSeconds: 300,
+      ),
+    );
+  }
+
+  @override
   Future<MiniProgramPollState> poll(String scene) async {
+    polledScenes.add(scene);
     final i = pollCount < states.length ? pollCount : states.length - 1;
     pollCount++;
     return states[i];
@@ -62,6 +86,7 @@ class _FakeClient extends MiniProgramLoginClient {
     required String state,
   }) async {
     exchangeCount++;
+    exchangedScenes.add(scene);
     final err = exchangeError;
     if (err != null) throw err;
     return exchangeCode;
@@ -89,6 +114,7 @@ void main() {
     Duration pollTimeout = const Duration(minutes: 3),
     Future<void> Function(Duration)? sleep,
     Future<String?> Function(String scene)? launchViaSdk,
+    void Function(MiniProgramShortCode code)? onShortCode,
   }) {
     return miniProgramSignIn(
       client: client,
@@ -98,6 +124,7 @@ void main() {
         return launchOk;
       },
       launchViaSdk: launchViaSdk,
+      onShortCode: onShortCode,
       onCode: (code, pkce) async {
         persisted.add((code: code, pkce: pkce));
         return null;
@@ -255,6 +282,96 @@ void main() {
 
     // consume() 会把进行中的请求取走；再取一次应为空。
     expect(await store.consume(), isNull, reason: '失败路径必须清掉 pending');
+  });
+
+  group('短码回退（个人主体小程序：唤起通道都不可用）', () {
+    test('scheme 不可用 → 发短码、把码交给 UI、轮询/兑换都用新 scene', () async {
+      final client = _FakeClient(
+        session: sessionWith(schemeError: '暂时无法直接唤起微信，请改用其他登录方式'),
+        states: [MiniProgramPollState.pending, MiniProgramPollState.done],
+        exchangeCode: 'ory_ac_short_code',
+      );
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+      final shown = <MiniProgramShortCode>[];
+
+      final error = await run(
+        client,
+        launched: launched,
+        persisted: persisted,
+        onShortCode: shown.add,
+      );
+
+      expect(error, isNull, reason: '有短码回退时不该再报「无法唤起微信」');
+      expect(client.shortCodeCount, 1);
+      expect(shown.single.displayCode, 'A3F-9K2');
+      expect(shown.single.ttl, const Duration(seconds: 300));
+      expect(launched, isEmpty, reason: '没有 schemeUrl 可启动');
+      // 关键：轮询与兑换必须换成短码 scene，否则会一直等那个没人能看见的旧场景
+      expect(client.polledScenes.toSet(), {'A3F9K2'});
+      expect(client.exchangedScenes, ['A3F9K2']);
+      expect(persisted.single.code, 'ory_ac_short_code');
+    });
+
+    test('OpenSDK 运行期失败（85407）→ 同样回退短码，而不是把错误抛给用户', () async {
+      // 这条是现实中最常见的形态：dart-define 配了 AppID，但小程序是个人主体，
+      // WXLaunchMiniProgram 运行期才返回 85407。
+      final client = _FakeClient(session: sessionWith(schemeError: 'ignored'));
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+      final shown = <MiniProgramShortCode>[];
+
+      final error = await run(
+        client,
+        launched: launched,
+        persisted: persisted,
+        launchViaSdk: (_) async => '无法唤起微信小程序：85407 没有权限',
+        onShortCode: shown.add,
+      );
+
+      expect(error, isNull);
+      expect(shown.single.displayCode, 'A3F-9K2');
+      expect(client.exchangedScenes, ['A3F9K2']);
+      expect(persisted.single.code, 'ory_ac_test');
+      expect(launched, isEmpty, reason: 'SDK 失败后不该再试 url_launcher');
+    });
+
+    test('短码创建失败 → 返回原因并清掉 pending（不留下永不完成的登录）', () async {
+      final client = _FakeClient(
+        session: sessionWith(schemeError: '暂时无法直接唤起微信'),
+        shortCodeError: const AuthError('尝试次数过多，请稍后再试'),
+      );
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+      final shown = <MiniProgramShortCode>[];
+
+      final error = await run(
+        client,
+        launched: launched,
+        persisted: persisted,
+        onShortCode: shown.add,
+      );
+
+      expect(error, contains('尝试次数过多'));
+      expect(shown, isEmpty, reason: '没拿到码就不该切到「请输码」状态');
+      expect(client.pollCount, 0);
+      expect(client.exchangeCount, 0);
+      expect(await store.consume(), isNull, reason: '失败路径必须清掉 pending');
+    });
+
+    test('没有短码 UI 承接时保持旧行为（返回原始错误，不空转）', () async {
+      final client = _FakeClient(
+        session: sessionWith(schemeError: '暂时无法直接唤起微信，请改用其他登录方式'),
+      );
+      final launched = <Uri>[];
+      final persisted = <({String code, PkcePair pkce})>[];
+
+      final error = await run(client, launched: launched, persisted: persisted);
+
+      expect(error, contains('无法直接唤起微信'));
+      expect(client.shortCodeCount, 0, reason: '没有 UI 承接就别浪费一次配额');
+      expect(client.pollCount, 0);
+    });
   });
 
   group('OpenSDK 通道（launchViaSdk）', () {
