@@ -71,7 +71,7 @@ void main() {
   group('createSession', () {
     test('默认带 ?scheme=1（App 内要能直接唤起微信）', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1&poll_secret=1',
         (server) => server.reply(200, {
           'success': true,
           'scene': 'abc123',
@@ -90,7 +90,7 @@ void main() {
 
     test('scheme 生成失败时带出 schemeError，且 canLaunchWeChat=false', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1&poll_secret=1',
         (server) => server.reply(200, {
           'success': true,
           'scene': 'abc123',
@@ -106,7 +106,7 @@ void main() {
 
     test('withScheme=false 时不请求 scheme（省微信 API 配额）', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?poll_secret=1',
         (server) => server.reply(200, {
           'success': true,
           'scene': 'abc123',
@@ -133,7 +133,7 @@ void main() {
         ),
       );
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1&poll_secret=1',
         (server) => server.reply(200, {
           'scene': 'abc123',
           'qrCodeUrl': 'data:image/png;base64,AAA',
@@ -149,7 +149,7 @@ void main() {
       // 的账号权限不该连坐 App 登录），所以 App 路径的响应里**没有** qrCodeUrl。
       // 客户端不能因此把它当成「响应不完整」。
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1&poll_secret=1',
         (server) => server.reply(200, {
           'success': true,
           'scene': 'abc123',
@@ -166,7 +166,7 @@ void main() {
 
     test('响应缺 scene 时抛 AuthError 而不是空指针', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1&poll_secret=1',
         (server) => server.reply(200, {'success': true}),
       );
 
@@ -186,7 +186,7 @@ void main() {
   group('createShortCodeSession', () {
     test('请求 ?code=1 并解析 displayCode/剩余秒数', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1&poll_secret=1',
         (server) => server.reply(200, {
           'success': true,
           'scene': 'A3F9K2',
@@ -209,7 +209,7 @@ void main() {
 
     test('displayCode 缺失时退回 userCode，再退回 scene（不展示空码）', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1&poll_secret=1',
         (server) => server.reply(200, {'success': true, 'scene': 'A3F9K2'}),
       );
 
@@ -221,7 +221,7 @@ void main() {
 
     test('缺 scene 视为失败（不能拿空串去轮询/兑换）', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1&poll_secret=1',
         (server) => server.reply(200, {'success': true}),
       );
 
@@ -239,7 +239,7 @@ void main() {
 
     test('限流 429 翻译成「稍后再试」（而不是 DioException 原文）', () async {
       adapter.onPost(
-        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1',
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1&poll_secret=1',
         (server) => server.reply(429, {
           'success': false,
           'error': 'rate_limited',
@@ -385,6 +385,104 @@ void main() {
         );
       });
     }
+  });
+
+  // 轮询密钥（pollSecret）是「6 位短码不能当凭据用」的关键：
+  // 服务端在创建时下发，轮询要放请求头、兑换要放进请求体。任何一处漏传，
+  // 服务端都会 403，用户看到的是「登录失败」而不是「实现漏了字段」。
+  group('轮询密钥（pollSecret）', () {
+    test('createSession 解析 pollSecret（服务端下发才能带上）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1&poll_secret=1',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'abc123',
+          'schemeUrl': 'weixin://dl/business/?t=xyz',
+          'pollSecret': 'deadbeef' * 4,
+        }),
+      );
+      final session = await client.createSession();
+      expect(session.pollSecret, 'deadbeef' * 4);
+    });
+
+    test('createShortCodeSession 也解析 pollSecret', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?code=1&poll_secret=1',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'A3F9K2',
+          'displayCode': 'A3F-9K2',
+          'expiresInSeconds': 300,
+          'pollSecret': 'cafebabe' * 4,
+        }),
+      );
+      final session = await client.createShortCodeSession();
+      expect(session.pollSecret, 'cafebabe' * 4);
+    });
+
+    test('poll 把密钥放请求头 X-Poll-Secret（不进 URL/日志）', () async {
+      adapter.onGet(
+        '$issuer/api/v1/bindings/mini-program/check/abc123',
+        (server) => server.reply(200, {'success': true, 'bound': true}),
+        headers: {'X-Poll-Secret': 'secret-value'},
+      );
+      final state = await client.poll('abc123', pollSecret: 'secret-value');
+      expect(state, MiniProgramPollState.done);
+    });
+
+    test('exchange 请求体带 poll_secret', () async {
+      final pkce = OidcPkce.generatePair();
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/exchange',
+        (server) => server.reply(200, {'success': true, 'code': 'ory_ac_y'}),
+        data: {
+          'scene': 'abc123',
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+          'state': 'st',
+          'code_challenge': pkce.challenge,
+          'code_challenge_method': 'S256',
+          'poll_secret': 'secret-value',
+        },
+      );
+      final code = await client.exchange(
+        scene: 'abc123',
+        pkce: pkce,
+        state: 'st',
+        pollSecret: 'secret-value',
+      );
+      expect(code, 'ory_ac_y');
+    });
+
+    test('服务端没下发时不发密钥（旧服务端兼容，不自己编值）', () async {
+      adapter.onGet(
+        '$issuer/api/v1/bindings/mini-program/check/abc123',
+        (server) => server.reply(200, {'success': true, 'bound': false}),
+      );
+      final state = await client.poll('abc123');
+      expect(state, MiniProgramPollState.pending);
+    });
+
+    test('服务端 403 poll_secret_required 时给出可读原因', () async {
+      adapter.onGet(
+        '$issuer/api/v1/bindings/mini-program/check/abc123',
+        (server) => server.reply(403, {
+          'success': false,
+          'error': 'poll_secret_required',
+          'message': '缺少轮询密钥',
+        }),
+      );
+      await expectLater(
+        () => client.poll('abc123'),
+        throwsA(
+          isA<AuthError>().having(
+            (e) => e.message,
+            'message',
+            contains('登录会话已失效'),
+          ),
+        ),
+      );
+    });
   });
 
   group('exchange', () {

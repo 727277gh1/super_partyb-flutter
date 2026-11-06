@@ -15,8 +15,8 @@ import 'oidc_client.dart';
 /// 1. `POST /qrcode-session?scheme=1` 创建 scene，并拿到可直接唤起小程序的
 ///    `weixin://dl/business/?t=...` 链接；
 /// 2. App 打开该链接 → 微信小程序启动，用户在微信里确认；
-/// 3. App 轮询 `GET /check/{scene}` 直到 `bound`；
-/// 4. `POST /exchange` 用 scene 换**标准 OIDC 授权码**；
+/// 3. App 轮询 `GET /check/{scene}` 直到 `bound`（带 `X-Poll-Secret`）；
+/// 4. `POST /exchange` 用 scene 换**标准 OIDC 授权码**（带 `poll_secret`）；
 /// 5. 客户端走既有 `OidcClient.exchangeCode`（PKCE）换 token。
 ///
 /// 第 4 步是关键：服务端不另发一套凭证，兑换出来的是 fosite 签发的普通授权码，
@@ -35,6 +35,7 @@ class MiniProgramSession {
     this.schemeError,
     this.expiresAt,
     this.shortCode,
+    this.pollSecret,
   });
 
   /// 本次扫码会话的 scene（32 位十六进制）。
@@ -56,6 +57,16 @@ class MiniProgramSession {
 
   /// 6 位短码（只有 `?code=1` 创建的会话才有，见 [MiniProgramLoginClient.createShortCodeSession]）。
   final MiniProgramShortCode? shortCode;
+
+  /// 轮询/兑换密钥（服务端在创建时下发，见 id-provider 的 `generatePollSecret`）。
+  ///
+  /// 为什么必须有它：6 位短码同时是「人看的码」和「轮询/兑换的键」，而短码只有
+  /// 30^6 种、预览端点还能被枚举。服务端把「知道短码」与「能轮询/兑换」用这个
+  /// 密钥分开（RFC 8628 的 device_code / user_code 分工）：拿不到密钥的人即使
+  /// 猜中 scene，轮询只会 403、兑换只会 403。
+  ///
+  /// 为 null 表示服务端没下发（旧版本服务端），此时按旧行为请求——不要自己编一个值。
+  final String? pollSecret;
 
   /// 是否可以自己唤起微信（否则只能展示小程序码给另一台设备扫）。
   bool get canLaunchWeChat => schemeUrl != null && schemeUrl!.trim().isNotEmpty;
@@ -147,9 +158,14 @@ class MiniProgramLoginClient {
 
   /// 创建扫码会话（[withScheme] 为 true 时顺带生成可直接唤起小程序的链接）。
   Future<MiniProgramSession> createSession({bool withScheme = true}) async {
+    // poll_secret=1 声明「我认识轮询密钥」：服务端会下发 pollSecret，之后
+    // 轮询与兑换都必须出示。不带它服务端会退回旧行为（会话可被枚举者利用），
+    // 所以这个参数是安全属性，不是可选优化。
     final uri = endpointBase.replace(
       path: '${endpointBase.path}/qrcode-session',
-      queryParameters: withScheme ? {'scheme': '1'} : null,
+      queryParameters: withScheme
+          ? {'scheme': '1', 'poll_secret': '1'}
+          : {'poll_secret': '1'},
     );
 
     // 必须声明 Content-Type：网关对**无 Content-Type 的 POST** 直接 400
@@ -176,6 +192,7 @@ class MiniProgramLoginClient {
       schemeUrl: _str(data['schemeUrl']),
       schemeError: _str(data['schemeError']),
       expiresAt: DateTime.tryParse(_str(data['expiresAt']) ?? ''),
+      pollSecret: _str(data['pollSecret']),
     );
   }
 
@@ -187,7 +204,7 @@ class MiniProgramLoginClient {
   Future<MiniProgramSession> createShortCodeSession() async {
     final uri = endpointBase.replace(
       path: '${endpointBase.path}/qrcode-session',
-      queryParameters: {'code': '1'},
+      queryParameters: {'code': '1', 'poll_secret': '1'},
     );
     final res = await _request(
       () => _dio.post<dynamic>(
@@ -212,13 +229,22 @@ class MiniProgramLoginClient {
         displayCode: display,
         expiresInSeconds: _int(data['expiresInSeconds']) ?? 300,
       ),
+      pollSecret: _str(data['pollSecret']),
     );
   }
 
-  /// 轮询扫码状态（不携带凭证）。
-  Future<MiniProgramPollState> poll(String scene) async {
+  /// 轮询扫码状态（不携带用户凭证，但要带轮询密钥）。
+  ///
+  /// 密钥放请求头而不是 query：URL 会进网关/反代日志与浏览器历史，而密钥是
+  /// 「能换 token 的那把钥匙」的前置，不该出现在日志里。
+  Future<MiniProgramPollState> poll(String scene, {String? pollSecret}) async {
     final uri = endpointBase.replace(path: '${endpointBase.path}/check/$scene');
-    final res = await _request(() => _dio.get<dynamic>(uri.toString()));
+    final res = await _request(
+      () => _dio.get<dynamic>(
+        uri.toString(),
+        options: Options(headers: _pollSecretHeader(pollSecret)),
+      ),
+    );
     final data = _asMap(res.data);
     if (data['bound'] == true) return MiniProgramPollState.done;
     if (data['expired'] == true) return MiniProgramPollState.expired;
@@ -232,6 +258,7 @@ class MiniProgramLoginClient {
     required String scene,
     required PkcePair pkce,
     required String state,
+    String? pollSecret,
   }) async {
     final uri = endpointBase.replace(path: '${endpointBase.path}/exchange');
     final res = await _request(
@@ -244,6 +271,8 @@ class MiniProgramLoginClient {
           'state': state,
           'code_challenge': pkce.challenge,
           'code_challenge_method': 'S256',
+          if (pollSecret != null && pollSecret.isNotEmpty)
+            'poll_secret': pollSecret,
         },
       ),
     );
@@ -336,6 +365,12 @@ class MiniProgramLoginClient {
       case 'too_many_attempts':
         // 同一个码错够次数就被作废：不能再让用户继续试，只能重新出码。
         return '这个登录码尝试次数过多已作废，请在小程序里重新生成';
+      case 'poll_secret_required':
+      case 'poll_secret_invalid':
+        // 服务端要求出示轮询密钥而这次请求没带/带错了。对用户来说等价于
+        // 「这次登录会话不能再用」，只能重新发起——但对开发者是明确信号：
+        // 客户端漏传了 MiniProgramSession.pollSecret。
+        return '登录会话已失效，请重新发起';
       case 'scene_pending':
         return '微信里还没确认，请在小程序中完成登录';
       case 'scene_expired':
@@ -355,6 +390,12 @@ class MiniProgramLoginClient {
       return '无法连接认证服务，请检查网络后重试';
     }
     return '小程序登录失败：${e.message ?? e.type.name}';
+  }
+
+  /// 轮询密钥的请求头（为空时不加，保持旧服务端兼容）。
+  Map<String, String> _pollSecretHeader(String? secret) {
+    if (secret == null || secret.isEmpty) return const <String, String>{};
+    return <String, String>{'X-Poll-Secret': secret};
   }
 
   Map<String, dynamic> _asMap(Object? data) {

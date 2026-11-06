@@ -133,10 +133,10 @@ curl -s -X POST -H 'Content-Type: application/json' \
 「打开能力」：**App 自己把 6 位码显示出来，用户打开小程序手输**。
 
 ```
-① App  POST {idp}/api/v1/bindings/mini-program/qrcode-session?code=1
-        → { scene:"A3F9K2", displayCode:"A3F-9K2", expiresInSeconds:300 }
+① App  POST {idp}/api/v1/bindings/mini-program/qrcode-session?code=1&poll_secret=1
+        → { scene:"A3F9K2", displayCode:"A3F-9K2", expiresInSeconds:300, pollSecret:"9f3c…" }
         ★ 不调任何微信 API：不生成小程序码（85412）、不生成 URL Scheme（85407）
-② App  界面显示 A3F-9K2 + 倒计时，同时轮询 /check/A3F9K2
+② App  界面显示 A3F-9K2 + 倒计时，同时轮询 /check/A3F9K2（带 X-Poll-Secret）
 ③ 手机 打开小程序 → 我的 → 输入登录码 → 输入 a3f-9k2
         GET  /code/A3F9K2   → 预览「来自 203.0.113.7 · Windows · Chrome，剩余 4:00」
         POST /login {code:<wx.login>, scene:"A3F9K2"} → openid → 账号 → 写入完成态
@@ -144,6 +144,13 @@ curl -s -X POST -H 'Content-Type: application/json' \
 ```
 
 服务端见 id-provider#18（短码即 scene，确认/轮询/兑换全复用）。
+
+**`pollSecret` 不是可选项**：6 位码同时是「人看的码」和「轮询/兑换的键」，而它只有
+`30^6` 种、预览端点还能被枚举；`check/{scene}` 会吐 token、`/exchange` 会签发带
+refresh 的授权码。所以服务端在创建时下发一个 128 位熵的 `pollSecret`（RFC 8628 里
+`device_code` 的角色），轮询放 `X-Poll-Secret` 头、兑换放进请求体。
+客户端漏传的症状是 403（`poll_secret_required`），对用户显示为「登录会话已失效」——
+排查时先看这条请求有没有带密钥，而不是去查微信侧。
 
 **App 侧编排（`miniprogram_signin.dart`）**：两条唤起通道**运行期**不可用时
 （无 OpenSDK / scheme 生成失败 / SDK 返回 85407）自动改发短码，不把用户卡在

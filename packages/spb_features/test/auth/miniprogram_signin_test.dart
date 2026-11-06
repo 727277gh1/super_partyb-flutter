@@ -55,19 +55,23 @@ class _FakeClient extends MiniProgramLoginClient {
     return session!;
   }
 
+  /// 短码会话下发的轮询密钥（模拟服务端行为）。
+  String? shortCodePollSecret = 'short-code-secret';
+
   @override
   Future<MiniProgramSession> createShortCodeSession() async {
     shortCodeCount++;
     final err = shortCodeError;
     if (err != null) throw err;
-    return const MiniProgramSession(
+    return MiniProgramSession(
       scene: 'A3F9K2',
       qrCodeUrl: '',
-      shortCode: MiniProgramShortCode(
+      shortCode: const MiniProgramShortCode(
         scene: 'A3F9K2',
         displayCode: 'A3F-9K2',
         expiresInSeconds: 300,
       ),
+      pollSecret: shortCodePollSecret,
     );
   }
 
@@ -90,9 +94,14 @@ class _FakeClient extends MiniProgramLoginClient {
     return handoffAuthCode;
   }
 
+  /// 收到的轮询密钥（服务端下发后必须一路带到轮询与兑换）。
+  final List<String?> pollSecrets = [];
+  final List<String?> exchangeSecrets = [];
+
   @override
-  Future<MiniProgramPollState> poll(String scene) async {
+  Future<MiniProgramPollState> poll(String scene, {String? pollSecret}) async {
     polledScenes.add(scene);
+    pollSecrets.add(pollSecret);
     final i = pollCount < states.length ? pollCount : states.length - 1;
     pollCount++;
     return states[i];
@@ -103,9 +112,11 @@ class _FakeClient extends MiniProgramLoginClient {
     required String scene,
     required PkcePair pkce,
     required String state,
+    String? pollSecret,
   }) async {
     exchangeCount++;
     exchangedScenes.add(scene);
+    exchangeSecrets.add(pollSecret);
     final err = exchangeError;
     if (err != null) throw err;
     return exchangeCode;
@@ -597,6 +608,44 @@ void main() {
       await runHandoff(client, code: ' ab2c-3d4e ', persisted: persisted);
 
       expect(client.redeemedCodes, ['AB2C3D4E']);
+    });
+  });
+
+  group('轮询密钥透传', () {
+    test('短码会话下发的 pollSecret 一路带到轮询与兑换', () async {
+      final client = _FakeClient(states: [MiniProgramPollState.done])
+        ..shortCodePollSecret = 'secret-from-server';
+
+      // 桌面端形态：没有唤起通道 → 直接发短码。
+      final err = await miniProgramSignIn(
+        client: client,
+        store: store,
+        onShortCode: (_) {},
+        onCode: (_, _) async => null,
+        pollInterval: const Duration(milliseconds: 1),
+        pollMaxInterval: const Duration(milliseconds: 2),
+      );
+      expect(err, isNull);
+      expect(client.pollSecrets, ['secret-from-server']);
+      expect(client.exchangeSecrets, ['secret-from-server']);
+    });
+
+    test('短码回退换了 scene，密钥也必须换（旧密钥对新会话无效）', () async {
+      final client = _FakeClient(
+        session: sessionWith(schemeError: '85407'),
+        states: [MiniProgramPollState.done],
+      )..shortCodePollSecret = 'fallback-secret';
+
+      final err = await run(
+        client,
+        launched: <Uri>[],
+        persisted: [],
+        onShortCode: (_) {},
+      );
+      expect(err, isNull);
+      expect(client.polledScenes, ['A3F9K2']);
+      expect(client.pollSecrets, ['fallback-secret']);
+      expect(client.exchangeSecrets, ['fallback-secret']);
     });
   });
 }

@@ -45,20 +45,22 @@ class _FakeMiniProgramClient extends MiniProgramLoginClient {
     shortCodeCount++;
     final err = createShortCodeError;
     if (err != null) throw err;
-    return const MiniProgramSession(
+    return MiniProgramSession(
       scene: 'A3F9K2',
       qrCodeUrl: '',
-      shortCode: MiniProgramShortCode(
+      shortCode: const MiniProgramShortCode(
         scene: 'A3F9K2',
         displayCode: 'A3F-9K2',
         expiresInSeconds: 300,
       ),
+      pollSecret: shortCodePollSecret,
     );
   }
 
   @override
-  Future<MiniProgramPollState> poll(String scene) async {
+  Future<MiniProgramPollState> poll(String scene, {String? pollSecret}) async {
     polledScenes.add(scene);
+    pollSecrets.add(pollSecret);
     pollCount++;
     return MiniProgramPollState.done;
   }
@@ -68,10 +70,18 @@ class _FakeMiniProgramClient extends MiniProgramLoginClient {
     required String scene,
     required PkcePair pkce,
     required String state,
+    String? pollSecret,
   }) async {
     exchangedScenes.add(scene);
+    exchangeSecrets.add(pollSecret);
     return 'ory_ac_desktop';
   }
+
+  /// 短码会话下发的轮询密钥与客户端实际带出去的密钥（服务端按会话存，
+  /// 桌面端也必须一路带到轮询与兑换，否则 403）。
+  String? shortCodePollSecret = 'desktop-secret';
+  final List<String?> pollSecrets = [];
+  final List<String?> exchangeSecrets = [];
 
   /// 反向码兑换（#21）。桌面端的主路径之一：不需要 public client 注册、
   /// 不需要邮件通道，只要手机上的小程序能出一个码。
@@ -183,5 +193,16 @@ void main() {
     expect(error, contains('已过期'));
     expect(persisted, isEmpty);
     expect((store as InMemoryPendingAuthStore).hasPending, isFalse);
+  });
+
+  test('桌面端把服务端下发的 pollSecret 带到轮询与兑换（否则服务端 403）', () async {
+    client.shortCodePollSecret = 'desktop-secret-abc';
+
+    // onShortCode 必须有：没有 UI 承接展示时编排层会保持旧的失败行为。
+    final error = await container.read(wechatSignInActionProvider)((_) {});
+
+    expect(error, isNull);
+    expect(client.pollSecrets, ['desktop-secret-abc']);
+    expect(client.exchangeSecrets, ['desktop-secret-abc']);
   });
 }

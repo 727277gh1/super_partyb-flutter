@@ -99,6 +99,7 @@ Future<String?> miniProgramSignIn({
       client: client,
       store: store,
       scene: start.scene!,
+      pollSecret: start.pollSecret,
       state: state,
       pkce: pkce,
       onCode: onCode,
@@ -123,8 +124,9 @@ Future<String?> miniProgramSignIn({
     return '无法创建微信登录会话：$e';
   }
 
-  // 各通道最终使用的 scene（短码回退会换掉它）。
+  // 各通道最终使用的 scene 与轮询密钥（短码回退会一起换掉）。
   var scene = session.scene;
+  var pollSecret = session.pollSecret;
   // 唤起通道运行期不可用时的原因；非空则改走短码。
   String? fallbackReason;
 
@@ -170,6 +172,8 @@ Future<String?> miniProgramSignIn({
     );
     if (fallback.error != null) return fallback.error;
     scene = fallback.scene!;
+    // 换码 = 换会话，密钥必须跟着换：旧密钥对新 scene 无效（服务端按会话存）。
+    pollSecret = fallback.pollSecret;
     SpbLog.info('已改为短码确认', {'scene': scene});
   } else {
     SpbLog.info('已唤起微信小程序等待确认', {'scene': scene});
@@ -179,6 +183,7 @@ Future<String?> miniProgramSignIn({
     client: client,
     store: store,
     scene: scene,
+    pollSecret: pollSecret,
     state: state,
     pkce: pkce,
     onCode: onCode,
@@ -280,6 +285,7 @@ Future<String?> _awaitAndExchange({
   required MiniProgramLoginClient client,
   required PendingAuthRequestStore store,
   required String scene,
+  String? pollSecret,
   required String state,
   required PkcePair pkce,
   required Future<String?> Function(String code, PkcePair pkce) onCode,
@@ -289,7 +295,7 @@ Future<String?> _awaitAndExchange({
   Future<void> Function(Duration)? sleep,
 }) async {
   final polled = await pollMiniProgramSession(
-    poll: () => client.poll(scene),
+    poll: () => client.poll(scene, pollSecret: pollSecret),
     interval: pollInterval,
     maxInterval: pollMaxInterval,
     timeout: pollTimeout,
@@ -307,7 +313,12 @@ Future<String?> _awaitAndExchange({
 
   final String code;
   try {
-    code = await client.exchange(scene: scene, pkce: pkce, state: state);
+    code = await client.exchange(
+      scene: scene,
+      pkce: pkce,
+      state: state,
+      pollSecret: pollSecret,
+    );
   } on AuthError catch (e) {
     await store.consume();
     return e.message;
@@ -323,9 +334,12 @@ Future<String?> _awaitAndExchange({
 
 /// 短码回退的结果：要么拿到新 scene，要么带着「该显示给用户的错误」返回。
 class _ShortCodeStart {
-  const _ShortCodeStart({this.scene, this.error});
+  const _ShortCodeStart({this.scene, this.error, this.pollSecret});
   final String? scene;
   final String? error;
+
+  /// 轮询/兑换密钥（服务端下发，见 MiniProgramSession.pollSecret）。
+  final String? pollSecret;
 }
 
 /// 发起短码会话并把码交给 UI 展示。
@@ -352,7 +366,10 @@ Future<_ShortCodeStart> _startShortCode({
       return const _ShortCodeStart(error: '登录码创建失败，请重试');
     }
     onShortCode(shortCode);
-    return _ShortCodeStart(scene: session.scene);
+    return _ShortCodeStart(
+      scene: session.scene,
+      pollSecret: session.pollSecret,
+    );
   } on AuthError catch (e) {
     await store.consume();
     return _ShortCodeStart(error: e.message);
