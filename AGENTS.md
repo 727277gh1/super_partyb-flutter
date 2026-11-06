@@ -235,8 +235,15 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 11. 已知问题
 
-**全表（含 60 余条已修项的根因与反向验证，以及两项会漂移的跨仓状态——bcc 库 `chat_*` 全为 0、
-缓存切片 C「反向验证为 0」）见 [`docs/known-issues.md`](docs/known-issues.md)。**
+**未修项只存在于 issue 跟踪器**（`git.atjog.com/dever/super_partyb-flutter`，用 `type/` +
+`priority/` + `area/` 标签筛）。**已修项的根因与反向验证不另设清单**——它们写在
+`docs/design-decisions/` 的对应 §6.x 小节里（改代码前读那里），只与代码绑定、无独立小节的写在源码文档注释里
+（例：`apps/*/lib/providers.dart` 的 `notificationSinkProvider`）。
+
+> `docs/known-issues.md`（60 余条已修项汇总表）已于 2026-11 删除：它与 §6.x 是**同一份内容的两个副本**，
+> 维护两份必然漂移——它自称「全表」，却漏掉了后来发现的两个通知缺口（冷启动不导航、不撤销陈旧通知）。
+> 规则改为：**未修先开 issue，修完把根因写进 §6.x / 源码注释，不再回填汇总表。**
+
 下面只留**有意不做**的（环境限制见 §8）：
 
 | 不做什么 | 依据 |
@@ -268,7 +275,7 @@ docs: 补充 Windows 构建限制
 | 文档 | 位置 |
 |---|---|
 | 设计决策全文（§6.x / §7 / §8） | `docs/design-decisions/`（索引 `README.md`） |
-| 已知问题全表（含已修项的根因与判据） | `docs/known-issues.md` |
+| 未修项与历史修复讨论 | issue 跟踪器：`git.atjog.com/dever/super_partyb-flutter/issues`（`type/` + `priority/` + `area/` 标签） |
 | Go API 契约（§5）与事件类型真源 | `docs/api-contract.md`（真源：`super_partyb/apps/go-api/internal/chatbus/broker.go`） |
 | 开发环境与无头验证边界（§9） | `docs/development.md` |
 | 待办与里程碑（§10） | `docs/roadmap.md` |

@@ -128,8 +128,7 @@ authStateProvider.signedIn() → 路由守卫放行
   path 是 `/callback`，路由表里没有 → 默认错误页（`Page Not Found` +
   `GoException: no routes for location: ...`），用户先看到一屏异常、退回首页
   才发现已登录。故 `buildAuthRedirect` 在匹配前先挡掉「带 scheme 的
-  location」（已登录回首页，否则登录页等回调完成），见
-  `docs/known-issues.md` 对应行。
+  location」（已登录回首页，否则登录页等回调完成），见 `buildAuthRedirect` 的文档注释。
 
 ### 2.3 claimed HTTPS（Android App Links）双形态
 
@@ -203,7 +202,7 @@ adb shell pm get-app-links com.atjog.spb.spb_mobile   # 期望 verified
    loopback），必须逐字符一致。
 2. **需要一个 public client**。—— **✅ 2026-10 已满足**：生产注册了
    `flutter-client`（`tokenEndpointAuthMethod='none'` + 强制 PKCE），见
-   `docs/known-issues.md` 对应行。
+   `docs/rfc8252-loopback-signin.md` §7。
 
 > 实际采用：未另建 client——桌面与移动共用 `flutter-client`（都是
 > public client + PKCE），只是多注册一条自定义 scheme 回调；与网关用的

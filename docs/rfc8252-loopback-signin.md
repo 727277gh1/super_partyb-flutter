@@ -198,7 +198,7 @@ cd id-provider/go && make build && bash scripts/deploy-<host>.sh
 ## 9. 已知限制
 
 - ~~IdP 侧 public client 尚未在生产注册~~ → 已注册（2026-10，
-  `flutter-client`，见 `docs/known-issues.md`）。
+  `flutter-client`，见本文件 §7 与 `docs/oidc-verification.md`）。
 - **移动端仍走自定义 scheme**（`partyb://oidc/callback`）：IdP 已于
   2026-11-06 注册该回调（同 client，多一条 redirectUris）；剩真机回跳
   闭环验证——移动端没有 loopback 监听能力（Android/iOS 沙箱），本次未改

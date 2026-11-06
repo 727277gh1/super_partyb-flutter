@@ -81,7 +81,6 @@ SPLIT_DOCS = [
     'docs/api-contract.md',
     'docs/development.md',
     'docs/roadmap.md',
-    'docs/known-issues.md',
 ]
 SPLIT_DOCS += sorted(glob.glob('docs/design-decisions/*.md'))
 

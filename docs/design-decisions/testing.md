@@ -256,8 +256,9 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 是**另一条**「漏了也没人知道」的接线：provider 有合理默认值（`Noop*`），漏挂后
 功能整条不执行、**零报错**。真实先例：`notificationSinkProvider` 的注释写着
 「生产在 `main.dart` 覆盖为 `LocalNotificationSink`」，而两端 `main.dart` 从未
-覆盖过——通知功能自上线起就没生效（根因与反向验证见
-[`known-issues.md`](../known-issues.md)）。
+覆盖过——通知功能自上线起就没生效（根因写在 `apps/*/lib/providers.dart` 的
+`notificationSinkProvider` 文档里；反向验证：删清单里的 sink 行 → 2 条红，
+删 `app.dart` 的启动 `ensurePermission()` → 1 条红）。
 
 本守卫管不到它（不看 provider 层）。做法是**把清单收敛成一个函数**：两端各一个
 `buildProductionOverrides(...)`（`apps/*/lib/providers.dart`，`main.dart` 只负责挂上），
@@ -643,7 +644,8 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（[§6.20](runtime-a
 
 `tools/check_agents_refs.sh`（§6.19）只查**标识符存在性**——查不到数字一致性。
 实测漂移：[§6.12](runtime-and-ops.md) 写 `spb_features` 硬编码中文 **808**（实际 878）、全仓 **782**
-（实际 1569）；[§11](../known-issues.md) 写总计 **83.4%** 而 §6.13 写 83.8%（**同一文档两处不一致**）。
+（实际 1569）；当时另一份清单（`docs/known-issues.md`，已于 2026-11 删除，见 AGENTS.md §11）写总计
+**83.4%** 而 §6.13 写 83.8%——**同一事实两处不一致**，且没有任何机制会发现它。
 
 **为什么值得修**：[§6.12](runtime-and-ops.md) 的「重新评估条件 2」是「`spb_features` 硬编码字符串
 > 1500」——文档里的「当前值」若长期不准，将来判断「是否触发重评估」时会基于
