@@ -18,7 +18,7 @@
 |---|---|
 | `AuthInterceptor.onError` | 401 → 尝试刷新 → 失败则归一化成 `AuthError` 抛给调用方。注释写着「**由上层统一监听 AuthError 并跳转登录页**」 |
 | 那个「上层监听」 | **不存在**。全仓 `markUnauthenticated` 只有 3 个调用点：移动端深链登录失败 1 处 + 两端各 1 处定义。生产路径**零调用** |
-| 各页面 catch 到 `AuthError` | 只翻成一句 SnackBar 文案（`_describeGroupActionError` / `_describeGoalError` / `_describeSwitchError`…），不做导航 |
+| 各页面 catch 到 `AuthError` | 只翻成一句 SnackBar 文案（`_describeGroupActionError` / `_describeGoalError` / `_describeNewSessionError`…），不做导航 |
 | SSE 401 | `SseClient` 置 `SseState.failed` 并推 `frames` 的 error → `ChatStreamController.errors`，而**没有任何装配层订阅它** |
 | 路由守卫 | 逻辑本身是对的（`buildAuthRedirect` + `AuthRefreshNotifier`），只要 `authState` 变成 `unauthenticated` 就会重定向到 `/login?from=…` |
 

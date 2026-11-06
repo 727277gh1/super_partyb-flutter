@@ -58,6 +58,7 @@ class MessageComposer extends StatefulWidget {
     this.draft,
     this.onFlush,
     this.onFlushWithStrategy,
+    this.onNewSession,
   });
 
   /// 提交回调。参数是去除首尾空白后的文本。
@@ -107,6 +108,28 @@ class MessageComposer extends StatefulWidget {
   /// 「一条都没发出去」）。
   final FlushWithStrategy? onFlushWithStrategy;
 
+  /// 「清空上下文」回调：装配层调 `POST /chat/groups/:gid/sessions/switch`
+  /// （`force_new_session: true`）。
+  ///
+  /// null = 不显示该入口（未接线时）。
+  ///
+  /// ## 为什么放在输入栏而不是 AppBar
+  ///
+  /// webapp 的同一个按钮就在输入栏（`ChatInputArea` 的底行）；而 AppBar 在窄屏
+  /// 已经没有余量（issue #31：320dp 下即使收起三个低频入口仍会溢出）。
+  ///
+  /// ## 为什么本组件自己弹确认框
+  ///
+  /// 它是本端**唯一**不可撤销的动作（AI 从此不记得之前的对话内容）。确认框是
+  /// UI 决策，与动作本身无关——若放在两个 router 里就变成两份实现、两份测试。
+  ///
+  /// ## 命名：叫「清空上下文」而不是「新对话」
+  ///
+  /// 它**保留** group（标题、交付物、任务清单、工作区文件全在），只清 pigo 的
+  /// session。「新对话」会被读成「新建一个对话」——小程序里的「新建」确实是建
+  /// group，用户已经建立了这个预期。详见 docs/design-decisions/chat.md §6.66。
+  final Future<void> Function()? onNewSession;
+
   @override
   State<MessageComposer> createState() => _MessageComposerState();
 }
@@ -117,6 +140,9 @@ class _MessageComposerState extends State<MessageComposer> {
 
   /// 「立即发送」是否在途（防重复点 + 禁用按钮）。
   bool _flushing = false;
+
+  /// 「清空上下文」是否在途（同上）。
+  bool _startingNewSession = false;
 
   @override
   void initState() {
@@ -210,10 +236,10 @@ class _MessageComposerState extends State<MessageComposer> {
         flushWithStrategy: widget.onFlushWithStrategy,
       );
     } on SpbError catch (e) {
-      _showFlushError('立即发送失败：${e.message}');
+      _showActionError('立即发送失败：${e.message}');
     } on Object catch (e, st) {
       SpbLog.warn('立即发送抛非 SpbError 异常', {'error': '$e', 'stack': '$st'});
-      _showFlushError('立即发送失败');
+      _showActionError('立即发送失败');
     } finally {
       // 无论成功失败都要复位：不复位会让按钮永久禁用。
       if (mounted) setState(() => _flushing = false);
@@ -229,13 +255,64 @@ class _MessageComposerState extends State<MessageComposer> {
   /// 失败提示也用 SnackBar，保持一致。
   ///
   /// 无 Scaffold 时（组件被孤立测试）静默降级，不抛异常。
-  void _showFlushError(String message) {
+  void _showActionError(String message) {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 「清空上下文」：确认 → 执行。
+  ///
+  /// 成功/失败的用户提示**不在这里**：动作本身（`/sessions/switch` 的调用与
+  /// 重拉 group）属于装配层，它比本组件更清楚失败原因（例如 group 已归档）。
+  /// 本组件只负责两件 UI 事：先问一句、执行期间禁用按钮。
+  ///
+  /// 但仍要 catch：`onPressed` 会丢弃返回的 Future（它是 `VoidCallback`），
+  /// 装配层若漏接某个异常就会变成未捕获的异步异常（§6.24）。
+  Future<void> _newSession() async {
+    final cb = widget.onNewSession;
+    if (cb == null || _startingNewSession) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        key: const ValueKey('new-session-confirm'),
+        title: const Text('清空上下文，重新开始？'),
+        // 必须写清「什么保留、什么失去」：用户把「新对话」读成「新建 group」
+        // 正是因为这个动作保留 group 却不保留记忆。
+        content: const Text(
+          '本对话的文件、交付物与任务清单都会保留；AI 将不再记得之前的对话内容。'
+          '此操作不可撤销。',
+        ),
+        actions: [
+          TextButton(
+            key: const ValueKey('new-session-confirm-cancel'),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('new-session-confirm-ok'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('清空并重新开始'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _startingNewSession = true);
+    try {
+      await cb();
+    } on SpbError catch (e) {
+      // 装配层已经弹过 SnackBar；这里不重复提示，只记日志。
+      SpbLog.warn('清空上下文失败', {'error': e.toString()});
+    } on Object catch (e, st) {
+      SpbLog.warn('清空上下文抛非 SpbError 异常', {'error': '$e', 'stack': '$st'});
+      _showActionError('清空上下文失败');
+    } finally {
+      if (mounted) setState(() => _startingNewSession = false);
+    }
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -282,6 +359,26 @@ class _MessageComposerState extends State<MessageComposer> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // 「清空上下文」：本端唯一不可撤销的动作，故先弹确认。
+          //
+          // 放在输入栏**左侧**：webapp 同一个按钮也在输入栏；而 AppBar 在窄屏
+          // 没有余量（issue #31）。放左侧而不是紧贴发送按钮，是为了不把
+          // 「不可撤销」和「发送」放到同一个热区里。
+          if (widget.onNewSession != null) ...[
+            IconButton(
+              key: const ValueKey('composer-new-session'),
+              onPressed: _startingNewSession ? null : _newSession,
+              tooltip: '清空上下文',
+              icon: _startingNewSession
+                  ? const SizedBox(
+                      width: SpbSpacing.lg,
+                      height: SpbSpacing.lg,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.restart_alt, size: SpbSpacing.lg),
+            ),
+            const SizedBox(width: SpbSpacing.xs),
+          ],
           Expanded(
             child: Focus(
               onKeyEvent: _onKey,

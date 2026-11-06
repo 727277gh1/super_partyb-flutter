@@ -13,9 +13,9 @@ import 'package:spb_models/spb_models.dart';
 /// - 点选必须**只回调** `selectAgent`，不得有 HTTP 请求、不得再要求二次确认；
 /// - 「自动路由」是唯一能把本地选择清回 null 的入口（webapp / 小程序都有）：
 ///   清成 null 后下一条消息发 `routing.mode=auto`，服务端按内容挑执行者；
-/// - 「同 Agent 开新会话」是另一条路径（`forceNewSession: true` 的
-///   `/sessions/switch`），不能被和「换 agent」混成一个动作（否则用户点
-///   「开新会话」只会改一下本地选择，旧会话根本没有被归档）。
+/// - 菜单里**没有任何会发请求的项**：「清空上下文」（旧名「同 Agent 开新会话」）
+///   已搬到输入栏的 `MessageComposer.onNewSession`（那里才能弹确认框、才能提示
+///   完成），它的测试在 `message_composer_test.dart`。
 ///
 /// 另外两条降级约定（与仓库其余可选注入一致）：
 /// - 列表为空 / 加载失败 → **隐藏入口**，不报错、不弹横幅（AppBar 上的附属
@@ -33,20 +33,15 @@ void main() {
   /// `selectAgent` 被调用的次数（区分「没选」与「选了自动路由」）。
   late int selectCalls;
 
-  /// 「同 Agent 开新会话」被触发的次数。
-  late int newSessionCalls;
-
   /// 把入口放进最小可用的 MaterialApp。
   Future<void> pumpSwitcher(
     WidgetTester tester, {
     List<Agent>? agents,
     Object? loadError,
     String? currentAgentId,
-    bool busy = false,
   }) async {
     lastSelected = null;
     selectCalls = 0;
-    newSessionCalls = 0;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -62,11 +57,7 @@ void main() {
                   lastSelected = agentId;
                   selectCalls++;
                 },
-                startNewSession: () async {
-                  newSessionCalls++;
-                },
                 currentAgentId: currentAgentId,
-                busy: busy,
               ),
             ],
           ),
@@ -117,7 +108,7 @@ void main() {
       // webapp 的 `selectedName || t("autoRouting")` 同此。
       expect(find.text('自动路由'), findsOneWidget);
       expect(find.text('未绑定'), findsNothing);
-      // 没有 agent 可开新会话。
+      // 菜单里不再有任何会发请求的项（「清空上下文」已搬到输入栏）。
       await openMenu(tester);
       expect(find.byKey(const ValueKey('agent-new-session')), findsNothing);
     });
@@ -174,7 +165,6 @@ void main() {
                     throw Exception('boom');
                   },
                   selectAgent: (_) {},
-                  startNewSession: () async {},
                   currentAgentId: 'a1',
                 ),
               ],
@@ -211,7 +201,6 @@ void main() {
               AgentSwitcher(
                 loadAgents: loader,
                 selectAgent: (_) {},
-                startNewSession: () async {},
                 currentAgentId: currentAgentId,
               ),
             ],
@@ -302,37 +291,6 @@ void main() {
     });
   });
 
-  group('同 Agent 开新会话', () {
-    testWidgets('当前有绑定时才展示该入口', (tester) async {
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手')],
-        currentAgentId: 'a1',
-      );
-
-      await openMenu(tester);
-      expect(find.byKey(const ValueKey('agent-new-session')), findsOneWidget);
-    });
-
-    testWidgets('选中后直接调 startNewSession（不弹确认、不改 agent）', (tester) async {
-      // 回归防线：这条路径是**立即**的服务端动作（归档旧绑定）。若它误走
-      // 纯本地的 `selectAgent`，用户点「开新会话」就什么都不发生。
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
-        currentAgentId: 'a1',
-      );
-
-      await openMenu(tester);
-      await tester.tap(find.byKey(const ValueKey('agent-new-session')));
-      await tester.pumpAndSettle();
-
-      expect(newSessionCalls, 1);
-      expect(selectCalls, 0, reason: '开新会话不换 agent');
-      expect(find.text('开新会话？'), findsNothing);
-    });
-  });
-
   group('菜单内容', () {
     testWidgets('当前 agent 被勾选', (tester) async {
       await pumpSwitcher(
@@ -352,20 +310,6 @@ void main() {
         find.byKey(const ValueKey('agent-option-a2')),
       );
       expect(other.checked, isFalse);
-    });
-
-    testWidgets('busy 时入口禁用（防重复触发开新会话）', (tester) async {
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手')],
-        currentAgentId: 'a1',
-        busy: true,
-      );
-
-      final button = tester.widget<PopupMenuButton<Object?>>(
-        find.byKey(const ValueKey('agent-switcher')),
-      );
-      expect(button.enabled, isFalse);
     });
 
     testWidgets('当前 agent 的菜单项不可选（选了也不会有任何变化）', (tester) async {

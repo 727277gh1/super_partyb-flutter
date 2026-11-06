@@ -98,6 +98,7 @@ class ConversationPage extends StatefulWidget {
     this.overflowItems,
     this.onFlush,
     this.onFlushWithStrategy,
+    this.onNewSession,
     this.onCancelTurn,
     this.onLoadOlder,
     this.onReconnect,
@@ -278,6 +279,13 @@ class ConversationPage extends StatefulWidget {
 
   /// 按用户选定的冲突策略重新提交（[onFlush] 返回待确认时才会用到）。
   final FlushWithStrategy? onFlushWithStrategy;
+
+  /// 「清空上下文」（同 group 新会话）的回调。null 时入口隐藏。
+  ///
+  /// 本页只负责透传给 [MessageComposer]（确认框与在途禁用都在那里），真实
+  /// 动作是 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`），
+  /// 由 app 层注入——与 [onSend] 同一约定：页面不依赖 `spb_api`。
+  final Future<void> Function()? onNewSession;
 
   /// 下载 agent 文件产物的回调。null 时下载按钮禁用。
   ///
@@ -2024,6 +2032,7 @@ class _ConversationPageState extends State<ConversationPage> {
             onSubmit: _handleSubmit,
             onFlush: widget.onFlush,
             onFlushWithStrategy: widget.onFlushWithStrategy,
+            onNewSession: widget.onNewSession,
             draft: _draft,
           ),
         ],

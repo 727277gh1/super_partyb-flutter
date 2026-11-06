@@ -301,20 +301,22 @@ void main() {
       reason: 'AppBar 标签必须跟着本地选择变（_effectiveAgentId 优先本地值）',
     );
 
-    // 「同 Agent 开新会话」：开菜单 → 最后一项。
-    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    // 「清空上下文」：输入栏的独立按钮（2026-11 从 agent 菜单里搬出来，
+    // 与 webapp 同位置）——先弹确认。
+    await tester.tap(find.byKey(const ValueKey('composer-new-session')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('new-session-confirm')), findsOneWidget);
 
     // 必须包在 `runAsync` 里：回调内部会 await dio 请求，dio 的 mock 响应
     // 靠真实事件循环完成（FakeAsync 时区里 await 会死锁）。
     await tester.runAsync(() async {
-      await tester.tap(find.byKey(const ValueKey('agent-new-session')));
+      await tester.tap(find.byKey(const ValueKey('new-session-confirm-ok')));
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
 
-    expect(hit, hasLength(1), reason: '开新会话必须真的发出一次切换请求');
+    expect(hit, hasLength(1), reason: '确认后必须真的发出一次切换请求');
     expect(hit.single.path, '/chat/groups/grp_m/sessions/switch');
     final body = hit.single.body! as Map<String, dynamic>;
     expect(

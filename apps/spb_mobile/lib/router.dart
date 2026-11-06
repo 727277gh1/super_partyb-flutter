@@ -1010,26 +1010,26 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     }
   }
 
-  /// 同 Agent 开新会话：立刻归档旧绑定、写一条新绑定（上下文从此断开）。
+  /// 清空上下文：归档旧绑定、写一条新绑定（AI 从此不记得之前的对话内容）。
   ///
-  /// 与 webapp 输入栏的「新对话」按钮（`startNewConversation`）同一动作，也是
-  /// 本页**唯一**调 `POST /chat/groups/:gid/sessions/switch` 的地方。
+  /// 与 webapp 输入栏的同名按钮（`startNewConversation`）同一动作，也是本页
+  /// **唯一**调 `POST /chat/groups/:gid/sessions/switch` 的地方。
   ///
   /// ## 为什么只有它需要服务端调用
   ///
   /// 换 agent 不需要（选中的 agent 随下一条消息的 `agent_id` 发出，服务端在
-  /// 入队事务里重绑，见 [_selectedAgentId]）。而「开新会话」要求**现在**就划出
-  /// 分界线——它没有「下一条消息」可以搭载，故必须显式调端点。
+  /// 入队事务里重绑，见 [_selectedAgentId]）。而「清空上下文」要求**现在**就
+  /// 划出分界线——它没有「下一条消息」可以搭载，故必须显式调端点。
   ///
   /// ## 成功后做什么
   ///
   /// 1. **重拉 group**：服务端刚换了 binding（`activeSession` 变了），本地
   ///    `_group` 已过期；
-  /// 2. 弹一句「已开始新会话」。
+  /// 2. 弹一句「已清空上下文」。
   ///
-  /// 不弹确认框（对齐 webapp：入口文案本身已写清它做什么，再弹一次只是形式
-  /// 主义）。也不清 [_selectedAgentId]——开新会话保留当前 agent，这是它相对
-  /// 「换 agent」的唯一区别。
+  /// 确认框在 `MessageComposer`（拥有按钮的那个组件），不在这里：它是 UI 决策，
+  /// 放在两个 router 里就变成两份实现。也不清 [_selectedAgentId]——清空上下文
+  /// 保留当前 agent，这是它与「换 agent」的唯一区别。
   ///
   /// ## 有意**不**刷新时间线
   ///
@@ -1037,8 +1037,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// `chat_events`）；SSE 是 user 级订阅，也不因它而重连。故重拉时间线只会
   /// 让列表闪一下、把用户正在读的位置打乱，没有任何新信息。
   ///
-  /// 失败弹 SnackBar：这是用户主动发起的动作，静默失败会让用户以为已经开了
-  /// 新会话，接着发消息却发现模型还记得上一段。
+  /// 失败弹 SnackBar：这是用户主动发起的动作，静默失败会让用户以为已经清空了，
+  /// 接着发消息却发现模型还记得上一段。
   Future<void> _startNewSession() async {
     if (_switchingAgent) return;
     final agentId = _effectiveAgentId ?? '';
@@ -1057,10 +1057,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('已开始新会话')));
+          ..showSnackBar(const SnackBar(content: Text('已清空上下文')));
       }
     } on SpbError catch (e) {
-      SpbLog.warn('开新会话失败', {
+      SpbLog.warn('清空上下文失败', {
         'groupId': widget.groupId,
         'agentId': agentId,
         'error': e.toString(),
@@ -1070,14 +1070,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           ..hideCurrentSnackBar()
           ..showSnackBar(SnackBar(content: Text(_describeNewSessionError(e))));
       }
-      // 不 rethrow：调用方是 [AgentSwitcher] 的 UI 回调（结果无人消费），
+      // 不 rethrow：调用方是 UI 回调（结果无人消费），
       // 上抛只会变成未捕获的异步异常（§6.24）。错误已经提示过了。
     } finally {
       if (mounted) setState(() => _switchingAgent = false);
     }
   }
 
-  /// 把「同 Agent 开新会话」的失败翻成用户能看懂的一句话。
+  /// 把「清空上下文」的失败翻成用户能看懂的一句话。
   ///
   /// `HttpError.message` 恒为 `"HTTP 400"`，服务端文案在 `body` 里
   /// （见 `AgentsApi._unwrap`），故必须从 body 提取。
@@ -1086,9 +1086,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       final body = e.body ?? '';
       // 404 = agent 已被删除（列表可能是在它删除前拉的）。
       if (e.isNotFound) return '这个 Agent 已不存在，请重新打开列表选择';
-      if (body.contains('agentId')) return '开新会话失败：Agent 参数无效';
+      if (body.contains('agentId')) return '清空上下文失败：Agent 参数无效';
       if (e.statusCode == 401) return '登录已过期，请重新登录';
-      return '开新会话失败（HTTP ${e.statusCode}）';
+      return '清空上下文失败（HTTP ${e.statusCode}）';
     }
     if (e is NetworkError) return '网络连接失败，请检查网络后重试';
     return e.message;
@@ -1553,9 +1553,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           _autoRouting = agentId == null;
           _selectedAgentId = agentId;
         }),
-        startNewSession: _startNewSession,
         currentAgentId: _effectiveAgentId,
-        busy: _switchingAgent,
         // 极窄屏（< 360dp）只显示图标：名字最多占 140dp，配上三个常驻图标
         // 在 320dp 下仍会溢出 10px（issue #31）。名字在菜单的勾选项里可见，
         // 故省它不丢信息。
@@ -2219,6 +2217,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       onFlush: ref.read(flushMessagesProvider(widget.groupId)),
       onFlushWithStrategy: ref.read(flushWithStrategyProvider(widget.groupId)),
+      // 清空上下文（同 group 新会话）：输入栏的独立按钮，带确认框。
+      // 与 webapp 同位置、同文案（docs/design-decisions/chat.md §6.66）。
+      onNewSession: _startNewSession,
       // 执行中活动指示（turn_activity）：长 turn 的静默期给用户可见进展。
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       activities: controller.activities,

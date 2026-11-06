@@ -907,21 +907,35 @@ void main() {
       reason: 'AppBar 标签必须跟着本地选择变（_effectiveAgentId 优先本地值）',
     );
 
-    // 「同 Agent 开新会话」：开菜单 → 最后一项（唯一会立即调端点的入口）。
-    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    // 「清空上下文」：输入栏的独立按钮（2026-11 从 agent 菜单里搬出来，
+    // 与 webapp 同位置）——先弹确认，取消则什么都不发。
+    expect(
+      find.byKey(const ValueKey('agent-new-session')),
+      findsNothing,
+      reason: '菜单里不该再有会发请求的项（它已搬到输入栏）',
+    );
+    await tester.tap(find.byKey(const ValueKey('composer-new-session')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('new-session-confirm')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('new-session-confirm-cancel')));
+    await tester.pumpAndSettle();
+    expect(hit, isEmpty, reason: '取消确认 = 不发请求');
+
+    await tester.tap(find.byKey(const ValueKey('composer-new-session')));
     await tester.pumpAndSettle();
 
     // 必须包在 `runAsync` 里：回调内部会 await dio 请求，而 dio 的 mock
     // 响应靠真实事件循环完成——在 FakeAsync 时区里直接 await 会死锁
     // （见同文件 onCancelTurn 用例的说明）。
     await tester.runAsync(() async {
-      await tester.tap(find.byKey(const ValueKey('agent-new-session')));
+      await tester.tap(find.byKey(const ValueKey('new-session-confirm-ok')));
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
 
-    expect(hit, hasLength(1), reason: '开新会话必须真的发出一次切换请求');
+    expect(hit, hasLength(1), reason: '确认后必须真的发出一次切换请求');
     expect(hit.single.path, '/chat/groups/grp_x/sessions/switch');
     final body = hit.single.body! as Map<String, dynamic>;
     expect(

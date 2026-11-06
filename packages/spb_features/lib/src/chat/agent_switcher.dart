@@ -20,9 +20,6 @@ typedef LoadAgents = Future<List<Agent>> Function();
 /// ——见两端 router 的 `_autoRouting`。
 typedef SelectAgent = void Function(String? agentId);
 
-/// 同 Agent 开新会话（装配层调 `AgentsApi.switchGroupAgent`，`forceNewSession: true`）。
-typedef StartNewSession = Future<void> Function();
-
 /// 对话页 AppBar 的 agent 切换入口。
 ///
 /// ## 语义：选择是**本地**的，服务端动作发生在下一条消息
@@ -35,22 +32,21 @@ typedef StartNewSession = Future<void> Function();
 /// | 点选 agent | 记本地（本组件只回调 [selectAgent]） | **什么都不发生** |
 /// | 点「自动路由」 | 同上，回调 `selectAgent(null)` | **什么都不发生** |
 /// | 发下一条消息 | 请求体带 `agent_id` | 入队事务里 `ReplaceBinding`：归档该 group 的旧 owner 绑定，写新绑定，**继承旧绑定的 `session_id`**（对话接着聊） |
-/// | 点「同 Agent 开新会话」 | 调 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`） | 立即归档 + 新绑定（`session_id` 置空） |
 ///
 /// 换 agent **不再断开上下文**（2026-11-06 服务端改为顶替归属、继承 session）：
 /// `chatbinding.Ensure` 归档旧 owner 时把它的 `session_id` 写给新行，pigo 用
 /// `-r` 续接同一段对话，只是人设换成新 agent（人设来自 group 工作区的
-/// `AGENTS.md` 软链接，每轮重指）。真正开新会话只有两条路径：「同 Agent 开新
-/// 会话」入口（`force_new_session: true`）与上下文超窗后的自动重试。
+/// `AGENTS.md` 软链接，每轮重指）。
 ///
 /// 因此**不弹确认框**：点选本身没有产生任何不可逆动作，弹窗只会变成每次切人
 /// 都要点一下的形式主义。
 ///
-/// ## 为什么「同 Agent 开新会话」仍然调服务端
+/// ## 本组件**不**承担「清空上下文」
 ///
-/// 这条动作没有「下一条消息」可以搭载——它要求**立刻**把旧绑定归档（会话的
-/// 分界线就在这里），故必须走 `sessions/switch`。对应 webapp 输入栏的「新对话」
-/// 按钮（`startNewConversation`）。同样不弹确认：入口文案本身已经写清它做什么。
+/// 那个动作（`force_new_session: true`）已搬到输入栏的
+/// `MessageComposer.onNewSession`——本组件只做「选人」，菜单里不再有任何会发
+/// 请求的项。理由：它是唯一不可逆的动作，需要确认框与完成提示，而菜单项只能
+/// 「点了立刻执行」。详见 docs/design-decisions/chat.md §6.66。
 ///
 /// ## 为什么列表为空 / 加载失败时**隐藏入口**
 ///
@@ -89,9 +85,7 @@ class AgentSwitcher extends StatefulWidget {
     super.key,
     required this.loadAgents,
     required this.selectAgent,
-    required this.startNewSession,
     this.currentAgentId,
-    this.busy = false,
     this.compact = false,
   });
 
@@ -99,9 +93,6 @@ class AgentSwitcher extends StatefulWidget {
 
   /// 选中一个 agent（纯本地，见类文档）。
   final SelectAgent selectAgent;
-
-  /// 同 Agent 开新会话（立即归档旧绑定）。
-  final StartNewSession startNewSession;
 
   /// 「本对话当前由谁回答」的**有效**值——装配层传的是
   /// 「本地选择 ?? 服务端 active binding」（`ChatGroup.activeSession?.agentId`）。
@@ -111,9 +102,6 @@ class AgentSwitcher extends StatefulWidget {
   /// `selectedName || t("autoRouting")`、小程序 `work-detail` 抽屉的
   /// `selectedAgentId: null` 同一语义。
   final String? currentAgentId;
-
-  /// 开新会话是否在途（装配层传入）。为真时禁用入口，防重复触发。
-  final bool busy;
 
   /// 紧凑模式：只显示图标，不显示 agent 名字。  ///
   /// ## 为什么需要它（issue #31）
@@ -135,7 +123,7 @@ class AgentSwitcher extends StatefulWidget {
   /// 超过这个数量就换成搜索弹层（见类文档的表格）。
   ///
   /// 取 8 的依据：一屏 `PopupMenu` 在常见手机高度下能完整显示 6–8 项（含
-  /// 菜单头与「开新会话」），超过它就要滚动，而滚动的列表里「找一项」与
+  /// 菜单头与「自动路由」），超过它就要滚动，而滚动的列表里「找一项」与
   /// 「搜一项」的成本差距随长度线性放大。
   static const int searchThreshold = 8;
 
@@ -218,11 +206,10 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
 
     // 小列表：保持原来的 PopupMenu（点两下就选中）。
     if (agents.length <= AgentSwitcher.searchThreshold) {
-      return PopupMenuButton<_SwitcherAction>(
+      return PopupMenuButton<AgentPick>(
         key: const ValueKey('agent-switcher'),
-        enabled: !widget.busy,
         tooltip: '切换 Agent',
-        onSelected: _onSelected,
+        onSelected: _select,
         itemBuilder: (context) => _menuItems(context, groupAgents(agents)),
         child: trigger,
       );
@@ -232,8 +219,8 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
     return InkWell(
       key: const ValueKey('agent-switcher'),
       borderRadius: SpbRadius.cardAll,
-      onTap: widget.busy ? null : _openPicker,
-      child: Opacity(opacity: widget.busy ? 0.5 : 1, child: trigger),
+      onTap: _openPicker,
+      child: trigger,
     );
   }
 
@@ -277,7 +264,7 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
   }
 
   /// PopupMenu 的条目（按 [groupAgents] 分节）。
-  List<PopupMenuEntry<_SwitcherAction>> _menuItems(
+  List<PopupMenuEntry<AgentPick>> _menuItems(
     BuildContext context,
     List<AgentGroup> groups,
   ) {
@@ -285,7 +272,7 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
     return [
       // 菜单头：说明「下一条消息」这个时机。它不再是「点一下就丢上下文」的
       // 警告（选择是纯本地的），但代价仍然真实存在，故保留一行说明。
-      const PopupMenuItem<_SwitcherAction>(
+      const PopupMenuItem<AgentPick>(
         enabled: false,
         height: 36,
         child: Text('选择后随下一条消息生效（沿用当前对话上下文）', style: TextStyle(fontSize: 12)),
@@ -295,9 +282,9 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       // 服务端绑定不会自动回退，只有清成 null 才会让下一条消息重新走
       // `auto_agent` 匹配（webapp `AgentSelector.tsx` 的「自动路由（AI 选择）」
       // 首项、小程序 `work-detail` 抽屉的 null 项，语义一致）。
-      CheckedPopupMenuItem<_SwitcherAction>(
+      CheckedPopupMenuItem<AgentPick>(
         key: const ValueKey('agent-option-auto'),
-        value: const _SwitchTo(null),
+        value: const AgentPick.auto(),
         checked: widget.currentAgentId == null,
         // 已经是自动路由时不可选（同当前 agent 的置灰理由）。
         enabled: widget.currentAgentId != null,
@@ -307,7 +294,7 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       for (final g in groups) ...[
         // 组头：只在真的分组时出现。全是未分组时它只是噪音。
         if (g.name != ungroupedAgentLabel || groups.length > 1)
-          PopupMenuItem<_SwitcherAction>(
+          PopupMenuItem<AgentPick>(
             key: ValueKey('agent-group-${g.name}'),
             enabled: false,
             height: 32,
@@ -319,9 +306,9 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
             ),
           ),
         for (final a in g.agents)
-          CheckedPopupMenuItem<_SwitcherAction>(
+          CheckedPopupMenuItem<AgentPick>(
             key: ValueKey('agent-option-${a.id}'),
-            value: _SwitchTo(a.id),
+            value: AgentPick.agent(a.id),
             checked: a.id == widget.currentAgentId,
             // 当前 agent **不可选**：选了也不会有任何变化（本地值没变、服务端
             // 也不收到请求），留着可点只会让用户怀疑「点了没反应」。
@@ -330,21 +317,12 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
             child: Text(a.label, overflow: TextOverflow.ellipsis),
           ),
       ],
-      // 同 agent 开新会话：单独一条，语义是「清空上下文但保留这个 agent」。
-      // 与 webapp 输入栏的「新对话」按钮同义——它是唯一**立即**触发服务端
-      // 动作的入口，因为它没有「下一条消息」可以搭载。
+      // 菜单只负责「选人」：本菜单**不再**包含任何会发请求的项。
       //
-      // 2026-11-06 起它是**唯一**会断开上下文的入口（换 agent 已改为继承
-      // session），而它没有确认框（对齐 webapp）——代价只能写在标签里，
-      // 否则菜单顶部那句「沿用当前对话上下文」会让人以为整张菜单都是安全的。
-      if ((widget.currentAgentId ?? '').isNotEmpty) ...[
-        const PopupMenuDivider(),
-        const PopupMenuItem<_SwitcherAction>(
-          key: ValueKey('agent-new-session'),
-          value: _NewSession(),
-          child: Text('同 Agent 开新会话（清空上下文）'),
-        ),
-      ],
+      // 「清空上下文」（旧名「同 Agent 开新会话」）已搬到输入栏
+      // （`MessageComposer.onNewSession`，与 webapp 同位置）：那里可以弹确认框、
+      // 可以在完成后提示，而菜单里的项只能「点了立刻执行」。两个入口两种行为
+      // 是最难解释的不一致（docs/design-decisions/chat.md §6.66）。
     ];
   }
 
@@ -373,51 +351,20 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
           );
     // null = 用户取消（`pop` 不传值）；`AgentPick` 本身才代表「选了什么」。
     if (pick == null || !mounted) return;
-    await _onSelected(_SwitchTo(pick.agentId));
+    _select(pick);
   }
 
-  Future<void> _onSelected(_SwitcherAction action) async {
-    switch (action) {
-      case _SwitchTo(:final agentId):
-        // 与当前一致 = 无变化（`enabled: false` 已经挡了一层，这里兜住
-        // 「外部重建导致 currentAgentId 变化」的窗口）。
-        if (agentId == widget.currentAgentId) return;
-        // 纯本地：不弹确认、不发请求（见类文档）。
-        widget.selectAgent(agentId);
-      case _NewSession():
-        final agentId = widget.currentAgentId ?? '';
-        if (agentId.isEmpty) return;
-        // 吞掉异常只记日志：装配层（两端 router 的 `_startNewSession`）
-        // **已经**弹过 SnackBar。不接住就会变成未捕获的异步异常，落到全局
-        // 处理器（§6.24 的三道防线）——用户界面上看不到新信息，日志里多一条
-        // 与已知失败重复的堆栈。
-        //
-        // 不能在此弹提示：`AgentSwitcher` 不知道失败原因该怎么描述（那是装配层
-        // 的 `_describeSwitchError`），也不应该知道。
-        try {
-          await widget.startNewSession();
-        } on Object catch (e) {
-          SpbLog.debug('开新会话失败（装配层已提示）', {
-            'agentId': agentId,
-            'error': e.toString(),
-          });
-        }
-    }
+  /// 选中：纯本地，不弹确认、不发请求（见类文档）。
+  ///
+  /// 与当前一致 = 无变化（`enabled: false` 已经挡了一层，这里兜住「外部重建
+  /// 导致 currentAgentId 变化」的窗口）。
+  void _select(AgentPick pick) {
+    if (pick.agentId == widget.currentAgentId) return;
+    widget.selectAgent(pick.agentId);
   }
 }
 
-/// 菜单项的动作（用 sealed 类而非裸字符串，避免 `agentId` 与哨兵值混淆）。
-sealed class _SwitcherAction {
-  const _SwitcherAction();
-}
-
-class _SwitchTo extends _SwitcherAction {
-  const _SwitchTo(this.agentId);
-
-  /// null = 自动路由。
-  final String? agentId;
-}
-
-class _NewSession extends _SwitcherAction {
-  const _NewSession();
-}
+// `_SwitcherAction` / `_SwitchTo` / `_NewSession` 已删：菜单现在只做「选人」，
+// 直接以 [AgentPick] 作为 `PopupMenuButton` 的值类型（与搜索弹层共用同一个结果
+// 类型）。不能用 `String?`：`PopupMenuButton` 把 `null` 结果当成「取消」，
+// 而「自动路由」本身就是一个合法选择（见 agent_picker.dart 的 [AgentPick]）。

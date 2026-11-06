@@ -1243,13 +1243,14 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 | 点选 agent | 只改本地 `_selectedAgentId`，**不发请求、不弹确认**；AppBar 标签立刻跟着变 | 什么都不发生 |
 | 点选「自动路由」 | 同上，但清成 null 并置 `_autoRouting`；标签变「自动路由」 | 什么都不发生 |
 | 发消息 | `agent_id` = **有效值**（标签上那个）+ `routing.mode=manual`；有效值为 null 时不带 `agent_id`、`mode=auto` | 入队事务里重绑（见上） |
-| 「同 Agent 开新会话（清空上下文）」 | 调 `/sessions/switch`（`force_new_session: true`），**不弹确认**，成功弹「已开始新会话」 | 立即归档 + 新绑定，`session_id` 置空 |
+| 「清空上下文」 | **输入栏的独立按钮**（`MessageComposer.onNewSession`）：先弹确认框，确认后调 `/sessions/switch`（`force_new_session: true`），成功弹「已清空上下文」 | 立即归档 + 新绑定，`session_id` 置空 |
 
 判据落在两处：
 
-- `packages/spb_features/lib/src/chat/agent_switcher.dart`：`selectAgent`（纯本地，
-  可传 null）与 `startNewSession`（唯一立即调端点的入口）是两个回调，**不能合并**
-  ——合并后「开新会话」会退化成只改本地值，旧会话根本没被归档。
+- 选人与清空是**两个组件**：`AgentSwitcher` 只做纯本地的选择（`selectAgent`，
+  可传 null，菜单里没有任何会发请求的项）；「清空上下文」在
+  `MessageComposer.onNewSession`。**不能合并**——合并后清空会退化成只改本地值，
+  旧会话根本没被归档。
 - 两端 router 的三态：`_selectedAgentId`（`String?`，null = 未覆盖）+ `_autoRouting`
   （bool，显式自动路由），合并成 `_effectiveAgentId`：显式自动 → null；否则本地
   选择；再否则服务端绑定。AppBar 标签、菜单勾选、发送的 `agent_id`、开新会话
@@ -1269,9 +1270,10 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
    「同 Agent 开新会话」入口才会真正断开。这是 webapp 既有的事实行为；客户端
    不做单方面的二次确认——点选本身没有产生任何不可逆动作。
 
-   ⚠️ 正因为顶部写着「沿用当前对话上下文」，菜单里那条**破坏性**入口必须自带
-   代价：标签是「同 Agent 开新会话（**清空上下文**）」。它是唯一的断点，又没有
-   确认框（对齐 webapp 的「新对话」按钮），代价只剩标签这一个位置可以写。
+   ⚠️ 正因为顶部写着「沿用当前对话上下文」，**破坏性**入口必须自己把代价说清。
+   2026-11 起这个责任从「菜单项标签」移到了「输入栏按钮 + 确认框」：按钮叫
+   「清空上下文」，确认框正文写明「文件、交付物与任务清单都会保留；AI 将不再
+   记得之前的对话内容」。标签只能塞一句短语，确认框能写两句完整的话。
 2. **建议卡的 agent 标注从「一次性」变成「持久」**。两者现在共用同一个本地值
    （webapp 同样如此：`FollowUpSuggestCard` 写的也是 `agentByGroup[groupId]`）。
    副作用是点过一次建议卡之后，后续消息仍由该 agent 回答——直到用户改选或换对话。
@@ -1279,6 +1281,32 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
    `agentByGroup` 在本次会话内按 group 分别记忆）。Flutter 的对话页是每 group 一个
    路由，State 复用由 `didUpdateWidget` 处理；保持「换对话即回到服务端绑定」比维护
    一份跨页缓存更简单，且与「刷新后回落到 `active_session`」的行为一致。
+
+#### 三端统一：命名、位置、确认框（2026-11）
+
+同一个动作在三个客户端上曾有三套说法，且只有 Flutter 把它藏在 agent 菜单里：
+
+| 端 | 改动前 | 改动后 |
+|---|---|---|
+| webapp | 输入栏按钮「新对话」、无确认 | 输入栏按钮「清空上下文」+ 确认框 + 成功 toast |
+| 小程序 | **没有这个能力**（只能新建 group） | 补上：同一位置、同一文案、同一确认框 |
+| Flutter | agent 菜单里的「同 Agent 开新会话（清空上下文）」、无确认 | 输入栏按钮「清空上下文」+ 确认框 + SnackBar |
+
+三条判据：
+
+1. **命名用「清空上下文」，不用「新对话/新会话」**。它保留 group（标题、交付物
+   目录、任务清单、工作区文件全在），只清 pigo 的 session。而「新对话」会被读成
+   「新建一个对话」——小程序 tab 栏中间那个「新建」确实是建 group，用户已经建立
+   了这个预期。名字必须说清「留下什么、失去什么」。
+2. **位置在输入栏，不在 AppBar/菜单**。webapp 一直就在输入栏；AppBar 在窄屏没有
+   余量（issue #31 实测 320dp 溢出）。菜单项还有个结构性限制：它只能「点了立刻
+   执行」，既不能确认也不能提示。
+3. **先确认、后提示**。这是本端唯一不可撤销的动作，且用户对它的预期最容易错位
+   （以为新建了 group，结果旧消息还在、只是模型不记得了）。确认框正文必须写明
+   保留什么、失去什么；完成后给一句「已清空上下文」，否则用户会怀疑没生效。
+
+确认框与在途禁用都在 `MessageComposer` 里（拥有按钮的那个组件），不放在两个
+router：它是 UI 决策，放两处就变成两份实现、两份测试。
 
 #### 有意**不**做的（避免下轮又提）
 
@@ -1309,10 +1337,13 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 
 - `packages/spb_features/test/chat/agent_switcher_test.dart`：点选**不弹确认框**、
   直接回调；选当前项无回调；点「自动路由」回调 `selectAgent(null)`（小列表与搜索
-  弹层两条路径都测）；「同 Agent 开新会话」直接调 `startNewSession`（不改 agent）。
+  弹层两条路径都测）；菜单里**没有** `agent-new-session` 项。
+- `packages/spb_features/test/chat/message_composer_test.dart`：未接线不显示入口；
+  点按钮先弹确认（不直接执行）；取消 → 零请求；确认 → 执行一次；在途禁用且完成后复位。
 - `apps/spb_desktop/test/router_chat_test.dart` / `apps/spb_mobile/test/router_list_test.dart`：
-  点选后 `hit` 为空（无 HTTP）+ 标签变成所选 agent；再点「同 Agent 开新会话」时
-  `sessions/switch` 的 body 是 `agentId`（camelCase，**不是** `agent_id`，写错 400
-  「agentId 不能为空」）+ `force_new_session: true` + 刚选中的 agent；桌面端额外
-  点「自动路由」后标签回到「自动路由」，且下一条消息的 body **不带** `agent_id`、
-  `routing.mode=auto`（「标签写谁就发给谁」的回归防线）。
+  点选后 `hit` 为空（无 HTTP）+ 标签变成所选 agent；再走输入栏的「清空上下文」
+  按钮 + 确认框时，`sessions/switch` 的 body 是 `agentId`（camelCase，**不是**
+  `agent_id`，写错 400「agentId 不能为空」）+ `force_new_session: true` + 刚选中
+  的 agent（桌面端还断言取消确认 = 零请求）；桌面端额外点「自动路由」后标签回到
+  「自动路由」，且下一条消息的 body **不带** `agent_id`、`routing.mode=auto`
+  （「标签写谁就发给谁」的回归防线）。
