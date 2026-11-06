@@ -40,6 +40,7 @@ class LoginPage extends StatefulWidget {
     this.state = const AuthState(),
     this.onImportSession,
     this.onWeChatSignIn,
+    this.onEmailSignIn,
     this.title = '登录 Super PartyB',
     this.subtitle = '使用统一身份认证中心（SSO）登录',
   });
@@ -82,6 +83,29 @@ class LoginPage extends StatefulWidget {
   /// 为 null 时不展示（桌面端没有微信小程序场景）。
   final Future<String?> Function()? onWeChatSignIn;
 
+  /// 邮箱 magic link 登录：输邮箱 → 收信 → 点链接确认 → 自动登录。
+  ///
+  /// 第二个参数 `onSent` 由本页提供，处理函数在**邮件受理成功**后调用它，
+  /// 页面据此把按钮文案从「正在发送…」切到「已发送，请在邮件中确认…」。
+  /// 没有它，用户在两三秒后看到按钮还在转圈，会以为卡住而重复点击。
+  ///
+  /// 返回 null 表示成功（已登录），字符串是失败原因（与 [onSignIn] 同语义）。
+  ///
+  /// ## 为什么这条路径值得单列一个入口
+  ///
+  /// SSO 要求用户在浏览器里完成一整套跳转；微信一键要求装微信且受开放平台
+  /// 审核约束。magic link 只要一个能收信的邮箱——它是**唯一**对「没装微信、
+  /// 又嫌 SSO 跳转麻烦」的用户成立的路径。
+  ///
+  /// ## 为什么文案不能说「邮件已发送」
+  ///
+  /// 服务端对不存在的邮箱也返回成功（防枚举），客户端拿不到「是否存在」的
+  /// 信息。写成「如果该邮箱已注册，你会收到…」才对得上实际行为。
+  ///
+  /// 为 null 时不展示（例如未配置 IdP 的环境）。
+  final Future<String?> Function(String email, void Function() onSent)?
+  onEmailSignIn;
+
   /// 当前认证状态（错误消息从这里读）。
   final AuthState state;
 
@@ -111,9 +135,19 @@ class _LoginPageState extends State<LoginPage> {
   /// 是否正在等待微信确认（唤起小程序后轮询期间）。
   bool _wechatBusy = false;
 
+  /// 是否正在等待邮件确认（已发信 → 轮询期间）。
+  bool _emailBusy = false;
+
+  /// 邮件是否已受理（决定按钮文案：正在发送 / 已发送）。
+  bool _emailSent = false;
+
+  /// 邮箱输入控制器。
+  final TextEditingController _emailController = TextEditingController();
+
   @override
   void dispose() {
     _importController.dispose();
+    _emailController.dispose();
     super.dispose();
   }
 
@@ -173,6 +207,46 @@ class _LoginPageState extends State<LoginPage> {
     if (!mounted) return;
     setState(() {
       _wechatBusy = false;
+      _localError = error;
+    });
+  }
+
+  /// 邮箱 magic link 登录。
+  ///
+  /// 与另外两条入口的差别：它**当场不会登录成功**——要等用户去收信并点
+  /// 「确认登录」。所以按钮在等待期间保持加载态，并说明「请查收邮件」。
+  Future<void> _handleEmailSignIn() async {
+    final handler = widget.onEmailSignIn;
+    if (handler == null || _emailBusy) return;
+
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      // 空输入直接提示，省掉一次必然失败的请求。
+      setState(() => _localError = '请先输入邮箱地址');
+      return;
+    }
+
+    setState(() {
+      _emailBusy = true;
+      _emailSent = false;
+      _localError = null;
+    });
+
+    String? error;
+    try {
+      error = await handler(email, () {
+        // 邮件已受理：切文案。页面可能已被销毁（用户返回上一页），故判 mounted。
+        if (mounted) setState(() => _emailSent = true);
+      });
+    } catch (e) {
+      SpbLog.warn('邮箱登录时异常', {'error': e.toString()});
+      error = '邮箱登录失败：$e';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _emailBusy = false;
+      _emailSent = false;
       _localError = error;
     });
   }
@@ -275,7 +349,7 @@ class _LoginPageState extends State<LoginPage> {
                       key: const ValueKey('login-wechat-button'),
                       // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
                       // 登录流程（state/PKCE 会互相覆盖）。
-                      onPressed: _busy || _wechatBusy
+                      onPressed: _busy || _wechatBusy || _emailBusy
                           ? null
                           : _handleWeChatSignIn,
                       icon: _wechatBusy
@@ -300,7 +374,9 @@ class _LoginPageState extends State<LoginPage> {
                   FilledButton.icon(
                     key: const ValueKey('login-sso-button'),
                     // 加载中禁用，避免重复发起授权（会产生多个 state）。
-                    onPressed: _busy || _wechatBusy ? null : _handleSignIn,
+                    onPressed: _busy || _wechatBusy || _emailBusy
+                        ? null
+                        : _handleSignIn,
                     icon: _busy
                         ? const SizedBox(
                             width: SpbSpacing.lg,
@@ -319,6 +395,10 @@ class _LoginPageState extends State<LoginPage> {
                       color: scheme.onSurfaceVariant,
                     ),
                   ),
+                  if (widget.onEmailSignIn != null) ...[
+                    const SizedBox(height: SpbSpacing.lg),
+                    _buildEmailSection(context),
+                  ],
                   if (widget.onImportSession != null) ...[
                     const SizedBox(height: SpbSpacing.lg),
                     _buildImportSection(context),
@@ -329,6 +409,70 @@ class _LoginPageState extends State<LoginPage> {
           ),
         ),
       ),
+    );
+  }
+
+  /// 邮箱 magic link 登录区域。
+  ///
+  /// 输入框与按钮始终可见（不像粘贴导入那样收起）：它是一条**对等**的登录
+  /// 路径，不是补救措施。收起会让不知道它存在的用户永远用不上。
+  Widget _buildEmailSection(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final locked = _busy || _wechatBusy || _emailBusy;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const Expanded(child: Divider()),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: SpbSpacing.sm),
+              child: Text(
+                '或',
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const Expanded(child: Divider()),
+          ],
+        ),
+        const SizedBox(height: SpbSpacing.md),
+        TextField(
+          key: const ValueKey('login-email-field'),
+          controller: _emailController,
+          enabled: !locked,
+          keyboardType: TextInputType.emailAddress,
+          autocorrect: false,
+          enableSuggestions: false,
+          textInputAction: TextInputAction.go,
+          onSubmitted: (_) => _handleEmailSignIn(),
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            labelText: '邮箱地址',
+            hintText: 'you@example.com',
+          ),
+        ),
+        const SizedBox(height: SpbSpacing.sm),
+        FilledButton.tonal(
+          key: const ValueKey('login-email-button'),
+          onPressed: locked ? null : _handleEmailSignIn,
+          child: Text(
+            _emailBusy ? (_emailSent ? '已发送，请在邮件中确认…' : '正在发送…') : '用邮件登录',
+          ),
+        ),
+        const SizedBox(height: SpbSpacing.sm),
+        Text(
+          _emailBusy && _emailSent
+              ? '如果该邮箱已注册，你会收到一封登录邮件。点开链接并确认后，'
+                    '本应用会自动完成登录。'
+              : '我们会向该邮箱发送一次性登录链接，无需密码。',
+          textAlign: TextAlign.center,
+          style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+      ],
     );
   }
 

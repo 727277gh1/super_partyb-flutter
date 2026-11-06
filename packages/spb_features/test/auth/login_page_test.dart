@@ -23,6 +23,8 @@ void main() {
     AuthState state = const AuthState(),
     Future<String?> Function(String raw)? onImportSession,
     Future<String?> Function()? onWeChatSignIn,
+    Future<String?> Function(String email, void Function() onSent)?
+    onEmailSignIn,
     Size? size,
   }) async {
     // 窗口尺寸：默认 800×600。改小可复现「内容过高溢出」这类布局问题
@@ -40,6 +42,7 @@ void main() {
           state: state,
           onImportSession: onImportSession,
           onWeChatSignIn: onWeChatSignIn,
+          onEmailSignIn: onEmailSignIn,
         ),
       ),
     );
@@ -275,6 +278,163 @@ void main() {
 
       expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
       expect(find.textContaining('微信登录失败'), findsOneWidget);
+    });
+  });
+
+  group('登录页：邮箱 magic link', () {
+    testWidgets('未注入回调时不展示邮箱入口', (tester) async {
+      await pumpLogin(tester, onSignIn: () async => null);
+      expect(find.byKey(const ValueKey('login-email-field')), findsNothing);
+      expect(find.byKey(const ValueKey('login-email-button')), findsNothing);
+    });
+
+    testWidgets('注入后展示输入框与按钮（始终可见，不像粘贴那样收起）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, onSent) async => null,
+      );
+      expect(find.byKey(const ValueKey('login-email-field')), findsOneWidget);
+      expect(find.text('用邮件登录'), findsOneWidget);
+      expect(find.textContaining('一次性登录链接'), findsOneWidget);
+    });
+
+    testWidgets('空输入不调回调，只提示（避免必然失败的请求）', (tester) async {
+      var calls = 0;
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, onSent) async {
+          calls++;
+          return null;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pump();
+
+      expect(calls, 0);
+      expect(find.text('请先输入邮箱地址'), findsOneWidget);
+    });
+
+    testWidgets('输入邮箱后点按钮，回调收到裁掉空白的邮箱一次', (tester) async {
+      final received = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, onSent) async {
+          received.add(email);
+          return null;
+        },
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-email-field')),
+        '  user@example.com  ',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pumpAndSettle();
+
+      expect(received, ['user@example.com']);
+    });
+
+    testWidgets('邮件受理后按钮文案切到「已发送」（用户知道该去查收）', (tester) async {
+      final completer = Completer<String?>();
+      void Function()? sentSignal;
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, onSent) {
+          sentSignal = onSent;
+          return completer.future;
+        },
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-email-field')),
+        'user@example.com',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pump();
+      expect(find.text('正在发送…'), findsOneWidget);
+
+      // 模拟编排层在邮件受理成功后调 onSent。
+      sentSignal!();
+      await tester.pump();
+      expect(find.text('已发送，请在邮件中确认…'), findsOneWidget);
+      // 防枚举：文案不能说「邮件已发送」。
+      expect(find.textContaining('如果该邮箱已注册'), findsOneWidget);
+
+      completer.complete(null);
+      await tester.pumpAndSettle();
+      expect(find.text('用邮件登录'), findsOneWidget);
+    });
+
+    testWidgets('等待期间三个入口全部禁用（避免并发发起两套登录）', (tester) async {
+      final completer = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: () async => null,
+        onEmailSignIn: (email, onSent) => completer.future,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-email-field')),
+        'user@example.com',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pump();
+
+      final sso = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('login-sso-button')),
+      );
+      final wechat = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('login-wechat-button')),
+      );
+      final email = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('login-email-button')),
+      );
+      expect(sso.onPressed, isNull);
+      expect(wechat.onPressed, isNull);
+      expect(email.onPressed, isNull);
+
+      completer.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('失败原因展示在错误条（与 onSignIn 同语义）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, onSent) async => '登录链接已过期，请重新发起',
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-email-field')),
+        'user@example.com',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('登录链接已过期，请重新发起'), findsOneWidget);
+    });
+
+    testWidgets('回调抛异常时兜住并展示（不白屏）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, onSent) async => throw StateError('boom'),
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('login-email-field')),
+        'user@example.com',
+      );
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('邮箱登录失败'), findsOneWidget);
     });
   });
 

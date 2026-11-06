@@ -16,6 +16,7 @@ export 'src/habit_api.dart';
 export 'src/http_client.dart';
 export 'src/loopback_redirect_server.dart';
 export 'src/miniapp_api.dart';
+export 'src/magic_link.dart';
 export 'src/miniprogram_login.dart';
 export 'src/oidc_callback.dart';
 export 'src/oidc_client.dart';

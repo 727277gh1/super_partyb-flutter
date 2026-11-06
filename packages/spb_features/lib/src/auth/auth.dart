@@ -15,3 +15,4 @@ library;
 
 export 'auth_state.dart';
 export 'login_page.dart';
+export 'magic_link_signin.dart';

@@ -638,6 +638,32 @@ class AuthStateNotifier extends Notifier<AuthState> {
     return null;
   }
 
+  /// 邮箱 magic link 登录。
+  ///
+  /// 与 [signIn] 的区别：整条流程（发信 → 等确认 → 兑换）都在本方法内完成，
+  /// 不依赖深链回跳；成功时落盘点已调 [signedIn]。
+  ///
+  /// [onSent] 在**邮件受理成功**后触发，供登录页切换「已发送，请查收」文案。
+  Future<String?> emailSignIn(String email, void Function() onSent) async {
+    final action = ref.read(emailSignInActionProvider);
+    String? error;
+    try {
+      error = await action(email, onSent);
+    } on SpbError catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '邮箱登录失败：$e';
+    }
+    if (error != null) {
+      state = AuthState.failed(error);
+      return error;
+    }
+    // 落盘点（oidcCallbackHandlerProvider）内部已调 signedIn()；这里只在
+    // 「没被推进」时兜底，避免把已登录覆盖成未知态。
+    if (!state.isAuthenticated) state = AuthState.unauthenticated;
+    return null;
+  }
+
   /// 标记会话失效（如收到 [AuthError]）。**不清凭证**。
   void markUnauthenticated(String? message) {
     state = message == null
@@ -684,6 +710,38 @@ final wechatSignInActionProvider = Provider<Future<String?> Function()>((ref) {
   );
 });
 
+/// 邮箱 magic link 客户端。
+///
+/// 端点由 issuer 推导（`{issuer}/api/v1/auth/magic-link`），不硬编码域名。
+final magicLinkClientProvider = Provider<MagicLinkClient>((ref) {
+  final config = ref.watch(oidcConfigProvider);
+  return MagicLinkClient(
+    issuer: Uri.parse(config.issuer),
+    clientId: config.clientId,
+    redirectUri: config.redirectUri,
+  );
+});
+
+/// 「用邮件登录」动作。
+///
+/// 编排在 `spb_features` 的 [magicLinkSignIn]：发信 → 轮询确认 → 兑换授权码 →
+/// 交给与深链回调同一个落盘点（`oidcCallbackHandlerProvider`）。
+///
+/// [isActive] 传 `null`：调用方（登录页）在等待期间保持页面存活，取消由
+/// 页面销毁后的 `mounted` 判断兜住——这里拿不到页面的生命周期。
+final emailSignInActionProvider =
+    Provider<Future<String?> Function(String email, void Function() onSent)>((
+      ref,
+    ) {
+      return (email, onSent) => magicLinkSignIn(
+        client: ref.read(magicLinkClientProvider),
+        store: ref.read(pendingAuthStoreProvider),
+        email: email,
+        onCode: ref.read(oidcCallbackHandlerProvider),
+        onSent: () async => onSent(),
+      );
+    });
+
 /// 认证动作集合。
 final authControllerProvider = Provider<AuthActions>((ref) {
   return AuthActions(
@@ -692,6 +750,8 @@ final authControllerProvider = Provider<AuthActions>((ref) {
     importSession: (raw) =>
         ref.read(authStateProvider.notifier).importSession(raw),
     wechatSignIn: () => ref.read(authStateProvider.notifier).wechatSignIn(),
+    emailSignIn: (email, onSent) =>
+        ref.read(authStateProvider.notifier).emailSignIn(email, onSent),
   );
 });
 
@@ -702,6 +762,7 @@ class AuthActions {
     required this.signOut,
     required this.importSession,
     required this.wechatSignIn,
+    required this.emailSignIn,
   });
 
   final Future<String?> Function() signIn;
@@ -712,6 +773,10 @@ class AuthActions {
 
   /// 微信一键登录（唤起小程序 → 确认 → 兑换授权码 → 落盘）。
   final Future<String?> Function() wechatSignIn;
+
+  /// 邮箱 magic link 登录，见 [AuthStateNotifier.emailSignIn]。
+  final Future<String?> Function(String email, void Function() onSent)
+  emailSignIn;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。

@@ -330,3 +330,111 @@ return refreshed?.accessToken;       // → null
 - **不做全局「网络恢复后自动重试」**：那需要订阅连通性事件，而 §5.1.1 已明确
   「有默认路由 ≠ 服务端可达」——`connectivity_plus` 给不出可信信号。下一次
   用户操作会自己刷新成功。
+
+### 6.67 邮箱 magic link 登录（issue #81，2026-11）
+
+服务端实现位于 id-provider 仓库 `go/internal/magiclink/`。这里记客户端取向，但把链路写全——否则「为什么客户端要轮询」没有上下文。
+
+#### 为什么加这条路
+
+两条既有入口都有摩擦：
+
+| 入口 | 摩擦 |
+|------|------|
+| 系统浏览器 SSO | 移动端至少 3 次跳转；桌面端最后一步要靠「粘贴导入会话」 |
+| 微信一键 | 要求安装微信，且受开放平台审核与资质约束 |
+| **邮箱 magic link** | 只需要一个能收信的邮箱 |
+
+对「没装微信、又嫌 SSO 跳转麻烦」的用户，这是目前唯一成立的路径。
+
+#### 链路
+
+```
+客户端                                IdP
+  │  POST /api/v1/auth/magic-link      │
+  │  {email}                           │  不管邮箱是否存在都 202
+  │ ─────────────────────────────────► │  存在 → 发信；不存在 → 静默受理
+  │  ◄───────────── {requestId}        │
+  │  onSent() → UI 切「已发送，请查收」 │
+  │                                    │
+  │                        （用户点邮件链接 → IdP 落地页 → 点「确认登录」）
+  │                                    │
+  │  GET  .../check?request_id=…       │  只回 pending|confirmed|expired
+  │ ─────────────────────────────────► │  不带任何凭证
+  │  ◄───────────── {status}           │
+  │                                    │
+  │  POST .../exchange                 │  单次消费
+  │  {request_id, client_id,           │  校验 client/redirect_uri/PKCE
+  │   redirect_uri, state,             │  → fosite 签发**标准授权码**
+  │   code_challenge, …}               │
+  │  ◄───────────── {code}             │
+  │                                    │
+  │  POST /oauth2/token (PKCE)         │  与浏览器登录同一个端点
+  │ ─────────────────────────────────► │
+  │  ◄──── access/refresh/id_token     │
+```
+
+客户端代码：
+
+- `packages/spb_api/lib/src/magic_link.dart` — HTTP 客户端（`MagicLinkClient`）；
+- `packages/spb_features/lib/src/auth/magic_link_signin.dart` — 编排（发信 →
+  轮询 → 兑换 → 交给落盘点）；
+- `packages/spb_features/lib/src/auth/login_page.dart` — 登录页入口
+  （`onEmailSignIn`，为 null 时不展示）；
+- 落盘点复用各端既有的「code → token → 安全存储 → 已登录」实现
+  （移动端 `oidcCallbackHandlerProvider`，桌面端同名 Provider）。
+
+#### 为什么兑换出的是「标准授权码」
+
+服务端不另发一套凭证，而是让 magic link 走 fosite 的授权码流程。好处是
+refresh / 吊销 / `id_token` 语义与浏览器登录**完全一致**：客户端只需要一个
+落盘点，不需要为登录方式分叉。
+
+代价是必须提供 `client_id` / `redirect_uri` / PKCE，且三者必须与 IdP 注册值
+一致——不一致时 IdP 返回 `invalid_request`，客户端翻译成「客户端配置与 IdP
+注册不一致」而不是笼统的「登录失败」。
+
+#### 刻意做的几个选择
+
+**GET 落地页不消费令牌，要 POST 确认。**
+邮件安全扫描器会预取链接；GET 直接消费会让用户点进去时链接已失效。落地页
+因此是一个带「确认登录」按钮的表单。
+
+**轮询端点不带凭证，兑换端点单次消费。**
+把发凭证的动作放在高频的公开轮询端点上，等于开一个发 token 的口子。
+
+**响应与邮箱是否存在无关。**
+否则这个端点就是账号枚举工具。客户端因此**不能**说「邮件已发送」，只能说
+「如果该邮箱已注册，你会收到…」（`login_page.dart` 的文案与测试都钉住了这点）。
+
+**客户端轮询有退避 + 总超时。**
+10 分钟窗口内固定 2 秒轮询是 ~300 次请求，退避后降到 ~80。超时必须有：
+用户走开后登录页不能永远停在「请在邮件中确认」。
+
+**桌面端不做 redirect。**
+确认发生在浏览器里的 IdP 落地页，客户端只轮询结果，所以**不需要**监听
+loopback 端口。这也意味着 magic link 在桌面端不依赖「浏览器能把 code 交回
+进程」这条脆弱链路（Linux 无主流 webview 插件的历史问题，见
+`docs/rfc8252-loopback-signin.md`）。
+
+#### 部署前提
+
+1. **邮件渠道可用**：id-provider 的 `internal/mailer` 必须配置好（否则端点
+   返回 `service_unavailable`，客户端提示「服务端暂时无法发送登录邮件」）。
+2. **client 已注册**：public client（`token_endpoint_auth_method=none`）且
+   `redirect_uri` 与客户端一致——移动端 `partyb://oidc/callback`，桌面端
+   `http://127.0.0.1/callback`。
+3. 服务端可调参数（环境变量）：`MAGIC_LINK_TOKEN_TTL`（默认 10m）、
+   `MAGIC_LINK_SEND_INTERVAL`（默认 60s，同邮箱发信间隔）。
+
+#### 已知限制
+
+- **邮件进垃圾箱等于登录失败**：文案里给出了「改用 SSO」的提示，但客户端
+  拿不到「信是否被投递」的信息；
+- **多端串话**：在手机请求、在电脑点链接，会话会建立在你点开链接的那一端
+  （客户端轮询到 `confirmed` 才兑换，故不会建立到错误设备上）；落地页仍显示
+  「确认登录」以避免误点；
+- **暂不减 `onImportSession`**：issue 原先设想 magic link 落地后删除桌面端的
+  粘贴导入。本轮保留它——邮件可达性本身就是这条路径的失败模式（见上一条），
+  在没有「邮件不可用时的替代确认」之前，删掉用户唯一的手工兜底并不划算，
+  等 magic link 在真机/生产跑过一轮再决定。

@@ -487,6 +487,78 @@ final loopbackSignInProvider = Provider<LoopbackSignIn>((ref) {
   return ({required OidcConfig config}) => loopbackSignIn(config: config);
 });
 
+/// 待验证登录请求（`state` + PKCE verifier）的存放处。
+///
+/// 桌面端的 loopback 流程自己管 state（监听在本进程内），用不到它；但邮箱
+/// magic link 的编排（`magicLinkSignIn`）与移动端共用同一份落盘语义，故这里
+/// 仍提供一个安全存储实现。
+final pendingAuthStoreProvider = Provider<PendingAuthRequestStore>((ref) {
+  return SecurePendingAuthStore();
+});
+
+/// 把授权码换成会话的处理函数（邮箱 magic link 的落盘点）。
+///
+/// 与移动端 `oidcCallbackHandlerProvider` 同构、同语义：换 token → 写安全
+/// 存储 → 推进认证状态。桌面端此前没有这个函数，因为 loopback 流程在
+/// `signInActionProvider` 内部就把 token 换掉了；magic link 拿到的是**授权码**
+/// 而非 token，需要一个独立的兑换点。
+///
+/// ⚠️ 落盘必须用 `StoredTokens.fromOidcTokens`（落 `id_token`），理由见
+/// [signInActionProvider] 的说明。
+final oidcCallbackHandlerProvider = Provider<OidcCallbackHandler>((ref) {
+  return (code, pkce) async {
+    try {
+      final tokens = await ref
+          .read(oidcClientProvider)
+          .exchangeCode(code: code, pkce: pkce);
+      await ref
+          .read(tokenStoreProvider)
+          .write(StoredTokens.fromOidcTokens(tokens));
+      ref.read(authStateProvider.notifier).signedIn();
+      return null;
+    } on SpbError catch (e) {
+      return e.message;
+    } catch (e) {
+      return '登录失败：$e';
+    }
+  };
+});
+
+/// 把授权码换成会话的处理函数（签名与移动端一致）。
+typedef OidcCallbackHandler = Future<String?> Function(
+  String code,
+  PkcePair pkce,
+);
+
+/// 邮箱 magic link 客户端。
+final magicLinkClientProvider = Provider<MagicLinkClient>((ref) {
+  final config = ref.watch(oidcConfigProvider);
+  return MagicLinkClient(
+    issuer: Uri.parse(config.issuer),
+    clientId: config.clientId,
+    redirectUri: config.redirectUri,
+  );
+});
+
+/// 「用邮件登录」动作（发信 → 等确认 → 兑换授权码 → 落盘）。
+///
+/// 桌面端的 redirect_uri 是 loopback（`http://127.0.0.1/callback`），但本流程
+/// **不会**真的打开那个端口：确认发生在浏览器里的 IdP 落地页，客户端只轮询
+/// 结果，因此不需要监听。兑换时声明的 redirect_uri 必须与 client 注册值一致，
+/// 否则 IdP 会以 `invalid_request` 拒绝。
+final emailSignInActionProvider =
+    Provider<Future<String?> Function(String email, void Function() onSent)>((
+      ref,
+    ) {
+      return (email, onSent) => magicLinkSignIn(
+        client: ref.read(magicLinkClientProvider),
+        store: ref.read(pendingAuthStoreProvider),
+        email: email,
+        onCode: ref.read(oidcCallbackHandlerProvider),
+        onSent: () async => onSent(),
+      );
+    });
+
 final signInActionProvider = Provider<Future<String?> Function()>((ref) {
   return () async {
     final result = await ref.read(loopbackSignInProvider)(
@@ -658,6 +730,25 @@ class AuthStateNotifier extends Notifier<AuthState> {
     state = AuthState.unauthenticated;
   }
 
+  /// 邮箱 magic link 登录（与移动端同构，编排在 `magicLinkSignIn`）。
+  Future<String?> emailSignIn(String email, void Function() onSent) async {
+    final action = ref.read(emailSignInActionProvider);
+    String? error;
+    try {
+      error = await action(email, onSent);
+    } on SpbError catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '邮箱登录失败：$e';
+    }
+    if (error != null) {
+      state = AuthState.failed(error);
+      return error;
+    }
+    if (!state.isAuthenticated) state = AuthState.unauthenticated;
+    return null;
+  }
+
   /// 标记会话失效（如收到 [AuthError]）。**不清凭证**：
   /// 401 可能是网关侧临时问题，清掉会让用户丢失 refresh_token。
   void markUnauthenticated(String? message) {
@@ -677,6 +768,8 @@ final authControllerProvider = Provider<AuthActions>((ref) {
     signOut: () => ref.read(authStateProvider.notifier).signOut(),
     importSession: (raw) =>
         ref.read(authStateProvider.notifier).importSession(raw),
+    emailSignIn: (email, onSent) =>
+        ref.read(authStateProvider.notifier).emailSignIn(email, onSent),
   );
 });
 
@@ -686,6 +779,7 @@ class AuthActions {
     required this.signIn,
     required this.signOut,
     required this.importSession,
+    required this.emailSignIn,
   });
 
   final Future<String?> Function() signIn;
@@ -693,6 +787,10 @@ class AuthActions {
 
   /// 粘贴导入已有会话，见 [AuthStateNotifier.importSession]。
   final Future<String?> Function(String raw) importSession;
+
+  /// 邮箱 magic link 登录，见 [AuthStateNotifier.emailSignIn]。
+  final Future<String?> Function(String email, void Function() onSent)
+  emailSignIn;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。

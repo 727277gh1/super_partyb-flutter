@@ -319,6 +319,10 @@ class _LoginPage extends ConsumerWidget {
       // 送回进程，不需要用户手工搬运凭证。
       onImportSession: (raw) =>
           ref.read(authControllerProvider).importSession(raw),
+      // 邮箱 magic link：不要求用户在浏览器与本进程之间搬运凭证，是粘贴导入
+      // 之外的「无摩擦」路径（邮件可达时优先用它）。
+      onEmailSignIn: (email, onSent) =>
+          ref.read(authControllerProvider).emailSignIn(email, onSent),
     );
   }
 }
