@@ -16,7 +16,12 @@
 | iOS `CFBundleURLTypes`（scheme `partyb`） | ✅ 已注册 |
 | 回调接收 + 解析 + state 校验 + 换 token | ✅ 已实现并单测（21 例） |
 | `flutter build apk --debug` | ✅ 构建成功 |
-| **能否真的完成登录** | ❌ **不能**，缺两个 IdP 侧配置（见 §3） |
+| **能否真的完成登录** | ⚠️ 差最后一步：IdP 侧配置 **2026-11-06 已完成**（见 §3），剩真机回跳闭环验证 |
+
+> ✅ **2026-11-06 状态更新**：§3 的两个 IdP 侧阻塞项均已完成（scheme 回调
+> 注册 + public client），authorize 端点实测 `400` → `302`。本文其余部分按
+> 当时快照保留；loopback 同样不可行的实测结论（下段、§1）指
+> **client 当时未注册任何可用回调**的时点，注册后两种形态都可用。
 
 **任务原文的备选方案（loopback）同样不可行**——本次重新实测确认，
 自定义 scheme 与 loopback 都被 IdP 以 `400 invalid_request` 拒绝（§1）。
