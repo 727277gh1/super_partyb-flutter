@@ -198,121 +198,135 @@ void main() {
     );
   });
 
-  testWidgets(
-    '对话页 Agent 切换：AppBar 入口接到 POST /chat/groups/:id/sessions/switch',
-    (tester) async {
-      // ## 本用例验证什么
-      //
-      // 移动端没有侧边栏，agent 切换是 AppBar 上的独立入口（与「对话设置」
-      // 图标按钮并列）。这里验证 router **真的注入了**列表与回调，且回调打到
-      // 正确端点、`agentId` 以 **camelCase** 进 body。
-      //
-      // `AgentSwitcher` 自身行为由 `spb_features` 的测试覆盖；但那个测试用
-      // 手工构造的回调，发现不了「router 忘了注入」——而那正是本仓库最常见的
-      // 失败模式（功能实现了但没人调用）。
-      final hit = <({String path, Object? body})>[];
-      final h = await pumpApp(
-        tester,
-        sseClient: FakeSseClient(),
-        loadAgents: () async => const [
-          Agent(id: 'agent_a', name: '写作助手'),
-          Agent(id: 'agent_b', name: '代码助手'),
-        ],
-        beforePump: (adapter) {
-          adapter.onGet(
-            '/api/auth/me',
-            (server) => server.reply(200, {
-              'id': 'usr_REAL',
-              'email': 'a@b.c',
-              'name': 'Test',
-              'role': 'member',
-              'roles': ['member'],
-              'permissions': <String>[],
+  testWidgets('对话页选 Agent：本地生效不发请求；「同 Agent 开新会话」才调 /sessions/switch', (
+    tester,
+  ) async {
+    // ## 本用例验证什么（与桌面端同一取向，对齐 webapp 的 `setAgentForGroup`）
+    //
+    // 1. 移动端没有侧边栏，agent 选择是 AppBar 上的独立入口（与「对话设置」
+    //    图标按钮并列）——router **真的注入了**列表与两个回调；
+    // 2. 点选 agent 是**纯本地**动作：不产生任何 HTTP 请求；
+    // 3. AppBar 标签跟着本地选择变；
+    // 4. 「同 Agent 开新会话」是唯一立即调端点的入口，`agentId` 以
+    //    **camelCase** 进 body，且用本地选中的 agent。
+    final hit = <({String path, Object? body})>[];
+    final h = await pumpApp(
+      tester,
+      sseClient: FakeSseClient(),
+      loadAgents: () async => const [
+        Agent(id: 'agent_a', name: '写作助手'),
+        Agent(id: 'agent_b', name: '代码助手'),
+      ],
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_m',
+          (server) => server.reply(200, {
+            'id': 'grp_m',
+            'user_id': 'usr_REAL',
+            'title': '测试对话',
+            'active_session': {
+              'agent_id': 'agent_a',
+              'session_id': 'up_1',
+              'role': 'owner',
+            },
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_m/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_m', 'limit': 20},
+        );
+        adapter.onPost(
+          '/chat/groups/grp_m/sessions/switch',
+          (server) => server.replyCallback(200, (options) {
+            hit.add((path: options.path, body: options.data));
+            return {
+              'group_id': 'grp_m',
+              'new_agent_id': 'agent_b',
+              'session_id': null,
               'status': 'active',
-            }),
-          );
-          adapter.onGet(
-            '/chat/groups/grp_m',
-            (server) => server.reply(200, {
-              'id': 'grp_m',
-              'user_id': 'usr_REAL',
-              'title': '测试对话',
-              'active_session': {
-                'agent_id': 'agent_a',
-                'session_id': 'up_1',
-                'role': 'owner',
-              },
-            }),
-          );
-          adapter.onGet(
-            '/chat/groups/grp_m/timeline',
-            (server) => server.reply(200, {
-              'items': <Map<String, dynamic>>[],
-              'next_before_global_seq': '',
-            }),
-            queryParameters: {'limit': 200},
-          );
-          adapter.onGet(
-            '/users/usr_REAL/chat/messages/pending',
-            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-            queryParameters: {'group_id': 'grp_m', 'limit': 20},
-          );
-          adapter.onPost(
-            '/chat/groups/grp_m/sessions/switch',
-            (server) => server.replyCallback(200, (options) {
-              hit.add((path: options.path, body: options.data));
-              return {
-                'group_id': 'grp_m',
-                'new_agent_id': 'agent_b',
-                'session_id': null,
-                'status': 'active',
-                'force_new_session': false,
-                'switched': true,
-              };
-            }),
-            data: Matchers.any,
-          );
-        },
-      );
+              'force_new_session': false,
+              'switched': true,
+            };
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
 
-      h.router.go(SpbRoutes.chat('grp_m'));
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
+    h.router.go(SpbRoutes.chat('grp_m'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
 
-      expect(
-        find.byKey(const ValueKey('agent-switcher')),
-        findsOneWidget,
-        reason: 'router 必须注入 loadAgents，否则入口会因空列表而隐藏',
-      );
-      // 回归防线：「对话设置」入口仍在（两个图标按钮共存，不是替换）。
-      expect(find.byKey(const ValueKey('open-group-settings')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('agent-switcher')),
+      findsOneWidget,
+      reason: 'router 必须注入 loadAgents，否则入口会因空列表而隐藏',
+    );
+    // 回归防线：「对话设置」入口仍在（两个图标按钮共存，不是替换）。
+    expect(find.byKey(const ValueKey('open-group-settings')), findsOneWidget);
 
-      await tester.tap(find.byKey(const ValueKey('agent-switcher')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('agent-option-agent_b')));
-      await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-option-agent_b')));
+    await tester.pumpAndSettle();
 
-      // 必须包在 `runAsync` 里：回调内部会 await dio 请求，dio 的 mock 响应
-      // 靠真实事件循环完成（FakeAsync 时区里 await 会死锁）。
-      await tester.runAsync(() async {
-        await tester.tap(find.byKey(const ValueKey('agent-switch-confirm-ok')));
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-      });
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 2));
+    expect(hit, isEmpty, reason: '选 agent 必须是纯本地动作（对齐 webapp）：不应发出任何请求');
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+          .data,
+      '代码助手',
+      reason: 'AppBar 标签必须跟着本地选择变（_effectiveAgentId 优先本地值）',
+    );
 
-      expect(hit, hasLength(1), reason: '必须真的发出一次切换请求');
-      expect(hit.single.path, '/chat/groups/grp_m/sessions/switch');
-      final body = hit.single.body! as Map<String, dynamic>;
-      expect(
-        body['agentId'],
-        'agent_b',
-        reason: '⚠️ 键名必须是 camelCase 的 agentId——写成 agent_id 会 400「agentId 不能为空」',
-      );
-      expect(body.containsKey('agent_id'), isFalse);
-    },
-  );
+    // 「同 Agent 开新会话」：开菜单 → 最后一项。
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+
+    // 必须包在 `runAsync` 里：回调内部会 await dio 请求，dio 的 mock 响应
+    // 靠真实事件循环完成（FakeAsync 时区里 await 会死锁）。
+    await tester.runAsync(() async {
+      await tester.tap(find.byKey(const ValueKey('agent-new-session')));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(hit, hasLength(1), reason: '开新会话必须真的发出一次切换请求');
+    expect(hit.single.path, '/chat/groups/grp_m/sessions/switch');
+    final body = hit.single.body! as Map<String, dynamic>;
+    expect(
+      body['agentId'],
+      'agent_b',
+      reason:
+          '⚠️ 键名必须是 camelCase 的 agentId——写成 agent_id 会 400「agentId 不能为空」；'
+          '且必须用**本地选中的** agent（否则开新会话会把绑定改回旧 agent）',
+    );
+    expect(body.containsKey('agent_id'), isFalse);
+    expect(body['force_new_session'], isTrue);
+  });
 
   testWidgets('对话页交付物入口：AppBar 按钮打开弹层并按 path_prefix 拉本对话清单', (tester) async {
     // ## 本用例验证什么

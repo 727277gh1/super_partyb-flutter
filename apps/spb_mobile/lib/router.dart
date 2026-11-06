@@ -741,32 +741,34 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 故 build 在 userId 就绪前只渲染加载态。
   String? _userId;
 
-  /// 建议卡标注的「下一条消息由谁回答」（follow_up 的 agent_id）。
+  /// 本对话「接下来由谁回答」的**本地选择**（`null` = 未覆盖，沿用服务端绑定）。
   ///
-  /// 点击建议时设置，发送时经 [ConversationPage.onSend] 透传给控制器。
-  /// null 表示未标注（服务端 routingMode=auto 照常走分类链）。
+  /// 两个写入点（语义完全一致，都是本地值）：
+  /// - AppBar 的 [AgentSwitcher]（`selectAgent` 回调）；
+  /// - 建议卡上的 `agent_id` 标注（follow_up 卡片「先切人再追加」）。
   ///
-  /// ## ⚠️ 它必须被**清掉**，不能一直留着
+  /// 读取点：发送时经 [ConversationPage.onSend] 作为 `agent_id` 透传，服务端
+  /// 在入队事务里据此 `ReplaceBinding`（归档旧 owner 绑定 + 写新绑定）。
   ///
-  /// 这个值**在界面上不可见**：AppBar 的 [AgentSwitcher] 显示的是
-  /// `_group.activeSession.agentId`（服务端权威绑定），不是它。于是「点过一次
-  /// 建议卡」之后，后续每条消息都带着这个陈旧的 `agent_id` 发出，而用户看不到
-  /// 任何提示。
+  /// ## 为什么是**持久**的（对齐 webapp）
   ///
-  /// 更糟的是它不只是「用旧 agent 回答」：服务端 `resolveGroupAgent` 的优先级
-  /// 第 1 条是请求里显式的 `agent_id`，而 `agentExplicit` 会走到
-  /// `ensureGroupAgentBinding(replace: true)`——即**归档当前绑定并重新绑到这个
-  /// 陈旧 agent**。用户刚在 AppBar 切到 B，发一条消息就被**静默改回** A，而
-  /// 切换时那句「已切换 Agent」的提示还在屏幕上。
+  /// webapp 的选择是 `agentByGroup[groupId]`，选完一直生效到用户改选或重新
+  /// 加载页面（`BOOTSTRAP` 用 `group.active_session` 覆盖回服务端绑定）。
+  /// 本状态与之对齐：**发送成功后不清**——清了就等于「每条消息都要重新选一次
+  /// Agent」，而 AppBar 上明明写着当前是谁。
   ///
-  /// 故三个清除点（缺任一个都会留下这条通路）：
-  /// - 切换成功后（[_switchAgent]：用户的显式选择优先于旧标注）；
-  /// - 换对话时（[didUpdateWidget]：State 会被 Flutter 复用，不清就泄漏到
-  ///   下一个对话）；
-  /// - 发送成功后（[build] 里的 `onSend`：标注的语义是「**下一条**消息由谁
-  ///   回答」，一次性。只在成功时清——失败那条没发出去，用户重试应当仍由
-  ///   同一个 agent 回答）。
+  /// ## 唯一的清除点：换对话
+  ///
+  /// [didUpdateWidget]（State 会被 Flutter 复用，不清就泄漏到下一个对话）。
+  /// 换对话后回落到新 group 的 `activeSession.agentId`。
   String? _selectedAgentId;
+
+  /// 「本对话当前由谁回答」的**有效**值：本地选择优先，否则服务端绑定。
+  ///
+  /// AppBar 标签、菜单勾选、「同 Agent 开新会话」都用它——三者必须同源，
+  /// 否则会出现「标签写着 A，点开菜单勾的是 B」这类自相矛盾。
+  String? get _effectiveAgentId =>
+      _selectedAgentId ?? _group?.activeSession?.agentId;
 
   /// 是否正在解析 userId（防重复请求）。
   bool _resolvingUser = false;
@@ -986,62 +988,64 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 建议卡的 agent 标注同理：它是**上一个对话**里某条建议的标注，带进
       // 新对话会让第一条消息发给一个用户没在这个对话里选过的 agent
       // （且服务端会据此改写新对话的绑定，见 [_selectedAgentId] 的说明）。
+      // 清掉后回落到新 group 的 `activeSession.agentId`（[_effectiveAgentId]）。
       _selectedAgentId = null;
       _resolveUserAndFocus();
       _loadGroup();
     }
   }
 
-  /// 把本对话切到另一个 agent（含「同 Agent 开新会话」）。
+  /// 同 Agent 开新会话：立刻归档旧绑定、写一条新绑定（上下文从此断开）。
   ///
-  /// ## 切换后做什么
+  /// 与 webapp 输入栏的「新对话」按钮（`startNewConversation`）同一动作，也是
+  /// 本页**唯一**调 `POST /chat/groups/:gid/sessions/switch` 的地方。
   ///
-  /// 1. **重拉 group**：`activeSession.agentId` 变了，AppBar 的标签要跟着变
-  ///    （它读的是 `_group.activeSession`，不是本地推断）；
-  /// 2. **清掉建议卡的 agent 标注**（[_selectedAgentId]）：用户的显式切换必须
-  ///    压过之前某条建议卡留下的标注，否则下一条消息会带着旧 `agent_id` 发出，
-  ///    而服务端会据此把绑定**改回**旧 agent（详见该字段的文档）；
-  /// 3. 弹一句「已切换 Agent / 已开始新会话」。
+  /// ## 为什么只有它需要服务端调用
+  ///
+  /// 换 agent 不需要（选中的 agent 随下一条消息的 `agent_id` 发出，服务端在
+  /// 入队事务里重绑，见 [_selectedAgentId]）。而「开新会话」要求**现在**就划出
+  /// 分界线——它没有「下一条消息」可以搭载，故必须显式调端点。
+  ///
+  /// ## 成功后做什么
+  ///
+  /// 1. **重拉 group**：服务端刚换了 binding（`activeSession` 变了），本地
+  ///    `_group` 已过期；
+  /// 2. 弹一句「已开始新会话」。
+  ///
+  /// 不弹确认框（对齐 webapp：入口文案本身已写清它做什么，再弹一次只是形式
+  /// 主义）。也不清 [_selectedAgentId]——开新会话保留当前 agent，这是它相对
+  /// 「换 agent」的唯一区别。
   ///
   /// ## 有意**不**刷新时间线
   ///
-  /// 历史消息属于这个 group，切换不改变它们（服务端只归档 binding，不动
-  /// `chat_events`）；SSE 是 user 级订阅，也不因切换而重连。故重拉时间线只会
+  /// 历史消息属于这个 group，归档 binding 不改变它们（服务端不动
+  /// `chat_events`）；SSE 是 user 级订阅，也不因它而重连。故重拉时间线只会
   /// 让列表闪一下、把用户正在读的位置打乱，没有任何新信息。
   ///
-  /// 失败弹 SnackBar：切换是用户主动发起且带确认的动作，失败必须告知——
-  /// 静默失败会让用户以为切好了，接着发消息却发现回复还来自旧 agent。
-  Future<GroupAgentSwitchResult> _switchAgent(
-    String agentId, {
-    required bool forceNewSession,
-  }) async {
-    if (_switchingAgent) {
-      throw const ValidationError('切换正在进行中，请稍候');
-    }
+  /// 失败弹 SnackBar：这是用户主动发起的动作，静默失败会让用户以为已经开了
+  /// 新会话，接着发消息却发现模型还记得上一段。
+  Future<void> _startNewSession() async {
+    if (_switchingAgent) return;
+    final agentId = _effectiveAgentId ?? '';
+    if (agentId.isEmpty) return;
     setState(() => _switchingAgent = true);
     try {
-      final result = await ref
+      await ref
           .read(agentsApiProvider)
           .switchGroupAgent(
             widget.groupId,
             agentId: agentId,
-            forceNewSession: forceNewSession,
+            forceNewSession: true,
           );
-      if (!mounted) return result;
-      // 先清标注再重拉：两者都在同一个同步段里完成，避免「已重拉但标注还在」
-      // 的中间态被用户的下一次发送撞上。
-      setState(() => _selectedAgentId = null);
+      if (!mounted) return;
       await _loadGroup();
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
-          ..showSnackBar(
-            SnackBar(content: Text(forceNewSession ? '已开始新会话' : '已切换 Agent')),
-          );
+          ..showSnackBar(const SnackBar(content: Text('已开始新会话')));
       }
-      return result;
     } on SpbError catch (e) {
-      SpbLog.warn('切换 Agent 失败', {
+      SpbLog.warn('开新会话失败', {
         'groupId': widget.groupId,
         'agentId': agentId,
         'error': e.toString(),
@@ -1049,26 +1053,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
-          ..showSnackBar(SnackBar(content: Text(_describeSwitchError(e))));
+          ..showSnackBar(SnackBar(content: Text(_describeNewSessionError(e))));
       }
-      rethrow;
+      // 不 rethrow：调用方是 [AgentSwitcher] 的 UI 回调（结果无人消费），
+      // 上抛只会变成未捕获的异步异常（§6.24）。错误已经提示过了。
     } finally {
       if (mounted) setState(() => _switchingAgent = false);
     }
   }
 
-  /// 把切换失败翻成用户能看懂的一句话。
+  /// 把「同 Agent 开新会话」的失败翻成用户能看懂的一句话。
   ///
   /// `HttpError.message` 恒为 `"HTTP 400"`，服务端文案在 `body` 里
   /// （见 `AgentsApi._unwrap`），故必须从 body 提取。
-  static String _describeSwitchError(SpbError e) {
+  static String _describeNewSessionError(SpbError e) {
     if (e is HttpError) {
       final body = e.body ?? '';
       // 404 = agent 已被删除（列表可能是在它删除前拉的）。
       if (e.isNotFound) return '这个 Agent 已不存在，请重新打开列表选择';
-      if (body.contains('agentId')) return '切换失败：Agent 参数无效';
+      if (body.contains('agentId')) return '开新会话失败：Agent 参数无效';
       if (e.statusCode == 401) return '登录已过期，请重新登录';
-      return '切换失败（HTTP ${e.statusCode}）';
+      return '开新会话失败（HTTP ${e.statusCode}）';
     }
     if (e is NetworkError) return '网络连接失败，请检查网络后重试';
     return e.message;
@@ -1525,9 +1530,11 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 为准），且比隐藏入口让用户以为「本端不支持切 agent」要好。
       AgentSwitcher(
         loadAgents: ref.watch(loadAgentsProvider),
-        switchAgent: (agentId, {forceNewSession = false}) =>
-            _switchAgent(agentId, forceNewSession: forceNewSession),
-        currentAgentId: _group?.activeSession?.agentId,
+        // 选 agent = 纯本地（对齐 webapp 的 `setAgentForGroup`）：不发请求、
+        // 不弹确认，随下一条消息的 `agent_id` 生效。
+        selectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
+        startNewSession: _startNewSession,
+        currentAgentId: _effectiveAgentId,
         busy: _switchingAgent,
         // 极窄屏（< 360dp）只显示图标：名字最多占 140dp，配上三个常驻图标
         // 在 320dp 下仍会溢出 10px（issue #31）。名字在菜单的勾选项里可见，
@@ -2375,21 +2382,22 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
             debugPrint('延后习惯建议失败: $e');
             return const HabitSuggestionResolveResult(resolved: false);
           }),
-      // 建议卡选中的 agent 随消息透传；未选中时为 null（与默认路径等价）。
-      // 之所以自建 onSend 而非用默认 controller.send：默认路径没有地方带 agentId。
+      // 本对话当前选中的 agent 随**每条**消息透传（AppBar 选择与建议卡标注共用
+      // 同一个本地值）。之所以自建 onSend 而非用默认 controller.send：默认路径
+      // 没有地方带 agentId。
       //
-      // 发完就清（见 [_selectedAgentId] 的文档）：标注的语义是「**下一条**消息
-      // 由谁回答」，留着会让后面每条消息都带着它。只在成功时清——失败那条没发
-      // 出去，用户重试应当仍由同一个 agent 回答；且只在值没被改过时清，否则会
-      // 把在途期间用户新点的另一条建议的标注也抹掉。
-      onSend: (text) {
-        final agentId = _selectedAgentId;
-        return controller.send(input: text, agentId: agentId).then<void>((_) {
-          if (mounted && _selectedAgentId == agentId) {
-            setState(() => _selectedAgentId = null);
-          }
-        });
-      },
+      // 传 `routingMode: manual` 与 webapp 一致（`sendMessage` 里
+      // `routing: { mode: currentAgentId ? 'manual' : 'auto' }`）：没选 agent 时
+      // 交回服务端路由。
+      //
+      // 发完**不清**（对齐 webapp 的 `agentByGroup[groupId]`）：清了就等于
+      // 「每条消息都要重新选一次 Agent」，而 AppBar 上明明写着当前是谁。
+      // 清除点只有换对话（见 [_selectedAgentId] 的文档）。
+      onSend: (text) => controller.send(
+        input: text,
+        agentId: _selectedAgentId,
+        routingMode: _selectedAgentId == null ? 'auto' : 'manual',
+      ),
       // 失败 turn 的重发：锁定原 group + 原 agent，`manual` 路由跳过归属判定。
       // 不传 requestId → 服务端新建 turn（沿用旧 id 会幂等命中那个已失败的 turn）。
       onRetryTurn: (text, agentId) => controller
@@ -2416,9 +2424,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           );
         }
       },
-      // 建议卡标注了 agent_id：记住它，下一条消息（含回填后用户改过再发的）
-      // 由这个 agent 回答。注意它是**一次性**的（发送成功后即清，
-      // 见 [_selectedAgentId]）。
+      // 建议卡标注了 agent_id：把它写进**同一个**本地选择（AppBar 的 agent
+      // 标签随后就会跟着变）——对齐 webapp FollowUpSuggestCard 的「先切人再追加」，
+      // 那边也是写 `agentByGroup[groupId]`，与选择器共用同一个值。
       onSelectAgent: (agentId) => setState(() => _selectedAgentId = agentId),
     );
   }

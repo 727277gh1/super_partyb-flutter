@@ -7,12 +7,13 @@ import 'package:spb_models/spb_models.dart';
 ///
 /// ## 这个测试防的是什么
 ///
-/// 切换 agent 是**有损**操作：服务端 `switchAgent`（`sessions.go`）先归档该
-/// group 的全部旧绑定，再写新绑定。用户看到的却是同一个对话窗口、同一段历史
-/// 消息，自然以为「换个签名接着聊」。故：
-/// - 必须**切换前**确认并明确说明「上下文会断开」——切完再说已经晚了；
-/// - 「同 Agent 开新会话」是另一条路径（`force_new_session: true`），不能被
-///   和普通切换混成一个动作（否则用户点「开新会话」实际换了 agent）。
+/// 选 agent 是**纯本地**动作（对齐 webapp 的 `setAgentForGroup`）：点选不弹确认、
+/// 不发请求，选中的 agent 随**下一条消息**的 `agent_id` 交给服务端，由入队事务
+/// 里的 `ReplaceBinding` 归档旧绑定。故：
+/// - 点选必须**只回调** `selectAgent`，不得有 HTTP 请求、不得再要求二次确认；
+/// - 「同 Agent 开新会话」是另一条路径（`forceNewSession: true` 的
+///   `/sessions/switch`），不能被和「换 agent」混成一个动作（否则用户点
+///   「开新会话」只会改一下本地选择，旧会话根本没有被归档）。
 ///
 /// 另外两条降级约定（与仓库其余可选注入一致）：
 /// - 列表为空 / 加载失败 → **隐藏入口**，不报错、不弹横幅（AppBar 上的附属
@@ -23,8 +24,11 @@ void main() {
   Agent agent(String id, String name, {String status = 'active'}) =>
       Agent(id: id, name: name, status: status);
 
-  /// 一次 switch 调用捕获到的参数。
-  late ({String agentId, bool forceNewSession})? lastSwitch;
+  /// 最近一次本地选择（`null` = 没有选择发生）。
+  late String? lastSelected;
+
+  /// 「同 Agent 开新会话」被触发的次数。
+  late int newSessionCalls;
 
   /// 把入口放进最小可用的 MaterialApp。
   Future<void> pumpSwitcher(
@@ -33,9 +37,9 @@ void main() {
     Object? loadError,
     String? currentAgentId,
     bool busy = false,
-    Object? switchError,
   }) async {
-    lastSwitch = null;
+    lastSelected = null;
+    newSessionCalls = 0;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -47,18 +51,9 @@ void main() {
                   if (loadError != null) throw loadError;
                   return agents ?? [agent('a1', '写作助手')];
                 },
-                switchAgent: (agentId, {bool forceNewSession = false}) async {
-                  lastSwitch = (
-                    agentId: agentId,
-                    forceNewSession: forceNewSession,
-                  );
-                  if (switchError != null) throw switchError;
-                  return GroupAgentSwitchResult(
-                    groupId: 'grp_1',
-                    newAgentId: agentId,
-                    forceNewSession: forceNewSession,
-                    switched: true,
-                  );
+                selectAgent: (agentId) => lastSelected = agentId,
+                startNewSession: () async {
+                  newSessionCalls++;
                 },
                 currentAgentId: currentAgentId,
                 busy: busy,
@@ -165,8 +160,8 @@ void main() {
                     calls++;
                     throw Exception('boom');
                   },
-                  switchAgent: (id, {forceNewSession = false}) async =>
-                      GroupAgentSwitchResult(groupId: 'g', newAgentId: id),
+                  selectAgent: (_) {},
+                  startNewSession: () async {},
                   currentAgentId: 'a1',
                 ),
               ],
@@ -202,8 +197,8 @@ void main() {
             actions: [
               AgentSwitcher(
                 loadAgents: loader,
-                switchAgent: (id, {forceNewSession = false}) async =>
-                    GroupAgentSwitchResult(groupId: 'g', newAgentId: id),
+                selectAgent: (_) {},
+                startNewSession: () async {},
                 currentAgentId: currentAgentId,
               ),
             ],
@@ -224,8 +219,8 @@ void main() {
     });
   });
 
-  group('切换必须确认，并说明上下文会断开', () {
-    testWidgets('点菜单项先弹确认框，不直接切换', (tester) async {
+  group('点选即本地生效：不弹确认、不发请求', () {
+    testWidgets('点菜单项直接回调 selectAgent（无确认框）', (tester) async {
       await pumpSwitcher(
         tester,
         agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
@@ -236,14 +231,16 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
       await tester.pumpAndSettle();
 
+      expect(lastSelected, 'a2');
       expect(
         find.byKey(const ValueKey('agent-switch-confirm')),
-        findsOneWidget,
+        findsNothing,
+        reason: '选择是本地动作（不归档任何绑定），弹确认只会变成形式主义',
       );
-      expect(lastSwitch, isNull, reason: '切换会归档旧绑定，必须用户确认后才发请求');
     });
 
-    testWidgets('确认框明确说明上下文会断开', (tester) async {
+    testWidgets('选当前 agent 不产生回调（点了也不该有任何变化）', (tester) async {
+      // 当前项已 `enabled: false`，这里兼底“外部重建导致 currentAgentId 变化”的窗口。
       await pumpSwitcher(
         tester,
         agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
@@ -251,46 +248,26 @@ void main() {
       );
 
       await openMenu(tester);
-      await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
-      await tester.pumpAndSettle();
+      final current = tester.widget<CheckedPopupMenuItem<Object?>>(
+        find.byKey(const ValueKey('agent-option-a1')),
+      );
+      expect(current.enabled, isFalse);
+      expect(lastSelected, isNull);
+    });
 
-      // 用户看到的是同一个对话窗口、同一段历史消息，不会自己推断出「模型
-      // 不再记得之前的内容」——必须写出来。
+    testWidgets('菜单头部说明“随下一条消息生效”（而不是要求确认）', (tester) async {
+      await pumpSwitcher(
+        tester,
+        agents: [agent('a1', '写作助手')],
+        currentAgentId: 'a1',
+      );
+
+      await openMenu(tester);
+
+      // 代价仍然真实（旧会话上下文会断开），只是它发生在下一条消息，
+      // 而不是点选的那一刻。
+      expect(find.textContaining('随下一条消息生效'), findsOneWidget);
       expect(find.textContaining('上下文会断开'), findsOneWidget);
-      expect(find.textContaining('代码助手'), findsWidgets);
-    });
-
-    testWidgets('取消不切换', (tester) async {
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
-        currentAgentId: 'a1',
-      );
-
-      await openMenu(tester);
-      await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('取消'));
-      await tester.pumpAndSettle();
-
-      expect(lastSwitch, isNull);
-    });
-
-    testWidgets('确认后调用 onSwitchAgent（forceNewSession=false）', (tester) async {
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
-        currentAgentId: 'a1',
-      );
-
-      await openMenu(tester);
-      await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('agent-switch-confirm-ok')));
-      await tester.pumpAndSettle();
-
-      expect(lastSwitch!.agentId, 'a2');
-      expect(lastSwitch!.forceNewSession, isFalse, reason: '普通切换不是「开新会话」');
     });
   });
 
@@ -306,9 +283,9 @@ void main() {
       expect(find.byKey(const ValueKey('agent-new-session')), findsOneWidget);
     });
 
-    testWidgets('选中后带 forceNewSession=true 且 agentId 不变', (tester) async {
-      // 回归防线：若这里误传「另一个 agent」或 forceNewSession=false，用户点
-      // 「开新会话」会变成「换 agent」或什么都不发生。
+    testWidgets('选中后直接调 startNewSession（不弹确认、不改 agent）', (tester) async {
+      // 回归防线：这条路径是**立即**的服务端动作（归档旧绑定）。若它误走
+      // 纯本地的 `selectAgent`，用户点「开新会话」就什么都不发生。
       await pumpSwitcher(
         tester,
         agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
@@ -318,26 +295,10 @@ void main() {
       await openMenu(tester);
       await tester.tap(find.byKey(const ValueKey('agent-new-session')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('agent-switch-confirm-ok')));
-      await tester.pumpAndSettle();
 
-      expect(lastSwitch!.agentId, 'a1', reason: 'agent 不变');
-      expect(lastSwitch!.forceNewSession, isTrue);
-    });
-
-    testWidgets('确认框文案与普通切换不同（说的是「新会话」）', (tester) async {
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手')],
-        currentAgentId: 'a1',
-      );
-
-      await openMenu(tester);
-      await tester.tap(find.byKey(const ValueKey('agent-new-session')));
-      await tester.pumpAndSettle();
-
-      expect(find.text('开新会话？'), findsOneWidget);
-      expect(find.textContaining('新会话'), findsWidgets);
+      expect(newSessionCalls, 1);
+      expect(lastSelected, isNull, reason: '开新会话不换 agent');
+      expect(find.text('开新会话？'), findsNothing);
     });
   });
 
@@ -362,19 +323,7 @@ void main() {
       expect(other.checked, isFalse);
     });
 
-    testWidgets('菜单头部提示上下文会断开（打开菜单即可见）', (tester) async {
-      await pumpSwitcher(
-        tester,
-        agents: [agent('a1', '写作助手')],
-        currentAgentId: 'a1',
-      );
-
-      await openMenu(tester);
-
-      expect(find.textContaining('断开当前对话的上下文'), findsOneWidget);
-    });
-
-    testWidgets('busy 时入口禁用（防并发切换打乱绑定）', (tester) async {
+    testWidgets('busy 时入口禁用（防重复触发开新会话）', (tester) async {
       await pumpSwitcher(
         tester,
         agents: [agent('a1', '写作助手')],
@@ -388,10 +337,10 @@ void main() {
       expect(button.enabled, isFalse);
     });
 
-    testWidgets('当前 agent 的菜单项不可选（否则静默丢掉上下文）', (tester) async {
-      // 服务端 `switchAgent` 先归档该 group 的全部旧绑定再写新的，所以
-      // 「切到同一个 agent」= 无声地丢上下文，而界面上没有任何变化。
-      // webapp 的 AgentSelector.tsx 用 `disabled={isCurrent}` 做了同一件事。
+    testWidgets('当前 agent 的菜单项不可选（选了也不会有任何变化）', (tester) async {
+      // 选择是纯本地的：选到当前值既不会改本地值、也不会发请求，
+      // 留着可点只会让用户怀疑「点了没反应」。webapp 的 `AgentSelector.tsx`
+      // 用 `disabled={isCurrent}` 做了同一件事。
       await pumpSwitcher(
         tester,
         agents: [agent('a1', '写作助手'), agent('a2', '代码助手')],
@@ -622,7 +571,7 @@ void main() {
       expect(find.text('当前'), findsOneWidget);
     });
 
-    testWidgets('点选其他 agent 后仍走确认框，确认后调用 switchAgent', (tester) async {
+    testWidgets('点选其他 agent 后仍直接回调（换了载体也不弹确认框）', (tester) async {
       await pumpSwitcher(tester, agents: manyAgents(), currentAgentId: 'a1');
 
       await tester.tap(find.byKey(const ValueKey('agent-switcher')));
@@ -630,19 +579,10 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
       await tester.pumpAndSettle();
 
-      // 弹层已关闭，确认框出现（不能因为换了载体就跳过确认）。
+      // 弹层已关闭，且没有确认框——选择就是本地动作。
       expect(find.byKey(const ValueKey('agent-picker')), findsNothing);
-      expect(
-        find.byKey(const ValueKey('agent-switch-confirm')),
-        findsOneWidget,
-      );
-      expect(lastSwitch, isNull, reason: '确认前不应调用');
-
-      await tester.tap(find.byKey(const ValueKey('agent-switch-confirm-ok')));
-      await tester.pumpAndSettle();
-
-      expect(lastSwitch?.agentId, 'a2');
-      expect(lastSwitch?.forceNewSession, isFalse);
+      expect(find.byKey(const ValueKey('agent-switch-confirm')), findsNothing);
+      expect(lastSelected, 'a2');
     });
   });
 }

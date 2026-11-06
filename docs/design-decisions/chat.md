@@ -1212,3 +1212,76 @@ transient 事件 `globalSeq = 0`（不落库），回放与实时混在同一条
 本条修的是**数据层**（缺的那段本来没进归约结果）。§6.51 的绘制层取舍
 （`addRepaintBoundaries: false`）**仍待设备复核**——「软件渲染下测试通过」不能
 用来宣称设备 GPU 故障已修。两层判据见 §6.64 的表。
+
+---
+
+### 6.66 选 Agent 改为**纯本地**（对齐 webapp），不再每次点选都调 `/sessions/switch`（2026-11）
+
+#### 问题：两个端对「换 agent」的语义不一致
+
+webapp 自 `a1f9bcad`（2026-08-10）起把选择器改成纯本地：点选只写
+`agentByGroup[groupId]`，服务端动作发生在**下一条消息**——请求体里的 `agent_id`
+让 Go 的入队事务走 `ReplaceBinding`（`internal/chat/pipeline_events.go`：
+`ReplaceBinding: req.AgentID != ""` → `chatbinding.Ensure`：归档该 group 的其余
+owner 绑定、写一条新绑定，`session_id` 留 NULL 由 pigo 首轮自产）。
+
+Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，并为它加了
+一个「上下文会断开」的确认弹窗。同一个服务端语义，两个客户端表现不同：webapp 的
+断开会**静默**发生在下一条消息，Flutter 的断开发生在点选那一刻并要求点确认。
+
+「两个端做同一件事有两种规则」比任何一种单独规则都糟——用户换来端用就会以为
+「这个客户端出问题了」。故本轮以 webapp 为准对齐（webapp 是功能最全的参考端）。
+
+#### 改成什么
+
+| 动作 | 现在的客户端行为 | 服务端 |
+|---|---|---|
+| 点选 agent | 只改本地 `_selectedAgentId`，**不发请求、不弹确认**；AppBar 标签立刻跟着变 | 什么都不发生 |
+| 发消息 | `agent_id` + `routing.mode=manual`（未选时为 `auto`），**每条都带**（选择是持久的） | 入队事务里重绑（见上） |
+| 「同 Agent 开新会话」 | 调 `/sessions/switch`（`force_new_session: true`），**不弹确认**，成功弹「已开始新会话」 | 立即归档 + 新绑定 |
+
+判据落在两处：
+
+- `packages/spb_features/lib/src/chat/agent_switcher.dart`：`selectAgent`（纯本地）
+  与 `startNewSession`（唯一立即调端点的入口）是两个回调，**不能合并**——合并后
+  「开新会话」会退化成只改本地值，旧会话根本没被归档。
+- 两端 router 的 `_effectiveAgentId = _selectedAgentId ?? _group.activeSession.agentId`：
+  AppBar 标签、菜单勾选、开新会话三者必须同源，否则会「标签写 A、菜单勾 B」。
+
+#### 代价（明说）
+
+1. **上下文真正断开的那一刻没有提示**。只保留菜单顶部/搜索弹层顶部的一行说明
+   （「选择后随下一条消息生效（旧会话上下文会断开）」）。这是 webapp 既有的事实
+   行为；客户端不再做单方面的二次确认——点选本身没有产生任何不可逆动作，为它弹窗
+   只会变成每次切人都要点一下的形式主义。
+2. **建议卡的 agent 标注从「一次性」变成「持久」**。两者现在共用同一个本地值
+   （webapp 同样如此：`FollowUpSuggestCard` 写的也是 `agentByGroup[groupId]`）。
+   副作用是点过一次建议卡之后，后续消息仍由该 agent 回答——直到用户改选或换对话。
+3. **选择在换对话时清空**，不回落到「上次在这个对话里选过谁」（webapp 的
+   `agentByGroup` 在本次会话内按 group 分别记忆）。Flutter 的对话页是每 group 一个
+   路由，State 复用由 `didUpdateWidget` 处理；保持「换对话即回到服务端绑定」比维护
+   一份跨页缓存更简单，且与「刷新后回落到 `active_session`」的行为一致。
+
+#### 有意**不**做的（避免下轮又提）
+
+- **不加「自动路由」菜单项**（webapp 选择器第一项，`onSelectAgent(null)`）。
+  webapp 的默认状态就是 `null`（平台路由），而 Flutter 对话页始终带 `group_id`
+  （服务端 `GroupBinding: GroupFixed`）、首轮之后必有绑定；用户要「换回绑定」直接
+  在列表里选它即可（它是可点的一项）。加这一项需要在本地引入三态
+  （未选 / 显式自动 / 指定），收益不抵复杂度。
+- **不接 Tool Agent**（webapp 的 `agent_type=tool_agent` + `tool-agent:<name>` 虚拟
+  ID）：Go 的 `switchAgent` 结构体没有 `agent_type` 字段，`chatbinding.Bind` 还会
+  `GetAgent` 校验 id 存在 → 虚拟 ID 必然 404。属 §6.9 一族，前置是服务端先支持。
+- **不给发消息补 e2e 断言**：`send` → `agent_id` 的 body 契约已由
+  `spb_api/test/chat_api_contract_test.dart`（路径 + 键名 + `routing.mode`）钉住；
+  router 层只验证「点选不发请求」与「开新会话用本地选中的 agent」。
+
+#### 测试
+
+- `packages/spb_features/test/chat/agent_switcher_test.dart`：点选**不弹确认框**、
+  直接回调；选当前项无回调；「同 Agent 开新会话」直接调 `startNewSession`（不改
+  agent）；大列表弹层同样不弹确认。
+- `apps/spb_desktop/test/router_chat_test.dart` / `apps/spb_mobile/test/router_list_test.dart`：
+  点选后 `hit` 为空（无 HTTP）+ 标签变成所选 agent；再点「同 Agent 开新会话」时
+  `sessions/switch` 的 body 是 `agentId`（camelCase，**不是** `agent_id`，写错 400
+  「agentId 不能为空」）+ `force_new_session: true` + 刚选中的 agent。

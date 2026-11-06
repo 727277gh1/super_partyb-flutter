@@ -10,24 +10,41 @@ import 'agent_picker.dart';
 /// 读取可选的 agent 列表（装配层注入 `AgentsApi.listAgents`）。
 typedef LoadAgents = Future<List<Agent>> Function();
 
-/// 把 group 切到另一个 agent（装配层注入 `AgentsApi.switchGroupAgent`）。
+/// 选中某个 agent（**纯本地**，不发请求、不落库）。
 ///
-/// [forceNewSession] = 同 agent 开新会话（断开旧 session 上下文）。
-typedef SwitchGroupAgent = Future<GroupAgentSwitchResult> Function(
-  String agentId, {
-  bool forceNewSession,
-});
+/// 选中的语义是「本对话接下来由谁回答」：装配层把它记在本地，随**下一条消息**
+/// 的 `agent_id` 发出，服务端在入队时归档旧绑定并重新绑定（见类文档）。
+typedef SelectAgent = void Function(String agentId);
+
+/// 同 Agent 开新会话（装配层调 `AgentsApi.switchGroupAgent`，`forceNewSession: true`）。
+typedef StartNewSession = Future<void> Function();
 
 /// 对话页 AppBar 的 agent 切换入口。
 ///
-/// ## 为什么必须有「历史上下文会断开」的确认
+/// ## 语义：选择是**本地**的，服务端动作发生在下一条消息
 ///
-/// 服务端 `switchAgent`（`sessions.go`）先 `ArchiveChatGroupSessionsByGroup`
-/// 归档该 group 的**全部**旧绑定，再写一条新 active binding。故切换 agent
-/// 不是「换个签名接着聊」，而是**丢掉这段上下文**。
+/// 与 webapp 的 `AgentSelector` / `setAgentForGroup` 保持一致（那边是
+/// `refactor(webapp): 选 Agent 改为纯本地，不再每次触发 /sessions/switch`）：
 ///
-/// 这一点在 UI 上不可推断：用户看到的是同一个对话窗口、同一段历史消息（它们
-/// 仍显示着），自然以为模型还记得。故切换前必须明确告知，而不是切完再说。
+/// | 动作 | 客户端 | 服务端 |
+/// |---|---|---|
+/// | 点选 agent | 记本地（本组件只回调 [selectAgent]） | **什么都不发生** |
+/// | 发下一条消息 | 请求体带 `agent_id` | 入队事务里 `ReplaceBinding`：归档该 group 的旧 owner 绑定，写新绑定，`session_id` 留 NULL（lazy） |
+/// | 点「同 Agent 开新会话」 | 调 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`） | 立即归档 + 新绑定 |
+///
+/// 两种做法在**是否断开上下文**上等价（服务端 `chatbinding.Ensure` 对新 agent
+/// 没有 active binding 时一律新开会话，pigo 首轮自产 session），差别只在时机与
+/// 可见性：这里跟 webapp 一样把断开推迟到「下一条消息」，因此**不再弹确认框**
+/// ——点选本身没有产生任何不可逆动作，弹窗只会变成每次切人都要点一下的形式主义。
+///
+/// 代价（明说）：上下文真正断开的那一刻用户看不到提示，只保留菜单顶部与搜索
+/// 弹层顶部的那行说明。这是 webapp 既有的事实行为，客户端不做单方面的二次确认。
+///
+/// ## 为什么「同 Agent 开新会话」仍然调服务端
+///
+/// 这条动作没有「下一条消息」可以搭载——它要求**立刻**把旧绑定归档（会话的
+/// 分界线就在这里），故必须走 `sessions/switch`。对应 webapp 输入栏的「新对话」
+/// 按钮（`startNewConversation`）。同样不弹确认：入口文案本身已经写清它做什么。
 ///
 /// ## 为什么列表为空 / 加载失败时**隐藏入口**
 ///
@@ -65,23 +82,29 @@ class AgentSwitcher extends StatefulWidget {
   const AgentSwitcher({
     super.key,
     required this.loadAgents,
-    required this.switchAgent,
+    required this.selectAgent,
+    required this.startNewSession,
     this.currentAgentId,
     this.busy = false,
     this.compact = false,
   });
 
   final LoadAgents loadAgents;
-  final SwitchGroupAgent switchAgent;
 
-  /// 当前 group 的 active binding 指向的 agent id
-  /// （`ChatGroup.activeSession?.agentId`）。
+  /// 选中一个 agent（纯本地，见类文档）。
+  final SelectAgent selectAgent;
+
+  /// 同 Agent 开新会话（立即归档旧绑定）。
+  final StartNewSession startNewSession;
+
+  /// 「本对话当前由谁回答」的**有效**值——装配层传的是
+  /// 「本地选择 ?? 服务端 active binding」（`ChatGroup.activeSession?.agentId`）。
   ///
-  /// 为空表示该 group 还没有绑定（服务端懒激活或异常数据）——此时仍展示入口，
+  /// 为空表示两端都没有：还没绑定（服务端懒激活或异常数据），此时仍展示入口，
   /// 标签显示「未绑定」，让用户能主动选一个。
   final String? currentAgentId;
 
-  /// 切换是否在途（装配层传入）。为真时禁用入口，防并发切换把绑定打乱。
+  /// 开新会话是否在途（装配层传入）。为真时禁用入口，防重复触发。
   final bool busy;
 
   /// 紧凑模式：只显示图标，不显示 agent 名字。  ///
@@ -252,12 +275,12 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
   ) {
     final theme = Theme.of(context);
     return [
-      // 菜单头：说明切换的代价。放在菜单里而非只在对话框里，是因为用户
-      // 打开菜单时就要知道「这不是无损操作」。
+      // 菜单头：说明「下一条消息」这个时机。它不再是「点一下就丢上下文」的
+      // 警告（选择是纯本地的），但代价仍然真实存在，故保留一行说明。
       const PopupMenuItem<_SwitcherAction>(
         enabled: false,
         height: 36,
-        child: Text('切换 Agent 会断开当前对话的上下文', style: TextStyle(fontSize: 12)),
+        child: Text('选择后随下一条消息生效（旧会话上下文会断开）', style: TextStyle(fontSize: 12)),
       ),
       const PopupMenuDivider(),
       for (final g in groups) ...[
@@ -279,15 +302,16 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
             key: ValueKey('agent-option-${a.id}'),
             value: _SwitchTo(a.id),
             checked: a.id == widget.currentAgentId,
-            // 当前 agent **不可选**：服务端 `switchAgent` 会先归档该 group 的
-            // 全部旧绑定再写新的，故「切到同一个 agent」= 无声地丢掉上下文，
-            // 而界面上没有任何变化（用户会以为点了没反应）。webapp 的
-            // `AgentSelector.tsx` 用 `disabled={isCurrent}` 做了同一件事。
+            // 当前 agent **不可选**：选了也不会有任何变化（本地值没变、服务端
+            // 也不收到请求），留着可点只会让用户怀疑「点了没反应」。
+            // webapp 的 `AgentSelector.tsx` 用 `disabled={isCurrent}` 做了同一件事。
             enabled: a.id != widget.currentAgentId,
             child: Text(a.label, overflow: TextOverflow.ellipsis),
           ),
       ],
       // 同 agent 开新会话：单独一条，语义是「清空上下文但保留这个 agent」。
+      // 与 webapp 输入栏的「新对话」按钮同义——它是唯一**立即**触发服务端
+      // 动作的入口，因为它没有「下一条消息」可以搭载。
       if ((widget.currentAgentId ?? '').isNotEmpty) ...[
         const PopupMenuDivider(),
         const PopupMenuItem<_SwitcherAction>(
@@ -327,62 +351,32 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
   }
 
   Future<void> _onSelected(_SwitcherAction action) async {
-    final (agentId, forceNewSession) = switch (action) {
-      _SwitchTo(:final agentId) => (agentId, false),
-      _NewSession() => (widget.currentAgentId ?? '', true),
-    };
-    if (agentId.isEmpty) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        key: const ValueKey('agent-switch-confirm'),
-        title: Text(forceNewSession ? '开新会话？' : '切换 Agent？'),
-        content: Text(
-          forceNewSession
-              ? '将以当前 Agent 开始一段新会话。\n\n'
-                    '旧会话的上下文会断开——模型不再记得这段对话之前的内容。'
-                    '历史消息仍会显示在这里。'
-              : '将把本对话切换到「${_labelFor(agentId)}」。\n\n'
-                    '旧绑定的上下文会断开——模型不再记得这段对话之前的内容。'
-                    '历史消息仍会显示在这里。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const ValueKey('agent-switch-confirm-ok'),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('确认'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    // 吞掉异常只记日志：装配层（两端 router 的 `_switchAgent`）**已经**弹过
-    // SnackBar 并 rethrow 了。不接住就会变成未捕获的异步异常，落到全局处理器
-    // （§6.24 的三道防线）——用户界面上看不到新信息，日志里多一条与已知失败
-    // 重复的堆栈。
-    //
-    // 不能在此弹提示：`AgentSwitcher` 不知道失败原因该怎么描述（那是装配层
-    // 的 `_describeSwitchError`），也不应该知道。
-    try {
-      await widget.switchAgent(agentId, forceNewSession: forceNewSession);
-    } on Object catch (e) {
-      SpbLog.debug('切换 Agent 失败（装配层已提示）', {
-        'agentId': agentId,
-        'error': e.toString(),
-      });
+    switch (action) {
+      case _SwitchTo(:final agentId):
+        // 与当前一致 = 无变化（`enabled: false` 已经挡了一层，这里兜住
+        // 「外部重建导致 currentAgentId 变化」的窗口）。
+        if (agentId == widget.currentAgentId) return;
+        // 纯本地：不弹确认、不发请求（见类文档）。
+        widget.selectAgent(agentId);
+      case _NewSession():
+        final agentId = widget.currentAgentId ?? '';
+        if (agentId.isEmpty) return;
+        // 吞掉异常只记日志：装配层（两端 router 的 `_startNewSession`）
+        // **已经**弹过 SnackBar。不接住就会变成未捕获的异步异常，落到全局
+        // 处理器（§6.24 的三道防线）——用户界面上看不到新信息，日志里多一条
+        // 与已知失败重复的堆栈。
+        //
+        // 不能在此弹提示：`AgentSwitcher` 不知道失败原因该怎么描述（那是装配层
+        // 的 `_describeSwitchError`），也不应该知道。
+        try {
+          await widget.startNewSession();
+        } on Object catch (e) {
+          SpbLog.debug('开新会话失败（装配层已提示）', {
+            'agentId': agentId,
+            'error': e.toString(),
+          });
+        }
     }
-  }
-
-  String _labelFor(String agentId) {
-    for (final a in _agents ?? const <Agent>[]) {
-      if (a.id == agentId) return a.label;
-    }
-    return agentId;
   }
 }
 

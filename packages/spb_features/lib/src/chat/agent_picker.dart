@@ -87,9 +87,8 @@ class _AgentPickerDialogState extends State<AgentPickerDialog> {
   }
 
   void _submit(Agent agent) {
-    // 当前 agent 不可选。这不只是 UI 上的置灰——服务端 `switchAgent` 会先
-    // 归档该 group 的全部旧绑定再写新的，故「切到同一个 agent」= 无声地
-    // 丢掉上下文，而界面上没有任何变化（用户会以为点了没反应）。
+    // 当前 agent 不可选。选择是纯本地的（见 `AgentSwitcher` 的类文档），故
+    // 「选同一个」不会有任何变化——留着可点只会让用户怀疑「点了没反应」。
     if (agent.id == widget.currentAgentId) return;
     Navigator.of(context).pop(agent.id);
   }
@@ -158,7 +157,7 @@ class _AgentPickerDialogState extends State<AgentPickerDialog> {
                   children: [
                     Expanded(
                       child: Text(
-                        '切换 Agent 会断开当前对话的上下文',
+                        '选择后随下一条消息生效（旧会话上下文会断开）',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),

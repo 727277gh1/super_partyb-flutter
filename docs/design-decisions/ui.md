@@ -376,7 +376,10 @@ String get _appBarTitle {
 
 两端逐字同构（桌面 `router.dart` / 移动 `router.dart`）。`_group` 已由
 `GET /chat/groups/:id` 异步拉取，且 `GroupUpdate.applyTo`（rename 事件）与
-`_loadGroup`（切换 agent 后重拉）都会刷新它，故标题会跟着改名走，无需额外订阅。
+`_loadGroup`（开新会话后重拉）都会刷新它，故标题会跟着改名走，无需额外订阅。
+
+> 选 agent 本身**不**重拉 `_group`（它是纯本地选择，服务端没变，见
+> [§6.66](chat.md)）；只有「同 Agent 开新会话」会改 `active_session` 才需要重拉。
 
 #### 两个判据
 
