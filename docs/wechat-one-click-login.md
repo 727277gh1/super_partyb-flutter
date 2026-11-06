@@ -104,11 +104,35 @@ App                      IdP (id-provider)                微信
 | `wxa/getwxacodeunlimit` | `85412 personal entity not verified` | **网页端扫码登录也是 500**（同一个接口） |
 | `wxa/generatescheme` | `85407 no scheme permission` | App 内一键登录无法唤起 |
 
-两条都是**账号级限制**，改代码无效：需要在小程序管理后台完成主体认证
-（个人主体不支持，需企业主体 + 微信认证）。认证前：
+两条都是**账号级限制**，改代码无效：微信把 URL Scheme / URL Link / 明文 Scheme
+全部限定为**非个人主体**小程序（官方错误码表：`40002 暂无生成权限（个人主体小程序
+无权限…）`、`85407 no scheme permission`），个人主体也无法完成微信认证。
 
-- `POST /idp/api/v1/bindings/mini-program/qrcode-session` 稳定 500；
-- 登录页「微信扫码」标签与 App 内「微信一键登录」都应视为**不可用**。
+### 已做的解耦（`dad6fd1`）
+
+App 路径**不再生成小程序码**（`?scheme=1` → `needQR=false`）：用户同机扫不了
+自己的屏幕，这张图除了多一次微信 API 调用（有配额）没有任何用处，却让会话创建
+被 85412 连坐——修复前 `POST .../qrcode-session?scheme=1` 直接 500，真正需要的
+URL Scheme 一次都没被尝试过。修复后：
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' \
+  'https://tbcc.atjog.com/idp/api/v1/bindings/mini-program/qrcode-session?scheme=1'
+# {"success":true,"scene":"cf25...","expiresAt":"...",
+#  "schemeError":"当前小程序未开通「URL Scheme 唤起」权限，无法直接打开微信，请改用 SSO 登录"}
+```
+
+网页端（跨设备扫码）仍然要图，所以 `POST .../qrcode-session`（不带 scheme）
+依旧 500 —— 那是 85412，等主体问题解决才恢复。
+
+### 剩下两条路（都需账号侧操作）
+
+| 方案 | 需要什么 | 代码改动 |
+|---|---|---|
+| 小程序主体改为企业主体 + 微信认证 | 微信公众平台操作（认证费） | **零**——`generatescheme` 通后现有实现直接可用 |
+| App 内用微信 OpenSDK `WXLaunchMiniProgram` | 微信开放平台「移动应用」appid + 该应用与小程序关联 + 用**发布签名**注册应用签名（MD5）+ 小程序原始 ID（`gh_` 开头） | 新增 `fluwx` 依赖 + `WXEntryActivity` + iOS Universal Links |
+
+OpenSDK 这条路不受「非个人主体」限制，但需要上面 4 项账号信息才能落地。
 
 顺带修掉的两个「看不见」问题：
 

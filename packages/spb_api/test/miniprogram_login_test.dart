@@ -144,6 +144,26 @@ void main() {
       expect(contentType, contains('application/json'));
     });
 
+    test('响应不含 qrCodeUrl（App 路径）时仍可创建会话并唤起', () async {
+      // 服务端对 ?scheme=1 不再生成小程序码（同机扫不了自己的屏幕，且小程序码
+      // 的账号权限不该连坐 App 登录），所以 App 路径的响应里**没有** qrCodeUrl。
+      // 客户端不能因此把它当成「响应不完整」。
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'abc123',
+          'expiresAt': '2026-11-06T13:20:00Z',
+          'schemeUrl': 'weixin://dl/business/?t=xyz',
+        }),
+      );
+
+      final session = await client.createSession();
+      expect(session.scene, 'abc123');
+      expect(session.qrCodeUrl, isEmpty);
+      expect(session.canLaunchWeChat, isTrue);
+    });
+
     test('响应缺 scene 时抛 AuthError 而不是空指针', () async {
       adapter.onPost(
         '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
