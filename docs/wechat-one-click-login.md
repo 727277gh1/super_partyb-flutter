@@ -95,7 +95,31 @@ App                      IdP (id-provider)                微信
 | `flutter-client` 注册 `partyb://oidc/callback` + `offline_access` | 生产库（2026-11-06） |
 | 小程序侧「来自 App 的授权」入口 | super_partyb `apps/miniapp`（已有 `login(code, scene)`，入口/文案待补，见 super_partyb#101） |
 
-## 7. 真机验证清单（未做）
+## 7. ⛔ 生产阻塞：小程序主体未认证（2026-11-06 实测）
+
+代码链路已通，但**微信侧账号状态**让整条路走不通。实测（生产凭证，直连微信 API）：
+
+| 接口 | 返回 | 影响 |
+|---|---|---|
+| `wxa/getwxacodeunlimit` | `85412 personal entity not verified` | **网页端扫码登录也是 500**（同一个接口） |
+| `wxa/generatescheme` | `85407 no scheme permission` | App 内一键登录无法唤起 |
+
+两条都是**账号级限制**，改代码无效：需要在小程序管理后台完成主体认证
+（个人主体不支持，需企业主体 + 微信认证）。认证前：
+
+- `POST /idp/api/v1/bindings/mini-program/qrcode-session` 稳定 500；
+- 登录页「微信扫码」标签与 App 内「微信一键登录」都应视为**不可用**。
+
+顺带修掉的两个「看不见」问题：
+
+1. **失败原因原本被吞掉**：handler 只回 `{"error":"internal_error"}`，微信的
+   errcode 完全不入日志——线上只能靠猜。现在 `http.go` 记录真实原因
+   （`error` 字段带 errcode 与 errmsg）。
+2. **`expire_type` 配错**：`expire_type: 1` 是「失效间隔（天）」，配 `expire_time`
+   会被微信拒为 `85401 time limit between 1min and 30days`。短时效链接必须
+   `expire_type: 0`（绝对时间点）。已有测试锁定该配对。
+
+## 8. 真机验证清单（未做）
 
 ```bash
 # 1. 装新 APK，点「微信一键登录」
@@ -108,6 +132,8 @@ curl -s "https://tbcc.atjog.com/idp/api/v1/bindings/mini-program/check/<scene>"
 
 # 5. 确认 token 里拿到了 refresh_token（否则一小时后会被踢）
 ```
+
+> ⚠️ 先解决 §7 的主体认证，否则上面第 1 步就会失败（`schemeError`/500）。
 
 未装微信的设备：点按钮应得到「无法唤起微信，请确认已安装微信后重试」，
 **不应**停在等待态。
