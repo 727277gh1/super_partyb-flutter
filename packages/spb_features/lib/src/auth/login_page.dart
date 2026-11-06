@@ -39,6 +39,7 @@ class LoginPage extends StatefulWidget {
     required this.onSignIn,
     this.state = const AuthState(),
     this.onImportSession,
+    this.onWeChatSignIn,
     this.title = '登录 Super PartyB',
     this.subtitle = '使用统一身份认证中心（SSO）登录',
   });
@@ -68,6 +69,19 @@ class LoginPage extends StatefulWidget {
   /// 为 null 时不展示该区域（移动端已有深链回调，不需要粘贴）。
   final Future<String?> Function(String raw)? onImportSession;
 
+  /// 微信一键登录（App 内唤起小程序确认）。
+  ///
+  /// 返回 null 表示成功，字符串是失败原因（与 [onSignIn] 同语义）。
+  ///
+  /// ## 为什么单独一条入口
+  ///
+  /// 手机上 SSO 至少 3 次跳转；而扫码登录在**同机**根本无法完成（用户只有
+  /// 这一台手机，扫不了自己屏幕上的码）。这条路径是移动端唯一能「一步到位」
+  /// 的登录方式：唤起小程序 → 在微信里确认 → 回到 App 已登录。
+  ///
+  /// 为 null 时不展示（桌面端没有微信小程序场景）。
+  final Future<String?> Function()? onWeChatSignIn;
+
   /// 当前认证状态（错误消息从这里读）。
   final AuthState state;
 
@@ -93,6 +107,9 @@ class _LoginPageState extends State<LoginPage> {
 
   /// 是否正在导入（防重复提交）。
   bool _importing = false;
+
+  /// 是否正在等待微信确认（唤起小程序后轮询期间）。
+  bool _wechatBusy = false;
 
   @override
   void dispose() {
@@ -128,6 +145,34 @@ class _LoginPageState extends State<LoginPage> {
     if (!mounted) return;
     setState(() {
       _busy = false;
+      _localError = error;
+    });
+  }
+
+  /// 微信一键登录。
+  ///
+  /// 与 [_handleSignIn] 的差别：这条路会**一直等到**微信里确认完成（轮询），
+  /// 所以按钮文案要说明「在微信里确认」，否则用户会以为卡住了。
+  Future<void> _handleWeChatSignIn() async {
+    final handler = widget.onWeChatSignIn;
+    if (handler == null || _wechatBusy) return;
+
+    setState(() {
+      _wechatBusy = true;
+      _localError = null;
+    });
+
+    String? error;
+    try {
+      error = await handler();
+    } catch (e) {
+      SpbLog.warn('微信登录时异常', {'error': e.toString()});
+      error = '微信登录失败：$e';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _wechatBusy = false;
       _localError = error;
     });
   }
@@ -225,10 +270,37 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                     const SizedBox(height: SpbSpacing.lg),
                   ],
+                  if (widget.onWeChatSignIn != null) ...[
+                    FilledButton.icon(
+                      key: const ValueKey('login-wechat-button'),
+                      // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
+                      // 登录流程（state/PKCE 会互相覆盖）。
+                      onPressed: _busy || _wechatBusy
+                          ? null
+                          : _handleWeChatSignIn,
+                      icon: _wechatBusy
+                          ? const SizedBox(
+                              width: SpbSpacing.lg,
+                              height: SpbSpacing.lg,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.chat_bubble_outline),
+                      label: Text(_wechatBusy ? '请在微信中确认…' : '微信一键登录'),
+                    ),
+                    const SizedBox(height: SpbSpacing.sm),
+                    Text(
+                      '将打开微信小程序，确认后自动返回本应用。',
+                      textAlign: TextAlign.center,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: SpbSpacing.lg),
+                  ],
                   FilledButton.icon(
                     key: const ValueKey('login-sso-button'),
                     // 加载中禁用，避免重复发起授权（会产生多个 state）。
-                    onPressed: _busy ? null : _handleSignIn,
+                    onPressed: _busy || _wechatBusy ? null : _handleSignIn,
                     icon: _busy
                         ? const SizedBox(
                             width: SpbSpacing.lg,

@@ -22,6 +22,7 @@ void main() {
     required Future<String?> Function() onSignIn,
     AuthState state = const AuthState(),
     Future<String?> Function(String raw)? onImportSession,
+    Future<String?> Function()? onWeChatSignIn,
     Size? size,
   }) async {
     // 窗口尺寸：默认 800×600。改小可复现「内容过高溢出」这类布局问题
@@ -38,6 +39,7 @@ void main() {
           onSignIn: onSignIn,
           state: state,
           onImportSession: onImportSession,
+          onWeChatSignIn: onWeChatSignIn,
         ),
       ),
     );
@@ -185,6 +187,94 @@ void main() {
         findsNothing,
         reason: '重试成功后不得残留上次的错误',
       );
+    });
+  });
+
+  group('登录页：微信一键登录', () {
+    testWidgets('未注入回调时不展示按钮（桌面端没有这条路径）', (tester) async {
+      await pumpLogin(tester, onSignIn: () async => null);
+      expect(find.byKey(const ValueKey('login-wechat-button')), findsNothing);
+    });
+
+    testWidgets('注入后展示按钮，点击调用一次回调', (tester) async {
+      var calls = 0;
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: () async {
+          calls++;
+          return null;
+        },
+      );
+
+      expect(find.byKey(const ValueKey('login-wechat-button')), findsOneWidget);
+      expect(find.text('微信一键登录'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pumpAndSettle();
+      expect(calls, 1);
+    });
+
+    testWidgets('失败原因展示在错误条', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: () async => '无法唤起微信，请确认已安装微信后重试',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.textContaining('无法唤起微信'), findsOneWidget);
+    });
+
+    testWidgets('等待微信确认期间：按钮文案变化且两个入口都禁用', (tester) async {
+      // 用 Completer 把回调挂住，模拟「已唤起小程序、正在轮询」的中间态。
+      final gate = Completer<String?>();
+      var ssoCalls = 0;
+      await pumpLogin(
+        tester,
+        onSignIn: () async {
+          ssoCalls++;
+          return null;
+        },
+        onWeChatSignIn: () => gate.future,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pump();
+
+      expect(find.text('请在微信中确认…'), findsOneWidget);
+      // 两个入口互斥：并发发起会产生两套 state/PKCE，回调只能匹配一个。
+      final wechat = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('login-wechat-button')),
+      );
+      final sso = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('login-sso-button')),
+      );
+      expect(wechat.onPressed, isNull, reason: '进行中应禁用，避免重复发起');
+      expect(sso.onPressed, isNull, reason: '另一条登录路径也必须禁用');
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
+      expect(ssoCalls, 0);
+      expect(find.text('微信一键登录'), findsOneWidget);
+    });
+
+    testWidgets('回调抛异常时兜住并展示（不白屏）', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onWeChatSignIn: () async =>
+            throw StateError('platform channel missing'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.textContaining('微信登录失败'), findsOneWidget);
     });
   });
 

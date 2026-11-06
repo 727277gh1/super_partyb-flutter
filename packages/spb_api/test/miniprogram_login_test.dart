@@ -1,0 +1,273 @@
+import 'package:dio/dio.dart';
+import 'package:http_mock_adapter/http_mock_adapter.dart';
+import 'package:spb_api/spb_api.dart';
+import 'package:spb_core/spb_core.dart';
+import 'package:test/test.dart';
+
+/// 小程序登录 API 客户端的契约测试。
+///
+/// ## 这个测试防的是什么
+///
+/// 这些错误都是**静默的**：
+/// - 端点路径拼错（漏 basePath、多一个斜杠）→ 404，用户只看到「登录失败」；
+/// - 兑换时 `redirect_uri` 与 client 注册值不一致 → IdP 400，扫码白扫；
+/// - 把轮询返回的 `token` 当授权码用 → 拿不到 refresh，一小时后被踢；
+/// - 服务端错误码没映射 → 用户看到 `DioException [bad response]`。
+///
+/// 所以这里断言的是**发出的请求长什么样**与**错误怎么翻译**，而不只是能跑通。
+void main() {
+  const issuer = 'https://tbcc.atjog.com/idp';
+  const redirectUri = 'partyb://oidc/callback';
+  const clientId = 'client_45f10bfb-0170-4815-b';
+
+  late Dio dio;
+  late DioAdapter adapter;
+  late MiniProgramLoginClient client;
+
+  setUp(() {
+    dio = Dio(BaseOptions(responseType: ResponseType.json));
+    adapter = DioAdapter(dio: dio);
+    client = MiniProgramLoginClient(
+      issuer: Uri.parse(issuer),
+      clientId: clientId,
+      redirectUri: redirectUri,
+      dio: dio,
+    );
+  });
+
+  group('端点推导', () {
+    test('从 issuer 推导，保留 basePath（/idp 前缀不能丢）', () {
+      expect(
+        client.endpointBase.toString(),
+        'https://tbcc.atjog.com/idp/api/v1/bindings/mini-program',
+      );
+    });
+
+    test('issuer 结尾带斜杠时不产生双斜杠', () {
+      final c = MiniProgramLoginClient(
+        issuer: Uri.parse('https://tbcc.atjog.com/idp/'),
+        clientId: clientId,
+        redirectUri: redirectUri,
+      );
+      expect(
+        c.endpointBase.toString(),
+        'https://tbcc.atjog.com/idp/api/v1/bindings/mini-program',
+      );
+    });
+
+    test('双栈/本地 issuer 同样推导（不硬编码域名）', () {
+      final c = MiniProgramLoginClient(
+        issuer: Uri.parse('http://127.0.0.1:3000/idp'),
+        clientId: clientId,
+        redirectUri: redirectUri,
+      );
+      expect(
+        c.endpointBase.toString(),
+        'http://127.0.0.1:3000/idp/api/v1/bindings/mini-program',
+      );
+    });
+  });
+
+  group('createSession', () {
+    test('默认带 ?scheme=1（App 内要能直接唤起微信）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'abc123',
+          'qrCodeUrl': 'data:image/png;base64,AAA',
+          'schemeUrl': 'weixin://dl/business/?t=xyz',
+          'expiresAt': '2026-11-06T12:00:00Z',
+        }),
+      );
+
+      final session = await client.createSession();
+      expect(session.scene, 'abc123');
+      expect(session.canLaunchWeChat, isTrue);
+      expect(session.schemeUrl, 'weixin://dl/business/?t=xyz');
+      expect(session.expiresAt, isNotNull);
+    });
+
+    test('scheme 生成失败时带出 schemeError，且 canLaunchWeChat=false', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'abc123',
+          'qrCodeUrl': 'data:image/png;base64,AAA',
+          'schemeError': '暂时无法直接唤起微信，请改用其他登录方式',
+        }),
+      );
+
+      final session = await client.createSession();
+      expect(session.canLaunchWeChat, isFalse);
+      expect(session.schemeError, contains('无法直接唤起微信'));
+    });
+
+    test('withScheme=false 时不请求 scheme（省微信 API 配额）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session',
+        (server) => server.reply(200, {
+          'success': true,
+          'scene': 'abc123',
+          'qrCodeUrl': 'data:image/png;base64,AAA',
+        }),
+      );
+
+      final session = await client.createSession(withScheme: false);
+      expect(session.scene, 'abc123');
+      expect(session.canLaunchWeChat, isFalse);
+    });
+
+    test('响应缺 scene 时抛 AuthError 而不是空指针', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/qrcode-session?scheme=1',
+        (server) => server.reply(200, {'success': true}),
+      );
+
+      expect(
+        () => client.createSession(),
+        throwsA(
+          isA<AuthError>().having(
+            (e) => e.message,
+            'message',
+            contains('scene'),
+          ),
+        ),
+      );
+    });
+  });
+
+  group('poll', () {
+    test('bound=true → done', () async {
+      adapter.onGet(
+        '$issuer/api/v1/bindings/mini-program/check/abc123',
+        (server) => server.reply(200, {
+          'success': true,
+          'bound': true,
+          'expired': false,
+          'tokens': {'accessToken': 'at', 'expiresIn': 900},
+        }),
+      );
+      expect(await client.poll('abc123'), MiniProgramPollState.done);
+    });
+
+    test('expired=true → expired', () async {
+      adapter.onGet(
+        '$issuer/api/v1/bindings/mini-program/check/abc123',
+        (server) => server.reply(200, {
+          'success': true,
+          'bound': false,
+          'expired': true,
+        }),
+      );
+      expect(await client.poll('abc123'), MiniProgramPollState.expired);
+    });
+
+    test('都没置位 → pending', () async {
+      adapter.onGet(
+        '$issuer/api/v1/bindings/mini-program/check/abc123',
+        (server) => server.reply(200, {
+          'success': true,
+          'bound': false,
+          'expired': false,
+        }),
+      );
+      expect(await client.poll('abc123'), MiniProgramPollState.pending);
+    });
+  });
+
+  group('exchange', () {
+    test('提交 scene/client_id/redirect_uri/state/PKCE，并取出 code', () async {
+      final pkce = OidcPkce.generatePair();
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/exchange',
+        (server) => server.reply(200, {
+          'success': true,
+          'code': 'ory_ac_x',
+          'state': 'st',
+        }),
+        data: {
+          'scene': 'abc123',
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+          'state': 'st',
+          'code_challenge': pkce.challenge,
+          'code_challenge_method': 'S256',
+        },
+      );
+
+      final code = await client.exchange(
+        scene: 'abc123',
+        pkce: pkce,
+        state: 'st',
+      );
+      expect(code, 'ory_ac_x');
+    });
+
+    for (final c in const [
+      ('scene_pending', '还没确认'),
+      ('scene_expired', '已过期'),
+      ('scene_not_found', '已失效'),
+      ('invalid_request', '参数校验失败'),
+      ('unavailable', '未启用'),
+    ]) {
+      test('服务端 ${c.$1} → 可读原因（含「${c.$2}」）', () async {
+        final pkce = OidcPkce.generatePair();
+        adapter.onPost(
+          '$issuer/api/v1/bindings/mini-program/exchange',
+          (server) => server.reply(409, {'success': false, 'error': c.$1}),
+          data: {
+            'scene': 'abc123',
+            'client_id': clientId,
+            'redirect_uri': redirectUri,
+            'state': 'st',
+            'code_challenge': pkce.challenge,
+            'code_challenge_method': 'S256',
+          },
+        );
+
+        await expectLater(
+          client.exchange(scene: 'abc123', pkce: pkce, state: 'st'),
+          throwsA(
+            isA<AuthError>().having(
+              (e) => e.message,
+              'message',
+              contains(c.$2),
+            ),
+          ),
+        );
+      });
+    }
+
+    test('网络不通时提示检查网络（而不是 DioException 原文）', () async {
+      final pkce = OidcPkce.generatePair();
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/exchange',
+        (server) => server.throws(
+          0,
+          DioException(
+            requestOptions: RequestOptions(path: '/'),
+            type: DioExceptionType.connectionError,
+            message: 'connection refused',
+          ),
+        ),
+        data: {
+          'scene': 'abc123',
+          'client_id': clientId,
+          'redirect_uri': redirectUri,
+          'state': 'st',
+          'code_challenge': pkce.challenge,
+          'code_challenge_method': 'S256',
+        },
+      );
+
+      await expectLater(
+        client.exchange(scene: 'abc123', pkce: pkce, state: 'st'),
+        throwsA(
+          isA<AuthError>().having((e) => e.message, 'message', contains('网络')),
+        ),
+      );
+    });
+  });
+}

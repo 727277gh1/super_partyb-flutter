@@ -42,6 +42,7 @@
 - [x] 工程卫生批量（issue #47：`.gitattributes` / Dependabot / action pin / 三项严格模式 / release notes 由 `git log` 生成 / `tools/` 清单守卫，见 [§6.26](design-decisions/testing.md)）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
 - [ ] 移动端 OIDC 登录闭环（IdP 侧已于 2026-11-06 注册 `partyb://oidc/callback`，剩真机回跳验证，见 `docs/mobile-oidc-deeplink.md` §3）
+- [x] App 内「微信一键登录」：小程序会话 → 标准 OIDC 授权码（客户端编排 + 服务端兑换端点 + URL Scheme 生成均已上线，剩真机验证，见 `docs/wechat-one-click-login.md`、id-provider#10、flutter#80）
 - [x] 移动端 claimed HTTPS 回调（Android App Links）客户端侧：`autoVerify` 过滤器（双栈两域名）+ `OidcCallbackUri.matches` 双形态 + manifest/plist 漂移守卫测试（服务端 `assetlinks.json` 与 IdP `redirectUris` 已就绪但**未部署**，见 `docs/mobile-oidc-deeplink.md` §2.3、api-gateway#12、id-provider#8）
 - [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
 - [x] 发布流水线（`.github/workflows/release.yml`：tag 触发四端出包 → GitHub Release）

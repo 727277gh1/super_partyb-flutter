@@ -20,6 +20,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
+import 'miniprogram_signin.dart';
 
 /// 移动端没有桌面能力，恒为空实现。
 ///
@@ -611,6 +612,31 @@ class AuthStateNotifier extends Notifier<AuthState> {
     state = AuthState.unauthenticated;
   }
 
+  /// 微信一键登录（App 内唤起小程序）。
+  ///
+  /// 与 [signIn] 的区别：这条路**当场**就能完成（拿到授权码 → 换 token），
+  /// 不依赖深链回跳，所以成功时直接把状态推进到已登录；失败则把原因写进
+  /// state（登录页展示）。
+  Future<String?> wechatSignIn() async {
+    final action = ref.read(wechatSignInActionProvider);
+    String? error;
+    try {
+      error = await action();
+    } on SpbError catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '微信登录失败：$e';
+    }
+    if (error != null) {
+      state = AuthState.failed(error);
+      return error;
+    }
+    // 落盘点（oidcCallbackHandlerProvider）内部已调 signedIn()；这里只在
+    // 「没被推进」时兜底，避免把已登录覆盖成 unknown。
+    if (!state.isAuthenticated) state = AuthState.unauthenticated;
+    return null;
+  }
+
   /// 标记会话失效（如收到 [AuthError]）。**不清凭证**。
   void markUnauthenticated(String? message) {
     state = message == null
@@ -619,6 +645,31 @@ class AuthStateNotifier extends Notifier<AuthState> {
   }
 }
 
+/// 小程序扫码登录客户端（App 内「微信一键」）。
+///
+/// 端点由 issuer 推导（`{issuer}/api/v1/bindings/mini-program`），不硬编码域名。
+final miniProgramLoginClientProvider = Provider<MiniProgramLoginClient>((ref) {
+  final config = ref.watch(oidcConfigProvider);
+  return MiniProgramLoginClient(
+    issuer: Uri.parse(config.issuer),
+    clientId: config.clientId,
+    redirectUri: config.redirectUri,
+  );
+});
+
+/// 「微信一键登录」动作。
+///
+/// 编排在 `miniprogram_signin.dart`：唤起小程序 → 轮询 → 兑换授权码 →
+/// 交给与深链回调同一个落盘点（`oidcCallbackHandlerProvider`）。
+final wechatSignInActionProvider = Provider<Future<String?> Function()>((ref) {
+  return () => miniProgramSignIn(
+    client: ref.read(miniProgramLoginClientProvider),
+    store: ref.read(pendingAuthStoreProvider),
+    launch: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+    onCode: ref.read(oidcCallbackHandlerProvider),
+  );
+});
+
 /// 认证动作集合。
 final authControllerProvider = Provider<AuthActions>((ref) {
   return AuthActions(
@@ -626,6 +677,7 @@ final authControllerProvider = Provider<AuthActions>((ref) {
     signOut: () => ref.read(authStateProvider.notifier).signOut(),
     importSession: (raw) =>
         ref.read(authStateProvider.notifier).importSession(raw),
+    wechatSignIn: () => ref.read(authStateProvider.notifier).wechatSignIn(),
   );
 });
 
@@ -635,6 +687,7 @@ class AuthActions {
     required this.signIn,
     required this.signOut,
     required this.importSession,
+    required this.wechatSignIn,
   });
 
   final Future<String?> Function() signIn;
@@ -642,6 +695,9 @@ class AuthActions {
 
   /// 粘贴导入已有会话，见 [AuthStateNotifier.importSession]。
   final Future<String?> Function(String raw) importSession;
+
+  /// 微信一键登录（唤起小程序 → 确认 → 兑换授权码 → 落盘）。
+  final Future<String?> Function() wechatSignIn;
 }
 
 /// 把认证状态变化转成 `Listenable`，供 go_router 的 `refreshListenable` 使用。

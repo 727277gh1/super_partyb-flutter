@@ -203,7 +203,7 @@ Future<String?> mobileSignIn({
     return 'OIDC client_id 未配置（--dart-define=SPB_OIDC_CLIENT_ID）';
   }
 
-  final state = (stateGenerator ?? _defaultState)();
+  final state = (stateGenerator ?? defaultAuthState)();
   final pkce = (pkceGenerator ?? OidcPkce.generatePair)();
   // 必须 await：写盘完成前不能打开浏览器。若回调在写入完成前到达，
   // 接收器会读到「没有进行中的登录」而拒绝这次回调。
@@ -214,7 +214,7 @@ Future<String?> mobileSignIn({
     pkce: pkce,
     state: state,
     // nonce 用于绑定 ID Token；客户端不解析 JWT，但 IdP 仍要求该参数。
-    nonce: (stateGenerator ?? _defaultState)(),
+    nonce: (stateGenerator ?? defaultAuthState)(),
   );
 
   try {
@@ -237,7 +237,10 @@ Future<String?> mobileSignIn({
 }
 
 /// 默认 `state` 生成（32 字符，与网关侧一致）。
-String _defaultState() {
+///
+/// 公开：小程序扫码登录（`miniprogram_signin.dart`）复用同一生成器——
+/// 两条登录路径的 state 形态不该有差异，否则排查 CSRF 类问题时要分别确认。
+String defaultAuthState() {
   const alphabet =
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   final rng = Random.secure();

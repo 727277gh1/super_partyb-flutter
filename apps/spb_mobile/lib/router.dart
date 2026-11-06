@@ -312,6 +312,8 @@ class _LoginPage extends ConsumerWidget {
       //（深链闭环依赖 `partyb://oidc/callback` 注册，见 docs/mobile-oidc-deeplink.md）。
       onImportSession: (raw) =>
           ref.read(authControllerProvider).importSession(raw),
+      // 微信一键登录：手机上唯一能「一步到位」的路径（同机无法扫码）。
+      onWeChatSignIn: () => ref.read(authControllerProvider).wechatSignIn(),
     );
   }
 }
