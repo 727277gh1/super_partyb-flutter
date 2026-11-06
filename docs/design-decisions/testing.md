@@ -250,6 +250,22 @@ class _SyncPage extends ConsumerWidget { ... return SyncPage(...); }
 - **provider 层**：两端 `providers.dart` 有上百个同名 provider（其中以 `Provider`
   结尾的 86 个），上提到共享包是独立重构（issue #39 已登记），不在本守卫范围。
 
+#### 补丁：override 漏挂也不在本守卫范围内——靠「可测的清单函数」（2026-11）
+
+`main.dart` 里的 `ProviderScope(overrides: [...])` / `ProviderContainer(overrides: ...)`
+是**另一条**「漏了也没人知道」的接线：provider 有合理默认值（`Noop*`），漏挂后
+功能整条不执行、**零报错**。真实先例：`notificationSinkProvider` 的注释写着
+「生产在 `main.dart` 覆盖为 `LocalNotificationSink`」，而两端 `main.dart` 从未
+覆盖过——通知功能自上线起就没生效（根因与反向验证见
+[`known-issues.md`](../known-issues.md)）。
+
+本守卫管不到它（不看 provider 层）。做法是**把清单收敛成一个函数**：两端各一个
+`buildProductionOverrides(...)`（`apps/*/lib/providers.dart`，`main.dart` 只负责挂上），
+由 `apps/*/test/production_overrides_test.dart` 用
+`ProviderContainer(overrides: buildProductionOverrides(...))` 断言「生产实际拿到的是
+什么实现」。判据很直白：**只写在 `main.dart` 里的 override 清单，没有任何测试能
+看见**。
+
 #### 四个易写错的点（写这类脚本时）
 
 1. **必须先把注释与字符串抹掉再解析**：`reason: 'a, b'` 里的逗号会被当成参数
