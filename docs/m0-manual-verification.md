@@ -393,16 +393,17 @@ flutter test test/chat/accessibility_test.dart   # 期望：+6 All tests passed!
 
 Android `<intent-filter>` 与 iOS `CFBundleURLTypes` **已注册**（
 `docs/mobile-oidc-deeplink.md` §0），回调接收/解析/state 校验/换 token
-**已实现并单测**（21 例）。但**仍不能真正登录**，缺两个 IdP 侧配置：
-
-1. 把 `partyb://oidc/callback` 加进该 client 的 `oauth_clients.redirectUris`
-   （当前只有三个网关回调）；
-2. 新建一个 **public client**（`token_endpoint_auth_method=none`）+ 强制 PKCE。
+**已实现并单测**（21 例）。~~仍不能真正登录，缺两个 IdP 侧配置~~ →
+**2026-11-06 已解除**：public client（`flutter-client`，`none` + PKCE 强制）
+已于 2026-10 注册，其 `redirectUris` 又于 2026-11-06 加入
+`partyb://oidc/callback`；authorize 端点实测 `302` → 登录页（见
+`docs/mobile-oidc-deeplink.md` §3）。剩真机回跳闭环验证（issue #4）。
 
 > IdP Go 版已支持 public client（`oauthclient.Create` 接受
 > `tokenEndpointAuthMethod=none`，`oidc.Client.GetTokenEndpointAuthMethod`
 > 读真实列值）并强制 public client 使用 PKCE（`EnforcePKCEForPublicClients`）。
-> 故**只差注册这一步**。
+> 故**只差注册这一步**。——该步已于 2026-10（client）与 2026-11-06
+> （scheme 回调）完成，见上。
 
 ### 3.3 其它环境阻塞
 

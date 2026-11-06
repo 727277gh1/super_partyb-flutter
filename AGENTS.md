@@ -226,8 +226,9 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 10. 待办与里程碑
 
-见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。仍未闭合的两项：
-移动端 OIDC 登录闭环（需 IdP 注册 `partyb://oidc/callback`）、iOS 出包（需 Apple 账号）。
+见 [`docs/roadmap.md`](docs/roadmap.md)（勾选状态是**事实记录**，不是计划）。仍未闭合的两项：移动端 OIDC 登录闭环（IdP 侧已于 2026-11-06 注册
+`partyb://oidc/callback`，剩真机回跳验证，见 `docs/mobile-oidc-deeplink.md`
+§3）、iOS 出包（需 Apple 账号）。
 
 ## 11. 已知问题
 

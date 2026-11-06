@@ -1,6 +1,7 @@
 # 桌面端登录：RFC 8252 §7.3 loopback 授权码流程
 
-> 状态：已实现（客户端 + IdP 侧），待生产注册 public client。
+> 状态：已实现并已接入生产（客户端 + IdP public client 2026-10 注册；
+> 移动端 scheme 回调 2026-11-06 注册，见 `docs/mobile-oidc-deeplink.md` §3）。
 > 替代此前的「网关托管 OIDC + 粘贴导入会话」方案。
 > 相关：`docs/oidc-verification.md`（旧方案的实测依据）、
 > `docs/mobile-oidc-deeplink.md`（移动端，同一思路的自定义 scheme 变体）。
@@ -196,11 +197,12 @@ cd id-provider/go && make build && bash scripts/deploy-<host>.sh
 
 ## 9. 已知限制
 
-- **IdP 侧 public client 尚未在生产注册**：未注册前 `loopbackSignIn` 会在
-  授权阶段收到 IdP 的 `400 invalid_request`。此时**粘贴导入会话仍是可用降级**
-  （登录页保留该入口）。
-- **移动端仍走自定义 scheme**（`partyb://oidc/callback`），需要 IdP 单独注册
-  该回调——移动端没有 loopback 监听能力（Android/iOS 沙箱）。本次未改移动端。
+- ~~IdP 侧 public client 尚未在生产注册~~ → 已注册（2026-10，
+  `flutter-client`，见 `docs/known-issues.md`）。
+- **移动端仍走自定义 scheme**（`partyb://oidc/callback`）：IdP 已于
+  2026-11-06 注册该回调（同 client，多一条 redirectUris）；剩真机回跳
+  闭环验证——移动端没有 loopback 监听能力（Android/iOS 沙箱），本次未改
+  移动端。
 - **Linux 无 GUI 环境无法端到端手测**：`docs/` 已记录本机限制；自动化测试覆盖
   到「假浏览器 + 真 loopback 监听 + 假 token 端点」全链路，真实浏览器登录需
   在有桌面环境的机器上验证。
