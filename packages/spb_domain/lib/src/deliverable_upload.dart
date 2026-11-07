@@ -25,60 +25,10 @@ library;
 import 'package:spb_models/spb_models.dart';
 
 import 'deliverable_sync.dart';
+import 'local_file_reader.dart';
 import 'sync_path.dart';
 import 'sync_prune.dart';
 import 'sync_state.dart';
-
-/// 读取本地文件内容（回传链路用）。
-///
-/// ## 为什么与 `FileSink` 分开而不是给它加一个 `read`
-///
-/// `FileSink` 是**同步引擎**的落盘契约，它刻意只有 `write`/`delete`/`exists`
-/// ——引擎只需要「写下去、删掉、问在不在」。回传链路需要的是「把本地内容读出
-/// 来」，是另一条路径上的另一种能力。合成一个接口会让只想注入落盘桩的测试
-/// 被迫实现读取（或反之），也让「谁有权限读用户目录」这件事失去边界。
-///
-/// ## 实现必须保证
-///
-/// - **路径穿越防御**：`relPath` 来自状态表（相对路径形态），但实现仍须独立
-///   校验并解析符号链接后确认落在同步目录内——与 `LocalFileSink` 同一套
-///   `resolveWithinRoot` 语义。这是纵深防御：第一层（domain 的路径校验）只
-///   看字符串形态，看不见软链。
-/// - **不存在的文件抛错**，不要返回空列表：空列表会被上层当成「一个 0 字节
-///   的文件」，进而算出与记录不同的 hash → 误判为「用户改动过」并触发一次
-///   覆盖上传（把远端文件写成空文件）。
-///
-/// ## 为什么除了 `readBytes` 还有 `sizeOf` / `contentDigestOf`
-///
-/// 脏检测只需要「体积」与「内容指纹」，**不需要**内容本身。若只给
-/// [readBytes]，它就必然把整份文件读进内存：
-///
-/// 1. 体积过滤必须**先**判——一个 2GB 的媒体文件被读完才发现超上限，那是
-///    纯浪费（[sizeOf] 只 stat，不读内容）；
-/// 2. 指纹可以**流式**算（[contentDigestOf]）——峰值 O(块) 而不是 O(文件)。
-///    真实报障的 ~240MB 瞬时尖峰就来自「整份读入 + 哈希再拷一份」（见
-///    `contentHashOfStream` 的文档）。
-///
-/// [readBytes] 仍然保留：回传**上传**那一步要的就是内容本身（`_handleOne`），
-/// 那时整份字节本来就必须在内存里。
-abstract interface class LocalFileReader {
-  /// 读取 [relPath]（相对同步目录）的全部字节。
-  ///
-  /// 路径非法、文件不存在或读取失败时抛错。
-  Future<List<int>> readBytes(String relPath);
-
-  /// 只 stat：返回 [relPath] 的字节数，**不读内容**。
-  ///
-  /// 路径非法、文件不存在或读取失败时抛错（语义同 [readBytes]——抛错而不是
-  /// 返回 0，否则 0 字节会被判成「内容变了」而触发覆盖上传）。
-  Future<int> sizeOf(String relPath);
-
-  /// 流式算出 [relPath] 的内容 SHA256（十六进制小写）。
-  ///
-  /// 实现必须**分块读取**（如 `File.openRead()` + `contentHashOfStream`），
-  /// 不得先 `readBytes` 再哈希——那样又把整份文件驻留内存了。
-  Future<String> contentDigestOf(String relPath);
-}
 
 // ===========================================================================
 // 回传目标解析

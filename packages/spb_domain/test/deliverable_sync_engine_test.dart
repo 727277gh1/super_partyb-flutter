@@ -11,7 +11,7 @@ import 'support/deliverable_sync_harness.dart';
 void main() {
   group('同步执行：失败与状态不变量', () {
     test('失败项不写状态（否则永久漏更新）', () async {
-      final sink = StubSink();
+      final sink = StubSink(preExisting: <String>{});
       final downloader = StubDownloader();
       downloader.errors['bad'] = '网络超时';
       final engine = SyncEngine(downloader: downloader, sink: sink);
@@ -53,7 +53,7 @@ void main() {
     });
 
     test('失败项不推进游标（否则该文件被下轮 updated_since 过滤掉）', () async {
-      final sink = StubSink();
+      final sink = StubSink(preExisting: <String>{});
       final downloader = StubDownloader();
       downloader.errors['bad'] = '网络超时';
       final engine = SyncEngine(downloader: downloader, sink: sink);
@@ -102,7 +102,7 @@ void main() {
     });
 
     test('用实际写入字节数记状态（服务端 size 不符时以本地事实为准）', () async {
-      final sink = StubSink();
+      final sink = StubSink(preExisting: <String>{});
       // 桩返回 5 字节，但清单声明 size = 999
       final engine = SyncEngine(downloader: StubDownloader(), sink: sink);
       final result = await engine.run(
@@ -115,7 +115,7 @@ void main() {
     });
 
     test('304 视为成功：刷新状态但不写入文件', () async {
-      final sink = StubSink();
+      final sink = StubSink(preExisting: <String>{});
       final engine = SyncEngine(
         downloader: StubDownloader(notModifiedIds: {'id-a.md'}),
         sink: sink,
@@ -139,7 +139,7 @@ void main() {
 
     test('首次同步绝不带 If-None-Match（否则 304 骗成「未变更」，文件永不落盘）', () async {
       // 这个 bug 曾在 Tauri 端真实发生：首次同步 0 个文件落盘却报「未变更 9 个」。
-      final sink = StubSink();
+      final sink = StubSink(preExisting: <String>{});
       final downloader = StubDownloader(notModifiedIds: {'id-a.md'});
       final engine = SyncEngine(downloader: downloader, sink: sink);
 
@@ -224,7 +224,7 @@ void main() {
     });
 
     test('报告摘要包含各计数与跳过原因', () async {
-      final sink = StubSink();
+      final sink = StubSink(preExisting: <String>{});
       final engine = SyncEngine(downloader: StubDownloader(), sink: sink);
       final result = await engine.run(
         remote: [
@@ -818,4 +818,204 @@ void main() {
       expect(r.state.cursor, isNull, reason: '未隔离的失败仍冻结游标（保守）');
     });
   });
+  group('下行覆盖未回传的本地编辑（issue #56）', () {
+    test('本地脏时覆盖前先物化 _conflict/ 副本，本地字节可找回', () async {
+      final sink = StubSink(preExisting: <String>{});
+      // 模拟用户上次同步后手动改了本地文件（干净基线 etag=E1/hash=H1，磁盘上是 H2）。
+      final edited = [9, 9, 9];
+      final record = SyncedFile(
+        etag: 'W/"1"',
+        size: 5,
+        updatedAt: '2026-05-01T00:00:00Z',
+        contentHash: contentHashOf([1, 2, 3]), // 与磁盘不同 → 脏
+      );
+      // preExisting 只表达「磁盘上有」，没有字节；脏检测要读内容，故写入真实字节。
+      sink.written['a.md'] = edited;
+      final engine = SyncEngine(downloader: StubDownloader(), sink: sink);
+
+      final r = await engine.run(
+        remote: [
+          remoteFixture(
+            'a.md',
+            id: 'f1',
+            updatedAt: '2026-05-02T00:00:00Z',
+            etag: 'W/"2"',
+          ),
+        ],
+        state: stateWith({'a.md': record}),
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+
+      expect(r.report.downloaded, 1);
+      expect(r.report.dirtyOverwritten, 1, reason: '覆盖了未回传编辑必须可见');
+      // 本地编辑没有被销毁：_conflict/ 下找得到
+      final conflicts = sink.written.keys
+          .where((p) => p.contains('_conflict/'))
+          .toList();
+      expect(conflicts, hasLength(1), reason: '旧内容必须物化为副本');
+      expect(sink.written[conflicts.single], edited);
+      // 新版本照常落盘
+      expect(sink.written['a.md'], isNotNull);
+    });
+
+    test('本地干净（hash 一致）时直接覆盖，不产生副本', () async {
+      final sink = StubSink();
+      final record = SyncedFile(
+        etag: 'W/"1"',
+        size: 5,
+        updatedAt: '2026-05-01T00:00:00Z',
+        contentHash: contentHashOf([7, 7, 7]), // 磁盘上就是这份 → 不脏
+      );
+      sink.written['a.md'] = [7, 7, 7];
+      final engine = SyncEngine(downloader: StubDownloader(), sink: sink);
+
+      final r = await engine.run(
+        remote: [
+          remoteFixture(
+            'a.md',
+            id: 'f1',
+            updatedAt: '2026-05-02T00:00:00Z',
+            etag: 'W/"2"',
+          ),
+        ],
+        state: stateWith({'a.md': record}),
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+
+      expect(r.report.downloaded, 1);
+      expect(r.report.dirtyOverwritten, 0);
+      expect(sink.written.keys.where((p) => p.contains('_conflict/')), isEmpty);
+    });
+
+    test('远端没变（etag 命中）时即使本地脏也不触发检测/下载', () async {
+      final sink = StubSink(preExisting: <String>{'a.md'});
+      final record = SyncedFile(
+        etag: 'W/"1"',
+        size: 5,
+        updatedAt: '2026-05-01T00:00:00Z',
+        contentHash: contentHashOf([1, 2, 3]),
+      );
+      sink.written['a.md'] = [9, 9, 9]; // 脏，但远端没变 → 不下载
+      final engine = SyncEngine(downloader: StubDownloader(), sink: sink);
+
+      final r = await engine.run(
+        remote: [
+          remoteFixture(
+            'a.md',
+            id: 'f1',
+            updatedAt: '2026-05-01T00:00:00Z',
+            etag: 'W/"1"',
+          ),
+        ],
+        state: stateWith({'a.md': record}),
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+
+      expect(r.report.downloaded, 0);
+      expect(r.report.dirtyOverwritten, 0);
+    });
+
+    test('旧状态条目没有 contentHash 时退回旧行为（覆盖，不产生副本）', () async {
+      final sink = StubSink(preExisting: <String>{'a.md'});
+      const record = SyncedFile(
+        etag: 'W/"1"',
+        size: 5,
+        updatedAt: '2026-05-01T00:00:00Z',
+      );
+      final engine = SyncEngine(downloader: StubDownloader(), sink: sink);
+
+      final r = await engine.run(
+        remote: [
+          remoteFixture(
+            'a.md',
+            id: 'f1',
+            updatedAt: '2026-05-02T00:00:00Z',
+            etag: 'W/"2"',
+          ),
+        ],
+        state: stateWith({'a.md': record}),
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+
+      expect(r.report.downloaded, 1);
+      expect(r.report.dirtyOverwritten, 0, reason: '无指纹无从判脏，按未脏处理');
+      expect(sink.written.keys.where((p) => p.contains('_conflict/')), isEmpty);
+    });
+
+    test('副本物化失败 → 整个下载失败（拒绝覆盖），本地内容原封不动', () async {
+      final sink = StubSink();
+      sink.written['a.md'] = [9, 9, 9]; // 用户未回传的编辑
+      final record = SyncedFile(
+        etag: 'W/"1"',
+        size: 5,
+        updatedAt: '2026-05-01T00:00:00Z',
+        contentHash: contentHashOf([1, 2, 3]),
+      );
+      // 冲突副本名带时间戳（不可预知），故用包装桩拦截所有 `_conflict/` 写。
+      final blocking = _ConflictWriteBlockingSink(inner: sink);
+      final engine = SyncEngine(downloader: StubDownloader(), sink: blocking);
+
+      final r = await engine.run(
+        remote: [
+          remoteFixture(
+            'a.md',
+            id: 'f1',
+            updatedAt: '2026-05-02T00:00:00Z',
+            etag: 'W/"2"',
+          ),
+        ],
+        state: stateWith({'a.md': record}),
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+
+      expect(r.report.downloaded, 0, reason: '留不了副本就绝不覆盖');
+      expect(r.report.failed.single.relPath, 'a.md');
+      expect(r.report.failed.single.reason, contains('拒绝覆盖'));
+      expect(
+        blocking.attemptedOverwrite,
+        isFalse,
+        reason: '留不了副本就覆盖 = 白丢编辑，必须阻断',
+      );
+      // 远端 etag 未写入状态 → 下轮重试
+      expect(r.state.files['a.md']?.etag, 'W/"1"');
+    });
+  });
+}
+
+/// 拦截 `_conflict/` 写入的桩：副本写失败，但目标路径写入被记录。
+class _ConflictWriteBlockingSink implements FileSink, LocalFileReader {
+  _ConflictWriteBlockingSink({required StubSink inner}) : _inner = inner;
+
+  final StubSink _inner;
+  bool attemptedOverwrite = false;
+
+  bool _isConflict(String relPath) => relPath.contains('_conflict/');
+
+  @override
+  Future<void> write(String relPath, List<int> bytes) async {
+    if (_isConflict(relPath)) throw Exception('副本写失败');
+    attemptedOverwrite = true;
+    await _inner.write(relPath, bytes);
+  }
+
+  @override
+  Future<void> delete(String relPath) => _inner.delete(relPath);
+
+  @override
+  Future<bool> exists(String relPath) => _inner.exists(relPath);
+
+  @override
+  Future<List<int>> readBytes(String relPath) => _inner.readBytes(relPath);
+
+  @override
+  Future<int> sizeOf(String relPath) => _inner.sizeOf(relPath);
+
+  @override
+  Future<String> contentDigestOf(String relPath) =>
+      _inner.contentDigestOf(relPath);
 }

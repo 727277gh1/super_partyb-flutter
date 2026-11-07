@@ -17,6 +17,9 @@ library;
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'conflict_path.dart';
+import 'local_file_reader.dart';
+import 'sync_cursor.dart';
 import 'sync_memory.dart';
 import 'sync_path.dart';
 import 'sync_state.dart';
@@ -377,6 +380,7 @@ class SyncDownload extends SyncAction {
     required this.etag,
     required this.size,
     required this.updatedAt,
+    this.localDirty = false,
   });
 
   /// 服务端文件 id（下载 URL 需要）。
@@ -390,6 +394,13 @@ class SyncDownload extends SyncAction {
 
   /// 服务端 `updated_at` 的**原始字符串**，成功后用于推进游标。
   final String? updatedAt;
+
+  /// 本地有**未回传的编辑**（issue #56）：覆盖前必须先把本地那份存成
+  /// `_conflict/` 副本，否则用户的改动被静默销毁。
+  ///
+  /// 判据见 [buildSyncPlan] 的 [dirtyLocally] 说明：状态里的 contentHash
+  /// 与磁盘现状不一致 = 用户改过而尚未回传。
+  final bool localDirty;
 }
 
 /// 删除本地副本（远端已软删除）。
@@ -449,12 +460,34 @@ class SyncPlan {
 ///
 /// 默认值 null 表示「调用方无磁盘信息」——此时行为退化为仅看状态，即修复前的
 /// 语义。**生产路径（[SyncEngine]）总是传入真实集合**，见其 `run`。
+///
+/// ## [dirtyLocally]：本地有未回传的编辑（issue #56）
+///
+/// 同步状态里存了 `contentHash`（上次同步时本地内容的指纹）。若它与磁盘现状
+/// 不一致，说明用户改过这份文件而**尚未回传**。此时远端又变了的话，是真正的
+/// 编辑冲突——直接覆盖就是**静默数据丢失**（本模块唯一一条这样的路径）：
+///
+/// ```
+/// 用户同步 reports/x.md（状态 contentHash=H1, etag=E1）
+/// → 用户改了几行（本地 H2，未回传）
+/// → agent 重写远端（etag=E2）
+/// → 下行同步：E2 != E1 → 下载覆盖 → 用户的改动消失，报告只写「下载 1 个」
+/// ```
+///
+/// 传入该集合后，命中的下载项会带上 `localDirty`，执行器在落盘前先把本地
+/// 版本存成 `_conflict/<时间戳>-<原名>.conflict`（与上传方向的冲突物化同款），
+/// 再覆盖；[SyncReport.dirtyOverwritten] 如实报告「本轮覆盖了哪些未回传改动」。
+///
+/// 只对 **contentHash 非空** 的条目生效：该字段是后加的，旧状态条目没有
+/// 指纹就无从判断脏，只能退回旧行为（覆盖）。这是有意的降级——不能因为
+/// 「无法判断」就永远不下载（那会让文件永远不新鲜）。
 SyncPlan buildSyncPlan({
   required List<UfsFileEntry> remote,
   required SyncState state,
   required SyncScope scope,
   required SyncFilterConfig filter,
   Set<String>? presentLocally,
+  Set<String>? dirtyLocally,
 }) {
   final downloads = <SyncAction>[];
   final deletes = <SyncAction>[];
@@ -508,6 +541,9 @@ SyncPlan buildSyncPlan({
         size: file.size,
         // 游标用原始字符串（精度问题见 UfsFileEntry.updatedAtRaw）。
         updatedAt: file.updatedAtRaw,
+        // 本地有未回传的编辑：执行器必须先物化 `_conflict/` 副本再覆盖
+        // （issue #56，判据见本函数文档的 dirtyLocally 一节）。
+        localDirty: dirtyLocally?.contains(relPath) ?? false,
       ),
     );
   }
@@ -610,6 +646,7 @@ class SyncReport {
     this.downloaded = 0,
     this.notModified = 0,
     this.deleted = 0,
+    this.dirtyOverwritten = 0,
     List<SyncFailure>? failed,
     List<SyncFailure>? quarantined,
     Map<SyncSkipReason, int>? skipped,
@@ -620,6 +657,13 @@ class SyncReport {
   final int downloaded;
   final int notModified;
   final int deleted;
+
+  /// 覆盖「本地有未回传编辑」的文件数（issue #56）。
+  ///
+  /// 这些文件覆盖前已把本地版本物化到 `_conflict/`，但「覆盖了用户的改动」
+  /// 这个事实必须可见——否则同步报告仍然只说「下载 N 个」，用户无从知道
+  /// 自己的编辑被替换了（哪怕内容已保留在副本里）。
+  final int dirtyOverwritten;
 
   /// 失败项：相对路径 → 原因。
   ///
@@ -641,6 +685,9 @@ class SyncReport {
   String summarize() {
     final parts = ['下载 $downloaded 个，删除 $deleted 个'];
     if (notModified > 0) parts.add('未变更 $notModified 个');
+    if (dirtyOverwritten > 0) {
+      parts.add('覆盖未回传改动 $dirtyOverwritten 个（旧内容已存 _conflict/）');
+    }
     if (failed.isNotEmpty) parts.add('失败 ${failed.length} 个');
     if (quarantined.isNotEmpty) {
       parts.add('${quarantined.length} 个连续失败已暂停重试');
@@ -815,12 +862,24 @@ class SyncEngine {
       presentLocally.addAll(results.nonNulls);
     }
 
+    // 本地脏检测（issue #56）：只对「本轮会下载、且状态里有 contentHash」的
+    // 文件算一次本地摘要。这三重收窄让常态成本接近零——绝大多数同步轮次里
+    // 远端没有变化的文件根本不进入候选集，而旧状态条目没有 contentHash
+    // 无从判断（退回覆盖，见 buildSyncPlan 的说明）。
+    final dirtyLocally = await _detectDirtyLocally(
+      remote: remote,
+      state: state,
+      scope: scope,
+      presentLocally: presentLocally,
+    );
+
     final plan = buildSyncPlan(
       remote: remote,
       state: state,
       scope: scope,
       filter: filter,
       presentLocally: presentLocally,
+      dirtyLocally: dirtyLocally,
     );
 
     if (plan.isEmpty) {
@@ -849,6 +908,82 @@ class SyncEngine {
       skipped: plan.skipped,
       advanceCursor: scope.advancesCursor,
     );
+  }
+
+  /// 找出「本地有未回传编辑」的路径（issue #56）。
+  ///
+  /// ## 判据
+  ///
+  /// 候选 = `remote` 里出现的路径 ∩ `state.contains` ∩ 磁盘上存在 ∩
+  /// 状态里 `contentHash != null` ∩ **etag/size 已变**（否则本轮不会下载，
+  /// 脏不脏都无所谓）。
+  ///
+  /// 对候选逐个算本地内容摘要并与状态里的 contentHash 比对：不同 → 脏。
+  ///
+  /// ## 为什么必须在这里算（而不是让执行器边下载边判断）
+  ///
+  /// 计划一旦生成，执行器只知道「这个文件要覆盖」。是否该先留副本属于**计划
+  /// 决策**（它对应用户可见的语义：本轮会不会动用户未回传的编辑），必须与
+  /// 「跳过 / 下载 / 删除」一起在计划里体现，才能被报告与测试覆盖。
+  ///
+  /// ## 成本与失败取向
+  ///
+  /// - 只读候选文件的本地内容（分块流式摘要，不整份驻留内存）；
+  /// - 分批并发（8）避免一次打开上千个文件；
+  /// - **读取失败按「不脏」处理**：宁可覆盖也不要因为一次读盘失败就把文件
+  ///   永远卡在「不敢下载」（那会让用户看到永不更新的旧内容）。代价是这种
+  ///   情形下仍可能丢一次本地编辑——但它只发生在「文件读不出来」时，而那种
+  ///   文件的本地内容本来也无法回传。
+  Future<Set<String>> _detectDirtyLocally({
+    required List<UfsFileEntry> remote,
+    required SyncState state,
+    required SyncScope scope,
+    required Set<String> presentLocally,
+  }) async {
+    // `sink` 是字段，Dart 不对字段做 flow promotion；显式 cast 一步到位。
+    final reader = sink is LocalFileReader ? sink as LocalFileReader : null;
+    if (reader == null) return const <String>{};
+
+    final candidates = <String>[];
+    for (final file in remote) {
+      if (file.isDirectory || file.deletedAt != null) continue;
+      final relPath = scope.relativePath(file.path);
+      if (relPath == null) continue;
+      if (!presentLocally.contains(relPath)) continue;
+      final record = state.files[relPath];
+      if (record == null || record.contentHash == null) continue;
+      // 远端没变 → 本轮不会下载，脏不脏都不影响任何决定。
+      if (state.isUnchanged(relPath, etag: file.etag, size: file.size)) {
+        continue;
+      }
+      candidates.add(relPath);
+    }
+    if (candidates.isEmpty) return const <String>{};
+
+    final dirty = <String>{};
+    Future<String?> probe(String relPath) async {
+      try {
+        final digest = await reader.contentDigestOf(relPath);
+        return digest == state.files[relPath]?.contentHash ? null : relPath;
+      } catch (e) {
+        SpbLog.debug('脏检测读本地文件失败，按「未改动」处理', {
+          'relPath': relPath,
+          'error': e.toString(),
+        });
+        return null;
+      }
+    }
+
+    const batchSize = 8;
+    for (var i = 0; i < candidates.length; i += batchSize) {
+      final batch = candidates.skip(i).take(batchSize).toList();
+      final results = await Future.wait(batch.map(probe));
+      dirty.addAll(results.nonNulls);
+    }
+    if (dirty.isNotEmpty) {
+      SpbLog.info('下行同步发现本地未回传的编辑，将先物化冲突副本', {'count': dirty.length});
+    }
+    return dirty;
   }
 
   /// 并发执行全部动作，返回与输入**同序**的结果列表。
@@ -908,6 +1043,7 @@ class SyncEngine {
         :final etag,
         :final size,
         :final updatedAt,
+        :final localDirty,
       ):
         // 只在本地**确实有副本**时才发条件请求（见 FileDownloader.download
         // 的文档：否则首次同步会被 304 骗成「未变更」，文件永不落盘）。
@@ -937,6 +1073,41 @@ class SyncEngine {
             );
           }
           final bytes = result.bytes ?? const <int>[];
+
+          // 本地有未回传的编辑（issue #56）：先物化 `_conflict/` 副本再覆盖。
+          //
+          // ## 为什么物化发生在**执行阶段**而不是计划阶段
+          //
+          // 副本的内容是「下载那一刻磁盘上的本地字节」——计划只决定「需要留」，
+          // 字节本身必须在覆盖动作之前捕获。若放在计划阶段读，到执行时本地
+          // 内容可能又变（读-改-写窗口），留的副本就不是用户最后的样子。
+          //
+          // ## 失败取向：物化失败 → 整个下载失败（不覆盖）
+          //
+          // 留不了副本就覆盖 = 白丢用户编辑，与 issue 要修的缺陷同罪。把它
+          // 当成下载失败处理：文件留在 failed 列表（计入隔离/游标不推进的
+          // 既有语义），本地内容原封不动，下轮重试。
+          if (localDirty) {
+            try {
+              final localBytes = (sink as LocalFileReader).readBytes(relPath);
+              final conflictRel = buildConflictPath(
+                relPath,
+                unixToRfc3339(nowUnix()),
+              );
+              await sink.write(conflictRel, await localBytes);
+              SpbLog.info('下行覆盖前已物化冲突副本', {
+                'relPath': relPath,
+                'conflict': conflictRel,
+              });
+            } catch (e) {
+              return _ActionResult.failed(
+                relPath,
+                '本地改动冲突副本物化失败，拒绝覆盖（$e）',
+                updatedAt: updatedAt,
+              );
+            }
+          }
+
           // 在途登记（`sync_memory.dart`）：从这一刻到写完 + 算完哈希，这份
           // 字节常驻内存，且 `contentHashOfAsync` 会再拷一份（
           // `TransferableTypedData.fromList` 自己就拷贝）——真机上就是这里
@@ -954,6 +1125,7 @@ class SyncEngine {
               etag: etag,
               size: bytes.length,
               updatedAt: updatedAt,
+              overwroteDirty: localDirty,
               // 后台 isolate 哈希（docs/memory-audit.md G6）：大文件不再冻结
               // UI。worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆
               // （见 contentHashOfAsync 的文档）。
@@ -1016,6 +1188,7 @@ class SyncEngine {
     var downloaded = 0;
     var notModified = 0;
     var deleted = 0;
+    var dirtyOverwritten = 0;
 
     // 本轮结束后各失败项的最终计数（issue #64）：合并是按计划顺序串行的，
     // 成功项（可能排在失败项之前）做推进判定时，失败项**还没** markFailure。
@@ -1079,6 +1252,7 @@ class SyncEngine {
           :final size,
           :final updatedAt,
           :final contentHash,
+          :final overwroteDirty,
         ):
           files[relPath] = SyncedFile(
             etag: etag,
@@ -1089,6 +1263,8 @@ class SyncEngine {
           failures.remove(relPath);
           if (advanceCursor && canAdvance()) advanceBy(updatedAt);
           downloaded++;
+          // issue #56：覆盖了用户未回传的编辑（旧内容已物化到 _conflict/）。
+          if (overwroteDirty) dirtyOverwritten++;
 
         case _Failed(:final relPath, :final reason, :final updatedAt):
           // 失败：不写文件记录（不变量 1），但连续失败计数要累计（issue #64）。
@@ -1123,6 +1299,7 @@ class SyncEngine {
         downloaded: downloaded,
         notModified: notModified,
         deleted: deleted,
+        dirtyOverwritten: dirtyOverwritten,
         failed: failed,
         quarantined: quarantined,
         skipped: skipped,
@@ -1156,6 +1333,7 @@ sealed class _ActionResult {
     required int size,
     required String? updatedAt,
     required String contentHash,
+    bool overwroteDirty,
   }) = _Downloaded;
   factory _ActionResult.failed(
     String relPath,
@@ -1188,12 +1366,16 @@ class _Downloaded extends _ActionResult {
     required this.size,
     required this.updatedAt,
     required this.contentHash,
+    this.overwroteDirty = false,
   });
 
   final String? etag;
   final int size;
   final String? updatedAt;
   final String contentHash;
+
+  /// 覆盖前物化了 `_conflict/` 副本（本地有未回传编辑，issue #56）。
+  final bool overwroteDirty;
 }
 
 class _Failed extends _ActionResult {

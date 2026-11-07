@@ -46,8 +46,10 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:uuid/uuid.dart';
 
+import 'conflict_path.dart';
 import 'deliverable_sync.dart';
 import 'deliverable_upload.dart';
+import 'local_file_reader.dart';
 import 'sync_cursor.dart';
 import 'sync_memory.dart';
 import 'sync_path.dart';
@@ -508,7 +510,7 @@ class DeliverableUploadUseCase {
     required UfsFileEntry? remoteEntry,
     String? conflictTimestamp,
   }) async {
-    final filename = _basename(target.groupRelPath);
+    final filename = conflictBasename(target.groupRelPath);
 
     // 远端已删：不覆盖、不通知。本地这份可能是用户在远端删除后新建的，
     // 但「重建一个已删文件」应该是用户的显式决定（重新走 quick-capture 或
@@ -616,7 +618,7 @@ class DeliverableUploadUseCase {
       dirty: dirty,
       target: target,
       localBytes: localBytes,
-      filename: _basename(target.groupRelPath),
+      filename: conflictBasename(target.groupRelPath),
       // 通知在两次上传都完成后再发（消息里要给出两个路径）。
       notifyKind: _NotifyKind.none,
     );
@@ -644,7 +646,7 @@ class DeliverableUploadUseCase {
       dirty: conflictDirty,
       target: conflictTarget,
       localBytes: agentBytes,
-      filename: _basename(conflictRelPath),
+      filename: conflictBasename(conflictRelPath),
       notifyKind: _NotifyKind.none,
     );
 
@@ -804,7 +806,7 @@ class DeliverableUploadUseCase {
   /// 于是那条文案连同它的插值 bug 一起是死代码。
   ///
   /// 顺带记录那个 bug 的形态（`tools/check_dollar_paren.sh` 现在会拦）：
-  /// `'… $_basename(conflictRelPath) …'` 插值的是**函数对象**，`$identifier`
+  /// `'… $conflictBasename(conflictRelPath) …'` 插值的是**函数对象**，`$identifier`
   /// 只取标识符本身，后面的 `(conflictRelPath)` 是字面文本，产出
   /// `Closure: (String) => String from Function '_basename': static.(conflictRelPath)`。
   /// `dart analyze` 抓不到（插值函数合法、`Object.toString()` 存在）。
@@ -886,7 +888,7 @@ class DeliverableUploadUseCase {
     String? conflictRelPath,
   }) async {
     final path = _groupRelPathForMessage(relPath, groupId);
-    final filename = _basename(path);
+    final filename = conflictBasename(path);
 
     final String input;
     switch (kind) {
@@ -895,8 +897,8 @@ class DeliverableUploadUseCase {
       case _NotifyKind.conflict:
         input =
             '我修改了交付物 $filename（$path），同时你也有一个新版本，'
-            '两者产生了冲突。你的版本已保留在 $_conflictDirName/'
-            '${_basename(conflictRelPath ?? '')}。'
+            '两者产生了冲突。你的版本已保留在 $conflictDirName/'
+            '${conflictBasename(conflictRelPath ?? '')}。'
             '请比对两份内容：若我的改动小，请合并后写回 $path 并把差异讲清楚；'
             '若无法安全合并，请说明冲突点并等我确认。默认以我的版本为准。';
       case _NotifyKind.none:
@@ -939,42 +941,6 @@ class DeliverableUploadUseCase {
 
 /// 通知消息的种类。
 enum _NotifyKind { none, direct, conflict }
-
-/// 冲突副本目录名。
-///
-/// 不在 groupsync 的 include globs 里 → 不被上传 UFS、不 emit 事件；但它在
-/// workspace 里 → agent（容器挂载视图）能读到。
-const String _conflictDirName = '_conflict';
-
-/// 构造冲突副本的组内路径：`_conflict/<RFC3339时间戳>-<原名>.conflict`。
-///
-/// ## 为什么 `.conflict` 后缀是必需的
-///
-/// groupsync 的 include globs 含 `**/*.spec.json`、`**/*.html`、`**/*.pdf`
-/// 等**全目录**模式（`groupsync.go:89`）。若副本保持原名，
-/// `_conflict/<ts>-foo.spec.json` 仍会命中白名单 → 被上传 UFS 并 emit
-/// `agent.file.*`（归因错乱，且可能触发 IM 主动推送，额度仅 10 条/24h）。
-/// 统一加 `.conflict` 后缀后，原名里的扩展名不再位于末尾，从而不命中任何
-/// include glob。
-///
-/// ## 为什么时间戳要放进文件名
-///
-/// 同一文件可能冲突多次。只有原名的话第二次物化会**覆盖**第一次的副本，
-/// 上一次的 agent 版本就丢了（UFS 的 file_versions 里还有，但用户/agent
-/// 无从知道该去翻哪一版）。
-String buildConflictPath(String groupRelPath, String rfc3339Timestamp) {
-  final filename = _basename(groupRelPath);
-  // 冒号在 Windows 上是非法文件名字符，而冲突副本会落到用户的同步目录
-  // （可能是 Windows）。替换成 '-'：仍是可读的时间戳，且不破坏排序。
-  final safeTs = rfc3339Timestamp.replaceAll(':', '-');
-  return '$_conflictDirName/$safeTs-$filename.conflict';
-}
-
-/// 取路径最后一段（文件名）。
-String _basename(String path) {
-  final i = path.lastIndexOf('/');
-  return i < 0 ? path : path.substring(i + 1);
-}
 
 /// 从 UFS 绝对路径取 group 内相对路径；null = 不属于该 group。
 String? _groupRelPathOf(String ufsPath, String groupId) =>
