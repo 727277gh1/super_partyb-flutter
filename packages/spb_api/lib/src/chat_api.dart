@@ -1372,10 +1372,29 @@ class ChatApi {
     return mapDioError(e);
   }
 
+  /// 把响应体收窄成 JSON 对象；**不是对象就抛 [ParseError]**。
+  ///
+  /// ## 为什么不再返回 `const {}`
+  ///
+  /// 返回空 map 会让每个 `Xxx.fromJson(_asMap(res))` 得到**字段全空的对象**：
+  /// 界面上是「这个对话没有标题 / 没有消息」，不是「出错了」。契约漂移被静默
+  /// 降级成一个合法的空模型，用户报障时无从复现，日志里也没有痕迹。
+  ///
+  /// 本仓库在同一条链路上已经选了「大声失败」（`_unwrap` 对非 2xx 抛
+  /// [HttpError]、分页超限抛 [ParseError]），这里是唯一一处相反取向。
+  ///
+  /// 真实触发面：网关返回 200 + `text/html` 错误页、端点改成返回数组、
+  /// 未来某端点改形状而客户端未同步（正是手写契约承认的长期风险）。
+  ///
+  /// 若某端点确实可能返回空体（204 / `null`），在**那个调用点**显式分支，
+  /// 而不是让这个全局 helper 兜底——兜底会把「真没有」和「解析不了」混成一件事。
   static Map<String, dynamic> _asMap(Object? v) {
     if (v is Map<String, dynamic>) return v;
     if (v is Map) return Map<String, dynamic>.from(v);
-    return const {};
+    throw ParseError(
+      '响应不是 JSON 对象（实际类型 ${v.runtimeType}），无法解析为模型',
+      raw: v is String ? v : null,
+    );
   }
 }
 
