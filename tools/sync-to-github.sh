@@ -170,6 +170,26 @@ apply_rules() {
   echo "  替换：$changed_hits 处，涉及 $changed_files 个文件"
 }
 
+# ── 格式化导出树 ──────────────────────────────────────────────────────
+# WHY 必须在脱敏**之后**：替换会改变字符串字面量的长度，跨过 80 列换行
+# 边界的行在导出树里需要重新折行。若不重排，本地 `dart format` 是绿的、
+# CI（跑的是导出树）却是红的——2026-11 首次出现，7 个文件无辜躺枪。
+# 本地树与导出树各自 format 干净即可，两边换行允许不同（历史本来孤立）。
+format_export() {
+  local dir=$1 dart_bin
+  dart_bin="${SPB_DART:-$(command -v dart || true)}"
+  if [ -z "$dart_bin" ]; then
+    echo "  ❌ 未找到 dart：格式化导出树需要它（CI 会因脱敏改变换行而红）。" >&2
+    echo "     请把 Flutter/Dart SDK 加入 PATH，或 export SPB_DART=<dart 路径>" >&2
+    return 1
+  fi
+  local out
+  out=$(cd "$dir" && "$dart_bin" format . 2>&1) || {
+    echo "  ❌ dart format 失败：" >&2; echo "$out" >&2; return 1;
+  }
+  echo "  $(echo "$out" | tail -1)"
+}
+
 # ── 校验：任一真实值仍残留 ────────────────────────────────────────────
 # $1 = 目标目录。返回 0 = 干净，1 = 有残留。
 verify_clean() {
@@ -220,6 +240,9 @@ echo "▶ 应用脱敏规则"
 apply_rules "$src"
 
 # ── 校验 ──────────────────────────────────────────────────────────────
+echo "▶ 格式化导出树"
+format_export "$src"
+
 echo "▶ 校验"
 if ! verify_clean "$src"; then
   echo "❌ 导出树仍有真实值残留，**不推送**。" >&2
