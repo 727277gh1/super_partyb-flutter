@@ -234,6 +234,32 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     // `initState` 里拿不到 InheritedWidget）。
     notifier.attach(onNavigate: (payload) => _router.go(payload));
 
+    // 冷启动的启动详情（issue #86）：App 被杀后点通知，payload 不走 onSelect
+    // （那只覆盖进程存活时的点击），要单独读一次 launch details。
+    //
+    // ## 为什么可以与 onSelect 并存而不会导航两次
+    //
+    // 冷启动时 onSelect 根本不会为这次点击触发——它注册在 initialize 之后，
+    // 而启动点击发生在插件初始化之前（平台把它放进 launch details 等我们取）。
+    // 两者覆盖的是**互斥的**两个生命周期阶段。读一次即消费，不重复导航。
+    if (sink is LocalNotificationSink) {
+      unawaited(
+        sink.launchDetails().then((details) {
+          final payload = details?.notificationResponse?.payload;
+          if (details?.didNotificationLaunchApp != true ||
+              payload == null ||
+              payload.isEmpty) {
+            return; // 普通启动 / 空 payload → 打开主窗口（默认路由）。
+          }
+          // 首帧后再导航：initState 阶段路由栈尚未完全就绪，直接 go 可能
+          // 被首帧的初始路由覆盖。微任务不保险，用首帧回调。
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _router.go(payload);
+          });
+        }),
+      );
+    }
+
     // 窗口焦点 → 通知判定。真实实现会推送；Noop/测试桩不推（保持初始 true）。
     final caps = ref.read(desktopCapabilitiesProvider);
     if (caps is WindowFocusTarget) {

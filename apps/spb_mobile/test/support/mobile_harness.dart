@@ -540,4 +540,11 @@ class RecordingNotificationSink implements NotificationSink {
   Future<void> show(LocalNotification notification) async {
     sent.add(notification);
   }
+
+  @override
+  Future<void> cancel(String id) async {
+    cancelled.add(id);
+  }
+
+  final cancelled = <String>[];
 }

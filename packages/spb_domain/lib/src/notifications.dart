@@ -71,6 +71,14 @@ abstract interface class NotificationSink {
   /// 发出通知。**不抛异常**。
   Future<void> show(LocalNotification notification);
 
+  /// 撤销一条已发出的通知（issue #87：确认卡解决后不再留在通知中心）。
+  ///
+  /// id 与 [show] 时传的 [LocalNotification.id] 同源（字符串）。实现方负责
+  /// 映射到平台 id（与 [show] 同一映射，否则撤不掉）。**不抛异常**：平台
+  /// 不支持 / id 不存在都静默——撤销失败的最坏后果只是通知多留一会儿，
+  /// 不值得打断业务链路。
+  Future<void> cancel(String id);
+
   /// 点击通知的回调接线点。
   ///
   /// 与 `WindowDisplayTarget` 同一理由：这是「接线」不是「能力」，
@@ -88,6 +96,11 @@ class NoopNotificationSink implements NotificationSink {
   @override
   Future<void> show(LocalNotification notification) async {
     SpbLog.debug('通知在当前平台不可用', {'id': notification.id});
+  }
+
+  @override
+  Future<void> cancel(String id) async {
+    // 空实现：与 show 一致的静默降级（本类就是「无通知平台」的化身）。
   }
 
   @override

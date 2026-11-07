@@ -423,6 +423,30 @@ class OutboxQueue {
     }
   }
 
+  /// 构造一条队列条目。幂等键规则见 [submit] 的 [requestId] 说明：
+  /// 调用方已生成（首次直发失败转入）→ 复用；否则此处生成。
+  OutboxEntry _buildEntry({
+    required String userId,
+    required String input,
+    String? groupId,
+    String? agentId,
+    String routingMode = 'auto',
+    String? requestId,
+    required DateTime now,
+  }) {
+    return OutboxEntry(
+      id: requestId ?? _uuid.v4(),
+      userId: userId,
+      input: input,
+      groupId: groupId,
+      agentId: agentId,
+      routingMode: routingMode,
+      createdAt: now,
+      nextAttemptAt: now,
+      maxAttempts: _policy.maxAttempts,
+    );
+  }
+
   /// 提交一条消息。
   ///
   /// ## 三种结果（见 [OutboxSubmitOutcome]）
@@ -433,26 +457,72 @@ class OutboxQueue {
   ///
   /// 终态错误（400 等）**不入队**，直接上抛——重试无用，入队只会让用户在
   /// 「待发送」里看到一条永远发不出去的消息。
+  ///
+  /// [requestId]：调用方已生成的幂等键（issue #58）。非空则用作 `entry.id`——
+  /// `id` 就是 `request_id`，首次直发与失败入队**必须**是同一个键：服务端按
+  /// `(user_id, request_id)` 去重，若入队换了新键，「服务端已受理但客户端看到
+  /// 失败」的场景下重试会再建一个 turn。空则由本方法生成（离线首次入队、
+  /// 重放等无直发前置的场景）。
   Future<OutboxSubmitOutcome> submit({
     required String userId,
     required String input,
     String? groupId,
     String? agentId,
     String routingMode = 'auto',
+    String? requestId,
   }) async {
     _userId = userId;
     final now = _now();
-    final entry = OutboxEntry(
-      // 幂等键在这里生成一次，此后每次重试都用它。
-      id: _uuid.v4(),
+
+    // ## 严格 FIFO 守卫（issue #60）
+    //
+    // 不变式 1 说「只投递队首」；若队列非空时仍走下方直发快速路径，新消息会
+    // 先于退避中的旧消息到达服务端——顺序颠倒（「帮我改这个」/「算了别改了」
+    // 调换是语义事故，且两个 turn 都已建、无法自愈）。
+    //
+    // 故：队列非空时**只入队**，投递权交给 drain（队首重试成功后自然轮到本条）。
+    // 代价是排队期间新消息不再享受直发——但那条快速路径优化的是一条用户
+    // 本来就在等网络往返的消息，收益远小于顺序错乱。
+    if (_entries.isNotEmpty) {
+      final entry = _buildEntry(
+        userId: userId,
+        input: input,
+        groupId: groupId,
+        agentId: agentId,
+        routingMode: routingMode,
+        requestId: requestId,
+        now: now,
+      );
+      try {
+        await _store.upsert(entry);
+      } catch (storageError) {
+        return OutboxEnqueueFailed(
+          error: storageError is SpbError
+              ? storageError
+              : StorageError('离线队列写入失败：$storageError'),
+        );
+      }
+      _entries.add(entry);
+      _emit();
+      SpbLog.info('消息已入离线队列（队列非空，顺延投递）', {
+        'user_id': userId,
+        'request_id': entry.id,
+        'ahead': _entries.length - 1,
+      });
+      // 队首可能正处于退避等待；挂上定时器保其按时重试（幂等：已在跑则 no-op）。
+      final head = _entries.isEmpty ? null : _entries.first;
+      if (head != null) unawaited(drain());
+      return OutboxQueuedOffline(entry: entry);
+    }
+
+    final entry = _buildEntry(
       userId: userId,
       input: input,
       groupId: groupId,
       agentId: agentId,
       routingMode: routingMode,
-      createdAt: now,
-      nextAttemptAt: now,
-      maxAttempts: _policy.maxAttempts,
+      requestId: requestId,
+      now: now,
     );
 
     try {
@@ -468,7 +538,6 @@ class OutboxQueue {
         rethrow;
       }
       final queued = entry.copyWith(attempts: 1, lastError: e.message);
-      // 入队失败 → 降级为旧行为（提示发送失败），而不是假装排队成功。
       try {
         await _store.upsert(queued);
       } catch (storageError) {

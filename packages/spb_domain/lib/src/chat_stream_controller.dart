@@ -5,6 +5,7 @@ import 'package:meta/meta.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:uuid/uuid.dart';
 
 import 'conversation_item.dart';
 import 'event_reducer.dart';
@@ -2114,6 +2115,14 @@ class ChatStreamController {
     String? requestId,
   }) async {
     final resolvedGroupId = groupId ?? _groupId;
+    // 幂等键**只生成一次**，首次直发与失败入队共用（issue #58）。
+    //
+    // 服务端去重键是 (user_id, request_id)：若直发用一个键、入队重试用新键，
+    // 则在「服务端已受理但响应丢失」（超时 / 502 / 断线）时，重试会**再建一个
+    // turn**——用户同一条输入被 agent 处理两遍（重复成本 + 重复文件改动）。
+    //
+    // 调用方可显式传入（重放/测试用）；不传就在此处生成。
+    final rid = requestId ?? const Uuid().v4();
     // 乐观回显：请求在飞时立即渲染（issue #52）。pending 让 UI 显示「发送中」；
     // 拿到响应后原位转正（成功）或移除（失败/入队）。
     final echoId = injectLocalUserMessage(
@@ -2129,7 +2138,7 @@ class ChatStreamController {
         groupId: resolvedGroupId,
         agentId: agentId,
         routingMode: routingMode,
-        requestId: requestId,
+        requestId: rid,
       );
       _settleLocalEcho(echoId, result.groupId, result.turnId, input, agentId);
       return result;
@@ -2144,6 +2153,8 @@ class ChatStreamController {
         groupId: resolvedGroupId,
         agentId: agentId,
         routingMode: routingMode,
+        // 与首次直发同一个幂等键（issue #58）。
+        requestId: rid,
       );
       switch (outcome) {
         case OutboxSubmittedNow(:final result):
@@ -2158,6 +2169,23 @@ class ChatStreamController {
           // 存储也挂了 → 降级为旧行为（发送失败）。
           throw error;
       }
+    } catch (e, st) {
+      // 非 SpbError：响应体形状异常导致的 TypeError/CastError、拦截器链路里
+      // 未被 mapDioError 覆盖的裸异常、或 outbox.submit 内部意外异常。
+      //
+      // ⚠️ 必须清理乐观回显（issue #57）：否则那条幽灵气泡会**永久**停在
+      // 「发送中」——这正是 §6.50 消灭过的失败模式，只是从另一个入口回来了。
+      //
+      // ⚠️ 不要顺手入队：非 SpbError 无法判定 isTransient / isQueueable，
+      // 盲目入队会把不可重试的请求塞进离线队列，变成一条永远发不出去的「待发送」。
+      _removeLocalEcho(echoId);
+      SpbLog.error(
+        '发送失败（非 SpbError），已移除乐观回显',
+        error: e,
+        stackTrace: st,
+        fields: {'request_id': rid},
+      );
+      rethrow;
     }
   }
 

@@ -215,4 +215,38 @@ class LocalNotificationSink implements NotificationSink {
       ),
     );
   }
+
+  @override
+  Future<void> cancel(String id) async {
+    if (!await initialize()) return;
+    try {
+      // 与 show 同一映射（id.hashCode），否则平台侧找不到对应通知。
+      //
+      // ⚠️ String.hashCode 不保证跨进程稳定（Dart 文档明确说明）：撤销只在
+      // 同进程内有效——确认卡解决的时刻与发通知的时刻在同一会话。若将来要
+      // 「冷启动清理上次残留」，必须换稳定哈希并落盘映射，见 issue #87。
+      await _plugin.cancel(id: id.hashCode);
+    } catch (e) {
+      // 撤销失败的最坏后果只是通知多留一会儿，不影响业务。
+      debugPrint('[notifications] 撤销通知失败（已忽略）：$e');
+    }
+  }
+
+  /// 冷启动的启动详情（issue #86）。
+  ///
+  /// App 被系统杀掉后点通知，payload 随 launch details 到达——它不会走
+  /// [onSelect]（那只覆盖进程存活时的点击）。调用方在路由建好后读一次：
+  /// 非空则导航到 payload（一次），与热路径的 onSelect 互斥（本方法返回后
+  /// 应把详情消费掉，避免同一次点击导航两次）。
+  ///
+  /// 未初始化 / 插件抛异常时返回 null（调用方退化为「打开主窗口」）。
+  Future<NotificationAppLaunchDetails?> launchDetails() async {
+    if (!await initialize()) return null;
+    try {
+      return await _plugin.getNotificationAppLaunchDetails();
+    } catch (e) {
+      debugPrint('[notifications] 读取启动详情失败（按无点击处理）：$e');
+      return null;
+    }
+  }
 }

@@ -8,7 +8,13 @@ class _RecordingSink implements NotificationSink {
   bool granted;
   int permissionCalls = 0;
   final sent = <LocalNotification>[];
+  final cancelled = <String>[];
   void Function(String? payload)? onSelect;
+
+  @override
+  Future<void> cancel(String id) async {
+    cancelled.add(id);
+  }
 
   @override
   Future<bool> requestPermission() async {
@@ -407,7 +413,64 @@ void main() {
       const sink = NoopNotificationSink();
       expect(await sink.requestPermission(), isFalse);
       await sink.show(const LocalNotification(id: 'x', title: 't', body: 'b'));
+      await sink.cancel('x'); // issue #87：空实现同样静默。
       sink.onSelect = (_) {};
+    });
+  });
+
+  group('已解决卡撤销通知（issue #87）', () {
+    test('发过通知的卡 resolved 到达 → cancel 被调一次', () async {
+      final sink = _RecordingSink();
+      final notifier = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => false,
+      );
+
+      await notifier.handleItems([_card()]);
+      expect(sink.sent, hasLength(1));
+
+      await notifier.handleItems([_card(resolved: true)]);
+
+      expect(sink.cancelled, ['conf_1']);
+    });
+
+    test('同一 resolved 卡连续多轮 → 只 cancel 一次', () async {
+      final sink = _RecordingSink();
+      final notifier = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => false,
+      );
+
+      await notifier.handleItems([_card()]);
+      await notifier.handleItems([_card(resolved: true)]);
+      await notifier.handleItems([_card(resolved: true)]);
+      await notifier.handleItems([_card(resolved: true)]);
+
+      expect(sink.cancelled, hasLength(1), reason: '重复 cancel 是无效调用噪音');
+    });
+
+    test('从未发过通知的 resolved 卡（历史回填 / 前台看过）→ 不产生 cancel', () async {
+      final sink = _RecordingSink();
+      final notifier = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => false,
+      );
+
+      // 卡先在前台到达（记入判重但不发通知），随后解决。
+      await notifier.handleItems([_card()]);
+      sink.sent.clear();
+      sink.cancelled.clear();
+      // 模拟前台：第二条直接以 resolved 到达且从未 show 过。
+      final fresh = ConfirmationNotifier(
+        sink: sink,
+        isWindowFocused: () => true,
+      );
+      await fresh.handleItems([_card(id: 'conf_2')]);
+      await fresh.handleItems([_card(id: 'conf_2', resolved: true)]);
+
+      expect(sink.sent, isEmpty);
+      expect(sink.cancelled, isEmpty,
+          reason: '没发过通知就无通知可撤——cancel 分支必须只对发过的 id 生效');
     });
   });
 

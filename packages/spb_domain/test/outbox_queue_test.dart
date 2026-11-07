@@ -126,6 +126,66 @@ void main() {
       expect(seen, hasLength(2));
       expect(seen.toSet(), {id});
     });
+
+    test('传入 requestId 则用作 entry.id（issue #58：首次直发与入队同幂等键）', () async {
+      final store = FakeStore();
+      final queue = OutboxQueue(
+        store: store,
+        send: (e) async => throw const NetworkError('断网'),
+      );
+      addTearDown(queue.dispose);
+
+      const rid = 'rid-from-first-send';
+      await queue.submit(userId: 'u1', input: '你好', requestId: rid);
+
+      expect(queue.snapshot.single.id, rid,
+          reason: '入队条目的 id 就是后续重试用的 request_id；'
+              '若换成新生成的 uuid，服务端已受理的首包会被重发成第二个 turn');
+      expect(store.rows.keys.single, rid);
+    });
+
+    test('队列非空时 submit 只入队不直发（issue #60：严格 FIFO 不被快速路径绕过）', () async {
+      final store = FakeStore();
+      final sent = <String>[];
+      var releaseR1 = false;
+      // 可控时钟：首次失败后退避 2s，把时钟拨到退避之后触发 drain。
+      var t = DateTime.utc(2026, 1, 1, 12);
+      final queue = OutboxQueue(
+        store: store,
+        send: (e) async {
+          sent.add(e.id);
+          if (e.id == 'r1' && !releaseR1) throw const NetworkError('断网');
+          return result(requestId: e.id);
+        },
+        now: () => t,
+      );
+      addTearDown(queue.dispose);
+
+      // 先把一条消息卡进退避（队首 r1 可重试失败）。
+      await queue.submit(userId: 'u1', input: 'A', requestId: 'r1');
+      expect(queue.snapshot.single.attempts, 1, reason: '首败已计入尝试');
+
+      // 队列非空时新消息 B 提交：不得直发（否则 B 先于 A 到达，顺序颠倒）。
+      final outcome = await queue.submit(userId: 'u1', input: 'B', requestId: 'r2');
+
+      expect(outcome, isA<OutboxQueuedOffline>());
+      expect(sent, isNot(contains('r2')), reason: 'B 绝不能绕过队首直发');
+      expect(store.rows.keys, containsAllInOrder(['r1', 'r2']));
+
+      // 放行后按轮拨钟（每轮拨过 maxDelay=5min，覆盖 2s/4s… 指数退避与抖动），
+      // 显式 drain：应按 FIFO 依次投出 r1 → r2。第一轮 r1 重新失败（4s 退避），
+      // 第二轮成功后才轮到 r2——这本身就是队首阻塞语义的一部分。
+      // （不用 onConnectivityRestored：拨后时钟已晚于条目 nextAttemptAt，
+      // 它无可提前项，changed=false 时直接 return，不会触发 drain。）
+      releaseR1 = true;
+      for (var round = 0; round < 5 && queue.snapshot.isNotEmpty; round++) {
+        t = t.add(const Duration(hours: 1));
+        await queue.drain();
+        await settle();
+      }
+      expect(sent, containsAllInOrder(['r1', 'r2']));
+      expect(queue.snapshot, isEmpty);
+    });
   });
 
   group('OutboxQueue.drain：严格全局 FIFO', () {

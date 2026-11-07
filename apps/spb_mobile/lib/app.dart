@@ -93,6 +93,27 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
     // 好几次才回到用户原来的位置——而用户根本没在这个应用里。
     notifier.attach(onNavigate: (payload) => _router.go(payload));
 
+    // 冷启动的启动详情（issue #86）：App 被杀后点通知，payload 不走 onSelect
+    // （那只覆盖进程存活时的点击），要单独读一次 launch details。与 onSelect
+    // 覆盖互斥的两个生命周期阶段（启动点击发生在插件初始化之前），读一次即
+    // 消费，不重复导航。
+    if (sink is LocalNotificationSink) {
+      unawaited(
+        sink.launchDetails().then((details) {
+          final payload = details?.notificationResponse?.payload;
+          if (details?.didNotificationLaunchApp != true ||
+              payload == null ||
+              payload.isEmpty) {
+            return; // 普通启动 / 空 payload → 打开主窗口（默认路由）。
+          }
+          // 首帧后再导航：initState 阶段路由栈尚未完全就绪。
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _router.go(payload);
+          });
+        }),
+      );
+    }
+
     _lifecycleObserver = _LifecycleFocusObserver(
       onChanged: (focused) =>
           ref.read(windowFocusedProvider.notifier).set(focused),

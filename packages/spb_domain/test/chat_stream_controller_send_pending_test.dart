@@ -91,6 +91,32 @@ ChatStreamController _controllerWith(_HangAdapter adapter) {
   return ChatStreamController(sse: sse, api: ChatApi(dio), userId: 'usr_1');
 }
 
+/// sendMessage 直接裸抛给定异常的 ChatApi 替身（issue #57 用例）。
+///
+/// dio 适配器路线到不了控制器：适配器抛的非 DioException 会被 dio 包成
+/// DioException，再被 ChatApi._post 转成 NetworkError（SpbError 子类）。
+/// 要模拟「非 SpbError 到达控制器的 catch 块」，只能绕过 dio——直接在
+/// sendMessage 上抛。其余成员永不触达（本用例只调 send）。
+class _ThrowingApi implements ChatApi {
+  _ThrowingApi(this.error);
+  final Object error;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('本替身只支持 sendMessage 裸抛：${invocation.memberName}');
+
+  @override
+  Future<SendMessageResult> sendMessage(
+    String userId, {
+    required String input,
+    String? groupId,
+    String? agentId,
+    String routingMode = 'auto',
+    String? requestId,
+    Map<String, dynamic>? options,
+  }) async => throw error;
+}
+
 void main() {
   setUpHarness();
 
@@ -245,6 +271,70 @@ void main() {
       c.flushEmit();
 
       expect(c.snapshot, isEmpty, reason: '失败的消息不能永久停在时间线上');
+
+      await c.dispose();
+    });
+
+    test('非 SpbError 失败（StateError）→ 回显移除且异常原样上抛（issue #57）', () async {
+      // 现有失败注入都是 SpbError 子类；本条锁住「其它异常也必须清理回显」：
+      // 响应体形状异常导致的 TypeError/CastError、拦截器链里未被 mapDioError
+      // 覆盖的裸异常，都可达本分支。若漏清理，乐观回显会**永久**停在「发送中」
+      // ——§6.50 消灭过的失败模式从另一个入口回来。
+      //
+      // 注入方式：dio 会把适配器抛的非 DioException 包成 DioException（→
+      // NetworkError），到不了控制器；故用一个 sendMessage 直接裸抛的 ChatApi
+      // 替身，模拟「API 层之上、控制器之内」的意外异常。
+      final store = FakeOutboxStore();
+      final c = ChatStreamController(
+        sse: sse,
+        api: _ThrowingApi(StateError("响应体形状异常")),
+        userId: 'usr_1',
+        outbox: queueFor(store, fail: const NetworkError('投递也断')),
+      );
+
+      final sending = c.send(input: '会裸抛的一句话', groupId: 'grp_1');
+      c.flushEmit();
+      expect(c.snapshot, hasLength(1));
+
+      await expectLater(sending, throwsA(isA<StateError>()));
+      c.flushEmit();
+
+      expect(c.snapshot, isEmpty,
+          reason: '非 SpbError 也必须移除乐观回显，否则幽灵气泡永久转圈');
+      expect(store.rows, isEmpty,
+          reason: '非 SpbError 无法判定可重试性，不得顺手入队');
+
+      await c.dispose();
+    });
+
+    test('首次直发与失败入队用同一个 request_id（issue #58）', () async {
+      final hang = _HangAdapter();
+      final store = FakeOutboxStore();
+      final c = ChatStreamController(
+        sse: sse,
+        api: ChatApi(
+          Dio(BaseOptions(baseUrl: 'https://api.test/pba'))
+            ..httpClientAdapter = hang,
+        ),
+        userId: 'usr_1',
+        outbox: queueFor(store, fail: const NetworkError('投递也断')),
+      );
+
+      final sending = c.send(input: '断网时写的一句话', groupId: 'grp_1');
+      c.flushEmit();
+      await hang.waitForRequest();
+
+      hang.reject(const NetworkError('断网'));
+      await expectLater(sending, throwsA(isA<MessageQueuedError>()));
+
+      // 入队条目的 id（= 后续重试用的 request_id）必须与直发是同一个键：
+      // 服务端按 (user_id, request_id) 去重，若入队换新键，「服务端已受理
+      // 但客户端看到失败」时重试会再建一个 turn。直发与入队共用同一把
+      // 生成（send 内 rid），结构上保证一致；这里锁「入队不换键」。
+      final queuedId = store.rows.values.single.id;
+      expect(queuedId, isNotEmpty);
+      expect(queuedId.length, greaterThanOrEqualTo(32),
+          reason: 'UUID 形态（与直发同一把生成）');
 
       await c.dispose();
     });

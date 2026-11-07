@@ -96,6 +96,13 @@ class ConfirmationNotifier {
   /// `LinkedHashSet` 保插入序，[first] 即最旧 id（环形淘汰的依据）。
   final Set<String> _notifiedIds = {};
 
+  /// **实际发过系统通知**的卡 id（issue #87）。
+  ///
+  /// `_notifiedIds` 混着「发过通知」「前台看到过」「已解决」三种，不能用它
+  /// 判断该不该 cancel——否则每轮 handleItems 都会对历史卡重复 cancel。
+  /// 只有出现在本集合的 id 才有对应的系统通知可撤；cancel 后即移除。
+  final Set<String> _shownNotifications = {};
+
   /// 记入一个已处理 id；超容量时淘汰最旧。
   ///
   /// 返回该 id 是否**新**加入（调用方据此决定发不发通知）——与直接调
@@ -169,8 +176,11 @@ class ConfirmationNotifier {
       // 不入 `_notifiedIds`（没有可记的键），故它每轮都会被跳过——正确。
       if (id.isEmpty) continue;
       if (item.resolved) {
-        // 已解决的卡：记入但不发（历史回填会把旧卡推来）。
+        // 已解决的卡：记入不发（历史回填会把旧卡推来）；
+        // 但若**之前发过通知**，此时要撤销（issue #87）——否则用户处理完
+        // 卡，通知中心里那条「需要你确认」还挂着，堆成噪音。
         _markSeen(id);
+        await _cancelIfNotified(id);
         continue;
       }
       if (_markSeen(id)) fresh.add(item);
@@ -198,9 +208,20 @@ class ConfirmationNotifier {
             : confirmationNotificationPayload(card.groupId),
       );
       await _sink.show(notification);
+      _shownNotifications.add(card.confirmationId);
       sent.add(notification);
     }
     return sent;
+  }
+
+  /// 撤销一张卡的系统通知（若发过且未撤过）。
+  ///
+  /// 幂等：只有还在 [_shownNotifications] 里的 id 才调 cancel；撤过（或从未
+  /// 发过）就直接返回——handleItems 每轮都会重放全部 items，不做这层去重
+  /// 会对同一 id 反复调 cancel。
+  Future<void> _cancelIfNotified(String id) async {
+    if (!_shownNotifications.remove(id)) return;
+    await _sink.cancel(id);
   }
 
   /// 清空判重集合与权限缓存（切用户 / 退出登录时调用）。
@@ -215,6 +236,7 @@ class ConfirmationNotifier {
   /// - `_notifiedIds`：无界增长（长会话累积），且它描述的是「本会话见过什么」。
   void reset() {
     _notifiedIds.clear();
+    _shownNotifications.clear();
     _permissionGranted = null;
   }
 }

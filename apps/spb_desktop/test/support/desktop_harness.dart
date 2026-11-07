@@ -767,6 +767,13 @@ class RecordingNotificationSink implements NotificationSink {
   Future<void> show(LocalNotification notification) async {
     sent.add(notification);
   }
+
+  @override
+  Future<void> cancel(String id) async {
+    cancelled.add(id);
+  }
+
+  final cancelled = <String>[];
 }
 
 /// 只记录、不排程的调度器桩（默认值，见 `autoSyncScheduler` 参数说明）。
