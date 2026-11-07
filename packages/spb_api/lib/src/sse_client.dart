@@ -163,6 +163,10 @@ class SseClient {
   /// [path] 为相对路径（如 `/users/xxx/chat/stream`），会拼接到 [baseUrl]。
   /// 重复调用会先关闭既有连接。
   Future<void> connect({required String path}) async {
+    // 先取消挂起的重连定时器（issue #54）：否则「退避期间用户调 connect()」
+    // 会留下一个陈旧定时器，到期后无视新连接再开一条流。
+    _retryTimer?.cancel();
+    _retryTimer = null;
     await _teardown();
     _closedByUser = false;
     _retryCount = 0;
@@ -192,6 +196,8 @@ class SseClient {
     if (_path == null) return;
     _closedByUser = false;
     _retryCount = 0;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     await _teardown();
     await _openStream();
   }
@@ -212,8 +218,6 @@ class SseClient {
     baseUrl = nextBaseUrl;
     final path = _path;
     if (path == null || _closedByUser) return false;
-    _retryTimer?.cancel();
-    _retryTimer = null;
     _retryCount = 0;
     _lastEventId = null;
     await _teardown();
@@ -224,6 +228,15 @@ class SseClient {
   Future<void> _openStream() async {
     final path = _path;
     if (path == null) return;
+
+    // 防重入（issue #54）：已有在途请求或活流时不得再开一条，否则两条 HTTP
+    // 流的下字机会交错进入同一套行缓冲，帧被截断/串接，连接数还随时间放大。
+    // 所有合法调用点（connect/resume/switchBaseUrl/重连定时器）都先经过了
+    // 清理，走到这里还非空只可能是陈旧定时器或并发触发。
+    if (_cancelToken != null || _byteSub != null) {
+      SpbLog.warn('SSE 已有活动连接，忽略重复打开', {'path': path});
+      return;
+    }
 
     _setState(SseState.connecting);
     _cancelToken = CancelToken();
@@ -259,24 +272,32 @@ class SseClient {
       SpbLog.info('SSE 已连接', {'path': path, 'cursor': cursor ?? '(none)'});
 
       // 每次连接重建增量解码器：新连接不得携带上一个连接的不完整字节。
+      // 本地变量随流捕获（issue #54）：读字段的话，一旦第二条流在本条流的
+      // 字节到达前替换了解码器，本条流剩余的字节会被写进第二个解码器，
+      // 两路字节拼进同一个行缓冲。
       final sink = _Utf8LineSink(_onText);
-      _utf8Sink = const Utf8Decoder(allowMalformed: true)
+      final utf8Sink = const Utf8Decoder(allowMalformed: true)
           .startChunkedConversion(sink);
 
       _byteSub = body.stream.listen(
-        (bytes) => _utf8Sink?.add(bytes),
+        (bytes) => utf8Sink.add(bytes),
         onError: (Object e, StackTrace st) {
           SpbLog.warn('SSE 流错误', {'error': e.toString()});
+          _markStreamDead();
           _scheduleReconnect();
         },
         onDone: () {
           SpbLog.info('SSE 流结束');
+          _markStreamDead();
           _scheduleReconnect();
         },
         cancelOnError: true,
       );
     } on DioException catch (e) {
       final mapped = mapDioError(e);
+      // 连接建立失败：把 _openStream 开头的占位清掉，否则重连定时器回调的
+      // 「已有活流」守卫会把之后的合法重连误拦掉（issue #54 配套）。
+      _markStreamDead();
       // 401/403 属不可恢复：重连只会重复被拒，直接置 failed 让上层跳登录。
       // 用 [AuthError] 判定（不是 `HttpError.isUnauthorized`）：认证失败在
       // `mapDioError` 里已统一归为 AuthError，见 `auth_interceptor.dart`。
@@ -291,6 +312,7 @@ class SseClient {
       _scheduleReconnect(error: mapped);
     } catch (e, st) {
       SpbLog.error('SSE 连接异常', error: e, stackTrace: st);
+      _markStreamDead();
       _scheduleReconnect(error: NetworkError(e.toString(), cause: e));
     }
   }
@@ -330,9 +352,8 @@ class SseClient {
   String? _pendingEvent;
   String? _pendingId;
 
-  /// 当前连接的增量解码 sink；每次 `_openStream` 重建（新连接不得携带旧连接
-  /// 的不完整字节）。
-  ByteConversionSink? _utf8Sink;
+  // 增量解码 sink 不再存字段：本地变量随流捕获（issue #54）。字段只用于
+  // _teardown/_markStreamDead 置空引用以助 GC，不存在「跨流读字段」的路径。
 
   /// 接收解码后的文本，按行切分。
   ///
@@ -475,8 +496,24 @@ class SseClient {
 
     _retryTimer?.cancel();
     _retryTimer = Timer(backoff, () {
-      if (!_closedByUser) _openStream();
+      // 已有活流/在途请求（退避期间用户调了 connect()/resume()）时丢弃
+      // 这次重连，否则会与新连接并存（issue #54）。
+      if (_closedByUser || _cancelToken != null || _byteSub != null) return;
+      _openStream();
     });
+  }
+
+  /// 把当前连接标记为已终结，并释放其解码资源。
+  ///
+  /// 在流的 onError/onDone 里调用。除了清理字段，更重要的是**在安排重连
+  /// 之前**把 `_cancelToken`/`_byteSub` 置空：否则重连定时器回调里的
+  /// 「已有活流」守卫会把这次合法重连误拦掉，断线后永远连不回来。
+  void _markStreamDead() {
+    _byteSub = null;
+    if (_cancelToken != null && !_cancelToken!.isCancelled) {
+      _cancelToken!.cancel('SSE 流终结');
+    }
+    _cancelToken = null;
   }
 
   void _setState(SseState s) {
@@ -487,7 +524,6 @@ class SseClient {
   Future<void> _teardown() async {
     await _byteSub?.cancel();
     _byteSub = null;
-    _utf8Sink = null;
     if (_cancelToken != null && !_cancelToken!.isCancelled) {
       _cancelToken!.cancel('SSE 连接重建');
     }
@@ -503,6 +539,7 @@ class SseClient {
   Future<void> dispose() async {
     _closedByUser = true;
     _retryTimer?.cancel();
+    _retryTimer = null;
     await _teardown();
     await _frameController.close();
     await _stateController.close();

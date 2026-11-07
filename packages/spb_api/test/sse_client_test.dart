@@ -488,6 +488,129 @@ void main() {
     });
   });
 
+  group('重连定时器与活流互斥（issue #54）', () {
+    test('退避期间调 connect()：陈旧定时器到期后不得再开第二条流', () async {
+      // 触发路径：流断开 → 1s 后定时器重连；期间用户点进对话调 connect()。
+      // 修复前：定时器回调只判 _closedByUser，会再开一条流——两条 HTTP 流
+      // 交错写字节，连接数随时间放大。
+      final stream = _ControllableAdapter();
+      final client = _client(
+        stream,
+        initialBackoff: const Duration(milliseconds: 20),
+        maxBackoff: const Duration(milliseconds: 20),
+      );
+
+      await client.connect(path: '/s');
+      await _drain();
+      expect(client.state, SseState.connected);
+      expect(stream.connectionCount, 1);
+
+      // 断流 → 安排 20ms 后重连。
+      await stream.endStream();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(client.state, SseState.reconnecting);
+
+      // 重连定时器还在挂起时，用户切换会话 → connect() 到新路径。
+      await client.connect(path: '/s2');
+      await _drain();
+      expect(client.state, SseState.connected);
+      final connectionsAtSwitch = stream.connectionCount;
+
+      // 推进过陈旧定时器的到期时刻：不得再发起新连接。
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        stream.connectionCount,
+        connectionsAtSwitch,
+        reason: 'connect() 之后陈旧重连定时器不得再开流',
+      );
+      expect(client.state, SseState.connected);
+      await client.dispose();
+    });
+
+    test('退避期间调 resume()：同理只保留一条流', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(
+        stream,
+        initialBackoff: const Duration(milliseconds: 20),
+        maxBackoff: const Duration(milliseconds: 20),
+      );
+
+      await client.connect(path: '/s');
+      await _drain();
+      await stream.endStream();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+
+      await client.resume();
+      await _drain();
+      final connectionsAtResume = stream.connectionCount;
+
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(
+        stream.connectionCount,
+        connectionsAtResume,
+        reason: 'resume() 之后陈旧重连定时器不得再开流',
+      );
+      await client.dispose();
+    });
+
+    test('连接建立失败后重连仍能进行（catch 路径清占位，防守卫误拦）', () async {
+      // 守卫依赖 _cancelToken/_byteSub 为空才能放行重连；若 fetch 失败的
+      // catch 路径忘了清理占位，这里会永远停在 reconnecting。
+      // 不用 _ScriptedAdapter：它按脚本返回**同一个** ResponseBody 实例，
+      // 而单订阅流不能被第二次 listen（失败后重试会撞上「已被监听」）。
+      final adapter = _FailThenStreamAdapter(2);
+      final client = _client(
+        adapter,
+        initialBackoff: const Duration(milliseconds: 5),
+      );
+      final frames = <SseFrame>[];
+      client.frames.listen(frames.add, onError: (_) {});
+
+      await client.connect(path: '/s');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(adapter.attempts, 3, reason: '两次失败后第三次应重连成功');
+      expect(client.state, SseState.connected);
+
+      // 重连后的流确实可用（解码链路属于新流，不是残留状态）。
+      adapter.push(utf8.encode('data: {"ok":true}\n\n'));
+      await _drain();
+      expect(frames.map((f) => f.data), contains('{"ok":true}'));
+      await client.dispose();
+    });
+
+    test('重连定时器到期时若已有活流则丢弃这次重连（防重入守卫）', () async {
+      // 直接构造守卫场景：定时器挂起期间流已被上层重建。
+      // endStream → reconnecting(20ms) → 在到期前 connect() 新流 →
+      // 第一个用例已覆盖「定时器丢弃」；这里验证相反方向：重连成功开流后
+      // 又一条流结束的 onDone 不会与在途流叠加。
+      final stream = _ControllableAdapter();
+      final client = _client(
+        stream,
+        initialBackoff: const Duration(milliseconds: 1),
+        maxBackoff: const Duration(milliseconds: 1),
+      );
+
+      await client.connect(path: '/s');
+      await _drain();
+
+      // 连续快速断流两次，退避只有 1ms：修复前第二次 onDone 的定时器会在
+      // 第一条重连还在建立时再开一条。修复后 _openStream 开头守卫会拒绝。
+      await stream.endStream();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final afterFirstReconnect = stream.connectionCount;
+      expect(afterFirstReconnect, greaterThanOrEqualTo(2));
+
+      // 稳定后连接数不再增长。
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(
+        stream.connectionCount,
+        lessThanOrEqualTo(afterFirstReconnect + 1),
+      );
+      await client.dispose();
+    });
+  });
+
   group('退避与重连上限', () {
     test('退避序列为 1s, 2s, 4s, ... 且封顶 maxBackoff', () async {
       // 用极短的 maxBackoff 与 initialBackoff 使测试快速跑完，
@@ -749,6 +872,49 @@ class _ChunkAdapter implements HttpClientAdapter {
 /// 记录每次请求、按脚本依次返回结果的适配器。
 ///
 /// 返回项可以是 [ResponseBody]（正常响应）或 [_DioFailure]（抛 DioException）。
+/// 前 [failures] 次请求抛连接错误，之后每次返回**全新的**可控流。
+///
+/// 与 `_ScriptedAdapter` 的区别：后者会重试同一个 ResponseBody，而
+/// SSE 的体是单订阅流，不能被第二次 listen——验证「失败后重试」必须
+/// 给每次成功一个干净的流。
+class _FailThenStreamAdapter implements HttpClientAdapter {
+  _FailThenStreamAdapter(this.failures);
+
+  final int failures;
+  int attempts = 0;
+  final List<StreamController<Uint8List>> _controllers = [];
+
+  void push(List<int> bytes) =>
+      _controllers.last.add(Uint8List.fromList(bytes));
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    attempts++;
+    if (attempts <= failures) {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.connectionError,
+      );
+    }
+    final controller = StreamController<Uint8List>();
+    _controllers.add(controller);
+    return ResponseBody(
+      controller.stream,
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['text/event-stream'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
 class _ScriptedAdapter implements HttpClientAdapter {
   _ScriptedAdapter(this.script);
 
