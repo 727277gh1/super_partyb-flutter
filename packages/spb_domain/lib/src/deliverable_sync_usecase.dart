@@ -113,9 +113,14 @@ class DeliverableSyncUseCase {
 
   /// 拉完所有页。
   ///
-  /// 用 `total` 判断是否还有下一页，而不是「本页条数 == pageSize」：
-  /// 后者在「总数恰好是 pageSize 整数倍」时会多发一次空请求，且若服务端
-  /// 因过滤少返回几条就会**提前停止**而漏文件。
+  /// 分页判据见 [UfsFilePage.hasMore]：`total` 与「本页是否满」取**并集**。
+  /// 只用 `total` 是一条没有兜底的单点契约依赖——`total` 缺失被归 0 时会
+  /// 停在第一页，而本轮照常推进游标并报成功，剩余文件被 `updated_since`
+  /// 永久过滤（issue #65）。并集只会在 `total` 不可信时多翻一页，空页由
+  /// 下面的 `items.isEmpty` 终止。
+  ///
+  /// `total` 明显自相矛盾（报 0 却给了非空页）时打一条 `SpbLog.warn` 留痕，
+  /// 但**不中止**——并集判据已经能自愈（见循环内注释）。
   Future<List<UfsFileEntry>> _listAll({
     required String pathPrefix,
     String? updatedSince,
@@ -132,6 +137,21 @@ class DeliverableSyncUseCase {
         page: page,
         pageSize: pageSize,
       );
+      // total 自相矛盾（报 0 条却给了非空页）：契约漂移，留痕但不中止。
+      //
+      // 不抛异常的理由：`hasMore` 的并集判据已经保证「本页满就继续翻」，因此
+      // 缺失 total 的响应仍能**完整**拉完（多一次空请求收尾）。真正会丢数据的
+      // 是「照旧只按 total 判」——那已经改掉了。若在这里抛错，任何不带 total 的
+      // UFS 变体都会整轮同步失败（连带游标不动），把一个可自愈的契约漂移升级
+      // 成永久故障。日志留给导出诊断（issue #40 的环形缓冲）。
+      if (result.total <= 0 && result.items.isNotEmpty) {
+        SpbLog.warn('UFS 列表响应缺少 total，已按「本页是否满」兜底翻页', {
+          'page': page,
+          'items': result.items.length,
+          'total': result.total,
+        });
+      }
+
       all.addAll(result.items);
 
       // 防御：服务端返回空页但 total 声称还有更多 → 继续会死循环。

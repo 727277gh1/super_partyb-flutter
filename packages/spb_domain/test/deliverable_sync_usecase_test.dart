@@ -178,9 +178,11 @@ void main() {
       expect(report.downloaded, 0);
     });
 
-    test('total 恰好是 pageSize 整数倍时不多发空请求', () async {
-      // 只注册第 1 页的 mock：若实现多发一次第 2 页请求，DioAdapter 会因
-      // 「no mock found」报错。
+    test('total 恰好是 pageSize 整数倍时多发一次空请求即停（issue #65 的代价）', () async {
+      // 旧判据（只看 total）在这里**不多请求**，但那正是 issue #65 的成因：
+      // total 缺失/少报时同一行代码会判「到底了」而静默截断。并集判据把这种
+      // 不可判定的情况统一成「本页满就再翻一页」，代价是总数恰好为 pageSize
+      // 整数倍时多打一次空请求（下面显式注册空页，断言它真的在这里停下）。
       adapter.onGet(
         '/api/files',
         (server) => server.reply(200, {
@@ -198,9 +200,28 @@ void main() {
           'page_size': 2,
         },
       );
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': <Map<String, dynamic>>[],
+          'total': 2,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'page': 2,
+          'page_size': 2,
+        },
+      );
 
       final report = await useCase.run(scope: scope, filter: filter);
-      expect(report.downloaded, 2);
+      expect(report.downloaded, 2, reason: '空页不得被算成文件');
+      expect(
+        store.saves,
+        1,
+        reason: '多发的那次空请求不得产生额外状态写入或失败',
+      );
     });
   });
 

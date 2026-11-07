@@ -167,7 +167,7 @@ void main() {
       expect(b.isDeleted, isTrue, reason: 'deleted_at 非空 = 远端已删除');
     });
 
-    test('total 与 items 不一致时以 total 判断还有下一页', () async {
+    test('total 与 items 不一致时的取向：宁可多翻一页，不静默截断（issue #65）', () async {
       adapter.onGet(
         '/api/files',
         (server) => server.reply(200, {
@@ -177,8 +177,12 @@ void main() {
       );
 
       final page = await api.listFiles();
+      // 本页未满（1 < 20）且 total 也说到底了 → 停。这里两个判据一致。
       expect(page.hasMore(page: 1, pageSize: 20), isFalse);
-      expect(page.hasMore(page: 2, pageSize: 1), isFalse);
+      // 本页**满了**（1 条 == pageSize 1），而 total 只有 1 —— 响应自相矛盾。
+      // 选「继续翻」：多一次请求最坏拿回空页；选「停」在对侧（total 少报）
+      // 则是静默丢文件 + 游标照推，永远找不回来。
+      expect(page.hasMore(page: 2, pageSize: 1), isTrue);
     });
 
     test('4xx 显式抛 HttpError（不静默解析成空对象）', () async {

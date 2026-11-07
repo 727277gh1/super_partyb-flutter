@@ -177,8 +177,22 @@ class UfsFilePage {
   bool get isEmpty => items.isEmpty;
 
   /// 是否还有下一页（已知 [page] 与 [pageSize] 时）。
+  ///
+  /// ## 为什么是「两个条件取或」而不是只看 [total]
+  ///
+  /// 只看 `total` 是一条**没有任何兜底的单点契约依赖**：`total` 缺失时
+  /// [UfsFileEntry._int] 归 0，于是第一页后就判「没有下一页」，而这一轮同步
+  /// **照常推进游标并报告成功**——剩余文件被 `updated_since` 永久过滤，静默丢数据。
+  /// 触发面不只「新增端点忘带 total」：网关改写/裁剪响应体、服务端在过滤路径上
+  /// 把 total 算成本页条数、任何 200 + `{items:[...]}` 的降级页都会命中。
+  ///
+  /// `items.length == pageSize` 这个旧判据单独用确实有毛病（「总数恰好是
+  /// pageSize 整数倍」时多发一次空请求、服务端因过滤少返回几条会提前停止），
+  /// 但作为**并集**它只会在 total 不可信时多翻一页：空页由调用方的
+  /// `if (result.items.isEmpty) break;` 安全终止，代价是一次多余请求，
+  /// 换来的是「不会静默截断」。
   bool hasMore({required int page, required int pageSize}) =>
-      page * pageSize < total;
+      page * pageSize < total || items.length >= pageSize;
 
   factory UfsFilePage.fromJson(Map<String, dynamic> json) {
     final rawItems = json['items'];

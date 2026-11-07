@@ -185,6 +185,32 @@ void main() {
       expect(p.isEmpty, isFalse);
     });
 
+    test('total 缺失（归 0）但本页满 → 仍判有下一页（issue #65）', () {
+      // 这是唯一会**静默丢数据**的方向：total 缺失 → `_int` 归 0 →
+      // 只按 total 判就停在第一页，而调用方照常推进游标并报成功，
+      // 剩余文件被 updated_since 永久过滤。
+      final p = UfsFilePage(
+        items: List.generate(5, (_) => UfsFileEntry.fromJson(fileJson())),
+        total: 0,
+      );
+      expect(p.total, 0, reason: '前提：total 缺失被归 0');
+      expect(
+        p.hasMore(page: 1, pageSize: 5),
+        isTrue,
+        reason: '本页满了就不能假定没有下一页（宁可多请求一次）',
+      );
+    });
+
+    test('total 可信时不被 items.length 影响（不会多发请求）', () {
+      // 反向约束：total 说了「到底了」且本页不满 → 必须停，
+      // 否则每轮同步都会多打一次空请求。
+      final p = UfsFilePage.fromJson({
+        'items': [fileJson()],
+        'total': 1,
+      });
+      expect(p.hasMore(page: 1, pageSize: 5), isFalse);
+    });
+
     test('hasMore 按 total 算（不是 items.length == pageSize 的脆弱推断）', () {
       final p = UfsFilePage.fromJson({
         'items': [fileJson()],
