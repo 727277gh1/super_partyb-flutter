@@ -776,25 +776,43 @@ class SyncEngine {
     // 若只看状态，这些文件会被判为「未变更」而跳过——**永远不再落盘**，
     // 而同步报告显示成功（对齐 Tauri 端 `sync/engine.rs` 的 `target.exists()`）。
     //
-    // ## 为什么只探**状态里记过**的路径
+    // ## 为什么只探**本轮可能用到**的路径（issue #67-③）
     //
-    // 同步目录可能很大（生产实测 5666 个文件）。只探状态里已有的路径，
-    // 数量与状态条目同阶，而不是与整个目录同阶。
+    // `presentLocally` 的全部消费点只有两个：`buildSyncPlan` 的「unchanged
+    // 跳过」判据与 `_executeOne` 的条件请求判据——两者都只对 **remote 清单
+    // 里出现的路径**（且 `state.contains` 成立）有意义。原实现探**全
+    // workspace** 状态键（生产 5666 条）且完全串行：定向同步一个 group
+    // （几十个文件）也要为整个 workspace 付 5666 次串行 stat，全是白付。
+    // 现按 remote 的 relPath 集合收窄（定向同步 ≈ group 文件数），并用
+    // 分批 `Future.wait` 替代纯串行（stat 是轻量系统调用，批内并发 64 足够）。
     //
     // ## 探测失败按「不存在」处理（安全的一侧）
     //
     // `exists` 抛异常（如路径逃逸）时记 debug 并视为「本地没有」：后果只是多一次
     // 无条件下载，比「文件永远缺席」好得多。
+    final probePaths = {
+      for (final f in remote)
+        if (scope.relativePath(f.path) case final rel? when state.contains(rel))
+          rel,
+    };
     final presentLocally = <String>{};
-    for (final relPath in state.files.keys) {
-      try {
-        if (await sink.exists(relPath)) presentLocally.add(relPath);
-      } catch (e) {
-        SpbLog.debug('探测本地副本失败，按「不存在」处理', {
-          'relPath': relPath,
-          'error': e.toString(),
-        });
-      }
+    const probeBatch = 64;
+    for (var i = 0; i < probePaths.length; i += probeBatch) {
+      final batch = probePaths.skip(i).take(probeBatch).toList();
+      final results = await Future.wait(
+        batch.map((relPath) async {
+          try {
+            return await sink.exists(relPath) ? relPath : null;
+          } catch (e) {
+            SpbLog.debug('探测本地副本失败，按「不存在」处理', {
+              'relPath': relPath,
+              'error': e.toString(),
+            });
+            return null;
+          }
+        }),
+      );
+      presentLocally.addAll(results.nonNulls);
     }
 
     final plan = buildSyncPlan(
@@ -980,7 +998,19 @@ class SyncEngine {
     required Map<SyncSkipReason, int> skipped,
     required bool advanceCursor,
   }) {
-    var next = state;
+    // 可变累加器（issue #67-②）：原来每合并一个文件都 `copyWith(files: {...})`
+    // 复制整张 map（5666 条），一轮下载 200 个新文件 ≈ 113 万次 entry 复制。
+    //
+    // ## 为什么用可变累加器不破坏「SyncState 不可变」的不变量
+    //
+    // 该不变量保护的是**计划阶段**：`buildSyncPlan` 读到的必须是执行前的
+    // 事实。计划在本方法之前已经算完（入参 results 与 state），这里再怎么
+    // 改都只影响「执行后」的新状态。故累加器是局部实现细节，对外的
+    // [SyncState] 仍是不可变值（只在方法结尾构造一次）。
+    final files = Map<String, SyncedFile>.of(state.files);
+    final failures = Map<String, SyncFailureRecord>.of(state.failures);
+    var cursor = state.cursor;
+
     final failed = <SyncFailure>[];
     final quarantined = <SyncFailure>[];
     var downloaded = 0;
@@ -1003,11 +1033,25 @@ class SyncEngine {
     bool quarantinedAfter(String relPath) =>
         (finalFailures[relPath] ?? 0) >= quarantineAfterFailures;
 
+    // 游标单调推进（原 SyncState.advanceCursor 的语义：字典序比较，只前进）。
+    void advanceBy(String? candidate) {
+      if (candidate == null || candidate.isEmpty) return;
+      if (cursor != null && cursor!.compareTo(candidate) >= 0) return;
+      cursor = candidate;
+    }
+
+    bool canAdvance() {
+      final failedResults = results.whereType<_Failed>();
+      if (failedResults.isEmpty) return true;
+      return failedResults.every((f) => quarantinedAfter(f.relPath));
+    }
+
     for (final result in results) {
       switch (result) {
         case _Deleted(:final relPath):
           // 删除成功才移除记录：失败保留记录，下轮会重新安排删除。
-          next = next.forget(relPath).clearFailure(relPath);
+          files.remove(relPath);
+          failures.remove(relPath); // 删除成功同样解除隔离（issue #64）
           deleted++;
 
         case _NotModified(
@@ -1019,17 +1063,14 @@ class SyncEngine {
           // 304：内容未重下，本地磁盘上那份仍与之前一致——沿用状态里的旧
           // contentHash（记录里可能没有：该条目写于 contentHash 引入前，
           // 或首次同步就 304 的异常路径，此时保持 null，脏检测自然降级）。
-          next = next.markSynced(
-            relPath,
+          files[relPath] = SyncedFile(
             etag: etag,
             size: size,
             updatedAt: updatedAt,
-            contentHash: next.files[relPath]?.contentHash,
+            contentHash: files[relPath]?.contentHash,
           );
-          next = next.clearFailure(relPath);
-          if (advanceCursor && _canAdvance(next, results, quarantinedAfter)) {
-            next = next.advanceCursor(updatedAt);
-          }
+          failures.remove(relPath);
+          if (advanceCursor && canAdvance()) advanceBy(updatedAt);
           notModified++;
 
         case _Downloaded(
@@ -1039,23 +1080,25 @@ class SyncEngine {
           :final updatedAt,
           :final contentHash,
         ):
-          next = next.markSynced(
-            relPath,
+          files[relPath] = SyncedFile(
             etag: etag,
             size: size,
             updatedAt: updatedAt,
             contentHash: contentHash,
           );
-          next = next.clearFailure(relPath);
-          if (advanceCursor && _canAdvance(next, results, quarantinedAfter)) {
-            next = next.advanceCursor(updatedAt);
-          }
+          failures.remove(relPath);
+          if (advanceCursor && canAdvance()) advanceBy(updatedAt);
           downloaded++;
 
         case _Failed(:final relPath, :final reason, :final updatedAt):
           // 失败：不写文件记录（不变量 1），但连续失败计数要累计（issue #64）。
           // 计数跨轮持久化，达阈值后允许游标越过这个文件。
-          next = next.markFailure(relPath, reason, updatedAt: updatedAt);
+          final prev = failures[relPath];
+          failures[relPath] = SyncFailureRecord(
+            count: (prev?.count ?? 0) + 1,
+            lastError: reason,
+            updatedAt: updatedAt ?? prev?.updatedAt,
+          );
           failed.add(SyncFailure(relPath, reason));
           if (quarantinedAfter(relPath)) {
             quarantined.add(SyncFailure(relPath, reason));
@@ -1070,12 +1113,12 @@ class SyncEngine {
         if (result is! _Failed) continue;
         if (!quarantinedAfter(result.relPath)) continue;
         final ua = result.updatedAt;
-        if (ua != null && ua.isNotEmpty) next = next.advanceCursor(ua);
+        if (ua != null && ua.isNotEmpty) advanceBy(ua);
       }
     }
 
     return SyncRunResult(
-      state: next,
+      state: SyncState(cursor: cursor, files: files, failures: failures),
       report: SyncReport(
         downloaded: downloaded,
         notModified: notModified,
@@ -1084,25 +1127,6 @@ class SyncEngine {
         quarantined: quarantined,
         skipped: skipped,
       ),
-    );
-  }
-
-  /// 本轮是否可以推进游标（issue #64 的核心判据）。
-  ///
-  /// - 无失败：推进（原有语义）。
-  /// - 有失败：仅当**所有**失败项都已达隔离阈值才推进。只要有任何一个
-  ///   「还没失败够次数」的项，就保持旧语义的不推进——它的 updatedAt
-  ///   可能比后面的成功项旧，推过去就永久跳过它之后的重试机会。
-  ///
-  /// [quarantinedAfter] 是预计算的「本轮结束后」隔离判定（见 _merge 开头）。
-  bool _canAdvance(
-    SyncState state,
-    List<_ActionResult> results,
-    bool Function(String relPath) quarantinedAfter,
-  ) {
-    if (!results.any((r) => r is _Failed)) return true;
-    return results.whereType<_Failed>().every(
-      (f) => quarantinedAfter(f.relPath),
     );
   }
 }

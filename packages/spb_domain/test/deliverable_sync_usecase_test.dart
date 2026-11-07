@@ -12,6 +12,9 @@ class _Sink implements FileSink, LocalFileReader {
   /// 模拟上次同步留下的本地副本（[exists] 为真）。
   final preExisting = <String>{};
 
+  /// exists 调用记录（issue #67-③ 验收：探测范围收窄）。
+  final existsCalls = <String>[];
+
   @override
   Future<void> write(String relPath, List<int> bytes) async =>
       written[relPath] = bytes;
@@ -20,8 +23,10 @@ class _Sink implements FileSink, LocalFileReader {
   Future<void> delete(String relPath) async => written.remove(relPath);
 
   @override
-  Future<bool> exists(String relPath) async =>
-      written.containsKey(relPath) || preExisting.contains(relPath);
+  Future<bool> exists(String relPath) async {
+    existsCalls.add(relPath);
+    return written.containsKey(relPath) || preExisting.contains(relPath);
+  }
 
   /// 读取已写入的字节；preExisting 模拟的「磁盘上有但状态外」的文件无法提供
   /// 内容（测试里不记录），同样抛错。
@@ -586,6 +591,74 @@ void main() {
       );
 
       expect(downloader.calls.single.$2, 'W/"2"');
+    });
+  });
+  group('同步热路径结构性开销（issue #67）', () {
+    test('空计划一轮 → 不写状态（save 次数为 0）', () async {
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {'items': <dynamic>[], 'total': 0}),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      final report = await useCase.run(scope: scope, filter: filter);
+
+      expect(report.downloaded, 0);
+      expect(store.saves, 0, reason: '空计划时 engine 原样返回入参 state，usecase 不得写库');
+    });
+
+    test('定向同步的 exists 探测与 group 文件数同阶，而非 workspace 状态条目数', () async {
+      // 状态里预置另一个 group（g2）的 50 条记录：旧实现会为整个 workspace
+      // 状态探 50 次；收窄后只探本轮清单涉及的 1 个路径。
+      final stale = <String, SyncedFile>{
+        // 本轮清单里的文件：etag 与远端一致 → unchanged，走 exists 判据
+        //（磁盘上没有 → 安排重新下载）。
+        'a.md': SyncedFile(
+          etag: 'W/"1"',
+          size: 3,
+          updatedAt: '2026-05-01T00:00:00Z',
+        ),
+      };
+      for (var i = 0; i < 50; i++) {
+        stale['notes/f$i.md'] = SyncedFile(
+          etag: 'W/"1"',
+          size: 3,
+          updatedAt: '2026-05-01T00:00:00Z',
+        );
+      }
+      // SyncGroupScope 的状态键是 groupId 本身（'g1'），不是 workspace 键。
+      await store.save(gid, SyncState(files: stale));
+
+      adapter.onGet(
+        '/api/files',
+        (server) => server.reply(200, {
+          'items': [_file('/workspace/groups/g1/a.md')],
+          'total': 1,
+        }),
+        queryParameters: {
+          'owner_type': 'user',
+          'path_prefix': groupPrefix,
+          'include_deleted': 'true',
+          'page': 1,
+          'page_size': 2,
+        },
+      );
+
+      final report = await useCase.run(scope: scope, filter: filter);
+
+      expect(report.downloaded, 1);
+      expect(
+        sink.existsCalls.where((p) => p.startsWith('g2/')),
+        isEmpty,
+        reason: '只探本轮清单涉及的路径，不得探状态里其它 group 的条目',
+      );
+      expect(sink.existsCalls, hasLength(1));
     });
   });
 }

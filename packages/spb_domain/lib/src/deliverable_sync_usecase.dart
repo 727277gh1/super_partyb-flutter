@@ -107,7 +107,22 @@ class DeliverableSyncUseCase {
     //
     // 故这里把它转成 [StorageError] 抛出（而不是静默吞掉）。代价是「本轮
     // 报告丢失」，但那比「用户以为同步好了、其实每轮都在全量重拉」更可诊断。
-    await stateStore.save(stateKey, result.state);
+    //
+    // ## 空计划不落盘（issue #67-①）
+    //
+    // `SyncEngine.run` 在 plan 为空时**原样返回入参 state**（same instance）。
+    // 那时写库是纯粹的浪费：`DriftSyncStateStore.save` 是「删 5666 行 + 插
+    // 5666 行」的整体替换，而周期同步大多数轮次都无事可做（生产实测 5666
+    // 文件 / 4.7 GB）——每 15 分钟一次全表删插，WAL 增长与写放大都白付。
+    //
+    // 用 `identical` 而不是 `==`：后者要逐 entry 比对 5666 条（本身也不便宜），
+    // 而「engine 没动过状态」这个事实恰好等价于「返回的就是入参」（run 的
+    // 空计划分支与「计划非空但全部跳过」都返回同一个实例？后者不是——计划
+    // 非空时 _merge 会构造新实例，即便结果与旧值逐字段相等。这种「相等但
+    // 不同实例」的轮次写库是可接受的：它至少意味着本轮真的执行了动作）。
+    if (!identical(result.state, state)) {
+      await stateStore.save(stateKey, result.state);
+    }
     return result.report;
   }
 

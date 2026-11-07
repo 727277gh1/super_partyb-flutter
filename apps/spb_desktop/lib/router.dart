@@ -1418,6 +1418,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 用户仍可手动同步——那条路径的失败有明确反馈。
       // 用 info：debug 在生产被过滤，探测失败就变成完全不可见（见上）。
       SpbLog.info('进入对话时探测同步需求失败', {'group': groupId, 'error': e.toString()});
+    } catch (e) {
+      // 非 SpbError 的探测失败（issue #67 附带项）：原本会逃逸到全局错误处理，
+      // 有 installGlobalErrorHandlers 兜底不会崩，但那是「应用级异常」的语义；
+      // 探测失败本应只是「这轮不提示」——与上一分支同款静默降级 + info 留痕。
+      SpbLog.info('进入对话时探测同步需求失败（非预期异常）', {
+        'group': groupId,
+        'error': e.toString(),
+      });
     } finally {
       _checkingSync = false;
     }
