@@ -619,14 +619,14 @@ void main() {
       final stale = <String, SyncedFile>{
         // 本轮清单里的文件：etag 与远端一致 → unchanged，走 exists 判据
         //（磁盘上没有 → 安排重新下载）。
-        'a.md': SyncedFile(
+        'a.md': const SyncedFile(
           etag: 'W/"1"',
           size: 3,
           updatedAt: '2026-05-01T00:00:00Z',
         ),
       };
       for (var i = 0; i < 50; i++) {
-        stale['notes/f$i.md'] = SyncedFile(
+        stale['notes/f$i.md'] = const SyncedFile(
           etag: 'W/"1"',
           size: 3,
           updatedAt: '2026-05-01T00:00:00Z',

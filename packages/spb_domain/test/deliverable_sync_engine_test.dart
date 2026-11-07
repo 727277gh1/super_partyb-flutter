@@ -758,14 +758,15 @@ void main() {
 
     test('删除成功同样解除隔离', () async {
       final engine = SyncEngine(downloader: StubDownloader(), sink: StubSink());
-      var state = SyncState(
+      var state = const SyncState(
         files: {
-          'bad.md': const SyncedFile(
+          'bad.md': SyncedFile(
+            etag: 'W/"9"',
             size: 5,
             updatedAt: '2026-04-01T00:00:00Z',
           ),
         },
-        failures: const {
+        failures: {
           'bad.md': SyncFailureRecord(
             count: quarantineAfterFailures,
             lastError: '历史失败',
