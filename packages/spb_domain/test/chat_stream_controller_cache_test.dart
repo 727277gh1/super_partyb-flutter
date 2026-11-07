@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 
 import 'package:spb_domain/spb_domain.dart';
@@ -541,6 +543,211 @@ void main() {
       ], reason: '缓冲非空时不得用缓存覆盖——那会丢掉刚到的实时消息');
       expect(c.timelineFromCacheSnapshot, isFalse, reason: '缓冲里是实时事件，不是「离线数据」');
       expect(cache.loadedGroups, isEmpty, reason: '守卫应拦在读缓存之前');
+
+      await c.dispose();
+    });
+
+    test('回填成功返回时归并而非覆盖：在途到达的实时事件不丢（issue #55）', () async {
+      // 反向验证：把 `_backfill` 的归并改回 `clear()+addAll()` → 本用例失败。
+      //
+      // ## 场景与「缓存不覆盖」用例的区别
+      //
+      // 上一个用例是**回填失败**路径（缓存回落被非空守卫拦住）。本用例是
+      // **回填成功**路径：回填返回的页**不含**在途到达的实时事件（服务端
+      // timeline 是请求时刻的快照），且这些事件的 ID 已被 recordEventId
+      // 推进进游标——服务端回放不会再带回它们。覆盖 = 永久缺口。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+
+      // 第一次：成功建立订阅（start 在 _backfill 之后才 listen frames）。
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+      await pumpEventQueue();
+
+      // 第二次：切回同一 group，回填在途时推两条实时事件（globalSeq 落在
+      // 回填页区间内/之外各一），回填页返回「历史事件」。
+      adapter.onGet(
+        '/chat/groups/grp_1/timeline',
+        (server) => server.replyCallback(200, (options) {
+          // 在途：实时事件先到（会被 append 进缓冲 + 推进游标）。
+          sse.push(
+            EventTypes.userMessage,
+            sseEvent(
+              EventTypes.userMessage,
+              id: 'live_mid',
+              turnId: 't_live_mid',
+              globalSeq: 5,
+              payload: {'input': '切换期间到达的消息'},
+            ),
+          );
+          sse.push(
+            EventTypes.userMessage,
+            sseEvent(
+              EventTypes.userMessage,
+              id: 'live_new',
+              turnId: 't_live_new',
+              globalSeq: 9,
+              payload: {'input': '切换期间到达的更新消息'},
+            ),
+          );
+          return {
+            'items': [
+              sseEvent(
+                EventTypes.userMessage,
+                id: 'hist_1',
+                turnId: 't1',
+                globalSeq: 1,
+                payload: {'input': '历史第一条'},
+              ),
+              sseEvent(
+                EventTypes.userMessage,
+                id: 'hist_2',
+                turnId: 't2',
+                globalSeq: 2,
+                payload: {'input': '历史第二条'},
+              ),
+            ],
+            'next_before_global_seq': '',
+          };
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.switchGroup('grp_1');
+      await pumpEventQueue();
+
+      // 归并后按 globalSeq 升序：历史两条 + 实时两条全部在缓冲里。
+      expect(c.bufferedEventIds, [
+        'hist_1',
+        'hist_2',
+        'live_mid',
+        'live_new',
+      ], reason: '回填返回不得覆盖切换期间到达的实时事件（游标已越过它们，丢了就是永久缺口）');
+      // 游标已包含实时事件（recordEventId 在帧到达时被调）。
+      expect(sse.lastEventId, 'live_new');
+      // 归约结果按时间正序渲染。
+      expect(c.snapshot.whereType<UserMessageItem>().map((i) => i.text), [
+        '历史第一条',
+        '历史第二条',
+        '切换期间到达的消息',
+        '切换期间到达的更新消息',
+      ]);
+
+      await c.dispose();
+    });
+
+    test('回填与实时事件重叠时不产生重复气泡（按 eventId 去重）', () async {
+      // SSE 落库事件与 timeline 页可能重叠：SSE 先推了 e1，回填页也含 e1。
+      // 归并必须去重，否则归约层按 eventId 建项会渲染两个相同气泡。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+      await pumpEventQueue();
+
+      adapter.onGet(
+        '/chat/groups/grp_1/timeline',
+        (server) => server.replyCallback(200, (options) {
+          // 在途：e1 先经 SSE 到达。
+          sse.push(
+            EventTypes.userMessage,
+            sseEvent(
+              EventTypes.userMessage,
+              id: 'e1',
+              turnId: 't1',
+              globalSeq: 1,
+              payload: {'input': '同一条消息'},
+            ),
+          );
+          return {
+            'items': [
+              // 回填页也含 e1（服务端视角它是落库历史）。
+              sseEvent(
+                EventTypes.userMessage,
+                id: 'e1',
+                turnId: 't1',
+                globalSeq: 1,
+                payload: {'input': '同一条消息'},
+              ),
+            ],
+            'next_before_global_seq': '',
+          };
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.switchGroup('grp_1');
+      await pumpEventQueue();
+
+      expect(c.bufferedEventIds, ['e1'], reason: '重叠事件只保留一份');
+      expect(c.snapshot.whereType<UserMessageItem>(), hasLength(1));
+
+      await c.dispose();
+    });
+
+    test('回填在途时再次切组：旧回填的结果整页丢弃（令牌校验）', () async {
+      // 快速连切 grp_1 → grp_2：grp_1 的回填响应后到，不得灌进 grp_2 的
+      // 上下文（否则旧对话的事件混进新对话，且令牌校验防的就是这个）。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+
+      mockTimeline();
+      await c.start(groupId: 'grp_1');
+      await pumpEventQueue();
+
+      // grp_1 的回填：请求在途时不立即返回（挂到 grp_2 回填返回后才完成）。
+      final grp1Released = Completer<void>();
+      adapter.onGet(
+        '/chat/groups/grp_1/timeline',
+        (server) => server.replyCallback(200, (options) async {
+          // 等 grp_2 的回填先完成（令牌已再次递增）。
+          await grp1Released.future;
+          return {
+            'items': [
+              sseEvent(
+                EventTypes.userMessage,
+                id: 'stale_grp1',
+                turnId: 't_stale',
+                groupId: 'grp_1',
+                globalSeq: 100,
+                payload: {'input': '旧对话的迟到事件'},
+              ),
+            ],
+            'next_before_global_seq': '',
+          };
+        }),
+        queryParameters: {'limit': 200},
+      );
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(200, {
+          'items': [
+            sseEvent(
+              EventTypes.userMessage,
+              id: 'grp2_1',
+              turnId: 't_g2',
+              groupId: 'grp_2',
+              globalSeq: 1,
+              payload: {'input': '新对话的事件'},
+            ),
+          ],
+          'next_before_global_seq': '',
+        }),
+        queryParameters: {'limit': 200},
+      );
+
+      final switching = c.switchGroup('grp_1');
+      await pumpEventQueue(); // 让 grp_1 的请求到达适配器并挂起
+      final done = c.switchGroup('grp_2');
+      await done;
+      await pumpEventQueue();
+
+      // grp_2 已完成回填；现在放行 grp_1 的迟到响应。
+      grp1Released.complete();
+      await switching;
+      await pumpEventQueue();
+
+      expect(c.bufferedEventIds, ['grp2_1'], reason: '过期回填的结果必须整页丢弃');
+      expect(c.snapshot.whereType<UserMessageItem>().map((i) => i.text), [
+        '新对话的事件',
+      ]);
 
       await c.dispose();
     });

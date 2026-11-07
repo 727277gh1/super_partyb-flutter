@@ -527,6 +527,11 @@ class ChatStreamController {
   Timer? _emitTimer;
   Set<String>? _pendingTouchedTurnIds;
 
+  /// 回填的上下文令牌（issue #55）：[start] / [switchGroup] 每次清缓冲后
+  /// 递增，[_backfill] 用它识别「响应回来时是否仍在同一上下文」。
+  /// 详见 [_backfill] 开头说明。
+  int _backfillToken = 0;
+
   // ==================== 超时兜底（长时间无进展） ====================
   //
   // ## 它解决什么问题
@@ -809,6 +814,10 @@ class ChatStreamController {
     _resetTimelineTracking();
     _resetStaleWatch();
     _resetUsageSummary(groupId);
+    // 令牌递增要在清缓冲**之后**、发请求之前：上一轮在途回填的结果从此作废
+    // （issue #55）。`_backfill` 内部也会递增，这里不递增会让上一轮在途的
+    // 回填与本次回填拿到相同令牌。
+    _backfillToken++;
 
     if (groupId != null) {
       await _backfill(groupId);
@@ -882,6 +891,13 @@ class ChatStreamController {
   ///
   /// 复用同一条 SSE 连接——SSE 是 user 级订阅，切 group 无需重连，
   /// 只需清空缓冲并重新回填。
+  ///
+  /// ## 回填在途时的实时事件不丢（issue #55）
+  ///
+  /// `await _backfill` 期间 SSE 订阅仍然挂接，实时事件照常进入缓冲并推进
+  /// 游标。[_backfill] 返回后按 eventId 归并去重（不再 clear+addAll），
+  /// 故这些事件保留在时间线上；游标也已包含它们，服务端回放不会重复。
+  /// 若在途期间再次切组，旧回填的结果会被令牌校验整页丢弃。
   Future<void> switchGroup(String? groupId) async {
     _groupId = groupId;
     _buffer.clear();
@@ -890,6 +906,8 @@ class ChatStreamController {
     _setFromCache(false);
     _resetStaleWatch();
     _resetUsageSummary(groupId);
+    // 同 [start]：递增令牌作废在途回填（必须在清缓冲后、新回填前）。
+    _backfillToken++;
     if (groupId != null) {
       await _backfill(groupId);
     }
@@ -969,6 +987,16 @@ class ChatStreamController {
 
   /// 用 timeline API 拉取历史事件。
   ///
+  /// [replaceBuffer] 控制返回后如何落缓冲：
+  ///
+  /// - `false`（默认，[start] / [switchGroup]）：**归并去重**。清缓冲后到回填
+  ///   返回之间，实时事件已进入缓冲且游标已推进（服务端回放不会带回它们），
+  ///   覆盖会永久丢失这些事件（issue #55）。此时缓冲里只可能是「本上下文内
+  ///   到达的实时事件」，与回填页同源，归并不可能制造缺口。
+  /// - `true`（[_probeReplayGap] 的修复路径）：**整段替换**。缓冲里已有事件
+  ///   与回填页之间隔着**断线造成的洞**，拼接会「看起来连续但缺一段」；
+  ///   只有服务端 timeline 返回的完整页才是可信的连续历史。
+  ///
   /// ## 失败时回落缓存（issue #29）
   ///
   /// 回填失败（断网 / 5xx）时，用 [TimelineCacheStore] 里的落库事件渲染历史，
@@ -983,16 +1011,54 @@ class ChatStreamController {
   ///
   /// 缓存与网络的**互斥性**由调用点保证：只有 catch 分支才读缓存，故不会出现
   /// 「缓存上界与 timeline 下界重叠/缺口」的拼接问题。
-  Future<void> _backfill(String groupId, {int limit = 200}) async {
+  Future<void> _backfill(
+    String groupId, {
+    int limit = 200,
+    bool replaceBuffer = false,
+  }) async {
+    // 回填的「上下文令牌」（issue #55）：[switchGroup] / [start] 在清缓冲后
+    // 递增。回填是一次网络往返，期间 SSE 订阅仍然挂接（切组不重连），实时
+    // 事件会持续到达并推进游标。令牌用于两件事：
+    //
+    // 1. **丢弃过期结果**：响应回来时若用户已再次切组（令牌变化），本次
+    //    结果属于上一个上下文，整页丢弃——否则旧对话的事件会被灌进新对话
+    //    （与 [_resolveTurnTimeout] 的 identical 校验同一取向）。
+    // 2. **合并而非覆盖**：同上下文内，回填返回时缓冲里可能已有切换期间
+    //    到达的实时事件，它们的 ID 已被 `recordEventId` 推进进游标——
+    //    服务端回放不会再带回它们。若用 `clear()+addAll()` 覆盖，这些事件
+    //    会永久丢失（直到下次切组）。故改为按 eventId 去重后**归并**。
+    final token = ++_backfillToken;
     try {
       final page = await _api.groupTimeline(groupId, limit: limit);
+      // 已切组 / 已重新 start：本次结果过期，整页丢弃。
+      if (_disposed || token != _backfillToken) {
+        SpbLog.info('对话历史回填结果已过期（上下文已切换），丢弃', {
+          'groupId': groupId,
+          'count': page.items.length,
+        });
+        return;
+      }
       // timeline 返回顺序为「新 → 旧」或「旧 → 新」取决于服务端实现；
       // 归约要求按时间正序，这里按 globalSeq 显式排序保证正确性。
       final events = page.items.toList()
         ..sort((a, b) => (a.globalSeq ?? 0).compareTo(b.globalSeq ?? 0));
+      // 切换期间到达的实时事件仍在缓冲里，按 eventId 归并去重
+      // （issue #55）：回填页与实时帧可能重叠（SSE 先到的落库事件、
+      // timeline 都包含），直接 addAll 会渲染出重复气泡。
+      final known = _buffer.map((e) => e.eventId).toSet();
+      final fresh = events.where((e) => !known.contains(e.eventId)).toList();
+      // 归并模式：与缓冲里切换期间到达的实时事件合并后按 globalSeq 重排
+      // （归约器假定输入正序）。替换模式：整段换掉，修缺口（见方法文档）。
+      final List<ChatEvent> merged;
+      if (replaceBuffer) {
+        merged = events;
+      } else {
+        merged = [...fresh, ..._buffer]
+          ..sort((a, b) => (a.globalSeq ?? 0).compareTo(b.globalSeq ?? 0));
+      }
       _buffer
         ..clear()
-        ..addAll(events);
+        ..addAll(merged);
       // 缓冲被整段换掉 → 缓存的归约立即失效。
       //
       // ⚠️ 不能只靠后面的 `_emit()` 置脏：本方法在 `_emit()` **之前**就要读
@@ -1001,9 +1067,13 @@ class ChatStreamController {
       _reductionDirty = true;
       // 整段替换：必须先清掉旧的最大值，否则上一个对话残留的 globalSeq 会让
       // 缺口探测（[_probeReplayGap]）把「本轮真的有缺口」判成「已追上」。
+      // （归并后写入的是同一上下文的缓冲，最大值从合并结果重新记。）
       _maxBufferedGlobalSeq = null;
-      _noteMaxGlobalSeq(events);
+      _noteMaxGlobalSeq(merged);
       // 首屏拉的是**最新**一页，故本页最小值就是「历史边界」。
+      // ⚠️ 用回填页自身的最小值（events），不是缓冲的最小值：切换期间到达的
+      // 实时事件可能 globalSeq 更大，不影响历史边界；但若它反而更小（不可能，
+      // 回填拉的是最新页），以本页为准也不会把翻页游标抬高到已加载区间内。
       _oldestLoadedGlobalSeq = _minGlobalSeqOf(events);
       _trimBuffer();
       SpbLog.info('对话历史回填完成', {'groupId': groupId, 'count': events.length});
@@ -1013,10 +1083,15 @@ class ChatStreamController {
       // 写缓存：**只在网络成功路径**（§4.3）。SSE 热路径不写。
       //
       // 不 await：写缓存是旁路，不应拖慢首屏渲染（实现层已静默，不会抛）。
+      // 写回填页本身（events）：实时事件由 [_onFrame] 之外的路径负责
+      // （upsert 语义下两路写入最终一致）。
       unawaited(_saveTimelineCache(groupId, events));
       // 网络成功 → 清除「离线数据」提示（否则提示条永久残留）。
       _setFromCache(false);
     } catch (e) {
+      // 失败同样受令牌约束：已切组时本次失败属于旧上下文，不得再触发
+      // 缓存回落（那会把旧 group 的缓存填进新上下文的缓冲）。
+      if (_disposed || token != _backfillToken) return;
       SpbLog.warn('对话历史回填失败，仅依赖实时流', {'error': e.toString()});
       if (e is SpbError && !_errorController.isClosed) {
         _errorController.add(e);
@@ -1684,7 +1759,10 @@ class ChatStreamController {
       'server_max_global_seq': serverMax,
       'repairs': _replayGapRepairs,
     });
-    await _backfill(groupId);
+    // 整段替换（replaceBuffer: true）：缓冲里已有事件与回填页之间隔着断线
+    // 造成的洞，拼接无意义（见方法文档）。注意令牌校验仍然生效——修复在途时
+    // 用户切组的话，修复结果照样会被丢弃。
+    await _backfill(groupId, replaceBuffer: true);
     _emit();
   }
 
