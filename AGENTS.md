@@ -85,6 +85,7 @@ cd packages/spb_data && dart run build_runner build && dart format lib && cd ../
 | `tools/check_wiring_parity.sh` | 两端接线一致 |
 | `tools/check_unused_deps.sh` | 零 import 依赖 |
 | `tools/check_silent_catches.sh` | 静默吞异常 |
+| `tools/check_dollar_paren.sh` | 插值里 `$x(` 误写（分析器抓不到，issue #62） |
 | `tools/check_codegen.sh` | 生成物漂移 |
 | `tools/check_build_defines.sh` | 发布构建传 `--dart-define` |
 | `tools/check_agents_refs.sh` | 文档标识符引用 |
