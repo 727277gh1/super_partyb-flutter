@@ -167,7 +167,9 @@ final sessionTokenProvider = Provider<Future<String?> Function()>((ref) {
 
 /// 会话凭证存储（Keychain / Keystore / libsecret）。
 ///
-/// 由 [SecureTokenStore] 实现，非 autoDispose：它无状态，重建无意义。
+/// 由 [SecureTokenStore] 实现，非 autoDispose：**必须单例**——它持有内存
+/// 缓存（issue #68），重建会丢缓存；更要紧的是「写路径与读路径必须是同一
+/// 实例」，否则 `write` 暖的缓存对另一个实例不可见（读到旧值）。
 final tokenStoreProvider = Provider<TokenStore>((ref) {
   return SecureTokenStore();
 });
@@ -1834,9 +1836,7 @@ final checkGroupSyncNeedProvider =
         }
 
         if (scope.isSingleGroup) {
-          SpbLog.warn('同步范围为单 group 模式，按需同步探测不可用，跳过', {
-            'group': groupId,
-          });
+          SpbLog.warn('同步范围为单 group 模式，按需同步探测不可用，跳过', {'group': groupId});
           return GroupSyncCheckResult(
             groupId: groupId,
             need: GroupSyncNeed.unknown,

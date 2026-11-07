@@ -129,6 +129,9 @@ final sessionTokenProvider = Provider<Future<String?> Function()>((ref) {
 });
 
 /// 会话凭证存储（Keychain / Keystore）。
+///
+/// 非 autoDispose 且必须单例：它持有内存缓存（issue #68），写路径与读路径
+/// 必须命中同一实例，否则 `write` 暖的缓存对另一实例不可见（读到旧值）。
 final tokenStoreProvider = Provider<TokenStore>((ref) {
   return SecureTokenStore();
 });

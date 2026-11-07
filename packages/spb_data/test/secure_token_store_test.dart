@@ -29,6 +29,9 @@ class _FakeSecureStoragePlatform extends FlutterSecureStoragePlatform
   bool failRead = false;
   bool failDelete = false;
 
+  /// read 调用计数（issue #68 验收：缓存命中时底层只读一次）。
+  int readCalls = 0;
+
   @override
   Future<void> write({
     required String key,
@@ -44,6 +47,7 @@ class _FakeSecureStoragePlatform extends FlutterSecureStoragePlatform
     required String key,
     required Map<String, String> options,
   }) async {
+    readCalls++;
     if (failRead) throw StateError('read failed');
     return data[key];
   }
@@ -275,6 +279,94 @@ void main() {
       final persisted = await store.read();
       expect(persisted!.accessToken, 'at_new');
       expect(persisted.refreshToken, 'rt_2');
+    });
+  });
+  group('内存缓存（issue #68）', () {
+    final expires = DateTime.utc(2026, 9, 28, 12, 0, 0);
+    final tokens = StoredTokens(
+      accessToken: 'at_value',
+      refreshToken: 'rt_value',
+      expiresAt: expires,
+      tokenType: 'Bearer',
+    );
+
+    test('连续两次 read → 底层只读一次平台存储', () async {
+      await store.write(tokens);
+      final a = await store.read();
+      final b = await store.read();
+
+      expect(a!.accessToken, 'at_value');
+      expect(b!.accessToken, 'at_value');
+      expect(backend.readCalls, 0, reason: 'write 已暖缓存，read 全命中');
+    });
+
+    test('write 后 read 返回新值（缓存与存储一致）', () async {
+      await store.write(tokens);
+      final updated = StoredTokens(
+        accessToken: 'at_v2',
+        refreshToken: 'rt_v2',
+        expiresAt: expires,
+        tokenType: 'Bearer',
+      );
+      await store.write(updated);
+      final loaded = await store.read();
+
+      expect(loaded!.accessToken, 'at_v2', reason: '写穿缓存，不得返回旧值');
+      expect(backend.readCalls, 0);
+    });
+
+    test('clear 后 read 返回 null', () async {
+      await store.write(tokens);
+      await store.clear();
+      final loaded = await store.read();
+
+      expect(loaded, isNull);
+      expect(backend.data[SecureTokenStore.storageKey], isNull);
+    });
+
+    test('冷启动首次 read 走真实存储并暖缓存（只一次）', () async {
+      backend.data[SecureTokenStore.storageKey] =
+          '{"access_token":"cold","token_type":"Bearer"}';
+      final a = await store.read();
+      final b = await store.read();
+
+      expect(a!.accessToken, 'cold');
+      expect(b!.accessToken, 'cold');
+      expect(backend.readCalls, 1, reason: '首次读暖缓存，第二次命中');
+    });
+
+    test('读失败不缓存：平台恢复后下次 read 再试真实存储', () async {
+      backend.failRead = true;
+      expect(await store.read(), isNull);
+
+      backend.failRead = false;
+      backend.data[SecureTokenStore.storageKey] =
+          '{"access_token":"recovered","token_type":"Bearer"}';
+      final loaded = await store.read();
+      expect(
+        loaded!.accessToken,
+        'recovered',
+        reason: '读失败不进缓存，故障是瞬时的，恢复后应能读到',
+      );
+    });
+
+    test('写失败不更新缓存（磁盘与缓存保持一致）', () async {
+      await store.write(tokens);
+      backend.failWrite = true;
+      final updated = StoredTokens(
+        accessToken: 'at_v3',
+        refreshToken: null,
+        expiresAt: expires,
+        tokenType: 'Bearer',
+      );
+      expect(() => store.write(updated), throwsA(isA<StorageError>()));
+      backend.failWrite = false;
+      final loaded = await store.read();
+      expect(
+        loaded!.accessToken,
+        'at_value',
+        reason: '写失败时磁盘仍是旧值，缓存也必须保持旧值（一致性）',
+      );
     });
   });
 }

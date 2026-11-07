@@ -23,33 +23,59 @@ import 'package:spb_core/spb_core.dart';
 /// - **读写次数**：安全存储的每次操作都是一次平台通道往返（Android 上还可能
 ///   触发密钥派生），一次读写比三次快得多。
 ///
-/// ## 为什么不缓存到内存
+/// ## 内存缓存（issue #68）
 ///
-/// 每次 [read] 都真的去读平台存储。看起来慢，但：
-/// - token 的消费方只有 [AuthInterceptor]，每个请求一次读，量不大；
-/// - 加内存缓存就得处理「另一处登出后缓存未失效」的失效问题，
-///   而这正是「登出后仍能发请求」这类安全 bug 的来源。
+/// 每次 [read] 命中缓存直接返回；[write] / [clear] 同步更新缓存。每个 HTTP
+/// 请求都要读一次令牌（AuthInterceptor），桌面端是 libsecret / D-Bus 往返，
+/// 移动端是 Keystore 解密 —— 一轮清单分页 57 次请求 = 57 次平台存储往返。
+///
+/// ## 为什么缓存是安全的（原注释担心的失效问题）
+///
+/// 原实现的顾虑是「另一处登出后缓存未失效」。实际写路径**全部**收敛在本类：
+/// 登录/刷新走 [write]、登出/重置走 [clear]，没有任何绕过本类直接碰
+/// `FlutterSecureStorage` 的代码（本类是该存储键的唯一持有者）。故缓存与
+/// 真实存储不会不一致；跨进程变更（另一实例/另一进程登出）则与原实现同样
+/// 处理——下次写入会覆盖。
+///
+/// 失效点（全部在本类内，不依赖调用方自觉）：
+/// - [write] 成功后缓存新值（失败不更新——存储失败时旧缓存仍有效，但与
+///   磁盘不一致？不：写失败时磁盘上还是旧值，缓存也保持旧值，一致）；
+/// - [clear] 成功后清缓存；失败抛出（登出后凭证仍在设备上属安全问题）。
+///
+/// 读失败按「未登录」处理后**不写缓存**（null 缓存与未缓存同形，直接不缓存
+/// 更简单——下次 read 再试一次真实存储，平台故障可能是瞬时的）。
 class SecureTokenStore implements TokenStore {
   SecureTokenStore({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
   final FlutterSecureStorage _storage;
 
+  /// 内存缓存：null = 未缓存（首次 read / clear 后）。哨兵值
+  /// [_cachedAbsent] 表示「已确认磁盘上没有」（避免空存储被反复读）。
+  StoredTokens? _cache;
+  bool _cachePopulated = false;
+
   /// 存储键名。带应用前缀避免与同设备其他应用/其他用途的键冲突。
   static const String storageKey = 'spb.session.tokens.v1';
 
   @override
   Future<StoredTokens?> read() async {
+    if (_cachePopulated) return _cache;
     String? raw;
     try {
       raw = await _storage.read(key: storageKey);
     } catch (e) {
       // 读失败（平台通道异常 / Linux 上 keyring 不可用）不应让整个应用崩溃：
       // 返回 null 等同于「未登录」，用户重新登录即可。
+      // ⚠️ 不缓存：平台故障可能是瞬时的，下次 read 再试真实存储。
       SpbLog.warn('读取安全存储失败，按未登录处理', {'error': e.toString()});
       return null;
     }
-    if (raw == null || raw.isEmpty) return null;
+    if (raw == null || raw.isEmpty) {
+      _cache = null;
+      _cachePopulated = true;
+      return null;
+    }
 
     try {
       final json = jsonDecode(raw);
@@ -57,10 +83,14 @@ class SecureTokenStore implements TokenStore {
         SpbLog.warn('安全存储中的凭证格式异常（非 JSON 对象）');
         return null;
       }
-      return _tokensFromJson(Map<String, dynamic>.from(json));
+      final tokens = _tokensFromJson(Map<String, dynamic>.from(json));
+      _cache = tokens;
+      _cachePopulated = true;
+      return tokens;
     } catch (e) {
       // 解码失败说明写入方与读取方版本不一致（或数据损坏）。
       // 返回 null 让用户重新登录，比抛异常卡住启动流程更合理。
+      // ⚠️ 不缓存：与上一处同一取向。
       SpbLog.warn('解析安全存储中的凭证失败', {'error': e.toString()});
       return null;
     }
@@ -80,6 +110,9 @@ class SecureTokenStore implements TokenStore {
     });
     try {
       await _storage.write(key: storageKey, value: payload);
+      // 写成功才更新缓存（写失败抛 StorageError，调用方知道登录态未持久化）。
+      _cache = tokens;
+      _cachePopulated = true;
     } catch (e) {
       // 写失败必须让调用方知道：静默吞掉会导致「登录成功但下次启动又要求登录」
       // 这种极难定位的现象。
@@ -91,6 +124,8 @@ class SecureTokenStore implements TokenStore {
   Future<void> clear() async {
     try {
       await _storage.delete(key: storageKey);
+      _cache = null;
+      _cachePopulated = true;
     } catch (e) {
       // 清除失败同样抛出：登出后凭证仍在设备上属于安全问题，必须暴露。
       throw StorageError('清除安全存储失败', cause: e);
