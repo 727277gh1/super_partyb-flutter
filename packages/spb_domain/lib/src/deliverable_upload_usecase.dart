@@ -49,6 +49,7 @@ import 'package:uuid/uuid.dart';
 import 'deliverable_sync.dart';
 import 'deliverable_upload.dart';
 import 'sync_cursor.dart';
+import 'sync_memory.dart';
 import 'sync_path.dart';
 import 'sync_state.dart';
 
@@ -482,23 +483,31 @@ class DeliverableUploadUseCase {
       );
     }
 
-    if (check is UploadConflict) {
-      return _materializeConflict(
+    // 在途登记（`sync_memory.dart`）：从这一刻到上传/冲突物化结束，这份字节
+    // 常驻内存。上传与脏检测不同：它**本来就必须**持有整份内容（要发出去），
+    // 这里登记是为了让高水位日志的 `breakdown` 能指认它。
+    SyncInFlightBytes.hold(localBytes.length);
+    try {
+      if (check is UploadConflict) {
+        return await _materializeConflict(
+          dirty: dirty,
+          target: target,
+          localBytes: localBytes,
+          remoteEntry: remoteEntry,
+          conflictTimestamp: conflictTimestamp,
+        );
+      }
+
+      return await _uploadTarget(
         dirty: dirty,
         target: target,
         localBytes: localBytes,
-        remoteEntry: remoteEntry,
-        conflictTimestamp: conflictTimestamp,
+        filename: filename,
+        notifyKind: _NotifyKind.direct,
       );
+    } finally {
+      SyncInFlightBytes.release(localBytes.length);
     }
-
-    return _uploadTarget(
-      dirty: dirty,
-      target: target,
-      localBytes: localBytes,
-      filename: filename,
-      notifyKind: _NotifyKind.direct,
-    );
   }
 
   /// 冲突分支：人类版本 → 目标路径，agent 版本 → `_conflict/`。

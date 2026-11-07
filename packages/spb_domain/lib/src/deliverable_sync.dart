@@ -17,6 +17,7 @@ library;
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_models/spb_models.dart';
 
+import 'sync_memory.dart';
 import 'sync_path.dart';
 import 'sync_state.dart';
 
@@ -904,21 +905,31 @@ class SyncEngine {
             );
           }
           final bytes = result.bytes ?? const <int>[];
-          await sink.write(relPath, bytes);
-          // 用**实际写入字节数**记状态：服务端 size 与实际内容不符时以本地
-          // 事实为准，避免下轮误判为「未变更」。
-          // contentHash 也以实际落盘字节计算——脏检测拿它与用户日后改过的
-          // 本地内容比对（见 sync_state.dart 的 contentHashOf 说明）。
-          return _ActionResult.downloaded(
-            relPath,
-            etag: etag,
-            size: bytes.length,
-            updatedAt: updatedAt,
-            // 后台 isolate 哈希（docs/memory-audit.md G6）：大文件不再冻结
-            // UI。worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆
-            // （见 contentHashOfAsync 的文档）。
-            contentHash: await contentHashOfAsync(bytes),
-          );
+          // 在途登记（`sync_memory.dart`）：从这一刻到写完 + 算完哈希，这份
+          // 字节常驻内存，且 `contentHashOfAsync` 会再拷一份（
+          // `TransferableTypedData.fromList` 自己就拷贝）——真机上就是这里
+          // 打出 200MB+ 的尖峰。账本里有这条读数，下次报障的 `breakdown`
+          // 才不会又是空的。
+          SyncInFlightBytes.hold(bytes.length);
+          try {
+            await sink.write(relPath, bytes);
+            // 用**实际写入字节数**记状态：服务端 size 与实际内容不符时以本地
+            // 事实为准，避免下轮误判为「未变更」。
+            // contentHash 也以实际落盘字节计算——脏检测拿它与用户日后改过的
+            // 本地内容比对（见 sync_state.dart 的 contentHashOf 说明）。
+            return _ActionResult.downloaded(
+              relPath,
+              etag: etag,
+              size: bytes.length,
+              updatedAt: updatedAt,
+              // 后台 isolate 哈希（docs/memory-audit.md G6）：大文件不再冻结
+              // UI。worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆
+              // （见 contentHashOfAsync 的文档）。
+              contentHash: await contentHashOfAsync(bytes),
+            );
+          } finally {
+            SyncInFlightBytes.release(bytes.length);
+          }
         } catch (e) {
           // 失败：**不写状态、不推进游标**（见类文档的不变量 1、2）。
           return _ActionResult.failed(relPath, '下载失败：$e');

@@ -24,6 +24,10 @@ library;
 //   SyncState / SyncedFile        —— 同步状态值类型（含 contentHash：脏检测的比对基准）
 //   contentHashOf / contentHashOfAsync —— 内容 SHA256（下载时记录与回传前比对共用
 //                                     同一算法；生产用异步版，大文件不冻结 UI）
+//   contentHashOfStream           —— 流式 SHA256（有文件路径时用：峰值 O(块)，
+//                                     不把整份内容读进内存）
+//   SyncInFlightBytes / registerSyncInFlightGauge —— 同步在途字节计数与账本登记
+//                                     （高水位日志的 breakdown 靠它指认同步）
 //   workspaceStateKey             —— 「全部/选中若干 group」共用的状态键
 //   buildSyncPlan / SyncEngine    —— 交付物同步计划与执行（纯逻辑，可无头单测）
 //   SyncScope 家族                —— 同步范围（单 group / workspace / 选中若干）
@@ -102,6 +106,7 @@ export 'src/spec_ui.dart';
 export 'src/sync_auto_config.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';
+export 'src/sync_memory.dart';
 export 'src/sync_prune.dart';
 export 'src/outbox.dart';
 export 'src/timeline_cache.dart';

@@ -258,4 +258,56 @@ class LocalFileSink implements FileSink, LocalFileReader {
       rethrow;
     }
   }
+
+  /// 只 stat：返回字节数，**不读内容**。
+  ///
+  /// ## 为什么脏检测必须先走这一步
+  ///
+  /// 体积过滤（`SyncFilterConfig.maxFileSize`）在域层的判据是「文件多大」。
+  /// 以前它只能靠「先把内容读进来、再看 `bytes.length`」——一个 2GB 的媒体
+  /// 文件读完才发现超上限。`File.length()` 只 stat，成本与文件大小无关。
+  ///
+  /// 错误语义与 [readBytes] 一致：文件不存在抛 [PlatformError]（不返回 0），
+  /// 否则 0 字节会被判成「内容变了」而触发覆盖上传。
+  @override
+  Future<int> sizeOf(String relPath) async {
+    final target = await resolveWithinRoot(localRoot, relPath);
+    try {
+      return await File(target).length();
+    } on FileSystemException catch (e) {
+      if (e.osError?.errorCode == 2) {
+        throw PlatformError('本地文件不存在：$relPath', cause: e);
+      }
+      throw StorageError('读取失败：$relPath（${e.message}）', cause: e);
+    } on PlatformError {
+      rethrow;
+    }
+  }
+
+  /// 流式算内容 SHA256（**不把整份文件读进内存**）。
+  ///
+  /// ## 为什么必须分块
+  ///
+  /// 脏检测对同步目录里**每一个**同步过的文件算摘要。若先 `readAsBytes`
+  /// 再哈希，峰值是「整份文件 + 哈希时的一次拷贝」≈ 2× 文件大小；真机上
+  /// （2026-11，Windows，5666 个文件）就打出过 `rss 258MB → 498.5MB` 的
+  /// 瞬时尖峰。`File.openRead()` 的块（默认 64KB）喂给
+  /// [contentHashOfStream] 后，峰值 ≈ 块大小，与文件大小无关；`await for`
+  /// 之间还会让出事件循环，UI 不会整段冻结。
+  ///
+  /// 路径防御与错误语义同 [readBytes]（同一套 `resolveWithinRoot`）。
+  @override
+  Future<String> contentDigestOf(String relPath) async {
+    final target = await resolveWithinRoot(localRoot, relPath);
+    try {
+      return await contentHashOfStream(File(target).openRead());
+    } on FileSystemException catch (e) {
+      if (e.osError?.errorCode == 2) {
+        throw PlatformError('本地文件不存在：$relPath', cause: e);
+      }
+      throw StorageError('读取失败：$relPath（${e.message}）', cause: e);
+    } on PlatformError {
+      rethrow;
+    }
+  }
 }

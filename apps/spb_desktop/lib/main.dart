@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'app.dart';
@@ -74,6 +75,12 @@ void main() {
     // 桌面端**不自动清缓存**：没有 OS 低内存信号可作依据，且在拿到真实机器的
     // 分解数据前，自动清理只是在拿界面抖动赌收益（见 memory_watchdog.dart）。
     installMemoryWatchdog();
+
+    // 同步链路的在途字节也进账本（`sync_memory.dart`）：下载/上传会把整份文件
+    // 读进内存，而这条路径**没有页面级持有方**，2026-11 真机报障里高水位日志
+    // 的 `breakdown=` 因此是空的（只有 imageCache 0.3MB，看不出 400MB 去哪了）。
+    // 进程级登记、与进程同寿命，故不注销。
+    registerSyncInFlightGauge();
 
     // 系统内存压力信号（docs/memory-audit.md G9）：桌面端引擎不派发这条信号
     // （Linux/Windows/macOS 无此系统回调），注册后零效果、无副作用——两端

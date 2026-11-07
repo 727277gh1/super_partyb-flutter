@@ -17,6 +17,7 @@
 ///   「这个文件以前同步过、现在要删」。
 library;
 
+import 'dart:convert' show ChunkedConversionSink;
 import 'dart:isolate' show Isolate, TransferableTypedData;
 import 'dart:typed_data' show Uint8List;
 
@@ -93,6 +94,49 @@ Future<String> contentHashOfAsync(List<int> bytes) async {
     // 受限环境（无 isolate 支持）：回退主 isolate，行为与旧版一致。
     return contentHashOf(bytes);
   }
+}
+
+/// **流式**算 SHA256（十六进制小写）：峰值内存 O(单块)，与文件大小无关。
+///
+/// ## 为什么需要它（2026-11 真机实测的 ~240MB 瞬时尖峰）
+///
+/// 回传脏检测此前是「`LocalFileReader.readBytes` 整份读入 →
+/// [contentHashOfAsync] 再拷一份」（`TransferableTypedData.fromList` 自己就
+/// 会拷贝，见其文档），即**瞬时 ≈ 2× 文件大小**。真实用户机器（Windows，
+/// 同步目录 5666 个文件）在登录后首次脏检测时打出
+/// `rss 258MB → 498.5MB，9 秒后回落到 287MB`——那份拷贝，不是泄漏。
+///
+/// 本函数让调用方把 `File.openRead()` 这类**块流**喂进来：`HashSink` 内部只
+/// 累积摘要状态，每块处理完即可释放，峰值 ≈ 块大小（dart:io 默认 64KB）。
+///
+/// ## 与 [contentHashOfAsync] 的分工（**不可互换**）
+///
+/// - 手上已有**整份字节**（网络响应已在内存里）：用 [contentHashOfAsync]，
+///   在 isolate 里算，不冻 UI；
+/// - 手上是**文件路径**：用本函数（经 `LocalFileReader.contentDigestOf`），
+///   连读带算都不驻留整份内容，`await for` 之间还能让出事件循环。
+///
+/// 两者必须给出**同一个**摘要——脏检测拿它与 [SyncedFile.contentHash] 比对，
+/// 算法或编码不一致会把全部文件误判成「用户改动过」。故这里同样用
+/// [crypto.sha256] 与 `Digest.toString()`（即小写十六进制）。
+Future<String> contentHashOfStream(Stream<List<int>> chunks) async {
+  crypto.Digest? digest;
+  final sink = crypto.sha256.startChunkedConversion(
+    ChunkedConversionSink<crypto.Digest>.withCallback(
+      (out) => digest = out.single,
+    ),
+  );
+  await for (final chunk in chunks) {
+    sink.add(chunk);
+  }
+  sink.close();
+  final result = digest;
+  if (result == null) {
+    // 正常路径不可能到这里（`close()` 一定产出摘要）。显式抛错而不是返回
+    // 空串：空串会被脏检测当成「与基准不同」→ 整目录误判为改动。
+    throw StateError('SHA256 分块计算未产出摘要');
+  }
+  return result.toString();
 }
 
 /// 单个已同步文件的记录。

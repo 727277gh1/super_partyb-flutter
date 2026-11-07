@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 /// 本地落盘测试：**路径穿越防御** + 原子写入。
@@ -340,6 +341,104 @@ void main() {
       final sink = LocalFileSink(root.path);
       await sink.write('reports/a.md', [1]);
       await expectLater(sink.readBytes('reports'), throwsA(isA<SpbError>()));
+    });
+  });
+
+  // sizeOf / contentDigestOf 是脏检测的两条新通道（取代「整份读入」），
+  // 它们的存在理由就是「不把文件读进内存」，因此错误语义必须与 readBytes
+  // 逐条对齐：抛错而不是给一个默认值，否则脏检测会把「读不到」当成
+  // 「内容变了」而去覆盖远端。
+  group('LocalFileSink sizeOf（只 stat，不读内容）', () {
+    test('返回字节数（含 0 字节文件）', () async {
+      final sink = LocalFileSink(root.path);
+      await sink.write('reports/a.md', [1, 2, 3, 4, 5]);
+      expect(await sink.sizeOf('reports/a.md'), 5);
+
+      await sink.write('empty.md', const []);
+      expect(await sink.sizeOf('empty.md'), 0);
+    });
+
+    test('文件不存在时抛 PlatformError（不得返回 0）', () async {
+      final sink = LocalFileSink(root.path);
+      await expectLater(sink.sizeOf('nope.md'), throwsA(isA<PlatformError>()));
+    });
+
+    test('路径逃逸时抛错（不会 stat 到目录之外）', () async {
+      File('${outside.path}/secret.txt').writeAsStringSync('secret');
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.sizeOf('../outside/secret.txt'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('软链指向外部时抛错', () async {
+      File('${outside.path}/secret.txt').writeAsStringSync('secret');
+      Link('${root.path}/link').createSync(outside.path);
+
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.sizeOf('link/secret.txt'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+  });
+
+  group('LocalFileSink contentDigestOf（流式哈希）', () {
+    test('与整份字节的 SHA256 逐字相等（脏检测比对基准不能漂）', () async {
+      final sink = LocalFileSink(root.path);
+      final bytes = List<int>.generate(4096, (i) => i % 251);
+      await sink.write('reports/a.md', bytes);
+
+      expect(await sink.contentDigestOf('reports/a.md'), contentHashOf(bytes));
+    });
+
+    test('跳多块的文件与整份哈希相等（分块不影响结果）', () async {
+      // 300KB 远大于 dart:io 的读块（默认 64KB），会跨多个块。
+      final sink = LocalFileSink(root.path);
+      final bytes = List<int>.generate(300 * 1024, (i) => (i * 31 + 7) % 256);
+      await sink.write('big.bin', bytes);
+
+      expect(await sink.contentDigestOf('big.bin'), contentHashOf(bytes));
+      // 体积与内容都能拿到，脏检测全程不需要 readBytes。
+      expect(await sink.sizeOf('big.bin'), bytes.length);
+    });
+
+    test('0 字节文件的摘要是空输入的 SHA256', () async {
+      final sink = LocalFileSink(root.path);
+      await sink.write('empty.md', const []);
+      expect(
+        await sink.contentDigestOf('empty.md'),
+        contentHashOf(const <int>[]),
+      );
+    });
+
+    test('文件不存在时抛 PlatformError', () async {
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.contentDigestOf('nope.md'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('路径逃逸时抛错（不会算同步目录之外文件的摘要）', () async {
+      File('${outside.path}/secret.txt').writeAsStringSync('secret');
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.contentDigestOf('../outside/secret.txt'),
+        throwsA(isA<PlatformError>()),
+      );
+    });
+
+    test('软链指向外部时抛错', () async {
+      File('${outside.path}/secret.txt').writeAsStringSync('secret');
+      Link('${root.path}/link').createSync(outside.path);
+
+      final sink = LocalFileSink(root.path);
+      await expectLater(
+        sink.contentDigestOf('link/secret.txt'),
+        throwsA(isA<PlatformError>()),
+      );
     });
   });
 

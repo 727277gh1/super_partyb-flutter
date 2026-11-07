@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'app.dart';
@@ -58,6 +59,11 @@ void main() {
     // imageCache（见下），但压力信号只在真正吃紧时来；高水位日志记录的是
     // 「离上限还有多远」以及**谁占的**（时间线 / 缩略图 / 气泡缓存 / 清单）。
     installMemoryWatchdog();
+
+    // 同步链路的在途字节也进账本（`sync_memory.dart`）：下载/上传会把整份文件
+    // 读进内存，而这条路径**没有页面级持有方**（账本只在会话页/交付面板
+    // 登记），于是高水位日志的 `breakdown=` 会是空的。进程级登记、与进程同寿命。
+    registerSyncInFlightGauge();
 
     // 系统内存压力信号（docs/memory-audit.md G9）：Android/iOS 引擎在内存
     // 吃紧时派发 `memoryPressure`，此前全仓无接收方。收到后清空全局解码缓存

@@ -166,6 +166,37 @@ widget 按需建。
 
 ---
 
+## 4.4 第三轮（2026-11）：真机诊断报告驱动的收口
+
+这一轮**不是**靠 grep 找出来的，而是真实用户导出的一份诊断报告（Windows 10
+LTSC，`release: true`）把两个静默问题一起暴露了：
+
+```
+23:13:19 内存基线 rss_mb=66.9 peak_rss_mb=66.9 image_cache_mb=0.0
+...
+23:33:19 rss=253.4MB peak=421.1MB imageCache=0.3MB(1 张)
+23:43:19 WARN 内存高水位 rss_mb=498.5 peak_mb=565.3 since_start_mb=431.6
+              image_cache_mb=0.3 breakdown=
+23:43:28 rss=287.2MB peak=578.5MB
+```
+
+`imageCache` 只有 0.3MB、`breakdown=` 为空 → 既不是图片，也不是任何登记过的
+持有方。而那 240MB 的瞬时尖峰落在「登录成功后同步启动」的那一分钟，9 秒后
+回落——典型的**一次性大块分配**，不是泄漏。
+
+| # | 项 | 证据（file:line） | 影响 | 处置 |
+|---|---|---|---|---|
+| G11 | 回传脏检测**逐文件整份读入**（`readBytes`）再用 `contentHashOfAsync` 算摘要——而 `TransferableTypedData.fromList` **自己就拷贝一次**（`sync_state.dart` 有实测记录），瞬时 ≈ **2× 文件大小**；且体积过滤在读完**之后**才判，超大文件白读 | `spb_domain/lib/src/deliverable_upload.dart`（`scanLocalDirtyFiles`）、`spb_domain/lib/src/sync_state.dart`（`contentHashOfStream`）、`spb_platform/lib/src/file_sink.dart`（`sizeOf` / `contentDigestOf`） | 同步目录实测 5666 文件 / 4.7GB：只要有一个一两百 MB 的媒体交付物，就是 200–400MB 瞬时峰（与报告里 258→498.5MB 完全吻合） | **stat 先判体积**（`LocalFileReader.sizeOf`，超上限连读都不读）+ **流式摘要**（`LocalFileReader.contentDigestOf` → `File.openRead()` + `contentHashOfStream`，峰值 O(块)）。`readBytes` 只留在「上传确实要整份内容」那一步 |
+| G12 | 同步**下载**路径仍然整份持有：`downloader.download()` 返回 `bytes` → `sink.write(bytes)` → `contentHashOfAsync(bytes)`（又一份拷贝） | `spb_domain/lib/src/deliverable_sync.dart`（下载分支） | 大文件下载仍有 ≈ 2× 瞬时峰。**未消除**，但已可观测（G13） | 本轮只补**读数**（`SyncInFlightBytes.hold/release`）；真正的流式落盘（下载流边写边算摘要）会改动 `FileDownloader`/`FileSink` 契约，留给独立改动 |
+| G13 | 观测缺口两处：①`MemoryProbe` 环形缓冲只有 12 条，长会话里**启动基线被滚掉**（报告最早一条已是启动后 20 分钟）；②账本只在会话页/交付面板登记，**登录页上 `breakdown` 恒为空** | `spb_platform/lib/src/memory_probe.dart`、`spb_platform/lib/src/diagnostics_export.dart`、`spb_domain/lib/src/sync_memory.dart` | 报告能说「占了多少」，说不出「从多少涨上来、花在谁身上」——这正是本次排查卡住的地方 | 基线单独保留（滚出窗口时报告补一行并标注）；新增 `sync.inflight` 账本读数（同步在途字节）；账本为空时报告显式写一行「无登记项」而不是留白 |
+
+**仍未解释的一段**：启动后 20 分钟内 `rss 66.9 → 253.4MB`、`peak 421.1MB`，
+当时停在**登录页**（会话失效，5 次 401）、窗口已隐藏到托盘，且窗口里没有任何
+日志。这一段的样本已被 12 槽缓冲冲掉，G13 修好后下一份报告才能看到斜率；若仍
+复现，需要 profile 模式 + DevTools 做 Dart heap 分解（本模块拿不到这一维）。
+
+---
+
 ## 五、结论摘要
 
 - 第一轮：结构上无界的点共 **7 条**（G1a/G1b/G2/G3/G4a/G4b/G5），全部映射到
@@ -176,3 +207,7 @@ widget 按需建。
   G8 缩略图有界+版本令牌 / G9 内存压力 / G10 Markdown 图片降采样），待议
   **4 条**（J1–J4）均仍**缺少真机或产品取舍依据**，不以猜测改动（#72–#75
   开着；#70 G8 与 #71 G10 已结）。
+- 第三轮（真机报告驱动）：已修 **2 条**（G11 脏检测整份读入 / G13 观测缺口），
+  **1 条只补读数未消除**（G12 下载整份持有，等流式落盘契约改动）。
+  判据来源是用户机器的 `rss=253.4MB peak=421.1MB imageCache=0.3MB breakdown=`——
+  真机数据能把「结构上可疑」变成「确实是它」，这是前两轮拿不到的。

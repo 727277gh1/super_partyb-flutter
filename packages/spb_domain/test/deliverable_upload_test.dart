@@ -24,6 +24,15 @@ class _Reader implements LocalFileReader {
     if (bytes == null) throw PlatformError('本地文件不存在：$relPath');
     return bytes;
   }
+
+  /// stat 桩：内存桩里「体积」就是已存字节数。
+  @override
+  Future<int> sizeOf(String relPath) async => (await readBytes(relPath)).length;
+
+  /// 流式摘要桩：内存桩没有「分块」可言，直接复用同一算法保证结果一致。
+  @override
+  Future<String> contentDigestOf(String relPath) async =>
+      contentHashOf(await readBytes(relPath));
 }
 
 const _gid = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
@@ -61,6 +70,51 @@ SyncedFile _record(
 /// 内容 → 记录（hash 由同一算法算，避免测试里手抄哈希）。
 
 const _permissive = SyncFilterConfig(maxFileSize: 0, includeMedia: true);
+
+/// 调用记录桩：钉住「先 stat 判体积、再流式算摘要」这条顺序。
+///
+/// ## 为什么要单独一个桩（而不是复用 `_Reader`）
+///
+/// 本次修复的核心是「**不要把整份内容读进内存**」。若沿用按字节给的桩，
+/// `readBytes` 与 `contentDigestOf` 都能成功，测试就分不清走的是哪条路径——
+/// 而回归恰恰会以「一切正常、只是又读了一遍整文件」的形式发生。故这里让
+/// `readBytes` 直接抛错：任何走到它的代码都会立刻失败。
+class _RecordingReader implements LocalFileReader {
+  _RecordingReader({
+    required this.sizes,
+    this.digests = const {},
+    this.failDigest = false,
+  });
+
+  final Map<String, int> sizes;
+  final Map<String, String> digests;
+  final bool failDigest;
+
+  final digestCalls = <String>[];
+  final readCalls = <String>[];
+
+  @override
+  Future<List<int>> readBytes(String relPath) async {
+    readCalls.add(relPath);
+    throw StateError('脏检测不该整份读取：$relPath');
+  }
+
+  @override
+  Future<int> sizeOf(String relPath) async {
+    final size = sizes[relPath];
+    if (size == null) throw PlatformError('本地文件不存在：$relPath');
+    return size;
+  }
+
+  @override
+  Future<String> contentDigestOf(String relPath) async {
+    digestCalls.add(relPath);
+    if (failDigest) throw PlatformError('读取失败：$relPath');
+    final digest = digests[relPath];
+    if (digest == null) throw PlatformError('本地文件不存在：$relPath');
+    return digest;
+  }
+}
 
 void main() {
   // =========================================================================
@@ -262,6 +316,85 @@ void main() {
         1,
         reason: '体积按要上传的字节判，不是记录里下载时的大小',
       );
+    });
+
+    test('超过体积上限时**连内容都不读**（先 stat 再判）', () async {
+      // 修复前：readBytes 整份读入 → 再看长度。一个 2GB 的媒体文件要读完
+      // 才发现超上限，且瞬时内存 = 文件大小（真机上打出过 ~240MB 尖峰）。
+      const rel = '$_gid/big.bin';
+      final reader = _RecordingReader(sizes: {rel: 2 * 1024 * 1024 * 1024});
+      final result = await scanLocalDirtyFiles(
+        reader: reader,
+        state: SyncState(
+          files: {
+            rel: _record([9]),
+          },
+        ),
+        filter: const SyncFilterConfig(maxFileSize: 1024, includeMedia: true),
+        stateKey: workspaceStateKey,
+      );
+
+      expect(result.filtered[SyncSkipReason.tooLarge], 1);
+      expect(reader.digestCalls, isEmpty, reason: '超上限的文件连摘要都不该算——那仍要读完整份内容');
+      expect(reader.readCalls, isEmpty);
+    });
+
+    test('内容一致 → 只走 stat + 流式摘要，不整份读取', () async {
+      const rel = '$_gid/a.md';
+      final bytes = [1, 2, 3, 4];
+      final reader = _RecordingReader(
+        sizes: {rel: bytes.length},
+        digests: {rel: contentHashOf(bytes)},
+      );
+      final result = await scanLocalDirtyFiles(
+        reader: reader,
+        state: SyncState(files: {rel: _record(bytes)}),
+        filter: _permissive,
+        stateKey: workspaceStateKey,
+      );
+
+      expect(result.unchanged, 1);
+      expect(result.dirty, isEmpty);
+      expect(reader.digestCalls, [rel]);
+      expect(reader.readCalls, isEmpty, reason: '整份读取就是那条 2× 内存尖峰');
+    });
+
+    test('摘要计算失败 → 记失败、不算脏（不误报为「用户改过」）', () async {
+      const rel = '$_gid/locked.md';
+      final reader = _RecordingReader(sizes: {rel: 4}, failDigest: true);
+      final result = await scanLocalDirtyFiles(
+        reader: reader,
+        state: SyncState(
+          files: {
+            rel: _record([1, 2, 3, 4]),
+          },
+        ),
+        filter: _permissive,
+        stateKey: workspaceStateKey,
+      );
+
+      expect(result.dirty, isEmpty);
+      expect(result.failed, hasLength(1));
+      expect(result.failed.single.relPath, rel);
+    });
+
+    test('stat 失败 → 记失败、不算脏', () async {
+      const rel = '$_gid/gone.md';
+      final reader = _RecordingReader(sizes: const {});
+      final result = await scanLocalDirtyFiles(
+        reader: reader,
+        state: SyncState(
+          files: {
+            rel: _record([1]),
+          },
+        ),
+        filter: _permissive,
+        stateKey: workspaceStateKey,
+      );
+
+      expect(result.dirty, isEmpty);
+      expect(result.failed, hasLength(1));
+      expect(reader.digestCalls, isEmpty);
     });
 
     test('记录缺 contentHash → 无法检测，不算脏（降级不误报）', () async {

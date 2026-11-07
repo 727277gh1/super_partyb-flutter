@@ -99,3 +99,4 @@
 | §6.69 | 悬浮窗「不打扰」：进入先缩小再跳、退出弹出主窗口抢焦点（2026-11） | [`platform.md`](platform.md) |
 | §6.71 | 生物识别门禁：`AuthStatus.locked` + 回前台重锁 + 五态失败分支（2026-11） | [`auth.md`](auth.md) |
 | §6.72 | G8 收口（缩略图有界 + 版本失效）与内存分解/高水位日志（2026-11） | [`performance.md`](performance.md) |
+| §6.73 | 真机报告驱动的第三轮：脏检测改 stat + 流式摘要，补同步在途读数（2026-11） | [`performance.md`](performance.md) |

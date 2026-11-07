@@ -546,3 +546,86 @@ issue #70 给了三条路：（a）服务端在 `agent.file.*` 里带 mtime/etag
   不写 / 分解与 `!` 标记 / 读数抛错 / 安装幂等）；`memory_probe_wiring_test` +1
   （两端都装看门狗）；`diagnostics_export_test` +2（分解行 / 纯账本小节）。
 - 守卫全绿（`dart analyze` / `dart format` / 12 个 `check_*.sh` + 自测）。
+
+### 6.73 真机报告驱动的第三轮收口：脏检测改为 stat + 流式摘要，补上同步在途读数（2026-11）
+
+前两轮（§6.59 / §6.60 / §6.72）都是「结构上找无界集合」与「按操作估峰值」。
+这一轮换了判据：**用户机器导出的诊断报告**。它把两个静默问题一起暴露了。
+
+#### 报告长什么样（Windows 10 LTSC，release）
+
+```
+23:13:19 内存基线 rss_mb=66.9 peak_rss_mb=66.9 image_cache_mb=0.0
+23:33:19 rss=253.4MB peak=421.1MB imageCache=0.3MB(1 张)
+23:43:19 WARN 内存高水位 rss_mb=498.5 peak_mb=565.3 since_start_mb=431.6
+              image_cache_mb=0.3 breakdown=
+23:43:28 rss=287.2MB peak=578.5MB
+```
+
+三条读数各自否掉一批猜测：`image_cache_mb=0.3` 否掉图片；`breakdown=` 为空
+否掉**所有登记过的**持有方（时间线 / 缩略图 / 气泡缓存 / 清单）；498.5MB 出现
+在登录成功那一分钟、9 秒后回落到 287MB —— **一次性大块分配**，不是泄漏。
+
+#### G11：脏检测的 2× 瞬时峰
+
+`scanLocalDirtyFiles` 对状态表里每个文件做「整份读入 → `contentHashOfAsync`
+算摘要」，而后者内部的 `TransferableTypedData.fromList` **自己就拷贝一次**
+（§6.60 时已实测确认，当时只当它是「worker 侧零拷贝的代价」）。于是峰值是
+**2× 文件大小**；并且体积过滤排在读完**之后**——2GB 的媒体文件要读完才发现
+超上限。
+
+同步目录实测 5666 个文件 / 4.7GB：只要有一个一两百 MB 的交付物，就是
+200–400MB 的瞬时峰，与报告里的 258 → 498.5MB 吻合。
+
+处置（两处都不改语义，摘要仍是同一个 SHA256）：
+
+- `LocalFileReader` 增加 `sizeOf`（只 stat）与 `contentDigestOf`（流式）；
+  脏检测**先判体积**（超上限连读都不读），再用 `contentHashOfStream`
+  （`File.openRead()` + `sha256.startChunkedConversion`，峰值 O(块)）；
+- `readBytes` 保留给「上传确实要整份内容」那一步（`_handleOne`）——那里本来
+  就必须持有内容，不该假装能省。
+
+#### G12：下载路径仍然整份持有（**只补读数，未消除**）
+
+`downloader.download()` 返回 `bytes` → `sink.write(bytes)` →
+`contentHashOfAsync(bytes)`（又一份拷贝）。要真正消掉得让下载流边写边算摘要，
+那会改 `FileDownloader` / `FileSink` 契约（涉及 `.part` + rename 的原子写不变量，
+§6.42）。本轮只把它**变可见**：新增 `SyncInFlightBytes.hold/release` +
+`registerSyncInFlightGauge`（账本项 `sync.inflight`，越线 128MB）。
+
+#### G13：观测缺口
+
+两处，都直接导致这次排查卡住：
+
+1. **基线被滚掉**：`MemoryProbe` 只有 12 槽（≈12 分钟），长会话里启动基线
+   滚出窗口，报告最早一条已是启动后 20 分钟的 253MB——「从 66.9 涨到 253」
+   这段过程完全不可见。现在基线**单独保留**，滚出窗口时报告在最前面补一行
+   并标注「已滚出采样窗口」；基线还在窗口里时不重复输出。
+2. **登录页上账本恒为空**：账本只在会话页与交付面板登记，于是 `breakdown=`
+   为空被读成「没花在谁身上」，实际是「这一页没有任何持有方登记」。现在同步
+   链路的在途字节有读数（G12），且账本为空时报告**显式写一行**「无登记项」
+   ——但探针与账本都空（移动端未接线 / 单测）时整个小节仍省略，那才是「什么
+   都没采集」。
+
+#### 仍未解释的一段（诚实记录）
+
+启动后 20 分钟 `rss 66.9 → 253.4MB`、`peak 421.1MB`，当时停在**登录页**
+（会话失效，5 次 401）、窗口已隐藏到托盘，窗口内零日志。样本已被 12 槽冲掉，
+G13 修好后下一份报告能看到斜率；若仍复现，只能靠 profile 模式 + DevTools 的
+Dart heap 分解（本模块拿不到这一维）。
+
+#### 验证
+
+- `spb_domain`：`sync_hash_stream_test.dart` 6 条（空输入 / 已知向量 `"abc"` /
+  跨块等价 / 1 字节块等价 / 与 `contentHashOfAsync` 一致 / 流中途抛错上抛）；
+  `sync_memory_test.dart` 6 条（hold/release 累加 / release 多时归零 / 0 与负数
+  不计数 / 登记后进快照 / 越线标记 / 清零后不越线）；`deliverable_upload_test`
+  +4（超上限**连摘要都不算** / 内容一致只走 stat + 流式摘要、`readBytes` 零调用 /
+  摘要失败记失败不算脏 / stat 失败记失败）。
+- `spb_platform`：`file_sink_test` +10（`sizeOf` 含 0 字节 / 不存在抛
+  `PlatformError` / 逃逸与软链拒读；`contentDigestOf` 与整份哈希逐字相等 /
+  跨块等价 / 0 字节 / 不存在 / 逃逸 / 软链）；`memory_probe_test` +3（基线在
+  窗口内不重复 / 滚出后补行并标注 / 基线只记首条）。
+- 全仓 `dart analyze` 干净；`dart format` 无 diff；12 个守卫 + 自测全绿；
+  `spb_domain` 1194 / `spb_platform` 252 / `spb_desktop` 243 / `spb_mobile` 159
+  全绿。

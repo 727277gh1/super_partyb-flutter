@@ -147,11 +147,24 @@ class MemoryProbe {
   int _peakRssBytes = 0;
   DateTime? _lastSampleAt;
 
+  /// **首条**采样（启动基线）。
+  ///
+  /// 单独保留而不是只靠 [_samples] 的第一项：环形缓冲只有 [capacity] 条，
+  /// 长会话里基线会被滚掉——而它正是「涨了多少」的唯一参照（
+  /// docs/memory-audit.md §四：看峰值与斜率，不看是否回落）。
+  ///
+  /// 2026-11 真机报障就是被这一点误住的：报告里最早一条已是启动后 20 分钟
+  /// （rss 253MB），而基线是 66.9MB——中间那段爬坡的样本全被冲掉了。
+  MemorySample? _baseline;
+
   /// 已采集的采样（最旧在前）。返回不可变副本，调用方无法改动内部状态。
   List<MemorySample> get samples => List<MemorySample>.unmodifiable(_samples);
 
   /// 观测到的 RSS 峰值（取「OS 高水位」与「已采样最大值」的较大者）。
   int get peakRssBytes => _peakRssBytes;
+
+  /// 启动基线（首条采样）；null = 还没采过。
+  MemorySample? get baseline => _baseline;
 
   /// 最近一次采样；null = 还没采过。
   MemorySample? get latest => _samples.isEmpty ? null : _samples.last;
@@ -200,6 +213,7 @@ class MemoryProbe {
       liveImages: live,
     );
     _samples.addLast(sample);
+    _baseline ??= sample;
     _lastSampleAt = now;
     while (_samples.length > capacity) {
       _samples.removeFirst();
@@ -209,8 +223,20 @@ class MemoryProbe {
 
   /// 诊断报告的「内存采样」小节（逐行）。空表示还没采过——报告里整个小节
   /// 会被省略，而不是写一个空壳（同 `TimelineProbe` 的取向）。
-  List<String> reportLines() =>
-      _samples.map((s) => s.toReportLine()).toList(growable: false);
+  ///
+  /// 基线已被环形缓冲滚出时，在最前面补一行并标注——否则读者只能看到最近
+  /// 12 分钟的曲线，无法回答「从多少涨上来的」。基线还在窗口里时不重复输出
+  /// （它就是第一行）。
+  List<String> reportLines() {
+    final lines = <String>[];
+    final baseline = _baseline;
+    if (baseline != null &&
+        (_samples.isEmpty || !identical(_samples.first, baseline))) {
+      lines.add('${baseline.toReportLine()} ← 启动基线（已滚出采样窗口）');
+    }
+    lines.addAll(_samples.map((s) => s.toReportLine()));
+    return List<String>.unmodifiable(lines);
+  }
 }
 
 int _processRss() => ProcessInfo.currentRss;

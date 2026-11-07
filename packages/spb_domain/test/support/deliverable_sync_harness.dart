@@ -88,6 +88,15 @@ class StubSink implements FileSink, LocalFileReader {
     }
     return bytes;
   }
+
+  /// stat 桩：内存桩里「体积」就是已存字节数。
+  @override
+  Future<int> sizeOf(String relPath) async => (await readBytes(relPath)).length;
+
+  /// 流式摘要桩：内存桩没有「分块」可言，直接复用同一算法保证结果一致。
+  @override
+  Future<String> contentDigestOf(String relPath) async =>
+      contentHashOf(await readBytes(relPath));
 }
 
 /// 内存状态库（`SyncStateStore` 的最小实现，用于范围/目录变更语义）。

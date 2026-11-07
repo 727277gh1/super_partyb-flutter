@@ -47,11 +47,37 @@ import 'sync_state.dart';
 /// - **不存在的文件抛错**，不要返回空列表：空列表会被上层当成「一个 0 字节
 ///   的文件」，进而算出与记录不同的 hash → 误判为「用户改动过」并触发一次
 ///   覆盖上传（把远端文件写成空文件）。
+///
+/// ## 为什么除了 `readBytes` 还有 `sizeOf` / `contentDigestOf`
+///
+/// 脏检测只需要「体积」与「内容指纹」，**不需要**内容本身。若只给
+/// [readBytes]，它就必然把整份文件读进内存：
+///
+/// 1. 体积过滤必须**先**判——一个 2GB 的媒体文件被读完才发现超上限，那是
+///    纯浪费（[sizeOf] 只 stat，不读内容）；
+/// 2. 指纹可以**流式**算（[contentDigestOf]）——峰值 O(块) 而不是 O(文件)。
+///    真实报障的 ~240MB 瞬时尖峰就来自「整份读入 + 哈希再拷一份」（见
+///    `contentHashOfStream` 的文档）。
+///
+/// [readBytes] 仍然保留：回传**上传**那一步要的就是内容本身（`_handleOne`），
+/// 那时整份字节本来就必须在内存里。
 abstract interface class LocalFileReader {
   /// 读取 [relPath]（相对同步目录）的全部字节。
   ///
   /// 路径非法、文件不存在或读取失败时抛错。
   Future<List<int>> readBytes(String relPath);
+
+  /// 只 stat：返回 [relPath] 的字节数，**不读内容**。
+  ///
+  /// 路径非法、文件不存在或读取失败时抛错（语义同 [readBytes]——抛错而不是
+  /// 返回 0，否则 0 字节会被判成「内容变了」而触发覆盖上传）。
+  Future<int> sizeOf(String relPath);
+
+  /// 流式算出 [relPath] 的内容 SHA256（十六进制小写）。
+  ///
+  /// 实现必须**分块读取**（如 `File.openRead()` + `contentHashOfStream`），
+  /// 不得先 `readBytes` 再哈希——那样又把整份文件驻留内存了。
+  Future<String> contentDigestOf(String relPath);
 }
 
 // ===========================================================================
@@ -309,11 +335,22 @@ bool _looksLikeMedia(String relPath) {
 /// 文件，递归扫描要把整个目录读一遍；而**只有同步过的文件才可能被回传**
 /// （没同步过的本地文件没有基准，无法知道它是不是「改动」）。
 ///
-/// ## 每条都要读一遍内容
+/// ## 每条都要算一遍摘要（但不必读进内存）
 ///
-/// 判据是内容 SHA256 与记录里的 [SyncedFile.contentHash] 比对，故必须读字节
-/// （不能只看 size：改一个字不改大小）。读失败（文件被手动删掉、权限不足）
-/// 记入 [LocalDirtyScanResult.failed]，**不算脏**——那没有内容可上传。
+/// 判据是内容 SHA256 与记录里的 [SyncedFile.contentHash] 比对，故必须算摘要
+/// （不能只看 size：改一个字不改大小）。但**不必把内容驻留内存**：
+///
+/// 1. 先 [LocalFileReader.sizeOf]（stat）判体积——超上限的文件直接跳过，
+///    连读都不读；
+/// 2. 再用 [LocalFileReader.contentDigestOf]（流式）算指纹，峰值 O(块)。
+///
+/// 修复前这里是「`readBytes` 整份读入 → `contentHashOfAsync` 再拷一份」，即
+/// **瞬时 ≈ 2× 文件大小**：2026-11 真机（Windows，同步目录 5666 个文件）登录
+/// 后首轮脏检测打出 `rss 258MB → 498.5MB`，9 秒后回落。那是这份拷贝，不是
+/// 泄漏（docs/memory-audit.md §四）。
+///
+/// 读失败（文件被手动删掉、权限不足）记入 [LocalDirtyScanResult.failed]，
+/// **不算脏**——那没有内容可上传。
 ///
 /// ## [stateKey] 决定 groupId 的解析方式
 ///
@@ -360,9 +397,11 @@ Future<LocalDirtyScanResult> scanLocalDirtyFiles({
       continue;
     }
 
-    final List<int> bytes;
+    // 先 stat 判体积，再流式算指纹：**不把整份内容读进内存**（见本函数
+    // 文档的「每条都要算一遍摘要」）。
+    final int size;
     try {
-      bytes = await reader.readBytes(relPath);
+      size = await reader.sizeOf(relPath);
     } catch (e) {
       failed.add(LocalScanFailure(relPath, '$e'));
       continue;
@@ -370,7 +409,7 @@ Future<LocalDirtyScanResult> scanLocalDirtyFiles({
 
     final sizeReason = shouldUploadLocalFile(
       groupRelPath: target.groupRelPath,
-      size: bytes.length,
+      size: size,
       filter: filter,
     );
     if (sizeReason != null) {
@@ -385,9 +424,19 @@ Future<LocalDirtyScanResult> scanLocalDirtyFiles({
       continue;
     }
 
-    // 后台 isolate 哈希（docs/memory-audit.md G6）：脏检测逐文件全量读入 +
-    // 哈希，大文件在主 isolate 会逐个冻结 UI。
-    if (await contentHashOfAsync(bytes) == baseline) {
+    // 流式哈希：峰值 O(块)，与文件大小无关。此前这里是
+    // `contentHashOfAsync(bytes)`，而 bytes 是整份读入的——那条路径在真机上
+    // 打出过 ~240MB 的瞬时尖峰。
+    final String digest;
+    try {
+      digest = await reader.contentDigestOf(relPath);
+    } catch (e) {
+      // 读失败与体积/路径类失败同一处理：不算脏、记失败。
+      failed.add(LocalScanFailure(relPath, '$e'));
+      continue;
+    }
+
+    if (digest == baseline) {
       unchanged++;
       continue;
     }
@@ -396,7 +445,7 @@ Future<LocalDirtyScanResult> scanLocalDirtyFiles({
       LocalDirtyFile(
         relPath: relPath,
         groupId: target.groupId,
-        localSize: bytes.length,
+        localSize: size,
       ),
     );
   }

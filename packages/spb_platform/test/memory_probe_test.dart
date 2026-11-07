@@ -172,6 +172,54 @@ void main() {
     });
   });
 
+  group('启动基线', () {
+    test('基线在窗口内时不重复输出（它就是第一行）', () {
+      final p = probeWith(capacity: 3);
+      p.probe.sample(force: true, at: DateTime(2026, 11, 5, 23, 13, 19));
+      p.setRss(120 * 1024 * 1024);
+      p.probe.sample(force: true, at: DateTime(2026, 11, 5, 23, 14, 19));
+
+      final lines = p.probe.reportLines();
+      expect(lines, hasLength(2));
+      expect(lines.first, startsWith('23:13:19 rss='));
+      expect(
+        lines.where((l) => l.contains('启动基线')),
+        isEmpty,
+        reason: '基线还在窗口里时，它就是第一行',
+      );
+    });
+
+    test('基线被环形缓冲滚掉后，报告里补一行并标注（否则读不出「从多少涨上来」）', () {
+      final p = probeWith(capacity: 2);
+      // 真实报障的形状：启动 66.9MB，20 分钟后窗口里只剩 253MB 那几条。
+      p.probe.sample(force: true, at: DateTime(2026, 11, 5, 23, 13, 19));
+      for (var i = 0; i < 4; i++) {
+        p.setRss(250 * 1024 * 1024);
+        p.probe.sample(
+          force: true,
+          at: DateTime(2026, 11, 5, 23, 33, 19 + i * 60),
+        );
+      }
+
+      final lines = p.probe.reportLines();
+      expect(lines, hasLength(3), reason: '1 条基线 + 2 条窗口内采样');
+      expect(lines.first, startsWith('23:13:19 rss='));
+      expect(lines.first, contains('启动基线'));
+      expect(p.probe.baseline?.rssBytes, 100 * 1024 * 1024);
+      expect(p.probe.samples.first.rssBytes, 250 * 1024 * 1024);
+    });
+
+    test('基线只记首条（后续采样不覆盖它）', () {
+      final p = probeWith();
+      p.probe.sample(force: true, at: DateTime(2026, 11, 5, 10, 0, 0));
+      p.setRss(500 * 1024 * 1024);
+      p.probe.sample(force: true, at: DateTime(2026, 11, 5, 10, 1, 0));
+
+      expect(p.probe.baseline?.at, DateTime(2026, 11, 5, 10, 0, 0));
+      expect(p.probe.baseline?.rssBytes, 100 * 1024 * 1024);
+    });
+  });
+
   group('安装 / 卸载', () {
     test('安装后立即采一条基线（启动时的参照点）', () {
       final p = probeWith();

@@ -227,11 +227,19 @@ Future<DiagnosticsExportOutcome> exportDiagnosticsReport(
     memoryLines = memory;
   } else {
     // 分解行追加在曲线之后：先看「涨到多少」，再看「花在谁身上」。
-    // 账本为空（还没有持有方登记）时仅保留曲线，整节省略逻辑不变。
-    final lines = <String>[
-      ...?probe?.reportLines(),
-      ...MemoryLedger.reportLines(),
-    ];
+    // 账本为空时**显式写一行**而不是留白：2026-11 真机报告里 `breakdown=`
+    // 为空被误读成「没花在谁身上」，实际上是「这一页没有任何持有方登记」
+    // （账本只在会话页/交付面板登记，登录页上就是空的）。同步链路的在途字节
+    // 已由 `registerSyncInFlightGauge` 补上，故生产通常不会是空。
+    //
+    // 但「探针没装、账本也空」（移动端未接线 / 单测）仍然整节省略——那才是
+    // 「什么都没采集」，写一行占位只会让人以为采集挂了。
+    final probeLines = probe?.reportLines() ?? const <String>[];
+    final ledgerLines = MemoryLedger.reportLines();
+    final lines = <String>[...probeLines, ...ledgerLines];
+    if (lines.isNotEmpty && ledgerLines.isEmpty) {
+      lines.add('（内存账本无登记项：当前页面不持有可再生态缓存）');
+    }
     memoryLines = lines.isEmpty ? null : lines;
   }
   final text = buildDiagnosticsReport(
