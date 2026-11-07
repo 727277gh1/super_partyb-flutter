@@ -189,6 +189,22 @@ void main() {
     expect(ufs.queries, isEmpty);
   });
 
+  test('单 group 模式（isSingleGroup）短路：不发请求、判 unknown（issue #66）', () async {
+    // 这是「单 group 模式被接通后探测恒判 stale + 两份副本」防线的**前置**：
+    // SyncGroupScope（单 group 模式）的状态键是 groupId、布局剥掉 {gid}/，
+    // 而探测固定按 SyncSingleGroupScope 统计（workspaceStateKey）。放行的话
+    // 探测读不到该 group 的记录 → 提示条常驻；「立即同步」又把文件写到另一套
+    // 布局。两套语义各自都有测试，只有这条守住「不交叉」。
+    settings = const SyncSettings(localRoot: '/unused', scope: SyncScopeConfig());
+    // `SyncScopeConfig()` 默认 allGroups=true，单 group 模式是「非全部 + 空」。
+    settings = settings.copyWith(scope: const SyncScopeConfig(allGroups: false));
+
+    ufs.files.addAll([_file('a.md')]);
+    final result = await check();
+    expect(result.need, GroupSyncNeed.unknown);
+    expect(ufs.queries, isEmpty, reason: '短路必须发生在任何 HTTP 之前');
+  });
+
   test('首 100 条都是目录，第二页交付物仍被找到', () async {
     ufs.files.addAll([
       for (var i = 0; i < 100; i++) _file('dir$i', directory: true),

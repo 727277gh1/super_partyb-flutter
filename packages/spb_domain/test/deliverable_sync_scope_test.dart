@@ -22,6 +22,63 @@ void main() {
       );
     });
 
+    test('SyncGroupScope 与 SyncSingleGroupScope 是两套语义，不得互相判读（issue #66）', () {
+      // 这两个名字只差一个词，语义却**完全不同**：
+      //
+      // |                      | SyncGroupScope            | SyncSingleGroupScope            |
+      // |---|---|---|
+      // | 状态键               | groupId（独立）           | workspaceStateKey（共用）       |
+      // | 本地布局             | `reports/a.md`（剥 gid）  | `g1/reports/a.md`（保留 gid）   |
+      // | 推进游标             | 是                        | 否                              |
+      //
+      // 本用例钉住这三处差异，让「顺手把两者当成同一个东西」必然测试变红：
+      // 装配层若改用错的那个，探测会恒判 stale，而文件会落到另一套目录形成
+      // 两份副本（apps/spb_desktop 的按需同步探测已按此短路）。
+      const single = SyncGroupScope('g1');
+      const scoped = SyncSingleGroupScope('g1');
+      const ufsPath = '/workspace/groups/g1/reports/a.md/';
+
+      expect(single.relativePath(ufsPath), 'reports/a.md');
+      expect(scoped.relativePath(ufsPath), 'g1/reports/a.md');
+      expect(
+        single.relativePath(ufsPath),
+        isNot(scoped.relativePath(ufsPath)),
+        reason: '同一份文件在两种范围下必须落到不同路径（这正是不可混用的原因）',
+      );
+
+      expect(syncStateKeyFor(single), 'g1');
+      expect(syncStateKeyFor(scoped), workspaceStateKey);
+      expect(syncStateKeyFor(single), isNot(syncStateKeyFor(scoped)));
+
+      expect(single.advancesCursor, isTrue);
+      expect(scoped.advancesCursor, isFalse);
+
+      // 交叉判读：用 SyncGroupScope 写下的状态去跑定向同步计划，那个文件必须
+      // 仍被判为「待下载」——两份状态互不认账。混用会得到「已同步」的假象。
+      final remote = [remoteFixture('reports/a.md', id: 'a')];
+      const stateWrittenByGroupScope = SyncState(
+        cursor: '2026-01-01T00:00:00Z',
+        files: {
+          'reports/a.md': SyncedFile(
+            size: 3,
+            etag: 'W/"1"',
+            updatedAt: '2026-01-01T00:00:00Z',
+          ),
+        },
+      );
+      final plan = buildSyncPlan(
+        remote: remote,
+        state: stateWrittenByGroupScope,
+        scope: scoped,
+        filter: const SyncFilterConfig(),
+      );
+      expect(
+        plan.actions.map((a) => a.relPath),
+        contains('g1/reports/a.md'),
+        reason: '另一套状态键里的记录不能被当成「本 scope 已同步」',
+      );
+    });
+
     test('groupScopedRelativePath 剥掉 groupId 段（与落盘布局无关）', () {
       // 它是过滤判据（`isMachineGenerated`）的输入，而过滤判据表达的是
       // 「这份文件在 group 里处于什么位置」——与它落到本地哪个路径无关。

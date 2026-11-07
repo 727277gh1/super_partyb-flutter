@@ -1833,6 +1833,28 @@ final checkGroupSyncNeedProvider =
           );
         }
 
+        if (scope.isSingleGroup) {
+          SpbLog.warn('同步范围为单 group 模式，按需同步探测不可用，跳过', {
+            'group': groupId,
+          });
+          return GroupSyncCheckResult(
+            groupId: groupId,
+            need: GroupSyncNeed.unknown,
+          );
+        }
+        // 单 group 模式（`SyncScopeConfig.isSingleGroup` → 运行时
+        // [SyncGroupScope]）与本探测的语义**不兼容**，必须短路（issue #66）：
+        //
+        // 探测固定按 [SyncSingleGroupScope] 统计（状态键 `workspaceStateKey`、
+        // 布局 `{root}/{gid}/…`），而单 group 模式用 [SyncGroupScope]
+        // （状态键 = `groupId` 独立、布局剥掉 `{gid}/`）。若放行：
+        //  1. 探测读不到该 group 的记录 → 恒判 stale，提示条常驻；
+        //  2. 「立即同步」把文件写到剥掉 `{gid}/` 的布局，与常规同步的
+        //     `{root}/{gid}/…` 并存成两份副本，回传目标也在两套布局间反复。
+        // 该模式目前没有生产入口（设置页表单不产出它），但这正是危险所在：
+        // 交叉发生时**没有任何测试会红**。这里显式短路并留 warn，保证
+        // 「两套语义不交叉」是代码强制的，而不是文档约定。
+
         // 与定向同步一致，只应用用户的时间范围。最大成功文件时间无法
         // 证明更旧文件已同步，不能作为列表下限。
         const stateKey = workspaceStateKey;
