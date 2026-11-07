@@ -30,6 +30,11 @@ library;
 ///                                  scheme 对个人主体不可用时的唯一通道）
 ///   HostPlatform / ProcessRunner / spawnSystemOpen / spawnSystemReveal
 ///                               —— 系统「打开 / 定位」命令的三平台分派（可注入以便测试）
+///   normalizeWindowsPath        —— explorer 只认原生分隔符：混合分隔符路径
+///                                  归一化（issue #97）
+///   WindowsRevealBackend / Shell32RevealBackend
+///                               —— Windows「在资源管理器中选中」的原生实现
+///                                  （SHOpenFolderAndSelectItems，issue #97）
 ///   OverlayWindowAttribute / overlayRollbackOrder
 ///                               —— 悬浮窗属性改写与失败回滚顺序（纯逻辑，可无头单测）
 ///   fitOverlayWindowHeight / kOverlayMin/MaxWindowHeight
@@ -57,6 +62,7 @@ export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
 export 'src/drag_drop.dart';
 export 'src/file_sink.dart';
+export 'src/frame_activity.dart';
 export 'src/frame_timing.dart';
 export 'src/global_error_handler.dart';
 export 'src/image_cache_config.dart';
@@ -69,5 +75,6 @@ export 'src/overlay_files.dart';
 export 'src/overlay_window_state.dart';
 export 'src/system_open.dart';
 export 'src/tray.dart';
+export 'src/windows_reveal.dart';
 export 'src/window_manager.dart';
 export 'src/wechat_launcher.dart';

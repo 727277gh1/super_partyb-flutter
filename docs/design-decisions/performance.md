@@ -629,3 +629,49 @@ Dart heap 分解（本模块拿不到这一维）。
 - 全仓 `dart analyze` 干净；`dart format` 无 diff；12 个守卫 + 自测全绿；
   `spb_domain` 1194 / `spb_platform` 252 / `spb_desktop` 243 / `spb_mobile` 159
   全绿。
+
+---
+
+### 6.74 渲染帧数进内存采样：把「CPU 为什么高」变成报告里的一行（2026-11）
+
+#### 背景
+
+第三轮真机回访（`docs/memory-audit.md` §4.5）的读数里，RSS 470MB 平台期与
+`peak 897MB` 和**同步、图片、登录页全部无关**（在途 0B、`imageCache` 0 张、
+无 401），而用户同时报「CPU 一直很高」。两者很可能是同一件事，但当时报告里
+**没有任何渲染维度的读数**，只能猜。
+
+两种可能的原因要用两个数字分开：
+
+| 读数 | 含义 | 判读 |
+|---|---|---|
+| 每秒帧数 | 引擎是不是**一直在出帧** | ≈60 → 常驻动画/每帧重建；≈0 → CPU 在别处 |
+| 平均光栅耗时 | 光栅化**画得贵不贵** | 十几 ms 以上 → 更像软件光栅化（WARP）或过度绘制 |
+
+#### 做法
+
+- 新增 `spb_platform/lib/src/frame_activity.dart`：`FrameActivityCounter`
+  数帧（`addPostFrameCallback` 自续排，**必定**每帧触发）+ 累加光栅耗时
+  （`addTimingsCallback`）。
+- `MemoryProbe` 采样行尾部追加 `fps=59.6 raster=7.3ms`，与 RSS 同一行、同一
+  时间戳——拆成两个小节就得靠人对时间。
+- 由 `installMemoryProbe()` 自动接线（两端 `main()` 无需改动）；注入
+  `probe` 的测试路径不接线。
+
+#### 三条取舍
+
+1. **帧数不用 `FrameTiming` 数**：timings 在部分平台/构建不提供，用它计数会
+   把「没收到 timings」误读成「没出帧」——两个完全不同的结论。故帧数走
+   post-frame 回调，光栅耗时走 timings，且**拿不到时报告里不写 `raster=`**
+   （缺席 ≠ 0ms）。
+2. **窗口为 0 的采样不写 `fps`**：首条采样没有间隔可算，写 `fps=0.0` 会被读成
+   「这一分钟一帧都没画」。
+3. **保留一位小数**：1 分钟窗口里 3576 帧 = 59.6fps，取整会把「满速」与
+   「掉到 50」显示成同一个值。
+
+#### 验证
+
+`frame_activity_test.dart` 7 条（取走即清零 / 窗口重置 / 未出帧不除零 /
+3576 帧=59.6 / 多帧光栅取均值 / 安装幂等 / post-frame 真回调计帧）；
+`memory_probe_test.dart` +4（接线后有 `fps` 与 `raster` / 窗口为 0 不写 /
+未接线保持原格式 / 无 timings 时不写 `raster=`）。

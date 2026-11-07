@@ -100,3 +100,4 @@
 | §6.71 | 生物识别门禁：`AuthStatus.locked` + 回前台重锁 + 五态失败分支（2026-11） | [`auth.md`](auth.md) |
 | §6.72 | G8 收口（缩略图有界 + 版本失效）与内存分解/高水位日志（2026-11） | [`performance.md`](performance.md) |
 | §6.73 | 真机报告驱动的第三轮：脏检测改 stat + 流式摘要，补同步在途读数（2026-11） | [`performance.md`](performance.md) |
+| §6.74 | 渲染帧数（fps/光栅耗时）进内存采样：把「CPU 为什么高」变成一行读数（2026-11） | [`performance.md`](performance.md) |

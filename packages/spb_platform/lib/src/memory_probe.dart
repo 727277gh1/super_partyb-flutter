@@ -54,6 +54,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart' show imageCache;
 import 'package:spb_core/spb_core.dart';
 
+import 'frame_activity.dart';
+
 /// 一次内存采样的快照（纯数据，可在无引擎环境构造）。
 @immutable
 class MemorySample {
@@ -64,6 +66,7 @@ class MemorySample {
     required this.imageCacheBytes,
     required this.imageCacheEntries,
     required this.liveImages,
+    this.activity,
   });
 
   /// 采样时刻（报告里显示到秒）。
@@ -84,17 +87,31 @@ class MemorySample {
   /// 仍有 listener 的图片张数（`clear()` 清不掉的那部分）。
   final int liveImages;
 
+  /// 本采样窗口内的渲染活动（帧数 / 平均光栅耗时）；null = 这一维没接线。
+  ///
+  /// 为什么要和内存放同一行：用户报「内存高 + CPU 高」时，两者很可能是同一
+  /// 件事（持续出帧，或光栅化了在 CPU 上）。拆成两个小节反而要靠人对时间
+  /// （见 `frame_activity.dart` 文件头）。
+  final FrameActivity? activity;
+
   /// 报告里的一行。
   ///
-  /// 形如 `14:03:11 rss=182.4MB peak=240.9MB imageCache=12.1MB(4 张) live=1`。
+  /// 形如 `14:03:11 rss=182.4MB peak=240.9MB imageCache=12.1MB(4 张) live=1`，
+  /// 接线了帧计数时尾部再加 ` fps=59.6 raster=7.3ms`。
   /// 只写时刻（不写日期）：同一份报告里的采样都在同一次运行内，日期是噪音。
   String toReportLine() {
     final hh = at.hour.toString().padLeft(2, '0');
     final mm = at.minute.toString().padLeft(2, '0');
     final ss = at.second.toString().padLeft(2, '0');
-    return '$hh:$mm:$ss rss=${_mb(rssBytes)}MB peak=${_mb(peakRssBytes)}MB '
+    final base =
+        '$hh:$mm:$ss rss=${_mb(rssBytes)}MB peak=${_mb(peakRssBytes)}MB '
         'imageCache=${_mb(imageCacheBytes)}MB($imageCacheEntries 张) '
         'live=$liveImages';
+    final activity = this.activity;
+    // 窗口为 0 说明这是首条采样（还没有间隔可算），写 fps=0.0 会误导成
+    // 「没画帧」，故整段省略。
+    if (activity == null || activity.window.inMicroseconds <= 0) return base;
+    return '$base ${activity.toReportFragment()}';
   }
 
   static String _mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(1);
@@ -121,6 +138,7 @@ class MemoryProbe {
     int Function()? readImageCacheBytes,
     int Function()? readImageCacheEntries,
     int Function()? readLiveImages,
+    this.takeFrameActivity,
   }) : _readRss = readRss ?? _processRss,
        _readPeakRss = readPeakRss ?? _processPeakRss,
        _readImageCacheBytes = readImageCacheBytes ?? _imageCacheBytes,
@@ -142,6 +160,9 @@ class MemoryProbe {
   final int Function() _readImageCacheBytes;
   final int Function() _readImageCacheEntries;
   final int Function() _readLiveImages;
+
+  /// 取本窗口渲染活动；null = 未接线（报告行里就没有 `fps=`）。
+  final FrameActivity Function()? takeFrameActivity;
 
   final Queue<MemorySample> _samples = Queue<MemorySample>();
   int _peakRssBytes = 0;
@@ -211,6 +232,7 @@ class MemoryProbe {
       imageCacheBytes: cacheBytes,
       imageCacheEntries: cacheEntries,
       liveImages: live,
+      activity: takeFrameActivity?.call(),
     );
     _samples.addLast(sample);
     _baseline ??= sample;
@@ -271,6 +293,9 @@ MemoryProbe? get installedMemoryProbe => _installed;
 ///
 /// 采样器不写 [SpbLog]（见文件头）；只有安装时落一条基线日志，因为
 /// 「这次运行的起点是多少」本身就是报障要的第一条信息。
+///
+/// [probe] 被注入时（测试）**不会**接帧活动计数：测试环境大多没有真引擎，
+/// 接上也采不到东西；生产（两端 `main()`）走默认构造，自动接上。
 MemoryProbe installMemoryProbe({
   Duration interval = const Duration(minutes: 1),
   MemoryProbe? probe,
@@ -278,7 +303,9 @@ MemoryProbe installMemoryProbe({
   final existing = _installed;
   if (existing != null) return existing;
 
-  final created = probe ?? MemoryProbe();
+  final created =
+      probe ??
+      MemoryProbe(takeFrameActivity: installFrameActivityCounter().take);
   _installed = created;
 
   final first = created.sample(force: true);

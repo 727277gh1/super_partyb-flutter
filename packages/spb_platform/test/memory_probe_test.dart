@@ -39,6 +39,7 @@ void main() {
     int cacheBytes = 4 * 1024 * 1024,
     int cacheEntries = 2,
     int live = 1,
+    FrameActivity Function()? activity,
   }) {
     var rss = initialRss;
     var peak = initialPeak;
@@ -50,6 +51,7 @@ void main() {
       readImageCacheBytes: () => cacheBytes,
       readImageCacheEntries: () => cacheEntries,
       readLiveImages: () => live,
+      takeFrameActivity: activity,
     );
     return (probe: probe, setRss: (v) => rss = v, setPeak: (v) => peak = v);
   }
@@ -285,6 +287,49 @@ void main() {
 
       expect(p.probe.samples.length, frozen);
       expect(installedMemoryProbe, isNull);
+    });
+  });
+
+  group('渲染帧活动（CPU 维度）', () {
+    test('接线后采样行尾部带 fps 与 raster', () {
+      final p = probeWith(
+        activity: () => const FrameActivity(
+          frames: 3576,
+          window: Duration(minutes: 1),
+          avgRasterUs: 7300,
+        ),
+      );
+      final s = p.probe.sample(force: true)!;
+      final line = s.toReportLine();
+      expect(line, contains('fps=59.6'));
+      expect(line, contains('raster=7.3ms'));
+    });
+
+    test('窗口为 0（首条采样）时不写 fps，避免误读成「没画帧」', () {
+      final p = probeWith(
+        activity: () => const FrameActivity(frames: 0, window: Duration.zero),
+      );
+      expect(
+        p.probe.sample(force: true)!.toReportLine(),
+        isNot(contains('fps=')),
+      );
+    });
+
+    test('未接线（旧构造方式）时报告行保持原样', () {
+      final p = probeWith();
+      final line = p.probe.sample(force: true)!.toReportLine();
+      expect(line, contains('rss='));
+      expect(line, isNot(contains('fps=')));
+    });
+
+    test('引擎没回传 timings 时只写 fps，不写 raster=0ms', () {
+      final p = probeWith(
+        activity: () =>
+            const FrameActivity(frames: 60, window: Duration(seconds: 60)),
+      );
+      final line = p.probe.sample(force: true)!.toReportLine();
+      expect(line, contains('fps=1.0'));
+      expect(line, isNot(contains('raster=')));
     });
   });
 }
