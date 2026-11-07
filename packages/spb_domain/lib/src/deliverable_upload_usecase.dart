@@ -627,7 +627,6 @@ class DeliverableUploadUseCase {
     required List<int> localBytes,
     required String filename,
     required _NotifyKind notifyKind,
-    String? conflictRelPath,
   }) async {
     try {
       await uploader.uploadWorkspaceFile(
@@ -645,7 +644,6 @@ class DeliverableUploadUseCase {
           target: target,
           localBytes: localBytes,
           filename: filename,
-          conflictRelPath: conflictRelPath,
         );
       }
       // 400（路径黑名单等）/ 404 / 其他：如实报失败。
@@ -671,7 +669,6 @@ class DeliverableUploadUseCase {
         relPath: dirty.relPath,
         groupId: target.groupId,
         outcome: UploadOutcome.uploaded,
-        conflictPath: conflictRelPath,
       );
     }
 
@@ -700,12 +697,28 @@ class DeliverableUploadUseCase {
   ///
   /// 附件落到 workspace 的 `_attachments/{turnID}/`，**不是**用户改的那个路径。
   /// 不写清楚的话 agent 只会看到「一个叫 x.md 的附件」，不知道该覆盖谁。
+  ///
+  /// ## 为什么这里不提 `_conflict/` 副本（issue #62）
+  ///
+  /// 本函数曾收一个 `conflictRelPath` 并往文案里追加「另有一份 agent 版本副本
+  /// 位于 …」。该参数**没有任何调用点传过非 null**：冲突分支由
+  /// [_materializeConflict] 自己发通知（`_NotifyKind.conflict`，两次上传都成功
+  /// 之后），而 413 兜底发生在人类版本首次上传时——那时副本还没物化。
+  /// 于是那条文案连同它的插值 bug 一起是死代码。
+  ///
+  /// 顺带记录那个 bug 的形态（`tools/check_dollar_paren.sh` 现在会拦）：
+  /// `'… $_basename(conflictRelPath) …'` 插值的是**函数对象**，`$identifier`
+  /// 只取标识符本身，后面的 `(conflictRelPath)` 是字面文本，产出
+  /// `Closure: (String) => String from Function '_basename': static.(conflictRelPath)`。
+  /// `dart analyze` 抓不到（插值函数合法、`Object.toString()` 存在）。
+  ///
+  /// 将来若真要在 413 兜底里提副本，得先让冲突分支在 413 之前就物化副本，
+  /// 那是另一个设计（副本上传同样可能 413），不要靠复活这个参数解决。
   Future<UploadItemResult> _fallbackToQuickCapture({
     required LocalDirtyFile dirty,
     required UploadTarget target,
     required List<int> localBytes,
     required String filename,
-    String? conflictRelPath,
   }) async {
     final QuickCaptureUpload uploaded;
     try {
@@ -733,16 +746,12 @@ class DeliverableUploadUseCase {
       );
     }
 
-    final conflictNote = conflictRelPath == null
-        ? ''
-        : '\n另有一份 agent 版本副本位于 $_conflictDirName/$_basename(conflictRelPath)，'
-              '请一并比对。';
     try {
       await quickCapture.enqueueQuickCapture(
         input:
             '我修改了交付物 $filename，目标路径 ${target.groupRelPath}。'
             '该文件超过 workspace 同步上限，已作为附件发送，'
-            '请把它落位到上述路径（覆盖旧版本）后继续。$conflictNote',
+            '请把它落位到上述路径（覆盖旧版本）后继续。',
         attachments: [uploaded.fileId],
       );
     } on SpbError catch (e) {
@@ -758,8 +767,8 @@ class DeliverableUploadUseCase {
       relPath: dirty.relPath,
       groupId: target.groupId,
       outcome: UploadOutcome.fallbackQuickCapture,
-      conflictPath: conflictRelPath,
       // 附件链的通知就是 enqueue 本身（它建 turn），不需要再发一条消息。
+      // 副本路径同理留空：走到这里时副本尚未物化（见函数文档）。
       notified: true,
     );
   }
