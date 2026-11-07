@@ -824,6 +824,23 @@ class ChatStreamController {
       await _backfill(groupId);
     }
 
+    // 冷启动游标（issue #61）：回填与建连之间服务端落库的事件，既不在回填
+    // 快照里、也不会被（无游标连接的）回放带回 → 时间线静默少一条。把缓冲
+    // 里**最后**一条落库事件的 eventId 作为初始游标传给 connect，服务端只
+    // 回放其后的事件，窗口收窄为零。回填事件全部落库（timeline 不含瞬态
+    // 帧，AGENTS.md §5.4），可直接作游标；缓冲按 globalSeq 正序，从尾部
+    // 倒找第一条带 eventId 的即可（o(缓冲)，一次性冷启动成本）。
+    //
+    // 缓冲为空（回填失败/离线/空对话）时不传：旧行为从实时头开始，此窗口
+    // 由缺口探测（[_probeReplayGap]）兜底——它本就覆盖「建连后才发现落后」。
+    String? initialCursor;
+    for (final e in _buffer.reversed) {
+      if (!e.transient && e.eventId.isNotEmpty) {
+        initialCursor = e.eventId;
+        break;
+      }
+    }
+
     // 回填完立即推送：`_backfill` 只改 `_buffer`，自身不 emit（issue #3）。
     //
     // WHY 放在 `connect` **之前**：先把历史渲染出来，再建连接。
@@ -853,7 +870,10 @@ class ChatStreamController {
     // 产生重复订阅）。
     if (_outboxDeliveredSub == null) _bindOutbox();
 
-    await _sse.connect(path: '/users/$userId/chat/stream');
+    await _sse.connect(
+      path: '/users/$userId/chat/stream',
+      initialCursor: initialCursor,
+    );
   }
 
   /// 是否已建立过 SSE 连接（[start] 已调用过）。

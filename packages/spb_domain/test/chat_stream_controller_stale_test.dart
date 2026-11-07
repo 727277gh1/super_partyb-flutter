@@ -23,7 +23,7 @@ class _FakeSseClient extends SseClient {
   SseState get state => SseState.connected;
 
   @override
-  Future<void> connect({required String path}) async {}
+  Future<void> connect({required String path, String? initialCursor}) async {}
 
   @override
   Future<void> resume() async {}

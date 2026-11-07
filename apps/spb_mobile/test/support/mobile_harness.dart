@@ -61,7 +61,7 @@ class FakeSseClient extends SseClient {
   final connectedPaths = <String>[];
 
   @override
-  Future<void> connect({required String path}) async {
+  Future<void> connect({required String path, String? initialCursor}) async {
     connectedPaths.add(path);
     _hasPath = true;
   }

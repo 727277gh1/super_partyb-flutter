@@ -50,6 +50,10 @@ class FakeSseClient extends SseClient {
   /// `connect` 被调用的次数与路径。
   final connectedPaths = <String>[];
 
+  /// 每次 `connect` 收到的 initialCursor（issue #61 冷启动游标），按调用顺序。
+  /// null = 未传；空串 = 传了空（降级）。
+  final initialCursors = <String?>[];
+
   int resumeCount = 0;
   bool disposed = false;
 
@@ -73,10 +77,13 @@ class FakeSseClient extends SseClient {
   void emitState(SseState s) => statesController.add(s);
 
   @override
-  Future<void> connect({required String path}) async {
+  Future<void> connect({required String path, String? initialCursor}) async {
     connectedPaths.add(path);
-    // 同真实实现：connect 重置续接游标。
-    lastEventId = null;
+    initialCursors.add(initialCursor);
+    // 同真实实现：有 initialCursor 则落游标，否则重置（新会话语义）。
+    lastEventId = (initialCursor != null && initialCursor.isNotEmpty)
+        ? initialCursor
+        : null;
   }
 
   @override

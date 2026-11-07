@@ -414,6 +414,84 @@ void main() {
     });
   });
 
+  group('冷启动初始游标（issue #61）', () {
+    test('start() 回填后把缓冲最大落库 eventId 作为 initialCursor 传给 connect', () async {
+      // 回填与建连之间服务端落库的事件，既不在回填快照里、也不会被无游标
+      // 连接回放 → 时间线静默少一条。回填后以快照最大 eventId 为游标建连，
+      // 服务端只回放其后的事件，窗口收窄为零。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline(
+        events: [
+          sseEvent(
+            EventTypes.message,
+            id: 'evt_first',
+            payload: {'text': '第一条'},
+            globalSeq: 1,
+          ),
+          sseEvent(
+            EventTypes.message,
+            id: 'evt_last',
+            payload: {'text': '最后一条'},
+            globalSeq: 2,
+          ),
+        ],
+      );
+
+      await c.start(groupId: 'grp_1');
+
+      expect(sse.initialCursors, hasLength(1));
+      expect(
+        sse.initialCursors.single,
+        'evt_last',
+        reason: '必须取缓冲里最后的落库事件，不是第一条也不是 null',
+      );
+      expect(sse.lastEventId, 'evt_last', reason: '游标要真的落进 SseClient');
+
+      await c.dispose();
+    });
+
+    test('回填为空（空对话/失败）时 initialCursor 为 null（旧行为）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+
+      await c.start(groupId: 'grp_1');
+
+      expect(sse.initialCursors.single, isNull);
+
+      await c.dispose();
+    });
+
+    test('瞬态事件不作初始游标（AGENTS.md §5.4：游标只在落库事件上推进）', () async {
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline(
+        events: [
+          sseEvent(
+            EventTypes.message,
+            id: 'evt_real',
+            payload: {'text': '落库'},
+            globalSeq: 1,
+          ),
+          sseEvent(
+            EventTypes.heartbeat,
+            id: 'evt_transient',
+            transient: true,
+            globalSeq: 2,
+          ),
+        ],
+      );
+
+      await c.start(groupId: 'grp_1');
+
+      expect(
+        sse.initialCursors.single,
+        'evt_real',
+        reason: '瞬态帧无服务端回放语义，作游标会造成永久缺口',
+      );
+
+      await c.dispose();
+    });
+  });
+
   group('ensureConnected（对话列表页与对话页共用一条连接）', () {
     test('未连接时以全局模式建连，且不回填任何 group 的时间线', () async {
       // 列表页在首页挂载时对话页往往不存在，故它必须能自己把连接建起来。

@@ -324,6 +324,45 @@ void main() {
       await client.dispose();
     });
 
+    test('connect(initialCursor:) 首次请求即带 cursor（issue #61 冷启动游标）', () async {
+      // 回填完成后建连：快照最大落库 eventId 作为 initialCursor，服务端只
+      // 回放其后的事件——回填与建连之间落库的事件不会被静默漏掉。
+      final adapter = _ScriptedAdapter([_ok('data: {}\n\n')]);
+      final client = _client(adapter);
+      await client.connect(
+        path: '/users/u/chat/stream',
+        initialCursor: 'evt_1000',
+      );
+      await _drain();
+
+      expect(adapter.requests.single.queryParameters['cursor'], 'evt_1000');
+      expect(client.lastEventId, 'evt_1000');
+      await client.dispose();
+    });
+
+    test('connect(initialCursor: 空串) 等价不传（回填失败/空对话降级）', () async {
+      final adapter = _ScriptedAdapter([_ok('data: {}\n\n')]);
+      final client = _client(adapter);
+      await client.connect(path: '/users/u/chat/stream', initialCursor: '');
+      await _drain();
+
+      expect(adapter.requests.single.queryParameters, isEmpty);
+      await client.dispose();
+    });
+
+    test('initialCursor 不污染下一次无参 connect（新会话仍从头开始）', () async {
+      final adapter = _ScriptedAdapter([_ok('data: {}\n\n'), _ok('data: {}\n\n')]);
+      final client = _client(adapter);
+      await client.connect(path: '/s', initialCursor: 'evt_a');
+      await _drain();
+      await client.connect(path: '/s');
+      await _drain();
+
+      expect(adapter.requests[1].queryParameters, isEmpty);
+      expect(client.lastEventId, isNull);
+      await client.dispose();
+    });
+
     test('recordEventId 忽略空串（避免把 cursor 清成空）', () async {
       final adapter = _ScriptedAdapter([_ok('data: {}\n\n')]);
       final client = _client(adapter);

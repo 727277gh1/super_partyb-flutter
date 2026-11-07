@@ -162,7 +162,18 @@ class SseClient {
   ///
   /// [path] 为相对路径（如 `/users/xxx/chat/stream`），会拼接到 [baseUrl]。
   /// 重复调用会先关闭既有连接。
-  Future<void> connect({required String path}) async {
+  ///
+  /// [initialCursor] 冷启动初始游标（issue #61）：上层在 `connect` 前已用
+  /// timeline 回填了首屏，把快照里最大的**落库**事件 eventId 传进来，服务端
+  /// 只回放其后的事件。不传则从实时头开始（旧行为）。
+  ///
+  /// ## 为什么不能复用 [resume] 的语义
+  ///
+  /// `resume` 的游标来自「本进程内上次连接收到的事件」，服务端回放窗口
+  /// 只有 500 条，断线久了会静默回放为空（由上层缺口探测兑底）。而
+  /// `initialCursor` 来自**刚刚拉过的 timeline 快照**，可靠性高一个量级；
+  /// 两者混用会让上层无法区分「初始游标」与「续接游标」的失败模式。
+  Future<void> connect({required String path, String? initialCursor}) async {
     // 先取消挂起的重连定时器（issue #54）：否则「退避期间用户调 connect()」
     // 会留下一个陈旧定时器，到期后无视新连接再开一条流。
     _retryTimer?.cancel();
@@ -171,7 +182,9 @@ class SseClient {
     _closedByUser = false;
     _retryCount = 0;
     _path = path;
-    _lastEventId = null;
+    _lastEventId = (initialCursor != null && initialCursor.isNotEmpty)
+        ? initialCursor
+        : null;
     await _openStream();
   }
 
