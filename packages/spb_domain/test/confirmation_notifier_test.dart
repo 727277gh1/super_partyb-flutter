@@ -469,8 +469,11 @@ void main() {
       await fresh.handleItems([_card(id: 'conf_2', resolved: true)]);
 
       expect(sink.sent, isEmpty);
-      expect(sink.cancelled, isEmpty,
-          reason: '没发过通知就无通知可撤——cancel 分支必须只对发过的 id 生效');
+      expect(
+        sink.cancelled,
+        isEmpty,
+        reason: '没发过通知就无通知可撤——cancel 分支必须只对发过的 id 生效',
+      );
     });
   });
 

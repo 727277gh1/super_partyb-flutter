@@ -103,8 +103,12 @@ class _Uploader implements UploadSender {
       fileId: 'ufs-1',
       syncStatus: 'local_synced',
       sizeBytes: call.bytes.length,
+      etag: etags[relativePath] ?? 'W/"ufs-1:upload-${calls.length}"',
     );
   }
+
+  /// 上传响应回显的 etag（新服务端行为）；null = 模拟旧服务端不回 etag。
+  final etags = <String, String?>{};
 }
 
 /// 一次通知消息。
@@ -798,6 +802,151 @@ void main() {
         isTrue,
         reason: 'include globs 是全目录模式，必须靠末尾后缀避开',
       );
+    });
+
+    group('回传后状态写回与幂等键默认实现（issue #53）', () {
+      test('直传成功 → SyncState.markSynced 写入新 etag/contentHash 并落盘', () async {
+        final local = [1, 2, 3, 9];
+        final (reader, store, remote, uploader, notifier, quick) = _defaults(
+          state: _state(recordEtag: 'W/"2"'),
+          remoteEntries: [
+            _remoteEntry(groupRel: 'reports/x.md', etag: 'W/"2"'),
+          ],
+          localFiles: {_rel: local},
+        );
+        uploader.etags['reports/x.md'] = 'W/"new:etag"';
+        final useCase = _useCase(
+          reader: reader,
+          store: store,
+          remote: remote,
+          uploader: uploader,
+          notifier: notifier,
+          quickCapture: quick,
+        );
+
+        final report = await useCase.run(
+          scope: const SyncWorkspaceScope(),
+          filter: const SyncFilterConfig(),
+        );
+
+        expect(report.count(UploadOutcome.uploaded), 1);
+        final saved = store.data[workspaceStateKey]!;
+        final rec = saved.files[_rel]!;
+        expect(
+          rec.etag,
+          'W/"new:etag"',
+          reason: '状态必须记上传后的 etag，否则下次回传误判冲突（假 _conflict/ 副本）',
+        );
+        expect(rec.size, local.length);
+        expect(rec.contentHash, contentHashOf(local));
+      });
+
+      test('冲突物化后也写回目标路径的新基线', () async {
+        final (reader, store, remote, uploader, notifier, quick) = _defaults(
+          state: _state(recordEtag: 'W/"1"'),
+          remoteEntries: [
+            _remoteEntry(groupRel: 'reports/x.md', etag: 'W/"remote:new"'),
+          ],
+          localFiles: {
+            _rel: [9, 9],
+          },
+        );
+        uploader.etags['reports/x.md'] = 'W/"human:ver"';
+        final useCase = _useCase(
+          reader: reader,
+          store: store,
+          remote: remote,
+          uploader: uploader,
+          notifier: notifier,
+          quickCapture: quick,
+        );
+
+        final report = await useCase.run(
+          scope: const SyncWorkspaceScope(),
+          filter: const SyncFilterConfig(),
+        );
+
+        expect(report.count(UploadOutcome.conflictMaterialized), 1);
+        final rec = store.data[workspaceStateKey]!.files[_rel]!;
+        expect(
+          rec.etag,
+          'W/"human:ver"',
+          reason: '目标路径已是人类版本；不写回则下次回传再次误判冲突物化假副本',
+        );
+      });
+
+      test('上传失败不写状态（保持旧基线，下轮照常重试）', () async {
+        final (reader, store, remote, uploader, notifier, quick) = _defaults(
+          state: _state(recordEtag: 'W/"1"'),
+          remoteEntries: [
+            _remoteEntry(groupRel: 'reports/x.md', etag: 'W/"1"'),
+          ],
+          localFiles: {
+            _rel: [9, 9, 9],
+          },
+        );
+        uploader.errors['reports/x.md'] = (call) => const NetworkError('上传超时');
+        final useCase = _useCase(
+          reader: reader,
+          store: store,
+          remote: remote,
+          uploader: uploader,
+          notifier: notifier,
+          quickCapture: quick,
+        );
+
+        final report = await useCase.run(
+          scope: const SyncWorkspaceScope(),
+          filter: const SyncFilterConfig(),
+        );
+
+        expect(report.count(UploadOutcome.failed), 1);
+        final saved = store.data[workspaceStateKey]!;
+        expect(saved.files[_rel]!.etag, 'W/"1"', reason: '失败不动基线');
+      });
+
+      test('默认 _requestId：同一 (groupId, relPath) 两次调用得到同一 id', () async {
+        // 不注入 requestIdFor 的默认装配（生产 providers.dart 就是不注入）。
+        final (reader, store, remote, uploader, notifier, quick) = _defaults(
+          state: _state(recordEtag: 'W/"2"'),
+          remoteEntries: [
+            _remoteEntry(groupRel: 'reports/x.md', etag: 'W/"2"'),
+          ],
+          localFiles: {
+            _rel: [1, 2, 3, 9],
+          },
+        );
+        final useCase = DeliverableUploadUseCase(
+          reader: reader,
+          stateStore: store,
+          remote: remote,
+          uploader: uploader,
+          quickCapture: quick,
+          notifier: notifier,
+          userId: 'usr_1',
+          nowUnix: () => 1791000000,
+          // 故意不传 requestIdFor —— 走默认 v5 派生分支。
+        );
+
+        await useCase.run(
+          scope: const SyncWorkspaceScope(),
+          filter: const SyncFilterConfig(),
+        );
+        final id1 = notifier.calls.single.requestId;
+        notifier.calls.clear();
+
+        reader.files[_rel] = [1, 2, 3, 8];
+        await useCase.run(
+          scope: const SyncWorkspaceScope(),
+          filter: const SyncFilterConfig(),
+        );
+        expect(
+          notifier.calls.single.requestId,
+          id1,
+          reason: '默认实现必须由 relPath 稳定推出；uuid v4 默认值会让重试重复建 turn',
+        );
+        expect(id1, isNotEmpty);
+      });
     });
   });
 }

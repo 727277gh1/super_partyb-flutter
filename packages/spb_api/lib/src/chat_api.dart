@@ -1920,6 +1920,7 @@ class WorkspaceFileUpload {
     this.fileSize = 0,
     this.fileMimeType,
     this.absolutePath,
+    this.etag,
     this.sizeBytes = 0,
     this.syncStatus,
     this.raw = const {},
@@ -1948,6 +1949,15 @@ class WorkspaceFileUpload {
   final int fileSize;
 
   final String? fileMimeType;
+
+  /// UFS 内容指纹（`W/"<file_id>:<updated_at_unix_nano>"`）。
+  ///
+  /// 回传用例（DeliverableUploadUseCase）上传成功后把它写进同步状态
+  /// （SyncState.markSynced），下次回传的预检（precheckUpload）才能正确判定
+  /// 「远端没被写过 → clean」，否则每次重传都会误判成冲突。旧版服务端
+  /// （2026-11-07 之前的 ufs-upload 响应）不回 etag，此时为 null——预检
+  /// 退回「缺 etag 归入冲突」的保守语义（多一次物化，不丢数据）。
+  final String? etag;
 
   /// 服务端本地 workspace 里的绝对路径（诊断用，客户端一般不用）。
   final String? absolutePath;
@@ -1979,6 +1989,7 @@ class WorkspaceFileUpload {
       filePath: file['path']?.toString(),
       fileSize: (file['size'] as num?)?.toInt() ?? 0,
       fileMimeType: file['mime_type']?.toString(),
+      etag: file['etag']?.toString(),
       absolutePath: json['absolute_path']?.toString(),
       sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
       syncStatus: json['sync_status']?.toString(),

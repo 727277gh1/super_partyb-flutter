@@ -202,10 +202,8 @@ void main() {
       );
       adapter.onGet(
         '/api/files',
-        (server) => server.reply(200, {
-          'items': <Map<String, dynamic>>[],
-          'total': 2,
-        }),
+        (server) =>
+            server.reply(200, {'items': <Map<String, dynamic>>[], 'total': 2}),
         queryParameters: {
           'owner_type': 'user',
           'path_prefix': groupPrefix,
@@ -217,11 +215,7 @@ void main() {
 
       final report = await useCase.run(scope: scope, filter: filter);
       expect(report.downloaded, 2, reason: '空页不得被算成文件');
-      expect(
-        store.saves,
-        1,
-        reason: '多发的那次空请求不得产生额外状态写入或失败',
-      );
+      expect(store.saves, 1, reason: '多发的那次空请求不得产生额外状态写入或失败');
     });
   });
 

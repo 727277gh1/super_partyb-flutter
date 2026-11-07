@@ -171,6 +171,29 @@ enum UploadOutcome {
 }
 
 /// 单个文件的回传结果。
+/// 上传成功后的新同步基线（issue #53 缺陷②）。
+class UploadSyncedRecord {
+  const UploadSyncedRecord({
+    required this.etag,
+    required this.size,
+    required this.contentHash,
+    this.updatedAt,
+  });
+
+  /// 上传后远端的 etag（`WorkspaceFileUpload.etag`）。旧服务端不回时为
+  /// null——预检退回「缺 etag 归入冲突」的保守语义（多一次物化，不丢数据）。
+  final String? etag;
+
+  /// 上传字节数。
+  final int size;
+
+  /// 上传字节的 SHA256（脏检测基准，与下行 SyncDownloaded 同一算法）。
+  final String contentHash;
+
+  /// 服务端 `updated_at`（若有，仅展示用；游标由下行同步推进，这里不动它）。
+  final String? updatedAt;
+}
+
 class UploadItemResult {
   const UploadItemResult({
     required this.relPath,
@@ -179,6 +202,7 @@ class UploadItemResult {
     this.reason,
     this.conflictPath,
     this.notified = false,
+    this.syncedRecord,
   });
 
   /// 本地相对路径（同步目录内，可能含 `{gid}/` 前缀）。
@@ -193,6 +217,15 @@ class UploadItemResult {
 
   /// 冲突副本的**组内**路径（仅 [UploadOutcome.conflictMaterialized] 非空）。
   final String? conflictPath;
+
+  /// 上传成功后的新基线（issue #53 缺陷②）。非 null 时调用方（[run]）把它
+  /// markSynced 进状态并持久化——没有它，状态里记的还是上传前的旧 etag，
+  /// 第二次回传（文件未再改）会因 `remoteEtag != recordedEtag` 误判冲突，
+  /// 物化假 `_conflict/` 副本 + 再发一条冲突通知。
+  ///
+  /// 只在「目标路径的内容已是本地这份」时非 null：直传成功、冲突物化（人类
+  /// 版本上到目标路径）。413 兜底走附件链的**不是**——文件没落到目标路径。
+  final UploadSyncedRecord? syncedRecord;
 
   /// 是否已发出通知消息。
   ///
@@ -381,6 +414,9 @@ class DeliverableUploadUseCase {
     }
 
     final items = <UploadItemResult>[];
+    // 上传成功的新基线累积到 next（初始为执行前状态）；identical 判断「本轮
+    // 是否真的写过」，避免无谓落盘。
+    var next = state;
     for (final dirty in candidates) {
       final target = uploadTargetFor(dirty.relPath, stateKey: stateKey);
       if (target == null) {
@@ -425,15 +461,33 @@ class DeliverableUploadUseCase {
       final remoteEntry = remoteByGroup[target.groupId]?[target.groupRelPath];
       final check = precheckUpload(remote: remoteEntry, recorded: record);
 
-      items.add(
-        await _handleOne(
-          dirty: dirty,
-          target: target,
-          check: check,
-          remoteEntry: remoteEntry,
-          conflictTimestamp: conflictTimestamp,
-        ),
+      final result = await _handleOne(
+        dirty: dirty,
+        target: target,
+        check: check,
+        remoteEntry: remoteEntry,
+        conflictTimestamp: conflictTimestamp,
       );
+      items.add(result);
+
+      // 新基线写回（issue #53 缺陷②）：上传成功 → markSynced + 失败记录清零
+      // （与下行 SyncDownloaded 同一口径）。上传失败/跳过不动状态。
+      final synced = result.syncedRecord;
+      if (synced != null) {
+        next = next
+            .markSynced(
+              dirty.relPath,
+              etag: synced.etag,
+              size: synced.size,
+              contentHash: synced.contentHash,
+            )
+            .clearFailure(dirty.relPath);
+      }
+    }
+
+    // 每轮一次持久化（无新基线则不写，与 SyncEngine「无事不写」同一取向）。
+    if (!identical(next, state)) {
+      await stateStore.save(stateKey, next);
     }
 
     return UploadReport(
@@ -567,6 +621,9 @@ class DeliverableUploadUseCase {
       notifyKind: _NotifyKind.none,
     );
     if (!first.isSuccess) return first;
+    // 目标路径已是本地这份内容（issue #53 缺陷②）：冲突也把新基线写回，
+    // 否则第二次回传（内容未再改）会再次误判冲突，物化假副本。
+    final targetRecord = first.syncedRecord;
 
     // 3) agent 版本 → `_conflict/<时间戳>-<原名>.conflict`。
     //
@@ -611,12 +668,26 @@ class DeliverableUploadUseCase {
       conflictRelPath: conflictRelPath,
     );
 
+    // 与直传分支同一取向（issue #53）：通知失败不写基线 —— 冲突虽已物化，
+    // agent 尚不知道有副本可裁决。不写回 → 下轮仍 dirty → 重跑重新走冲突
+    // 分支（agent 版本再下载一次，target 路径幂等覆盖）+ 重新通知。
+    if (!notified) {
+      return UploadItemResult(
+        relPath: dirty.relPath,
+        groupId: target.groupId,
+        outcome: UploadOutcome.conflictMaterialized,
+        conflictPath: conflictRelPath,
+        notified: false,
+      );
+    }
+
     return UploadItemResult(
       relPath: dirty.relPath,
       groupId: target.groupId,
       outcome: UploadOutcome.conflictMaterialized,
       conflictPath: conflictRelPath,
-      notified: notified,
+      notified: true,
+      syncedRecord: targetRecord,
     );
   }
 
@@ -628,8 +699,9 @@ class DeliverableUploadUseCase {
     required String filename,
     required _NotifyKind notifyKind,
   }) async {
+    final WorkspaceFileUpload uploaded;
     try {
-      await uploader.uploadWorkspaceFile(
+      uploaded = await uploader.uploadWorkspaceFile(
         groupId: target.groupId,
         relativePath: target.groupRelPath,
         bytes: localBytes,
@@ -662,6 +734,15 @@ class DeliverableUploadUseCase {
       );
     }
 
+    // 新基线（issue #53 缺陷②）：etag 来自上传响应（服务端须回 file.etag；
+    // 旧版服务端缺失时为 null，预检退回保守冲突语义）。contentHash 对上传
+    // 字节计算——脏检测拿它与用户日后改过的本地内容比对。
+    final record = UploadSyncedRecord(
+      etag: uploaded.etag,
+      size: localBytes.length,
+      contentHash: contentHashOf(localBytes),
+    );
+
     if (notifyKind == _NotifyKind.none) {
       // 冲突分支：通知在两次上传后统一发（消息里要给出两个路径）。
       // 这里返回一个「已上传但未通知」的结果，由调用方替换。
@@ -669,6 +750,7 @@ class DeliverableUploadUseCase {
         relPath: dirty.relPath,
         groupId: target.groupId,
         outcome: UploadOutcome.uploaded,
+        syncedRecord: record,
       );
     }
 
@@ -678,11 +760,26 @@ class DeliverableUploadUseCase {
       kind: notifyKind,
     );
 
+    // 通知失败时**不**返回新基线（issue #53 的重试语义）：内容已上传，但
+    // agent 还不知道。若把基线写回，用户重跑「回传」时脏检测判定「未变更」
+    // → 连通知机会都没有，改动静默丢失。不写回 → 文件仍 dirty → 重跑会
+    // 重新上传（服务端 overwrite）+ 重新通知；requestId 稳定（同 relPath），
+    // 服务端幂等去重不会重复建 turn。上传本身可重入（幂等覆盖）。
+    if (!notified) {
+      return UploadItemResult(
+        relPath: dirty.relPath,
+        groupId: target.groupId,
+        outcome: UploadOutcome.uploaded,
+        notified: false,
+      );
+    }
+
     return UploadItemResult(
       relPath: dirty.relPath,
       groupId: target.groupId,
       outcome: UploadOutcome.uploaded,
-      notified: notified,
+      notified: true,
+      syncedRecord: record,
     );
   }
 
@@ -811,7 +908,7 @@ class DeliverableUploadUseCase {
         userId: userId,
         groupId: groupId,
         input: input,
-        requestId: _requestId(relPath),
+        requestId: _requestId(relPath, groupId),
       );
       return true;
     } on SpbError catch (e) {
@@ -826,8 +923,18 @@ class DeliverableUploadUseCase {
     }
   }
 
-  String _requestId(String relPath) =>
-      requestIdFor?.call(relPath) ?? const Uuid().v4();
+  String _requestId(String relPath, String groupId) {
+    if (requestIdFor != null) return requestIdFor!(relPath);
+    // 稳定派生（issue #53 缺陷①）：uuid v5，namespace 取 groupId 的 v5
+    // （URL namespace + groupId），name 取 relPath。同一 (groupId, relPath)
+    // 永远得到同一 id → 服务端 (user_id, request_id) 幂等命中，重试不再
+    // 重复建 turn。不再用 uuid v4 默认值：生产装配未注入 requestIdFor，
+    // 随机 id 让「通知超时后重试」必产第二个 turn（重复 agent 成本）。
+    // 内层 namespace 也是 v5：与 groupId 一一对应，且不要求 groupId 本身
+    // 是合法 uuid。两层都用 URL namespace 作根。
+    final groupNs = const Uuid().v5(Namespace.url.value, groupId);
+    return const Uuid().v5(groupNs, relPath);
+  }
 }
 
 /// 通知消息的种类。

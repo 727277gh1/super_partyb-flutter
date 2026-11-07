@@ -138,9 +138,13 @@ void main() {
       const rid = 'rid-from-first-send';
       await queue.submit(userId: 'u1', input: '你好', requestId: rid);
 
-      expect(queue.snapshot.single.id, rid,
-          reason: '入队条目的 id 就是后续重试用的 request_id；'
-              '若换成新生成的 uuid，服务端已受理的首包会被重发成第二个 turn');
+      expect(
+        queue.snapshot.single.id,
+        rid,
+        reason:
+            '入队条目的 id 就是后续重试用的 request_id；'
+            '若换成新生成的 uuid，服务端已受理的首包会被重发成第二个 turn',
+      );
       expect(store.rows.keys.single, rid);
     });
 
@@ -166,7 +170,11 @@ void main() {
       expect(queue.snapshot.single.attempts, 1, reason: '首败已计入尝试');
 
       // 队列非空时新消息 B 提交：不得直发（否则 B 先于 A 到达，顺序颠倒）。
-      final outcome = await queue.submit(userId: 'u1', input: 'B', requestId: 'r2');
+      final outcome = await queue.submit(
+        userId: 'u1',
+        input: 'B',
+        requestId: 'r2',
+      );
 
       expect(outcome, isA<OutboxQueuedOffline>());
       expect(sent, isNot(contains('r2')), reason: 'B 绝不能绕过队首直发');

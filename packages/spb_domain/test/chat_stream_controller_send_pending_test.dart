@@ -102,8 +102,9 @@ class _ThrowingApi implements ChatApi {
   final Object error;
 
   @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      throw UnimplementedError('本替身只支持 sendMessage 裸抛：${invocation.memberName}');
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError(
+    '本替身只支持 sendMessage 裸抛：${invocation.memberName}',
+  );
 
   @override
   Future<SendMessageResult> sendMessage(
@@ -299,10 +300,8 @@ void main() {
       await expectLater(sending, throwsA(isA<StateError>()));
       c.flushEmit();
 
-      expect(c.snapshot, isEmpty,
-          reason: '非 SpbError 也必须移除乐观回显，否则幽灵气泡永久转圈');
-      expect(store.rows, isEmpty,
-          reason: '非 SpbError 无法判定可重试性，不得顺手入队');
+      expect(c.snapshot, isEmpty, reason: '非 SpbError 也必须移除乐观回显，否则幽灵气泡永久转圈');
+      expect(store.rows, isEmpty, reason: '非 SpbError 无法判定可重试性，不得顺手入队');
 
       await c.dispose();
     });
@@ -333,8 +332,11 @@ void main() {
       // 生成（send 内 rid），结构上保证一致；这里锁「入队不换键」。
       final queuedId = store.rows.values.single.id;
       expect(queuedId, isNotEmpty);
-      expect(queuedId.length, greaterThanOrEqualTo(32),
-          reason: 'UUID 形态（与直发同一把生成）');
+      expect(
+        queuedId.length,
+        greaterThanOrEqualTo(32),
+        reason: 'UUID 形态（与直发同一把生成）',
+      );
 
       await c.dispose();
     });
