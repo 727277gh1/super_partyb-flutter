@@ -351,7 +351,10 @@ void main() {
     });
 
     test('initialCursor 不污染下一次无参 connect（新会话仍从头开始）', () async {
-      final adapter = _ScriptedAdapter([_ok('data: {}\n\n'), _ok('data: {}\n\n')]);
+      final adapter = _ScriptedAdapter([
+        _ok('data: {}\n\n'),
+        _ok('data: {}\n\n'),
+      ]);
       final client = _client(adapter);
       await client.connect(path: '/s', initialCursor: 'evt_a');
       await _drain();
