@@ -195,9 +195,14 @@ void main() {
     // 而探测固定按 SyncSingleGroupScope 统计（workspaceStateKey）。放行的话
     // 探测读不到该 group 的记录 → 提示条常驻；「立即同步」又把文件写到另一套
     // 布局。两套语义各自都有测试，只有这条守住「不交叉」。
-    settings = const SyncSettings(localRoot: '/unused', scope: SyncScopeConfig());
+    settings = const SyncSettings(
+      localRoot: '/unused',
+      scope: SyncScopeConfig(),
+    );
     // `SyncScopeConfig()` 默认 allGroups=true，单 group 模式是「非全部 + 空」。
-    settings = settings.copyWith(scope: const SyncScopeConfig(allGroups: false));
+    settings = settings.copyWith(
+      scope: const SyncScopeConfig(allGroups: false),
+    );
 
     ufs.files.addAll([_file('a.md')]);
     final result = await check();
