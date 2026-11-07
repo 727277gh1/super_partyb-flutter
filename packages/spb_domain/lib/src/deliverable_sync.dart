@@ -394,7 +394,10 @@ class SyncDownload extends SyncAction {
 
 /// 删除本地副本（远端已软删除）。
 class SyncDelete extends SyncAction {
-  const SyncDelete({required super.relPath});
+  const SyncDelete({required super.relPath, this.updatedAt});
+
+  /// 该条目的远端 `updated_at`（来自清单），删除失败计入隔离后推进游标用。
+  final String? updatedAt;
 }
 
 /// 同步计划。
@@ -480,7 +483,7 @@ SyncPlan buildSyncPlan({
       // 只在本地确实有副本时才安排删除；否则是「删了一个从没同步过的文件」，
       // 无事可做（也不该把远端删除当成异常上报）。
       if (state.contains(relPath)) {
-        deletes.add(SyncDelete(relPath: relPath));
+        deletes.add(SyncDelete(relPath: relPath, updatedAt: file.updatedAtRaw));
       }
       continue;
     }
@@ -608,8 +611,10 @@ class SyncReport {
     this.notModified = 0,
     this.deleted = 0,
     List<SyncFailure>? failed,
+    List<SyncFailure>? quarantined,
     Map<SyncSkipReason, int>? skipped,
   }) : failed = failed ?? const [],
+       quarantined = quarantined ?? const [],
        skipped = skipped ?? const {};
 
   final int downloaded;
@@ -621,6 +626,12 @@ class SyncReport {
   /// 失败**不阻断**其余文件：一次网络抖动不该让整轮同步白跑。
   final List<SyncFailure> failed;
 
+  /// 已隔离（连续失败达 [quarantineAfterFailures] 次）的文件（issue #64）。
+  ///
+  /// 同步页据此展示「这些文件连续失败，已暂停重试」+ 手动重试入口。
+  /// 隔离项仍会出现在 [failed] 里（本轮确实又失败了）；本列表是其子集。
+  final List<SyncFailure> quarantined;
+
   /// 计划里的跳过统计（原样带出，供摘要展示）。
   final Map<SyncSkipReason, int> skipped;
 
@@ -631,6 +642,9 @@ class SyncReport {
     final parts = ['下载 $downloaded 个，删除 $deleted 个'];
     if (notModified > 0) parts.add('未变更 $notModified 个');
     if (failed.isNotEmpty) parts.add('失败 ${failed.length} 个');
+    if (quarantined.isNotEmpty) {
+      parts.add('${quarantined.length} 个连续失败已暂停重试');
+    }
     if (skipped.isNotEmpty) {
       final detail = skipped.entries
           .map((e) => '${e.value} ${e.key.description}')
@@ -862,12 +876,12 @@ class SyncEngine {
     required Set<String> presentLocally,
   }) async {
     switch (action) {
-      case SyncDelete(:final relPath):
+      case SyncDelete(:final relPath, :final updatedAt):
         try {
           await sink.delete(relPath);
           return _ActionResult.deleted(relPath);
         } catch (e) {
-          return _ActionResult.failed(relPath, '删除失败：$e');
+          return _ActionResult.failed(relPath, '删除失败：$e', updatedAt: updatedAt);
         }
 
       case SyncDownload(
@@ -932,7 +946,12 @@ class SyncEngine {
           }
         } catch (e) {
           // 失败：**不写状态、不推进游标**（见类文档的不变量 1、2）。
-          return _ActionResult.failed(relPath, '下载失败：$e');
+          // updatedAt 保留（issue #64）：连续失败达阈值后游标要越过它。
+          return _ActionResult.failed(
+            relPath,
+            '下载失败：$e',
+            updatedAt: action.updatedAt,
+          );
         }
     }
   }
@@ -942,26 +961,53 @@ class SyncEngine {
   /// 顺序确定性来自本方法：`advanceCursor` 取 `updatedAt` 的最大值，而最大值
   /// 与顺序无关；但 `markSynced` 逐条写入、`forget` 逐条移除——保持原顺序让
   /// 结果与串行实现逐字段相等（同一 relPath 的「先删后写」也依赖顺序）。
+  ///
+  /// ## 游标推进与隔离（issue #64）
+  ///
+  /// 原「任一失败就不推进」是全有或全无：一个 403/恒 500 的文件会把整个
+  /// workspace 的游标冻死（每轮全量列清单，线性恶化）。现改为：
+  ///
+  /// - 失败项计入 [SyncState.markFailure]（连续失败 +1，持久化，跨轮累计）；
+  /// - 未达 [quarantineAfterFailures] 次且存在未隔离失败 → 不推进（保守，
+  ///   维持「失败项之后的文件不被跳过」的保护）；
+  /// - 全部失败项都已隔离 → 推进（含隔离项自身的 updatedAt），这个
+  ///   workspace 不再被一个坏文件拖住；
+  /// - 任何成功（下载/304/删除）即 [SyncState.clearFailure] —— 隔离自动
+  ///   解除，文件重新纳入正常轮转。
   SyncRunResult _merge(
     List<_ActionResult> results, {
     required SyncState state,
     required Map<SyncSkipReason, int> skipped,
     required bool advanceCursor,
   }) {
-    // 任一动作失败时保留原游标。只排除失败项自身仍不够：较新的成功项
-    // 会把游标推过较旧的失败项，下一轮清单将永远不再返回它。
-    final canAdvance = advanceCursor && !results.any((r) => r is _Failed);
     var next = state;
     final failed = <SyncFailure>[];
+    final quarantined = <SyncFailure>[];
     var downloaded = 0;
     var notModified = 0;
     var deleted = 0;
+
+    // 本轮结束后各失败项的最终计数（issue #64）：合并是按计划顺序串行的，
+    // 成功项（可能排在失败项之前）做推进判定时，失败项**还没** markFailure。
+    // 若按「合并到一半」的计数判定，排在失败项之前的成功项会因「失败项
+    // 尚未达阈值」而不推进——而失败项本轮结束后明明已隔离。故先按
+    // 「初始计数 + 本轮各失败一次」算出最终计数，隔离判定一律用它。
+    final finalFailures = <String, int>{
+      for (final e in state.failures.entries) e.key: e.value.count,
+    };
+    for (final r in results) {
+      if (r is _Failed) {
+        finalFailures[r.relPath] = (finalFailures[r.relPath] ?? 0) + 1;
+      }
+    }
+    bool quarantinedAfter(String relPath) =>
+        (finalFailures[relPath] ?? 0) >= quarantineAfterFailures;
 
     for (final result in results) {
       switch (result) {
         case _Deleted(:final relPath):
           // 删除成功才移除记录：失败保留记录，下轮会重新安排删除。
-          next = next.forget(relPath);
+          next = next.forget(relPath).clearFailure(relPath);
           deleted++;
 
         case _NotModified(
@@ -980,7 +1026,10 @@ class SyncEngine {
             updatedAt: updatedAt,
             contentHash: next.files[relPath]?.contentHash,
           );
-          if (canAdvance) next = next.advanceCursor(updatedAt);
+          next = next.clearFailure(relPath);
+          if (advanceCursor && _canAdvance(next, results, quarantinedAfter)) {
+            next = next.advanceCursor(updatedAt);
+          }
           notModified++;
 
         case _Downloaded(
@@ -997,11 +1046,31 @@ class SyncEngine {
             updatedAt: updatedAt,
             contentHash: contentHash,
           );
-          if (canAdvance) next = next.advanceCursor(updatedAt);
+          next = next.clearFailure(relPath);
+          if (advanceCursor && _canAdvance(next, results, quarantinedAfter)) {
+            next = next.advanceCursor(updatedAt);
+          }
           downloaded++;
 
-        case _Failed(:final relPath, :final reason):
+        case _Failed(:final relPath, :final reason, :final updatedAt):
+          // 失败：不写文件记录（不变量 1），但连续失败计数要累计（issue #64）。
+          // 计数跨轮持久化，达阈值后允许游标越过这个文件。
+          next = next.markFailure(relPath, reason, updatedAt: updatedAt);
           failed.add(SyncFailure(relPath, reason));
+          if (quarantinedAfter(relPath)) {
+            quarantined.add(SyncFailure(relPath, reason));
+          }
+      }
+    }
+
+    // 隔离后的失败项也是「已知进不了本轮状态」的事实：把它的 updatedAt
+    // 一并推给游标，否则下一轮清单仍会返回它，隔离白做（issue #64）。
+    if (advanceCursor) {
+      for (final result in results) {
+        if (result is! _Failed) continue;
+        if (!quarantinedAfter(result.relPath)) continue;
+        final ua = result.updatedAt;
+        if (ua != null && ua.isNotEmpty) next = next.advanceCursor(ua);
       }
     }
 
@@ -1012,8 +1081,28 @@ class SyncEngine {
         notModified: notModified,
         deleted: deleted,
         failed: failed,
+        quarantined: quarantined,
         skipped: skipped,
       ),
+    );
+  }
+
+  /// 本轮是否可以推进游标（issue #64 的核心判据）。
+  ///
+  /// - 无失败：推进（原有语义）。
+  /// - 有失败：仅当**所有**失败项都已达隔离阈值才推进。只要有任何一个
+  ///   「还没失败够次数」的项，就保持旧语义的不推进——它的 updatedAt
+  ///   可能比后面的成功项旧，推过去就永久跳过它之后的重试机会。
+  ///
+  /// [quarantinedAfter] 是预计算的「本轮结束后」隔离判定（见 _merge 开头）。
+  bool _canAdvance(
+    SyncState state,
+    List<_ActionResult> results,
+    bool Function(String relPath) quarantinedAfter,
+  ) {
+    if (!results.any((r) => r is _Failed)) return true;
+    return results.whereType<_Failed>().every(
+      (f) => quarantinedAfter(f.relPath),
     );
   }
 }
@@ -1044,7 +1133,11 @@ sealed class _ActionResult {
     required String? updatedAt,
     required String contentHash,
   }) = _Downloaded;
-  factory _ActionResult.failed(String relPath, String reason) = _Failed;
+  factory _ActionResult.failed(
+    String relPath,
+    String reason, {
+    String? updatedAt,
+  }) = _Failed;
 }
 
 class _Deleted extends _ActionResult {
@@ -1080,7 +1173,10 @@ class _Downloaded extends _ActionResult {
 }
 
 class _Failed extends _ActionResult {
-  const _Failed(super.relPath, this.reason);
+  const _Failed(super.relPath, this.reason, {this.updatedAt});
 
   final String reason;
+
+  /// 失败时该文件的远端 `updated_at`（来自动作），隔离后推进游标用。
+  final String? updatedAt;
 }

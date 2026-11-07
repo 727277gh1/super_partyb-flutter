@@ -653,6 +653,383 @@ class SyncedFilesCompanion extends UpdateCompanion<SyncedFileRow> {
   }
 }
 
+class $SyncFailuresTable extends SyncFailures
+    with TableInfo<$SyncFailuresTable, SyncFailureRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SyncFailuresTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _stateKeyMeta = const VerificationMeta(
+    'stateKey',
+  );
+  @override
+  late final GeneratedColumn<String> stateKey = GeneratedColumn<String>(
+    'state_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _relPathMeta = const VerificationMeta(
+    'relPath',
+  );
+  @override
+  late final GeneratedColumn<String> relPath = GeneratedColumn<String>(
+    'rel_path',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _countMeta = const VerificationMeta('count');
+  @override
+  late final GeneratedColumn<int> count = GeneratedColumn<int>(
+    'count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastErrorMeta = const VerificationMeta(
+    'lastError',
+  );
+  @override
+  late final GeneratedColumn<String> lastError = GeneratedColumn<String>(
+    'last_error',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    stateKey,
+    relPath,
+    count,
+    lastError,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'sync_failures';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SyncFailureRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('state_key')) {
+      context.handle(
+        _stateKeyMeta,
+        stateKey.isAcceptableOrUnknown(data['state_key']!, _stateKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_stateKeyMeta);
+    }
+    if (data.containsKey('rel_path')) {
+      context.handle(
+        _relPathMeta,
+        relPath.isAcceptableOrUnknown(data['rel_path']!, _relPathMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_relPathMeta);
+    }
+    if (data.containsKey('count')) {
+      context.handle(
+        _countMeta,
+        count.isAcceptableOrUnknown(data['count']!, _countMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_countMeta);
+    }
+    if (data.containsKey('last_error')) {
+      context.handle(
+        _lastErrorMeta,
+        lastError.isAcceptableOrUnknown(data['last_error']!, _lastErrorMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_lastErrorMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {stateKey, relPath};
+  @override
+  SyncFailureRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SyncFailureRow(
+      stateKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}state_key'],
+      )!,
+      relPath: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rel_path'],
+      )!,
+      count: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}count'],
+      )!,
+      lastError: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_error'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      ),
+    );
+  }
+
+  @override
+  $SyncFailuresTable createAlias(String alias) {
+    return $SyncFailuresTable(attachedDatabase, alias);
+  }
+}
+
+class SyncFailureRow extends DataClass implements Insertable<SyncFailureRow> {
+  /// 状态键（与 [SyncCursors]/[SyncedFiles] 同一键空间）。
+  final String stateKey;
+
+  /// group 内相对路径。
+  final String relPath;
+
+  /// 连续失败次数（每轮失败 +1，成功或删除成功即清零移除）。
+  final int count;
+
+  /// 最近一次失败原因（展示用，给「这些文件连续失败，已暂停重试」配详情）。
+  final String lastError;
+
+  /// 失败时该文件的远端 `updated_at`。隔离后用它推进游标
+  /// （不推进则下一轮清单仍会返回它，隔离白做）。
+  final String? updatedAt;
+  const SyncFailureRow({
+    required this.stateKey,
+    required this.relPath,
+    required this.count,
+    required this.lastError,
+    this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['state_key'] = Variable<String>(stateKey);
+    map['rel_path'] = Variable<String>(relPath);
+    map['count'] = Variable<int>(count);
+    map['last_error'] = Variable<String>(lastError);
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<String>(updatedAt);
+    }
+    return map;
+  }
+
+  SyncFailuresCompanion toCompanion(bool nullToAbsent) {
+    return SyncFailuresCompanion(
+      stateKey: Value(stateKey),
+      relPath: Value(relPath),
+      count: Value(count),
+      lastError: Value(lastError),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
+    );
+  }
+
+  factory SyncFailureRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SyncFailureRow(
+      stateKey: serializer.fromJson<String>(json['stateKey']),
+      relPath: serializer.fromJson<String>(json['relPath']),
+      count: serializer.fromJson<int>(json['count']),
+      lastError: serializer.fromJson<String>(json['lastError']),
+      updatedAt: serializer.fromJson<String?>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'stateKey': serializer.toJson<String>(stateKey),
+      'relPath': serializer.toJson<String>(relPath),
+      'count': serializer.toJson<int>(count),
+      'lastError': serializer.toJson<String>(lastError),
+      'updatedAt': serializer.toJson<String?>(updatedAt),
+    };
+  }
+
+  SyncFailureRow copyWith({
+    String? stateKey,
+    String? relPath,
+    int? count,
+    String? lastError,
+    Value<String?> updatedAt = const Value.absent(),
+  }) => SyncFailureRow(
+    stateKey: stateKey ?? this.stateKey,
+    relPath: relPath ?? this.relPath,
+    count: count ?? this.count,
+    lastError: lastError ?? this.lastError,
+    updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
+  );
+  SyncFailureRow copyWithCompanion(SyncFailuresCompanion data) {
+    return SyncFailureRow(
+      stateKey: data.stateKey.present ? data.stateKey.value : this.stateKey,
+      relPath: data.relPath.present ? data.relPath.value : this.relPath,
+      count: data.count.present ? data.count.value : this.count,
+      lastError: data.lastError.present ? data.lastError.value : this.lastError,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncFailureRow(')
+          ..write('stateKey: $stateKey, ')
+          ..write('relPath: $relPath, ')
+          ..write('count: $count, ')
+          ..write('lastError: $lastError, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(stateKey, relPath, count, lastError, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SyncFailureRow &&
+          other.stateKey == this.stateKey &&
+          other.relPath == this.relPath &&
+          other.count == this.count &&
+          other.lastError == this.lastError &&
+          other.updatedAt == this.updatedAt);
+}
+
+class SyncFailuresCompanion extends UpdateCompanion<SyncFailureRow> {
+  final Value<String> stateKey;
+  final Value<String> relPath;
+  final Value<int> count;
+  final Value<String> lastError;
+  final Value<String?> updatedAt;
+  final Value<int> rowid;
+  const SyncFailuresCompanion({
+    this.stateKey = const Value.absent(),
+    this.relPath = const Value.absent(),
+    this.count = const Value.absent(),
+    this.lastError = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SyncFailuresCompanion.insert({
+    required String stateKey,
+    required String relPath,
+    required int count,
+    required String lastError,
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : stateKey = Value(stateKey),
+       relPath = Value(relPath),
+       count = Value(count),
+       lastError = Value(lastError);
+  static Insertable<SyncFailureRow> custom({
+    Expression<String>? stateKey,
+    Expression<String>? relPath,
+    Expression<int>? count,
+    Expression<String>? lastError,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (stateKey != null) 'state_key': stateKey,
+      if (relPath != null) 'rel_path': relPath,
+      if (count != null) 'count': count,
+      if (lastError != null) 'last_error': lastError,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SyncFailuresCompanion copyWith({
+    Value<String>? stateKey,
+    Value<String>? relPath,
+    Value<int>? count,
+    Value<String>? lastError,
+    Value<String?>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return SyncFailuresCompanion(
+      stateKey: stateKey ?? this.stateKey,
+      relPath: relPath ?? this.relPath,
+      count: count ?? this.count,
+      lastError: lastError ?? this.lastError,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (stateKey.present) {
+      map['state_key'] = Variable<String>(stateKey.value);
+    }
+    if (relPath.present) {
+      map['rel_path'] = Variable<String>(relPath.value);
+    }
+    if (count.present) {
+      map['count'] = Variable<int>(count.value);
+    }
+    if (lastError.present) {
+      map['last_error'] = Variable<String>(lastError.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncFailuresCompanion(')
+          ..write('stateKey: $stateKey, ')
+          ..write('relPath: $relPath, ')
+          ..write('count: $count, ')
+          ..write('lastError: $lastError, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $SyncBindingsTable extends SyncBindings
     with TableInfo<$SyncBindingsTable, SyncBindingRow> {
   @override
@@ -2524,6 +2901,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
   late final $SyncCursorsTable syncCursors = $SyncCursorsTable(this);
   late final $SyncedFilesTable syncedFiles = $SyncedFilesTable(this);
+  late final $SyncFailuresTable syncFailures = $SyncFailuresTable(this);
   late final $SyncBindingsTable syncBindings = $SyncBindingsTable(this);
   late final $CachedGroupsTable cachedGroups = $CachedGroupsTable(this);
   late final $CachedEventsTable cachedEvents = $CachedEventsTable(this);
@@ -2536,6 +2914,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   List<DatabaseSchemaEntity> get allSchemaEntities => [
     syncCursors,
     syncedFiles,
+    syncFailures,
     syncBindings,
     cachedGroups,
     cachedEvents,
@@ -2906,6 +3285,206 @@ typedef $$SyncedFilesTableProcessedTableManager =
         BaseReferences<_$AppDatabase, $SyncedFilesTable, SyncedFileRow>,
       ),
       SyncedFileRow,
+      PrefetchHooks Function()
+    >;
+typedef $$SyncFailuresTableCreateCompanionBuilder =
+    SyncFailuresCompanion Function({
+      required String stateKey,
+      required String relPath,
+      required int count,
+      required String lastError,
+      Value<String?> updatedAt,
+      Value<int> rowid,
+    });
+typedef $$SyncFailuresTableUpdateCompanionBuilder =
+    SyncFailuresCompanion Function({
+      Value<String> stateKey,
+      Value<String> relPath,
+      Value<int> count,
+      Value<String> lastError,
+      Value<String?> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$SyncFailuresTableFilterComposer
+    extends Composer<_$AppDatabase, $SyncFailuresTable> {
+  $$SyncFailuresTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get stateKey => $composableBuilder(
+    column: $table.stateKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get relPath => $composableBuilder(
+    column: $table.relPath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get count => $composableBuilder(
+    column: $table.count,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastError => $composableBuilder(
+    column: $table.lastError,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SyncFailuresTableOrderingComposer
+    extends Composer<_$AppDatabase, $SyncFailuresTable> {
+  $$SyncFailuresTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get stateKey => $composableBuilder(
+    column: $table.stateKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get relPath => $composableBuilder(
+    column: $table.relPath,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get count => $composableBuilder(
+    column: $table.count,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastError => $composableBuilder(
+    column: $table.lastError,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SyncFailuresTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SyncFailuresTable> {
+  $$SyncFailuresTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get stateKey =>
+      $composableBuilder(column: $table.stateKey, builder: (column) => column);
+
+  GeneratedColumn<String> get relPath =>
+      $composableBuilder(column: $table.relPath, builder: (column) => column);
+
+  GeneratedColumn<int> get count =>
+      $composableBuilder(column: $table.count, builder: (column) => column);
+
+  GeneratedColumn<String> get lastError =>
+      $composableBuilder(column: $table.lastError, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$SyncFailuresTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SyncFailuresTable,
+          SyncFailureRow,
+          $$SyncFailuresTableFilterComposer,
+          $$SyncFailuresTableOrderingComposer,
+          $$SyncFailuresTableAnnotationComposer,
+          $$SyncFailuresTableCreateCompanionBuilder,
+          $$SyncFailuresTableUpdateCompanionBuilder,
+          (
+            SyncFailureRow,
+            BaseReferences<_$AppDatabase, $SyncFailuresTable, SyncFailureRow>,
+          ),
+          SyncFailureRow,
+          PrefetchHooks Function()
+        > {
+  $$SyncFailuresTableTableManager(_$AppDatabase db, $SyncFailuresTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SyncFailuresTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SyncFailuresTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SyncFailuresTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> stateKey = const Value.absent(),
+                Value<String> relPath = const Value.absent(),
+                Value<int> count = const Value.absent(),
+                Value<String> lastError = const Value.absent(),
+                Value<String?> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SyncFailuresCompanion(
+                stateKey: stateKey,
+                relPath: relPath,
+                count: count,
+                lastError: lastError,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String stateKey,
+                required String relPath,
+                required int count,
+                required String lastError,
+                Value<String?> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SyncFailuresCompanion.insert(
+                stateKey: stateKey,
+                relPath: relPath,
+                count: count,
+                lastError: lastError,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SyncFailuresTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SyncFailuresTable,
+      SyncFailureRow,
+      $$SyncFailuresTableFilterComposer,
+      $$SyncFailuresTableOrderingComposer,
+      $$SyncFailuresTableAnnotationComposer,
+      $$SyncFailuresTableCreateCompanionBuilder,
+      $$SyncFailuresTableUpdateCompanionBuilder,
+      (
+        SyncFailureRow,
+        BaseReferences<_$AppDatabase, $SyncFailuresTable, SyncFailureRow>,
+      ),
+      SyncFailureRow,
       PrefetchHooks Function()
     >;
 typedef $$SyncBindingsTableCreateCompanionBuilder =
@@ -3899,6 +4478,8 @@ class $AppDatabaseManager {
       $$SyncCursorsTableTableManager(_db, _db.syncCursors);
   $$SyncedFilesTableTableManager get syncedFiles =>
       $$SyncedFilesTableTableManager(_db, _db.syncedFiles);
+  $$SyncFailuresTableTableManager get syncFailures =>
+      $$SyncFailuresTableTableManager(_db, _db.syncFailures);
   $$SyncBindingsTableTableManager get syncBindings =>
       $$SyncBindingsTableTableManager(_db, _db.syncBindings);
   $$CachedGroupsTableTableManager get cachedGroups =>

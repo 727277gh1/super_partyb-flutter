@@ -629,4 +629,192 @@ void main() {
       expect(concurrent.report.failed, serial.report.failed);
     });
   });
+  group('持续失败隔离（issue #64）', () {
+    UfsFileEntry remote(String id, String rel, String updatedAt) =>
+        UfsFileEntry.fromJson({
+          'id': id,
+          'path': '/workspace/groups/$gidFixture/$rel/',
+          'name': rel,
+          'size': 5,
+          'etag': 'W/"$id"',
+          'updated_at': updatedAt,
+        });
+
+    test('同一文件连续失败未达阈值：游标不推进（保守）', () async {
+      final downloader = StubDownloader()..errors['bad'] = '服务端 500';
+      final engine = SyncEngine(downloader: downloader, sink: StubSink());
+      var state = SyncState.empty;
+      SyncRunResult result;
+      for (var round = 1; round < quarantineAfterFailures; round++) {
+        result = await engine.run(
+          remote: [
+            remote('ok', 'ok.md', '2026-05-01T00:00:00Z'),
+            remote('bad', 'bad.md', '2026-04-01T00:00:00Z'),
+          ],
+          state: state,
+          scope: const SyncGroupScope(gidFixture),
+          filter: permissiveFixture,
+        );
+        expect(result.state.failures['bad.md']?.count, round);
+        expect(result.state.cursor, isNull, reason: '第 $round 轮失败未达阈值，不推进');
+        state = result.state;
+      }
+    });
+
+    test('连续失败达阈值：游标越过隔离项（含其 updatedAt），其余文件不再被拖住', () async {
+      final downloader = StubDownloader()..errors['bad'] = '服务端 500';
+      final engine = SyncEngine(downloader: downloader, sink: StubSink());
+      var state = SyncState.empty;
+      // 前 2 轮：计数累积，不推进。ok.md 每轮更新（etag 变化），
+      // 否则第 3 轮它会被「unchanged 跳过」，不进入计划（隔离就无从验证）。
+      for (var round = 1; round < quarantineAfterFailures; round++) {
+        final r = await engine.run(
+          remote: [
+            remote('ok$round', 'ok.md', '2026-05-0${round}T00:00:00Z'),
+            remote('bad', 'bad.md', '2026-04-01T00:00:00Z'),
+          ],
+          state: state,
+          scope: const SyncGroupScope(gidFixture),
+          filter: permissiveFixture,
+        );
+        state = r.state;
+      }
+      // 第 3 轮（达阈值）：bad.md 仍失败，但 ok.md 的下载必须能推进游标
+      final r3 = await engine.run(
+        remote: [
+          remote('ok3', 'ok.md', '2026-05-01T00:00:00Z'),
+          remote('bad', 'bad.md', '2026-04-01T00:00:00Z'),
+        ],
+        state: state,
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+
+      expect(r3.state.failures['bad.md']?.count, quarantineAfterFailures);
+      expect(r3.state.isQuarantined('bad.md'), isTrue);
+      expect(
+        r3.state.cursor,
+        '2026-05-01T00:00:00Z',
+        reason: '隔离后游标应推进到成功项（ok.md 的 updatedAt）',
+      );
+      expect(r3.report.quarantined.map((f) => f.relPath), contains('bad.md'));
+      // 计数继续累加：隔离不是终点，文件每轮仍会重试（只是不再阻塞游标）
+      expect(r3.state.failures['bad.md']?.count, greaterThan(2));
+    });
+
+    test('达阈值后游标也会越过隔离项自身的 updatedAt（下轮清单不再返回它）', () async {
+      final downloader = StubDownloader()..errors['bad'] = '服务端 500';
+      final engine = SyncEngine(downloader: downloader, sink: StubSink());
+      var state = SyncState.empty;
+      for (var i = 0; i < quarantineAfterFailures - 1; i++) {
+        state = (await engine.run(
+          remote: [remote('bad', 'bad.md', '2026-04-01T00:00:00Z')],
+          state: state,
+          scope: const SyncGroupScope(gidFixture),
+          filter: permissiveFixture,
+        )).state;
+      }
+      // 本轮只有失败项（ok.md 不在清单里）；达阈值后游标推进到 bad.md 的 updatedAt
+      final r = await engine.run(
+        remote: [remote('bad', 'bad.md', '2026-04-05T00:00:00Z')],
+        state: state,
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+      expect(r.state.isQuarantined('bad.md'), isTrue);
+      expect(
+        r.state.cursor,
+        '2026-04-05T00:00:00Z',
+        reason: '隔离项自身的 updatedAt 也算「已处理水位」，否则下轮清单仍返回它',
+      );
+    });
+
+    test('隔离自动解除：一轮成功即清计数、重新纳入正常轮转', () async {
+      final downloader = StubDownloader()..errors['bad'] = '服务端 500';
+      final engine = SyncEngine(downloader: downloader, sink: StubSink());
+      var state = SyncState.empty;
+      for (var i = 0; i < quarantineAfterFailures; i++) {
+        state = (await engine.run(
+          remote: [remote('bad', 'bad.md', '2026-04-01T00:00:00Z')],
+          state: state,
+          scope: const SyncGroupScope(gidFixture),
+          filter: permissiveFixture,
+        )).state;
+      }
+      expect(state.isQuarantined('bad.md'), isTrue);
+
+      // 服务端恢复：本轮成功
+      downloader.errors.clear();
+      final r = await engine.run(
+        remote: [remote('bad', 'bad.md', '2026-04-01T00:00:00Z')],
+        state: state,
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+      expect(r.state.contains('bad.md'), isTrue, reason: '成功后写正常记录');
+      expect(r.state.failures.containsKey('bad.md'), isFalse, reason: '隔离自动解除');
+      expect(r.report.quarantined, isEmpty);
+    });
+
+    test('删除成功同样解除隔离', () async {
+      final engine = SyncEngine(downloader: StubDownloader(), sink: StubSink());
+      var state = SyncState(
+        files: {
+          'bad.md': const SyncedFile(
+            size: 5,
+            updatedAt: '2026-04-01T00:00:00Z',
+          ),
+        },
+        failures: const {
+          'bad.md': SyncFailureRecord(
+            count: quarantineAfterFailures,
+            lastError: '历史失败',
+            updatedAt: '2026-04-01T00:00:00Z',
+          ),
+        },
+      );
+      // 远端标记删除 → 引擎安排删除 → 删除成功 → forget + clearFailure
+      final r = await engine.run(
+        remote: [
+          UfsFileEntry.fromJson({
+            'id': 'bad',
+            'path': '/workspace/groups/$gidFixture/bad.md/',
+            'name': 'bad.md',
+            'size': 5,
+            'updated_at': '2026-04-01T00:00:00Z',
+            'deleted_at': '2026-05-10T00:00:00Z',
+          }),
+        ],
+        state: state,
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+      expect(r.state.contains('bad.md'), isFalse);
+      expect(
+        r.state.failures.containsKey('bad.md'),
+        isFalse,
+        reason: '文件已删，失败计数必须一并清掉，否则幽灵隔离记录常驻',
+      );
+    });
+
+    test('一次网络抖动不隔离（单次失败计数 < 阈值时其余文件不推进）', () async {
+      final downloader = StubDownloader()..errors['bad'] = '网络超时';
+      final engine = SyncEngine(downloader: downloader, sink: StubSink());
+      final r = await engine.run(
+        remote: [
+          remote('ok', 'ok.md', '2026-05-01T00:00:00Z'),
+          remote('bad', 'bad.md', '2026-04-01T00:00:00Z'),
+        ],
+        state: SyncState.empty,
+        scope: const SyncGroupScope(gidFixture),
+        filter: permissiveFixture,
+      );
+      expect(
+        r.state.isQuarantined('bad.md'),
+        isFalse,
+        reason: '单次失败可能是抖动，不得隔离',
+      );
+      expect(r.state.cursor, isNull, reason: '未隔离的失败仍冻结游标（保守）');
+    });
+  });
 }

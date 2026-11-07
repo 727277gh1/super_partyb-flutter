@@ -71,6 +71,41 @@ class SyncedFiles extends Table {
   Set<Column> get primaryKey => {stateKey, relPath};
 }
 
+/// 持续失败文件的隔离记录（issue #64）。
+///
+/// ## 为什么单独一张表而不是 SyncedFile 加列
+///
+/// 失败项在 SyncState.files 里**没有记录**（成功才 markSynced，不变量 1）。
+/// 把失败计数塞进 SyncedFile 等于给「成功记录」强加失败语义，脏检测与
+/// etag 比对都要特判空行。单独一张表让「已同步文件」与「持续失败文件」
+/// 两个集合正交。
+///
+/// ## 为什么必须持久化（不能内存计数）
+///
+/// 「每进程重新数 N 次」= 定时同步的每轮都从头数 → 隔离永不生效，
+/// 等于没修（issue #64 判据原文）。
+@DataClassName('SyncFailureRow')
+class SyncFailures extends Table {
+  /// 状态键（与 [SyncCursors]/[SyncedFiles] 同一键空间）。
+  TextColumn get stateKey => text()();
+
+  /// group 内相对路径。
+  TextColumn get relPath => text()();
+
+  /// 连续失败次数（每轮失败 +1，成功或删除成功即清零移除）。
+  IntColumn get count => integer()();
+
+  /// 最近一次失败原因（展示用，给「这些文件连续失败，已暂停重试」配详情）。
+  TextColumn get lastError => text()();
+
+  /// 失败时该文件的远端 `updated_at`。隔离后用它推进游标
+  /// （不推进则下一轮清单仍会返回它，隔离白做）。
+  TextColumn get updatedAt => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {stateKey, relPath};
+}
+
 /// 同步目录绑定：单行表（`id` 恒为 1）。
 ///
 /// ## 为什么需要它
@@ -285,6 +320,7 @@ class Preferences extends Table {
   tables: [
     SyncCursors,
     SyncedFiles,
+    SyncFailures,
     SyncBindings,
     CachedGroups,
     CachedEvents,
@@ -297,7 +333,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -311,6 +347,8 @@ class AppDatabase extends _$AppDatabase {
     // 版本 3 → 4：新增 cached_events（timeline 只读缓存，切片 B / issue #29）。
     //
     // 版本 4 → 5：新增 outbox_entries（离线写队列，切片 C / issue #30）。
+    //
+    // 版本 5 → 6：新增 sync_failures（持续失败文件的隔离名单，issue #64）。
     onUpgrade: (m, from, to) async {
       if (from < 2) {
         await m.addColumn(syncedFiles, syncedFiles.contentHash);
@@ -323,6 +361,9 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 5) {
         await m.createTable(outboxEntries);
+      }
+      if (from < 6) {
+        await m.createTable(syncFailures);
       }
       // **不要**用 m.createAll() 兜底：那会重建全部表、丢用户已有的同步状态。
       //
@@ -412,5 +453,25 @@ extension SyncedFileMapper on SyncedFile {
         size: size,
         updatedAt: Value(updatedAt),
         contentHash: Value(contentHash),
+      );
+}
+
+/// 隔离记录 ↔ domain 值类型互转（issue #64）。
+extension SyncFailureRowMapper on SyncFailureRow {
+  SyncFailureRecord toDomain() => SyncFailureRecord(
+    count: count,
+    lastError: lastError,
+    updatedAt: updatedAt,
+  );
+}
+
+extension SyncFailureMapper on SyncFailureRecord {
+  SyncFailuresCompanion toCompanion(String stateKey, String relPath) =>
+      SyncFailuresCompanion.insert(
+        stateKey: stateKey,
+        relPath: relPath,
+        count: count,
+        lastError: lastError,
+        updatedAt: Value(updatedAt),
       );
 }

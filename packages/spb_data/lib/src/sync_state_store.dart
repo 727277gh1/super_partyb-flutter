@@ -32,9 +32,15 @@ class DriftSyncStateStore implements SyncStateStore {
         _db.syncedFiles,
       )..where((t) => t.stateKey.equals(key))).get();
 
+      // 隔离名单（issue #64）：与文件记录同键空间，随状态一起读回。
+      final failureRows = await (_db.select(
+        _db.syncFailures,
+      )..where((t) => t.stateKey.equals(key))).get();
+
       return SyncState(
         cursor: cursorRows.isEmpty ? null : cursorRows.first.cursor,
         files: {for (final row in fileRows) row.relPath: row.toDomain()},
+        failures: {for (final row in failureRows) row.relPath: row.toDomain()},
       );
     } on SpbError {
       rethrow;
@@ -53,6 +59,9 @@ class DriftSyncStateStore implements SyncStateStore {
         // 先清掉该键的旧记录：save 是整体替换语义（见类文档）。
         await (_db.delete(
           _db.syncedFiles,
+        )..where((t) => t.stateKey.equals(key))).go();
+        await (_db.delete(
+          _db.syncFailures,
         )..where((t) => t.stateKey.equals(key))).go();
 
         await _db
@@ -76,6 +85,12 @@ class DriftSyncStateStore implements SyncStateStore {
             for (final entry in state.files.entries)
               entry.value.toCompanion(key, entry.key),
           ], mode: InsertMode.insertOrReplace);
+          // 隔离名单（issue #64）：与文件记录同一事务写入，崩溃不会出现
+          // 「文件已同步、失败计数还在」的错位（错位会让已成功的文件被误判隔离）。
+          b.insertAll(_db.syncFailures, [
+            for (final entry in state.failures.entries)
+              entry.value.toCompanion(key, entry.key),
+          ], mode: InsertMode.insertOrReplace);
         });
       });
     } catch (e) {
@@ -91,6 +106,9 @@ class DriftSyncStateStore implements SyncStateStore {
           _db.syncedFiles,
         )..where((t) => t.stateKey.equals(key))).go();
         await (_db.delete(
+          _db.syncFailures,
+        )..where((t) => t.stateKey.equals(key))).go();
+        await (_db.delete(
           _db.syncCursors,
         )..where((t) => t.stateKey.equals(key))).go();
       });
@@ -104,6 +122,7 @@ class DriftSyncStateStore implements SyncStateStore {
     try {
       await _db.transaction(() async {
         await _db.delete(_db.syncedFiles).go();
+        await _db.delete(_db.syncFailures).go();
         await _db.delete(_db.syncCursors).go();
       });
     } catch (e) {

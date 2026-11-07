@@ -215,7 +215,11 @@ class SyncedFile {
 
 /// 一个同步状态键（state key）下的全部状态：游标 + 各文件的 etag 记录。
 class SyncState {
-  const SyncState({this.cursor, this.files = const <String, SyncedFile>{}});
+  const SyncState({
+    this.cursor,
+    this.files = const <String, SyncedFile>{},
+    this.failures = const <String, SyncFailureRecord>{},
+  });
 
   /// 上次成功同步的服务端时间点（RFC3339），作为下一轮 `updated_since`。
   ///
@@ -224,6 +228,13 @@ class SyncState {
 
   /// 相对路径 → 记录。
   final Map<String, SyncedFile> files;
+
+  /// 持续失败文件的隔离记录（issue #64）：相对路径 → 连续失败次数 + 最近错误。
+  ///
+  /// 与 [files] 正交：失败项不在 [files] 里（不变量：成功才写状态），这里
+  /// 只记「还没同步成过、且连续失败」的。成功一轮即移除（自动解除隔离）。
+  /// 必须持久化：内存计数在进程重启后清零，定时同步下隔离永不生效。
+  final Map<String, SyncFailureRecord> failures;
 
   /// 「从未同步过」的状态（无游标、无记录）。
   static const SyncState empty = SyncState();
@@ -272,6 +283,41 @@ class SyncState {
   SyncState forget(String relPath) =>
       copyWith(files: {...files}..remove(relPath));
 
+  /// 记一次失败（**不可变**：返回新状态），连续失败则次数 +1（issue #64）。
+  ///
+  /// [updatedAt] 是失败时该文件的远端 `updated_at`：隔离后游标要推过它，
+  /// 否则下一轮清单仍会返回这个文件，隔离白做。
+  SyncState markFailure(String relPath, String reason, {String? updatedAt}) {
+    final prev = failures[relPath];
+    return copyWith(
+      failures: {
+        ...failures,
+        relPath: SyncFailureRecord(
+          count: (prev?.count ?? 0) + 1,
+          lastError: reason,
+          updatedAt: updatedAt ?? prev?.updatedAt,
+        ),
+      },
+    );
+  }
+
+  /// 清除失败记录（成功/删除成功/远端不再返回时调用）。
+  ///
+  /// 这就是隔离名单的**自动解除**：一次成功即重新纳入正常轮转。
+  SyncState clearFailure(String relPath) {
+    if (!failures.containsKey(relPath)) return this;
+    return copyWith(failures: {...failures}..remove(relPath));
+  }
+
+  /// 该路径是否已达隔离阈值（连续失败 [quarantineAfterFailures] 次）。
+  bool isQuarantined(
+    String relPath, {
+    int quarantineAfter = quarantineAfterFailures,
+  }) {
+    final f = failures[relPath];
+    return f != null && f.count >= quarantineAfter;
+  }
+
   /// 推进游标（**只前进，不回退**）。
   ///
   /// ## 为什么必须单调
@@ -294,10 +340,12 @@ class SyncState {
   SyncState copyWith({
     String? cursor,
     Map<String, SyncedFile>? files,
+    Map<String, SyncFailureRecord>? failures,
     bool clearCursor = false,
   }) => SyncState(
     cursor: clearCursor ? null : (cursor ?? this.cursor),
     files: files ?? this.files,
+    failures: failures ?? this.failures,
   );
 
   @override
@@ -305,9 +353,14 @@ class SyncState {
     if (other is! SyncState) return false;
     if (other.cursor != cursor) return false;
     if (other.files.length != files.length) return false;
+    if (other.failures.length != failures.length) return false;
     for (final entry in files.entries) {
       final otherFile = other.files[entry.key];
       if (otherFile == null || otherFile != entry.value) return false;
+    }
+    for (final entry in failures.entries) {
+      final otherFailure = other.failures[entry.key];
+      if (otherFailure == null || otherFailure != entry.value) return false;
     }
     return true;
   }
@@ -318,11 +371,55 @@ class SyncState {
     Object.hashAllUnordered(
       files.entries.map((e) => Object.hash(e.key, e.value)),
     ),
+    Object.hashAllUnordered(
+      failures.entries.map((e) => Object.hash(e.key, e.value)),
+    ),
   );
 
   /// 诊断用（**不含文件内容**，只给条数）。
   @override
-  String toString() => 'SyncState(cursor: $cursor, files: ${files.length} 条)';
+  String toString() =>
+      'SyncState(cursor: $cursor, files: ${files.length} 条, '
+      'failures: ${failures.length} 条)';
+}
+
+/// 隔离阈值（issue #64）：同一文件连续失败这么多次后，允许游标越过它。
+///
+/// 前 N-1 轮保守（不推进，维持「失败不推进」的漏文件保护）；达到阈值后
+/// 判定为**持续性**失败（403 无权限 / 路径非法 / 服务端对该文件恒 500），
+/// 不再让它拖住整个 workspace。网络抖动几乎不可能连续命中同一文件 N 次。
+const int quarantineAfterFailures = 3;
+
+/// 单个文件的连续失败记录（持久化到 sync.db，跨进程累计）。
+class SyncFailureRecord {
+  const SyncFailureRecord({
+    required this.count,
+    required this.lastError,
+    this.updatedAt,
+  });
+
+  /// 连续失败次数。
+  final int count;
+
+  /// 最近一次失败原因（展示用）。
+  final String lastError;
+
+  /// 失败时该文件的远端 `updated_at`（隔离后推进游标用）。
+  final String? updatedAt;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SyncFailureRecord &&
+      other.count == count &&
+      other.lastError == lastError &&
+      other.updatedAt == updatedAt;
+
+  @override
+  int get hashCode => Object.hash(count, lastError, updatedAt);
+
+  @override
+  String toString() =>
+      'SyncFailureRecord(count: $count, lastError: $lastError)';
 }
 
 /// 状态键：**全部 group** 与 **选中若干 group** 共用。
