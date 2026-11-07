@@ -159,6 +159,9 @@ linux），所以这两个错误前提一直被固化着——与 [§6.21](testi
   踩坑。`start` 还会把 URL 里的 `&` 当成命令分隔符。
 - **不改用 `ShellExecuteW`**：需要平台通道（Dart 侧拿不到），与「桌面能力不引
   插件」的取向不符；`rundll32`（URL）+ `explorer`（路径）已覆盖全部调用场景。
+  ⚠️ 前提已部分变化：`dart:ffi` 让 Dart 侧能直接调 shell32，**定位**因此改走
+  `SHOpenFolderAndSelectItems`（见 §6.75）；
+  URL 打开仍保持 `rundll32`。
 - **不改用 `Process.start(detached)`**：只判「能否 spawn」会丢失「命令确实失败」
   的信号，比误报失败更糟（用户会看到「什么都没发生」）。
 - **不在 URL 分支做「打开了吗」的二次校验**：Windows 没有廉价可靠的探测手段
@@ -748,3 +751,84 @@ Riverpod / Dio / 认证状态都不共享，等于重做一遍装配）。
   进入失败本身已是异常路径。
 - **进入前最小化**的状态还原用 `minimize()`（不经过 `show()`），若某平台对隐藏窗口
   的 `minimize()` 无效果，结果是「窗口留在托盘里」——仍然是「不打扰」的方向。
+
+### 6.75 Windows「定位/打开交付物」落在默认视图：explorer 不吃混合分隔符（issue #97，2026-11）
+
+**症状**：Windows 上交付物面板 / 时间线文件卡的「在文件管理器中定位」每次
+都打开**此电脑**，「用默认程序打开」每次落到**文档**目录。Linux/macOS 正常，
+且全程无任何报错提示。
+
+#### 根因：explorer 的兜底行为 × 混合分隔符路径
+
+explorer.exe 收到**无法解析**的参数时不报错，直接打开它的默认视图——
+`/select,…` 解析不了 → 此电脑；普通路径解析不了 → 文档。而它的退出码
+成功失败都是 0/1 难分（§6.35），
+客户端把 `{0,1}` 都判成功——所以「失败」在客户端侧完全不可见。
+
+为什么参数解析不了：Windows 上交付物路径**必然**是混合分隔符：
+
+| 链路 | 拼法 |
+|---|---|
+| 下载 | `p.join(支持目录, rel)`，`rel` 来自 `deliverableDownloadRelPath`（`gidA/reports/spec.md`）——`p.join` 只补**段间**分隔符，不转换段内部 |
+| 同步索引 | 打开侧 `p.join(root, rel)`；落盘侧 `resolveWithinRoot` 也是 `/` 拼接 |
+
+结果形如 `C:\...\deliverables\gidA/reports/spec.md`。`dart:io` / Win32
+文件 API 对 `/` 宽容 → **存在性校验全部通过**，spawn 照常发生；explorer
+的命令行解析不宽容 → 打开默认视图。
+
+#### 缺陷二：`/select,` 的引号位置 argv 表达不出来
+
+路径含空格时，正确形态是 `/select,"C:\a b\f.md"`（引号只包路径）；
+而 `Process.run` 会把**整个 argv** 加引号 → `"/select,C:\a b\f.md"`。
+Dart 不提供原始命令行注入，argv 方式无解。
+
+#### 修法（两层）
+
+| 层 | 改动 |
+|---|---|
+| `spb_platform` `system_open.dart` | 新增纯函数 `normalizeWindowsPath`（分隔符统一 / 折叠 / 词法解析 `.`·`..`，对齐 Win32 的钳根行为）；`spawnSystemOpen` / `spawnSystemReveal` 的 Windows 分支 spawn 前一律归一化，**归一化失败放弃 spawn**（返回 false 而不是把原串递给 explorer） |
+| `spb_platform` `windows_reveal.dart`（新增） | Windows 定位首选原生 `SHOpenFolderAndSelectItems`（经 `dart:ffi`，`Shell32RevealBackend`）：直接吃 PIDL，没有命令行解析层，空格与分隔符歧义都不存在；失败/不可用回退 `explorer /select,<归一化路径>` |
+
+定位的降级链：**原生成功 → 返回；原生失败/不可用 → `explorer /select,`**。
+打开（目录 / 默认程序）继续用 `explorer <归一化路径>`——普通路径参数整体加
+引号恰好就是正确形态，不需要原生 API。
+
+#### 为什么引 FFI（之前 §6.35 说「不改用 ShellExecuteW」）
+
+§6.35 当时的前提是「ShellExecuteW 需要平台通道，Dart 侧拿不到」——`dart:ffi`
+让这个前提不再成立。但结论只更新一半：**定位**改用原生 API（argv 确实无解），
+**打开**保持 `rundll32`（URL）+ `explorer`（路径）——那条链路在真机验证过
+（§6.35），且归一化后已无歧义，换 `ShellExecuteW` 收益不抵验证成本。
+
+#### 测试与验证边界
+
+| 用例 | 钉住 |
+|---|---|
+| `normalizeWindowsPath`（9 条） | 混合→原生 / 全 `/` / 折叠 / `.`·`..` 词法解析+钳根 / 根与尾分隔符 / UNC 保留 / null 拒收集 |
+| `spawnSystemOpen` Windows（3 条） | 归一化后 spawn / 归一化失败不 spawn / URL 分支不做分隔符替换 |
+| `spawnSystemReveal` Windows（6 条） | 原生优先且收到归一化路径 / 原生 false → 回退 / 原生抛异常 → 回退 / 归一化失败两头都不调 / 默认后端是真实实现 / linux·macos 不调后端 |
+| `revealSystemEntry`（1 条） | 后端注入从能力层透传到定位 |
+
+⚠️ **验证边界（诚实记录）**：本机无 Windows（[§9](../development.md)）。
+归一化与降级链全部可无头单测；`SHOpenFolderAndSelectItems` 的真机行为
+（COM 初始化路径、真机 HRESULT）只有 Windows 用户能确认——FFI 绑定按
+MSDN 签名手写，真机报障先看日志里的 `hr=0x...` 字段。
+
+#### 反向验证（逐条实测）
+
+| 改坏 | 结果 |
+|---|---|
+| `spawnSystemOpen` Windows 分支去掉归一化 | 「打开：混合分隔符」用例失败 |
+| `normalizeWindowsPath` 对归一化不了的输入返回原串 | 「打开：归一化不了」失败 |
+| `spawnSystemReveal` 不先试原生后端 | 「定位：首选原生 API」失败 |
+| 原生失败不回退命令行 | 「原生返回 false → 回退」失败 |
+| URL 分支也做分隔符替换 | 「URL 分支不受归一化影响」失败 |
+| 默认后端改成 `null` 就跳过 | 「默认后端是真实实现」失败 |
+
+#### 有意不做
+
+- **不替换 URL 打开链路**（`rundll32`）：§6.35 真机验证过，见上。
+- **不给「打开」换 `ShellExecuteW`**：归一化后已无歧义，真机验证成本 > 收益。
+- **不让 `normalizeWindowsPath` 返回「尽力归一化的原串」**：归一化不了的输入
+  递给 explorer 就是缺陷形态本身；显式失败（提示「无法定位」）好于静默打开
+  错误窗口。

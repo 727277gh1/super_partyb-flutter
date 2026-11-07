@@ -599,6 +599,244 @@ void main() {
     });
   });
 
+  group('normalizeWindowsPath（issue #97：explorer 只认原生分隔符）', () {
+    // ## 这个 group 防的是什么
+    //
+    // Windows 上交付物路径**必然**是混合分隔符（`p.join` 只补段间分隔符，
+    // 相对路径由 `spb_domain` 用 `/` 拼出）。`dart:io` 宽容 → 存在性探测通过；
+    // explorer 的命令行解析不宽容 → 静默打开「此电脑」/「文档」。
+    //
+    // 故这里钉住归一化的**两个方向**：改对（混合→原生）与拒收（归一化不了
+    // 时返回 null，而不是把原串放行——放行等于保留缺陷）。
+
+    test('混合分隔符 → 全反斜杠（交付物下载路径的真实形态）', () {
+      expect(
+        normalizeWindowsPath(
+          r'C:\Users\me\AppData\Roaming\spb\downloads\deliverables\gidA/reports/spec.md',
+        ),
+        r'C:\Users\me\AppData\Roaming\spb\downloads\deliverables\gidA\reports\spec.md',
+      );
+    });
+
+    test('全正斜杠（含盘符）也能归一化', () {
+      expect(
+        normalizeWindowsPath('C:/Users/me/My Docs/a.md'),
+        r'C:\Users\me\My Docs\a.md',
+      );
+    });
+
+    test('重复分隔符折叠', () {
+      expect(
+        normalizeWindowsPath(r'C:\\Users\\\me//a.md'),
+        r'C:\Users\me\a.md',
+      );
+    });
+
+    test('. 段丢弃、.. 段词法解析（与 Win32 一致）', () {
+      expect(normalizeWindowsPath(r'C:\a\.\b\..\c.md'), r'C:\a\c.md');
+    });
+
+    test('.. 越过根钳在根', () {
+      expect(normalizeWindowsPath(r'C:\..\..\x.md'), r'C:\x.md');
+    });
+
+    test('末尾分隔符去掉，盘符根保留', () {
+      expect(normalizeWindowsPath(r'C:\a\b\'), r'C:\a\b');
+      expect(normalizeWindowsPath(r'C:\'), r'C:\');
+      expect(normalizeWindowsPath('C:/'), r'C:\');
+    });
+
+    test('UNC 前缀保留（`\\\\server\\share`，正/反斜杠两种写法同义）', () {
+      expect(
+        normalizeWindowsPath(r'\\server\share\dir/a.md'),
+        r'\\server\share\dir\a.md',
+      );
+      expect(
+        normalizeWindowsPath('//server/share/dir/a.md'),
+        r'\\server\share\dir\a.md',
+      );
+    });
+
+    test('归一化不了 → null（调用方必须放弃 spawn）', () {
+      expect(normalizeWindowsPath(''), isNull);
+      // `\\?\` / `\\.\` 关闭一切归一化，猜错比不开更糟。
+      expect(normalizeWindowsPath(r'\\?\C:\a b\f.md'), isNull);
+      expect(normalizeWindowsPath(r'\\.\C:\a.md'), isNull);
+      // UNC 缺 share：无法确定根。
+      expect(normalizeWindowsPath(r'\\server'), isNull);
+      // 裸盘符 = 「该盘当前目录」，与 `C:\` 不是一个东西。
+      expect(normalizeWindowsPath('C:'), isNull);
+      // NUL 会让 Win32 截断，等于打开另一个路径。
+      expect(normalizeWindowsPath('C:\\a\u0000b.md'), isNull);
+      // 相对路径的 `..` 越过起点，无法在字符串层面等价表达。
+      expect(normalizeWindowsPath('../a.md'), isNull);
+    });
+  });
+
+  group('Windows 归一化 + 原生定位（issue #97）', () {
+    // ## 用户看到的两个症状
+    //
+    // 「定位」每次打开「此电脑」，「用默认程序打开」每次落到「文档」。两个都
+    // 不是我们打开的东西——是 explorer 解析不了参数时**自己的兜底视图**，
+    // 而且它不报错（退出码 0/1 难分，见 §6.35）。
+
+    test('打开：混合分隔符路径归一化后再交给 explorer', () async {
+      final ok = await spawnSystemOpen(
+        r'C:\Users\me\AppData\deliverables\gidA/reports/spec.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$1, 'explorer');
+      expect(calls.single.$2, [
+        r'C:\Users\me\AppData\deliverables\gidA\reports\spec.md',
+      ]);
+    });
+
+    test('打开：归一化不了 → false 且不 spawn', () async {
+      final ok = await spawnSystemOpen(
+        r'\\?\C:\a b\f.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      // 关键：宁可什么都不做，也不要把原串递给 explorer——那正是
+      // 「定位跳到此电脑」的成因，而且用户会以为应用坏了。
+      expect(ok, isFalse);
+      expect(calls, isEmpty);
+    });
+
+    test('打开：URL 分支不受归一化影响（`/` 是协议的一部分）', () async {
+      const url = 'https://example.com/a/b/login?state=st_1';
+
+      await spawnSystemOpen(
+        url,
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      expect(calls.single.$1, 'rundll32');
+      expect(calls.single.$2, ['url.dll,FileProtocolHandler', url]);
+    });
+
+    test('定位：首选原生 API，收到归一化路径，且不再 spawn explorer', () async {
+      final backend = _FakeRevealBackend();
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\AppData\deliverables\gidA/reports/spec.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        windowsReveal: backend,
+      );
+
+      expect(ok, isTrue);
+      expect(backend.calls, [
+        r'C:\Users\me\AppData\deliverables\gidA\reports\spec.md',
+      ]);
+      expect(calls, isEmpty);
+    });
+
+    test('定位：原生返回 false → 回退 explorer /select,（仍用归一化路径）', () async {
+      final backend = _FakeRevealBackend(result: false);
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\a/b.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        windowsReveal: backend,
+      );
+
+      expect(ok, isTrue);
+      expect(backend.calls, [r'C:\Users\me\a\b.md']);
+      expect(calls.single.$2, [r'/select,C:\Users\me\a\b.md']);
+    });
+
+    test('定位：原生抛异常（非 Windows 上加载 shell32.dll）→ 回退命令行', () async {
+      final backend = _FakeRevealBackend(throwError: StateError('no shell32'));
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        windowsReveal: backend,
+      );
+
+      expect(ok, isTrue);
+      expect(calls.single.$2, [r'/select,C:\Users\me\a.md']);
+    });
+
+    test('定位：归一化不了 → false，原生与命令行都不调', () async {
+      final backend = _FakeRevealBackend();
+
+      final ok = await spawnSystemReveal(
+        r'\\server',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        windowsReveal: backend,
+      );
+
+      expect(ok, isFalse);
+      expect(backend.calls, isEmpty);
+      expect(calls, isEmpty);
+    });
+
+    test('定位：默认后端是真实实现（Linux 上不可用 → 自动回退）', () async {
+      // 默认参数必须是 `Shell32RevealBackend`：改成「null 就跳过」时 Windows
+      // 真机上就只剩命令行形态（含空格路径必坏），而那个环境本仓无人验证。
+      const backend = Shell32RevealBackend();
+      expect(backend, isA<WindowsRevealBackend>());
+
+      final ok = await spawnSystemReveal(
+        r'C:\Users\me\a.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+      );
+
+      // Linux 测试机上真实后端打不开 shell32.dll → 回退 explorer。
+      expect(ok, isTrue);
+      expect(calls.single.$2, [r'/select,C:\Users\me\a.md']);
+    });
+
+    test('linux/macos 不调原生后端（Windows 专属）', () async {
+      final backend = _FakeRevealBackend();
+
+      await spawnSystemReveal(
+        '/home/me/a.md',
+        platform: HostPlatform.linux,
+        runner: fakeRunner(),
+        windowsReveal: backend,
+      );
+      await spawnSystemReveal(
+        '/Users/me/a.md',
+        platform: HostPlatform.macos,
+        runner: fakeRunner(),
+        windowsReveal: backend,
+      );
+
+      expect(backend.calls, isEmpty);
+      expect(calls.map((c) => c.$1), ['xdg-open', 'open']);
+    });
+
+    test('revealSystemEntry：文件 → 原生定位（注入透传）', () async {
+      Future<FileSystemEntityType> fileProbe(String _) async =>
+          FileSystemEntityType.file;
+      final backend = _FakeRevealBackend();
+
+      final ok = await revealSystemEntry(
+        r'C:\Users\me\a/b.md',
+        platform: HostPlatform.windows,
+        runner: fakeRunner(),
+        probe: fileProbe,
+        windowsReveal: backend,
+      );
+
+      expect(ok, isTrue);
+      expect(backend.calls, [r'C:\Users\me\a\b.md']);
+      expect(calls, isEmpty);
+    });
+  });
+
   group('HostPlatform.current', () {
     test('在 Linux 测试机上推导出 HostPlatform.linux', () {
       // 本测试运行在 Linux CI / 开发机上；若将来在 macOS runner 上跑会失败，
@@ -631,4 +869,21 @@ class _FakeRunner implements ProcessRunner {
   @override
   Future<ProcessResult> run(String exe, List<String> args) async =>
       onRun(exe, args);
+}
+
+/// 记录调用并可预设结果的假原生定位后端。
+class _FakeRevealBackend implements WindowsRevealBackend {
+  _FakeRevealBackend({this.result = true, this.throwError});
+
+  final bool result;
+  final Object? throwError;
+  final List<String> calls = [];
+
+  @override
+  Future<bool> reveal(String nativePath) async {
+    calls.add(nativePath);
+    final error = throwError;
+    if (error != null) throw error;
+    return result;
+  }
 }

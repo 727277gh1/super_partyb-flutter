@@ -178,9 +178,14 @@ abstract interface class DesktopCapabilities {
   ///
   /// | 平台 | 命令 | 行为 |
   /// |---|---|---|
-  /// | Windows | `explorer /select,<path>` | 在资源管理器里**选中**它 |
+  /// | Windows | `SHOpenFolderAndSelectItems`（原生，经 FFI；回退 `explorer /select,<path>`） | 在资源管理器里**选中**它 |
   /// | macOS | `open -R <path>` | 在 Finder 里选中它 |
   /// | Linux | `xdg-open <父目录>` | 打开所在目录（freedesktop 无选中概念） |
+  ///
+  /// ⚠️ Windows 上路径先经 `normalizeWindowsPath` 归一化（原生分隔符）：
+  /// 交付物路径是 `p.join` 拼出来的混合分隔符，`dart:io` 接受而 explorer 的
+  /// 命令行解析不接受——不接受时 explorer **不报错**，静默打开「此电脑」
+  /// （issue #97）。
   ///
   /// 返回 true 表示已成功发起；false 表示不支持、路径不存在或 spawn 失败。
   /// **不抛异常**——对齐本接口既有的静默降级哲学：上层只在 false 时提示

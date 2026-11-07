@@ -36,6 +36,7 @@
 - [x] 导出诊断日志（issue #40 第一层：环形缓冲 + 环境信息 + 脱敏，见 [§6.20](design-decisions/runtime-and-ops.md)）
 - [x] 本地文件日志 + 会话标记（[§6.57](design-decisions/runtime-and-ops.md)：`FileLogSink` / `MultiLogSink`，能区分「崩了」与「被关了」，日志与 `sync.db` 同根）+ 默认同步目录可见标记（「默认，可修改」）
 - [x] 悬浮窗进入失败时回滚窗口属性（[§6.57](design-decisions/runtime-and-ops.md)：只回滚真的改过的、逆序、失败仍导航）
+- [x] Windows「定位/打开交付物」落在默认视图（issue #97）：路径归一化 + `SHOpenFolderAndSelectItems` 原生定位，见 [§6.75](design-decisions/platform.md)（FFI 真机行为待 Windows 实测）
 - [x] 同步目录未选择时的默认值（[§6.57](design-decisions/runtime-and-ops.md)：`~/Documents/Super PartyB` → 应用数据目录，仅桌面端）
 - [x] 工具调用折叠 + 「动态」面板 + 流式进度条（[§6.54](design-decisions/ui.md)：展示层批卡、诊断→动态并两端可见、底部状态条报工具进度）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 [§6.24](design-decisions/testing.md)）

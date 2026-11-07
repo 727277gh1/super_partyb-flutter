@@ -31,13 +31,24 @@
 ///
 /// ## 分层
 ///
-/// 本文件只依赖 `dart:io` 与 `spb_core`，**不 import `package:flutter`**——
-/// 与 `desktop_capabilities.dart` 同一取向（能力接口保持与 UI 框架无关）。
+/// 本文件只依赖 `dart:io`、`spb_core` 与同包的 `windows_reveal.dart`，
+/// **不 import `package:flutter`**——与 `desktop_capabilities.dart` 同一取向
+/// （能力接口保持与 UI 框架无关）。
+///
+/// ## Windows 还要过一道「路径归一化」（issue #97）
+///
+/// 交付物路径在 Windows 上**必然**是混合分隔符（`p.join` 不转换参数内部的
+/// `/`，而相对路径由 `spb_domain` 用 `/` 拼出）。`dart:io` 吃这套，explorer
+/// 的**命令行解析**不吃——解析不了就静默打开默认视图（「定位」→ 此电脑、
+/// 「打开」→ 文档）。故 Windows 分支 spawn 前一律过 [normalizeWindowsPath]，
+/// 归一化失败时**放弃 spawn**（记日志返回 false），不把原始路径递给 explorer。
 library;
 
 import 'dart:io';
 
 import 'package:spb_core/spb_core.dart';
+
+import 'windows_reveal.dart';
 
 /// 宿主平台。
 ///
@@ -117,6 +128,9 @@ class SystemProcessRunner implements ProcessRunner {
 /// | Windows | URL（含 `://`） | `rundll32 url.dll,FileProtocolHandler` | **不能用 `explorer`**，见下 |
 /// | Windows | 文件/目录路径 | `explorer` | 在资源管理器里定位/用默认程序打开 |
 ///
+/// ⚠️ Windows 的路径分支必须先把目标交给 [normalizeWindowsPath]：explorer 的
+/// 命令行解析不接受 `/` 与 `\` 混用（issue #97）。
+///
 /// 三平台都**不要**用 `start`：它是 `cmd.exe` 内建命令，不是可执行文件，
 /// `Process.run` 找不到；经 `cmd /c` 又会被重新解析一遍命令行，URL 里的 `&`
 /// 会变成命令分隔符（注入面）。
@@ -170,12 +184,20 @@ Future<bool> spawnSystemOpen(
       args = [target];
     case HostPlatform.windows when looksLikeUrl(target):
       // URL 走 rundll32：`explorer <带 query 的 URL>` 会打开文件浏览器。
+      // URL 里的 `/` 是**协议的一部分**，绝不能做分隔符归一化。
       exe = 'rundll32';
       args = ['url.dll,FileProtocolHandler', target];
       exitCodeIsMeaningful = false;
     case HostPlatform.windows:
+      final native = normalizeWindowsPath(target);
+      if (native == null) {
+        // 不把未归一化的路径递给 explorer：它解析不了时会静默打开「文档」
+        // （用户以为应用坏了），而失败本该显式。
+        SpbLog.warn('Windows 打开目标无法归一化为原生路径，跳过', {'target': target});
+        return false;
+      }
       exe = 'explorer';
-      args = [target];
+      args = [native];
     case HostPlatform.other:
       SpbLog.warn('当前平台不支持打开目标', {'target': target, 'platform': platform.name});
       return false;
@@ -221,7 +243,8 @@ Future<bool> spawnSystemOpen(
 ///
 /// | 平台 | 命令 | 说明 |
 /// |---|---|---|
-/// | Windows | `explorer /select,<path>` | `/select,` 与路径**必须是同一个参数**（见下） |
+/// | Windows | **`SHOpenFolderAndSelectItems`**（原生，见 [WindowsRevealBackend]） | 无命令行解析层，路径含空格/混合分隔符都不会歧义；失败回退下一行 |
+/// | Windows（回退） | `explorer /select,<path>` | `/select,` 与路径**必须是同一个参数**（见下） |
 /// | macOS | `open -R <path>` | `-R` = reveal in Finder |
 /// | Linux | `xdg-open <父目录>` | freedesktop **没有**「选中某个文件」的概念 |
 ///
@@ -233,14 +256,21 @@ Future<bool> spawnSystemOpen(
 /// dolphin/thunar 各自的命令行（`nautilus --select` / `dolphin --select`…），
 /// 两条都脆弱。打开父目录已能满足「我要找这个文件在哪」的诉求。
 ///
-/// ## ⚠️ Windows 的 `/select,` 必须与路径**拼成一个参数**
+/// ## ⚠️ Windows 为什么首选原生 API，而不是 `explorer /select,`
 ///
-/// `explorer` 的参数解析不走标准 CRT：写成两个参数（`['/select,', path]`）时
-/// 它把 `/select,` 当成「要打开的路径」，行为不可预测。实测与上游一致：
-/// `explorer.exe /select,"C:\path\file.txt"` 是唯一正确形态。
+/// 命令行形态有两条**用 `Process.run` 表达不出来**的限制（issue #97）：
 ///
-/// 路径含空格时**不加引号**：`Process.run` 按数组传参、不经 shell，Windows 侧
-/// 会自己处理参数边界；加引号反而会让引号成为路径的一部分。
+/// 1. **含空格路径的引号位置**：explorer 要求 `/select,"C:\a b\f.md"`
+///   （引号只包路径），而 `Process.run` 会把**整个 argv** 加引号 →
+///   `"/select,C:\a b\f.md"`。运气好什么都不发生，运气不好打开「此电脑」。
+/// 2. **混合分隔符**（`C:\dir/file.md`）被当成无效参数——`dart:io` 宽容、
+///   explorer 不宽容。[normalizeWindowsPath] 解决这一半；引号那一半它解决
+///   不了，故 Windows 定位首选 [WindowsRevealBackend]（原生
+///   `SHOpenFolderAndSelectItems`），**不可用时才回退** `explorer /select,`。
+///
+/// `/select,` 与路径**必须拼成一个参数**：`explorer` 的参数解析不走标准 CRT，
+/// 写成两个参数（`['/select,', path]`）时它把 `/select,` 当成「要打开的路径」
+/// 行为不可预测。
 ///
 /// 退出码语义与 [spawnSystemOpen] 的 Windows 分支一致（`explorer` 成功也返回
 /// 1，见 [_successExitCodes]）。
@@ -248,6 +278,7 @@ Future<bool> spawnSystemReveal(
   String path, {
   required HostPlatform platform,
   required ProcessRunner runner,
+  WindowsRevealBackend windowsReveal = const Shell32RevealBackend(),
 }) async {
   if (path.isEmpty) {
     SpbLog.warn('spawnSystemReveal 目标为空，跳过', {'platform': platform.name});
@@ -270,9 +301,18 @@ Future<bool> spawnSystemReveal(
       exe = 'open';
       args = ['-R', path];
     case HostPlatform.windows:
+      final native = normalizeWindowsPath(path);
+      if (native == null) {
+        SpbLog.warn('Windows 定位目标无法归一化为原生路径，跳过', {'path': path});
+        return false;
+      }
+      // 首选原生 API：没有命令行解析层（含空格路径只能靠它）。
+      if (await _tryWindowsReveal(windowsReveal, native)) return true;
+      // 原生不可用（非 Windows 测试环境 / DLL 缺失 / HRESULT 非 S_OK）
+      // → 回退命令行形态。
       exe = 'explorer';
       // 单个参数：`/select,` 与路径之间**不能**有空格分隔成两个 argv。
-      args = ['/select,$path'];
+      args = ['/select,$native'];
     case HostPlatform.other:
       SpbLog.warn('当前平台不支持定位条目', {'target': path, 'platform': platform.name});
       return false;
@@ -323,14 +363,15 @@ Future<FileSystemEntityType> realEntityType(String path) =>
 /// | 目录 | `spawnSystemOpen` | 在文件管理器里打开它 |
 /// | 文件 | `spawnSystemReveal` | 在文件管理器里**选中**它 |
 ///
-/// 在 Windows 上前者是 `explorer <dir>`、后者是 `explorer /select,<file>`。
-/// 把文件交给 `explorer <file>` 会用默认程序**打开它**（Word/编辑器弹出来）
-/// ——那正是修复前「定位」的第二个缺陷。
+/// 在 Windows 上前者是 `explorer <dir>`、后者是原生定位（回退
+/// `explorer /select,<file>`）。把文件交给 `explorer <file>` 会用默认程序
+/// **打开它**（Word/编辑器弹出来）——那正是修复前「定位」的第二个缺陷。
 Future<bool> revealSystemEntry(
   String path, {
   required HostPlatform platform,
   required ProcessRunner runner,
   EntityTypeProbe probe = realEntityType,
+  WindowsRevealBackend windowsReveal = const Shell32RevealBackend(),
 }) async {
   if (path.isEmpty) {
     SpbLog.warn('revealSystemEntry 目标为空，跳过', {'platform': platform.name});
@@ -356,7 +397,12 @@ Future<bool> revealSystemEntry(
 
   return type == FileSystemEntityType.directory
       ? spawnSystemOpen(path, platform: platform, runner: runner)
-      : spawnSystemReveal(path, platform: platform, runner: runner);
+      : spawnSystemReveal(
+          path,
+          platform: platform,
+          runner: runner,
+          windowsReveal: windowsReveal,
+        );
 }
 
 /// 便捷入口：用当前平台与真实进程执行器定位条目。
@@ -365,6 +411,110 @@ Future<bool> revealSystemEntryHere(String path) => revealSystemEntry(
   platform: HostPlatform.current(),
   runner: const SystemProcessRunner(),
 );
+
+/// 尝试用 Windows 原生 API 定位；任何异常都降级为 `false`。
+///
+/// 抽成函数而不是在 `switch` 的 case 里写 try/catch：那段代码里
+/// 「已成功 → 直接返回」与「失败 → 继续走命令行回退」交织，写在 case 里
+/// 会让后续的 `exe`/`args` 赋值看起来像是无条件执行。
+///
+/// 异常来源是**预期内**的：Linux CI 上跑 Windows 分支时
+/// `DynamicLibrary.open('shell32.dll')` 就是抛错——那正是回退路径的测试面。
+Future<bool> _tryWindowsReveal(
+  WindowsRevealBackend backend,
+  String nativePath,
+) async {
+  try {
+    return await backend.reveal(nativePath);
+  } on Object catch (e) {
+    SpbLog.warn('Windows 原生定位不可用，回退 explorer /select,', {
+      'path': nativePath,
+      'error': '$e',
+    });
+    return false;
+  }
+}
+
+/// 把 [path] 归一化成 explorer.exe 能正确解析的 Windows 原生形态。
+///
+/// ## 为什么必须有这一步（issue #97 的根因）
+///
+/// Windows 上交付物路径**必然**是混合分隔符：
+///
+/// - 下载：`p.join(getApplicationSupportDirectory(), rel)`，而 `rel` 由
+///   `spb_domain` 的 `deliverableDownloadRelPath` 用 `/` 拼出
+///   （`gidA/reports/spec.md`）——`p.join` 只补**段间**分隔符，不转换段内部；
+/// - 同步：落盘侧拼 `root/segments.join('/')`，打开侧拼 `p.join(root, rel)`。
+///
+/// 结果形如 `C:\...\deliverables\gidA/reports/spec.md`。`dart:io` / Win32
+/// 文件 API 对 `/` 宽容，于是存在性探测全部通过、spawn 照常发生；但 explorer
+/// 的**命令行解析**不宽容：`/select,…` 解析不了就打开「此电脑」，普通路径
+/// 解析不了就打开「文档」，且**不报错**（退出码仍是 0/1）。用户看到的就是
+/// 「定位总是跳到我的电脑」+「打开总是跳到文档」。
+///
+/// ## 归一化内容
+///
+/// - 分隔符统一为 `\`（UNC 前导 `\\` 保留）；
+/// - 折叠重复分隔符；
+/// - 丢弃 `.` 段，词法解析 `..` 段（越过根则钳在根，与 Win32 一致）；
+/// - 去掉末尾分隔符（根 `C:\` / `\\server\share\` 除外）。
+///
+/// ## 返回 null 的情形（调用方应放弃 spawn）
+///
+/// - 空串，或含 NUL（Win32 会截断，等于打开另一个路径）；
+/// - `\\?\` / `\\.\` 前缀（特殊命名空间**关闭**一切归一化，猜错比不开更糟）；
+/// - UNC 不完整（`\\server` 缺 share）、盘符后为空（`C:` 表示「C 盘当前目录」，
+///   语义依赖进程 CWD，归一化必然失真）；
+/// - 相对路径的 `..` 越过起点（无法在字符串层面等价表达）。
+///
+/// 返回 null 而不是「原样返回」是刻意的：把未归一化的路径递给 explorer 正是
+/// 本函数要修的缺陷形态——失败要**显式**（记日志 + 返回 false），而不是静默
+/// 打开一个错误的窗口。
+String? normalizeWindowsPath(String path) {
+  if (path.isEmpty || path.contains('\u0000')) return null;
+  if (path.startsWith(r'\\?\') || path.startsWith(r'\\.')) return null;
+
+  final String prefix;
+  final String body;
+  if (path.startsWith('//') || path.startsWith(r'\\')) {
+    // UNC：`\\server\share` + 其余。`//server/share` 同义（dart:io 也认）。
+    final match = RegExp(r'^[\\/]+([^\\/]+)[\\/]+([^\\/]+)').firstMatch(path);
+    if (match == null) return null;
+    prefix = '${r'\\'}${match.group(1)}${r'\'}${match.group(2)}';
+    body = path.substring(match.end);
+  } else if (path.length >= 2 && path[1] == ':') {
+    if (!RegExp(r'^[A-Za-z]$').hasMatch(path[0])) return null;
+    prefix = path.substring(0, 2);
+    body = path.substring(2);
+    // 裸 `C:` 是「C 盘当前目录」，与 `C:\` 不是一个东西。
+    if (body.isEmpty) return null;
+  } else {
+    // 相对路径：正常调用链不会出现（能打开的本地文件都是绝对路径），
+    // 保守支持（仅做分隔符统一），不猜根。
+    prefix = '';
+    body = path;
+  }
+
+  final segments = <String>[];
+  for (final segment in body.split(RegExp(r'[\\/]'))) {
+    if (segment.isEmpty || segment == '.') continue;
+    if (segment == '..') {
+      if (segments.isNotEmpty) {
+        segments.removeLast();
+      } else if (prefix.isEmpty) {
+        return null;
+      }
+      // 绝对路径栈空：`C:\..\x` 在 Win32 里等价于 `C:\x`，钳在根。
+      continue;
+    }
+    segments.add(segment);
+  }
+
+  final joined = segments.join(r'\');
+  if (prefix.isEmpty) return joined;
+  // `C:` + `\` → 盘符根（`C:\`）；UNC 同理得到 `\\server\share\`。
+  return '$prefix\\$joined';
+}
 
 /// 取 [path] 的父目录（去掉末尾分隔符后再退一级）；已是根或无分隔符时返回 null。
 ///

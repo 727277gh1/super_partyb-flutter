@@ -20,6 +20,10 @@ dependencies:
   #
   # 这四个在本包 lib 里实际 import（目录选择 / 拖放 / 本地通知），必须留。
   file_selector: ^1.0.3
+  # Windows「在资源管理器中选中条目」经 FFI 调 shell32 的
+  # SHOpenFolderAndSelectItems（issue #97）：命令行形态表达不了
+  # `/select,"含 空格"` 的引号位置。只用 `toNativeUtf16` / `calloc`。
+  ffi: ^2.2.0
   desktop_drop: ^0.8.4
   cross_file: ^0.3.5+5
   flutter_local_notifications: ^22.3.1
