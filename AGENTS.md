@@ -2,6 +2,9 @@
 
 本文件指导 Claude Code / pi 等 AI Agent 在 **super_partyb-flutter** 仓库中工作。
 
+**仅在用户明确要求修改本文件时才能编辑。** 实现功能、修复 bug、补文档或新增判据，
+以及 Agent 自行生成的计划、验收项，都不构成修改授权；这些任务按下文指针维护普通文档。
+
 > **本文件每次请求都会被全文注入上下文**（它是提示词，不是 wiki）：只放「现在就要
 > 遵守的判据 + 去哪找细节」。体积由 `tools/check_agents_size.sh` 守着——别把它写回成变更日志。
 
@@ -72,30 +75,7 @@ cd packages/spb_data && dart run build_runner build && dart format lib && cd ../
 （DI / 路由 / 入口）；`packages/` 九个包：`spb_core` `spb_models` `spb_api` `spb_domain`
 `spb_data` `spb_design` `spb_ui` `spb_platform` `spb_features`（职责见 §4 的表与「依赖方向」）。
 
-`tools/` —— 守卫（每个 `check_*.sh` 都配一个 `check_*_selftest.sh`，自测脚本不单列，
-用 `ls tools/` 看全量）：
-
-| 脚本 | 查什么 |
-|---|---|
-| `tools/check_layering.sh` | 分层规则 |
-| `tools/check_format.sh` | dart format 门禁 |
-| `tools/check_analysis_options.sh` | analysis_options 接线 |
-| `tools/check_test_support_sync.sh` | 重复的测试辅助文件一致 |
-| `tools/check_workflow_steps.sh` | workflow step 未被注释吞掉 |
-| `tools/check_wiring_parity.sh` | 两端接线一致 |
-| `tools/check_unused_deps.sh` | 零 import 依赖 |
-| `tools/check_silent_catches.sh` | 静默吞异常 |
-| `tools/check_dollar_paren.sh` | 插值里 `$x(` 误写（分析器抓不到，issue #62） |
-| `tools/check_codegen.sh` | 生成物漂移 |
-| `tools/check_build_defines.sh` | 发布构建传 `--dart-define` |
-| `tools/check_agents_refs.sh` | 文档标识符引用 |
-| `tools/check_agents_numbers.sh` | 文档数字漂移 |
-| `tools/check_agents_size.sh` | 本文体积 |
-
-工具：`tools/coverage.sh`（覆盖率）、`tools/bundle_linux_deps.sh`（Linux 分发依赖打包）、
-`tools/gen_brand_assets.py`（品牌图标）、`tools/build_windows_installer.ps1`（Inno Setup 包）、
-`tools/reverse_verify_issue50.sh`（双栈降级变异验证）、`tools/sync-to-github.sh`（导出干净仓库
-推 GitHub）、`tools/scrub-history.sh`（开源前重写历史里的真实标识；**只重写历史**，用法见脚本头）。
+`tools/` 的守卫与工具清单见 [`tools/README.md`](tools/README.md)。新增脚本只维护该清单。
 
 ### 依赖方向（**单向，不可逆**）
 
@@ -163,12 +143,10 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 完整复盘在 [`docs/design-decisions/`](docs/design-decisions/README.md)（§6.x 逐条索引见该目录 `README.md`）。
 **编号永久稳定**：`§6.43` 永远指同一件事，只是换了文件——代码、`tools/`、`docs/` 里大量 `§6.x`
-引用因此不失效：按上表找到主题文件、再按编号定位小节即可。
+引用因此不失效：按该索引找到主题文件、再按编号定位小节即可。
 
-> ⚠️ **新增决策写进 `docs/design-decisions/<主题>.md`，正文一律不进本文。** 本文件每次请求
-> 都被全文注入，体积就是上下文预算（`tools/check_agents_size.sh` 守着）。**只有新增主题文件（新 `.md`）
-> 才在 §6.1 加一行；在既有主题下新增 §6.x 小节、记录进展或状态，都不改本文件**——状态写
-> `docs/roadmap.md` 与 issue 跟踪器。
+新增决策写进 `docs/design-decisions/<主题>.md`，主题与小节索引只维护该目录的 `README.md`；
+进展与状态写 `docs/roadmap.md` 与 issue 跟踪器。
 
 ### 6.0 仍然约束写代码的硬规则
 
@@ -189,21 +167,6 @@ spb_design / spb_models / spb_core → 无包内依赖
 | 6.42 | 交付物同步的既有语义**必须保持**：单向 / 增量游标 / 只凭 `deleted_at` 感知远端删除 / `.part` + rename 原子写 / 路径穿越防御 / 失败项不写状态 / 全 group 与选中共用 `__workspace__` 单状态键（见 sync.md） |
 | 6.66 | 选 Agent 是**纯本地**的（对齐 webapp）：点选不发请求、不弹确认，`agent_id` 随下一条消息发出；`/sessions/switch` 只给「同 Agent 开新会话」（见 chat.md） |
 | 6.70 | 无归属输入页：系统返回键**有草稿必须确认**（`PopScope(canPop:false)` + 走宿主的 `onClose`）；键位说明只在 `showKeyboardHints` 时显示（桌面端传 true）（见 ui.md） |
-
-### 6.1 主题索引
-
-| 主题 | 文件 |
-|---|---|
-| 架构与关键取舍 | [`architecture.md`](docs/design-decisions/architecture.md) |
-| 对话与流式 | [`chat.md`](docs/design-decisions/chat.md) |
-| 交付物同步 | [`sync.md`](docs/design-decisions/sync.md) |
-| 认证与会话 | [`auth.md`](docs/design-decisions/auth.md) |
-| 桌面平台集成 | [`platform.md`](docs/design-decisions/platform.md) |
-| 界面与交互 | [`ui.md`](docs/design-decisions/ui.md) |
-| 测试与仓库守卫 | [`testing.md`](docs/design-decisions/testing.md) |
-| 构建、分发与发布 | [`build-and-release.md`](docs/design-decisions/build-and-release.md) |
-| 产品边界与可运维性 | [`runtime-and-ops.md`](docs/design-decisions/runtime-and-ops.md) |
-| 性能与内存 | [`performance.md`](docs/design-decisions/performance.md) |
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
@@ -270,8 +233,8 @@ docs: 补充 Windows 构建限制
 - `--dart-define` 的生产密钥（走 CI secrets）
 - `apps/*/android/key.properties`、`*.jks`、`*.keystore`
 
-**不要**因为「记录进展/记下这次做了什么」而改 `AGENTS.md`：根因写 `docs/design-decisions/` 对应 §6.x，
-状态写 `docs/roadmap.md` 与 issue。只有「新增一条会约束未来写码的判据」才动它（§6 前言）。
+提交前遵守文件开头的修改授权规则；根因写 `docs/design-decisions/` 对应 §6.x，
+状态写 `docs/roadmap.md` 与 issue。
 
 ---
 

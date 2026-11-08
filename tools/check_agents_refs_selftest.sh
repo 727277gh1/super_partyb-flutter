@@ -16,7 +16,8 @@
 #   - 假绿：所有脚本都不检查 → 守卫静默空转；
 #   - 假红：要求列出 18 个脚本 → 守卫一上线就红，很快被删掉。
 #
-# 故这里四条断言：漏列报错、已列放行、selftest 豁免、引用不存在的标识符报错。
+# 除原有判定外，还验证清单迁移：只更新 tools/README.md 即可通过，
+# AGENTS.md 的提及不能替代清单登记，清单缺失或含坏引用必须报错。
 #
 # ## 测法：受控的最小仓库
 #
@@ -74,6 +75,11 @@ SH
 cat > "$repo/AGENTS.md" <<'MD'
 # AGENTS.md（自测桩）
 
+引用一个真实存在的符号：`_privateThing`。
+MD
+cat > "$repo/tools/README.md" <<'MD'
+# 仓库工具
+
 ```bash
 bash tools/check_alpha.sh
 bash tools/check_agents_refs.sh
@@ -87,6 +93,10 @@ case "$out" in
   *check_beta.sh*) ;;
   *) note_fail "漏列报错未点名 check_beta.sh：$out" ;;
 esac
+case "$out" in
+  *tools/README.md*) ;;
+  *) note_fail "漏列报错未指向 tools/README.md：$out" ;;
+esac
 # ⚠️ 豁免规则写反的话，这里会连 selftest 一起报——那会让守卫一上线就假红。
 case "$out" in
   *check_beta_selftest.sh*)
@@ -96,8 +106,8 @@ esac
 # ---------------------------------------------------------------------------
 # 2) 全部列出（且 selftest 豁免）→ 必须放行
 # ---------------------------------------------------------------------------
-cat > "$repo/AGENTS.md" <<'MD'
-# AGENTS.md（自测桩）
+cat > "$repo/tools/README.md" <<'MD'
+# 仓库工具
 
 ```bash
 bash tools/check_alpha.sh
@@ -109,19 +119,15 @@ bash tools/check_agents_refs.sh
 MD
 
 if ! out=$(run_guard); then
-  note_fail "脚本全部列出时被误报（假红会让守卫被删掉）：$out"
+  note_fail "只在 tools/README.md 列出脚本时被误报：$out"
 fi
+cp "$repo/tools/README.md" "$work/tools-readme-good.md"
 
 # ---------------------------------------------------------------------------
 # 3) 文档引用了不存在的标识符 → 必须报错（原有方向，防止被新逻辑挤掉）
 # ---------------------------------------------------------------------------
 cat > "$repo/AGENTS.md" <<'MD'
 # AGENTS.md（自测桩）
-
-```bash
-bash tools/check_alpha.sh
-bash tools/check_beta.sh
-```
 
 引用一个**不存在**的符号：`_noSuchMember`。
 MD
@@ -139,12 +145,6 @@ esac
 # ---------------------------------------------------------------------------
 cat > "$repo/AGENTS.md" <<'MD'
 # AGENTS.md（自测桩）
-
-```bash
-bash tools/check_alpha.sh
-bash tools/check_beta.sh
-bash tools/check_agents_refs.sh
-```
 
 引用一个真实存在的符号：`_privateThing`。
 MD
@@ -183,9 +183,55 @@ if ! out=$(run_guard); then
 fi
 
 # ---------------------------------------------------------------------------
+# 6) 只在 AGENTS.md 列出脚本不能替代清单登记
+# ---------------------------------------------------------------------------
+printf '\n`tools/check_beta.sh`\n' >> "$repo/AGENTS.md"
+cat > "$repo/tools/README.md" <<'MD'
+# 仓库工具
+
+`tools/check_alpha.sh`、`tools/check_agents_refs.sh`。
+MD
+
+out=$(run_guard) && {
+  note_fail "仍在使用 AGENTS.md 作为脚本清单，迁移未生效"
+} || true
+case "$out" in
+  *check_beta.sh*) ;;
+  *) note_fail "仅在 AGENTS.md 登记的脚本未被点名：$out" ;;
+esac
+cp "$work/tools-readme-good.md" "$repo/tools/README.md"
+
+# ---------------------------------------------------------------------------
+# 7) 新清单也必须接受标识符检查
+# ---------------------------------------------------------------------------
+printf '\n`_noSuchMemberInToolsDoc`\n' >> "$repo/tools/README.md"
+
+out=$(run_guard) && {
+  note_fail "tools/README.md 中不存在的标识符未被检出"
+} || true
+case "$out" in
+  *tools/README.md*"_noSuchMemberInToolsDoc"*) ;;
+  *) note_fail "新清单的坏引用报错未指出位置与符号：$out" ;;
+esac
+cp "$work/tools-readme-good.md" "$repo/tools/README.md"
+
+# ---------------------------------------------------------------------------
+# 8) 清单文件缺失必须明确报错
+# ---------------------------------------------------------------------------
+rm "$repo/tools/README.md"
+
+out=$(run_guard) && {
+  note_fail "tools/README.md 缺失时未报错"
+} || true
+case "$out" in
+  *"未找到 tools/README.md"*) ;;
+  *) note_fail "缺失清单的报错未点名 tools/README.md：$out" ;;
+esac
+
+# ---------------------------------------------------------------------------
 echo
 if [ ${#failures[@]} -eq 0 ]; then
-  echo "✅ check_agents_refs 自测通过（6 条断言）"
+  echo "✅ check_agents_refs 自测通过（含清单迁移与原有引用检查）"
   exit 0
 fi
 

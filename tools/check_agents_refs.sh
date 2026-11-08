@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 守卫：AGENTS.md 里的 Dart 标识符引用是否真实存在（issue #37）。
+# 守卫：文档里的 Dart 标识符引用是否真实存在，以及 tools/README.md 的脚本清单。
 #
 # ## 为什么需要它
 #
@@ -38,9 +38,8 @@
 #
 # ## 另加一条：`tools/` 脚本清单不得漏列（issue #47 第六项）
 #
-# §3 的 tools/ 树是**读者找脚本的唯一入口**。新增守卫脚本后若忘了补文档，
-# 读者根本不知道它存在（`ls tools/` 不会被想起来）。故反向检查：
-# 每个非 `_selftest` 的 `tools/*.sh` 都必须在 AGENTS.md 里被 backtick 引用。
+# 清单集中放在 tools/README.md，避免新增脚本迫使 Agent 修改 AGENTS.md。
+# 每个非 `_selftest` 的 `tools/*.sh` 都必须在该清单里被引用。
 #
 # ⚠️ 豁免的是 `*_selftest.sh`（每个守卫都配一个，逐个列进树会让树长一倍；
 # 树里已用一行注释说明它们的存在）。这是一个**规则**而非白名单，故不会腐化。
@@ -67,6 +66,7 @@ import re
 import sys
 
 DOC = 'AGENTS.md'
+TOOLS_DOC = 'tools/README.md'
 
 # 被拆走的正文同样受本守卫约束。
 #
@@ -75,8 +75,7 @@ DOC = 'AGENTS.md'
 # 拆开后若只扫 AGENTS.md，等于给被拆走的部分**悄悄去掉守卫**——而这部分正是
 # 复盘与判据最密集的地方（`_privateMember` 引用最多）。
 #
-# 反过来，`tools/` 脚本清单仍只查 AGENTS.md：§3 的树是「读者找脚本的唯一入口」，
-# 那个入口不能分散到 10 个文件里。
+# 脚本清单单独查 tools/README.md，其他文档的提及不能替代清单登记。
 SPLIT_DOCS = [
     'docs/api-contract.md',
     'docs/development.md',
@@ -115,8 +114,14 @@ EXEMPT = {
 with open(DOC, encoding='utf-8') as fh:
     doc = fh.read()
 
+if not os.path.isfile(TOOLS_DOC):
+    print(f'❌ 未找到 {TOOLS_DOC}，请恢复脚本清单。')
+    sys.exit(1)
+with open(TOOLS_DOC, encoding='utf-8') as fh:
+    tools_doc = fh.read()
+
 # 待检查的文档集合：(路径, 文本)。第一个永远是 AGENTS.md。
-scan_docs = [(DOC, doc)]
+scan_docs = [(DOC, doc), (TOOLS_DOC, tools_doc)]
 for split_path in SPLIT_DOCS:
     if not os.path.exists(split_path):
         continue
@@ -176,7 +181,7 @@ if failed:
 # 见脚本头「另加一条」的说明。
 #
 # 只查非 selftest 的 .sh（豁免规则而非白名单，见头注）。
-script_refs = set(re.findall(r'`(tools/[a-z0-9_]+\.sh)`', doc))
+script_refs = set(re.findall(r'`(tools/[a-z0-9_]+\.sh)`', tools_doc))
 script_names = {os.path.basename(p) for p in script_refs}
 
 missing = []
@@ -184,14 +189,14 @@ for path in sorted(glob.glob('tools/*.sh')):
     name = os.path.basename(path)
     if name.endswith('_selftest.sh'):
         continue
-    if name not in script_names and name not in doc:
+    if name not in script_names and name not in tools_doc:
         missing.append(name)
 
 if missing:
-    print('❌ 下列 tools/ 脚本没有被 AGENTS.md §3 提到：')
+    print(f'❌ 下列 tools/ 脚本没有被 {TOOLS_DOC} 提到：')
     for name in missing:
         print(f'   - tools/{name}')
-    print('   请在 §3 的 tools/ 树里补上（它是读者找脚本的唯一入口）。')
+    print(f'   请在 {TOOLS_DOC} 的脚本清单里补上。')
     sys.exit(1)
 
 print(f'✅ 文档标识符引用检查通过（{len(scan_docs)} 个文件、{total} 个高置信度引用'
