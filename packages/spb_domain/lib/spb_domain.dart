@@ -74,7 +74,10 @@ library;
 //   ToolCallBatchRow —— 工具调用折叠行（TimelineDisplayRow 家族成员，含在飞项时默认展开）
 //   deliverableDownloadRelPath / agentFileDownloadRelPath —— 下载到本地的落地相对路径（{groupId}/<group 内相对路径>，两端同一口径）
 //   defaultSyncLocalRoot / defaultSyncFolderName —— 默认的交付物同步目录（用户未选目录时用，纯函数可注入）
+//   GroupFileSummary / groupFileSummaryOf —— 本地已同步交付物按 group 的统计聚合
+//                                     （对话列表卡片「N 个文件 · 体积 · 同步时间」，纯函数）
 export 'src/agent_file_batch.dart';
+export 'src/group_file_summary.dart';
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
 export 'src/confirmation_notifier.dart';

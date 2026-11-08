@@ -437,6 +437,9 @@ class _ConversationsTab extends ConsumerWidget {
     final pendingCount = ref
         .watch(pendingConfirmationCountProvider)
         .maybeWhen(data: (n) => n, orElse: () => 0);
+    // 本地交付物统计快照（与桌面端同构）：未加载完/失败时给 null（文件条
+    // 不显示，不阻断列表）。加载完成后 provider 发新值，本 widget 重建。
+    final fileSummaries = ref.watch(groupFileSummariesProvider).value;
     return GroupListPage(
       api: api,
       // group 变更实时增量更新（新建/删除/归档/改名）。
@@ -450,6 +453,9 @@ class _ConversationsTab extends ConsumerWidget {
       // 结项快照的两个客户端能力（与桌面端同构，实现差异在下面的方法里）。
       onOpenSnapshotSite: _openSnapshotSite,
       onSaveSnapshot: _saveSnapshotFile,
+      groupFileSummary: fileSummaries == null
+          ? null
+          : (groupId) => fileSummaries[groupId],
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       pendingConfirmationCount: pendingCount,

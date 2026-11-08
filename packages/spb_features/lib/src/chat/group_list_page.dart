@@ -57,6 +57,7 @@ class GroupListPage extends StatefulWidget {
     this.userId,
     this.onSaveSnapshot,
     this.onOpenSnapshotSite,
+    this.groupFileSummary,
     this.pageSize = 30,
   });
 
@@ -211,6 +212,28 @@ class GroupListPage extends StatefulWidget {
   /// 提示「已下载但未配置保存入口」，**不静默丢弃**——否则用户会以为点击
   /// 没生效，反复点。
   final Future<void> Function(String fileName, List<int> bytes)? onSaveSnapshot;
+
+  /// 查询某个对话的**本地已同步交付物统计**（文件数/体积/最近同步时间）。
+  ///
+  /// ## 为什么是回调而不是页面查状态库
+  ///
+  /// 数据来自交付物同步的状态库（`SyncStateStore`，在 `spb_data`），查询需要
+  /// 先拿「同步目录绑定 + 两个状态键的状态」——那是装配层的知识（两端目录
+  /// 来源不同：桌面端用户自选、移动端固定沙箱）。页面只依赖一个同步函数，
+  /// 与 [onSaveSnapshot] 同一取向。
+  ///
+  /// ## 为什么是同步函数（不返回 Future）
+  ///
+  /// 与 [ResolveLocalDeliverable]（`group_deliverables_panel.dart`）同一约定：
+  /// 卡片在 `build` 期间逐行调用，返回 Future 会逼页面为每行维护「正在查询」
+  /// 中间态。装配层 watch 一个已加载好的快照（见两端
+  /// `groupFileSummariesProvider`），状态变化时页面自然重建。
+  ///
+  /// 返回 null = 该对话没有可展示的本地交付物（从未同步 / 机器产物过滤后为
+  /// 空），卡片**不渲染**文件条——与纯函数 [groupFileSummaryOf] 的空语义一致。
+  ///
+  /// 为 null 时（未注入）同样不渲染文件条：保持「纯拉取列表」用法。
+  final GroupFileSummary? Function(String groupId)? groupFileSummary;
 
   final int pageSize;
 
@@ -855,6 +878,7 @@ class _GroupListPageState extends State<GroupListPage> {
                 ? null
                 : (action) => _handleAction(group, action),
             onOpenSnapshotSite: widget.onOpenSnapshotSite,
+            fileSummary: widget.groupFileSummary?.call(group.id),
           );
         },
       ),
@@ -889,7 +913,10 @@ class _GroupListPageState extends State<GroupListPage> {
       return Padding(
         padding: SpbSpacing.pagePadding,
         child: Center(
-          child: Text('没有更多了', style: Theme.of(context).textTheme.labelSmall),
+          child: Text(
+            '没有更多了',
+            style: SpbType.listMeta(Theme.of(context).textTheme),
+          ),
         ),
       );
     }
@@ -993,6 +1020,7 @@ class _GroupTile extends StatelessWidget {
     this.onTap,
     this.onAction,
     this.onOpenSnapshotSite,
+    this.fileSummary,
   });
 
   final ChatGroup group;
@@ -1014,6 +1042,9 @@ class _GroupTile extends StatelessWidget {
   /// 当前 group 的快照（仅归档行有值，见 [ChatGroup.archiveSnapshot]）。
   ArchiveSnapshot? get _snapshot =>
       group.isArchived ? group.archiveSnapshot : null;
+
+  /// 本地已同步交付物统计（装配层从同步状态库算好传入；null = 不显示文件条）。
+  final GroupFileSummary? fileSummary;
 
   /// 打开菜单并把用户选择交给 [onAction]。
   Future<void> _openMenu(BuildContext context, Offset position) async {
@@ -1198,57 +1229,161 @@ class _GroupTile extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    final tile = ListTile(
-      onTap: onTap,
-      title: Text(group.title, overflow: TextOverflow.ellipsis),
-      subtitle: Row(
+    // 信息卡（对齐小程序 work-card 的密度）：标题行 + 目标行 + 进度条 +
+    // 文件条 + 元信息行。各段**缺数据即不渲染**，避免满屏空占位。
+    //
+    // ## 与旧 ListTile 的取舍
+    //
+    // 旧行只有标题 + 相对时间；但 `GET /chat/groups` 本就每行携带
+    // `current_goal`（含 progress）/ `active_session` / `goal`，全部被丢弃了。
+    // 卡片把这些字段兑现成 UI，而长按/右键菜单、Semantics 与点击行为不变。
+    final tile = Padding(
+      // 垂直 8px 配合分隔线刚好是列表卡的标准密度；水平 16px 与页面边距一致。
+      padding: const EdgeInsets.symmetric(
+        horizontal: SpbSpacing.lg,
+        vertical: SpbSpacing.sm,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          if (group.isArchived) ...[
-            // 归档状态必须可见：否则用户会奇怪为什么这个对话不更新。
-            Icon(
-              Icons.archive_outlined,
-              size: SpbSpacing.md,
-              color: scheme.outline,
-            ),
-            const SizedBox(width: SpbSpacing.xs),
-            Text('已归档', style: textTheme.labelSmall),
-            const SizedBox(width: SpbSpacing.sm),
-          ],
-          Text(
-            _relativeTime(group.updatedAt),
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+          // ── 标题行：归档徽标 + 标题 + 相对时间 ──
+          Row(
+            children: [
+              if (group.isArchived) ...[
+                // 归档状态必须可见：否则用户会奇怪为什么这个对话不更新。
+                Icon(
+                  Icons.archive_outlined,
+                  size: SpbSpacing.md,
+                  color: scheme.outline,
+                ),
+                const SizedBox(width: SpbSpacing.xs),
+                // 元数据用 SpbType.listMeta（12px）：11px 的 labelSmall 对中文
+                // 状态词太挤（见 docs/design-decisions/ui.md 字号小节）。
+                Text('已归档', style: SpbType.listMeta(textTheme)),
+                const SizedBox(width: SpbSpacing.sm),
+              ],
+              Expanded(
+                child: Text(
+                  group.title,
+                  style: textTheme.titleSmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: SpbSpacing.sm),
+              Text(
+                _relativeTime(group.updatedAt),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+            ],
           ),
-          // 结项快照状态徽标：只在归档行且有快照时出现。
-          //
-          // ## 为什么在 subtitle 而不是 trailing
-          //
-          // trailing 已被 chevron 占用，塞第二个图标会让整行显得拥挤；而
-          // 「有没有结项记录」属于元信息，与「多久没动过」同一层级。
-          //
-          // ## 为什么 pending/failed 也要显示
-          //
-          // 用户点了归档后最想知道的是「结项记录好了没」。只显示 ready 会让
-          // 生成中的状态看起来像「没做」。
-          if (_snapshot != null) ...[
-            const SizedBox(width: SpbSpacing.sm),
-            _SnapshotBadge(
-              snapshot: _snapshot!,
-              // 站点可打开时徽标变成可点入口（常显，不依赖 hover——
-              // 触屏没有 hover）。站点不可用时保持纯展示。
-              onOpenSite:
-                  _snapshot!.site.isOpenable && onOpenSnapshotSite != null
-                  ? () => onOpenSnapshotSite!(_snapshot!)
-                  : null,
+          // ── 目标行：结构化 goal 优先，旧列兑底（ChatGroup.currentGoalText）──
+          if (group.currentGoalText.isNotEmpty) ...[
+            const SizedBox(height: SpbSpacing.xs),
+            Text(
+              group.currentGoalText,
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+          // ── 进度行：服务端 goal 快照的 progress（迁移 0022 后的字段）──
+          if (_progress != null && _progress!.total > 0) ...[
+            const SizedBox(height: SpbSpacing.sm),
+            // 用 fraction 而不是 percent/100：服务端 percent 是整数截断，
+            // 1/3 会被舍成 33%（对齐 works_page 的同一取舍）。
+            LinearProgressIndicator(value: _progress!.ratio),
+            const SizedBox(height: SpbSpacing.xxs),
+            Text(
+              '${_progress!.completed}/${_progress!.total} 步'
+              '${_currentTaskSuffix()}',
+              style: SpbType.listMeta(textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+          // ── 文件条：本地已同步交付物统计（纯本地数据，零网络）──
+          if (fileSummary != null && !fileSummary!.isEmpty) ...[
+            const SizedBox(height: SpbSpacing.sm),
+            Row(
+              children: [
+                Icon(
+                  Icons.folder_outlined,
+                  size: SpbSpacing.md,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: SpbSpacing.xs),
+                Expanded(
+                  child: Text(
+                    _fileSummaryText(),
+                    style: SpbType.listMeta(textTheme)
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
+          // ── 元信息行：绑定 agent + 结项快照徽标 ──
+          if (group.activeSession != null || _snapshot != null) ...[
+            const SizedBox(height: SpbSpacing.xs),
+            Row(
+              children: [
+                if (group.activeSession != null) ...[
+                  Icon(
+                    Icons.smart_toy_outlined,
+                    size: SpbSpacing.md,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: SpbSpacing.xs),
+                  Flexible(
+                    child: Text(
+                      // agent_id 是面向用户的展示名（webapp 同款）。
+                      group.activeSession!.agentId,
+                      style: SpbType.listMeta(textTheme)
+                          ?.copyWith(color: scheme.onSurfaceVariant),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: SpbSpacing.sm),
+                ],
+                // 结项快照状态徽标：只在归档行且有快照时出现。
+                //
+                // ## 为什么在元信息行而不是 trailing
+                //
+                // 「有没有结项记录」属于元信息，与「绑定了哪个 agent」
+                // 同一层级；塞进标题行会与归档徽标/时间挤在一起。
+                //
+                // ## 为什么 pending/failed 也要显示
+                //
+                // 用户点了归档后最想知道的是「结项记录好了没」。只显示 ready
+                // 会让生成中的状态看起来像「没做」。
+                if (_snapshot != null)
+                  _SnapshotBadge(
+                    snapshot: _snapshot!,
+                    // 站点可打开时徽标变成可点入口（常显，不依赖 hover——
+                    // 触屏没有 hover）。站点不可用时保持纯展示。
+                    onOpenSite:
+                        _snapshot!.site.isOpenable && onOpenSnapshotSite != null
+                        ? () => onOpenSnapshotSite!(_snapshot!)
+                        : null,
+                  ),
+              ],
             ),
           ],
         ],
       ),
-      trailing: const Icon(Icons.chevron_right),
     );
 
-    if (onAction == null) return tile;
+    if (onAction == null) {
+      // 只读用法也要可点：旧 ListTile 自带 onTap 水波纹，卡片化后补上。
+      return InkWell(onTap: onTap, child: tile);
+    }
 
     // 用 GestureDetector 包一层而不是 ListTile.onLongPress：
     // 需要同时拿到右键的**指针位置**（菜单要出现在鼠标处），而
@@ -1277,11 +1412,42 @@ class _GroupTile extends StatelessWidget {
             _openMenu(context, details.globalPosition),
         onSecondaryTapDown: (details) =>
             _openMenu(context, details.globalPosition),
-        // 让 ListTile 自己处理点击：GestureDetector 的 opaque 会吃掉手势，
-        // 故只挂长按/右键，不设 onTap。
-        child: tile,
+        // 点击（进对话）交给内层 InkWell：GestureDetector 的 opaque 会吃掉
+        // 手势，故只挂长按/右键，不设 onTap。
+        child: InkWell(onTap: onTap, child: tile),
       ),
     );
+  }
+
+  /// 服务端 goal 快照的进度（无 goal / 无 progress / 无任务时为 null）。
+  ///
+  /// 数据来自 `GET /chat/groups` 每行都带的 `current_goal`（服务端
+  /// `loadGroupGoalSnapshots` 固定 2 次查询批量取，零额外请求）。
+  GoalProgress? get _progress {
+    final p = group.currentGoal?['progress'];
+    if (p is! Map) return null;
+    return GoalProgress.fromJson(Map<String, dynamic>.from(p));
+  }
+
+  /// 当前任务后缀（` · TASK-005`）；无 current_task_id 时空串。
+  ///
+  /// 该字段只在 group DTO 的快照里下发（见 `Goal.currentTaskId` 的说明）。
+  String _currentTaskSuffix() {
+    final raw = group.currentGoal?['goal'];
+    if (raw is! Map) return '';
+    final task = Map<String, dynamic>.from(raw)['current_task_id'] as String?;
+    if (task == null || task.isEmpty) return '';
+    return ' · $task';
+  }
+
+  /// 文件条文案：`18 个文件 · 3.4 MB · 3 天前同步`。
+  ///
+  /// 时间缺失（旧版本状态没有 updated_at）时只显示数量与体积。
+  String _fileSummaryText() {
+    final s = fileSummary!;
+    final at = s.lastSyncedAt;
+    final synced = at == null ? '' : ' · ${_relativeTime(at)}同步';
+    return '${s.fileCount} 个文件 · ${formatByteSize(s.totalBytes)}$synced';
   }
 
   /// 相对时间（「3 分钟前」）。
@@ -1375,7 +1541,8 @@ class _SnapshotBadge extends StatelessWidget {
       children: [
         Icon(icon, size: SpbSpacing.md, color: color),
         const SizedBox(width: SpbSpacing.xs),
-        Text(label, style: textTheme.labelSmall?.copyWith(color: color)),
+        // 状态词（含 error 语义色）必须能读懂，用 12px 而非 11px。
+        Text(label, style: SpbType.badge(textTheme)?.copyWith(color: color)),
         if (onOpenSite != null) ...[
           const SizedBox(width: SpbSpacing.xs),
           // 用 `open_in_new` 而不是 chevron：明确「会跳出去」。

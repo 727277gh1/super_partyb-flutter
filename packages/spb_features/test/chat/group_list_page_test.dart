@@ -29,6 +29,7 @@ void main() {
     String title = '某个对话',
     String status = 'active',
     String updatedAt = '2024-03-05T08:09:10Z',
+    Map<String, dynamic>? extra,
   }) => {
     'id': id,
     'user_id': 'usr_1',
@@ -36,7 +37,45 @@ void main() {
     'status': status,
     'created_at': '2024-03-05T08:00:00Z',
     'updated_at': updatedAt,
+    ...?extra,
   };
+
+  /// 带 `current_goal` 快照的 group（服务端 `loadGroupGoalSnapshots` 批量
+  /// 下发，`goalSnapshotDTO` 形状：`{goal, tasks, progress}`）。
+  Map<String, dynamic> groupWithGoalJson({
+    required String id,
+    String title = '有目标的对话',
+    String goalText = '把 500 报错定位并修掉',
+    String? currentTaskId = 'TASK-005',
+  }) => groupJson(
+    id: id,
+    title: title,
+    extra: {
+      'goal': '', // 旧列空：currentGoalText 应回落不到它
+      'current_goal': {
+        'goal': {
+          'id': 'goal_1',
+          'group_id': id,
+          'goal_text': goalText,
+          'status': 'active',
+          'tasks_source': 'llm_expand',
+          if (currentTaskId != null) 'current_task_id': currentTaskId,
+          'created_at': '2024-03-05T08:00:00Z',
+          'updated_at': '2024-03-05T08:00:00Z',
+        },
+        'tasks': <Map<String, dynamic>>[],
+        'progress': {
+          'total': 7,
+          'completed': 4,
+          'in_progress': 1,
+          'blocked': 0,
+          'error_stopped': 0,
+          'pending': 2,
+          'percent': 57,
+        },
+      },
+    },
+  );
 
   /// 挂一页 groups 响应。
   void mockPage({
@@ -75,6 +114,7 @@ void main() {
     String? userId,
     Future<bool> Function(ArchiveSnapshot)? onOpenSnapshotSite,
     Future<void> Function(String, List<int>)? onSaveSnapshot,
+    Map<String, GroupFileSummary>? fileSummary,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -91,6 +131,9 @@ void main() {
           userId: userId,
           onOpenSnapshotSite: onOpenSnapshotSite,
           onSaveSnapshot: onSaveSnapshot,
+          groupFileSummary: fileSummary == null
+              ? null
+              : (groupId) => fileSummary[groupId],
           pageSize: pageSize,
         ),
       ),
@@ -944,6 +987,155 @@ void main() {
       await settleIo(tester);
 
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  // ==================== 信息卡（goal / 进度 / agent / 文件条） ====================
+
+  group('信息卡渲染', () {
+    testWidgets('带 goal 快照：显示目标文本 + 进度条 + 当前任务', (tester) async {
+      mockPage(offset: 0, items: [groupWithGoalJson(id: 'g1')]);
+      await pumpPage(tester);
+
+      expect(find.text('把 500 报错定位并修掉'), findsOneWidget);
+      expect(find.text('4/7 步 · TASK-005'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    });
+
+    testWidgets('旧列 goal 兑底：无 current_goal 时显示旧列文本', (tester) async {
+      // 迁移 0022 后旧列不再被写入，但存量 group 可能只有旧列。
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(id: 'g1', extra: {'goal': '旧列目标'}),
+        ],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('旧列目标'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+    });
+
+    testWidgets('无 goal：不渲染目标行与进度条（缺数据即不渲染）', (tester) async {
+      mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+      await pumpPage(tester);
+
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.text('0/0 步'), findsNothing);
+    });
+
+    testWidgets('total=0 的 progress 不画进度条（避免 0/0）', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(
+            id: 'g1',
+            extra: {
+              'current_goal': {
+                'goal': {
+                  'id': 'goal_1',
+                  'group_id': 'g1',
+                  'goal_text': '有 goal 无任务',
+                  'status': 'active',
+                  'created_at': '2024-03-05T08:00:00Z',
+                  'updated_at': '2024-03-05T08:00:00Z',
+                },
+                'tasks': <Map<String, dynamic>>[],
+                'progress': null,
+              },
+            },
+          ),
+        ],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('有 goal 无任务'), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+    });
+
+    testWidgets('绑定 agent：元信息行显示 agent_id', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(
+            id: 'g1',
+            extra: {
+              'active_session': {
+                'agent_id': 'claude',
+                'session_id': 'sess_1',
+                'joined_at': '2024-03-05T08:00:00Z',
+              },
+            },
+          ),
+        ],
+      );
+      await pumpPage(tester);
+
+      expect(find.text('claude'), findsOneWidget);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
+    });
+
+    testWidgets('未绑定 agent：不渲染元信息行的 agent 段', (tester) async {
+      mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+      await pumpPage(tester);
+
+      expect(find.byIcon(Icons.smart_toy_outlined), findsNothing);
+    });
+
+    testWidgets('注入统计快照：显示文件条（数量 + 体积 + 同步时间）', (tester) async {
+      mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+      await pumpPage(
+        tester,
+        fileSummary: {
+          'g1': const GroupFileSummary(
+            fileCount: 18,
+            totalBytes: 3 * 1024 * 1024,
+            lastSyncedAt: null,
+          ),
+        },
+      );
+
+      expect(find.text('18 个文件 · 3.0 MB'), findsOneWidget);
+      expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
+    });
+
+    testWidgets('文件条带同步时间', (tester) async {
+      mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+      await pumpPage(
+        tester,
+        fileSummary: {
+          'g1': GroupFileSummary(
+            fileCount: 2,
+            totalBytes: 300,
+            lastSyncedAt: DateTime.now().subtract(const Duration(days: 3)),
+          ),
+        },
+      );
+
+      expect(find.textContaining('2 个文件 · 300 B · 3 天前同步'), findsOneWidget);
+    });
+
+    testWidgets('未注入统计（或查不到该 group）：不渲染文件条', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '没文件的')],
+      );
+      await pumpPage(tester, fileSummary: const {});
+
+      expect(find.byIcon(Icons.folder_outlined), findsNothing);
+      expect(find.text('没文件的'), findsOneWidget);
+    });
+
+    testWidgets('统计在途（null）：不渲染文件条且不崩溃', (tester) async {
+      // provider 未加载完时装配层传 groupFileSummary: null。
+      mockPage(
+        offset: 0,
+        items: [groupJson(id: 'g1', title: '在途的')],
+      );
+      await pumpPage(tester); // 未注入 fileSummary
+
+      expect(find.byIcon(Icons.folder_outlined), findsNothing);
+      expect(find.text('在途的'), findsOneWidget);
     });
   });
 

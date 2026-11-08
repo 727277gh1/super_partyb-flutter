@@ -2629,6 +2629,70 @@ final deliverableLocalIndexProvider = FutureProvider.autoDispose
       );
     });
 
+// ==================== 对话列表卡片的本地交付物统计 ====================
+//
+// `GroupListPage.groupFileSummary` 的数据源：把同步状态库的记录按 group
+// 聚合成「N 个文件 · 体积 · 同步时间」。纯逻辑在 domain（`groupFileSummaryOf`），
+// 这里只做「读库 + 缓存快照」。
+
+/// 全部 group 的本地交付物统计快照（groupId → 统计）。
+///
+/// ## 为什么是**一次性快照**而不是 family(groupId)
+///
+/// 列表页一次渲染几十个 group。若每行一个 `family(groupId)` 查询，就会变成
+/// 「每行两次 SELECT」× 几十行——而两个状态键的读取本来就是整键加载
+/// （`load(stateKey)` 返回全部记录），一次读完再在内存里按 group 分组，
+/// 成本从 O(2N) 次查询降到 O(2) 次。
+///
+/// ## 为什么返回空 Map 而不是让页面判 null
+///
+/// 页面逐行查 Map：查不到 = 不显示文件条。空 Map 与「未加载完」在页面上
+/// 都是「不显示」，无需区分——加载完成后页面重建，文件条自然出现。
+final groupFileSummariesProvider =
+    FutureProvider<Map<String, GroupFileSummary>>((ref) async {
+      final store = ref.watch(syncStateStoreProvider);
+      // 两个键各读一次（同 `deliverableLocalIndexProvider` 的策略）：
+      // workspace 布局记录带 `{gid}/` 前缀，单 group 布局的记录键就是 groupId
+      // 本身。目录未绑定时状态表必然为空（绑定与状态清空在同一事务里，
+      // 见 `DriftSyncStateStore.bindLocalRoot`），读出来就是空状态，无需特判。
+      final workspace = await store.load(workspaceStateKey);
+      // 单 group 布局的状态键 = groupId 本身，无法枚举（没有「列出全部键」的
+      // 接口）。但定向同步与全量同步写的是**同一个** workspace 键（见
+      // `SyncSingleGroupScope` 共用 [workspaceStateKey] 的设计），单 group 键
+      // 只能由程序化配置产出（`SyncScopeConfig.toScope` 的注释），列表场景
+      // 暂不覆盖它——文件条在那种配置下不显示，属可接受降级。
+      return groupFileSummariesFromStates(workspaceState: workspace);
+    }, name: 'groupFileSummaries');
+
+/// 把 workspace 键的记录聚合成逐 group 统计（供上方 provider；独立函数便于单测）。
+Map<String, GroupFileSummary> groupFileSummariesFromStates({
+  required SyncState workspaceState,
+}) {
+  // 按 groupId 归并：workspace 布局的记录带 `{gid}/` 前缀，首段即 groupId。
+  // 首段不是合法 groupId 形状的行（防御）也交给聚合函数——它会按空/非法
+  // group id 的路径返回 null，自然丢弃。
+  final byGroup = <String, List<MapEntry<String, SyncedFile>>>{};
+  workspaceState.files.forEach((relPath, file) {
+    final slash = relPath.indexOf('/');
+    if (slash <= 0) return;
+    byGroup
+        .putIfAbsent(relPath.substring(0, slash), () => [])
+        .add(MapEntry(relPath.substring(slash + 1), file));
+  });
+
+  final out = <String, GroupFileSummary>{};
+  byGroup.forEach((groupId, entries) {
+    final s = groupFileSummaryOf(
+      groupId: groupId,
+      workspaceState: SyncState(
+        files: {for (final e in entries) e.key: e.value},
+      ),
+    );
+    if (s != null) out[groupId] = s;
+  });
+  return out;
+}
+
 /// 查询某个交付物在**同步目录**里的本地绝对路径（未同步返回 null）。
 ///
 /// 装配给 `GroupDeliverablesPanel.resolveLocalPath`。

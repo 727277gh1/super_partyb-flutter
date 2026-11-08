@@ -362,6 +362,11 @@ class _HomePage extends ConsumerWidget {
     final pendingCount = ref
         .watch(pendingConfirmationCountProvider)
         .maybeWhen(data: (n) => n, orElse: () => 0);
+    // 本地交付物统计快照：未加载完/失败时给空 Map（文件条不显示，不阻断列表）。
+    // 加载完成后 provider 发新值，本 widget 重建，文件条自然出现。
+    // 用 `.value` 而非 `watch(future)`：本页不该因快照重算而整页重建（同
+    // 本文件其它 `.value` 的取向）。
+    final fileSummaries = ref.watch(groupFileSummariesProvider).value;
     return GroupListPage(
       api: api,
       // group 变更实时增量更新（新建/删除/归档/改名）。
@@ -381,6 +386,9 @@ class _HomePage extends ConsumerWidget {
       // `AgentFilePreviewCallbacks` 的取向：IO 与 URL 拼装留装配层。
       onOpenSnapshotSite: _openSnapshotSite,
       onSaveSnapshot: _saveSnapshotFile,
+      groupFileSummary: fileSummaries == null
+          ? null
+          : (groupId) => fileSummaries[groupId],
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       // 工作台（小程序 BFF 投影层）。

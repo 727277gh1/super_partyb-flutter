@@ -1740,6 +1740,53 @@ final uploadFileReaderFactoryProvider =
       return (String localRoot) => LocalFileSink(localRoot);
     });
 
+// ==================== 对话列表卡片的本地交付物统计 ====================
+//
+// 与桌面端同名同构（装配逻辑见桌面端 providers.dart 的同名一节）：
+// 把同步状态库的 workspace 键记录按 group 聚合成「N 个文件 · 体积 · 同步
+// 时间」，供 `GroupListPage.groupFileSummary` 逐行查。
+//
+// ## 移动端为什么也需要它
+//
+// 移动端的同步目录是固定的沙箱路径（`syncLocalRootProvider`），同步页会把
+// workspace 全量拉到本地——也就是说移动端**同样有「已同步到本地」的数据**，
+// 文件条在手机上同样能兑现。同步从未跑过时状态表为空，文件条不显示。
+
+/// 全部 group 的本地交付物统计快照（groupId → 统计；与桌面端同名同构）。
+final groupFileSummariesProvider =
+    FutureProvider<Map<String, GroupFileSummary>>((ref) async {
+      final store = ref.watch(syncStateStoreProvider);
+      // 单 group 布局的状态键无法枚举，与桌面端同一降级：只聚合 workspace 键。
+      final workspace = await store.load(workspaceStateKey);
+      return groupFileSummariesFromStates(workspaceState: workspace);
+    }, name: 'groupFileSummaries');
+
+/// 把 workspace 键的记录聚合成逐 group 统计（与桌面端同名同构；独立函数便于单测）。
+Map<String, GroupFileSummary> groupFileSummariesFromStates({
+  required SyncState workspaceState,
+}) {
+  final byGroup = <String, List<MapEntry<String, SyncedFile>>>{};
+  workspaceState.files.forEach((relPath, file) {
+    final slash = relPath.indexOf('/');
+    if (slash <= 0) return;
+    byGroup
+        .putIfAbsent(relPath.substring(0, slash), () => [])
+        .add(MapEntry(relPath.substring(slash + 1), file));
+  });
+
+  final out = <String, GroupFileSummary>{};
+  byGroup.forEach((groupId, entries) {
+    final s = groupFileSummaryOf(
+      groupId: groupId,
+      workspaceState: SyncState(
+        files: {for (final e in entries) e.key: e.value},
+      ),
+    );
+    if (s != null) out[groupId] = s;
+  });
+  return out;
+}
+
 /// 回传是否在途（与桌面端同名同构；移动端无托盘，但保留状态供 UI 禁用按钮）。
 final uploadInFlightProvider = NotifierProvider<UploadInFlightNotifier, bool>(
   UploadInFlightNotifier.new,
