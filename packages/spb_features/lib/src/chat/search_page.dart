@@ -276,9 +276,8 @@ class _HitTile extends StatelessWidget {
               const SizedBox(height: SpbSpacing.xs),
               Text(
                 _relativeTime(hit.createdAt!),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ],
           ],

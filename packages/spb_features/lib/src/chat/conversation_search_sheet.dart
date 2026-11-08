@@ -178,7 +178,7 @@ class _ScopeNotice extends StatelessWidget {
       color: scheme.surfaceContainerHighest,
       child: Text(
         '只搜索了已加载的内容，更早的历史尚未加载',
-        style: Theme.of(context).textTheme.labelSmall
+        style: SpbType.listMeta(Theme.of(context).textTheme)
             ?.copyWith(color: scheme.onSurfaceVariant),
       ),
     );
@@ -210,9 +210,8 @@ class _SummaryLine extends StatelessWidget {
         child: Text(
           text,
           key: const ValueKey('conversation-search-summary'),
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
+          style: SpbType.listMeta(theme.textTheme)
+              ?.copyWith(color: scheme.onSurfaceVariant),
         ),
       ),
     );
@@ -247,9 +246,8 @@ class _HitTile extends StatelessWidget {
         children: [
           Text(
             label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+            style: SpbType.badge(theme.textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
         ],
       ),

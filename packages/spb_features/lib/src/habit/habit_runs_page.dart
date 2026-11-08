@@ -391,7 +391,7 @@ class HabitDailyBudgetBar extends StatelessWidget {
               ),
               Text(
                 exhausted ? '额度已用尽' : '剩余 ${budget.remaining} 次',
-                style: textTheme.labelSmall?.copyWith(color: color),
+                style: SpbType.badge(textTheme)?.copyWith(color: color),
               ),
             ],
           ),
@@ -463,9 +463,8 @@ class HabitRunTile extends StatelessWidget {
               const Spacer(),
             Text(
               _formatTime(run.createdAt),
-              style: textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ],
         ),

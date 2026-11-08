@@ -260,11 +260,11 @@ class _MapPainter extends CustomPainter {
       canvas.drawCircle(Offset(p.x, p.y), 5, ringPaint);
       if (marker.title.isNotEmpty) {
         // 标签直接画在画布上（不做命中测试/换行）：它是**辅助**信息，
-        // 完整标题由下方列表承载。
+        // 完整标题由下方列表承载。字号取 SpbType 的可读下界（12px）。
         final tp = TextPainter(
           text: TextSpan(
             text: marker.title,
-            style: TextStyle(fontSize: 11, color: labelColor),
+            style: TextStyle(fontSize: 12, color: labelColor),
           ),
           textDirection: TextDirection.ltr,
           maxLines: 1,

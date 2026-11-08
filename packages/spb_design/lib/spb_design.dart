@@ -6,5 +6,6 @@ library;
 
 export 'src/fonts.dart';
 export 'src/theme.dart';
+export 'src/type.dart';
 export 'src/theme_mode.dart';
 export 'src/tokens.dart';

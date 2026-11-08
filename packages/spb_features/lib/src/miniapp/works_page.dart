@@ -429,7 +429,7 @@ class _WorkCard extends StatelessWidget {
                 Text(
                   '${work.progress.completed}/${work.progress.total}'
                   '${work.progress.currentStepTitle == null ? '' : ' · ${work.progress.currentStepTitle}'}',
-                  style: textTheme.labelSmall,
+                  style: SpbType.listMeta(textTheme),
                 ),
               ],
               if (work.latestSummary != null &&
@@ -454,9 +454,8 @@ class _WorkCard extends StatelessWidget {
                     const SizedBox(width: SpbSpacing.xs),
                     Text(
                       '${work.pendingConfirmationCount} 项待确认',
-                      style: textTheme.labelSmall?.copyWith(
-                        color: scheme.tertiary,
-                      ),
+                      style: SpbType.badge(textTheme)
+                          ?.copyWith(color: scheme.tertiary),
                     ),
                   ],
                 ),
@@ -500,7 +499,7 @@ class _StatusChip extends StatelessWidget {
       ),
       child: Text(
         work.displayStatus,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg),
+        style: SpbType.badge(Theme.of(context).textTheme)?.copyWith(color: fg),
       ),
     );
   }

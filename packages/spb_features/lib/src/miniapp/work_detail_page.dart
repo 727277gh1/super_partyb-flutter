@@ -531,9 +531,8 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
               child: Text(
                 detail.displayStatus,
                 key: const ValueKey('miniapp-work-status'),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSecondaryContainer,
-                ),
+                style: SpbType.badge(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
               ),
             ),
             const SizedBox(width: SpbSpacing.sm),
@@ -741,7 +740,7 @@ class _ConfirmationCard extends StatelessWidget {
               for (final i in card.requiredInputs)
                 Text(
                   '· ${i.label}${i.required ? '（必填）' : ''}',
-                  style: Theme.of(context).textTheme.labelSmall,
+                  style: SpbType.listMeta(Theme.of(context).textTheme),
                 ),
             ],
             const SizedBox(height: SpbSpacing.sm),
@@ -805,7 +804,7 @@ class _ArtifactTile extends StatelessWidget {
       ),
       subtitle: Text(
         '${artifact.type} · ${_humanBytes(artifact.sizeBytes)}',
-        style: Theme.of(context).textTheme.labelSmall,
+        style: SpbType.listMeta(Theme.of(context).textTheme),
       ),
       trailing: downloading
           ? const SizedBox(

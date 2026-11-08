@@ -275,6 +275,8 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
       const PopupMenuItem<AgentPick>(
         enabled: false,
         height: 36,
+        // 菜单头是说明文字，12px（bodySmall 同级）；不引用 SpbType 是
+        // 因为它要 TextStyle 而非 TextTheme 槽位，且本条在 const 上下文里。
         child: Text('选择后随下一条消息生效（沿用当前对话上下文）', style: TextStyle(fontSize: 12)),
       ),
       const PopupMenuDivider(),

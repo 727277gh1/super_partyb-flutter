@@ -343,7 +343,8 @@ class _ConfirmationTile extends StatelessWidget {
         const SizedBox(width: SpbSpacing.xxs),
         Text(
           label,
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+          style: SpbType.badge(Theme.of(context).textTheme)
+              ?.copyWith(color: color),
         ),
       ],
     );

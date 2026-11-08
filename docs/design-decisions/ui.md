@@ -898,3 +898,66 @@ overflow，故门禁全绿而界面不可用——与 §6.16（窄屏 AppBar 溢
 - **不在列表页 / AppBar 再放一份**：同一事实两处入口 = 两处状态要同步，而设置面板这一处已覆盖
   「我就在这个对话里，要拿它的 id」这个唯一真实场景。
 - **不显示 `user_id` / `turn_id`**：用户侧报障场景用不到；`turn_id` 已在动态面板的工具调用里可见。
+
+### 6.76 列表页文字偏小：`SpbType` 语义令牌 + 元数据 11px→12px（2026-11）
+
+#### 缺陷
+
+列表类页面（对话列表、我的回合、工作台、习惯、待确认、搜索）的**元数据行**
+（相对时间、状态词、来源、所属群名）几乎全部用 `textTheme.labelSmall`——
+Material 3 下它是 **11px / w500 / letterSpacing 0.5**，且这套参数是为拉丁字母
+小标签设计的。侧边栏角标甚至硬编码 `fontSize: 10`（全应用最小的字放在最需要
+被看见的未读数上），tab 标签也用 11px（比内容区元数据还小，主次颠倒）。
+
+中文笔画密度高，小字号可读性衰减比拉丁字母快得多；且「结项记录生成失败」
+这类带 error 语义色的**状态词**也用 11px，用户需要读懂的不只是装饰。
+
+#### 根因链（排查时容易误判的三处）
+
+1. **`ThemeData().textTheme` 的 fontSize 全是 null**。几何信息（字号/字重）由
+   `Theme.of(context)` 在运行时经 `ThemeData.localize(theme,
+   typography.geometryThemeFor(scriptCategory))` 合并 `englishLike2021` 才得出。
+   测试里断言字号必须走同一条 localize 路径（见 `tokens_test.dart` 的
+   `resolve()`），否则断言的是 null。
+2. **`listTileTheme.dense: true` 会硬改 ListTile 字号**（`list_tile.dart` 的
+   `fontSize: _isDenseLayout ? 13.0 : null`），且发生在**显式 style 之后**的
+   `copyWith`——`my_turns_page` 曾给 title 显式写 `bodyMedium`（意图 14px）
+   实际渲染 13px。dense 在 M3 下官方明确不建议（`list_tile.dart:501`），
+   本次**未动**它（影响面全局，另立决策）。
+3. **golden 不保护列表页**：4 张 spec 卡 golden 只盖 `spec_ui_card` /
+   `map_spec_card`。本次唯一受影响的基线是 `map_spec_card`（画布标签 11→12）。
+
+#### 修法：语义令牌（`SpbType`），不是逐处改字号
+
+新增 `packages/spb_design/lib/src/type.dart`，把「某类 UI 文字该多大」收敛为
+一处，页面按语义取用而非各自挑 TextTheme 槽位（挑槽位的人未必记得槽位的
+实际字号）：
+
+| 语义 | 令牌 | 实际样式 | 替换掉的 |
+|---|---|---|---|
+| 列表元数据行（时间/状态/来源） | `SpbType.listMeta` | `bodySmall`（12 / w400） | `labelSmall`（11） |
+| 徽标 / 状态 chip / tab 标签 | `SpbType.badge` | `labelMedium`（12 / w500） | `labelSmall`（11） |
+| 角标数字 | `SpbType.badgeCount` | `labelSmall` 归零 letterSpacing（11） | 硬编码 `fontSize: 10` |
+
+下界由 `tokens_test.dart` 钉住（元数据/徽标 ≥12、角标 ≥11）；想把字改小先改
+`SpbType` 并同步测试，**不要**在页面里 `copyWith(fontSize: …)`。
+
+#### 迁移范围（列表页优先，聊天面板留待后续）
+
+- **列表页全量迁移**：`group_list_page` / `my_turns_page` / `chat_sidebar`
+  （tab + 角标）/ `search_page` / `conversation_search_sheet` /
+  `pending_confirmations_page` / `habit_runs_page` / `habits_page` /
+  `works_page` / `work_detail_page`。
+- **硬编码清理**：`map_spec_card` 画布标签 11→12（经 golden 复核）、
+  `agent_switcher` 菜单头加注释说明为何保留 12。
+- **有意不改**：聊天内面板（`turn_detail_panel` / `agent_picker` /
+  `group_settings_panel` 等约 30 处 `labelSmall`）与设置/同步页——它们是
+  对话流的附属 UI，字号层次与列表页不同，留待与 dense 决策一起统一。
+
+#### 有意不做
+
+- **不摘 `dense: true` / `VisualDensity.compact`**：它们是全局行高/密度的
+  取舍（注释写「桌面端」，实际两端共用），动它要按平台分支并重出一批
+  布局测试，另立决策。
+- **不改 `labelSmall` 本身**：它是 Flutter 组件的默认槽位（`Badge` 等内部
+  用），改主题槽位会外溢到没审计过的组件。

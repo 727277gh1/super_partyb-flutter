@@ -254,7 +254,9 @@ class _ChatSidebarState extends State<ChatSidebar> {
                     const SizedBox(width: SpbSpacing.xs),
                     Text(
                       tab.label,
-                      style: theme.textTheme.labelSmall?.copyWith(
+                      // 一级导航用 12px（labelMedium）：11px 的 labelSmall
+                      // 比内容区元数据还小，主次颠倒。层次靠字重区分。
+                      style: SpbType.badge(theme.textTheme)?.copyWith(
                         color: selected ? active : scheme.onSurfaceVariant,
                         fontWeight: selected ? FontWeight.w600 : null,
                       ),
@@ -287,8 +289,10 @@ class _ChatSidebarState extends State<ChatSidebar> {
       child: Text(
         '$count',
         textAlign: TextAlign.center,
-        style: Theme.of(context).textTheme.labelSmall
-            ?.copyWith(color: scheme.onSecondaryContainer, fontSize: 10),
+        // 角标数字走 SpbType.badgeCount（11px + 零字距）：曾硬编码
+        // fontSize: 10，是全应用最小的字却放在最需要被看见的未读数上。
+        style: SpbType.badgeCount(Theme.of(context).textTheme)
+            ?.copyWith(color: scheme.onSecondaryContainer),
       ),
     );
   }

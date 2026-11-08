@@ -471,9 +471,8 @@ class _MyTurnsPageState extends State<MyTurnsPage> {
             child: Text(
               // 说清「为什么灰了」：不是本端不支持，而是这个端点不接筛选参数。
               '搜索模式下筛选条件不生效（按关键词全量搜索）',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
           ),
         ],
@@ -777,16 +776,14 @@ class _TurnTile extends StatelessWidget {
             if (t.groupTitle != null && t.groupTitle!.isNotEmpty)
               Text(
                 t.groupTitle!,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
+                style: SpbType.listMeta(theme.textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
                 overflow: TextOverflow.ellipsis,
               ),
             Text(
               _formatTime(t.createdAt),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ],
         ),
@@ -807,7 +804,7 @@ class _TurnTile extends StatelessWidget {
         color: scheme.surfaceContainerHighest,
         borderRadius: SpbRadius.cardAll,
       ),
-      child: Text(turn.source.label, style: textTheme.labelSmall),
+      child: Text(turn.source.label, style: SpbType.badge(textTheme)),
     );
   }
 
@@ -835,7 +832,7 @@ class _TurnTile extends StatelessWidget {
         color: effectiveBg,
         borderRadius: SpbRadius.cardAll,
       ),
-      child: Text(label, style: textTheme.labelSmall),
+      child: Text(label, style: SpbType.badge(textTheme)),
     );
   }
 

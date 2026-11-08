@@ -1020,7 +1020,7 @@ class _StatusChip extends StatelessWidget {
       decoration: BoxDecoration(color: bg, borderRadius: SpbRadius.cardAll),
       child: Text(
         status.label,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg),
+        style: SpbType.badge(Theme.of(context).textTheme)?.copyWith(color: fg),
       ),
     );
   }

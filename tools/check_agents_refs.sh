@@ -105,6 +105,11 @@ EXEMPT = {
     # §6.60 用它钉死「插件默认图片渲染不带解码上限」的证据
     # （`imageSpan` 默认分支是裸 `NetworkImage(url)`）。
     'shared_render.dart': 'gpt_markdown 插件源码文件，非本仓库符号（§6.60）',
+    # Flutter SDK 的 material 组件文件名（`packages/flutter/lib/src/material/`）。
+    # §6.76 用它钉住「dense 会硬改 ListTile 字号且发生在显式 style 之后」
+    # 的证据（`fontSize: _isDenseLayout ? 13.0 : null`）——那是对 SDK 内部
+    # 实现的引用，本仓库当然没有这个文件。
+    'list_tile.dart': 'Flutter SDK 文件名，非本仓库符号（§6.76）',
 }
 
 with open(DOC, encoding='utf-8') as fh:

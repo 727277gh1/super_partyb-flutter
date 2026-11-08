@@ -275,6 +275,50 @@ void main() {
     });
   });
 
+  group('SpbType 令牌', () {
+    // ## 为什么要有下界
+    //
+    // 列表页文字偏小曾是真实缺陷（2026-11）：元数据全用 labelSmall（11px）、
+    // 角标硬编码 10px。中文字形笔画密度高，11px 以下可读性急剧衰减。
+    // 本组断言钉住「语义令牌不小于可读下界」，防止后续又悄悄滑回去。
+    // 想改字号请改 SpbType 本身（一处生效全局），并同步更新这里的下界。
+    const minReadable = 12.0;
+
+    // ⚠️ 裸 `ThemeData().textTheme` 的各样式 **fontSize 为 null**：几何信息
+    // （字号/字重）由 `Theme.of` 在运行时经 `ThemeData.localize` 按
+    // scriptCategory 合并 `englishLike2021` 才得出（见 material/theme.dart）。
+    // 生产页面全部经 `Theme.of(context)` 取 textTheme，故这里也走同一条
+    // localize 路径，断言的才是真实渲染值。
+    TextTheme resolve() {
+      final theme = SpbTheme.light();
+      return ThemeData.localize(
+        theme,
+        theme.typography.geometryThemeFor(ScriptCategory.englishLike),
+      ).textTheme;
+    }
+
+    test('listMeta 不小于可读下界（列表元数据必须能读懂）', () {
+      final style = SpbType.listMeta(resolve());
+      expect(style, isNotNull);
+      expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
+    });
+
+    test('badge 不小于可读下界（徽标是状态词，不是装饰）', () {
+      final style = SpbType.badge(resolve());
+      expect(style, isNotNull);
+      expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
+    });
+
+    test('badgeCount 至少 11（Flutter Badge 的默认字号）', () {
+      final style = SpbType.badgeCount(resolve());
+      expect(style, isNotNull);
+      expect(style!.fontSize, greaterThanOrEqualTo(11.0));
+      // letterSpacing 归零是 badgeCount 的本职（数字不需要拉丁小标签的
+      // 0.5 间距，间距只会让多位数字更散）。
+      expect(style.letterSpacing, 0);
+    });
+  });
+
   group('SpbThemeMode 编解码（跨端持久化契约）', () {
     test('prefKey 固定（改它会让老用户的设置静默丢失）', () {
       // 这个键是持久化契约：已发布的客户端把它写进了本地存储。
