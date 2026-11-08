@@ -214,6 +214,91 @@ void main() {
     });
   });
 
+  group('SpbTheme 密度分支（§6.77）', () {
+    // 与 localize 同源的真实字号：裸 ThemeData 的 textTheme fontSize 为
+    // null（见 SpbType 组顶部的说明），必须经 ThemeData.localize 才拿得到。
+    TextTheme resolved(ThemeData theme) => ThemeData.localize(
+      theme,
+      theme.typography.geometryThemeFor(ScriptCategory.englishLike),
+    ).textTheme;
+
+    test('桌面端：全局 compact + ListTile 级 compact + 标题钉在 14px', () {
+      final theme = SpbTheme.lightFor(TargetPlatform.linux);
+      expect(theme.visualDensity, VisualDensity.compact);
+      expect(theme.listTileTheme.visualDensity, VisualDensity.compact);
+      expect(
+        theme.listTileTheme.dense,
+        isNot(true),
+        reason: 'dense 在 M3 下会硬改字号，禁用',
+      );
+
+      final title = resolved(theme);
+      expect(title.titleSmall?.fontSize, 14.0);
+    });
+
+    test('移动端：standard 密度（触控目标 ≥48dp），不设 ListTile 级覆盖', () {
+      for (final p in [TargetPlatform.android, TargetPlatform.iOS]) {
+        final theme = SpbTheme.lightFor(p);
+        expect(theme.visualDensity, VisualDensity.standard, reason: '$p');
+        expect(theme.listTileTheme.visualDensity, isNull, reason: '$p');
+        expect(theme.listTileTheme.dense, isNot(true), reason: '$p');
+      }
+    });
+
+    test('ListTile 标题样式只设桌面端（移动端用 M3 默认 bodyLarge）', () {
+      expect(
+        SpbTheme.lightFor(TargetPlatform.linux).listTileTheme.titleTextStyle,
+        isNotNull,
+      );
+      expect(
+        SpbTheme.lightFor(TargetPlatform.android).listTileTheme.titleTextStyle,
+        isNull,
+      );
+    });
+
+    test('明暗两套的分支一致（dark 不会漏掉分支）', () {
+      expect(
+        SpbTheme.darkFor(TargetPlatform.linux).visualDensity,
+        VisualDensity.compact,
+      );
+      expect(
+        SpbTheme.darkFor(TargetPlatform.android).visualDensity,
+        VisualDensity.standard,
+      );
+    });
+
+    testWidgets('移动端单行 ListTile 实际高度 ≥48dp（触控目标下界）', (tester) async {
+      // 摘掉 dense + 回到 standard 的全部意义就在这一条：移动端手指能点中。
+      // 若将来有人把 dense 或 compact 加回移动端分支，这里会挂。
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: SpbTheme.lightFor(TargetPlatform.android),
+          home: const Scaffold(body: ListTile(title: Text('行'))),
+        ),
+      );
+      final height = tester.getSize(find.byType(ListTile)).height;
+      expect(height, greaterThanOrEqualTo(48.0));
+    });
+
+    testWidgets('桌面端单行 ListTile 维持紧凑（≤56dp，compact 生效）', (tester) async {
+      // 反向钉住：桌面分支的 compact 必须真的在压行高，否则「桌面一屏
+      // 更多内容」的意图就丢了（静默退化成与移动端同高也该被拦住）。
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: SpbTheme.lightFor(TargetPlatform.linux),
+          home: const Scaffold(body: ListTile(title: Text('行'))),
+        ),
+      );
+      final height = tester.getSize(find.byType(ListTile)).height;
+      expect(height, lessThanOrEqualTo(56.0));
+      expect(
+        height,
+        lessThan(56.0),
+        reason: 'compact 应比移动端 standard 的 56dp 更矮',
+      );
+    });
+  });
+
   group('SpbTheme 构建', () {
     test('light() 不抛且 brightness 正确', () {
       // 主题在 `main()` 里构建一次，抛了就是白屏启动失败。

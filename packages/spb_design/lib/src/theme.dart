@@ -55,13 +55,33 @@ class SpbTheme {
     final fontFamily = SpbFonts.sansFor(target);
     final fallback = SpbFonts.sansFallbackFor(target);
 
+    // 密度按平台分支（§6.77）：桌面端鼠标操作无「手指拍击」误差，控件密度
+    // 高（一屏更多内容）；移动端触控需要 ≥48dp 的目标，standard 才能达标。
+    // 测试环境（defaultTargetPlatform == android）自动落移动端分支。
+    final desktop = switch (target) {
+      TargetPlatform.windows ||
+      TargetPlatform.macOS ||
+      TargetPlatform.linux => true,
+      TargetPlatform.android ||
+      TargetPlatform.iOS ||
+      TargetPlatform.fuchsia => false,
+    };
+    final density = desktop ? VisualDensity.compact : VisualDensity.standard;
+    // M3 字号几何（titleSmall = 14/w500）。ThemeData 的 textTheme 在构造后
+    // fontSize 为 null（几何由 Theme.of 经 localize 合并），拿不到现成样式，
+    // 故直接从 typography 取几何主题（与 localize 用的同源）。
+    final m3Geometry = Typography.material2021(
+      platform: target,
+      colorScheme: scheme,
+    ).englishLike;
+
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
       fontFamily: fontFamily,
       fontFamilyFallback: fallback,
-      // 桌面端：控件密度略高，一屏能放更多内容。
-      visualDensity: VisualDensity.compact,
+      // 桌面端：控件密度略高，一屏能放更多内容（移动端 standard，见上）。
+      visualDensity: density,
       appBarTheme: AppBarTheme(
         centerTitle: false,
         elevation: 0,
@@ -82,9 +102,19 @@ class SpbTheme {
           vertical: SpbSpacing.sm,
         ),
       ),
-      listTileTheme: const ListTileThemeData(
-        dense: true,
-        contentPadding: EdgeInsets.symmetric(horizontal: SpbSpacing.md),
+      // ⚠️ 不设 `dense: true`（§6.77）：M3 下它把标题硬压到 13px 且发生在
+      // 显式 style **之后**的 copyWith（list_tile.dart:925）——连页面显式
+      // 指定 bodyMedium(14) 都会被覆盖，官方也明确不建议（list_tile.dart:501）。
+      // 桌面端的紧凑诉求改由 ListTile 级 visualDensity + 显式标题样式承担。
+      listTileTheme: ListTileThemeData(
+        contentPadding: const EdgeInsets.symmetric(horizontal: SpbSpacing.md),
+        // 只对 ListTile 补密度（行高 -8px），不碰字号——标题字号由下面
+        // titleTextStyle 显式钉在 titleSmall(14)：裸 M3 默认是 bodyLarge(16)，
+        // 对中文列表行偏大；显式声明后不再有「以为 14 实际 13」的落差。
+        visualDensity: desktop ? VisualDensity.compact : null,
+        titleTextStyle: desktop
+            ? m3Geometry.titleSmall?.copyWith(color: scheme.onSurface)
+            : null,
       ),
       dividerTheme: DividerThemeData(
         space: 1,

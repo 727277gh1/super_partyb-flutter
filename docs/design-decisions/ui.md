@@ -954,10 +954,70 @@ Material 3 下它是 **11px / w500 / letterSpacing 0.5**，且这套参数是为
   `group_settings_panel` 等约 30 处 `labelSmall`）与设置/同步页——它们是
   对话流的附属 UI，字号层次与列表页不同，留待与 dense 决策一起统一。
 
+#### 有意不做（→ 已由 §6.77 接手）
+
+- ~~**不摘 `dense: true` / `VisualDensity.compact`**~~：**已做**，见 §6.77
+  （密度按平台分支 + 两端摘 dense）。
+- **不改 `labelSmall` 本身**：它是 Flutter 组件的默认槽位（`Badge` 等内部
+  用），改主题槽位会外溢到没审计过的组件——这一条仍成立。
+
+### 6.77 密度按平台分支：摘掉全局 `dense` + `VisualDensity` 分端（2026-11）
+
+承接 §6.76（本文上文）：字号修完后，剩下两个全局密度设置一并收口。
+
+#### 缺陷
+
+`SpbTheme` 曾无条件设 `visualDensity: VisualDensity.compact` +
+`listTileTheme.dense: true`，注释写「桌面端」，实际**两端共用**。后果：
+
+1. **移动端触控目标不达标**：单行 ListTile = 56 − 8(compact) − 8(dense) = 40dp，
+   低于 Material 48dp 指导线。
+2. **dense 的 13px 陷阱**：M3 下 dense 把 ListTile 标题硬压到 13px
+   （`list_tile.dart:925` 的 `fontSize: _isDenseLayout ? 13.0 : null`），且发生在
+   **显式 style 之后的 copyWith**——`my_turns_page` 曾给 title 显式写
+   `bodyMedium`（意图 14px）实际渲染 13px。这个覆盖**无法用显式样式对抗**，
+   只有不设 dense。官方也明确不建议（`list_tile.dart:501`）。
+
+#### 修法
+
+`_build` 里按 `target` 分支（沿用 `lightFor(platform)` 的注入模式）：
+
+| 设置 | 桌面（win/mac/linux） | 移动（android/ios/fuchsia） |
+|---|---|---|
+| 全局 `visualDensity` | `compact` | `standard` |
+| `listTileTheme.dense` | **删除**（两端都不设） | 同左 |
+| `listTileTheme.visualDensity` | `compact`（只压行高不碰字号） | null（M3 默认） |
+| `listTileTheme.titleTextStyle` | `titleSmall`(14/w500) + `onSurface` | null（M3 默认 bodyLarge(16)） |
+
+要点：
+
+- **桌面端显式 `titleSmall` 而非靠 dense 偷字号**：裸 M3 的 ListTile 标题是
+  bodyLarge(16)，对中文列表行偏大；显式钉在 14，与 §6.76 的令牌层次衔接
+  （元数据 12 < 标题 14）。「以为 14 实际 13」的落差从机制上消失。
+- **字号几何直接取 `Typography.material2021(...).englishLike`**：裸
+  `ThemeData` 的 textTheme fontSize 为 null（几何由 `Theme.of` 经 localize
+  合并，见 §6.76 根因链第 1 条），构造期拿不到现成样式，取同源几何主题。
+- **移动端不设 titleTextStyle**：移动端列表标题保持 M3 默认 16px——触屏
+  阅读距离更远，大一号是合理的平台差异，不是不统一。
+
+#### 验证（几何断言钉住，`tokens_test.dart`）
+
+- 移动端单行 ListTile 实际高度 **≥48dp**（回归到合规触控目标）；
+- 桌面端单行 **<56dp** 且 ≥40（compact 真的在压行高，静默退化会被拦住）;
+- 明暗两套分支一致（dark 不会漏分支）。
+
+golden 重出 2 张（`spec_ui_follow_up_card` / `error_state_with_retry`）：
+diff 图确认只是按钮胶囊高度 compact→standard 的预期变化（测试环境
+`defaultTargetPlatform == android`，落移动端分支）。
+
+#### 未验证（本机边界，§9）
+
+- 真机观感：移动端行高变化（40→48）后一屏行数变少、桌面端列表标题
+  13→14 的视觉密度，需按 `docs/` 手工验证清单在设备上复核。
+- Windows/macOS 桌面分支本机只验证了主题构造与断言，未跑真机。
+
 #### 有意不做
 
-- **不摘 `dense: true` / `VisualDensity.compact`**：它们是全局行高/密度的
-  取舍（注释写「桌面端」，实际两端共用），动它要按平台分支并重出一批
-  布局测试，另立决策。
-- **不改 `labelSmall` 本身**：它是 Flutter 组件的默认槽位（`Badge` 等内部
-  用），改主题槽位会外溢到没审计过的组件。
+- **不给移动端设 `titleTextStyle`**（理由见上）。
+- **不动面板内 ~30 处 `labelSmall`**：它们与旧 dense(13px) 语境配套，
+  现桌面标题已是 14px，字号层次变化后应逐个语义判定，另立一轮。
