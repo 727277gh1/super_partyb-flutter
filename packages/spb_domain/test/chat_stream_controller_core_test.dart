@@ -374,6 +374,78 @@ void main() {
       await c.dispose();
     });
 
+    test('回填在途期间不得把上一个 group 的时间线留在页面上（切组先清屏）', () async {
+      // 用户可见现象：从 A 对话点进 B（或新建一个 group），打开后**先显示 A 的
+      // 内容**，过一会儿（timeline 请求往返完成）才变成 B 的。
+      //
+      // 根因是两件事同时发生：
+      //
+      // 1. `switchGroup` 只 `_buffer.clear()`，**不置脏、不 emit**；
+      // 2. 回填是 `await` 的一次网络往返，期间没有任何推送。
+      //
+      // 于是页面拿到的仍是上一个 group 的归约结果（`_cachedReduction` 未失效），
+      // items 流也不推送——旧时间线一直留在屏幕上直到回填返回。
+      //
+      // 本条钉住两点：清缓冲后**同步**读 snapshot 必须立刻为空；且在途期间推给
+      // 页面的必须是空时间线（而不是 A 的内容）。
+      final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+      mockTimeline();
+      adapter.onGet(
+        '/chat/groups/grp_2/timeline',
+        (server) => server.reply(
+          200,
+          {
+            'items': [
+              sseEvent(
+                EventTypes.message,
+                id: 'g2_1',
+                groupId: 'grp_2',
+                payload: {'text': '第二个对话'},
+              ),
+            ],
+            'next_before_global_seq': '',
+          },
+          // 网络往返刻意放慢：在途窗口就是用户看到旧内容的那段时间。
+          delay: const Duration(milliseconds: 100),
+        ),
+        queryParameters: {'limit': 200},
+      );
+
+      await c.start(groupId: 'grp_1');
+      sse.push(
+        EventTypes.message,
+        sseEvent(EventTypes.message, payload: {'text': '第一个对话'}, globalSeq: 2),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        (c.snapshot.single as AssistantMessageItem).text,
+        '第一个对话',
+        reason: '前提：页面此刻显示的是 A 的内容',
+      );
+
+      final emitted = <List<ConversationItem>>[];
+      final sub = c.items.listen(emitted.add);
+
+      final switching = c.switchGroup('grp_2');
+      // 同步段已清缓冲：页面若在此刻读 snapshot（首次挂载 / 重建），必须为空。
+      expect(c.snapshot, isEmpty, reason: '清缓冲后归约缓存必须立刻失效');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(emitted, isNotEmpty, reason: '清屏必须真的推给页面，而不是等回填返回');
+      expect(emitted.last, isEmpty, reason: '在途期间推的必须是空时间线，不能是 A 的内容');
+
+      await switching;
+      expect(
+        (c.snapshot.single as AssistantMessageItem).text,
+        '第二个对话',
+        reason: '回填返回后落到 B 的内容',
+      );
+
+      await sub.cancel();
+      await c.dispose();
+    });
+
     test('switchGroup 不重连且不丢续接游标（start 才会重置 cursor）', () async {
       // 回归防线：切对话若走 `start()`，`SseClient.connect()` 会把
       // `_lastEventId` 置 null——断线重连时无法带 cursor 回放，只能整段重拉。

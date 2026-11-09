@@ -820,11 +820,13 @@ class ChatStreamController {
   /// [groupId] 为 null 时进入「全局模式」，接收所有 group 的事件（用于通知中心）。
   Future<void> start({String? groupId}) async {
     _groupId = groupId;
-    _buffer.clear();
     _oldestLoadedGlobalSeq = null;
     _resetTimelineTracking();
     _resetStaleWatch();
     _resetUsageSummary(groupId);
+    // 清屏立刻推给页面：回填是一次网络往返，期间不能让上一个 group 的时间线
+    // 继续留在屏幕上（见 [_clearTimelineAndEmit]）。
+    _clearTimelineAndEmit();
     // 令牌递增要在清缓冲**之后**、发请求之前：上一轮在途回填的结果从此作废
     // （issue #55）。`_backfill` 内部也会递增，这里不递增会让上一轮在途的
     // 回填与本次回填拿到相同令牌。
@@ -886,6 +888,46 @@ class ChatStreamController {
     );
   }
 
+  /// 清空时间线，并（若原本有内容）**立刻**把「空时间线」推给页面。
+  ///
+  /// ## 为什么不能只 `_buffer.clear()`
+  ///
+  /// 回填（[_backfill]）是 `await` 的一次网络往返，期间没有任何推送。只清缓冲
+  /// 会产生两个用户可见的错误：
+  ///
+  /// 1. **`snapshot` 继续返回旧 group 的归约结果**。归约结果是缓存的
+  ///    （[_cachedReduction]），只有 `_emit()` 会置脏。于是切对话后**新挂载**的
+  ///    页面（`ConversationPage.initState` 读 `controller.snapshot`）会把另一个
+  ///    对话的时间线当作初值渲染出来；
+  /// 2. **`items` 流不推**。已挂载的页面靠这条流 `setState`，不推就收不到
+  ///    「已清空」这一事实，屏幕上的旧内容一直留到回填返回（弱网可达数秒）。
+  ///
+  /// 现象即「打开另一个对话，先看到上一个对话的内容，过一会儿才更新」。
+  ///
+  /// ## 为什么只在「原本有内容」时推
+  ///
+  /// 冷启动（缓冲本来就空）推一帧空列表没有信息量，还会把「首帧即含回填
+  /// 历史」变成「首帧空、次帧满」（见 `chat_stream_controller_core_test` 的
+  /// `start() 回填后推送 items`）。但**归约缓存仍必须置脏**：顺着 [_cachedReduction]
+  /// 读 `snapshot` 的调用方（新挂载的页面）不能拿到旧上下文的结果。
+  ///
+  /// ## 代价与取舍
+  ///
+  /// 切到**非空**对话时会先闪一帧空态提示（`emptyHint`），随后被回填内容
+  /// 替换——这与「首次进入该对话」的首帧表现一致（首次进入同样是先空后满），
+  /// 且远优于把别人的消息显示在当前对话里。若要彻底消掉这一帧，需要给控制器
+  /// 增加「回填在途」状态并在页面上渲染加载态；那是另一个刻度（页面/契约改动），
+  /// 不在本次修复范围。
+  ///
+  /// 置脏要在 `_emit()` **之前**：`_emit` 有 `_itemsController.isClosed` 的早退
+  /// 分支，控制器已关闭时至少要保证 `snapshot` 不再返回旧归约。
+  void _clearTimelineAndEmit() {
+    final hadTimeline = _buffer.isNotEmpty;
+    _buffer.clear();
+    _reductionDirty = true;
+    if (hadTimeline) _emit();
+  }
+
   /// 是否已建立过 SSE 连接（[start] 已调用过）。
   ///
   /// ## 为什么需要它（对话列表与对话页共用一条连接）
@@ -931,12 +973,14 @@ class ChatStreamController {
   /// 若在途期间再次切组，旧回填的结果会被令牌校验整页丢弃。
   Future<void> switchGroup(String? groupId) async {
     _groupId = groupId;
-    _buffer.clear();
     _oldestLoadedGlobalSeq = null;
     _resetTimelineTracking();
     _setFromCache(false);
     _resetStaleWatch();
     _resetUsageSummary(groupId);
+    // 同 [start]：清屏立刻推给页面，别让上一个 group 的内容留到回填返回
+    // （见 [_clearTimelineAndEmit]）。
+    _clearTimelineAndEmit();
     // 同 [start]：递增令牌作废在途回填（必须在清缓冲后、新回填前）。
     _backfillToken++;
     if (groupId != null) {
