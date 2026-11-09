@@ -223,5 +223,38 @@ void main() {
         matchesGoldenFile('goldens/map_spec_card.png'),
       );
     });
+
+    testWidgets('系统字号 2.0：画布上的标签跟着放大（§6.80）', (tester) async {
+      // 画布标签是 `TextPainter` 手绘的，**不会**自动跟随系统字体缩放——
+      // 曾经它固定 12px，于是 2 倍字号下「卡片文字变大、地图标签没变」。
+      // 这张基线把「标签确实跟随缩放（且仍在 120px 宽内省略）」钉住：
+      // 若哪天有人去掉 `textScaler`，标签会缩回 1 倍大小，这张图立刻变。
+      tester.binding.platformDispatcher.textScaleFactorTestValue = 2.0;
+      addTearDown(
+        tester.binding.platformDispatcher.clearTextScaleFactorTestValue,
+      );
+
+      // ⚠️ 两处高度都要放大，否则红的是**测试宿主**而不是卡片：
+      // 1. 默认测试画布是 800×600（`tester.view`），比字号先撞天花板——
+      //    不放开就会看到 `Column` 溢出 19px，误判成「卡片有 bug」；
+      // 2. `host()` 的 SizedBox 也要更高（2.0 倍时卡片整体高 ~19px）。
+      // 真实页面里卡片在可滚动的时间线里，不受这些上限约束。
+      tester.view.physicalSize = const Size(800, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        host(
+          MapSpecCard(schema: parseMapSchema(realMapSpec())!),
+          size: const Size(600, 760),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await expectLater(
+        find.byType(MapSpecCard),
+        matchesGoldenFile('goldens/map_spec_card_scale2.png'),
+      );
+    });
   });
 }

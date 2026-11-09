@@ -96,6 +96,10 @@ class MapSpecCard extends StatelessWidget {
                   routeColors: _routeColors(scheme),
                   markerColor: scheme.error,
                   labelColor: scheme.onSurfaceVariant,
+                  // 画布上的标签是 `TextPainter` 手绘的，**不会**自动跟随系统
+                  // 字体缩放（`Text` 才会）。不传就会在 2 倍字号下出现
+                  // 「卡片其余文字变大、地图标签还是 12px」的不一致。见 §6.80。
+                  textScaler: MediaQuery.textScalerOf(context),
                 ),
                 // 无障碍：轨迹图对屏幕阅读器是完全空白的自绘区域，必须给
                 // 语义标签（同 `SpecUiCard` 的进度条，issue #24 的同一判据）。
@@ -209,6 +213,7 @@ class _MapPainter extends CustomPainter {
     required this.routeColors,
     required this.markerColor,
     required this.labelColor,
+    required this.textScaler,
   });
 
   final MapSchema schema;
@@ -216,6 +221,10 @@ class _MapPainter extends CustomPainter {
   final List<Color> routeColors;
   final Color markerColor;
   final Color labelColor;
+
+  /// 系统字体缩放（`MediaQuery.textScalerOf`）。手绘文本不跟随它是缺陷
+  /// （§6.80），故必须显式传进来，并参与 [shouldRepaint] 的比较。
+  final TextScaler textScaler;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -266,6 +275,7 @@ class _MapPainter extends CustomPainter {
             style: TextStyle(fontSize: SpbType.metaSize, color: labelColor),
           ),
           textDirection: TextDirection.ltr,
+          textScaler: textScaler,
           maxLines: 1,
           ellipsis: '…',
         )..layout(maxWidth: 120);
@@ -280,7 +290,8 @@ class _MapPainter extends CustomPainter {
   bool shouldRepaint(_MapPainter old) =>
       old.schema != schema ||
       old.projection != projection ||
-      old.markerColor != markerColor;
+      old.markerColor != markerColor ||
+      old.textScaler != textScaler;
 }
 
 /// 地点行。可点时整行是 `InkWell`（有 `onTap`），不可点时是纯展示。
