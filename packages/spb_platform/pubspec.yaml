@@ -26,7 +26,7 @@ dependencies:
   ffi: ^2.2.0
   desktop_drop: ^0.8.4
   cross_file: ^0.3.5+5
-  flutter_local_notifications: ^22.3.1
+  flutter_local_notifications: ^23.0.0
 
   # ⚠️ 曾声明 window_manager / tray_manager / hotkey_manager / screen_retriever /
   # launch_at_startup / path_provider，但本包 lib **一个都没 import**——实现全在
