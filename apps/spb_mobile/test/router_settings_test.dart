@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -617,10 +618,13 @@ void main() {
       //
       // 故这里另建一个只覆盖 `tokenStoreProvider` 的容器，让 `dioProvider`
       // 走**真实实现**，再把它的适配器换成「一律 401」。
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
       final store = InMemoryTokenStore(freshTokens());
       final container = ProviderContainer(
         overrides: [
           tokenStoreProvider.overrideWithValue(store),
+          appDatabaseProvider.overrideWithValue(db),
           // 启动判定会读「生物识别解锁」偏好（走 drift → path_provider）。
           // 这个容器只关心认证/拦截器接线，不需要真库，显式关掉门禁即可
           // （不覆盖会抛 MissingPluginException，且 drift 的 LazyDatabase 会

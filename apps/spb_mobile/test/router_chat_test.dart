@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_data/spb_data.dart';
 import 'package:spb_features/spb_features.dart';
 
 import 'package:spb_mobile/providers.dart';
@@ -820,8 +822,11 @@ void main() {
       // 不在测试树中）。`StoredTokens.fromOidcTokens` 本身在 `spb_api` 已有单测；
       // 这里钉的是**接线**：这段代码真的用了它，而不是又手写一份映射。
       final store = InMemoryTokenStore();
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
       final container = ProviderContainer(
         overrides: [
+          appDatabaseProvider.overrideWithValue(db),
           tokenStoreProvider.overrideWithValue(store),
           // 不真发 HTTP：直接返回一份「真实形态」的 token 响应。
           oidcClientProvider.overrideWithValue(FakeOidcClient()),

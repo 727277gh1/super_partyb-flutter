@@ -1,11 +1,13 @@
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_data/spb_data.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
@@ -898,9 +900,14 @@ void main() {
       //
       // 故这里另建一个只覆盖 `tokenStoreProvider` 的容器，让 `dioProvider`
       // 走**真实实现**，再把它的适配器换成“一律 401”。
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
       final store = InMemoryTokenStore(freshTokens());
       final container = ProviderContainer(
-        overrides: [tokenStoreProvider.overrideWithValue(store)],
+        overrides: [
+          tokenStoreProvider.overrideWithValue(store),
+          appDatabaseProvider.overrideWithValue(db),
+        ],
       );
       addTearDown(container.dispose);
 

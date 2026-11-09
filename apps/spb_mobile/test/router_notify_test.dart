@@ -1,10 +1,12 @@
 import 'package:dio/dio.dart';
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -465,10 +467,13 @@ void main() {
       // 成裸 dio（只挂 DioAdapter，没有 AuthInterceptor），用它断言「带
       // Bearer」是空洞的（实测 Authorization 恒为 null）。故自建容器，
       // 只 override 凭证存储，让 dioProvider 走生产实现。
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
       final store = InMemoryTokenStore();
       final container = ProviderContainer(
         overrides: [
           tokenStoreProvider.overrideWithValue(store),
+          appDatabaseProvider.overrideWithValue(db),
           // 启动判定会读「生物识别解锁」偏好（走 drift → path_provider）。
           // 这个容器只关心认证/拦截器接线，不需要真库，显式关掉门禁即可
           // （不覆盖会抛 MissingPluginException，且 drift 的 LazyDatabase 会

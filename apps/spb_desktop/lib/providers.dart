@@ -513,6 +513,7 @@ final oidcCallbackHandlerProvider = Provider<OidcCallbackHandler>((ref) {
       final tokens = await ref
           .read(oidcClientProvider)
           .exchangeCode(code: code, pkce: pkce);
+      await ref.read(sessionIdentityCacheProvider).clear();
       await ref
           .read(tokenStoreProvider)
           .write(StoredTokens.fromOidcTokens(tokens));
@@ -622,6 +623,7 @@ final signInActionProvider = Provider<Future<String?> Function()>((ref) {
     // JWT，见 `OidcTokens.bearerToken` 的说明）。
     final tokens = result.tokens!;
     try {
+      await ref.read(sessionIdentityCacheProvider).clear();
       await ref
           .read(tokenStoreProvider)
           .write(StoredTokens.fromOidcTokens(tokens));
@@ -677,7 +679,7 @@ class AuthStateNotifier extends Notifier<AuthState> {
         state = AuthState.unauthenticated;
         return;
       }
-      state = AuthState.authenticated;
+      signedIn();
     } on SpbError catch (e) {
       SpbLog.warn('恢复登录态失败', {'error': e.toString()});
       state = AuthState.failed(e.message);
@@ -726,7 +728,12 @@ class AuthStateNotifier extends Notifier<AuthState> {
   }
 
   /// 凭证已落盘（回调收到 token 后调用）。
-  void signedIn() => state = AuthState.authenticated;
+  void signedIn() {
+    ref.read(sessionIdentityCacheProvider).beginSession();
+    // 新凭证可能对应另一账号，也可能恰好仍是 authenticated，不能只依赖状态变化。
+    ref.read(sessionRevisionProvider.notifier).advance();
+    state = AuthState.authenticated;
+  }
 
   /// 粘贴导入已有会话（桌面端登录闭环的入口）。
   ///
@@ -753,6 +760,7 @@ class AuthStateNotifier extends Notifier<AuthState> {
     }
 
     try {
+      await ref.read(sessionIdentityCacheProvider).clear();
       await ref.read(tokenStoreProvider).write(tokens);
     } on SpbError catch (e) {
       // 安全存储写失败（如 Linux 上 keyring 不可用）：不能假装成功，
@@ -769,6 +777,12 @@ class AuthStateNotifier extends Notifier<AuthState> {
 
   /// 登出：清凭证并切到未登录。
   Future<void> signOut() async {
+    try {
+      await ref.read(sessionIdentityCacheProvider).clear();
+    } on SpbError catch (e) {
+      // 内存归属已立即禁用；磁盘故障不能阻止清除登录凭证。
+      SpbLog.warn('登出时清除缓存归属失败', {'error': e.toString()});
+    }
     await ref.read(sessionManagerProvider).logout();
     // 确认卡判重与权限缓存属「本会话」状态：换用户后清掉（文档注释的
     // 「切用户 / 退出登录时调用」唯一允许时机）。这里 read 而非 watch：
@@ -851,6 +865,13 @@ class AuthStateNotifier extends Notifier<AuthState> {
   /// 标记会话失效（如收到 [AuthError]）。**不清凭证**：
   /// 401 可能是网关侧临时问题，清掉会让用户丢失 refresh_token。
   void markUnauthenticated(String? message) {
+    if (!state.isUnauthenticated) {
+      unawaited(
+        ref.read(sessionIdentityCacheProvider).clear().catchError((Object e) {
+          SpbLog.warn('清除失效会话的缓存归属失败', {'error': e.toString()});
+        }),
+      );
+    }
     state = message == null
         ? AuthState.unauthenticated
         : AuthState.failed(message);
@@ -936,74 +957,86 @@ final authRefreshListenableProvider = Provider<Listenable>((ref) {
 
 // ==================== 用户身份 ====================
 
-/// 当前登录用户（`GET /api/auth/me`）。
-///
-/// ## 为什么必须有它
-///
-/// `ChatApi` 的 `/users/:user_id/chat/*` 系列都要调用方传 userId，而客户端
-/// 不解析 JWT、不申请 API Key——本 Provider 是拿到 userId 的**唯一**途径。
-///
-/// 用 `FutureProvider` 让 Riverpod 缓存这次结果：多处需要 userId 时只发一次请求。
-/// **不要在 UI 里手写「先 await 拿 id 再发第二条请求」**——那样每个页面都会
-/// 各自发一次 `/api/auth/me`。
-final currentUserProvider = FutureProvider<CurrentUser>((ref) async {
-  return ref.watch(chatApiProvider).me();
+/// 会话代际独立于路由认证状态：同为 authenticated 的新凭证也必须重读身份。
+class SessionRevisionNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void advance() => state++;
+}
+
+final sessionRevisionProvider = NotifierProvider<SessionRevisionNotifier, int>(
+  SessionRevisionNotifier.new,
+);
+
+/// 持久化归属与会话切换的写入顺序由数据层统一维护（issue #103）。
+final sessionIdentityCacheProvider = Provider<SessionIdentityCache>((ref) {
+  return SessionIdentityCache(ref.watch(preferencesStoreProvider));
 });
+
+/// 当前登录用户（GET /api/auth/me），仅在同一会话内复用。
+///
+/// 只重建身份数据，不重建 Dio/SSE；新凭证和登出都会令旧 Future 失效。
+final currentUserProvider = FutureProvider<CurrentUser>(
+  (ref) async {
+    ref.watch(sessionRevisionProvider);
+    final unauthenticated = ref.watch(
+      authStateProvider.select((state) => state.isUnauthenticated),
+    );
+    if (unauthenticated) throw const AuthError('尚未登录');
+    final cache = ref.watch(sessionIdentityCacheProvider);
+    final generation = cache.generation;
+    final me = await ref.watch(chatApiProvider).me();
+    if (ref.mounted) {
+      try {
+        await cache.save(me.id, generation: generation);
+      } on Object catch (e) {
+        // 缓存写失败不应把网络已确认的身份变成登录失败。
+        SpbLog.warn('持久化用户身份失败', {'error': e.toString()});
+      }
+    }
+    return me;
+  },
+  // 未登录是状态，不是网络故障；等认证状态变更后自动重算。
+  retry: (count, error) =>
+      error is AuthError ? null : ProviderContainer.defaultRetry(count, error),
+);
 
 /// 便捷读取 userId（依赖 [currentUserProvider]）。
-final currentUserIdProvider = FutureProvider<String>((ref) async {
-  final me = await ref.watch(currentUserProvider.future);
-  return me.id;
-});
+final currentUserIdProvider = FutureProvider<String>(
+  (ref) async {
+    final me = await ref.watch(currentUserProvider.future);
+    return me.id;
+  },
+  // 身份请求已在上游重试；派生值不能在登出后自行重试 AuthError。
+  retry: (_, _) => null,
+);
 
-/// userId 的**本地持久化**副本（离线可用）。
+/// userId 的本地持久化副本，供同一会话离线启动时定位缓存。
 ///
-/// ## 为什么不能只用 [currentUserIdProvider]（issue #26 切片 A）
-///
-/// 它内部是 `chatApi.me()` ——一次 `GET /api/auth/me` **网络请求**。而对话列表
-/// 缓存要解决的正是在**断网冷启动**时展示列表，那时这个请求必然失败 →
-/// userId 拿不到 → 缓存无法定位自己的行 → 回落失效。
-///
-/// 于是把成功拿到的 userId 落进偏好表，读时**先本地后网络**：
-///
-/// | 场景 | 结果 |
-/// |---|---|
-/// | 在线 | 本地命中，零额外请求（仍会后台刷新写入，见下） |
-/// | 断网冷启动 | 本地命中 → 缓存可用 ✅ |
-/// | 首次启动（本地无值）且断网 | 返回 null → 不回落（无行可查，无法更优） |
-///
-/// ⚠️ **不在这里发网络请求**：它会在启动路径上引入一次往返（列表页首帧就要等
-/// 它），而 [currentUserIdProvider] 的调用方本来就会各自去拿。本 Provider 只
-/// 做「读本地 + 把已知值写回」，故是同步可得的 `FutureProvider`。
-///
-/// ## 为什么用 userId 而不是 session id 作缓存行归属
-///
-/// 服务端 `chat_groups.user_id` 就是 userId，且 `GET /api/auth/me` 返回它。
-/// 用 session id 会让「同一用户重新登录」被当成换人，缓存白丢。
+/// 订阅共享的身份请求，但不等待网络：请求在途或离线时先读本地，联网确认后
+/// 切到最新身份。新凭证落盘前先清归属，防止另一账号离线时读到旧数据（#103）。
+/// 缓存行仍按服务端 userId 隔离，同一用户重新登录可继续使用原有缓存。
 final cachedUserIdProvider = FutureProvider<String?>((ref) async {
-  final prefs = ref.watch(preferencesStoreProvider);
-  final stored = await prefs.getString(cachedUserIdPrefKey);
-  if (stored != null && stored.isNotEmpty) return stored;
-
-  // 本地没有：尝试从网络拿一次并落盘。失败返回 null（不抛——缓存是可选能力）。
-  try {
-    final id = await ref.watch(currentUserIdProvider.future);
-    if (id.isNotEmpty) {
-      await prefs.setString(cachedUserIdPrefKey, id);
-      return id;
-    }
-  } catch (e) {
-    // 断网 / 未登录：返回 null，调用方（列表页）据此不启用缓存。
-    //
-    // 记 debug（issue #45）：离线启动时这是**正常**路径（不是故障），
-    // 但它是「为什么这次没有缓存」的唯一线索，排查时少了它只能猜。
-    SpbLog.debug('取不到 userId，本地缓存本次不启用', {'error': e.toString()});
+  if (ref.watch(authStateProvider.select((state) => state.isUnauthenticated))) {
+    return null;
   }
-  return null;
+  final cache = ref.watch(sessionIdentityCacheProvider);
+  final current = ref.watch(currentUserProvider);
+  // 刷新中的 AsyncValue 会保留旧 data，不能把它当作新会话已经确认的身份。
+  if (!current.isLoading && !current.hasError && current.hasValue) {
+    return current.requireValue.id;
+  }
+  try {
+    return await cache.read();
+  } on Object catch (e) {
+    SpbLog.debug('取不到用户缓存归属，本次不启用离线缓存', {'error': e.toString()});
+    return null;
+  }
 });
 
-/// 缓存 userId 的偏好键。
-const String cachedUserIdPrefKey = 'auth.cached_user_id';
+/// 缓存 userId 的偏好键（兼容既有离线数据）。
+const String cachedUserIdPrefKey = SessionIdentityCache.preferenceKey;
 
 /// 对话列表缓存（issue #26 切片 A）。
 final groupCacheStoreProvider = Provider<GroupCacheStore>((ref) {

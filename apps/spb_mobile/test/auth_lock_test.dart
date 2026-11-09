@@ -1,9 +1,11 @@
 library;
 
+import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_data/spb_data.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_platform/spb_platform.dart';
 
@@ -66,6 +68,12 @@ Future<void> settleAuth(ProviderContainer container) async {
 }
 
 void main() {
+  late AppDatabase db;
+  setUp(() {
+    db = AppDatabase(NativeDatabase.memory());
+    addTearDown(db.close);
+  });
+
   /// 建容器并等到启动判定结束（`unknown` → 其他）。
   Future<ProviderContainer> start({
     required FakeBiometricGate gate,
@@ -75,6 +83,7 @@ void main() {
   }) async {
     final container = ProviderContainer(
       overrides: [
+        appDatabaseProvider.overrideWithValue(db),
         tokenStoreProvider.overrideWithValue(InMemoryTokenStore(stored)),
         biometricGateProvider.overrideWithValue(gate),
         biometricLockEnabledProvider.overrideWith((ref) async => lockEnabled),
@@ -93,6 +102,7 @@ void main() {
     final store = InMemoryTokenStore(freshSessionTokens());
     final container = ProviderContainer(
       overrides: [
+        appDatabaseProvider.overrideWithValue(db),
         tokenStoreProvider.overrideWithValue(store),
         biometricGateProvider.overrideWithValue(gate),
         biometricLockEnabledProvider.overrideWith((ref) async => true),
@@ -126,6 +136,7 @@ void main() {
       final store = InMemoryTokenStore(freshSessionTokens());
       final container = ProviderContainer(
         overrides: [
+          appDatabaseProvider.overrideWithValue(db),
           tokenStoreProvider.overrideWithValue(store),
           biometricGateProvider.overrideWithValue(gate),
           biometricLockEnabledProvider.overrideWith((ref) async => true),
@@ -161,6 +172,7 @@ void main() {
     final store = InMemoryTokenStore(freshSessionTokens());
     final container = ProviderContainer(
       overrides: [
+        appDatabaseProvider.overrideWithValue(db),
         tokenStoreProvider.overrideWithValue(store),
         biometricGateProvider.overrideWithValue(gate),
         biometricLockEnabledProvider.overrideWith((ref) async => true),
@@ -273,6 +285,7 @@ void main() {
     final gate = FakeBiometricGate();
     final container = ProviderContainer(
       overrides: [
+        appDatabaseProvider.overrideWithValue(db),
         tokenStoreProvider.overrideWithValue(store),
         biometricGateProvider.overrideWithValue(gate),
         biometricLockEnabledProvider.overrideWith((ref) async => true),

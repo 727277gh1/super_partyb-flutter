@@ -1337,9 +1337,14 @@ void main() {
       //
       // 故这里自建容器，**只** override 凭证存储，让 `dioProvider` 用生产实现
       // （带真实 `AuthInterceptor`）。这才能证明「凭证 → 请求头」真的通。
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
       final store = InMemoryTokenStore();
       final container = ProviderContainer(
-        overrides: [tokenStoreProvider.overrideWithValue(store)],
+        overrides: [
+          tokenStoreProvider.overrideWithValue(store),
+          appDatabaseProvider.overrideWithValue(db),
+        ],
       );
       addTearDown(container.dispose);
 
