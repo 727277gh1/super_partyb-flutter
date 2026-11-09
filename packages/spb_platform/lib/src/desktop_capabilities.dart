@@ -392,19 +392,25 @@ abstract interface class TrayActionTarget {
 ///
 /// [DesktopCapabilities.dispose] 的语义是「释放资源」（应用已在退出流程中），
 /// 而 `quit` 是「**发起**退出」（摘监听器 → 注销快捷键 → 销毁托盘 → 结束进程）。
-/// 两者前置条件不同：`dispose` 可以在任何时候调用，`quit` 只能由用户动作触发。
+/// 两者前置条件不同：`dispose` 可以在任何时候调用，`quit` 只应由「用户或系统
+/// 明确要求退出」的动作触发（托盘菜单、Windows 安装包升级时的会话结束请求）。
 ///
 /// ## 为什么需要它
 ///
 /// 桌面端的默认行为是「关窗 = 隐藏到托盘」（保留后台同步）。因此必须有另一条
 /// **明确的**退出路径，否则用户无法真正结束应用——只能杀进程。托盘菜单的
-/// 「退出」项就是这条路。
+/// 「退出」项就是这条路；系统会话结束（Windows 安装包升级时 Restart Manager
+/// 的请求，见 `session_end.dart` 与 AGENTS.md §6.87）也走它。
 ///
 /// 没有托盘时（Linux 无 appindicator 等）不启用「关窗即隐藏」，
 /// 此时关闭主窗口即退出，本能力不被调用。
 abstract interface class PlatformDesktopQuit {
   /// 摘除监听器、注销快捷键、销毁托盘图标，然后结束进程。
-  Future<void> quit();
+  ///
+  /// [reason] 只进日志，不改变行为：两条调用来源走**同一条**收尾路径。
+  /// 「是谁要退出」是关窗/退出类报障的第一问，而退出之后再没有机会补记。
+  /// 取值目前是 `'user'`（托盘「退出」）与 `'session-end'`（系统会话结束）。
+  Future<void> quit({String reason = 'user'});
 }
 
 /// 悬浮输入窗的「窗口形态」切换能力。

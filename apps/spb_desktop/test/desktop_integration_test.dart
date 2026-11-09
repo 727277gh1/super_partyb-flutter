@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
@@ -17,7 +20,8 @@ class _WiringCapabilities
         DesktopCapabilities,
         WindowDisplayTarget,
         TrayActionTarget,
-        OverlayWindowController {
+        OverlayWindowController,
+        PlatformDesktopQuit {
   @override
   bool get isSupported => true;
 
@@ -160,6 +164,20 @@ class _WiringCapabilities
   }) async => DiagnosticsExportOutcome.unsupported;
   @override
   Future<void> dispose() async {}
+
+  // ---- PlatformDesktopQuit ----
+
+  /// 退出次数（托盘「退出」与系统会话结束共用同一条路径）。
+  int quitCalls = 0;
+
+  /// 每次退出时的 `reason`（见 `PlatformDesktopQuit.quit` 的文档）。
+  final quitReasons = <String>[];
+
+  @override
+  Future<void> quit({String reason = 'user'}) async {
+    quitCalls++;
+    quitReasons.add(reason);
+  }
 }
 
 /// 只实现能力接口的桩（模拟 Noop：无可接线点）。
@@ -244,6 +262,10 @@ class _CountingPageState extends State<_CountingPage> {
 }
 
 void main() {
+  // 通道级处理器是全局槽位：用例结束后必须摘掉，否则下一个用例会收到
+  // 上一个实例（已 dispose）的回调。
+  tearDown(uninstallSessionEndHandler);
+
   group('attach', () {
     testWidgets('实现接线接口时接上回调并推送托盘菜单', (tester) async {
       final caps = _WiringCapabilities();
@@ -319,6 +341,85 @@ void main() {
       integration.detach();
       expect(caps.showCallback, isNull);
       expect(caps.hideCallback, isNull);
+    });
+
+    testWidgets('系统会话结束走 quit（安装包升级时 Restart Manager 的请求）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      // 模拟原生侧（Windows runner 的 WM_ENDSESSION）发来的动作。
+      // 不 await：testWidgets 跑在 FakeAsync 里，微任务要靠 pump 推进
+      // （见 `TestDefaultBinaryMessenger.handlePlatformMessage` 的说明）。
+      unawaited(
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+              kHostLifecycleChannelName,
+              const StandardMethodCodec().encodeMethodCall(
+                const MethodCall('sessionEnding'),
+              ),
+              null,
+            ),
+      );
+      await tester.pump();
+
+      // 钉住这一点：必须真的调 `quit`（而不是只是隐藏窗口）。
+      // 不退出的话，安装程序会停在「正在关闭应用」——正是本接线解决的问题。
+      expect(caps.quitCalls, 1);
+      expect(caps.quitReasons, ['session-end']);
+    });
+
+    testWidgets('重复的会话结束请求只退出一次（_quitting 幂等）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+
+      DesktopIntegration(capabilities: caps, router: router).attach();
+
+      // Restart Manager 的 `WM_ENDSESSION` 之后还会用 `WM_CLOSE` 兜底，
+      // Dart 收尾慢时同一条请求可能到两次——重复 `quit()` 会二次 dispose
+      // 托盘/快捷键（行为未定义）。
+      for (var i = 0; i < 2; i++) {
+        unawaited(
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .handlePlatformMessage(
+                kHostLifecycleChannelName,
+                const StandardMethodCodec().encodeMethodCall(
+                  const MethodCall('sessionEnding'),
+                ),
+                null,
+              ),
+        );
+        await tester.pump();
+      }
+
+      expect(caps.quitCalls, 1);
+    });
+
+    testWidgets('detach 后不再响应会话结束（否则旧实例会被重启的退出带走）', (tester) async {
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+
+      final integration = DesktopIntegration(capabilities: caps, router: router)
+        ..attach();
+      integration.detach();
+
+      unawaited(
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+              kHostLifecycleChannelName,
+              const StandardMethodCodec().encodeMethodCall(
+                const MethodCall('sessionEnding'),
+              ),
+              null,
+            ),
+      );
+      await tester.pump();
+
+      expect(caps.quitCalls, 0);
     });
   });
 
@@ -669,6 +770,22 @@ void main() {
 
       caps.trayActions[TrayActionIds.show]!();
       expect(caps.shown, [WindowRole.main]);
+    });
+
+    testWidgets('「退出」项调 quit（与系统会话结束共用同一条路）', (tester) async {
+      // 两个入口（这里是托盘菜单，上面的用例是会话结束）必须落到同一个
+      // `quit`。若将来有人给托盘单独写一套收尾逻辑，这里会红。
+      final caps = _WiringCapabilities();
+      final router = _testRouter();
+      addTearDown(router.dispose);
+      DesktopIntegration(capabilities: caps, router: router).attach();
+      await tester.pump();
+
+      caps.trayActions[TrayActionIds.quit]!();
+      await tester.pump();
+
+      expect(caps.quitCalls, 1);
+      expect(caps.quitReasons, ['user']);
     });
 
     testWidgets('popUpTrayContextMenu 可从能力层到达（右键弹菜单的接线）', (tester) async {

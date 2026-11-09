@@ -138,6 +138,48 @@ class DesktopIntegration {
     display.onHideWindow = _onHideWindow;
 
     _installTrayMenu(tray, caps);
+
+    // 系统会话结束（Windows 安装包升级时 Restart Manager 的请求）走
+    // **同一条**退出路径。不装这条接线的后果是升级安装停在「正在关闭应用」
+    // ——客户端「关窗即隐藏」，原生侧发来的 WM_CLOSE 会被 preventClose 拦下，
+    // 进程不退（见 AGENTS.md §6.87 与 `session_end.dart` 的说明）。
+    installSessionEndHandler(() => quitApplication(reason: 'session-end'));
+  }
+
+  /// 是否已发起退出（防重复）。
+  ///
+  /// 两条来源可能触发同一件事：托盘「退出」与系统会话结束。后者在 Dart 侧
+  /// 收尾慢时，原生侧还会用 WM_CLOSE 兜底；重复 `quit()` 会把托盘/快捷键
+  /// 再 `dispose()` 一次（行为未定义）。
+  bool _quitting = false;
+
+  /// 真正退出应用（托盘「退出」与系统会话结束共用）。
+  ///
+  /// ## 为什么把「能力判定」留在这里而不是挪到 attach
+  ///
+  /// `PlatformDesktopQuit` 与 [DesktopCapabilities] 是两个独立接口（真实
+  /// 实现同时 implements 两者，测试桩不会）。故只能在**调用的那一刻**判，
+  /// 否则 attach 时就得假定某个子类型关系。
+  Future<void> quitApplication({String reason = 'user'}) async {
+    if (_quitting) return;
+    final caps = _capabilities;
+    // 显式 cast：类型提升对独立接口不生效（同 `_installTrayMenu` 里的说明）。
+    final quittable = caps is PlatformDesktopQuit
+        ? caps as PlatformDesktopQuit
+        : null;
+    if (quittable == null) {
+      SpbLog.warn('当前能力实现不支持 quit，退出请求无效', {'reason': reason});
+      return;
+    }
+    _quitting = true;
+    try {
+      await quittable.quit(reason: reason);
+    } on Object catch (e, st) {
+      // 退出失败意味着进程可能仍在跑（安装包升级时会重演「卡在关闭应用」），
+      // 必须留下 error 级线索；同时复位标记，允许下一次请求重试。
+      _quitting = false;
+      SpbLog.error('退出应用失败', error: e, stackTrace: st);
+    }
   }
 
   /// 把「显示某角色的窗口」映射成路由导航。
@@ -420,21 +462,11 @@ class DesktopIntegration {
     });
     tray.registerTrayAction(TrayActionIds.quit, () {
       // 退出需要先摘监听器、注销快捷键、销毁托盘图标，见
-      // `PlatformDesktopQuit.quit` 的文档。
-      // ## 为什么用显式 cast 而不是 `is` 提升
+      // `PlatformDesktopQuit.quit` 的文档；能力判定与去重都在
+      // [quitApplication] 里（系统会话结束也走那里）。
       //
-      // Dart 的类型提升要求目标类型是**当前类型的子类型**。
-      // `PlatformDesktopQuit` 与 `DesktopCapabilities` 是两个独立接口
-      // （真实实现同时 implements 两者），故 `caps is PlatformDesktopQuit`
-      // 不会把 `caps` 提升成可调用 `.quit()` 的类型。
-      final quittable = caps is PlatformDesktopQuit
-          ? caps as PlatformDesktopQuit
-          : null;
-      if (quittable == null) {
-        SpbLog.warn('当前能力实现不支持 quit，托盘退出项无效');
-        return;
-      }
-      unawaited(quittable.quit());
+      // 不 await：托盘回调必须立刻返回（否则托盘线程被占）。
+      unawaited(quitApplication());
     });
 
     // ## 为什么「关窗即隐藏」要以托盘可用为前提
@@ -507,6 +539,11 @@ class DesktopIntegration {
   void detach() {
     if (!_attached) return;
     _attached = false;
+    _quitting = false;
+    // 会话结束的处理器也要摘：它是通道级的全局槽位（见
+    // `installSessionEndHandler` 的说明），留着会让下一个 attach 的实例
+    // 收到本该送给旧实例的请求。
+    uninstallSessionEndHandler();
     // 同 attach：显式 cast（提升对独立接口不生效）。
     final caps = _capabilities;
     if (caps is WindowDisplayTarget) {

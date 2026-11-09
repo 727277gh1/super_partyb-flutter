@@ -24,6 +24,21 @@ namespace {
 // 与「平台根本没实现」完全无法区分。三端（Linux / Windows / macOS）同理。
 constexpr char kClipboardFilesChannelName[] = "com.atjog.spb/clipboard_files";
 
+// 宿主生命周期通道名（原生 → Dart）。
+//
+// ⚠️ 必须与 Dart 侧逐字一致：packages/spb_platform/lib/src/session_end.dart
+// 的 `kHostLifecycleChannelName`。写错不会报错，只会表现为 Dart 侧永远收不到
+// 「会话即将结束」，即安装包升级时进程照旧不退、安装程序停在「正在关闭应用」。
+constexpr char kHostLifecycleChannelName[] = "com.atjog.spb/host_lifecycle";
+
+// `ENDSESSION_CLOSEAPP`（0x1）：WM_ENDSESSION/WM_QUERYENDSESSION 的 lParam 位。
+//
+// Windows SDK（Vista 起）在 winuser.h 里定义；这里再定义一次是为了让旧 SDK
+// 也能编译——`#ifndef` 让它退化成无害的重复定义，而不是一个编译错误。
+#ifndef ENDSESSION_CLOSEAPP
+#define ENDSESSION_CLOSEAPP 0x00000001
+#endif
+
 // 单文件读取上限（OOM 兜底）。
 //
 // Dart 侧真正的策略上限是 kOverlayMaxAttachmentBytes = 50 MiB，但那个判断
@@ -237,6 +252,15 @@ bool FlutterWindow::OnCreate() {
           &flutter::StandardMethodCodec::GetInstance());
   clipboard_channel_->SetMethodCallHandler(ClipboardMethodCallHandler);
 
+  // 宿主生命周期通道（原生 → Dart）：把 Windows 的「会话即将结束」翻译成
+  // 一次正常的退出请求。只有**出站**调用（本类 InvokeMethod），不需要
+  // SetMethodCallHandler。
+  host_lifecycle_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          kHostLifecycleChannelName,
+          &flutter::StandardMethodCodec::GetInstance());
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -252,6 +276,7 @@ bool FlutterWindow::OnCreate() {
 void FlutterWindow::OnDestroy() {
   // 先释放通道再释放 controller：通道持有 engine 的 messenger 指针，
   // 顺序反了会留下一个指向已析构 engine 的悬垂指针。
+  host_lifecycle_channel_.reset();
   clipboard_channel_.reset();
 
   if (flutter_controller_) {
@@ -265,6 +290,52 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // ---- 会话结束（Windows Restart Manager） ----
+  //
+  // 安装包升级时，Inno Setup 用 Restart Manager 关掉正在运行的客户端：先发
+  // `WM_QUERYENDSESSION`（lParam = `ENDSESSION_CLOSEAPP`），等所有应用都应答
+  // 「准备好了」，再发 `WM_ENDSESSION`；最后对仍未退出的 GUI 应用用
+  // `WM_CLOSE` 兜底（见 MS「Restart Manager - Guidelines for Applications」）。
+  //
+  // 而本客户端「关窗 = 隐藏到托盘」（`window_manager` 的 `preventClose`，见
+  // packages/spb_platform/lib/src/desktop_capabilities.dart 的 `setHideOnClose`），
+  // 于是这条链断在最后一步：WM_CLOSE 被拦下 → 进程不退 → 安装程序停
+  // 「正在关闭应用」（卸载同理）。
+  //
+  // 故这里按微软的约定把这串消息接住：WM_QUERYENDSESSION 应答 TRUE，
+  // WM_ENDSESSION 交给 Dart 走正常退出路径（摘监听器 / 注销全局快捷键 /
+  // 销毁托盘图标），Dart 没来得及退出时再由 WM_CLOSE 兜底。
+  //
+  // ⚠️ 三个判断都必须在 `HandleTopLevelWindowProc` **之前**：那个入口会把
+  // WM_CLOSE 交给 window_manager，它看到 `preventClose` 就返回 -1。
+  if (message == WM_QUERYENDSESSION &&
+      (lparam & ENDSESSION_CLOSEAPP) != 0) {
+    // TRUE = 「已准备好结束」。返回 FALSE 会让 Restart Manager 直接取消
+    // 整次关闭（安装程序仍会停在「正在关闭应用」，且不会再发 WM_CLOSE）。
+    return TRUE;
+  }
+  if (message == WM_ENDSESSION) {
+    if (wparam == TRUE && (lparam & ENDSESSION_CLOSEAPP) != 0) {
+      // 会话确实要结束了：先让 Dart 收尾。不等结果——WndProc 卡住只会让
+      // 安装程序更早判定「关不掉」；Dart 没跑完时有下面的 WM_CLOSE 兜底。
+      session_ending_ = true;
+      if (host_lifecycle_channel_) {
+        host_lifecycle_channel_->InvokeMethod(
+            "sessionEnding", std::make_unique<flutter::EncodableValue>());
+      }
+      return 0;
+    }
+    // wParam == FALSE：会话结束被取消（别的应用没准备好）。回到平常行为。
+    session_ending_ = false;
+    return 0;
+  }
+  if (message == WM_CLOSE && session_ending_) {
+    // 兜底：Dart 的退出没在 Restart Manager 的超时内跑完。此时必须真的关窗
+    // （DefWindowProc → DestroyWindow → WM_DESTROY → 退出），不能再让
+    // window_manager 换成 hide。
+    return DefWindowProc(hwnd, message, wparam, lparam);
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

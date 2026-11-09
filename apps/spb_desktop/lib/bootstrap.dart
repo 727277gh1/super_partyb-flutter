@@ -1399,11 +1399,17 @@ class PlatformDesktopCapabilities
   /// - 全局快捷键残留会让 `Alt+Space` 指向已死进程（部分平台会报错）；
   /// - 托盘图标残留会显示成「僵尸图标」，直到用户 hover 才消失。
   ///
-  /// 托盘菜单的「退出」走这里；主窗口的关闭按钮走 [onWindowClose]
+  /// 托盘菜单的「退出」与系统会话结束（Windows 安装包升级时 Restart Manager
+  /// 的请求，见 AGENTS.md §6.87）都走这里；主窗口的关闭按钮走 [onWindowClose]
   /// （默认隐藏到托盘，见 `setHideOnClose`）。
+  ///
+  /// ## 为什么日志区分来源（[reason]）
+  ///
+  /// 「应用为什么自己退了」与「用户点了退出」在排查时是两回事：前者通常是
+  /// 安装包升级或系统关机，后者是用户动作。行为相同，日志必须可分辨。
   @override
-  Future<void> quit() async {
-    SpbLog.info('用户请求退出应用');
+  Future<void> quit({String reason = 'user'}) async {
+    SpbLog.info('发起退出应用', {'reason': reason});
     // 会话正常退出标记：**必须在这次会话的所有业务日志之后**。下次启动时
     // `previousSessionExitedCleanly` 从末尾往前找边界标记，故它之后若还有
     // debug 级收尾日志（如 `dispose()` 里的托盘销毁失败）不影响判定，但

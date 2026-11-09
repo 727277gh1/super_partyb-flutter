@@ -56,6 +56,10 @@ library;
 ///   MemoryWatchdog / installMemoryWatchdog
 ///                               —— 内存高水位日志（低频、边沿触发，带
 ///                                  MemoryLedger 分解；见 memory-audit §四）
+///   installSessionEndHandler / uninstallSessionEndHandler
+///                               —— 宿主「会话即将结束」接线（Windows
+///                                  Restart Manager 升级安装要求客户端退出，
+///                                  见 §6.87）
 export 'src/biometric_gate.dart';
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
@@ -73,6 +77,7 @@ export 'src/memory_probe.dart';
 export 'src/memory_watchdog.dart';
 export 'src/overlay_files.dart';
 export 'src/overlay_window_state.dart';
+export 'src/session_end.dart';
 export 'src/system_open.dart';
 export 'src/tray.dart';
 export 'src/windows_reveal.dart';

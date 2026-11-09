@@ -78,7 +78,20 @@ WizardStyle=modern
 MinVersion=10.0
 ; 升级安装时用 Restart Manager 关掉正在运行的客户端。不设它的话，客户端常驻
 ; 托盘时「文件被占用」会让升级失败（而用户通常不知道要先退出应用）。
-CloseApplications=yes
+;
+; ⚠️ 用 `force` 而不是 `yes`：客户端默认「关窗即隐藏到托盘」，Restart Manager
+; 的 `WM_CLOSE` 会被 `window_manager` 的 `preventClose` 拦下（WM_QUERYENDSESSION/
+; WM_ENDSESSION 也不应答）。`yes` 时客户端关不掉，安装程序就停在「正在关闭应用」
+; —— 用户看到的就是「装不下去」。
+;
+; `force` 仍然是**先礼后兵**：Restart Manager 先按正常关闭流程走（客户端原生侧
+; 接住了 WM_ENDSESSION，会走一次干净的 quit），超时后才强把关。真正的干净退出
+; 由客户端自己实现（见 AGENTS.md §6.87）：
+;   apps/spb_desktop/windows/runner/flutter_window.cpp  ← WM_ENDSESSION
+;   packages/spb_platform/lib/src/session_end.dart       ← 通道接线
+; 若哪天客户端的这条链坏了，`force` 是最后一道保险（代价是强关：本地库是
+; WAL、交付物写盘走 `.part` + rename，不会留下半截文件）。
+CloseApplications=force
 RestartApplications=no
 
 ; `x64compatible` 是 Inno 6.3 才引入的标识符（旧的 `x64` 自 6.3 起弃用但仍在）。
