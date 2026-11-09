@@ -86,6 +86,10 @@ class SpbTheme {
         platform: defaultTargetPlatform,
         colorScheme: scheme,
       ),
+      // 正文差一档（§6.82）：移动端触屏阅读距离更近、手指遮挡更多，正文比
+      // 桌面大一号（14 → 15）。**只动正文**，不动元数据（12 是下界）与
+      // 块标题（16）——层次顺序由 `tokens_test.dart` 钉住。
+      mobile: !desktop,
     );
     final m3Geometry = typography.englishLike;
 
@@ -173,33 +177,50 @@ class SpbTheme {
   ///
   /// `dense` / `tall` 三套几何一起校正：`scriptCategory` 由 locale 决定，
   /// 中文 locale 落 `dense`，不跟着改会在真机上失效。
-  static Typography _cjkTypography(Typography base) => base.copyWith(
-    englishLike: _cjkTextTheme(base.englishLike),
-    dense: _cjkTextTheme(base.dense),
-    tall: _cjkTextTheme(base.tall),
-  );
+  ///
+  /// ## 移动端正文再升一档（§6.82）
+  ///
+  /// 触屏阅读距离更近、手指遮挡更多，且移动端列表标题本来就是 M3 默认的
+  /// 16（§6.77 的取向）。仅把 `bodyMedium`（正文）从 14 抬到 **15**：
+  /// 仍低于 16 的块标题/列表标题，令牌层次（12 < 15 < 16）不被打破。
+  static Typography _cjkTypography(Typography base, {required bool mobile}) =>
+      base.copyWith(
+        englishLike: _cjkTextTheme(base.englishLike, mobile: mobile),
+        dense: _cjkTextTheme(base.dense, mobile: mobile),
+        tall: _cjkTextTheme(base.tall, mobile: mobile),
+      );
 
   /// 对一套几何主题逐槽位校正；语义见 [_cjkTypography] 的表。
-  static TextTheme _cjkTextTheme(TextTheme g) => g.copyWith(
-    bodyLarge: _cjkStyle(g.bodyLarge),
-    bodyMedium: _cjkStyle(g.bodyMedium),
-    bodySmall: _cjkStyle(g.bodySmall),
-    labelLarge: _cjkStyle(g.labelLarge),
-    labelMedium: _cjkStyle(g.labelMedium),
-    titleSmall: _cjkStyle(g.titleSmall),
-    titleMedium: _cjkStyle(g.titleMedium),
-  );
+  static TextTheme _cjkTextTheme(TextTheme g, {required bool mobile}) =>
+      g.copyWith(
+        bodyLarge: _cjkStyle(g.bodyLarge),
+        bodyMedium: _cjkStyle(g.bodyMedium, mobile: mobile),
+        bodySmall: _cjkStyle(g.bodySmall),
+        labelLarge: _cjkStyle(g.labelLarge),
+        labelMedium: _cjkStyle(g.labelMedium),
+        titleSmall: _cjkStyle(g.titleSmall),
+        titleMedium: _cjkStyle(g.titleMedium),
+      );
 
   /// 单条样式的校正：字距归零 + 行高抬到 1.5（已 ≥1.5 的槽位保持原值）。
-  static TextStyle? _cjkStyle(TextStyle? style) {
+  ///
+  /// [mobile] 为真时正文再升一档（§6.82）。**只有 `bodyMedium` 传 true**——
+  /// 见 [_cjkTypography] 的说明。
+  static TextStyle? _cjkStyle(TextStyle? style, {bool mobile = false}) {
     if (style == null) return null;
     final current = style.height ?? 1.0;
+    final size = style.fontSize;
     return style.copyWith(
       letterSpacing: 0,
       height: current < _cjkMinHeight ? _cjkMinHeight : current,
+      fontSize: mobile && size != null ? size + _mobileBodyBump : null,
     );
   }
 
   /// 中文正文的最小行高（§6.79）。改它要先看 `tokens_test.dart` 的行高断言。
   static const double _cjkMinHeight = 1.5;
+
+  /// 移动端正文比桌面端大多少（§6.82）。改它要先看 `tokens_test.dart` 的
+  /// 「移动端正文 15 / 桌面端 14」与令牌层次断言。
+  static const double _mobileBodyBump = 1.0;
 }

@@ -21,7 +21,7 @@ import 'fonts.dart';
 /// | 徽标 / 状态 chip / 导航 tab 标签 | [badge] | `labelMedium`（12 / w500） |
 /// | 角标（Badge）里的数字 | [badgeCount] | `labelSmall` 归零 letterSpacing + 抬到 12（w500） |
 /// | 等宽文字（登录码 / 工具入参 / 文件内容） | [mono] | `listMeta` 或指定 base + `monospace` + CJK 回退 |
-/// | 正文（对话气泡、卡片说明） | [body] | `bodyMedium`（14 / w400） |
+/// | 正文（对话气泡、卡片说明） | [body] | `bodyMedium`（桌面 14 / 移动 15，w400；§6.82） |
 /// | 块标题（卡片 / 面板区块标题） | [cardTitle] | `titleMedium`（16 / w500） |
 ///
 /// 下界由 `packages/spb_design/test/tokens_test.dart` 钉住：**所有**令牌
@@ -77,8 +77,8 @@ class SpbType {
 
   /// 正文：对话气泡、卡片里的说明段落。
   ///
-  /// 取 `bodyMedium`（14px / w400）。与 [listMeta]（12）拉开一档，
-  /// 比 [cardTitle]（16）低一档。
+  /// 取 `bodyMedium`：**桌面 14 / 移动 15**（w400，§6.82 的移动端 +1 档）。
+  /// 与 [listMeta]（12）拉开一档，比 [cardTitle]（16）低一档——两端都成立。
   static TextStyle? body(TextTheme textTheme) => textTheme.bodyMedium;
 
   /// 块标题：卡片标题、面板区块标题（`spec_ui_card` 的 card、文件预览卡等）。

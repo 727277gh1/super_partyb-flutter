@@ -418,6 +418,32 @@ void main() {
       expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
     });
 
+    test('移动端正文 15 / 桌面端 14，层次仍然成立（§6.82）', () {
+      // `lightFor(platform)` 就是为了「按平台取真实几何」而存在（§6.77）。
+      TextTheme localized(TargetPlatform platform) {
+        final theme = SpbTheme.lightFor(platform);
+        return ThemeData.localize(
+          theme,
+          theme.typography.geometryThemeFor(ScriptCategory.englishLike),
+        ).textTheme;
+      }
+
+      final android = localized(TargetPlatform.android);
+      final linux = localized(TargetPlatform.linux);
+
+      expect(SpbType.body(android)?.fontSize, 15.0);
+      expect(SpbType.body(linux)?.fontSize, 14.0);
+      // 块标题两端都是 16：移动端正文 15 仍低于它，层次没被打破。
+      expect(SpbType.cardTitle(android)?.fontSize, 16.0);
+      expect(SpbType.cardTitle(linux)?.fontSize, 16.0);
+      // 元数据（12）必须仍然低于移动端正文（15），否则令牌表失效。
+      expect(SpbType.listMeta(android)?.fontSize, 12.0);
+      expect(
+        SpbType.listMeta(android)!.fontSize,
+        lessThan(SpbType.body(android)!.fontSize!),
+      );
+    });
+
     test('mono 自带 CJK 回退链（等宽字体四个平台都不含中文，§6.81）', () {
       final style = SpbType.mono(resolve());
       expect(style, isNotNull);
