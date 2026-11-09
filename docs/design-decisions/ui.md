@@ -1133,5 +1133,113 @@ diff 图确认只是按钮胶囊高度 compact→standard 的预期变化（测�
   改槽位会外溢到没审计过的组件（§6.76 的结论仍成立）。
 - **不动 `PopupMenuItem(height: 36)` 与画布 `maxWidth: 120`**：它们属于
   「固定高度 + 文字」的系统字体缩放问题（属于下一轮）。
-- **不做 CJK 字距/行高校正**（`letterSpacing 0.4/0.5`、`height 1.33` 仍是
-  拉丁参数）：它会改动全部 golden，且与 §6.77 的行高断言耦合，单独立一轮。
+- ~~**不做 CJK 字距/行高校正**~~：**已做**，见 §6.79（`Typography` 三套几何校正 + 12 张
+  golden 重出 + 行高断言）。
+
+### 6.79 CJK 度量校正：字距归零 + 行高 ≥1.5（2026-11）
+
+承接 §6.78 的「不做 CJK 校正，单独立一轮」。字号已经定了（§6.76/§6.78），
+这一轮只改**度量**：字距与行高。
+
+#### 缺陷
+
+M3 的字距/行高是**拉丁文**的度量，中文一直在穿这身不合身的衣服：
+
+| 槽位 | M3（拉丁） | 中文实际需要 |
+|---|---|---|
+| `bodySmall`(12) | `letterSpacing 0.4` / `height 1.33`（16px） | 字距 0；行高 ≈18px |
+| `bodyMedium`(14) | `ls 0.25` / `height 1.43`（20px） | 字距 0；行高 ≈21px |
+| `labelMedium`(12) | `ls 0.5` / `height 1.33` | 字距 0；行高 ≈18px |
+| `labelLarge`/`titleSmall`(14) | `ls 0.1` / `height 1.43` | 字距 0；行高 ≈21px |
+
+0.4px 在 12px 上是 **3%** 的额外字距——中文是等宽方块字，字距不需要「补」，
+补了就是密排正文发虚；而 12px 只给 16px 行高，对笔画密度远高于拉丁的中文
+明显偏挤（没有 ascender/descender 的天然节奏可借）。
+
+此前唯一的特例是 `SpbType.badgeCount`（在实例上把字距归零，§6.76），
+其余 200+ 处中文都在用拉丁 tracking。
+
+#### 为什么以前没修（根因链）
+
+1. **几何的真源是 `Typography` 的三套 `geometryTheme`**，不是 `ThemeData.textTheme`
+   （后者的 `fontSize` 构造期为 null，见 §6.76 根因链第 1 条）。页面按槽位取名
+   `labelSmall`/`bodySmall` 时，看到的是「槽位」而不是「0.5 / 1.45」，
+   没人会去查字距——这正是 §6.76 里解释过的同一个盲点。
+2. **三套几何按 locale 的 `scriptCategory` 选**（`englishLike` / `dense` / `tall`），
+   任何在页面级或单一几何上的修补，中文 locale（落 `dense`）都不生效。
+3. **动它必然重出全部 12 张 golden**，而 §6.77 的行高断言（移动端 ListTile
+   ≥48dp / 桌面 ≤56dp）与行高耦合，需要一起复核。
+
+#### 修法
+
+`SpbTheme` 里新增 `_cjkTypography` / `_cjkTextTheme` / `_cjkStyle`
+（`packages/spb_design/lib/src/theme.dart`），在 `Typography` 层做一次校正：
+
+| 规则 | 值 |
+|---|---|
+| `letterSpacing` | **0**（仅 `bodyLarge`/`bodyMedium`/`bodySmall`/`labelLarge`/`labelMedium`/`titleSmall`/`titleMedium`） |
+| `height` | **max(原值, 1.5)**（同一批槽位；`bodyLarge`/`titleMedium` 原就是 1.50，不变） |
+| 三套几何 | `englishLike` / `dense` / `tall` **一起**校正（只改一套 = 测试绿、中文真机无效） |
+
+要点：
+
+- **`labelSmall` 一字不改**：它是 Flutter 组件（`Badge` 等）的内部槽位，
+  改它会外溢到没审计过的组件（§6.76 的结论仍成立）。11px 角标数字的字距
+  仍由 `SpbType.badgeCount` 在实例上归零。
+- **`headline*` / `display*` / `titleLarge` 不动**：它们是短的单行标题
+  （空态标题、登录短码），行高对可读性没有收益，动它只会扩大 golden 面。
+- **为什么改 `Typography` 而不是 `ThemeData.textTheme`**：两处都能生效
+  （`ThemeData.localize` 的 `merge` 以 `baseTheme.textTheme` 的非空字段为先），
+  但 `typography` 是三套几何的唯一真源，且本类的
+  `listTileTheme.titleTextStyle` 也直接读 `typography.englishLike`——各写一遍
+  必然漂移。
+- **`Typography` 用 `defaultTargetPlatform` 而不是注入的 `target`**：
+  `Typography` 除了几何还携带**平台字体回退链**（Linux 是 `blackHelsinki`
+  的 Ubuntu/Adwaita/Cantarell…）。测试环境 `defaultTargetPlatform == android`，
+  若按注入的 linux 取，golden 会在本机渲染出与 CI 不同的字形
+  （`fonts_test.dart` 有一条专门钉住这件事，本轮一度被它抓住）。
+
+#### 验证
+
+`tokens_test.dart` 新增 4 条断言：
+
+- 五个语义令牌一律零字距；
+- 正文（`bodySmall`/`bodyMedium`/`labelMedium`/`titleSmall`）行高 ≥1.5×字号；
+- `labelSmall` 与 SDK 原始几何**逐字段相同**（把「有意不改」变成机器可查的）；
+- `dense` / `tall` 两套几何同样被校正。
+
+12 张 golden 重出，逐张统计（diff% / 内容高度变化 / 差异是否只在文字区）：
+
+| 基线 | diff | 内容高度 | 差异性质 |
+|---|---|---|---|
+| `spec_ui_goal_card` | 4.74% | +8px | 4 行正文各 +2px，卡片整体居中上移 |
+| `spec_ui_unknown_type` | 4.62% | +5px | 同上 |
+| `map_spec_card` | 3.11% | +11px | 地图卡内各行 +2px，画布随之上移（画布本身逐像素相同） |
+| `spec_ui_follow_up_card` | 1.40% | +2px | 标题/说明行高 |
+| `hint_line_kinds` | 1.60% | +4px | 三行提示各 +1–2px |
+| `error_banner_*` | 1.11–1.15% | 0 | 单行文字字距归零（宽度略收） |
+| `empty_state_*` | 0.30–0.82% | 0 | 同上 |
+| `error_state_*` | 0.13–0.56% | 0–1px | 同上 |
+| `section_title` | 0.33% | 0 | 同上 |
+
+全部差异的 bbox 都紧贴文字区域（没有边框/背景/图元变化），且**没有一条
+overflow 报错**（`RenderFlex overflowed` 在 widget 测试里是硬失败）。
+
+测试：`spb_design` 51 条、`spb_ui` 43 条、`spb_features` **1428 条**、
+`spb_platform` 281 条、`spb_mobile` 全过。`apps/spb_desktop` 有 13 条
+`router_workbench_test` 失败——经 `git stash` 对照确认**改动前就存在**
+（本机环境问题，与本轮无关）。
+
+#### 未验证（本机边界，§9）
+
+- 真机观感：中文密排在 12→18px 行高后的实际密度、桌面列表行高变大后的
+  一屏行数，需在设备上复核。
+- Windows / macOS 的平台字体回退链未在本机跑（测试只跑 android 目标）。
+
+#### 有意不做
+
+- **不改任何字号**：这一轮只动度量；字号仍由 §6.76/§6.78 的令牌与下界管。
+- **不做「中文 12px、数字 11px」这类按字符类型分流**：Flutter 的
+  `TextStyle` 不按字符分类，按脚本分流要靠手写 fallback 字体族，代价远超收益。
+- **不引入 `TextScaler` 策略**：系统字体缩放是下一轮（`PopupMenuItem(height: 36)`、
+  `maxLines: 1`、画布 `TextPainter` 不跟随缩放都在那里）。
