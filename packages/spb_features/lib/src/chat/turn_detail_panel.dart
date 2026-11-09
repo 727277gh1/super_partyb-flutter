@@ -219,9 +219,8 @@ class TurnDetailPanel extends StatelessWidget {
           _chip(theme, scheme.errorContainer, '${t.errorCount} 个错误'),
         Text(
           _formatTime(t.createdAt),
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
+          style: SpbType.listMeta(theme.textTheme)
+              ?.copyWith(color: scheme.onSurfaceVariant),
         ),
       ],
     );
@@ -233,7 +232,7 @@ class TurnDetailPanel extends StatelessWidget {
       vertical: SpbSpacing.xxs,
     ),
     decoration: BoxDecoration(color: bg, borderRadius: SpbRadius.cardAll),
-    child: Text(text, style: theme.textTheme.labelSmall),
+    child: Text(text, style: SpbType.badge(theme.textTheme)),
   );
 
   /// 用户输入置顶（不依赖事件里有没有 `user_message`）。
@@ -252,9 +251,8 @@ class TurnDetailPanel extends StatelessWidget {
         children: [
           Text(
             '用户输入',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: SpbType.badge(theme.textTheme)
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
           const SizedBox(height: SpbSpacing.xxs),
           // 空输入给占位而不是留白（异常 turn 可能没有 input_text）。
@@ -295,9 +293,8 @@ class TurnDetailPanel extends StatelessWidget {
           Text(
             '事件可能已超出时间线窗口，或尚未落库。',
             textAlign: TextAlign.center,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(theme.textTheme)
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
       ),
@@ -421,9 +418,8 @@ class TurnDetailPanel extends StatelessWidget {
           const SizedBox(height: SpbSpacing.xxs),
           Text(
             _formatTime(e.createdAt),
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onErrorContainer,
-            ),
+            style: SpbType.listMeta(theme.textTheme)
+                ?.copyWith(color: scheme.onErrorContainer),
           ),
         ],
       ),
@@ -458,18 +454,16 @@ class TurnDetailPanel extends StatelessWidget {
               Flexible(
                 child: Text(
                   title,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
+                  style: SpbType.listMeta(theme.textTheme)
+                      ?.copyWith(color: scheme.onSurfaceVariant),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               if (e.source.isNotEmpty)
                 Text(
                   e.source,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
+                  style: SpbType.listMeta(theme.textTheme)
+                      ?.copyWith(color: scheme.onSurfaceVariant),
                 ),
             ],
           ),
@@ -480,9 +474,8 @@ class TurnDetailPanel extends StatelessWidget {
           const SizedBox(height: SpbSpacing.xxs),
           Text(
             _formatTime(e.createdAt),
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(theme.textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
         ],
       ),

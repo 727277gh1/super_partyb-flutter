@@ -836,7 +836,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
                 color: theme.colorScheme.surfaceContainerHighest,
                 borderRadius: SpbRadius.cardAll,
               ),
-              child: Text(badgeLabel, style: theme.textTheme.labelSmall),
+              child: Text(badgeLabel, style: SpbType.badge(theme.textTheme)),
             ),
           ],
         ),

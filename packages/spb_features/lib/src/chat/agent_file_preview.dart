@@ -299,15 +299,14 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
               children: [
                 Text(
                   f.displayName.isEmpty ? f.fileName : f.displayName,
-                  style: theme.textTheme.titleMedium,
+                  style: SpbType.cardTitle(theme.textTheme),
                   overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: SpbSpacing.xxs),
                 Text(
                   kindLabel,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
+                  style: SpbType.listMeta(theme.textTheme)
+                      ?.copyWith(color: scheme.onSurfaceVariant),
                 ),
               ],
             ),

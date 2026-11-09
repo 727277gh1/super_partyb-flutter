@@ -118,9 +118,8 @@ class GroupToolCallsPanel extends StatelessWidget {
           Expanded(child: Text('工具调用', style: theme.textTheme.titleSmall)),
           Text(
             '$count',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(theme.textTheme)
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
       ),

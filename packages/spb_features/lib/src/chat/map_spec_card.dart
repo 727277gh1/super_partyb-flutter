@@ -192,9 +192,8 @@ class MapSpecCard extends StatelessWidget {
           const SizedBox(width: SpbSpacing.xxs),
           Text(
             label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: SpbType.badge(theme.textTheme)
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
       ),
@@ -264,7 +263,7 @@ class _MapPainter extends CustomPainter {
         final tp = TextPainter(
           text: TextSpan(
             text: marker.title,
-            style: TextStyle(fontSize: 12, color: labelColor),
+            style: TextStyle(fontSize: SpbType.metaSize, color: labelColor),
           ),
           textDirection: TextDirection.ltr,
           maxLines: 1,
@@ -320,9 +319,8 @@ class _MarkerRow extends StatelessWidget {
                 if (marker.description.isNotEmpty)
                   Text(
                     marker.description,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
+                    style: SpbType.listMeta(theme.textTheme)
+                        ?.copyWith(color: scheme.onSurfaceVariant),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -339,7 +337,10 @@ class _MarkerRow extends StatelessWidget {
                 color: scheme.surfaceContainerHighest,
                 borderRadius: BorderRadius.circular(SpbRadius.sm),
               ),
-              child: Text(marker.category, style: theme.textTheme.labelSmall),
+              child: Text(
+                marker.category,
+                style: SpbType.badge(theme.textTheme),
+              ),
             ),
         ],
       ),
@@ -400,9 +401,8 @@ class _RouteRow extends StatelessWidget {
           if (meta.isNotEmpty)
             Text(
               meta,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
         ],
       ),

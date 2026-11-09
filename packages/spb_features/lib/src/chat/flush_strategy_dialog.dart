@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_design/spb_design.dart';
 
 /// 按服务端默认策略提交 pending 消息。
 ///
@@ -88,7 +89,7 @@ Future<String?> showFlushStrategyDialog(
                 if (flushStrategyHint(strategy).isNotEmpty)
                   Text(
                     flushStrategyHint(strategy),
-                    style: Theme.of(dialogContext).textTheme.labelSmall,
+                    style: SpbType.listMeta(Theme.of(dialogContext).textTheme),
                   ),
               ],
             ),

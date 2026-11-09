@@ -263,7 +263,7 @@ class _HabitEditDialogState extends State<HabitEditDialog> {
               const SizedBox(height: SpbSpacing.xs),
               Text(
                 '重复（不选 = 每天）',
-                style: Theme.of(context).textTheme.labelSmall,
+                style: SpbType.listMeta(Theme.of(context).textTheme),
               ),
               const SizedBox(height: SpbSpacing.xs),
               Wrap(
@@ -348,9 +348,8 @@ class _WatchReadOnly extends StatelessWidget {
           const SizedBox(height: SpbSpacing.xxs),
           Text(
             '盯梢型规则的间隔由指数退避策略维护，服务端不接收就地修改。',
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
         ],
       ),

@@ -446,9 +446,8 @@ class _MessageComposerState extends State<MessageComposer> {
           if (!SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width))
             Text(
               'Enter 发送 · Shift+Enter 换行',
-              style: textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
         ],
       ),

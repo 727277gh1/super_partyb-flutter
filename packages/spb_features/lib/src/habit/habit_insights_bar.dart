@@ -134,17 +134,15 @@ class _Metric extends StatelessWidget {
         children: [
           Text(
             label,
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
           const SizedBox(width: SpbSpacing.xs),
           Text(
             value,
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurface,
-              fontWeight: FontWeight.w600,
-            ),
+            style: SpbType.listMeta(
+              textTheme,
+            )?.copyWith(color: scheme.onSurface, fontWeight: FontWeight.w600),
           ),
         ],
       ),

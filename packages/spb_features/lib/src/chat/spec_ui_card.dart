@@ -176,9 +176,8 @@ class _SpecElementView extends StatelessWidget {
         if (text.isEmpty) return const SizedBox.shrink();
         return Text(
           text,
-          style: textTheme.titleMedium?.copyWith(
-            color: scheme.onSecondaryContainer,
-          ),
+          style: SpbType.cardTitle(textTheme)
+              ?.copyWith(color: scheme.onSecondaryContainer),
         );
 
       case SpecUiType.progress:
@@ -232,9 +231,8 @@ class _SpecElementView extends StatelessWidget {
               Text(
                 value,
                 key: const ValueKey('spec-metric-value'),
-                style: textTheme.titleMedium?.copyWith(
-                  color: scheme.onSecondaryContainer,
-                ),
+                style: SpbType.cardTitle(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
               ),
             if (hint.isNotEmpty)
               Text(
@@ -298,7 +296,7 @@ class _SpecElementView extends StatelessWidget {
             color: scheme.secondaryContainer,
             borderRadius: BorderRadius.circular(SpbRadius.sm),
           ),
-          child: Text(label, style: textTheme.labelSmall),
+          child: Text(label, style: SpbType.badge(textTheme)),
         );
 
       case SpecUiType.alert:

@@ -692,14 +692,14 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
     if (progress != null && progress.$2 > 0 && progress.$1 < progress.$2) {
       return Text(
         '正在上传附件 ${progress.$1}/${progress.$2}…',
-        style: textTheme.labelSmall?.copyWith(color: scheme.primary),
+        style: SpbType.listMeta(textTheme)?.copyWith(color: scheme.primary),
       );
     }
 
     if (_dragging) {
       return Text(
         '松开即可添加文件',
-        style: textTheme.labelSmall?.copyWith(color: scheme.primary),
+        style: SpbType.listMeta(textTheme)?.copyWith(color: scheme.primary),
       );
     }
 
@@ -711,7 +711,8 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
 
     return Text(
       'Enter 提交 · Shift+Enter 换行 · Esc 清空',
-      style: textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+      style: SpbType.listMeta(textTheme)
+          ?.copyWith(color: scheme.onSurfaceVariant),
     );
   }
 }
@@ -833,7 +834,7 @@ class _AttachmentChip extends StatelessWidget {
           const SizedBox(width: SpbSpacing.xs),
           Text(
             size,
-            style: Theme.of(context).textTheme.labelSmall
+            style: SpbType.listMeta(Theme.of(context).textTheme)
                 ?.copyWith(color: scheme.onSurfaceVariant),
           ),
           if (onRemove != null) ...[

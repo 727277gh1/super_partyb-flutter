@@ -280,9 +280,8 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
         const SizedBox(height: SpbSpacing.xxs),
         Text(
           '清空后保存即清除目标（旧目标会归档保留，其任务不受影响）',
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
+          style: SpbType.listMeta(theme.textTheme)
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
         ),
         const SizedBox(height: SpbSpacing.xs),
         Align(
@@ -564,7 +563,7 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
       title: Text(title, style: Theme.of(context).textTheme.bodyMedium),
       subtitle: Text(
         subtitle,
-        style: Theme.of(context).textTheme.labelSmall
+        style: SpbType.listMeta(Theme.of(context).textTheme)
             ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
       ),
     );
@@ -591,9 +590,8 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
           Expanded(
             child: Text(
               text,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
           ),
         ],

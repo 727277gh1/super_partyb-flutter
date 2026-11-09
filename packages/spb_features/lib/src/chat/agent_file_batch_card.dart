@@ -190,7 +190,10 @@ class _AgentFileBatchCardState extends State<AgentFileBatchCard> {
                             color: scheme.secondaryContainer,
                             borderRadius: SpbRadius.cardAll,
                           ),
-                          child: Text('批量', style: theme.textTheme.labelSmall),
+                          child: Text(
+                            '批量',
+                            style: SpbType.badge(theme.textTheme),
+                          ),
                         ),
                       ],
                     ),
@@ -212,9 +215,8 @@ class _AgentFileBatchCardState extends State<AgentFileBatchCard> {
                           const SizedBox(width: SpbSpacing.sm),
                           Text(
                             '含 $deletedCount 个已删除',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
+                            style: SpbType.listMeta(theme.textTheme)
+                                ?.copyWith(color: scheme.onSurfaceVariant),
                           ),
                         ],
                       ],

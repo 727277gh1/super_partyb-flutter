@@ -403,7 +403,7 @@ class _AgentFileCardState extends State<AgentFileCard> {
         children: [
           Icon(icon, size: SpbSpacing.lg),
           const SizedBox(width: SpbSpacing.xxs),
-          Text(label, style: Theme.of(context).textTheme.labelSmall),
+          Text(label, style: SpbType.badge(Theme.of(context).textTheme)),
         ],
       ),
     );

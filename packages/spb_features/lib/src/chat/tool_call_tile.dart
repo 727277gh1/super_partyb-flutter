@@ -138,7 +138,7 @@ class _ToolCallTileState extends State<ToolCallTile> {
           if (widget.args != null && widget.args!.isNotEmpty) ...[
             Align(
               alignment: Alignment.centerLeft,
-              child: Text('参数', style: textTheme.labelSmall),
+              child: Text('参数', style: SpbType.badge(textTheme)),
             ),
             const SizedBox(height: SpbSpacing.xs),
             Container(
@@ -158,7 +158,7 @@ class _ToolCallTileState extends State<ToolCallTile> {
             const SizedBox(height: SpbSpacing.sm),
             Align(
               alignment: Alignment.centerLeft,
-              child: Text('结果', style: textTheme.labelSmall),
+              child: Text('结果', style: SpbType.badge(textTheme)),
             ),
             const SizedBox(height: SpbSpacing.xs),
             Container(

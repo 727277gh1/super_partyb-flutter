@@ -184,9 +184,8 @@ class _StatusRow extends StatelessWidget {
             Text(
               detail,
               key: const ValueKey('activity-status-detail'),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
         ],
       ),

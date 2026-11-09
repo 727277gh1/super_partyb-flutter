@@ -188,9 +188,8 @@ class _AgentPickerDialogState extends State<AgentPickerDialog> {
                       // 只数 agent：自动路由不是一个「匹配结果」。
                       '${flat.length - 1}',
                       key: const ValueKey('agent-picker-count'),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
+                      style: SpbType.listMeta(theme.textTheme)
+                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                     ),
                   ],
                 ),
@@ -233,7 +232,7 @@ class _AgentPickerDialogState extends State<AgentPickerDialog> {
                           child: Text(
                             g.name,
                             key: ValueKey('agent-picker-group-${g.name}'),
-                            style: theme.textTheme.labelSmall?.copyWith(
+                            style: SpbType.badge(theme.textTheme)?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
                             ),
                           ),
@@ -294,7 +293,7 @@ class _AgentPickerDialogState extends State<AgentPickerDialog> {
               style: theme.textTheme.bodySmall,
             ),
       trailing: isCurrent
-          ? Text('当前', style: theme.textTheme.labelSmall)
+          ? Text('当前', style: SpbType.badge(theme.textTheme))
           : null,
       onTap: isCurrent ? null : onTap,
     );

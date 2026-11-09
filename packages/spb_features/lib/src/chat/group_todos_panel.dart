@@ -153,9 +153,8 @@ class _GroupTodosPanelState extends State<GroupTodosPanel> {
           Expanded(child: Text('待处理', style: theme.textTheme.titleSmall)),
           Text(
             '$count 轮',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(theme.textTheme)
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
       ),
@@ -221,9 +220,8 @@ class _GroupTodosPanelState extends State<GroupTodosPanel> {
                     ),
                     child: Text(
                       '${pending.length}',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: scheme.onSecondaryContainer,
-                      ),
+                      style: SpbType.badgeCount(theme.textTheme)
+                          ?.copyWith(color: scheme.onSecondaryContainer),
                     ),
                   ),
                 ],

@@ -63,7 +63,7 @@ class UserMessageBubble extends StatelessWidget {
             children: [
               SelectableText(
                 text,
-                style: textTheme.bodyMedium?.copyWith(
+                style: SpbType.body(textTheme)?.copyWith(
                   // 发送中：降为半透明，与助手气泡流式态的取向一致（提示
                   // 「这条还未被服务端确认」）。
                   color: scheme.onPrimaryContainer.withValues(
@@ -169,7 +169,10 @@ class _RoutingAttributionChip extends StatelessWidget {
           color: color,
         ),
         const SizedBox(width: SpbSpacing.xxs),
-        Text(notice.label, style: textTheme.labelSmall?.copyWith(color: color)),
+        Text(
+          notice.label,
+          style: SpbType.listMeta(textTheme)?.copyWith(color: color),
+        ),
       ],
     );
     if (message == null || message.isEmpty) return chip;

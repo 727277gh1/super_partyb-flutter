@@ -272,12 +272,17 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
     return [
       // 菜单头：说明「下一条消息」这个时机。它不再是「点一下就丢上下文」的
       // 警告（选择是纯本地的），但代价仍然真实存在，故保留一行说明。
-      const PopupMenuItem<AgentPick>(
+      PopupMenuItem<AgentPick>(
         enabled: false,
         height: 36,
-        // 菜单头是说明文字，12px（bodySmall 同级）；不引用 SpbType 是
-        // 因为它要 TextStyle 而非 TextTheme 槽位，且本条在 const 上下文里。
-        child: Text('选择后随下一条消息生效（沿用当前对话上下文）', style: TextStyle(fontSize: 12)),
+        // 菜单头是说明文字，取 SpbType.listMeta（12px，与列表元数据同档）。
+        // ⚠️ 这里曾是 `const TextStyle(fontSize: 12)` 字面量——不是懒，而是
+        // 旧 API 只给 TextTheme 槽位、const 上下文用不了。§6.78 补了令牌后
+        // 不再有理由写死字号（守卫 tools/check_type_tokens.sh 会拦）。
+        child: Text(
+          '选择后随下一条消息生效（沿用当前对话上下文）',
+          style: SpbType.listMeta(theme.textTheme),
+        ),
       ),
       const PopupMenuDivider(),
       // 自动路由：**唯一**能把本地选择清回去的入口。选过某个 agent 之后
@@ -302,9 +307,8 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
             height: 32,
             child: Text(
               g.name,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              style: SpbType.badge(theme.textTheme)
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
           ),
         for (final a in g.agents)

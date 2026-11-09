@@ -356,9 +356,8 @@ class _PendingRow extends StatelessWidget {
                 if (message.agentType.isNotEmpty)
                   Text(
                     message.agentType,
-                    style: textTheme.labelSmall?.copyWith(
-                      color: scheme.onSecondaryContainer.withValues(alpha: 0.7),
-                    ),
+                    style: SpbType.listMeta(textTheme)
+                        ?.copyWith(color: scheme.onSecondaryContainer),
                   ),
               ],
             ),

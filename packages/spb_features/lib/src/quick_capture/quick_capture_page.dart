@@ -387,7 +387,8 @@ class _QuickCapturePageState extends State<QuickCapturePage> {
     if (_hint != null) return HintLine(hint: _hint!);
     return Text(
       'Enter 提交 · Esc 取消',
-      style: textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+      style: SpbType.listMeta(textTheme)
+          ?.copyWith(color: scheme.onSurfaceVariant),
     );
   }
 

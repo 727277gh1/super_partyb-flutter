@@ -842,7 +842,7 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
       ),
       child: Text(
         text,
-        style: theme.textTheme.labelSmall?.copyWith(color: color),
+        style: SpbType.badge(theme.textTheme)?.copyWith(color: color),
       ),
     );
   }

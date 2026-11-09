@@ -172,7 +172,7 @@ class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
       // ~0.4s 时会自动提速追赶，这里只是抬高基线。
       charactersPerSecond: 600,
       textDirection: dir,
-      style: textTheme.bodyMedium?.copyWith(color: scheme.onSurface),
+      style: SpbType.body(textTheme)?.copyWith(color: scheme.onSurface),
       styleSheet: _styleSheet(scheme),
       // 图片解码降采样（docs/memory-audit.md G10）。不传时插件用
       // `Image(image: NetworkImage(url))`——无 ResizeImage，按原图分辨率解码。

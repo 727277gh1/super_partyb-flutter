@@ -2657,9 +2657,8 @@ class _TtsStatusBar extends StatelessWidget {
               Text(
                 '$parts 段',
                 key: const ValueKey('conversation-tts-status-parts'),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
-                ),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
           ],
         ),
@@ -2783,7 +2782,8 @@ class _UsageBarState extends State<_UsageBar> {
         Text(
           '费用 \$${cost.amount.toStringAsFixed(4)} ${cost.currency}',
           key: const ValueKey('conversation-context-usage-cost'),
-          style: textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+          style: SpbType.listMeta(textTheme)
+              ?.copyWith(color: scheme.onSurfaceVariant),
         ),
     ];
 
@@ -2988,9 +2988,8 @@ class _ExecutionStatusBar extends StatelessWidget {
               Text(
                 '队列：总计 $total，你的 $user',
                 key: const ValueKey('conversation-execution-status-queue'),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSecondaryContainer.withValues(alpha: 0.7),
-                ),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
               ),
           ],
         ),
@@ -3185,9 +3184,8 @@ class _TurnActivityIndicator extends StatelessWidget {
               Text(
                 '最近：$last',
                 key: const ValueKey('conversation-turn-activity-last'),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSecondaryContainer.withValues(alpha: 0.7),
-                ),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
               ),
           ],
         ),
@@ -3341,7 +3339,7 @@ class _RoutingNotice extends StatelessWidget {
       alignment: Alignment.center,
       child: Text(
         text,
-        style: Theme.of(context).textTheme.labelSmall
+        style: SpbType.listMeta(Theme.of(context).textTheme)
             ?.copyWith(color: scheme.onSurfaceVariant),
       ),
     );
@@ -3381,17 +3379,15 @@ class _GoalGateStoppedNotice extends StatelessWidget {
           Text(
             item.message,
             textAlign: TextAlign.center,
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
           if (turns != null)
             Text(
               turns,
               textAlign: TextAlign.center,
-              style: textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
-              ),
+              style: SpbType.listMeta(textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
         ],
       ),
@@ -3441,9 +3437,8 @@ class _ScheduleCreatedNotice extends StatelessWidget {
           Text(
             item.userText,
             textAlign: TextAlign.center,
-            style: textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
           ),
         ],
       ),

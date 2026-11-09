@@ -372,9 +372,8 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
               padding: const EdgeInsets.only(right: SpbSpacing.xs),
               child: Text(
                 '$_fileCount 个文件',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+                style: SpbType.listMeta(theme.textTheme)
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
             ),
           // 刷新：加载中禁用，避免叠请求。
@@ -559,9 +558,8 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
           if (dir.fileCount > 0)
             Text(
               '${dir.fileCount}',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
         ],
       ),
@@ -612,9 +610,8 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
           if (node.file.size > 0)
             Text(
               humanBytes(node.file.size),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
             ),
           if (_hasAnyAction) ...[
             const SizedBox(width: SpbSpacing.xs),

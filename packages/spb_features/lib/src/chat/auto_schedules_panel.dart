@@ -425,7 +425,8 @@ class _AutoScheduleRow extends StatelessWidget {
                 _describeScheduleError(schedule.lastError!),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: textTheme.labelSmall?.copyWith(color: scheme.error),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.error),
               ),
             ],
           ],
@@ -479,7 +480,8 @@ class _Chip extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+        style: SpbType.badge(Theme.of(context).textTheme)
+            ?.copyWith(color: color),
       ),
     );
   }
@@ -497,7 +499,7 @@ class _Meta extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return Text(
       text,
-      style: Theme.of(context).textTheme.labelSmall
+      style: SpbType.listMeta(Theme.of(context).textTheme)
           ?.copyWith(color: scheme.onSurfaceVariant),
     );
   }

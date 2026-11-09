@@ -229,7 +229,7 @@ class _ConfidenceChip extends StatelessWidget {
       ),
       child: Text(
         '置信度 $pct%',
-        style: Theme.of(context).textTheme.labelSmall
+        style: SpbType.badge(Theme.of(context).textTheme)
             ?.copyWith(color: scheme.onSecondaryContainer),
       ),
     );

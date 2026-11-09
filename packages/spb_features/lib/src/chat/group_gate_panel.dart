@@ -97,9 +97,8 @@ class GroupGatePanel extends StatelessWidget {
           Expanded(child: Text('Gate 决策', style: theme.textTheme.titleSmall)),
           Text(
             '$count',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            style: SpbType.listMeta(theme.textTheme)
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
       ),
@@ -166,7 +165,7 @@ class GroupGatePanel extends StatelessWidget {
             const SizedBox(height: SpbSpacing.xs),
             Align(
               alignment: Alignment.centerLeft,
-              child: Text('下一步输入预览', style: theme.textTheme.labelSmall),
+              child: Text('下一步输入预览', style: SpbType.badge(theme.textTheme)),
             ),
             const SizedBox(height: SpbSpacing.xxs),
             Container(
@@ -207,9 +206,8 @@ class GroupGatePanel extends StatelessWidget {
       ),
       child: Text(
         d.source.label,
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: scheme.onSurfaceVariant,
-        ),
+        style: SpbType.badge(theme.textTheme)
+            ?.copyWith(color: scheme.onSurfaceVariant),
       ),
     );
   }
@@ -225,9 +223,8 @@ class GroupGatePanel extends StatelessWidget {
             width: 72,
             child: Text(
               label,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              style: SpbType.listMeta(theme.textTheme)
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
           ),
           Expanded(child: Text(value, style: theme.textTheme.bodySmall)),

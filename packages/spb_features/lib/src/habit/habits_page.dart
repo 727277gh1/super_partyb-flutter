@@ -1141,7 +1141,10 @@ class _HabitEditorDialogState extends State<HabitEditorDialog> {
               ],
             ),
             const SizedBox(height: SpbSpacing.xs),
-            Text('重复（不选 = 每天）', style: Theme.of(context).textTheme.labelSmall),
+            Text(
+              '重复（不选 = 每天）',
+              style: SpbType.listMeta(Theme.of(context).textTheme),
+            ),
             const SizedBox(height: SpbSpacing.xs),
             Wrap(
               spacing: SpbSpacing.xs,

@@ -440,9 +440,8 @@ class TurnStatusStrip extends StatelessWidget {
               Text(
                 detail,
                 key: const ValueKey('conversation-turn-status-detail'),
-                style: textTheme.labelSmall?.copyWith(
-                  color: scheme.onSecondaryContainer.withValues(alpha: 0.75),
-                ),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
               ),
           ],
         ),
