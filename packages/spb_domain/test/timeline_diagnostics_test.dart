@@ -11,39 +11,47 @@ import 'package:test/test.dart';
 /// 1. 字段口径（`assistant_chars` 只算助手正文、逐轮按字符数降序）；
 /// 2. 报告小节**只输出数字与 id**——它会被贴进公开 issue，正文一个字都不能进。
 void main() {
-  TimelineDiagnostics sample({List<TurnTextStat>? turns, int? oldest}) =>
-      TimelineDiagnostics(
-        groupId: 'grp_1',
-        bufferedEvents: 2000,
-        maxBufferEvents: 2000,
-        itemCount: 42,
-        assistantChars: 9000,
-        turns:
-            turns ??
-            const [
-              TurnTextStat(
-                turnId: 'turn_long',
-                chars: 8000,
-                items: 2,
-                isStreaming: false,
-              ),
-              TurnTextStat(
-                turnId: 'turn_short',
-                chars: 1000,
-                items: 1,
-                isStreaming: true,
-              ),
-            ],
-        oldestLoadedGlobalSeq: oldest,
-        newestBufferedGlobalSeq: 12345,
-        trimCount: 3,
-        lastTrimDropped: 137,
-        lastTrimKept: 1900,
-        lastTrimPerTurn: true,
-        fromCache: false,
-        replayGapRepairs: 1,
-        sseCursorPresent: true,
-      );
+  TimelineDiagnostics sample({
+    List<TurnTextStat>? turns,
+    int? oldest,
+    int replaceDropped = 0,
+    int? replaceBefore,
+    int? replaceAfter,
+  }) => TimelineDiagnostics(
+    groupId: 'grp_1',
+    bufferedEvents: 2000,
+    maxBufferEvents: 2000,
+    itemCount: 42,
+    assistantChars: 9000,
+    turns:
+        turns ??
+        const [
+          TurnTextStat(
+            turnId: 'turn_long',
+            chars: 8000,
+            items: 2,
+            isStreaming: false,
+          ),
+          TurnTextStat(
+            turnId: 'turn_short',
+            chars: 1000,
+            items: 1,
+            isStreaming: true,
+          ),
+        ],
+    oldestLoadedGlobalSeq: oldest,
+    newestBufferedGlobalSeq: 12345,
+    trimCount: 3,
+    lastTrimDropped: 137,
+    lastTrimKept: 1900,
+    lastTrimPerTurn: true,
+    fromCache: false,
+    replayGapRepairs: 1,
+    sseCursorPresent: true,
+    lastReplaceDropped: replaceDropped,
+    lastReplaceOldestBefore: replaceBefore,
+    lastReplaceOldestAfter: replaceAfter,
+  );
 
   group('toLogFields：日志字段口径', () {
     test('关键词名齐全且是 snake_case（与 Go 的 slog 约定一致）', () {
@@ -68,6 +76,10 @@ void main() {
           'from_cache',
           'replay_gap_repairs',
           'sse_cursor_present',
+          // §6.85：整段替换的丢弃量（「中途丢块、滚动才回来」的唯一数字证据）
+          'last_replace_dropped_older',
+          'last_replace_oldest_before',
+          'last_replace_oldest_after',
         ]),
       );
       expect(fields['buffered_events'], 2000);
@@ -155,6 +167,72 @@ void main() {
       );
 
       expect(d.toReportLines().join('\n'), contains('group_id: (全局模式)'));
+    });
+
+    group('整段替换那条读数（§6.85）', () {
+      /// ## 这个 group 防的是什么
+      ///
+      /// 「对话中途丢块、滚动才回来」的成因之一，是缺口修复把缓冲整段换成
+      /// 最新一页、顺带扔掉已翻页的更早历史。而它的报告行有三种情形，**写混
+      /// 了就会被误读成「没发生」**：
+      ///
+      /// | 情形 | 正确措辞 | 误写的后果 |
+      /// |---|---|---|
+      /// | 没触发过缺口修复 | 无（未触发缺口修复） | — |
+      /// | 触发过但没丢东西 | 最近一次未丢弃已加载历史 | 写成「无」会让人以为探测没跑 |
+      /// | 丢了 | 丢 N 条 + 翻页下界 A → B | 不写区间就不知道「滚到顶能不能拉回来」 |
+      test('没触发过缺口修复 → 说明未触发（不是笼统的「无」）', () {
+        final lines = const TimelineDiagnostics(
+          groupId: 'grp_1',
+          bufferedEvents: 200,
+          maxBufferEvents: 2000,
+          itemCount: 10,
+          assistantChars: 100,
+          turns: [],
+          oldestLoadedGlobalSeq: 900,
+          newestBufferedGlobalSeq: 1000,
+          trimCount: 0,
+          lastTrimDropped: 0,
+          lastTrimKept: 0,
+          lastTrimPerTurn: true,
+          fromCache: false,
+          replayGapRepairs: 0,
+          sseCursorPresent: false,
+        ).toReportLines().join('\n');
+
+        expect(lines, contains('整段替换: 无（未触发缺口修复）'));
+      });
+
+      test('触发过但没丢已加载历史 → 明确写「未丢弃」（不能写「无」）', () {
+        final lines = sample().toReportLines().join('\n');
+
+        expect(lines, contains('整段替换: 最近一次未丢弃已加载历史'));
+      });
+
+      test('丢弃已加载历史 → 写清条数与翻页下界的变化（滚动可拉回）', () {
+        final lines = sample(
+          replaceDropped: 21,
+          replaceBefore: 100,
+          replaceAfter: 900,
+        ).toReportLines().join('\n');
+
+        expect(
+          lines,
+          contains('整段替换: 最近一次丢弃已加载历史 21 条（翻页下界 100 → 900，须重新向上翻页才能取回）'),
+        );
+      });
+
+      test('下界缺失时不伪造数字（用 ? 占位）', () {
+        // 首次加载就触发替换、或服务端事件没有 globalSeq 时，下界可能是 null。
+        // 写成 0 会让报告看起来像「覆盖到 0 号事件」。
+        final lines = sample(
+          replaceDropped: 5,
+          replaceBefore: null,
+          replaceAfter: null,
+        ).toReportLines().join('\n');
+
+        expect(lines, contains('翻页下界 ? → ?'));
+      });
     });
   });
 
