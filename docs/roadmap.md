@@ -24,6 +24,7 @@
 
 - [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
 - [x] 两端切账号身份与离线缓存归属失效（[issue #103](https://git.atjog.com/dever/super_partyb-flutter/issues/103)，见 [§6.90](design-decisions/auth.md)；本地修复与自动化回归）
+- [x] 对话列表刷新竞态、SSE 删除后复活及归档快照丢失（[issue #104](https://git.atjog.com/dever/super_partyb-flutter/issues/104)，见 [§6.91](design-decisions/ui.md)；本地修复与自动化回归）
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
 - [x] 对话列表卡片化 + 列数跟随宽度（移动端一列、桌面端并排 2~4 列，见 [§6.84](design-decisions/ui.md)）
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 [§6.22](design-decisions/testing.md)）

@@ -312,6 +312,15 @@ class _GroupListPageState extends State<GroupListPage> {
   /// 已见过的 id，用于 offset 分页去重（见类文档）。
   final _seenIds = <String>{};
 
+  /// 每个 group 的在途 created 查询令牌。
+  ///
+  /// `created` 事件先查权威行，查询期间可能收到 `deleted` 或新的 `created`。
+  /// 删除时撤销令牌，防止迟到响应把已经删除的条目重新插回列表。
+  final _createdRequests = <String, Object>{};
+
+  /// 刷新/分页请求代际；刷新后旧分页响应只能被丢弃。
+  int _loadGeneration = 0;
+
   bool _loading = false;
   bool _hasMore = true;
   SpbError? _error;
@@ -397,6 +406,8 @@ class _GroupListPageState extends State<GroupListPage> {
         unawaited(_insertCreated(update));
       case GroupUpdateOp.deleted:
         var removed = false;
+        // 使所有正在进行的 created 查询失效；查询完成后不得复活该条目。
+        _createdRequests.remove(update.groupId);
         setState(() {
           final index = _groups.indexWhere((g) => g.id == update.groupId);
           if (index >= 0) {
@@ -462,7 +473,12 @@ class _GroupListPageState extends State<GroupListPage> {
   /// 读回失败（网络抖动）时退化为用快照里的 title/status 造一条占位项——
   /// 「新建了但列表里没有」比「标题暂时不全」更糟。
   Future<void> _insertCreated(GroupUpdate update) async {
-    if (_seenIds.contains(update.groupId)) return;
+    if (_seenIds.contains(update.groupId) ||
+        _createdRequests.containsKey(update.groupId)) {
+      return;
+    }
+    final request = Object();
+    _createdRequests[update.groupId] = request;
 
     ChatGroup? group;
     try {
@@ -473,7 +489,10 @@ class _GroupListPageState extends State<GroupListPage> {
         'error': e.toString(),
       });
     }
-    if (!mounted) return;
+    if (!mounted || !identical(_createdRequests[update.groupId], request)) {
+      return;
+    }
+    _createdRequests.remove(update.groupId);
 
     final resolved = group ?? _placeholderFrom(update);
     if (resolved == null) return;
@@ -522,6 +541,7 @@ class _GroupListPageState extends State<GroupListPage> {
     metadata: g.metadata,
     activeSession: g.activeSession,
     currentGoal: g.currentGoal,
+    archiveSnapshot: g.archiveSnapshot,
   );
 
   void _onScroll() {
@@ -536,6 +556,7 @@ class _GroupListPageState extends State<GroupListPage> {
 
   Future<void> _loadMore() async {
     if (_loading || !_hasMore) return;
+    final generation = _loadGeneration;
     setState(() {
       _loading = true;
       _error = null;
@@ -546,7 +567,7 @@ class _GroupListPageState extends State<GroupListPage> {
         limit: widget.pageSize,
         offset: _groups.length,
       );
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         // 去重后追加：offset 分页在列表变动时会重复返回同一项。
         for (final g in page) {
@@ -564,7 +585,7 @@ class _GroupListPageState extends State<GroupListPage> {
       });
       unawaited(_saveCache());
     } on SpbError catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
 
       // ── 首次加载失败时回落缓存（issue #26 切片 A）──────────────
       //
@@ -578,8 +599,8 @@ class _GroupListPageState extends State<GroupListPage> {
       // 设了会让 _buildBody 渲染整页错误页，盖掉刚拿到的缓存内容——等于白回落。
       // 改为置 _fromCache，由 UI 渲染「离线数据」提示条（见 _CacheNotice）。
       if (_groups.isEmpty) {
-        final cached = await _loadCache();
-        if (!mounted) return;
+        final cached = await _loadCache(generation);
+        if (!mounted || generation != _loadGeneration) return;
         if (cached.isNotEmpty) {
           setState(() {
             _groups
@@ -606,13 +627,13 @@ class _GroupListPageState extends State<GroupListPage> {
   }
 
   /// 读缓存；未启用或为空时返回空列表（失败静默，见 `GroupCacheStore`）。
-  Future<List<ChatGroup>> _loadCache() async {
+  Future<List<ChatGroup>> _loadCache(int generation) async {
     final cache = widget.cache;
     final userId = widget.userId;
     if (cache == null || userId == null || userId.isEmpty) return const [];
     final groups = await cache.load(userId);
     final at = await cache.lastFetchedAt(userId);
-    if (mounted) _cacheFetchedAt = at;
+    if (mounted && generation == _loadGeneration) _cacheFetchedAt = at;
     return groups;
   }
 
@@ -645,6 +666,7 @@ class _GroupListPageState extends State<GroupListPage> {
   }
 
   Future<void> _refresh() async {
+    _loadGeneration++;
     setState(() {
       _groups.clear();
       _seenIds.clear();
@@ -652,6 +674,8 @@ class _GroupListPageState extends State<GroupListPage> {
       _error = null;
       _fromCache = false;
       _cacheFetchedAt = null;
+      // 允许刷新请求立即启动；旧请求的响应由 _loadGeneration 丢弃。
+      _loading = false;
     });
     await _loadMore();
   }
@@ -725,6 +749,7 @@ class _GroupListPageState extends State<GroupListPage> {
           final index = _groups.indexWhere((g) => g.id == group.id);
           if (index < 0) return;
           if (updated == null) {
+            _createdRequests.remove(group.id);
             // 删除成功：从列表移除，并把 id 从去重集合里放开——
             // 否则若同名 id 之后又被服务端返回（理论上不该发生），会因
             // 「已见过」而被静默丢弃，表现为列表少一项。
