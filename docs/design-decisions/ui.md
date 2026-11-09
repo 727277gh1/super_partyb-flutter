@@ -1243,3 +1243,78 @@ overflow 报错**（`RenderFlex overflowed` 在 widget 测试里是硬失败）�
   `TextStyle` 不按字符分类，按脚本分流要靠手写 fallback 字体族，代价远超收益。
 - **不引入 `TextScaler` 策略**：系统字体缩放是下一轮（`PopupMenuItem(height: 36)`、
   `maxLines: 1`、画布 `TextPainter` 不跟随缩放都在那里）。
+
+### 6.80 系统字体缩放（a11y）：决定**不** clamp，画布文本跟随缩放（2026-11）
+
+§6.79 之后字号与度量都定了，剩下的问题不再是「多大」，而是
+**用户把系统字号调大之后会怎样**。
+
+#### 议题（两个，性质完全不同）
+
+| # | 议题 | 性质 |
+|---|---|---|
+| 1 | `map_spec_card` 画布上的地点标签是 `TextPainter` 手绘的，字号固定 12px | **真缺陷**：卡片其余文字跟着系统字号放大，地图标签不动（视觉不一致 + 放大字号的用户仍读不到） |
+| 2 | 要不要在 `MaterialApp.builder` 里把 `textScaler` clamp 到 1.3「顺手修溢出」 | **决策题**：先量清楚有没有溢出，再决定 |
+
+#### 先量，再改（第 2 题的数据）
+
+用真实长度文案（长标题 + 长输入 + 多段回复 + 长路径工具调用）在对话页测
+1.0 / 1.3 / 2.0 三个倍率：**三个倍率下都没有任何 overflow**。
+再静态扫「固定高度 + 文字」的组合（`SizedBox`/`Container`/`ConstrainedBox`
+窗口内同时出现 `height:` 与 `Text(`）：`spb_ui` + `spb_features` 仅 8 处候选，
+且基本都是纯间距 `SizedBox`，没有「固定高度去装文字」的坏点。
+
+结论：本仓的布局是 **intrinsic sizing** 为主（面板、气泡、胶囊都不写死高度），
+2.0 倍也容得下。
+
+#### 决定：**不** clamp `textScaler`
+
+- clamp 等于**静默吞掉**系统无障碍设置：用户把字号调到 2.0 是有理由的，
+  我们改成 1.3 就是「你说要大，我偏只给一点点」，且**没有任何提示**。
+- 代价是不对称的：溢出（黄黑斜纹）是**看得见**的 bug，偷偷限幅是**看不见**的
+  bug；后者更难被发现、更难被投诉到。
+- 溢出风险已经实测为 0。若将来真的出现溢出，正解是把那个固定高度改成
+  `minHeight` / intrinsic（`PopupMenuItem.height` 本身就是 `minHeight` 语义，
+  见 `packages/flutter/lib/src/material/popup_menu.dart` 的
+  `BoxConstraints(minHeight: widget.height)`），而不是削字号。
+- 因此 `apps/*/lib/app.dart` 的 `MaterialApp.router` **不加** `builder`：
+  缩放策略就是「跟随系统，不干预」。
+
+#### 修法（第 1 题）
+
+`_MapPainter` 增加 `required this.textScaler`（在 `build` 里取
+`MediaQuery.textScalerOf(context)`），传给 `TextPainter(textScaler: …)`，
+并纳入 `shouldRepaint` 的比较（少了这一条，改字号不会重绘）。
+`layout(maxWidth: 120)` 保持不变：放大后标签会更早触发省略号——这正是
+「辅助信息让位给可读性」的预期行为（完整标题由下方列表承载）。
+
+#### 守卫
+
+| 守卫 | 钉住什么 |
+|---|---|
+| `packages/spb_features/test/chat/text_scale_test.dart` | 1.3 / 2.0 倍下对话页无 `FlutterError`（溢出是硬失败），且助手回复仍渲染 |
+| 同上第三条用例 | **2.0 倍下正文渲染高度 ≈2×**（`moreOrLessEquals(2.0, epsilon: 0.15)`）——专门防「有人为了修溢出在 `builder` 里 clamp」：那种改法让溢出消失、无障碍也消失，**现有测试一条都不会红** |
+| `goldens/map_spec_card_scale2.png` | 2.0 倍下画布标签确实放大。变异测试：去掉 `textScaler` → 该基线红（990px / 0.22%） |
+
+#### 写这类测试的三个坑（都踩过）
+
+1. **默认测试画布是 800×600**（`tester.view.physicalSize`）。2.0 倍时先撞天花板的是
+   **画布**而不是组件——本用例第一版就报 `Column` 溢出 19px，差点误判成卡片的 bug。
+2. **对话页有常驻动画**（流式指示器），`pumpAndSettle` **必然**超时；用两次
+   `tester.pump(Duration(milliseconds: 200))`。
+3. **助手回复走 markdown（RichText）**，`find.textContaining` 必须带
+   `findRichText: true`，否则「找不到」被误读成「放大后没渲染」。
+
+#### 未验证（本机边界，§9）
+
+- iOS / Android 真机的系统最大字号档（本机无真机）；
+- 桌面端：Linux 不上报 OS 缩放（恒 1.0），Windows / macOS 的上报行为未在本机跑。
+
+#### 有意不做
+
+- **不 clamp**（见「决定」）；
+- **不做应用内「字号设置」项**：系统已有该设置，再加一个就是双重缩放，
+  且要自己维护一整套倍率 → 令牌映射；
+- **不给所有 `maxLines: 1` 补 `ellipsis`**：18 处里 16 处已有；剩下两处是
+  `TextField`（单行输入靠滚动，不裁剪）与等长的对话 ID（`SelectableText`
+  本身不支持 `overflow`），改了没有收益。
