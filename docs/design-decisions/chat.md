@@ -1447,3 +1447,80 @@ router：它是 UI 决策，放两处就变成两份实现、两份测试。
   `flutter test` 与 domain 单测里验证过；实际故障现场能否据此定位，需要下一份
   真机报告。
 - §6.51 的绘制层规避**仍未被设备复核**（见该节末段），本轮不据此宣称修好。
+
+### 6.86 切对话先闪上一个对话的内容：清缓冲没作废归约缓存、也没推「已清空」（2026-11）
+
+#### 现象
+
+从 A 对话点进 B（或新建一个 group 后进入）：打开后**先看到 A 的时间线**，
+停留一会儿（一次 timeline 请求往返，弱网可达数秒）才换成 B 的内容。
+
+#### 根因：`switchGroup` / `start` 只清缓冲，没做另外两件事
+
+`ChatStreamController` 的切组入口是：
+
+```dart
+_groupId = groupId;
+_buffer.clear();          // ← 只做了这一件事
+// …若干状态复位…
+await _backfill(groupId);  // ← 一次网络往返，期间没有任何推送
+_emit();                   // ← 回填返回后才推
+```
+
+清缓冲本身是对了，但归约结果**是缓存的**（`_cachedReduction`，只有 `_emit()`
+会置脏），而页面有两条取数路径，两条都拿到旧数据：
+
+| 路径 | 清缓冲后、回填返回前会发生什么 |
+|---|---|
+| `ConversationPage.initState` 读 `controller.snapshot`（切组后**新挂载**的页面） | `_reduction` 因 `_reductionDirty == false` 直接返回**上一个 group 的归约结果** |
+| 已挂载页面靠 `controller.items` 流 `setState` | 流不推 → 收不到「已清空」，屏幕上的旧时间线一直留着 |
+
+于是「旧内容 → 旧内容 → 新内容」，中间那段窗口就是 `await _backfill` 的时长。
+
+#### 修法：清缓冲时同时置脏 + 推一次空时间线
+
+`_clearTimelineAndEmit()`（`chat_stream_controller.dart`）在 `start` / `switchGroup`
+里取代裸 `_buffer.clear()`：
+
+- `_buffer.clear()`；
+- `_reductionDirty = true`（**先于** `_emit()`：`_emit` 在
+  `_itemsController.isClosed` 时早退，控制器已关闭时至少要让 `snapshot` 不再返回
+  旧归约）；
+- **原本有内容**才 `_emit()`，让页面立刻拿到空时间线；回填返回后再推真实内容。
+
+「原本有内容才推」的理由：冷启动（缓冲本来就空）推一帧空列表没有信息量，反而会把
+「首帧即含回填历史」变成「首帧空、次帧满」——`core_test` 的
+`start() 回填后推送 items（issue #3）` 钉的就是后者，故该判据保留。
+
+#### 代价（明说）
+
+切到**非空**对话时会先闪一帧空态提示（`emptyHint`）再出内容。这与「首次进入该
+对话」的首帧表现一致（首次进入同样是先空后满），且远优于把**别人的消息**显示在
+当前对话里。要彻底消掉这一帧，需要给控制器加「回填在途」状态并在页面渲染加载态
+（页面 + 契约改动），不在本次范围。
+
+不是页面层能单独修的问题：`ConversationPage` 拿到的 `controller` 实例在切组时
+**不变**（SSE 是 user 级订阅，切组不重连），页面无法自行判断「这次 emit 前的
+旧 items 属于上一个 group」。修在控制器对两端（桌面 / 移动）同时生效。
+
+#### 覆盖
+
+- `packages/spb_domain/test/chat_stream_controller_core_test.dart`（新增 1 条）：
+  `回填在途期间不得把上一个 group 的时间线留在页面上（切组先清屏）`。用带
+  `delay: 100ms` 的 timeline mock 制造在途窗口，断言三件事：
+  1. `switchGroup` 的**同步段**跑完后 `c.snapshot` 立刻为空（钉住「缓存置脏」）；
+  2. 在途期间 `items` 流推的是**空时间线**（钉住「真的通知了页面」）；
+  3. `await` 完成后 snapshot 落到新 group 的内容（证明清屏没有吃掉回填结果）。
+
+#### 反向验证
+
+把 `_clearTimelineAndEmit()` 换回裸 `_buffer.clear()` → 上述用例第 1 条断言立刻红
+（`Expected: empty / Actual: [Instance of 'AssistantMessageItem']`，已实测）；只置脏
+不 emit → 第 2 条红（流没推）；置脏+emit 但无条件 emit → `start() 回填后推送 items`
+用例红（首帧被空列表占位）。三条一起钉住这次修法的边界。
+
+#### 未验证
+
+- **真机**：本机无 `DISPLAY`（[§9](../development.md)），结论来自 domain 单测 +
+  `flutter test`，没有在真实弱网下观察「空态那一帧」的实际时长与观感。
+- 未做：回填在途的加载态（见「代价」）。
