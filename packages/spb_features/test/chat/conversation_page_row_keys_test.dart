@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -49,6 +50,12 @@ import '../support/conversation_page_harness.dart';
 void main() {
   setUpHarness();
   tearDownHarness();
+  // §6.85 的两个 release 侧观测点都是**进程级**的（计数器 / 日志环形缓冲），
+  // 会跨用例累积。断言「没抱错」之前必须先清。
+  setUp(() {
+    PerfProbe.reset();
+    SpbLog.clearRecentLogs();
+  });
 
   testWidgets('批量卡被缓冲区裁剪拆散后，每一行都渲染出来（不撞 GlobalKey）', (tester) async {
     tester.view.physicalSize = const Size(900, 1200);
@@ -198,5 +205,16 @@ void main() {
         reason: 'out/batch_$f.md 的行必须是可见内容，不能是空白',
       );
     }
+
+    // ── §6.85 的 release 侧自检：本场景**不应**报「行主键重复」 ─────
+    //
+    // 批卡被拆成 4 行后，它们的主键是各自的文件 id（f3..f6），互不相同。
+    // 若这个自检误报，用户报障时就会把「撞键」当成病因，反向误导。
+    expect(PerfProbe.rowKeyOwnerCollisions, 0, reason: '每行主键独立（拆散后不再共享键实例）');
+    expect(
+      SpbLog.recentLogs.where((r) => r.message.contains('行主键重复')),
+      isEmpty,
+      reason: '正常行集合不得触发主键重复 warn',
+    );
   });
 }

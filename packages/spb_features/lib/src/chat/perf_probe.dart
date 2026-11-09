@@ -58,6 +58,13 @@ abstract final class PerfProbe {
   /// 用于「流式期间未变气泡是否重复 build」的测量。
   static int assistantBubbleBuilds = 0;
 
+  /// 时间线行主键重复的**检出次数**（跨行 `GlobalKey` 撞车，见
+  /// `ConversationPage._checkRowKeyOwners`）。
+  ///
+  /// release 里 Flutter 自己不校验这条，故只能靠这个计数与伴随的 warn 日志
+  /// 判断「用户看到的那块空白是不是撞键造成的」。
+  static int rowKeyOwnerCollisions = 0;
+
   /// 全部清零。测试在 `setUp` 里调用（计数器是进程级的，会跨用例累积）。
   @visibleForTesting
   static void reset() {
@@ -65,5 +72,6 @@ abstract final class PerfProbe {
     displayRowsComputations = 0;
     followBottomCalls = 0;
     assistantBubbleBuilds = 0;
+    rowKeyOwnerCollisions = 0;
   }
 }

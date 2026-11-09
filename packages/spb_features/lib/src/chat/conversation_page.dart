@@ -2184,7 +2184,57 @@ class _ConversationPageState extends State<ConversationPage> {
     // 与 rows 同步重算（它同样只取决于 `_items`）。放在这里而不是每次 build
     // 都扫一遍：重建时 `_items` 没变，结果必然相同。
     _keepAliveIds = _computeKeepAliveIds(_items);
+    _checkRowKeyOwners(rows);
     return rows;
+  }
+
+  /// 跨行主键去重的临时集合（避免每次重算展示行都新分配一个 `Set`）。
+  ///
+  /// 只在 [_displayRows] 里用，且用 `clear()` 而不是重建——2000 行的插入
+  /// 实测远低于分组本身（0.26 ms/次），但也不该每帧付一次分配代价。
+  final Set<String> _ownerScratch = <String>{};
+
+  /// 已经报过一次主键撞车（同一页面实例内只报一次，避免刷满 500 条环形缓冲）。
+  bool _rowOwnerCollisionLogged = false;
+
+  /// release 侧的 `GlobalKey` 撞车自检（§6.18 那类缺陷的可观测化）。
+  ///
+  /// ## 为什么必须自己检
+  ///
+  /// `Multiple widgets used the same GlobalKey` 是 `BuildOwner` 在 **debug**
+  /// 下用 `assert` 校验的；release 构建里那条校验根本不跑，用户看到的只有
+  /// 「整行空白，滚回来又出来」——正是 `docs/design-decisions/chat.md` §6.18
+  /// 里用户报障的原话。而在报障现场拿到 release 包+日志时，若没有这条自检，
+  /// 就只能靠「猜」区分「键撞车」与「绘制层没画」。
+  ///
+  /// 判据极简：行主键（`locateIdsOf(row).first`）在本次行集合里唯一。不唯一时
+  /// [RowLocateRegistry.keyFor] **必然**把同一个 `GlobalKey` 实例发给两行。
+  ///
+  /// ## 为什么放在 `_displayRows()` 而不是 `itemBuilder`
+  ///
+  /// 行集合只在这里变化（`identical(_items, _lastRowsItems)` 命中缓存时直接
+  /// 返回），故检查是「每次重算一次」而不是每帧一次；且行集合正是撞车的
+  /// 事实来源，检查时机与它同频。
+  void _checkRowKeyOwners(List<TimelineDisplayRow> rows) {
+    _ownerScratch.clear();
+    List<String>? dups;
+    for (final row in rows) {
+      final owner = locateIdsOf(row).first;
+      if (!_ownerScratch.add(owner)) {
+        (dups ??= <String>[]).add(owner);
+        if (dups.length >= 3) break;
+      }
+    }
+    if (dups == null) return;
+
+    PerfProbe.rowKeyOwnerCollisions++;
+    if (_rowOwnerCollisionLogged) return;
+    _rowOwnerCollisionLogged = true;
+    SpbLog.warn('时间线行主键重复：同帧两行会拿到同一个 GlobalKey（后出现的那行将渲染为空白）', {
+      'duplicate_owners': dups.join(','),
+      'rows': rows.length,
+      'note': 'release 里 Flutter 的 GlobalKey 唯一性校验不运行——本日志即那条缺失的报错',
+    });
   }
 
   /// [_displayRows] 的缓存（与 [_lastRowsItems] 成对，`identical` 作判据）。
