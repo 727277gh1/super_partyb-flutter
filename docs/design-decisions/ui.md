@@ -1139,6 +1139,28 @@ diff 图确认只是按钮胶囊高度 compact→standard 的预期变化（测�
 - ~~**不做 CJK 字距/行高校正**~~：**已做**，见 §6.79（`Typography` 三套几何校正 + 12 张
   golden 重出 + 行高断言）。
 
+#### 回归（2026-11）：窗口宽度 ≠ 这一栏的宽度
+
+§6.78 把 `message_composer` 里那句快捷键说明（`Enter 发送 · Shift+Enter 换行`）
+从 11px 的 `labelSmall` 迁到 12px 的 `SpbType.listMeta`，文本从 287.5dp 长到
+约 304dp，跨过了 `Row` 的余量边界。
+
+真正的问题不是「没测」，而是**判据读错了宽度**：显隐门控用的是
+`MediaQuery.sizeOf(context).width`（窗口宽度），而它所在的 `Row` 只有**这一栏**
+那么宽。桌面端侧边栏展开时窗口仍是 1280dp（判为宽屏、于是放行），聊天栏只剩
+455dp，整行溢出 9dp。表现是 `apps/spb_desktop/test/router_workbench_test.dart`
+**13 个用例同时红**，全部同一个 `RenderFlex overflowed by 9.0 pixels`；
+而 `spb_features` 自己的 composer 用例全绿——它们把窗口压到真机宽度，窗口宽度
+恰好等于这一栏宽度，两种判据在该场景下等价（这是判据用错却没被测出来的原因）。
+
+修法：`build()` 外包一层 `LayoutBuilder`，把**本控件的可用宽度**传给布局体
+（`_buildBar`），阈值仍是 `SpbBreakpoints.compact`（720dp）。判据从「窗口够宽」
+改为「这一栏够宽」，窄窗与窄栏因此得到同一结论：放不下就不显示。
+
+反向验证：`item_widgets_test.dart` 新增一条用例——窗口 1280 + `SizedBox(width: 455)`
+包住 composer，断言「无异常 + 说明隐藏 + 发送按钮仍在」。原用例的 719/720
+边界断言不变（composer 占满窗口时两种宽度相等）。
+
 ### 6.79 CJK 度量校正：字距归零 + 行高 ≥1.5（2026-11）
 
 承接 §6.78 的「不做 CJK 校正，单独立一轮」。字号已经定了（§6.76/§6.78），

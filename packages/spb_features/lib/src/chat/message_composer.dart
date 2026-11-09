@@ -347,6 +347,35 @@ class _MessageComposerState extends State<MessageComposer> {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
+    // 宽度门控必须看**本控件自己的可用宽度**，不是窗口宽度（见 [_buildBar]）。
+    // LayoutBuilder 放在 Container **外面**：Container 的 padding 会收窄
+    // 子树的约束，而这个阈值（[SpbBreakpoints.compact]）表达的是「这一栏够
+    // 不够宽」，不是「扣掉内边距后还剩多少」。
+    return LayoutBuilder(
+      builder: (context, constraints) =>
+          _buildBar(context, constraints.maxWidth, scheme, textTheme),
+    );
+  }
+
+  /// 输入区的实际布局体。
+  ///
+  /// 单独成方法只为把**可用宽度**传进来（`LayoutBuilder` 的约束拿不到窗口
+  /// 宽度，而 `MediaQuery` 拿不到「这一栏被侧边栏挤掉多少」）。
+  ///
+  /// ## 为什么不能用 `MediaQuery.sizeOf(context).width`（2026-11 真实回归）
+  ///
+  /// 桌面端侧边栏展开时，窗口仍是 1280dp（`isCompact` 判为宽屏），而聊天栏
+  /// 只剩 455dp。按窗口宽度放行那句 12px 的快捷键说明，整行溢出 9dp
+  /// （`router_workbench_test` 里 13 个用例同时失败，全部是同一个
+  /// `RenderFlex overflowed by 9.0 pixels`）。
+  ///
+  /// 判据换成可用宽度后，窄栏与窄窗得到同一结论：**放不下就不显示**。
+  Widget _buildBar(
+    BuildContext context,
+    double availableWidth,
+    ColorScheme scheme,
+    TextTheme textTheme,
+  ) {
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: SpbSpacing.md,
@@ -429,9 +458,11 @@ class _MessageComposerState extends State<MessageComposer> {
           //
           // ## 为什么必须处理（它是一个真实的窄屏溢出源）
           //
-          // 这句文本实测宽 **287.5dp**，且它在 `Row` 里不是 `Expanded`/
-          // `Flexible`——于是它把整行撑破：320dp 溢出 104px、360dp 64px、
-          // 390dp 34px（接线「立即发送」时；未接线时小 52px）。
+          // 这句文本实测宽 **约 304dp**（12px 令牌，§6.78 由 11px 的
+          // `labelSmall` 迁到 `SpbType.listMeta`；11px 时是 287.5dp），且它在
+          // `Row` 里不是 `Expanded`/`Flexible`——于是它把整行撑破：320dp
+          // 溢出 104px、360dp 64px、390dp 34px（接线「立即发送」时；未接线时
+          // 小 52px）。
           //
           // ## 为什么按宽度隐藏而不是 `Flexible` + 省略号
           //
@@ -443,7 +474,10 @@ class _MessageComposerState extends State<MessageComposer> {
           // 阈值用 `SpbBreakpoints.compact`（720dp）而不是「刚好够放下」的
           // 实测值：说明文本的出现与否不该随「几个像素」抖动，且 720 以下
           // 一律是单栏窄屏，正是它的适用场景分界。
-          if (!SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width))
+          //
+          // `availableWidth` 是**这一栏**的宽度（本控件从 `LayoutBuilder`
+          // 拿到的约束），不是窗口宽度：侧边栏展开时窗口 1280 而这一栏 455。
+          if (!SpbBreakpoints.isCompact(availableWidth))
             Text(
               'Enter 发送 · Shift+Enter 换行',
               style: SpbType.listMeta(textTheme)

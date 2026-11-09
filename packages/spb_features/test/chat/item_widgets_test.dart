@@ -515,6 +515,47 @@ void main() {
       expect(find.text(hint), findsOneWidget);
       expect(tester.takeException(), isNull, reason: '宽屏摆出提示文本后仍不应溢出（反向守卫）');
     });
+
+    // 窗口宽度与**这一栏**的宽度是两件事：桌面端侧边栏展开时窗口 1280、
+    // 聊天栏 455。按窗口宽度放行提示文本，整行溢出 9dp，`router_workbench_test`
+    // 里 13 个用例同时红（2026-11 真实回归，§6.78 把 11px 的 `labelSmall`
+    // 换成 12px 的 `SpbType.listMeta` 后文本跨过那条边界）。
+    testWidgets('窗口很宽但这一栏被挤窄时，说明隐藏且不溢出', (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await tester.pumpWidget(
+        _host(
+          Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 455,
+              child: MessageComposer(
+                onSubmit: _noop,
+                onFlush: () async => _okFlush(),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: '溢出会盖住发送按钮，用户点不到（issue #31 同一类缺陷）',
+      );
+      expect(
+        find.text('Enter 发送 · Shift+Enter 换行'),
+        findsNothing,
+        reason: '判据是这一栏的可用宽度，不是窗口宽度',
+      );
+      expect(find.byKey(const ValueKey('composer-send')), findsOneWidget);
+    });
   });
 
   group('UserMessageBubble', () {
