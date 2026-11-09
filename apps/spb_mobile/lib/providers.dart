@@ -2259,6 +2259,29 @@ final loadAgentsProvider = Provider<LoadAgents>((ref) {
   return api.listAgents;
 });
 
+/// `agent_id` → 展示名（`GET /api/agents` 的 `name`）。
+///
+/// ## 为什么需要它
+///
+/// `GET /chat/groups` 的 `active_session` **只有** `agent_id`（Go `groupToDict`
+/// 明确不写 `agent_name`），而对话列表卡片要显示用户认得的名字而不是内部
+/// 标识。注册表在装配层（`AgentsApi`），故按既有约定
+/// （`groupFileSummary` 同款）在这里算成同步查表函数注入页面。
+///
+/// 与 webapp `ChatMessageList` 的 `agentNames`（id → name）同做法。
+///
+/// ## 未加载完/失败时给空 Map
+///
+/// 与 `groupFileSummariesProvider` 同取向：一个展示细节不该阻断对话列表。
+/// 空 Map 时页面回退显示 `agent_id`；加载完成后 provider 发新值、路由重建，
+/// 名称自然替换掉 id。`GET /api/agents` 只返回 active agent（服务端
+/// `ListAgents` 已过滤），故已归档 agent 永远查不到——页面的 id 兜底正是
+/// 为这种情况准备的。
+final agentNamesProvider = FutureProvider<Map<String, String>>((ref) async {
+  final agents = await ref.watch(loadAgentsProvider)();
+  return {for (final a in agents) a.id: a.name};
+});
+
 /// 设置页「默认 Agent」下拉的候选项。
 ///
 /// ## 为什么要单独包一层 FutureProvider

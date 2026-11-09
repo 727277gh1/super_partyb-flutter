@@ -367,6 +367,9 @@ class _HomePage extends ConsumerWidget {
     // 用 `.value` 而非 `watch(future)`：本页不该因快照重算而整页重建（同
     // 本文件其它 `.value` 的取向）。
     final fileSummaries = ref.watch(groupFileSummariesProvider).value;
+    // agent_id → 名称（服务端 group 列表不带 agent_name，见 `agentNamesProvider`）。
+    // 未加载完/失败时给 null：页面回退显示 id，列表不因这条展示细节而阻断。
+    final agentNames = ref.watch(agentNamesProvider).value;
     return GroupListPage(
       api: api,
       // group 变更实时增量更新（新建/删除/归档/改名）。
@@ -389,6 +392,7 @@ class _HomePage extends ConsumerWidget {
       groupFileSummary: fileSummaries == null
           ? null
           : (groupId) => fileSummaries[groupId],
+      agentNameOf: agentNames == null ? null : (id) => agentNames[id],
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       // 工作台（小程序 BFF 投影层）。

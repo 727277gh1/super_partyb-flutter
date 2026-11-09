@@ -77,6 +77,10 @@ void main() {
         // 真实 SseClient 走流式响应，DioAdapter 不模拟，会留下重连 Timer
         // （→「A Timer is still pending」），故注入假实现。
         sseClientProvider.overrideWithValue(FakeSseClient()),
+        // 列表卡片的 agent 名称来自 `/api/agents` 映射（`agentNamesProvider`）。
+        // 真实实现会打未注册的 `/api/agents` → dio 起重试 Timer（同上方 SSE 的
+        // 「A Timer is still pending」根因），故注入空列表。
+        loadAgentsProvider.overrideWithValue(() async => const <Agent>[]),
       ],
     );
     addTearDown(container.dispose);

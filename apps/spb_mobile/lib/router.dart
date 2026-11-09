@@ -440,6 +440,9 @@ class _ConversationsTab extends ConsumerWidget {
     // 本地交付物统计快照（与桌面端同构）：未加载完/失败时给 null（文件条
     // 不显示，不阻断列表）。加载完成后 provider 发新值，本 widget 重建。
     final fileSummaries = ref.watch(groupFileSummariesProvider).value;
+    // agent_id → 名称（服务端 group 列表不带 agent_name，见 `agentNamesProvider`）。
+    // 未加载完/失败时给 null：页面回退显示 id，列表不因这条展示细节而阻断。
+    final agentNames = ref.watch(agentNamesProvider).value;
     return GroupListPage(
       api: api,
       // group 变更实时增量更新（新建/删除/归档/改名）。
@@ -456,6 +459,7 @@ class _ConversationsTab extends ConsumerWidget {
       groupFileSummary: fileSummaries == null
           ? null
           : (groupId) => fileSummaries[groupId],
+      agentNameOf: agentNames == null ? null : (id) => agentNames[id],
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       pendingConfirmationCount: pendingCount,

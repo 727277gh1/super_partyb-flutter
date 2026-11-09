@@ -100,6 +100,7 @@ class GroupListPage extends StatefulWidget {
     this.onSaveSnapshot,
     this.onOpenSnapshotSite,
     this.groupFileSummary,
+    this.agentNameOf,
     this.pageSize = 30,
   });
 
@@ -276,6 +277,27 @@ class GroupListPage extends StatefulWidget {
   ///
   /// 为 null 时（未注入）同样不渲染文件条：保持「纯拉取列表」用法。
   final GroupFileSummary? Function(String groupId)? groupFileSummary;
+
+  /// `agent_id` → 展示名（`GET /api/agents` 的 `name`）。
+  ///
+  /// ## 为什么需要注入（列表接口没有名字）
+  ///
+  /// `GET /chat/groups` 的 `active_session` 只有 `agent_id`（Go `groupToDict`
+  /// 明确只写 id/session_id/role/joined_at），**没有** `agent_name`——而卡片
+  /// 上直接显示 id 相当于把内部标识暴露给用户。名称只能由 agent 注册表
+  /// （`/api/agents`）映射，而列表页不掌握注册表，故与 [groupFileSummary]
+  /// 同一取向：装配层算好、以同步查表函数注入。
+  ///
+  /// 与 webapp `ChatMessageList` 的 `agentNames`（id → name 映射）做法一致。
+  ///
+  /// ## 返回 null 或空串时回退显示 id
+  ///
+  /// `/api/agents` 只返回 **active** agent（服务端 `ListAgents` 已过滤），
+  /// 已归档/已删除 agent 不在列表里。回退 id 是诚实兜底（宁可显示 id 也不
+  /// 显示空白或「未知」）；名称未加载完时同理，加载完成后装配层重建本页。
+  ///
+  /// 为 null 时（未注入）同样显示 id。
+  final String? Function(String agentId)? agentNameOf;
 
   final int pageSize;
 
@@ -1096,6 +1118,7 @@ class _GroupListPageState extends State<GroupListPage> {
           : (action) => _handleAction(group, action),
       onOpenSnapshotSite: widget.onOpenSnapshotSite,
       fileSummary: widget.groupFileSummary?.call(group.id),
+      agentNameOf: widget.agentNameOf,
     );
   }
 
@@ -1233,6 +1256,52 @@ class _CacheNotice extends StatelessWidget {
 ///
 /// 两者都打开同一个菜单。**不用**滑动（`Dismissible`）直接删：删除不可恢复，
 /// 滑动太容易误触，且无法承载「改名/归档」这类同级动作。
+/// 对话状态徽标（对齐小程序 `work-list` 的 `_StatusChip`）。
+///
+/// ## 为什么映射在客户端做
+///
+/// work-list 显示的是服务端投影层下发的 `status_label`（中文），客户端不翻译。
+/// 但 group 列表**没有**这个字段（Go `groupToDict` 只给原始 `status`），故
+/// 这里只能自己映射。
+///
+/// 只映射已知两态；**未知值原样显示**——服务端将来新增状态时，宁可露出原始
+/// 值，也不要被错标成「进行中」（与 works 的 `displayStatus` 兜底同一取向：
+/// 兜底不编造语义）。
+class _GroupStatusChip extends StatelessWidget {
+  const _GroupStatusChip({required this.status});
+
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    // 无状态值（异常载荷/旧缓存）不渲染空胶囊。
+    if (status.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final (bg, fg, label) = switch (status) {
+      'active' => (scheme.primaryContainer, scheme.onPrimaryContainer, '进行中'),
+      'archived' => (
+        scheme.surfaceContainerHighest,
+        scheme.onSurfaceVariant,
+        '已归档',
+      ),
+      _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant, status),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: SpbSpacing.sm,
+        vertical: SpbSpacing.xxs,
+      ),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(SpbRadius.pill),
+      ),
+      child: Text(label, style: SpbType.badge(textTheme)?.copyWith(color: fg)),
+    );
+  }
+}
+
 class _GroupTile extends StatelessWidget {
   const _GroupTile({
     super.key,
@@ -1241,6 +1310,7 @@ class _GroupTile extends StatelessWidget {
     this.onAction,
     this.onOpenSnapshotSite,
     this.fileSummary,
+    this.agentNameOf,
   });
 
   final ChatGroup group;
@@ -1265,6 +1335,19 @@ class _GroupTile extends StatelessWidget {
 
   /// 本地已同步交付物统计（装配层从同步状态库算好传入；null = 不显示文件条）。
   final GroupFileSummary? fileSummary;
+
+  /// `agent_id` → 名称（见 [GroupListPage.agentNameOf]）。
+  final String? Function(String agentId)? agentNameOf;
+
+  /// 元信息行要展示的 agent 文本：优先名称，查不到回退 id。
+  ///
+  /// 空白名称也回退 id：`Agent.name` 允许为空（服务端无 `binding:"required"`），
+  /// 渲染一个空串会让「绑定了一个 agent」看起来像没绑定。
+  String _agentLabel(String agentId) {
+    final name = agentNameOf?.call(agentId);
+    if (name == null || name.trim().isEmpty) return agentId;
+    return name;
+  }
 
   /// 打开菜单并把用户选择交给 [onAction]。
   Future<void> _openMenu(BuildContext context, Offset position) async {
@@ -1467,22 +1550,13 @@ class _GroupTile extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ── 标题行：归档徽标 + 标题 + 相对时间 ──
+          // ── 标题行：标题 + 状态徽标 + 相对时间（对齐小程序 work-card）──
+          //
+          // 归档态原先用「图标 + 已归档」文字，只在归档行出现；改成一枚**常显**
+          // 的状态徽标后（§6.89），活跃/归档两态同一视觉位置、同一阅读顺序，
+          // 也省掉标题行的图标宽度（窄屏卡片更不容易把标题挤没）。
           Row(
             children: [
-              if (group.isArchived) ...[
-                // 归档状态必须可见：否则用户会奇怪为什么这个对话不更新。
-                Icon(
-                  Icons.archive_outlined,
-                  size: SpbSpacing.md,
-                  color: scheme.outline,
-                ),
-                const SizedBox(width: SpbSpacing.xs),
-                // 元数据用 SpbType.listMeta（12px）：11px 的 labelSmall 对中文
-                // 状态词太挤（见 docs/design-decisions/ui.md 字号小节）。
-                Text('已归档', style: SpbType.listMeta(textTheme)),
-                const SizedBox(width: SpbSpacing.sm),
-              ],
               Expanded(
                 child: Text(
                   group.title,
@@ -1491,6 +1565,8 @@ class _GroupTile extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              const SizedBox(width: SpbSpacing.sm),
+              _GroupStatusChip(status: group.status),
               const SizedBox(width: SpbSpacing.sm),
               Text(
                 _relativeTime(group.updatedAt),
@@ -1562,8 +1638,8 @@ class _GroupTile extends StatelessWidget {
                   const SizedBox(width: SpbSpacing.xs),
                   Flexible(
                     child: Text(
-                      // agent_id 是面向用户的展示名（webapp 同款）。
-                      group.activeSession!.agentId,
+                      // 优先 agent 名称（注入映射），查不到回退 id（§6.89）。
+                      _agentLabel(group.activeSession!.agentId),
                       style: SpbType.listMeta(textTheme)
                           ?.copyWith(color: scheme.onSurfaceVariant),
                       maxLines: 1,

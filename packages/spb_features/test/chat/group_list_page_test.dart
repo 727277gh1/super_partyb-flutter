@@ -116,6 +116,7 @@ void main() {
     Future<bool> Function(ArchiveSnapshot)? onOpenSnapshotSite,
     Future<void> Function(String, List<int>)? onSaveSnapshot,
     Map<String, GroupFileSummary>? fileSummary,
+    String? Function(String agentId)? agentNameOf,
     int pageSize = 30,
   }) async {
     await tester.pumpWidget(
@@ -135,6 +136,7 @@ void main() {
           groupFileSummary: fileSummary == null
               ? null
               : (groupId) => fileSummary[groupId],
+          agentNameOf: agentNameOf,
           pageSize: pageSize,
         ),
       ),
@@ -180,6 +182,34 @@ void main() {
     await pumpPage(tester);
 
     expect(find.text('已归档'), findsOneWidget);
+  });
+
+  testWidgets('状态徽标：活跃显示「进行中」，归档显示「已归档」', (tester) async {
+    // 状态必须常显在同一视觉位置（对齐小程序 work-list 的状态 chip）：
+    // 只在归档行出现「已归档」文字时，用户无法一眼比较各对话的状态。
+    mockPage(
+      offset: 0,
+      items: [
+        groupJson(id: 'g1', title: '活跃对话'),
+        groupJson(id: 'g2', title: '旧对话', status: 'archived'),
+      ],
+    );
+    await pumpPage(tester);
+
+    expect(find.text('进行中'), findsOneWidget);
+    expect(find.text('已归档'), findsOneWidget);
+  });
+
+  testWidgets('未知状态原样显示（不误标成「进行中」）', (tester) async {
+    // 服务端将来新增状态时，宁可露出原始值，也不要错误地显示成进行中。
+    mockPage(
+      offset: 0,
+      items: [groupJson(id: 'g1', title: '暂停中', status: 'paused')],
+    );
+    await pumpPage(tester);
+
+    expect(find.text('进行中'), findsNothing);
+    expect(find.text('paused'), findsOneWidget);
   });
 
   testWidgets('点击条目回调携带该 ChatGroup', (tester) async {
@@ -1054,7 +1084,7 @@ void main() {
       expect(find.byType(LinearProgressIndicator), findsNothing);
     });
 
-    testWidgets('绑定 agent：元信息行显示 agent_id', (tester) async {
+    testWidgets('绑定 agent：未注入名称映射时回退显示 agent_id', (tester) async {
       mockPage(
         offset: 0,
         items: [
@@ -1073,6 +1103,49 @@ void main() {
       await pumpPage(tester);
 
       expect(find.text('claude'), findsOneWidget);
+      expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
+    });
+
+    testWidgets('注入名称映射：元信息行显示 agent 名称而不是 id', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(
+            id: 'g1',
+            extra: {
+              'active_session': {'agent_id': 'claude', 'session_id': 'sess_1'},
+            },
+          ),
+        ],
+      );
+      await pumpPage(
+        tester,
+        // claude → 小助手；其余 id 查不到（模拟 `/api/agents` 只返回 active，
+        // 已归档 agent 不在表里）。
+        agentNameOf: (id) => id == 'claude' ? '小助手' : null,
+      );
+
+      expect(find.text('小助手'), findsOneWidget);
+      // 内部标识不该再出现在卡片上（服务端列表只给 id，名称由装配层映射）。
+      expect(find.text('claude'), findsNothing);
+    });
+
+    testWidgets('名称缺失（空串/查不到）时回退 id，不渲染空白', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupJson(
+            id: 'g1',
+            extra: {
+              'active_session': {'agent_id': 'ghost_agent'},
+            },
+          ),
+        ],
+      );
+      await pumpPage(tester, agentNameOf: (_) => '');
+
+      // 空白名称会让「绑定了 agent」看起来像没绑定，故必须回退 id。
+      expect(find.text('ghost_agent'), findsOneWidget);
       expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
     });
 
