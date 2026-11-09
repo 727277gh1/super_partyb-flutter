@@ -951,8 +951,9 @@ Material 3 下它是 **11px / w500 / letterSpacing 0.5**，且这套参数是为
 - **硬编码清理**：`map_spec_card` 画布标签 11→12（经 golden 复核）、
   `agent_switcher` 菜单头加注释说明为何保留 12。
 - **有意不改**：聊天内面板（`turn_detail_panel` / `agent_picker` /
-  `group_settings_panel` 等约 30 处 `labelSmall`）与设置/同步页——它们是
-  对话流的附属 UI，字号层次与列表页不同，留待与 dense 决策一起统一。
+  `group_settings_panel` 等）与设置/同步页——它们是对话流的附属 UI，
+  字号层次与列表页不同，留待与 dense 决策一起统一。
+  （**已完成**：实测剩余 **68 处**，不是当初估的 ~30；见 §6.78。）
 
 #### 有意不做（→ 已由 §6.77 接手）
 
@@ -1019,5 +1020,118 @@ diff 图确认只是按钮胶囊高度 compact→standard 的预期变化（测�
 #### 有意不做
 
 - **不给移动端设 `titleTextStyle`**（理由见上）。
-- **不动面板内 ~30 处 `labelSmall`**：它们与旧 dense(13px) 语境配套，
-  现桌面标题已是 14px，字号层次变化后应逐个语义判定，另立一轮。
+- **不动面板内 `labelSmall`**：它们与旧 dense(13px) 语境配套，现桌面标题
+  已是 14px，字号层次变化后应逐个语义判定，另立一轮。
+  （**已完成**：§6.78 逐个判定并迁走全部 68 处，11px 归零。）
+
+### 6.78 聊天面板字号收口：68 处 `labelSmall` 迁走 + 小字禁降透明 + 字号守卫（2026-11）
+
+承接 §6.76/§6.77 留的尾巴。§6.76 当时估「聊天内面板约 30 处 `labelSmall`
+留待后续」，实测是 **68 处**——估算差了一倍多，因为面板在每个文件里只占一两行
+（`turn_detail_panel` 8 处、`conversation_page` 8 处、`map_spec_card` 4 处、
+`overlay_quick_capture_page` 4 处、`group_gate_panel` 4 处，其余 23 个文件各 1–3 处）。
+
+#### 缺陷
+
+1. **68 处 11px 里，大多数不是装饰**。它们是要读懂的状态语：
+   - `队列：总计 $total，你的 $user`（`conversation_page` 执行状态条）
+   - `最近：$last`（上一事件）、`$parts 段`（TTS 完成段数）
+   - `目标已停止：…` + 错误项正文（`goal-gate-stopped` 提示）
+   - `事件可能已超出时间线窗口，或尚未落库。`（详情面板的空态说明）
+   - `含 N 个已删除`（文件批次卡）、`置信度 N%`、`N 个文件`、错误说明
+   `12px` 是 §6.76 定下的可读下界，11px 明显在下界之下。
+2. **6 处 11px 与 `withValues(alpha: 0.7/0.75)` 叠加**。小字号 + 低对比度是
+   **乘法**叠加：字号已经在下界时再降透明度，实际对比度掉到几乎读不清
+   （`队列：…`、`最近：…`、`N 段`、`路由归属` 都中招）。
+3. **2 处裸字号仍是字面量**：`map_spec_card` 的画布标签
+   `TextStyle(fontSize: 12)`、`agent_switcher` 菜单头 `const TextStyle(fontSize: 12)`。
+   根因不是懒——旧令牌 API 只返回 `TextTheme` 槽位（`SpbType.listMeta(TextTheme)`），
+   而这两处拿不到 `TextTheme`：一处是 `CustomPainter` 里的 `TextPainter`（只要
+   `TextStyle`），一处是 `const` 上下文。
+
+#### 修法
+
+`SpbType` 扩到 5 个语义 + 1 个字面常量（`packages/spb_design/lib/src/type.dart`）：
+
+| 语义 | 令牌 | 实际样式 | 本轮用途 |
+|---|---|---|---|
+| 元数据 / 状态词 / 数量 / 说明 | `listMeta` | `bodySmall`（12 / w400） | 取代面板里 11px 的同类文案 |
+| 徽标 / 状态 chip / 分组头 | `badge` | `labelMedium`（12 / w500） | chip、`已归档`、组头、`参数`/`结果` |
+| 角标 / 计数胶囊 | `badgeCount` | `labelSmall` 零字距（11 / w500） | 待处理计数胶囊 |
+| 正文 | `body`（新） | `bodyMedium`（14 / w400） | 用户/助手气泡（原先直接挑槽位） |
+| 块标题 | `cardTitle`（新） | `titleMedium`（16 / w500） | spec 卡、文件预览卡的标题 |
+| 绘制字号 | `metaSize`（新，`double`） | 12.0 | `TextPainter` 用，与 `listMeta` 同值 |
+
+`body` / `cardTitle` 是**零像素变化的重命名**：原先那 5 处直接写
+`textTheme.bodyMedium` / `titleMedium`，换成令牌后渲染完全一致（`spec_ui_card`
+的 3 张 golden 因此不变）。价值在于「同一语义两个槽位」的挑槽位问题不再存在：
+块标题 16、行标题 14、正文 14、元数据 12 这条层次由令牌与断言固定。
+
+三条新规则写进 `SpbType` 文档，前两条由守卫检查：
+
+1. **禁止裸字号**（`fontSize: 数字`）。绘制场景用 `fontSize: SpbType.metaSize`。
+2. **`labelSmall` 必须就地说明理由**（纯装饰或受 golden 锁定的基线）。
+3. **小字号不再叠加透明度**：颜色直接给 `onSurfaceVariant` /
+   `onSecondaryContainer` 原色。层次靠字重（`w600`）或主题色，不靠降透明。
+
+#### 迁移判定（68 处 → 0）
+
+| 原位置 | 判给谁 | 依据 |
+|---|---|---|
+| 时间、来源、数量、费用、队列/最近/段数、错误说明、空态说明 | `listMeta` | 都是「要读懂」的正文级小字 |
+| 状态 chip、分组头、`当前`、`已归档`、`参数`/`结果`、类别胶囊、置信度 | `badge` | 面积小但一眼识别，靠字重区分 |
+| 待处理计数胶囊 | `badgeCount` | 纯数字，字距归零 |
+| `turn_detail_panel` 的 `用户输入`、`下一步输入预览` | `badge` | 区块标签，不是元数据 |
+| `map_spec_card` 的地点/路线小节头 | `badge` | 带图标的小节标签 |
+| `overlay_quick_capture_page` 的状态行、快捷键说明、附件大小 | `listMeta` | 与 `HintLine`（`bodySmall`）同一档 |
+
+同时归零的 6 处透明度：`conversation_page` 4 处（`N 段` / `队列` / `最近` /
+目标停止的 `turns`）、`turn_status` 1 处（状态详情）、`pending_messages_bar`
+1 处（agent 类型）。
+
+#### 守卫（`tools/check_type_tokens.sh`，本轮新增）
+
+没有守卫的清扫＝两周后长回来，而且**任何测试都不会红**（golden 只盖 12 张
+按钮/空态/spec 卡，面板一张都没有）。守卫扫 `packages/*/lib` 与 `apps/*/lib`
+（排除令牌本身所在的 `packages/spb_design/lib`）的两条规则：
+
+| 规则 | 免死金牌 |
+|---|---|
+| 数字字号字面量（`fontSize: 12`） | `fontSize: SpbType.metaSize` 等非数字形态放行 |
+| `labelSmall` | 该行或前两行写 `// 字号守卫豁免：<理由>`（理由必须非空） |
+
+- 用**就地注释**而非白名单：与 `tools/check_silent_catches.sh` 同一条理由
+  （白名单随文件改名腐化，而「记得加白名单」正是要避免的「靠人记得」）。
+- **空转保护**：扫描范围内一处 `SpbType.` 调用都没有时硬失败，不报「通过」。
+- 自测 8 条（`tools/check_type_tokens_selftest.sh`）：数字字面量、无理由
+  `labelSmall`、带理由豁免、空理由豁免、`SpbType.metaSize`、
+  注释里的 `fontSize: 10`、`spb_design` 内的定义、空转。
+
+#### 验证
+
+- `tokens_test.dart` 新增 4 条断言：`body` / `cardTitle` 下界、
+  层次顺序（`listMeta ≤ badge < body < cardTitle`）、
+  `metaSize` 与 `listMeta` 同字号（防止画布与列表差一个像素）。
+- `flutter test`：`spb_features` **1428 条全过**（含 4 张 spec/map golden）、
+  `spb_design` 47 条全过；`dart analyze` 干净。
+- golden 重出 **1 张**（`map_spec_card.png`，11→12）：像素 diff 只落在
+  y 438–492（地图下方的「地点/路线」列表区，744 个像素），轨迹图与画布标签区
+  **零变化**——确认没有连带布局跳动。
+- 守卫对本仓库实测：234 个文件、103 处 `SpbType` 调用、0 处裸字号、
+  0 处无理由 `labelSmall`。
+
+#### 未验证（本机边界，§9）
+
+- 真机观感：面板里 11→12 的密度变化（尤其 `turn_detail_panel` 的 chip 行、
+  `map_spec_card` 的小节头）需要在设备上复核，golden 只锁了 map 卡。
+- `agent_switcher` 菜单头由 `const` 改为运行时样式后，弹层宽度随文案/字宽
+  自适应——单测只断言条目存在，未测宽度。
+
+#### 有意不做
+
+- **不改 `labelSmall` 主题槽位本身**：Flutter 组件（`Badge` 等）内部用它，
+  改槽位会外溢到没审计过的组件（§6.76 的结论仍成立）。
+- **不动 `PopupMenuItem(height: 36)` 与画布 `maxWidth: 120`**：它们属于
+  「固定高度 + 文字」的系统字体缩放问题（属于下一轮）。
+- **不做 CJK 字距/行高校正**（`letterSpacing 0.4/0.5`、`height 1.33` 仍是
+  拉丁参数）：它会改动全部 golden，且与 §6.77 的行高断言耦合，单独立一轮。
