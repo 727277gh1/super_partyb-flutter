@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_ui/spb_ui.dart';
 
 /// 加载工作列表。
 ///
@@ -259,36 +260,23 @@ class _WorksPageState extends State<WorksPage> {
           ),
         ],
       ),
-      body: _buildBody(),
+      // 本页在移动端**不在** `_AppShell` 里（路由外置），底部没有
+      // `NavigationBar` 承接系统手势条，故列表要自己避开它。
+      body: SafeArea(top: false, child: _buildBody()),
     );
   }
 
   Widget _buildBody() {
     // 加载失败且无内容：整屏错误 + 重试。
+    // 整屏错误用共享的 `ErrorState`（图标尺寸 / 间距 / 重试按钮样式与
+    // 对话列表、搜索页一致）；此前这里是本页私有的第三份实现，图标比别处
+    // 小一号（xxl 32 vs xxxl 48）。
     if (_error != null && _works.isEmpty) {
-      return Center(
+      return ErrorState(
         key: const ValueKey('miniapp-works-error'),
-        child: Padding(
-          padding: SpbSpacing.pagePadding,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.error_outline,
-                size: SpbSpacing.xxl,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              const SizedBox(height: SpbSpacing.sm),
-              Text('加载工作列表失败：${_error!.message}', textAlign: TextAlign.center),
-              const SizedBox(height: SpbSpacing.md),
-              FilledButton(
-                key: const ValueKey('miniapp-works-retry'),
-                onPressed: _reload,
-                child: const Text('重试'),
-              ),
-            ],
-          ),
-        ),
+        message: '加载工作列表失败：${_error!.message}',
+        onRetry: _reload,
+        retryKey: const ValueKey('miniapp-works-retry'),
       );
     }
 
@@ -301,12 +289,10 @@ class _WorksPageState extends State<WorksPage> {
     }
 
     if (_works.isEmpty) {
-      return Center(
+      return EmptyState(
         key: const ValueKey('miniapp-works-empty'),
-        child: Text(
-          _status == 'active' ? '还没有进行中的工作' : '还没有任何工作',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
+        icon: Icons.work_outline,
+        message: _status == 'active' ? '还没有进行中的工作' : '还没有任何工作',
       );
     }
 

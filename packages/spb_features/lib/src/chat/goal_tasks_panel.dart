@@ -434,7 +434,6 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
                   key: const ValueKey('goal-tasks-reload'),
                   icon: const Icon(Icons.refresh, size: SpbSpacing.lg),
                   tooltip: '刷新任务',
-                  visualDensity: VisualDensity.compact,
                   onPressed: _locked ? null : () => _guard(widget.onReload!),
                 ),
             ],
@@ -505,6 +504,8 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
     final scheme = theme.colorScheme;
     final done = task.isCompleted;
     final tone = _statusTone(scheme, task);
+    // 桌面端才压勾选框的命中区（见下方 Checkbox 的说明）。
+    final desktop = SpbTheme.isDesktopTheme(theme);
     // 描述与标题重复时不重复渲染（LLM 展开的清单常见这种重复）。
     final description = task.description.trim();
     final showDescription = description.isNotEmpty && description != task.title;
@@ -544,8 +545,13 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
                     value: done,
                     // shrinkWrap + compact：默认 48dp 点击区在 320dp 侧边栏里
                     // 会白白吃掉正文宽度。视觉尺寸仍是标准的 18dp 方框。
-                    visualDensity: VisualDensity.compact,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    // 密度跟随主题（§6.77：桌面 compact / 移动 standard）。
+                    // 只有 `materialTapTargetSize` 要分端：桌面要 shrinkWrap 才能
+                    // 不让 48dp 的默认可点区把侧边栏的行高撑开；移动端保持默认
+                    // （勾选框是最常点的控件，18dp 命中区在触屏上会频频误触）。
+                    materialTapTargetSize: desktop
+                        ? MaterialTapTargetSize.shrinkWrap
+                        : null,
                     onChanged: _locked ? null : (_) => _toggle(task),
                   ),
                 ),
@@ -703,7 +709,6 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
               key: ValueKey('goal-task-edit-${task.taskId}'),
               icon: const Icon(Icons.edit_outlined, size: SpbSpacing.lg),
               tooltip: '编辑',
-              visualDensity: VisualDensity.compact,
               onPressed: _locked ? null : () => _edit(task),
             ),
           if (canMove) ...[
@@ -711,7 +716,6 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
               key: ValueKey('goal-task-up-${task.taskId}'),
               icon: const Icon(Icons.arrow_upward, size: SpbSpacing.lg),
               tooltip: '上移',
-              visualDensity: VisualDensity.compact,
               // 首位不能再上移：置灰而不是隐藏（位置稳定，列表不会跳动）。
               onPressed: _locked || index == 0 ? null : () => _move(task, -1),
             ),
@@ -719,7 +723,6 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
               key: ValueKey('goal-task-down-${task.taskId}'),
               icon: const Icon(Icons.arrow_downward, size: SpbSpacing.lg),
               tooltip: '下移',
-              visualDensity: VisualDensity.compact,
               onPressed: _locked || index == total - 1
                   ? null
                   : () => _move(task, 1),
@@ -730,7 +733,6 @@ class _GoalTasksPanelState extends State<GoalTasksPanel> {
               key: ValueKey('goal-task-delete-${task.taskId}'),
               icon: const Icon(Icons.delete_outline, size: SpbSpacing.lg),
               tooltip: '删除',
-              visualDensity: VisualDensity.compact,
               onPressed: _locked ? null : () => _delete(task),
             ),
         ],
@@ -925,6 +927,8 @@ class _GoalTaskEditDialogState extends State<_GoalTaskEditDialog> {
     return AlertDialog(
       key: const ValueKey('goal-task-edit-dialog'),
       title: Text('编辑任务 ${widget.task.taskId}'),
+      // 同 `goal_create`：两段多行输入 + 键盘弹起会超出小屏高度。
+      scrollable: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

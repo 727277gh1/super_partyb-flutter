@@ -218,7 +218,6 @@ class _OutboxRow extends StatelessWidget {
               key: ValueKey('outbox-remove-${entry.id}'),
               icon: const Icon(Icons.close, size: SpbSpacing.md),
               tooltip: '丢弃',
-              visualDensity: VisualDensity.compact,
               onPressed: () => onRemove!(entry.id),
             ),
         ],

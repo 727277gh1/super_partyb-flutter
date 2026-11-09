@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
@@ -392,32 +395,12 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
     if (detail == null) {
       return Scaffold(
         appBar: AppBar(title: Text(widget.title)),
-        body: Center(
+        // 与工作列表 / 对话列表共用 `ErrorState`（图标与按钮样式统一）。
+        body: ErrorState(
           key: const ValueKey('miniapp-work-error'),
-          child: Padding(
-            padding: SpbSpacing.pagePadding,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.error_outline,
-                  size: SpbSpacing.xxl,
-                  color: Theme.of(context).colorScheme.error,
-                ),
-                const SizedBox(height: SpbSpacing.sm),
-                Text(
-                  '加载失败：${_error?.message ?? '未知错误'}',
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: SpbSpacing.md),
-                FilledButton(
-                  key: const ValueKey('miniapp-work-retry'),
-                  onPressed: _reload,
-                  child: const Text('重试'),
-                ),
-              ],
-            ),
-          ),
+          message: '加载失败：${_error?.message ?? '未知错误'}',
+          onRetry: _reload,
+          retryKey: const ValueKey('miniapp-work-retry'),
         ),
       );
     }
@@ -449,63 +432,68 @@ class _WorkDetailPageState extends State<WorkDetailPage> {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: RefreshIndicator(
-              onRefresh: _reload,
-              child: ListView(
-                padding: SpbSpacing.pagePadding,
-                children: [
-                  _header(detail),
-                  if (detail.steps.isNotEmpty) ...[
+      // 本页在移动端同样**不在 shell 内**（与工作列表一起外置），底部没有
+      // `NavigationBar` 承接手势条；`top: false` 因为 AppBar 已经避开了状态栏。
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: _reload,
+                child: ListView(
+                  padding: SpbSpacing.pagePadding,
+                  children: [
+                    _header(detail),
+                    if (detail.steps.isNotEmpty) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      const SectionTitle('步骤'),
+                      for (final s in detail.steps) _StepTile(step: s),
+                    ],
+                    if (detail.pendingConfirmations.isNotEmpty) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      const SectionTitle('待确认'),
+                      for (final c in detail.pendingConfirmations)
+                        _ConfirmationCard(
+                          key: ValueKey('miniapp-confirmation-${c.id}'),
+                          card: c,
+                          busy: _acting,
+                          resolved: _resolved.contains(c.id),
+                          onResolve: (action) => _resolve(c, action),
+                        ),
+                    ],
+                    if (_artifacts.isNotEmpty) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      const SectionTitle('产物'),
+                      for (final a in _artifacts)
+                        _ArtifactTile(
+                          key: ValueKey('miniapp-artifact-${a.id}'),
+                          artifact: a,
+                          downloading: _downloading.contains(a.id),
+                          onDownload: () => _download(a),
+                        ),
+                    ],
+                    if (_events.isNotEmpty) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      const SectionTitle('事件'),
+                      for (final e in _events)
+                        _EventTile(
+                          key: ValueKey('miniapp-event-${e.id}'),
+                          event: e,
+                        ),
+                    ],
+                    if (detail.canComplete || detail.canStop) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      _actions(detail),
+                    ],
                     const SizedBox(height: SpbSpacing.lg),
-                    const SectionTitle('步骤'),
-                    for (final s in detail.steps) _StepTile(step: s),
                   ],
-                  if (detail.pendingConfirmations.isNotEmpty) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    const SectionTitle('待确认'),
-                    for (final c in detail.pendingConfirmations)
-                      _ConfirmationCard(
-                        key: ValueKey('miniapp-confirmation-${c.id}'),
-                        card: c,
-                        busy: _acting,
-                        resolved: _resolved.contains(c.id),
-                        onResolve: (action) => _resolve(c, action),
-                      ),
-                  ],
-                  if (_artifacts.isNotEmpty) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    const SectionTitle('产物'),
-                    for (final a in _artifacts)
-                      _ArtifactTile(
-                        key: ValueKey('miniapp-artifact-${a.id}'),
-                        artifact: a,
-                        downloading: _downloading.contains(a.id),
-                        onDownload: () => _download(a),
-                      ),
-                  ],
-                  if (_events.isNotEmpty) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    const SectionTitle('事件'),
-                    for (final e in _events)
-                      _EventTile(
-                        key: ValueKey('miniapp-event-${e.id}'),
-                        event: e,
-                      ),
-                  ],
-                  if (detail.canComplete || detail.canStop) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    _actions(detail),
-                  ],
-                  const SizedBox(height: SpbSpacing.lg),
-                ],
+                ),
               ),
             ),
-          ),
-          if (detail.canSendMessage) _composer(),
-        ],
+            if (detail.canSendMessage) _composer(),
+          ],
+        ),
       ),
     );
   }
@@ -632,41 +620,87 @@ class _MessageInputState extends State<_MessageInput> {
   final _controller = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    // 发送按钮的可用态依赖文本内容（空输入置灰），故需监听变化重建。
+    _controller.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() => setState(() {});
+
+  @override
   void dispose() {
-    _controller.dispose();
+    _controller
+      ..removeListener(_onTextChanged)
+      ..dispose();
     super.dispose();
   }
 
+  bool get _canSubmit => widget.enabled && _controller.text.trim().isNotEmpty;
+
   Future<void> _submit() async {
+    if (!_canSubmit) return;
     final text = _controller.text.trim();
-    if (text.isEmpty) return;
     _controller.clear();
     await widget.onSubmit(text);
   }
 
+  /// 桌面端：Enter = 发送、Shift+Enter = 换行（与 `MessageComposer` 同一约定）。
+  ///
+  /// 移动端**不**走这里：那里由软键盘的动作键（`textInputAction: send`）
+  /// 触发 `onSubmitted`；而 `newline` 会让软键盘只给一个换行键，用户发不出消息
+  /// （只能点按钮）。两端因此各自拿到符合直觉的行为，而不是把桌面约定强加给
+  /// 触摸端（这正是本组件不复用 `MessageComposer` 的原因，类文档已说明）。
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event.logicalKey != LogicalKeyboardKey.enter &&
+        event.logicalKey != LogicalKeyboardKey.numpadEnter) {
+      return KeyEventResult.ignored;
+    }
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      // 让 EditableText 走默认行为（插入换行）。
+      return KeyEventResult.ignored;
+    }
+    unawaited(_submit());
+    return KeyEventResult.handled;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final desktop = SpbTheme.isDesktopPlatform(context);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         Expanded(
-          child: TextField(
-            key: const ValueKey('miniapp-work-message-field'),
-            controller: _controller,
-            enabled: widget.enabled,
-            minLines: 1,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              hintText: '补充要求…',
-              border: OutlineInputBorder(),
-              isDense: true,
+          child: Focus(
+            onKeyEvent: desktop ? _onKey : null,
+            child: TextField(
+              key: const ValueKey('miniapp-work-message-field'),
+              controller: _controller,
+              enabled: widget.enabled,
+              minLines: 1,
+              maxLines: 4,
+              // 见 [_onKey]：桌面走 Enter 发送，移动端把软键盘的动作键改成
+              // 「发送」而不是「换行」。
+              textInputAction: desktop
+                  ? TextInputAction.newline
+                  : TextInputAction.send,
+              onSubmitted: desktop ? null : (_) => _submit(),
+              decoration: const InputDecoration(
+                hintText: '补充要求…',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
             ),
           ),
         ),
         const SizedBox(width: SpbSpacing.sm),
         IconButton.filled(
           key: const ValueKey('miniapp-work-message-send'),
-          onPressed: widget.enabled ? _submit : null,
+          // tooltip 同时是图标按钮的**无障碍名称**：没有它，屏幕阅读器只会念
+          // 「按钮」，桌面端悬停也没有提示。
+          tooltip: '发送',
+          onPressed: _canSubmit ? _submit : null,
           icon: const Icon(Icons.send),
         ),
       ],
@@ -691,7 +725,10 @@ class _StepTile extends StatelessWidget {
     };
 
     return ListTile(
-      dense: true,
+      // 这里不写 `dense: true`：M3 下它会**同时**把标题压到 13px 并缩行高
+      // （`list_tile.dart` 的 `_isDenseLayout`，显式样式也对抗不了，§6.77）。
+      // 步骤标题与说明是需要读的内容，桌面端的紧凑由主题的
+      // `visualDensity` 承担。
       contentPadding: EdgeInsets.zero,
       leading: Icon(icon, size: SpbSpacing.lg, color: color),
       title: Text(step.title),
@@ -789,7 +826,6 @@ class _ArtifactTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListTile(
-      dense: true,
       contentPadding: EdgeInsets.zero,
       leading: Icon(switch (artifact.type) {
         'image' => Icons.image_outlined,
@@ -834,7 +870,6 @@ class _EventTile extends StatelessWidget {
     final text = event.text;
 
     return ListTile(
-      dense: true,
       contentPadding: EdgeInsets.zero,
       leading: Icon(
         switch (event.eventType) {

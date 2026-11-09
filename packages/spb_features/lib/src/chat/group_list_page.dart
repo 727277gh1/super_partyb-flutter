@@ -778,63 +778,179 @@ class _GroupListPageState extends State<GroupListPage> {
       );
   }
 
+  /// AppBar 动作（按**可用宽度**与平台分档，见 §6.16 与 §6.88）。
+  ///
+  /// ## 为什么按宽度分档（而不是「塞得下就全摆」）
+  ///
+  /// 300dp 级窄屏上五个 48dp 图标会把标题压到 **0 宽**（实测：320dp、
+  /// 系统字号 2.0 时 `Text('对话')` 的宽度为 0）——用户看不出自己在哪一页，
+  /// 而 AppBar 本身**不会报溢出**（没有黄黑条，问题静默）。
+  ///
+  /// 与 `ConversationPage` 的 AppBar（§6.16）同一条判据：按频率分档，
+  /// **低频道入口只多一步，不消失**。
+  ///
+  /// | 入口 | 常驻 | 收进溢出菜单 |
+  /// |---|---|---|
+  /// | 新建 / 待确认 / 搜索 | ✅（与「现在这份列表」直接相关） | — |
+  /// | 工作台 / 习惯 / 设置 | 宽屏 | 窄屏（<720dp） |
+  /// | 刷新（**仅桌面**） | 宽屏 | 窄屏 |
+  ///
+  /// ## 为什么桌面端要一个显式「刷新」
+  ///
+  /// 列表靠 `RefreshIndicator`（下拉）刷新，而它需要 **overscroll 拖拽**：
+  /// 鼠标滚轮滚不出 overscroll，桌面默认的 `ScrollBehavior` 也不把鼠标
+  /// 当作拖动设备（`dragDevices` 只含 touch/stylus/trackpad）。结果是
+  /// **桌面用户没有任何手动刷新入口**（SSE 只推变更，拉漏的分页与缓存
+  /// 不会自愈）。
+  ///
+  /// 判据用 `SpbTheme.isDesktopPlatform`（主题注入的平台，不是 `dart:io`）：
+  /// 测试里默认平台是 android，故本入口不会凭空出现在移动端用例里。
+  ///
+  /// 宽度读 `MediaQuery.sizeOf`（窗口宽）：桌面主窗口的最小宽度是 720
+  /// （`WindowSpec.main.minWidth`），故窄屏分支实际只在移动端成立——那里
+  /// 窗口宽就是页面宽。桌面端若将来放宽最小宽度，再改成量 AppBar 的实际
+  /// 约束（`LayoutBuilder`），不要用窗口宽近似（§6.84 踩过同一个坑）。
+  List<Widget> _appBarActions(BuildContext context) {
+    final compact = SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width);
+    final desktop = SpbTheme.isDesktopPlatform(context);
+
+    final primary = <Widget>[
+      if (widget.onCreateGroup != null)
+        IconButton(
+          key: const ValueKey('group-list-create'),
+          icon: const Icon(Icons.add),
+          tooltip: '新建对话',
+          // 创建往返期间禁用：否则连点会建出两个对话。
+          onPressed: _creating ? null : _createGroup,
+        ),
+      if (widget.onOpenConfirmations != null)
+        IconButton(
+          key: const ValueKey('group-list-confirmations'),
+          icon: Badge(
+            isLabelVisible: widget.pendingConfirmationCount > 0,
+            label: Text('${widget.pendingConfirmationCount}'),
+            child: const Icon(Icons.pending_actions),
+          ),
+          tooltip: '待确认',
+          onPressed: widget.onOpenConfirmations,
+        ),
+      if (widget.onSearch != null)
+        IconButton(
+          key: const ValueKey('group-list-search'),
+          icon: const Icon(Icons.search),
+          tooltip: '搜索消息',
+          onPressed: widget.onSearch,
+        ),
+    ];
+
+    // 低频入口：宽屏常驻、窄屏进溢出菜单。
+    // 低频入口：宽屏常驻、窄屏进溢出菜单。[desktop] 那一项不是「低频」而是
+    // 「本端才有」——鼠标滚轮拖不出 RefreshIndicator 需要的 overscroll。
+    final secondary = <Widget>[
+      if (widget.onOpenWorks != null)
+        IconButton(
+          key: const ValueKey('group-list-works'),
+          icon: const Icon(Icons.work_outline),
+          tooltip: '工作台',
+          onPressed: widget.onOpenWorks,
+        ),
+      if (widget.onOpenHabits != null)
+        IconButton(
+          key: const ValueKey('group-list-habits'),
+          icon: const Icon(Icons.repeat),
+          tooltip: '习惯',
+          onPressed: widget.onOpenHabits,
+        ),
+      if (desktop)
+        IconButton(
+          key: const ValueKey('group-list-refresh'),
+          icon: const Icon(Icons.refresh),
+          tooltip: '刷新',
+          // 首次加载/刷新途中禁用；成功与否由列表自身反馈（转圈 / 内容变化）。
+          onPressed: _loading ? null : () => unawaited(_refresh()),
+        ),
+      // 全局设置放**最后**：它是低频入口，而前面几项都与「对话」这个
+      // 当前任务直接相关。顺序也贴合平台惯例（设置在最右）。
+      if (widget.onOpenSettings != null)
+        IconButton(
+          key: const ValueKey('group-list-settings'),
+          icon: const Icon(Icons.settings_outlined),
+          tooltip: '设置',
+          onPressed: widget.onOpenSettings,
+        ),
+    ];
+
+    return [
+      ...primary,
+      if (!compact) ...secondary,
+      if (compact && secondary.isNotEmpty) _overflowMenu(),
+    ];
+  }
+
+  /// 窄屏的溢出菜单（收纳 [_appBarActions] 里的低频入口）。
+  ///
+  /// 菜单项的 `key` 与宽屏图标**不同**（`menu-group-list-*` vs
+  /// `group-list-*`）：同一个 key 指向两种交互会让断言的语义随窗口宽度漂移
+  /// （与 `ConversationPage` 的 `menu-conversation-search` 同一约定）。
+  Widget _overflowMenu() {
+    final desktop = SpbTheme.isDesktopPlatform(context);
+    Widget row(IconData icon, String label) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: SpbSpacing.lg),
+        const SizedBox(width: SpbSpacing.md),
+        Text(label),
+      ],
+    );
+
+    // 用 `VoidCallback` 作菜单值：每个条目的动作已在装配层闭包里，
+    // 这里只转发，不重新实现。
+    final items = <(String, IconData, String, VoidCallback)>[
+      if (widget.onOpenWorks != null)
+        (
+          'menu-group-list-works',
+          Icons.work_outline,
+          '工作台',
+          widget.onOpenWorks!,
+        ),
+      if (widget.onOpenHabits != null)
+        ('menu-group-list-habits', Icons.repeat, '习惯', widget.onOpenHabits!),
+      if (desktop)
+        (
+          'menu-group-list-refresh',
+          Icons.refresh,
+          '刷新',
+          () => unawaited(_refresh()),
+        ),
+      if (widget.onOpenSettings != null)
+        (
+          'menu-group-list-settings',
+          Icons.settings_outlined,
+          '设置',
+          widget.onOpenSettings!,
+        ),
+    ];
+
+    return PopupMenuButton<int>(
+      key: const ValueKey('group-list-overflow'),
+      tooltip: '更多',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (index) => items[index].$4(),
+      itemBuilder: (context) => [
+        for (var i = 0; i < items.length; i++)
+          PopupMenuItem<int>(
+            key: ValueKey(items[i].$1),
+            value: i,
+            child: row(items[i].$2, items[i].$3),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('对话'),
-        actions: [
-          if (widget.onCreateGroup != null)
-            IconButton(
-              key: const ValueKey('group-list-create'),
-              icon: const Icon(Icons.add),
-              tooltip: '新建对话',
-              // 创建往返期间禁用：否则连点会建出两个对话。
-              onPressed: _creating ? null : _createGroup,
-            ),
-          if (widget.onOpenConfirmations != null)
-            IconButton(
-              key: const ValueKey('group-list-confirmations'),
-              icon: Badge(
-                isLabelVisible: widget.pendingConfirmationCount > 0,
-                label: Text('${widget.pendingConfirmationCount}'),
-                child: const Icon(Icons.pending_actions),
-              ),
-              tooltip: '待确认',
-              onPressed: widget.onOpenConfirmations,
-            ),
-          if (widget.onSearch != null)
-            IconButton(
-              key: const ValueKey('group-list-search'),
-              icon: const Icon(Icons.search),
-              tooltip: '搜索消息',
-              onPressed: widget.onSearch,
-            ),
-          if (widget.onOpenWorks != null)
-            IconButton(
-              key: const ValueKey('group-list-works'),
-              icon: const Icon(Icons.work_outline),
-              tooltip: '工作台',
-              onPressed: widget.onOpenWorks,
-            ),
-          if (widget.onOpenHabits != null)
-            IconButton(
-              key: const ValueKey('group-list-habits'),
-              icon: const Icon(Icons.repeat),
-              tooltip: '习惯',
-              onPressed: widget.onOpenHabits,
-            ),
-          // 全局设置放**最后**：它是低频入口，而前面几项都与「对话」这个
-          // 当前任务直接相关。顺序也贴合平台惯例（设置在最右）。
-          if (widget.onOpenSettings != null)
-            IconButton(
-              key: const ValueKey('group-list-settings'),
-              icon: const Icon(Icons.settings_outlined),
-              tooltip: '设置',
-              onPressed: widget.onOpenSettings,
-            ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('对话'), actions: _appBarActions(context)),
       body: RefreshIndicator(
         onRefresh: _refresh,
         child: Column(

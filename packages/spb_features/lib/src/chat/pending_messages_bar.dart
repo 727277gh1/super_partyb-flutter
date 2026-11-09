@@ -300,7 +300,6 @@ class _PendingMessagesBarState extends State<PendingMessagesBar> {
               IconButton(
                 key: const ValueKey('pending-refresh'),
                 iconSize: SpbSpacing.lg,
-                visualDensity: VisualDensity.compact,
                 tooltip: '刷新',
                 icon: const Icon(Icons.refresh),
                 onPressed: _loading ? null : _reload,

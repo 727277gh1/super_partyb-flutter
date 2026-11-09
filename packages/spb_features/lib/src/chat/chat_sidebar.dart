@@ -194,7 +194,6 @@ class _ChatSidebarState extends State<ChatSidebar> {
               icon: const Icon(Icons.chevron_right, size: SpbSpacing.xl),
               tooltip: '收起侧边栏',
               onPressed: widget.onClose,
-              visualDensity: VisualDensity.compact,
             ),
         ],
       ),

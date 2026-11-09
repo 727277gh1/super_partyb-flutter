@@ -270,6 +270,51 @@ void main() {
     expect(find.byKey(const ValueKey('miniapp-work-retry')), findsOneWidget);
   });
 
+  testWidgets('输入区：发送按钮有可读名称、空输入置灰、移动端走键盘「发送」', (tester) async {
+    setUpStubs();
+    await pumpPage(tester);
+
+    // 空输入时按钮禁用：此前点它只会静默无反应（`onSubmit` 内部 return）。
+    final send = tester.widget<IconButton>(
+      find.byKey(const ValueKey('miniapp-work-message-send')),
+    );
+    expect(send.onPressed, isNull);
+    // tooltip 同时是屏幕阅读器读到的名称（图标按钮没有文字标签）。
+    expect(find.byTooltip('发送'), findsOneWidget);
+
+    // 移动端主题：软键盘动作键必须是「发送」，否则只能点按钮发。
+    // 桌面端相反（Enter 发送、Shift+Enter 换行，见 `_MessageInput._onKey`）。
+    final field = tester.widget<TextField>(
+      find.byKey(const ValueKey('miniapp-work-message-field')),
+    );
+    expect(field.textInputAction, TextInputAction.send);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('miniapp-work-message-field')),
+      '再补充一点',
+    );
+    // 发送按钮的可用态由文本驱动（空输入置灰），故需推进一帧让重建生效。
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('miniapp-work-message-send')),
+          )
+          .onPressed,
+      isNotNull,
+      reason: '有非空输入后按钮必须可用',
+    );
+
+    // 触控目标不小于 48dp（移动端主题下 AppBar 的 IconButton 也靠它）。
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('miniapp-work-message-send')))
+          .height,
+      greaterThanOrEqualTo(48),
+    );
+  });
+
   testWidgets('发送消息走注入的 sendMessage', (tester) async {
     setUpStubs();
     await pumpPage(tester);
@@ -278,6 +323,8 @@ void main() {
       find.byKey(const ValueKey('miniapp-work-message-field')),
       '再补充一点',
     );
+    // 发送按钮的可用态由文本驱动（空输入置灰），故需推进一帧让重建生效。
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('miniapp-work-message-send')));
     await tester.pump();
     await tester.pump();
@@ -302,6 +349,8 @@ void main() {
       find.byKey(const ValueKey('miniapp-work-message-field')),
       'x',
     );
+    // 发送按钮的可用态由文本驱动（空输入置灰），故需推进一帧让重建生效。
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('miniapp-work-message-send')));
     await tester.pump();
     await tester.pump();
@@ -324,6 +373,8 @@ void main() {
       find.byKey(const ValueKey('miniapp-work-message-field')),
       '这属于另一个对话',
     );
+    // 发送按钮的可用态由文本驱动（空输入置灰），故需推进一帧让重建生效。
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('miniapp-work-message-send')));
     await tester.pump();
     await tester.pump();
@@ -519,6 +570,8 @@ void main() {
       find.byKey(const ValueKey('miniapp-work-message-field')),
       'x',
     );
+    // 发送按钮的可用态由文本驱动（空输入置灰），故需推进一帧让重建生效。
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('miniapp-work-message-send')));
     await tester.pump();
 

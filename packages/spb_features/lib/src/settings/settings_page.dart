@@ -1014,6 +1014,8 @@ class _SettingsPageState extends State<SettingsPage>
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: const Text('清理本地文件'),
+          // 三个单选行 + 说明文字在窄屏上会顶到按钮；`scrollable` 只滚内容区。
+          scrollable: true,
           content: RadioGroup<int>(
             groupValue: choice,
             onChanged: (v) => setDialogState(() => choice = v ?? 30),

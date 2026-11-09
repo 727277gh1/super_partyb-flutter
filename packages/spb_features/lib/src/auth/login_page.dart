@@ -458,130 +458,137 @@ class _LoginPageState extends State<LoginPage> {
     final error = _localError ?? widget.state.message;
 
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Padding(
-              padding: SpbSpacing.pagePadding,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // 品牌标志（成蹊 / Super PartyB）。
-                  //
-                  // 此前是 `Icons.shield_outlined` 占位——盾牌与产品无关，且
-                  // 与「统一身份认证」的暗示重复（下面的副标题已说明）。换成
-                  // 真正的品牌标志后，用户第一眼就知道自己装的是哪个应用。
-                  //
-                  // 尺寸用 xxxl（48）：登录页首屏不宜过大，且它下面紧跟标题，
-                  // 再大就会把 SSO 按钮挤出小屏（320dp 高度）。
-                  const Center(
-                    child: SpbLogo(
-                      key: ValueKey('login-logo'),
-                      size: SpbSpacing.xxxl,
-                    ),
-                  ),
-                  const SizedBox(height: SpbSpacing.lg),
-                  Text(
-                    widget.title,
-                    textAlign: TextAlign.center,
-                    style: textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: SpbSpacing.sm),
-                  Text(
-                    widget.subtitle,
-                    textAlign: TextAlign.center,
-                    style: textTheme.bodyMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: SpbSpacing.xl),
-                  if (error != null) ...[
-                    ErrorBanner(
-                      key: const ValueKey('login-error'),
-                      message: error,
+      // 本页**没有 AppBar**，`Scaffold` 因此不会替 body 避开刘海/手势条：
+      // 小屏（或横屏 + 键盘弹起）时首行内容会顶到状态栏下面。桌面端 inset 为
+      // 0，本层等价空操作。
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: SpbSpacing.pagePadding,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // 品牌标志（成蹊 / Super PartyB）。
+                    //
+                    // 此前是 `Icons.shield_outlined` 占位——盾牌与产品无关，且
+                    // 与「统一身份认证」的暗示重复（下面的副标题已说明）。换成
+                    // 真正的品牌标志后，用户第一眼就知道自己装的是哪个应用。
+                    //
+                    // 尺寸用 xxxl（48）：登录页首屏不宜过大，且它下面紧跟标题，
+                    // 再大就会把 SSO 按钮挤出小屏（320dp 高度）。
+                    const Center(
+                      child: SpbLogo(
+                        key: ValueKey('login-logo'),
+                        size: SpbSpacing.xxxl,
+                      ),
                     ),
                     const SizedBox(height: SpbSpacing.lg),
-                  ],
-                  if (widget.onWeChatSignIn != null) ...[
-                    if (_shortCode != null) ...[
-                      _ShortCodeCard(
-                        key: const ValueKey('login-short-code'),
-                        code: _shortCode!,
-                        remaining: _shortCodeRemaining(),
-                        miniProgramName: widget.miniProgramName,
+                    Text(
+                      widget.title,
+                      textAlign: TextAlign.center,
+                      style: textTheme.headlineSmall,
+                    ),
+                    const SizedBox(height: SpbSpacing.sm),
+                    Text(
+                      widget.subtitle,
+                      textAlign: TextAlign.center,
+                      style: textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: SpbSpacing.xl),
+                    if (error != null) ...[
+                      ErrorBanner(
+                        key: const ValueKey('login-error'),
+                        message: error,
+                      ),
+                      const SizedBox(height: SpbSpacing.lg),
+                    ],
+                    if (widget.onWeChatSignIn != null) ...[
+                      if (_shortCode != null) ...[
+                        _ShortCodeCard(
+                          key: const ValueKey('login-short-code'),
+                          code: _shortCode!,
+                          remaining: _shortCodeRemaining(),
+                          miniProgramName: widget.miniProgramName,
+                        ),
+                        const SizedBox(height: SpbSpacing.lg),
+                      ],
+                      FilledButton.icon(
+                        key: const ValueKey('login-wechat-button'),
+                        // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
+                        // 登录流程（state/PKCE 会互相覆盖）。
+                        onPressed: _busy || _wechatBusy || _emailBusy
+                            ? null
+                            : _handleWeChatSignIn,
+                        icon: _wechatBusy
+                            ? const SizedBox(
+                                width: SpbSpacing.lg,
+                                height: SpbSpacing.lg,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.chat_bubble_outline),
+                        label: Text(_wechatBusy ? '请在微信中确认…' : '微信一键登录'),
+                      ),
+                      const SizedBox(height: SpbSpacing.sm),
+                      Text(
+                        _shortCode == null
+                            ? '将打开微信小程序，确认后自动返回本应用。'
+                            : '打开微信 → 搜索或「发现 → 小程序」进入「${widget.miniProgramName}」→「我的 → 输入登录码」，填入上面的码。',
+                        textAlign: TextAlign.center,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
                       ),
                       const SizedBox(height: SpbSpacing.lg),
                     ],
                     FilledButton.icon(
-                      key: const ValueKey('login-wechat-button'),
-                      // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
-                      // 登录流程（state/PKCE 会互相覆盖）。
+                      key: const ValueKey('login-sso-button'),
+                      // 加载中禁用，避免重复发起授权（会产生多个 state）。
                       onPressed: _busy || _wechatBusy || _emailBusy
                           ? null
-                          : _handleWeChatSignIn,
-                      icon: _wechatBusy
+                          : _handleSignIn,
+                      icon: _busy
                           ? const SizedBox(
                               width: SpbSpacing.lg,
                               height: SpbSpacing.lg,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.chat_bubble_outline),
-                      label: Text(_wechatBusy ? '请在微信中确认…' : '微信一键登录'),
+                          : const Icon(Icons.login),
+                      label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
                     ),
-                    const SizedBox(height: SpbSpacing.sm),
+                    const SizedBox(height: SpbSpacing.md),
                     Text(
-                      _shortCode == null
-                          ? '将打开微信小程序，确认后自动返回本应用。'
-                          : '打开微信 → 搜索或「发现 → 小程序」进入「${widget.miniProgramName}」→「我的 → 输入登录码」，填入上面的码。',
+                      // 提一句浏览器页里的免密入口：那是用户真正打开的那一页，
+                      // 只在 App 里写「用邮件登录」的话，从这里进 SSO 的人不会知道
+                      // 浏览器页上还有这条路。
+                      '登录将在系统浏览器中完成，完成后自动返回本应用。'
+                      '浏览器页也可选「用邮件登录」免密进入。',
                       textAlign: TextAlign.center,
                       style: textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
                     ),
-                    const SizedBox(height: SpbSpacing.lg),
+                    if (widget.onEmailSignIn != null) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      _buildEmailSection(context),
+                    ],
+                    if (widget.onHandoffSignIn != null) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      _buildHandoffSection(context),
+                    ],
+                    if (widget.onImportSession != null) ...[
+                      const SizedBox(height: SpbSpacing.lg),
+                      _buildImportSection(context),
+                    ],
                   ],
-                  FilledButton.icon(
-                    key: const ValueKey('login-sso-button'),
-                    // 加载中禁用，避免重复发起授权（会产生多个 state）。
-                    onPressed: _busy || _wechatBusy || _emailBusy
-                        ? null
-                        : _handleSignIn,
-                    icon: _busy
-                        ? const SizedBox(
-                            width: SpbSpacing.lg,
-                            height: SpbSpacing.lg,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.login),
-                    label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
-                  ),
-                  const SizedBox(height: SpbSpacing.md),
-                  Text(
-                    // 提一句浏览器页里的免密入口：那是用户真正打开的那一页，
-                    // 只在 App 里写「用邮件登录」的话，从这里进 SSO 的人不会知道
-                    // 浏览器页上还有这条路。
-                    '登录将在系统浏览器中完成，完成后自动返回本应用。'
-                    '浏览器页也可选「用邮件登录」免密进入。',
-                    textAlign: TextAlign.center,
-                    style: textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  if (widget.onEmailSignIn != null) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    _buildEmailSection(context),
-                  ],
-                  if (widget.onHandoffSignIn != null) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    _buildHandoffSection(context),
-                  ],
-                  if (widget.onImportSession != null) ...[
-                    const SizedBox(height: SpbSpacing.lg),
-                    _buildImportSection(context),
-                  ],
-                ],
+                ),
               ),
             ),
           ),

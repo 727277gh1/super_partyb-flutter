@@ -482,6 +482,10 @@ class _CreateGoalDialogState extends State<_CreateGoalDialog> {
     return AlertDialog(
       key: const ValueKey('goal-create-dialog'),
       title: const Text('新建目标'),
+      // 小屏 + 系统字号放大 + 多行输入框 + 说明文字 + 复选项会超出可用高度；
+      // `scrollable` 让标题/按钮留在原位、内容自己滚动（否则底部按钮被挤出去，
+      // 键盘弹起时尤其明显）。
+      scrollable: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,

@@ -1571,6 +1571,7 @@ class _ConversationPageState extends State<ConversationPage> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       // 高度按屏幕比例给：键盘弹出时 `viewInsets` 会把内容顶上去，
       // 固定高度会让结果区被挤没。
       builder: (sheetContext) => SizedBox(

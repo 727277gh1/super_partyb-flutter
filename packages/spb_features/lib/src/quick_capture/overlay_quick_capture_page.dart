@@ -570,50 +570,55 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
         ),
         borderRadius: SpbRadius.bubbleAll,
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(SpbSpacing.md),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: fitContent ? MainAxisSize.min : MainAxisSize.max,
-          children: [
-            if (_attachments.isNotEmpty) _buildAttachmentList(scheme),
-            Focus(
-              onKeyEvent: _onKey,
-              child: TextField(
-                key: const ValueKey('overlay-input'),
-                controller: _controller,
-                focusNode: _focusNode,
-                autofocus: widget.autofocus,
-                enabled: !_busy,
-                // 多行 + 限高：输入长内容时最多长到 4 行，之后内部滚动。
-                minLines: 1,
-                maxLines: 4,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                decoration: InputDecoration(
-                  hintText: _hintText,
-                  prefixIcon: const Icon(Icons.bolt_outlined),
-                  suffixIcon: _buildSuffixIcon(),
+      // 安全区**在卡片内**（而不是把整张卡片缩进）：全屏页面（移动端）
+      // 要避开刘海与手势条，但卡片底色仍须铺满屏幕边缘——否则顶部/底部会
+      // 露出下面那一页的内容。悬浮窗（桌面）没有 inset，等价空操作。
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(SpbSpacing.md),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: fitContent ? MainAxisSize.min : MainAxisSize.max,
+            children: [
+              if (_attachments.isNotEmpty) _buildAttachmentList(scheme),
+              Focus(
+                onKeyEvent: _onKey,
+                child: TextField(
+                  key: const ValueKey('overlay-input'),
+                  controller: _controller,
+                  focusNode: _focusNode,
+                  autofocus: widget.autofocus,
+                  enabled: !_busy,
+                  // 多行 + 限高：输入长内容时最多长到 4 行，之后内部滚动。
+                  minLines: 1,
+                  maxLines: 4,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  decoration: InputDecoration(
+                    hintText: _hintText,
+                    prefixIcon: const Icon(Icons.bolt_outlined),
+                    suffixIcon: _buildSuffixIcon(),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: SpbSpacing.sm),
-            if (fitContent)
-              _buildFooter(scheme)
-            else
-              // 全屏页面：按钮行贴底。
-              //
-              // 此前这里是 `Expanded(child: footer)` —— 直接把 footer 的
-              // Row 撑满剩余高度，而 Row 默认垂直居中，于是「取消/发送」
-              // 浮在屏幕正中、上下各一大片空白（与悬浮窗的空白同一根因，
-              // 只是这里没有窗口可缩）。
-              Expanded(
-                child: Align(
-                  alignment: Alignment.bottomCenter,
-                  child: _buildFooter(scheme),
+              const SizedBox(height: SpbSpacing.sm),
+              if (fitContent)
+                _buildFooter(scheme)
+              else
+                // 全屏页面：按钮行贴底。
+                //
+                // 此前这里是 `Expanded(child: footer)` —— 直接把 footer 的
+                // Row 撑满剩余高度，而 Row 默认垂直居中，于是「取消/发送」
+                // 浮在屏幕正中、上下各一大片空白（与悬浮窗的空白同一根因，
+                // 只是这里没有窗口可缩）。
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _buildFooter(scheme),
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );

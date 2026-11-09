@@ -30,6 +30,7 @@ class ErrorState extends StatelessWidget {
     required this.message,
     this.onRetry,
     this.retryLabel = '重试',
+    this.retryKey,
   });
 
   /// 错误消息。直接展示给用户，故调用方应传**已本地化/已归一**的文案
@@ -41,6 +42,15 @@ class ErrorState extends StatelessWidget {
 
   /// 按钮文案。默认「重试」。
   final String retryLabel;
+
+  /// 「重试」按钮的 key（供 widget test 定位）。
+  ///
+  /// ## 为什么由调用方给而不是组件自造
+  ///
+  /// 各页面的重试语义不同（`miniapp-works-retry` / `miniapp-work-retry`），
+  /// 组件自造一个 `error-state-retry` 会退化成「每页 + 每测试各记一套」；
+  /// 页面本来就有既有的 key 断言，把它透传进来最省事。
+  final Key? retryKey;
 
   @override
   Widget build(BuildContext context) {
@@ -61,7 +71,11 @@ class ErrorState extends StatelessWidget {
             Text(message, textAlign: TextAlign.center),
             if (onRetry != null) ...[
               const SizedBox(height: SpbSpacing.lg),
-              FilledButton.tonal(onPressed: onRetry, child: Text(retryLabel)),
+              FilledButton.tonal(
+                key: retryKey,
+                onPressed: onRetry,
+                child: Text(retryLabel),
+              ),
             ],
           ],
         ),

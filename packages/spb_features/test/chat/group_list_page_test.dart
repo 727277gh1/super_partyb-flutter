@@ -7,6 +7,7 @@ import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
@@ -1463,6 +1464,135 @@ void main() {
       final big = tester.getSize(find.byKey(const ValueKey('g1')));
       // 正文 14 → 28，行高必须跟着涨；写死 94 就说明有人把高度钉死了。
       expect(big.height, greaterThan(94));
+    });
+  });
+
+  /// AppBar 入口按**宽度**与**平台**分档（§6.16 / §6.88）。
+  ///
+  /// 三条断言各钉一个失败模式：
+  /// 1. 窄屏不收起低频入口 → 标题被挤到 0 宽（不报溢出、静默）；
+  /// 2. 桌面端没有刷新入口 → 鼠标滚轮滚不出 overscroll，列表无法手动刷新；
+  /// 3. 移动端反而渲染刷新入口 → 触屏上的下拉手势与按钮重复，且占用标题宽度。
+  group('AppBar 分档（§6.88）', () {
+    Future<void> setWindow(WidgetTester tester, double w, double h) async {
+      tester.view.physicalSize = Size(w, h);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pump();
+    }
+
+    /// 挂页面并注入全部可选入口；`calls` 记录被触发的入口名。
+    Future<List<String>> pumpWithEntries(
+      WidgetTester tester, {
+      ThemeData? theme,
+    }) async {
+      final calls = <String>[];
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(200, {
+          'items': [groupJson(id: 'g1', title: '报错排查')],
+        }),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: GroupListPage(
+            api: api,
+            onOpenGroup: (_) {},
+            onCreateGroup: (_) async =>
+                ChatGroup.fromJson(groupJson(id: 'g_new')),
+            onOpenWorks: () => calls.add('works'),
+            onOpenHabits: () => calls.add('habits'),
+            onOpenSettings: () => calls.add('settings'),
+            onSearch: () => calls.add('search'),
+            onOpenConfirmations: () => calls.add('confirmations'),
+            onGroupAction: (_, _) async => const GroupActionApplied(),
+          ),
+        ),
+      );
+      await settleIo(tester);
+      return calls;
+    }
+
+    testWidgets('窄屏（360）：低频入口收进溢出菜单，标题仍有宽度', (tester) async {
+      await setWindow(tester, 360, 900);
+      final calls = await pumpWithEntries(tester);
+
+      // 标题没被图标挤没（320dp 下曾实测宽度 0）。
+      expect(tester.getSize(find.text('对话')).width, greaterThan(0));
+      expect(find.byKey(const ValueKey('group-list-works')), findsNothing);
+      expect(find.byKey(const ValueKey('group-list-habits')), findsNothing);
+      expect(find.byKey(const ValueKey('group-list-settings')), findsNothing);
+      // 常驻入口仍在（它们是「针对当前列表」的动作）。
+      expect(find.byKey(const ValueKey('group-list-create')), findsOneWidget);
+      expect(find.byKey(const ValueKey('group-list-search')), findsOneWidget);
+
+      // 「只多一步」而不是「消失」：打开菜单还能用到。
+      await tester.tap(find.byKey(const ValueKey('group-list-overflow')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('menu-group-list-works')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('menu-group-list-settings')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('menu-group-list-habits')));
+      await tester.pumpAndSettle();
+      expect(calls, ['habits']);
+    });
+
+    testWidgets('桌面端（linux 主题）：有刷新入口且点击真的重拉', (tester) async {
+      final calls = <String>[];
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(200, {
+          'items': [groupJson(id: 'g1', title: '报错排查')],
+        }),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: SpbTheme.lightFor(TargetPlatform.linux),
+          home: GroupListPage(
+            api: api,
+            onOpenGroup: (_) {},
+            onOpenWorks: () => calls.add('works'),
+            onOpenHabits: () => calls.add('habits'),
+            onOpenSettings: () => calls.add('settings'),
+          ),
+        ),
+      );
+      await settleIo(tester);
+      expect(find.text('报错排查'), findsOneWidget);
+
+      expect(find.byKey(const ValueKey('group-list-refresh')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('group-list-refresh')));
+      // 刷新是「清空 + 重拉」（见 `_refresh`）：点下后旧内容先消失、转圈出现，
+      // 网络回来后内容重新出现。这三步就是「真的重拉」的可观测证据
+      // （http_mock_adapter 的 handler 只在注册时调用一次，数调用次数不可靠）。
+      await tester.pump();
+      expect(find.text('报错排查'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      await settleIo(tester);
+      expect(find.text('报错排查'), findsOneWidget);
+
+      // 宽屏下低频入口仍常驻（不进菜单）。
+      expect(find.byKey(const ValueKey('group-list-works')), findsOneWidget);
+      expect(find.byKey(const ValueKey('group-list-settings')), findsOneWidget);
+    });
+
+    testWidgets('移动端主题不渲染刷新入口（下拉手势才是本端入口）', (tester) async {
+      await setWindow(tester, 1000, 900);
+      await pumpWithEntries(tester);
+
+      expect(find.byKey(const ValueKey('group-list-refresh')), findsNothing);
+      expect(find.byKey(const ValueKey('group-list-overflow')), findsNothing);
+      expect(find.byKey(const ValueKey('group-list-works')), findsOneWidget);
     });
   });
 }

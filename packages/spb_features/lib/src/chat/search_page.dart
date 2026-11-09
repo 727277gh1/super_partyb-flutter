@@ -126,6 +126,15 @@ class _SearchPageState extends State<SearchPage> {
     _debounceTimer = Timer(widget.debounce, () => _run(query));
   }
 
+  /// 清空输入并退出搜索状态（与「删光输入」走同一条路径）。
+  ///
+  /// `_onChanged('')` 而不是 `_onChanged(_controller.text)`：清空后要触发的
+  /// 正是「空串 = 退出搜索」那条分支。
+  void _clear() {
+    _controller.clear();
+    _onChanged('');
+  }
+
   /// 立即搜索（回车 / 点搜索按钮），不等防抖。
   void _submit() {
     _debounceTimer?.cancel();
@@ -168,17 +177,32 @@ class _SearchPageState extends State<SearchPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: TextField(
-          key: const ValueKey('search-field'),
-          controller: _controller,
-          autofocus: true,
-          textInputAction: TextInputAction.search,
-          decoration: const InputDecoration(
-            hintText: '搜索消息内容',
-            border: InputBorder.none,
+        // 只重建输入框（不整页重建）以切换清除按钮：搜索结果是长列表，
+        // 每次按键都 setState 整页会让 `ListView` 重新布局。
+        title: ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _controller,
+          builder: (context, value, _) => TextField(
+            key: const ValueKey('search-field'),
+            controller: _controller,
+            autofocus: true,
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              hintText: '搜索消息内容',
+              border: InputBorder.none,
+              // 没有清除按钮时只能长按/退格逐字删——AppBar 里的输入框没有
+              // 「点外面清空」的入口。空串时不渲染，避免白占 48dp。
+              suffixIcon: value.text.isEmpty
+                  ? null
+                  : IconButton(
+                      key: const ValueKey('search-clear'),
+                      icon: const Icon(Icons.close),
+                      tooltip: '清空搜索',
+                      onPressed: _clear,
+                    ),
+            ),
+            onChanged: _onChanged,
+            onSubmitted: (_) => _submit(),
           ),
-          onChanged: _onChanged,
-          onSubmitted: (_) => _submit(),
         ),
         actions: [
           IconButton(

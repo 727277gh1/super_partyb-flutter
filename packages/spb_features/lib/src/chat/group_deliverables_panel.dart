@@ -377,12 +377,14 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
               ),
             ),
           // 刷新：加载中禁用，避免叠请求。
+          //
+          // 不显式传 `visualDensity`：桌面端的紧凑密度来自主题（§6.77），
+          // 移动端仍是标准的 48dp 触控目标。
           IconButton(
             key: const ValueKey('deliverables-refresh'),
             icon: const Icon(Icons.refresh, size: SpbSpacing.lg),
             tooltip: '刷新',
             onPressed: _loading ? null : _load,
-            visualDensity: VisualDensity.compact,
           ),
         ],
       ),
@@ -532,9 +534,10 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
     final expanded = _isExpanded(dir, depth);
     return ListTile(
       key: ValueKey<String>('artifact-dir-${dir.relativePath}'),
+      // `dense` 只压行高（移动端仍是 48dp），**不**再叠加
+      // `VisualDensity.compact`：两者相加会把触控目标压到 40dp（§6.77）。
       dense: true,
       minTileHeight: 0,
-      visualDensity: VisualDensity.compact,
       contentPadding: EdgeInsets.only(
         left: SpbSpacing.sm + depth * SpbSpacing.lg,
         right: SpbSpacing.sm,
@@ -587,8 +590,8 @@ class _GroupDeliverablesPanelState extends State<GroupDeliverablesPanel> {
 
     return ListTile(
       key: ValueKey<String>('artifact-file-${node.relativePath}'),
+      // 同 [_buildDirectory]：`dense` 保留，显式 compact 移除（移动端 48dp）。
       dense: true,
-      visualDensity: VisualDensity.compact,
       contentPadding: EdgeInsets.only(
         left: SpbSpacing.md + depth * SpbSpacing.lg,
         right: SpbSpacing.xs,

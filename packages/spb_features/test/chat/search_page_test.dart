@@ -78,6 +78,33 @@ void main() {
     await tester.pump();
   }
 
+  group('搜索页：清除入口', () {
+    testWidgets('有输入才出现；点一下清空并退回「未搜索」态', (tester) async {
+      useSearch();
+      await pumpPage(tester);
+
+      expect(find.byKey(const ValueKey('search-clear')), findsNothing);
+
+      await typeAndSettle(tester, '报错');
+      expect(find.byKey(const ValueKey('search-clear')), findsOneWidget);
+      expect(queries, ['报错']);
+      expect(find.text('报错排查'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('search-clear')));
+      await tester.pump();
+
+      // 输入框被清空，结果区回到「还没搜」，且**不**再发一次请求
+      // （空串 = 退出搜索，而不是搜一个空关键字）。
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('search-field')),
+      );
+      expect(field.controller?.text, isEmpty);
+      expect(find.text('输入关键字搜索消息内容'), findsOneWidget);
+      expect(find.byKey(const ValueKey('search-clear')), findsNothing);
+      expect(queries, ['报错'], reason: '清空不应触发新的搜索请求');
+    });
+  });
+
   group('搜索页：输入与防抖', () {
     testWidgets('初始状态提示输入关键字（不是「没找到」）', (tester) async {
       useSearch();

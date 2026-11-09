@@ -619,6 +619,7 @@ class _MyTurnsPage extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       builder: (sheetContext) => SizedBox(
         height: MediaQuery.sizeOf(sheetContext).height * 0.85,
         child: TurnDetailSheet(
@@ -1233,6 +1234,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       builder: (sheetContext) => StatefulBuilder(
         builder: (sheetContext, setSheetState) => SizedBox(
           height: MediaQuery.sizeOf(sheetContext).height * 0.8,
@@ -1271,6 +1273,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       builder: (sheetContext) => StatefulBuilder(
         builder: (sheetContext, setSheetState) => SizedBox(
           height: MediaQuery.sizeOf(sheetContext).height * 0.8,
@@ -1341,6 +1344,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       builder: (sheetContext) => StatefulBuilder(
         // 弹层需要跟随外层 setState 重建（写成功后 _group 换了新对象），
         // 故用 StatefulBuilder + 每次 build 重新读 _group。
@@ -1507,6 +1511,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       builder: (sheetContext) => StatefulBuilder(
         builder: (sheetContext, setSheetState) => Padding(
           padding: EdgeInsets.only(
@@ -1801,6 +1806,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         context: context,
         isScrollControlled: true,
         showDragHandle: true,
+        useSafeArea: true,
         builder: (sheetContext) => ValueListenableBuilder<int>(
           valueListenable: tick,
           builder: (context, _, child) => SizedBox(
@@ -1833,6 +1839,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      useSafeArea: true,
       builder: (sheetContext) => StatefulBuilder(
         builder: (sheetContext, setSheetState) => Padding(
           padding: EdgeInsets.only(

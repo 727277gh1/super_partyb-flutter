@@ -38,6 +38,32 @@ class SpbTheme {
   static ThemeData darkFor(TargetPlatform platform) =>
       _build(Brightness.dark, platform: platform);
 
+  /// 当前主题是否为**桌面端**（与 [ThemeData.visualDensity] 的分支同源，§6.77）。
+  ///
+  /// ## 为什么读主题而不是 `dart:io` / `SpbEnv`
+  ///
+  /// 平台由**装配层**注入（`SpbTheme.lightFor(TargetPlatform.linux)` 可测），
+  /// 而 `flutter test` 里 `defaultTargetPlatform` 恒为 android（§6.77 的同一
+  /// 判据）。若改读真实宿主（测试机是 linux），「桌面专属入口」会出现在**移动
+  /// 端用例**里，而任何断言都不会因此变红——这正是「多端差异靠人记得」的
+  /// 老问题。
+  ///
+  /// 用途：只在**本端真的具备该能力**时才渲染入口（例如桌面端的「刷新」
+  /// 按钮——鼠标滚轮拖不出 `RefreshIndicator` 需要的 overscroll）。
+  static bool isDesktopPlatform(BuildContext context) =>
+      isDesktopTheme(Theme.of(context));
+
+  /// [isDesktopPlatform] 的 `ThemeData` 版本（手里只有 `ThemeData`、没有
+  /// `BuildContext` 的布局函数用）。
+  static bool isDesktopTheme(ThemeData theme) => switch (theme.platform) {
+    TargetPlatform.windows ||
+    TargetPlatform.macOS ||
+    TargetPlatform.linux => true,
+    TargetPlatform.android ||
+    TargetPlatform.iOS ||
+    TargetPlatform.fuchsia => false,
+  };
+
   static ThemeData _build(Brightness brightness, {TargetPlatform? platform}) {
     final target = platform ?? defaultTargetPlatform;
     final scheme = ColorScheme.fromSeed(
@@ -95,6 +121,14 @@ class SpbTheme {
 
     return ThemeData(
       useMaterial3: true,
+      // 把**注入的**平台写回主题（否则恒为 `defaultTargetPlatform`）。
+      //
+      // 不写会有一个假绿：测试里 `lightFor(TargetPlatform.linux)` 只改密度/字体，
+      // 而 `Theme.of(context).platform` 仍是 android——于是所有「桌面端专属入口」
+      // 的 widget 用例都测不到，且**不会红**（生产不受影响，因为生产注入的
+      // [target] 就是 `defaultTargetPlatform`）。`SpbTheme.isDesktopPlatform`
+      // 依赖这里（§6.88）。
+      platform: target,
       colorScheme: scheme,
       typography: typography,
       fontFamily: fontFamily,
