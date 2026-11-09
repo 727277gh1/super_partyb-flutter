@@ -1057,10 +1057,11 @@ diff 图确认只是按钮胶囊高度 compact→standard 的预期变化（测�
 |---|---|---|---|
 | 元数据 / 状态词 / 数量 / 说明 | `listMeta` | `bodySmall`（12 / w400） | 取代面板里 11px 的同类文案 |
 | 徽标 / 状态 chip / 分组头 | `badge` | `labelMedium`（12 / w500） | chip、`已归档`、组头、`参数`/`结果` |
-| 角标 / 计数胶囊 | `badgeCount` | `labelSmall` 零字距（11 / w500） | 待处理计数胶囊 |
+| 角标 / 计数胶囊 | `badgeCount` | `labelSmall` 零字距（11 / w500；§6.81 抬到 12） | 待处理计数胶囊 |
 | 正文 | `body`（新） | `bodyMedium`（14 / w400） | 用户/助手气泡（原先直接挑槽位） |
 | 块标题 | `cardTitle`（新） | `titleMedium`（16 / w500） | spec 卡、文件预览卡的标题 |
 | 绘制字号 | `metaSize`（新，`double`） | 12.0 | `TextPainter` 用，与 `listMeta` 同值 |
+| 等宽文字（§6.81） | `mono`（新） | `base`（默认 `listMeta`）+ `monospace` + CJK 回退 | 登录码、工具卡、文件预览 |
 
 `body` / `cardTitle` 是**零像素变化的重命名**：原先那 5 处直接写
 `textTheme.bodyMedium` / `titleMedium`，换成令牌后渲染完全一致（`spec_ui_card`
@@ -1318,3 +1319,51 @@ overflow 报错**（`RenderFlex overflowed` 在 widget 测试里是硬失败）�
 - **不给所有 `maxLines: 1` 补 `ellipsis`**：18 处里 16 处已有；剩下两处是
   `TextField`（单行输入靠滚动，不裁剪）与等长的对话 ID（`SelectableText`
   本身不支持 `overflow`），改了没有收益。
+
+### 6.81 等宽文字令牌 `SpbType.mono` + 角标数字 11→12（2026-11）
+
+§6.78 之后还剩两块「同样的东西写了好几遍」的地方。
+
+#### 缺陷
+
+1. **等宽样式 6 处各写一遍**：`login_page`(2)、`agent_file_preview`、
+   `tool_call_tile`(2)、`group_gate_panel`。其中 4 处手写了
+   `fontFamilyFallback: SpbFonts.monoFallback`，**`login_page` 的两处漏了**。
+   码本身是字母数字，暂时没暴露；但下一个人把这段样式复制给「含中文的输入预览」
+   就会中招——中文落到引擎的隐式回退，字形不可控（`SpbFonts` 类文档）。
+   根因是**一个语义需要写两行**（`fontFamily` + `fontFamilyFallback`），
+   复制粘贴必然漏掉一半。
+2. **角标数字是全仓唯一低于可读下界的字号**：`badgeCount` 取 `labelSmall`
+   的 11px，而它恰好用在「最需要被看见」的未读数上（§6.76 的原始缺陷就是
+   侧边栏硬编码 `fontSize: 10` 的角标）。§6.78 之后其他令牌都 ≥12，11 成了独苗。
+
+#### 修法
+
+| 令牌 | 定义 | 调用点 |
+|---|---|---|
+| `SpbType.mono(TextTheme, {TextStyle? base})` | `(base ?? listMeta)` + `fontFamily: 'monospace'` + `fontFamilyFallback: SpbFonts.monoFallback` | 登录码输入（`base: bodyLarge`）、短码大图（`base: headlineMedium`，另带 w700/字距 6）、工具卡标题（`base: labelLarge`）、工具入参预览、文件内容预览、gate 预览 |
+| `SpbType.badgeCount(TextTheme)` | `labelSmall?.copyWith(letterSpacing: 0, fontSize: metaSize)` | 侧边栏未读数、待办计数胶囊 |
+
+- `mono` 把「两行必须一起写」压成一个令牌：漏 fallback 的写法从此不存在
+  （想漏得先绕开令牌）。
+- `badgeCount` 11 → 12（`w500` 不变）：与 `badge` 同字号，区分靠字重与
+  `Badge` 自身的强调色底。
+
+#### 守卫
+
+- `tokens_test.dart`：`mono` 的 `fontFamily == 'monospace'` **且**
+  `fontFamilyFallback == SpbFonts.monoFallback`（把「一起写」变成机器可查）；
+  `base` 可替换时字号跟随 `base`；`badgeCount` 由 `>= 11`
+  改为 `== SpbType.metaSize`（11 不再是例外）。
+- `tools/check_type_tokens.sh` 继续拦新增的裸 `fontSize:`（`mono` 内部自己
+  不写字号，只取 `base`）。
+
+#### 未验证 / 有意不做
+
+- 三个平台的等宽字形未在本机核对（Linux DejaVu Sans Mono / Windows Consolas /
+  macOS Menlo）：golden 里中文是 tofu，等宽只影响拉丁与数字宽度，而这三套
+  fallback 链的定义已在 §6.76 的 `SpbFonts` 讨论里。
+- **不做「等宽 + 大写 + 字距」的组合令牌**：只有登录短码一处需要，再包一层
+  只会让令牌表变长。
+- **不动 `labelSmall` 槽位本身**（Flutter `Badge` 内部在用，§6.76 的结论），
+  抬字号是在 `badgeCount` 的实例上做的。
