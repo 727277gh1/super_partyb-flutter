@@ -402,6 +402,42 @@ void main() {
       // 0.5 间距，间距只会让多位数字更散）。
       expect(style.letterSpacing, 0);
     });
+
+    test('body 不小于可读下界（正文是长文本，不能比元数据还小）', () {
+      final style = SpbType.body(resolve());
+      expect(style, isNotNull);
+      expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
+    });
+
+    test('cardTitle 不小于可读下界（块标题要压得住正文）', () {
+      final style = SpbType.cardTitle(resolve());
+      expect(style, isNotNull);
+      expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
+    });
+
+    // ## 为什么钉「顺序」而不是每个绝对值
+    //
+    // 绝对值会随主题调整合理漂移（§6.78 之后还要做 CJK 行高/字距校正）。
+    // 真正不能错的是一条**层次关系**：元数据 < 正文 < 块标题。顺序反了
+    // 意味着「卡片标题比元数据还小」这种主次颠倒，而那正是 §6.76 缺陷的形态。
+    test('层次顺序：listMeta ≤ badge < body < cardTitle', () {
+      final t = resolve();
+      final meta = SpbType.listMeta(t)!.fontSize!;
+      final badge = SpbType.badge(t)!.fontSize!;
+      final body = SpbType.body(t)!.fontSize!;
+      final cardTitle = SpbType.cardTitle(t)!.fontSize!;
+      expect(meta, lessThanOrEqualTo(badge), reason: '元数据与徽标同档，靠字重区分');
+      expect(badge, lessThan(body), reason: '徽标不该比正文还大');
+      expect(body, lessThan(cardTitle), reason: '块标题必须压得住正文');
+    });
+
+    test('metaSize 与 listMeta 同字号（绘制场景与主题槽位不许漂移）', () {
+      // `SpbType.metaSize` 是给 `TextPainter`（Canvas 绘制）用的字面值，
+      // 它们与 `listMeta` 是同一语义的两种形态。若有人只改了一边，
+      // 地图画布上的标签会与列表里的元数据差一个像素——那种漂移没人看得出来，
+      // 只能靠断言拦住。
+      expect(SpbType.metaSize, SpbType.listMeta(resolve())!.fontSize);
+    });
   });
 
   group('SpbThemeMode 编解码（跨端持久化契约）', () {
