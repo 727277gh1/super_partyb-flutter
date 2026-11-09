@@ -1367,3 +1367,87 @@ overflow 报错**（`RenderFlex overflowed` 在 widget 测试里是硬失败）�
   只会让令牌表变长。
 - **不动 `labelSmall` 槽位本身**（Flutter `Badge` 内部在用，§6.76 的结论），
   抬字号是在 `badgeCount` 的实例上做的。
+
+### 6.82 移动端正文 14 → 15（触屏一档，层次不破）（2026-11）
+
+§6.77 已经确立了「移动端字号可以大一号」的取向（移动端列表标题保持 M3 默认
+16，桌面端显式钉 14），但**正文**当时没跟着走：`SpbType.body` 两端都是 14。
+
+#### 缺陷
+
+移动端正文（对话气泡、卡片说明段落）与桌面端一样是 14px。但两端的阅读条件
+差别很大：
+
+| | 桌面端 | 移动端 |
+|---|---|---|
+| 视距 | ~55–70cm | ~25–35cm（且手指常遮住部分屏幕） |
+| 同屏文字 | 大量列表 + 侧栏 | 单列窄屏，正文是主内容 |
+| 现有对照 | 令牌层次 12 / 14 / 16 | 列表标题已是 16、正文仍是 14 → **移动端「正文」比「列表标题」小两档** |
+
+于是移动端出现一个不对称：**标题 16、正文 14**，但移动端用户读的主要内容恰恰
+是正文。§6.77 的「大一号」只落到了列表标题上。
+
+#### 修法
+
+只在 `SpbTheme._cjkTypography` 里给 **`bodyMedium`** 加一档，且只在移动端：
+
+```dart
+// theme.dart：mobile = !desktop（desktop 来自 _build 的 target，与 §6.77 同一判据）
+bodyMedium: _cjkStyle(g.bodyMedium, mobile: mobile)   // 14 → 15
+static const double _mobileBodyBump = 1.0;
+```
+
+为什么是 **15 而不是 16**：
+
+- 16 会与 `cardTitle`（`titleMedium`）**持平**，`tokens_test` 钉住的
+  「元数据 ≤ 徽标 < 正文 < 块标题」层次断掉；
+- 16 也与移动端列表标题（M3 默认 `bodyLarge`）持平，列表行与正文失去区分；
+- 15 是「大一号」最小的可感知增量（+7%），CJK 在 15px × 1.5 行高下清晰。
+
+只动这一个槽位，其余一律不动：
+
+| 槽位 | 移动端 | 为什么不动 |
+|---|---|---|
+| `bodySmall`（`listMeta`） | 12 | 12 是可读下界（§6.76），元数据不该跟着长大——它会挤掉正文空间 |
+| `labelMedium`（`badge`） | 12 | chip / 状态词面积受限，变大就是换行 |
+| `titleSmall` / `titleMedium` | 14 / 16 | 桌面 14 / 移动 16 的既有层次（§6.77） |
+| `labelSmall` | 11 | Flutter `Badge` 内部槽位，不动（§6.76） |
+
+**没有新增平台分支**：复用 `_build` 里已有的 `desktop`（来自显式
+`platform` 参数，测试可注入），故 `lightFor(TargetPlatform.linux)` 拿 14、
+`lightFor(TargetPlatform.android)` 拿 15，两端都能断言。
+
+#### 验证
+
+- `tokens_test.dart` 新增：`SpbType.body(android) == 15`、`body(linux) == 14`、
+  两端 `cardTitle == 16`、`listMeta == 12` 且 **12 < 15**（层次断言在移动端也成立）。
+- 13 张 golden 里 **7 张**跟着变（其余 6 张不变——`spb_features` 的 spec 卡与
+  地图卡用的是 `listMeta`/`badge`/`cardTitle`，不含正文）：
+
+| 基线 | diff | 内容高度 | 差异性质 |
+|---|---|---|---|
+| `error_state_with_retry` | 1.26% | +1px | 14→15 单行正文 + 按钮内文字 |
+| `error_banner_light` / `_dark` | 1.27% / 1.35% | 0 | 单行文字变宽，胶囊内边距吸收 |
+| `empty_state_with_icon` | 0.56% | 0 | 副标题一行 |
+| `empty_state_no_icon` | 0.91% | 0 | 同上 |
+| `error_state_no_retry` | 0.61% | 0 | 同上 |
+| `section_title` | 0.45% | 0 | 标题下的说明行（`labelLarge` 未动，仍按原样） |
+
+全部 bbox 紧贴文字、无边框/背景变化、无 `RenderFlex overflowed`。
+
+- 全套：`spb_design` 54、`spb_ui` 43、`spb_features` 1432、`spb_mobile` 159 全过；
+  `apps/spb_desktop` 仍是那 13 条**改动前就有**的 `router_workbench` 失败。
+
+#### 未验证（本机边界，§9）
+
+- 真机观感：移动端一屏行数（正文行高 15×1.5=22.5）与气泡高度变化；
+- iOS 上 `defaultTargetPlatform` 是否也落移动端分支（代码是按
+  「非 windows/macOS/linux」判定，iOS 落移动端，但本机无 iOS 构建）。
+
+#### 有意不做
+
+- **不只给「移动端对话页」加**：令牌是全局语义，写在页面里就会漏（§6.76 的同一教训）。
+- **不跟着抬 `bodySmall`/`labelMedium`**：元数据与 chip 的约束是**宽度**，不是
+  阅读距离；抬它们只会让 chip 换行、列表更挤。
+- **不同时改移动端 `cardTitle`**：16 已经是移动端能接受的上限（再大就把
+  卡片标题变成「标题栏」），正文 15 与它 1px 之差靠字重（w400 vs w500）区分。
