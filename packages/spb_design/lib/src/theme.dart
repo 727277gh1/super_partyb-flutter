@@ -70,14 +70,29 @@ class SpbTheme {
     // M3 字号几何（titleSmall = 14/w500）。ThemeData 的 textTheme 在构造后
     // fontSize 为 null（几何由 Theme.of 经 localize 合并），拿不到现成样式，
     // 故直接从 typography 取几何主题（与 localize 用的同源）。
-    final m3Geometry = Typography.material2021(
-      platform: target,
-      colorScheme: scheme,
-    ).englishLike;
+    //
+    // ⚠️ 取的是**校正过 CJK 度量**的副本，不是 `Typography.material2021(...)`
+    // 的原始几何——见 [_cjkTypography]。校正必须发生在这条 localize 链的源头上，
+    // 否则 `Theme.of` 合并回来的还是拉丁参数。
+    //
+    // ⚠️ `platform` 用 `defaultTargetPlatform` 而不是本方法注入的 [target]：
+    // `Typography` 除了几何还携带**平台字体回退链**（Linux 是
+    // `blackHelsinki` 的 Ubuntu/Adwaita/Cantarell…）。测试环境
+    // `defaultTargetPlatform == android`，若按 [target] 取 linux 的
+    // `blackHelsinki`，golden 会在本机渲染出与 CI 不同的字形
+    // （`fonts_test.dart` 有一条专门钉住这件事）。生产端两者相同。
+    final typography = _cjkTypography(
+      Typography.material2021(
+        platform: defaultTargetPlatform,
+        colorScheme: scheme,
+      ),
+    );
+    final m3Geometry = typography.englishLike;
 
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
+      typography: typography,
       fontFamily: fontFamily,
       fontFamilyFallback: fallback,
       // 桌面端：控件密度略高，一屏能放更多内容（移动端 standard，见上）。
@@ -123,4 +138,68 @@ class SpbTheme {
       ),
     );
   }
+
+  /// CJK 度量校正：把 M3 的**拉丁文**字距/行高换成中文可读的那一套（§6.79）。
+  ///
+  /// ## 为什么改 `Typography`，而不是 `ThemeData.textTheme`
+  ///
+  /// 两处都能生效：`ThemeData.localize` 做的是
+  /// `localTextGeometry.merge(baseTheme.textTheme)`，而 `TextStyle.merge`
+  /// 的语义是「argument 的非空字段优先」——写进 `textTheme` 的几何会覆盖
+  /// 合并回来的原始几何。但 `typography` 才是几何的**唯一真源**：
+  ///
+  /// - 它有三套（`englishLike` / `dense` / `tall`，由 locale 的
+  ///   `scriptCategory` 选择），写 `textTheme` 只影响被 merge 的那一套，
+  ///   中文 locale 走 `dense` 时校正就失效了；
+  /// - 本类的 `listTileTheme.titleTextStyle` 也直接读 `typography.englishLike`
+  ///   （见 `_build`），两处各写一遍必然漂移。
+  ///
+  /// 故校正在 `Typography` 层做一次，`Theme.of` 合并出来的一定是同一套值。
+  ///
+  /// ## 改了什么（两条，都只针对中文正文/标签/小标题）
+  ///
+  /// | 属性 | M3（拉丁） | 本类 | 为什么 |
+  /// |---|---|---|---|
+  /// | `letterSpacing` | 0.1–0.5（为拉丁小标签设计的 tracking） | **0** | 中文全角字形不需要补字距；12px 下 0.4 已是 3% 的额外字距，密排正文显得「松」 |
+  /// | `height` | 1.33 / 1.43 / 1.50 | **≥1.5** | 中文笔画密度高、无 ascender/descender 的节奏，12px 给 16px 行高偏挤 |
+  ///
+  /// 只动 `body*` / `label*` / `title*`：
+  ///
+  /// - **`labelSmall` 一字不改**：它是 Flutter 组件（`Badge` 等）的内部槽位，
+  ///   改它会外溢到没审计过的组件（§6.76 的结论）。11px 的角标数字仍由
+  ///   `SpbType.badgeCount` 在实例上归零字距。
+  /// - **`headline*` / `display*` / `titleLarge` 不动**：它们是短的单行标题
+  ///   （空态标题、登录短码），行高对可读性没有影响，动它只会扩大 golden 面。
+  ///
+  /// `dense` / `tall` 三套几何一起校正：`scriptCategory` 由 locale 决定，
+  /// 中文 locale 落 `dense`，不跟着改会在真机上失效。
+  static Typography _cjkTypography(Typography base) => base.copyWith(
+    englishLike: _cjkTextTheme(base.englishLike),
+    dense: _cjkTextTheme(base.dense),
+    tall: _cjkTextTheme(base.tall),
+  );
+
+  /// 对一套几何主题逐槽位校正；语义见 [_cjkTypography] 的表。
+  static TextTheme _cjkTextTheme(TextTheme g) => g.copyWith(
+    bodyLarge: _cjkStyle(g.bodyLarge),
+    bodyMedium: _cjkStyle(g.bodyMedium),
+    bodySmall: _cjkStyle(g.bodySmall),
+    labelLarge: _cjkStyle(g.labelLarge),
+    labelMedium: _cjkStyle(g.labelMedium),
+    titleSmall: _cjkStyle(g.titleSmall),
+    titleMedium: _cjkStyle(g.titleMedium),
+  );
+
+  /// 单条样式的校正：字距归零 + 行高抬到 1.5（已 ≥1.5 的槽位保持原值）。
+  static TextStyle? _cjkStyle(TextStyle? style) {
+    if (style == null) return null;
+    final current = style.height ?? 1.0;
+    return style.copyWith(
+      letterSpacing: 0,
+      height: current < _cjkMinHeight ? _cjkMinHeight : current,
+    );
+  }
+
+  /// 中文正文的最小行高（§6.79）。改它要先看 `tokens_test.dart` 的行高断言。
+  static const double _cjkMinHeight = 1.5;
 }

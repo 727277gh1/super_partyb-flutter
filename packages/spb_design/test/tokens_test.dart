@@ -440,6 +440,82 @@ void main() {
     });
   });
 
+  group('CJK 度量校正（§6.79）', () {
+    // ## 它防的是什么
+    //
+    // M3 的字距/行高是**拉丁文**的度量：`bodySmall` 的 `letterSpacing: 0.4`
+    // （为 12px 拉丁小标签设计）在中文密排正文里是 3% 的额外字距，12px 只给
+    // 16px 行高（1.33）对中文笔画密度也偏挤。校正写在 `Typography` 层，故
+    // `Theme.of` 合并出来的才是 CJK 值——这里断言的必须是**同一条 localize
+    // 路径**的结果，而不是构造期的 `ThemeData.textTheme`（那里面 fontSize 为
+    // null，见 §6.76 根因链）。
+    TextTheme resolve() {
+      final theme = SpbTheme.light();
+      return ThemeData.localize(
+        theme,
+        theme.typography.geometryThemeFor(ScriptCategory.englishLike),
+      ).textTheme;
+    }
+
+    // SDK 原始几何（未校正）：用来证明「该改的改了、不该改的没碰」。
+    TextTheme pristine() =>
+        Typography.material2021(platform: TargetPlatform.android).englishLike;
+
+    test('五个语义令牌一律零字距（中文不需要补 tracking）', () {
+      final t = resolve();
+      for (final style in [
+        SpbType.listMeta(t),
+        SpbType.badge(t),
+        SpbType.badgeCount(t),
+        SpbType.body(t),
+        SpbType.cardTitle(t),
+      ]) {
+        expect(style, isNotNull);
+        expect(style!.letterSpacing, 0);
+      }
+    });
+
+    test('正文（10–16px 档）行高 ≥1.5×字号（中文需要更多行间留白）', () {
+      final t = resolve();
+      for (final style in [
+        t.bodySmall,
+        t.bodyMedium,
+        t.labelMedium,
+        t.titleSmall,
+      ]) {
+        expect(style, isNotNull);
+        expect(
+          style!.height! * style.fontSize!,
+          greaterThanOrEqualTo(1.5 * style.fontSize!),
+          reason: '${style.fontSize}px 的行高不足 1.5×',
+        );
+      }
+    });
+
+    test('labelSmall 一字未改（Flutter 组件内部槽位，外溢风险不可控）', () {
+      // §6.76 的结论：`Badge` 等组件直接吃 `labelSmall`，改槽位会外溢到
+      // 没审计过的组件。这条断言把「有意不改」变成机器可查的。
+      final theme = resolve();
+      final base = pristine();
+      final adjusted = theme.labelSmall!;
+      final original = base.labelSmall!;
+      expect(adjusted.fontSize, original.fontSize);
+      expect(adjusted.letterSpacing, original.letterSpacing);
+      expect(adjusted.height, original.height);
+    });
+
+    test('dense / tall 两套几何同样被校正（中文 locale 落 dense）', () {
+      // scriptCategory 由 locale 决定：英文落 englishLike，中文落 dense。
+      // 只改 englishLike 等于「测试环境绿、真机无效」。
+      final typography = SpbTheme.light().typography;
+      for (final geometry in [typography.dense, typography.tall]) {
+        expect(geometry.bodySmall?.letterSpacing, 0);
+        expect(geometry.bodyMedium?.letterSpacing, 0);
+        expect(geometry.bodySmall?.height, greaterThanOrEqualTo(1.5));
+      }
+    });
+  });
+
   group('SpbThemeMode 编解码（跨端持久化契约）', () {
     test('prefKey 固定（改它会让老用户的设置静默丢失）', () {
       // 这个键是持久化契约：已发布的客户端把它写进了本地存储。
