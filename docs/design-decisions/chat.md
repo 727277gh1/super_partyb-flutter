@@ -1356,3 +1356,94 @@ router：它是 UI 决策，放两处就变成两份实现、两份测试。
   的 agent（桌面端还断言取消确认 = 零请求）；桌面端额外点「自动路由」后标签回到
   「自动路由」，且下一条消息的 body **不带** `agent_id`、`routing.mode=auto`
   （「标签写谁就发给谁」的回归防线）。
+
+### 6.85 让「对话中途丢块、滚动才回来」在 release 包里可判定：两个探针（2026-11）
+
+#### 现象与三条已记录成因
+
+用户报障（与 §6.18 的原话几乎逐字相同）：**对话过程中某一块内容消失，继续滚动
+（或滚回去）才重新出现**。
+
+本仓库已有三条成因记录，但它们都缺一个共同前提——**报障现场是 release 包**：
+
+| 成因 | 章节 | 现场能查到的证据 |
+|---|---|---|
+| 行主键重复 → 同帧两行共用一个 `GlobalKey` → 后出现的那行渲染为空白 | [§6.18](chat.md) | ❌ **没有**：Flutter 的 `Multiple widgets used the same GlobalKey` 由 `BuildOwner._debugVerifyGlobalKeyReservation` 在 **debug** 下用 `assert` 校验，release 里根本不跑 |
+| 缓冲区裁剪丢头部（按轮 / 单轮降级逐条） | [§6.48](chat.md) | ✅ `trim_count` / `last_trim_dropped` |
+| 长正文整行绘制层（`RepaintBoundary` / raster cache） | [§6.51](ui.md) | ❌ 没有（且该规避本身未经设备复核） |
+
+还有第四条**一直没被记进报告**的通道：缺口修复走
+`_backfill(replaceBuffer: true)`，是把缓冲**整段换成最新一页**并把翻页下界重置成
+这一页的最小 `globalSeq`。于是用户此前 `loadOlder` 翻出来的更早历史**直接从时间线
+上消失**，直到他滚到顶部再翻一页才被拉回来——观感正是「丢了一大块，滚动才出现」。
+修复前的日志只有 `对话历史回填完成 count=N`，看不出「这次替换扔掉了多少已加载的
+历史」，两者在报告里**完全同形**。
+
+#### 决定：先让现场可判定，不猜病因
+
+本轮**不做**任何「修复」，只加两个观测点，都挂在低频节点（行集合重算 / 回填），
+不进每帧路径：
+
+**探针 A：行主键唯一性（`ConversationPage._checkRowKeyOwners`）**
+
+- 判据：本次行集合里 `locateIdsOf(row).first` 必须唯一。不唯一时
+  `RowLocateRegistry.keyFor` **必然**把同一个 `GlobalKey` 实例发给两行。
+- 位置：`_displayRows()`（行集合只在那里变化；`identical(_items, …)` 命中缓存时
+  直接返回，故不是每帧一次）。用 `_ownerScratch` 复用一个 `Set`，避免每次重算
+  分配。
+- 输出：`SpbLog.warn('时间线行主键重复…', {duplicate_owners, rows, note})`，**每个
+  页面实例只报一次**（否则会刷满 500 条环形缓冲，把真异常扫掉——与 §6.48 的裁剪
+  日志节流同一教训）；另有 `PerfProbe.rowKeyOwnerCollisions` 计数供测试断言。
+- 只查**主键**、不查别名：别名（批量卡的非首成员）本来就允许跨行出现（它只是
+  查询入口，不复制键实例）。纯函数 `duplicateRowOwners`（`spb_domain`）承载这条
+  口径，可在无 widget 环境断言。
+
+**探针 B：整段替换的丢弃量（`TimelineDiagnostics.lastReplaceDropped`）**
+
+- 在换掉缓冲**之前**量：`缓冲里 globalSeq < 新页最小值` 的条数 = 「已加载、但会被
+  这一页丢掉的更早历史」；同时记下替换前后的翻页下界
+  （`lastReplaceOldestBefore/After`）。
+- 日志分级：**丢了（>0）→ warn**（这是用户能感知的「内容消失」）；没丢 → info
+  （每次重连都会走一次替换，全 warn 会把真异常淹没）。字段名
+  `dropped_loaded_events` / `oldest_before` / `oldest_after` / `before_events`。
+- 报告：`## 时间线快照` 新增一行
+  `整段替换: 最近一次丢弃已加载历史 N 条（翻页下界 A → B，须重新向上翻页才能取回）`
+  ——三种情形（未触发 / 触发但没丢 / 丢了一段）分开写，避免「0 次」被误读成「没
+  发生」。
+
+#### 报障时怎么读（判据表）
+
+| 现场读数 | 结论 |
+|---|---|
+| `duplicate_owners` 非空 | §6.18 那类：**键撞车**（后出现的那行是空白，高度保留） |
+| `dropped_loaded_events > 0` 且时间点对得上 | 缺口修复整段替换**扔掉了已翻页历史**：滚到顶部会拉回来（数据层，非渲染层） |
+| `trim_count` 涨过 | 缓冲区裁剪（按轮 / 单轮逐条降级），见 §6.48 |
+| 三者都干净、且是长正文 | 落在 §6.51 那条未复核的绘制层猜测上——此时才有理由去做真机 A/B |
+
+#### 覆盖
+
+- `packages/spb_domain/test/agent_file_batch_test.dart`（新增 group，5 条）：
+  `duplicateRowOwners` 正常不报 / 真重复报出 / 去重保序 / **别名重叠不算重复** /
+  空集合。
+- `packages/spb_domain/test/chat_stream_controller_gap_probe_test.dart`（新增 2 条）：
+  整段替换丢掉已加载历史 → `lastReplaceDropped=21`、`oldest 100→900`、warn 字段齐全；
+  没丢 → `lastReplaceDropped=0`、日志降级为 info。
+- `packages/spb_features/test/chat/conversation_page_row_keys_test.dart`：批卡被裁剪
+  拆散（真实页面 + 真实 `_trimBuffer`）后 `rowKeyOwnerCollisions == 0` 且无
+  「行主键重复」warn——**防止探针误报把病因指错**。
+
+#### 反向验证（每个判据都能红）
+
+- 把 `duplicateRowOwners` 改成「查全部 id」→「别名重叠不算重复」用例立刻红；
+- 把 `replaceDropped` 写成常量 0 → gap-probe 的新用例红（既断言值，也断言 warn 级别）；
+- 把 `_checkRowKeyOwners` 从 `_displayRows()` 里删掉 → 页面用例的
+  `rowKeyOwnerCollisions` 断言仍绿（它本来就是 0）——**这条用例只能证明「不误报」，
+  不能证明「接上了」**，因为正向构造需要两行同主键，而归约层按 `eventId` 建项、
+  主键天然唯一。已知局限，不在本轮造注入缝。
+
+#### 未验证
+
+- **真机**：本机无 `DISPLAY`（[§9](../development.md)），上述读数只在
+  `flutter test` 与 domain 单测里验证过；实际故障现场能否据此定位，需要下一份
+  真机报告。
+- §6.51 的绘制层规避**仍未被设备复核**（见该节末段），本轮不据此宣称修好。
