@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
+import 'package:spb_models/spb_models.dart';
 
 import '../support/golden_fonts.dart';
 
@@ -254,6 +255,150 @@ void main() {
       await expectLater(
         find.byType(MapSpecCard),
         matchesGoldenFile('goldens/map_spec_card_scale2.png'),
+      );
+    });
+  });
+
+  group('TurnDetailPanel golden（§6.78 / §6.79 / §6.82）', () {
+    // 详情面板是**纯展示 + 数据驱动**（输入是已落库事件，无实时增量、无平台
+    // 能力），正是 §6.13 说的「稳定 + 纯展示 + 改错代价高」那一类：
+    //
+    // - §6.78 把它当重灾区（8 处 11px），但改动**没有任何基线保护**；
+    // - §6.79 的行高、§6.82 的正文档位都会改变它的排版；
+    // - 它是排障视图，密度变化要是没人看得出来，用户读到的是「挤成一团」。
+    //
+    // 时间戳一律写死（`_formatTime` 是绝对时间，不读 `DateTime.now()`），
+    // 否则基线每天都不一样。
+    ChatTurn turn({
+      String status = 'failed',
+      int errorCount = 1,
+      String? channel = '微信',
+    }) => ChatTurn(
+      id: 'turn_1',
+      groupId: 'grp_1',
+      userId: 'usr_1',
+      inputText: '帮我看一下这个报错，日志里说工具调用失败了',
+      status: status,
+      fanoutCount: 1,
+      completedCount: 2,
+      errorCount: errorCount,
+      channel: channel,
+      createdAt: DateTime(2024, 3, 5, 12, 0),
+    );
+
+    ChatEvent event({
+      required String eventType,
+      int seq = 1,
+      String source = 'agent',
+      Map<String, dynamic>? payload,
+    }) => ChatEvent(
+      eventId: 'ev_$seq',
+      userId: 'usr_1',
+      groupId: 'grp_1',
+      turnId: 'turn_1',
+      eventType: eventType,
+      seq: seq,
+      source: source,
+      createdAt: DateTime(2024, 3, 5, 12, 0, seq),
+      payload: payload,
+    );
+
+    /// 面板是 `ListView`，高度由宿主给；宽度取「移动端宽屏 / 桌面窄窗」量级。
+    ///
+    /// ⚠️ 必须有 `Center`：`MaterialApp.home` 拿到的是**紧约束**（整屏），
+    /// 少了它就等于 `SizedBox` 的宽高被忽略——基线会变成整屏尺寸，而且
+    /// 「窄屏下文案怎么折行」这件事根本没被测到（第一版就是这样，diff 里
+    /// 内容横跨 600px 才发现）。
+    Widget detailHost(Widget child, {Size size = const Size(480, 720)}) =>
+        MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: SpbTheme.light(),
+          home: Center(
+            child: RepaintBoundary(
+              child: SizedBox(
+                width: size.width,
+                height: size.height,
+                child: Directionality(
+                  textDirection: TextDirection.ltr,
+                  child: Material(child: child),
+                ),
+              ),
+            ),
+          ),
+        );
+
+    testWidgets('满事件流：meta chips + 用户输入 + 思考/工具/错误/回复', (tester) async {
+      tester.view.physicalSize = const Size(600, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        detailHost(
+          TurnDetailPanel(
+            detail: TurnDetail(
+              turn: turn(),
+              events: [
+                event(
+                  eventType: EventTypes.thought,
+                  seq: 1,
+                  payload: {'text': '先读一下日志，看看工具调用返回了什么。'},
+                ),
+                event(
+                  eventType: EventTypes.toolCall,
+                  seq: 2,
+                  payload: {
+                    'tool': 'read_file',
+                    'args': {'path': '/var/log/partyb/agent.log'},
+                    'output': 'permission denied: /var/log/partyb/agent.log',
+                    'ok': false,
+                  },
+                ),
+                event(
+                  eventType: EventTypes.error,
+                  seq: 3,
+                  payload: {'message': '读取日志失败：权限不足（permission denied）'},
+                ),
+                event(
+                  eventType: EventTypes.message,
+                  seq: 4,
+                  payload: {
+                    'text':
+                        '日志读不到：当前进程对 `/var/log/partyb/agent.log` 没有读权限。'
+                        '需要把该文件所属组加给服务账号，或改用 `journalctl` 取日志。',
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await expectLater(
+        find.byType(TurnDetailPanel),
+        matchesGoldenFile('goldens/turn_detail_panel_full.png'),
+      );
+    });
+
+    testWidgets('空事件：说明文案的密度（11px→12px 的落点）', (tester) async {
+      // 这条基线锁的正是 §6.78 修掉的那两行：`这一轮没有可展示的事件` +
+      // `事件可能已超出时间线窗口，或尚未落库。`（后者曾经是 11px）。
+      await tester.pumpWidget(
+        detailHost(
+          TurnDetailPanel(
+            detail: TurnDetail(
+              turn: turn(status: 'completed', errorCount: 0, channel: null),
+              events: const [],
+            ),
+          ),
+          size: const Size(480, 320),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await expectLater(
+        find.byType(TurnDetailPanel),
+        matchesGoldenFile('goldens/turn_detail_panel_empty.png'),
       );
     });
   });
