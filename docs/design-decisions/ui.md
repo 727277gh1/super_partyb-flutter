@@ -1739,3 +1739,62 @@ Semantics(container: semanticContainer, child: Padding(... child: Semantics(
 - 不动 `SpbBreakpoints` 的三档语义（compact/medium/expanded）：那是三栏布局的
   判据，与本节的「AppBar 分档」共用同一个宽度值但语义不同（§6.84 已说明）。
 - 不做 i18n（§6.12）。
+
+### 6.89 对话列表：agent 名称与状态徽标（2026-11）
+
+对话列表卡片此前有两个「信息不完整」问题：绑定 agent 一栏直接显示 `agent_id`
+（内部标识），状态只在归档行有一行小字。工作列表（`works_page`）早已是「标题 +
+状态 chip」的形态，本节把对话卡片对齐过去。
+
+#### agent_id → 名称：服务端没有，必须由装配层映射
+
+`GET /chat/groups` 的 `active_session` 只有 `agent_id` / `session_id` /
+`role` / `joined_at`（Go `groupToDict` 明确不写 `agent_name`），而名称在
+`/api/agents`（`Agent.name`）。会话消息的 webapp 侧早已用「id → name 映射」的
+做法（`ChatMessageList` 的 `agentNames`），本仓库沿用同一取向：
+
+- `GroupListPage` 新增可选 `agentNameOf(String agentId) → String?`（与
+  `groupFileSummary` 同款同步查表函数，卡片在 build 期逐行调用）；
+- 两端装配层各加 `agentNamesProvider`（`FutureProvider<Map<String,String>>`，
+  `ref.watch(loadAgentsProvider)()` 一次加载、缓存），路由把它折成闭包注入；
+- **查不到就回退显示 id**：`/api/agents` 只返回 active agent（服务端
+  `ListAgents` 已过滤），已归档 agent 永远不在表里，此时 id 是唯一可读标识；
+  `name` 为空串也回退（否则「绑定了 agent」看起来像没绑定）。名称未加载完
+  时同理，provider 到货后路由重建、名称自然替换掉 id。
+
+#### 状态徽标：常显、同位置，未知值不编造
+
+原先归档态是「图标 + 已归档」小字（只在归档行出现），活跃行没有状态可看。
+改为标题行右端**常显**一枚 pill：
+
+| `status` | 文案 | 配色 |
+|---|---|---|
+| `active` | 进行中 | `primaryContainer` |
+| `archived` | 已归档 | `surfaceContainerHighest` |
+| 其他 | **原样显示原始值** | `surfaceContainerHighest` |
+
+与 works 的 `_StatusChip`（`MiniappWork.displayStatus`）同一视觉语言。差别：
+works 的文案来自服务端 `status_label`（客户端不翻译），而 group 列表**没有**
+该字段，映射只能在客户端做——故对未知值刻意**原样露出**，不错误地标成
+「进行中」。
+
+副作用：归档行省掉了标题前的图标宽度，窄屏卡片（最小 320dp）更不容易把标题
+挤到 0 宽（§6.88.3 的同一类问题）。
+
+#### 验证
+
+- `group_list_page_test.dart` 新增 3 条：注入映射显示名称（且 id 不出现）、
+  名称缺失/空串回退 id、活跃/归档状态文案并存；另 1 条钉「未知状态原样显示」。
+  既有「归档显示已归档」「未绑定不渲染 agent 段」仍通过（chip 取代了旧标记）。
+- 两端 app 的 `router_list_test.dart` 补 `loadAgentsProvider` override：新 provider
+  会在列表路由首次 build 时拉 `/api/agents`，未 mock 时 dio 重试 Timer 会让
+  用例报「A Timer is still pending」（与 SSE 那条同因）。
+
+#### 未验证 / 有意不做
+
+- 真机/真桌面未手测（本机无 `DISPLAY`、无真机，§9）；chip 在 2.0 字号下的
+  实际观感未看（布局上由 `Expanded` 标题 + 定宽 chip/时间兜住）。
+- 不改 Go API：服务端若以后在 group 行补 `agent_name` / `status_label`，页面
+  应优先用服务端值（注入函数与 chip 映射各删一条兜底即可）。
+- 不把「最后一轮 turn 的运行状态」（running / waiting_user / failed）搬进列表：
+  列表接口没有该字段，逐 group 反查是 N+1；那是工作台/待确认页的职责。
