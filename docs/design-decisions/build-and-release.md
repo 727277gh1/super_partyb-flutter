@@ -588,6 +588,74 @@ exe 资源用它，资源管理器正常）。而 ISCC 读 `SetupIconFile` 时�
   安装后的行为与 zip 版**逐字节相同**——两套行为就是两套 bug。
 - **不在 `.iss` 里引中文语言包**：非官方翻译文件在 runner 上不存在，引了即构建失败。
 
+### 6.87 升级安装卡在「正在关闭应用」：关窗即隐藏把 Restart Manager 的 WM_CLOSE 拦下了（2026-11）
+
+**现象**：客户端留在托盘时直接装新版本，安装向导走到「正在关闭应用」就停住；
+「下一步」按了没反应（或反复提示应用关不掉），只能强杀进程再装。
+
+**根因**是两条**各自正确**的设计撞在一起：
+
+1. 客户端「关窗 = 隐藏到托盘」（`setHideOnClose` → `window_manager` 的
+   `preventClose`），目的是让交付物同步在后台继续跑（见
+   `packages/spb_platform/lib/src/desktop_capabilities.dart` 的 `setHideOnClose`）；
+2. `.iss` 用 `CloseApplications=yes`，即让 Inno Setup 通过 **Restart Manager**
+   关掉正在运行的客户端，否则升级时 `spb_desktop.exe`/DLL 被占用、覆盖失败。
+
+Restart Manager 的关闭序列（MS「Restart Manager — Guidelines for Applications」）
+是 `WM_QUERYENDSESSION`（lParam = `ENDSESSION_CLOSEAPP`）→ `WM_ENDSESSION` →
+对仍未退出的 GUI 应用**再用 `WM_CLOSE` 兜底**。本客户端在第一步没应答、第二步
+没退出，第三步的 `WM_CLOSE` 又正好被 `preventClose` 拦成「隐藏到托盘」——
+进程始终不退，安装程序就卡在那里。卸载器同理。
+
+```
+修复前：RM 发 WM_QUERYENDSESSION → DefWindowProc 应答 TRUE（没人管它）
+        → RM 发 WM_ENDSESSION   → 没人管它
+        → RM 发 WM_CLOSE        → window_manager 看到 preventClose，返回 -1
+        → 进程仍在 → 安装程序「关不掉」
+
+修复后：WM_QUERYENDSESSION(CLOSEAPP) → 原生侧应答 TRUE
+        → WM_ENDSESSION(TRUE)         → 通知 Dart 走 quit()（摘监听器/注销
+                                        全局快捷键/销毁托盘图标/结束进程）
+        → Dart 没来得及退出时 WM_CLOSE 直接 DefWindowProc（不再换 hide）
+```
+
+**修法的四处**（少一处就退回原样）：
+
+| 位置 | 内容 |
+|---|---|
+| `apps/spb_desktop/windows/runner/flutter_window.cpp` | 在 `MessageHandler` 里、**`HandleTopLevelWindowProc` 之前**接住三个消息：`WM_QUERYENDSESSION` 应答 `TRUE`、`WM_ENDSESSION` 调通道、`session_ending_` 时放行 `WM_CLOSE` |
+| `packages/spb_platform/lib/src/session_end.dart` | `installSessionEndHandler` / `uninstallSessionEndHandler`：通道路由到调用方的退出动作（`kHostLifecycleChannelName = 'com.atjog.spb/host_lifecycle'`，与原生侧逐字一致） |
+| `apps/spb_desktop/lib/desktop_integration.dart` | `quitApplication`：托盘「退出」与会话结束**共用**一条路径，且幂等（`_quitting`）——RM 在 Dart 收尾慢时还会再发一次 |
+| `apps/spb_desktop/windows/installer/spb_desktop.iss` | `CloseApplications=yes` → **`force`**：RM 仍先走正常关闭（即上面那条干净路径），超时才强关，作为最后一道保险 |
+
+**为什么 `.iss` 还要 `force`**：这是**先礼后兵**，不是替代。干净退出的价值在于托盘图标
+被注销、全局快捷键被摘除、会话正常退出标记被写下（下次启动不会把这次退出当成「中途
+崩溃」）；只有 Dart 侧确实跑不完时才强关。代价可控：本地库是 WAL，交付物写盘走
+`.part` + rename（[§6.42](sync.md)），强关不会留下半截文件。
+
+**顺带得到的**：退出日志现在区分来源（`quit(reason: 'user')` / `'session-end'`），
+「应用为什么自己退了」不再和「用户点了退出」混为一谈。
+
+**验证与边界**（本机（Linux LXC）**没有 Windows**，如实记录）：
+
+- 能自动验证的部分：`dart analyze` + `apps/spb_desktop` 单测（模拟原生侧发来
+  `sessionEnding` 后确实走 `quit`、`detach` 后不再响应）；`.iss` 的改动只有一行
+  指令，编译验证在 CI 的 `build-windows` job；
+- **不能**验证的部分：真机升级安装的全过程（`WM_*` 消息序列、Dart 收尾是否
+  在 RM 超时内完成）。故 [§6.61](#661-windows-分发zip-之外再发-inno-setup-安装包2026-11)
+  的那条真机验证清单里，「升级安装（确认自动关掉正在运行的客户端）」现在有
+  两个含义：装成功 **且** 托盘没有僵尸图标。
+
+**有意不做**：
+
+- **不处理普通关机/注销的 `WM_ENDSESSION`**（lParam 不含 `ENDSESSION_CLOSEAPP`）
+  ——保持既有行为（由系统兜底杀进程）。扩大到那条路径等于给「注销时还在写盘」
+  加一个未验证的时序，而它不在本次报障范围内。
+- **Linux/macOS 不加对应接线**：它们的安装形态是解压替换、没有 Restart Manager
+  这一步；同一条通道在那边**没有人调用**，注册处理器天然是空操作。
+- **不把 `preventClose` 关掉**：那会让「关窗即隐藏」失效（§6.4 的既有行为），
+  也解决不了问题——RM 的 `WM_QUERYENDSESSION` 仍无人应答。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
