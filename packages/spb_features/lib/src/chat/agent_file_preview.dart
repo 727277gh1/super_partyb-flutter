@@ -417,11 +417,8 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
                 : SelectableText(
                     key: const ValueKey('agent-file-preview-text'),
                     preview.content,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
-                      // 与另两处 monospace 调用点共用同一条链（含 CJK 兜底）。
-                      fontFamilyFallback: SpbFonts.monoFallback,
-                    ),
+                    // 等宽 + CJK 兜底由 SpbType.mono 一并给出（§6.81）。
+                    style: SpbType.mono(theme.textTheme),
                   ),
           ),
         ),

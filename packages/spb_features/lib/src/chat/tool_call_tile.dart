@@ -96,11 +96,9 @@ class _ToolCallTileState extends State<ToolCallTile> {
       (false, false) => (Icons.check_circle_outline, scheme.tertiary, '完成'),
     };
 
-    final mono = textTheme.bodySmall?.copyWith(
-      fontFamily: 'monospace',
-      // 等宽字体四个平台都不含 CJK（Windows 是 Consolas）。不接 fallback 时
-      // 工具入参里的中文只能靠引擎隐式回退，字形不可控。见 SpbFonts 类文档。
-      fontFamilyFallback: SpbFonts.monoFallback,
+    final mono = SpbType.mono(textTheme)?.copyWith(
+      // 等宽字体四个平台都不含 CJK（Windows 是 Consolas）。`SpbType.mono`
+      // 已经把 `SpbFonts.monoFallback` 接上了（§6.81）。
       color: scheme.onSurfaceVariant,
     );
 
@@ -124,10 +122,8 @@ class _ToolCallTileState extends State<ToolCallTile> {
             : Icon(icon, size: SpbSpacing.lg, color: color),
         title: Text(
           widget.name,
-          style: textTheme.labelLarge?.copyWith(
-            fontFamily: 'monospace',
-            fontFamilyFallback: SpbFonts.monoFallback,
-          ),
+          // 工具名比入参正文大一档（w500 的 labelLarge），仍走等宽。
+          style: SpbType.mono(textTheme, base: textTheme.labelLarge),
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: Text(

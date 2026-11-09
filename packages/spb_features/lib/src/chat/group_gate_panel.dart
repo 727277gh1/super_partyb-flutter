@@ -177,13 +177,10 @@ class GroupGatePanel extends StatelessWidget {
               ),
               child: SelectableText(
                 d.nextInputPreview!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
-                  // 预览是用户输入，通常含中文。等宽字体不含 CJK，必须接
-                  // fallback（见 SpbFonts.monoFallback 文档）。
-                  fontFamilyFallback: SpbFonts.monoFallback,
-                  color: scheme.onSurfaceVariant,
-                ),
+                // 预览是用户输入，通常含中文。等宽字体不含 CJK，`SpbType.mono`
+                // 已把 fallback 接上（§6.81）。
+                style: SpbType.mono(theme.textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ),
           ],

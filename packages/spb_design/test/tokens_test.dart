@@ -394,10 +394,13 @@ void main() {
       expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
     });
 
-    test('badgeCount 至少 11（Flutter Badge 的默认字号）', () {
+    test('badgeCount 与可读下界同字号（11 不再是例外，§6.81）', () {
       final style = SpbType.badgeCount(resolve());
       expect(style, isNotNull);
-      expect(style!.fontSize, greaterThanOrEqualTo(11.0));
+      // `labelSmall` 默认 11（Flutter Badge 的口径），但本仓把它抬到 12：
+      // 角标数字是**最需要被看见**的字，不该是全仓唯一低于下界的字号。
+      expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
+      expect(style.fontSize, SpbType.metaSize);
       // letterSpacing 归零是 badgeCount 的本职（数字不需要拉丁小标签的
       // 0.5 间距，间距只会让多位数字更散）。
       expect(style.letterSpacing, 0);
@@ -413,6 +416,24 @@ void main() {
       final style = SpbType.cardTitle(resolve());
       expect(style, isNotNull);
       expect(style!.fontSize, greaterThanOrEqualTo(minReadable));
+    });
+
+    test('mono 自带 CJK 回退链（等宽字体四个平台都不含中文，§6.81）', () {
+      final style = SpbType.mono(resolve());
+      expect(style, isNotNull);
+      expect(style!.fontFamily, 'monospace');
+      // 只写 `fontFamily` 时工具入参里的中文只能靠引擎隐式回退，字形不可控。
+      // 令牌把两件事绑在一起，这条断言就是绑死的依据。
+      expect(style.fontFamilyFallback, SpbFonts.monoFallback);
+      expect(style.fontSize, greaterThanOrEqualTo(minReadable));
+    });
+
+    test('mono 的 base 可替换（工具卡标题要比入参正文大一档）', () {
+      final t = resolve();
+      final style = SpbType.mono(t, base: t.labelLarge);
+      expect(style, isNotNull);
+      expect(style!.fontFamily, 'monospace');
+      expect(style.fontSize, t.labelLarge!.fontSize);
     });
 
     // ## 为什么钉「顺序」而不是每个绝对值

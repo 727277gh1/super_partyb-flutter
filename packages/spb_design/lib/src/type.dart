@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'fonts.dart';
+
 /// 语义化文字令牌（字号层次）。
 ///
 /// ## 为什么需要它
@@ -17,12 +19,13 @@ import 'package:flutter/material.dart';
 /// |---|---|---|
 /// | 列表/面板里的次要信息行（时间/状态/来源/数量/错误说明） | [listMeta] | `bodySmall`（12 / w400） |
 /// | 徽标 / 状态 chip / 导航 tab 标签 | [badge] | `labelMedium`（12 / w500） |
-/// | 角标（Badge）里的数字 | [badgeCount] | `labelSmall` 归零 letterSpacing（11 / w500） |
+/// | 角标（Badge）里的数字 | [badgeCount] | `labelSmall` 归零 letterSpacing + 抬到 12（w500） |
+/// | 等宽文字（登录码 / 工具入参 / 文件内容） | [mono] | `listMeta` 或指定 base + `monospace` + CJK 回退 |
 /// | 正文（对话气泡、卡片说明） | [body] | `bodyMedium`（14 / w400） |
 /// | 块标题（卡片 / 面板区块标题） | [cardTitle] | `titleMedium`（16 / w500） |
 ///
-/// 下界由 `packages/spb_design/test/tokens_test.dart` 钉住：元数据与徽标
-/// **不小于 12**、角标数字**不小于 11**，且令牌之间的**相对顺序**也被钉住
+/// 下界由 `packages/spb_design/test/tokens_test.dart` 钉住：**所有**令牌
+/// 不小于 12（角标数字也不例外，§6.81），且令牌之间的**相对顺序**也被钉住
 /// （元数据 < 正文 < 块标题）。
 ///
 /// ## 四条用字规则（`tools/check_type_tokens.sh` 查前两条）
@@ -60,13 +63,17 @@ class SpbType {
 
   /// 角标（`Badge` / 计数胶囊）里的数字。
   ///
-  /// `labelSmall` 本身是 11px（Flutter 自家 `Badge` 的默认），但它的
+  /// `labelSmall` 本身是 11px（Flutter 自家 `Badge` 的默认），它的
   /// `letterSpacing: 0.5` 对数字只有害处（视觉更散），归零。
+  ///
+  /// 字号**抬到 12**（§6.81）：11 曾是全仓唯一低于可读下界的字号，而它恰好
+  /// 用在「最需要被看见」的未读数上。抬到 12 后与 [badge] 同字号，靠 w500
+  /// 与主色区分（`Badge` 的背景本来就是强调色）。
   ///
   /// ⚠️ **不要**用硬编码 `fontSize: 10`：那是全应用最小的字，
   /// 却放在最需要被看见的未读数上。
   static TextStyle? badgeCount(TextTheme textTheme) =>
-      textTheme.labelSmall?.copyWith(letterSpacing: 0);
+      textTheme.labelSmall?.copyWith(letterSpacing: 0, fontSize: metaSize);
 
   /// 正文：对话气泡、卡片里的说明段落。
   ///
@@ -81,6 +88,26 @@ class SpbType {
   /// 桌面端）——「块标题 16 > 行标题 14 > 正文 14 > 元数据 12」是本仓库的
   /// 层次约定，`tokens_test.dart` 钉住顺序。
   static TextStyle? cardTitle(TextTheme textTheme) => textTheme.titleMedium;
+
+  /// 等宽文字：登录码、工具入参/结果预览、文件内容预览。
+  ///
+  /// ## 为什么把「等宽」做成令牌，而不是各处 `fontFamily: 'monospace'`
+  ///
+  /// 等宽字体**四个平台都不含 CJK**（Windows 是 Consolas，Linux 是
+  /// DejaVu Sans Mono）。只写 `fontFamily` 时，工具入参里的中文只能靠引擎
+  /// 隐式回退——字形不可控（见 [SpbFonts] 类文档）。所以这里把**两件事**
+  /// 绑在一起：`monospace` + `SpbFonts.monoFallback`。
+  ///
+  /// 各调用点原先各写一遍，其中「登录码」那一处就漏了 fallback（码是字母
+  /// 数字，暂时没暴露，但下一个人复制这段样式给中文用就会中招）。
+  ///
+  /// [base] 不给时取 [listMeta]（12px，正文级小字）；工具卡标题这类要更大时
+  /// 传 `textTheme.labelLarge`。
+  static TextStyle? mono(TextTheme textTheme, {TextStyle? base}) =>
+      (base ?? listMeta(textTheme))?.copyWith(
+        fontFamily: 'monospace',
+        fontFamilyFallback: SpbFonts.monoFallback,
+      );
 
   /// 元数字号（pt），**仅供绘制场景**取用：`CustomPainter` 里的 `TextPainter`
   /// 拿不到 `TextTheme`（它只要 `TextStyle`）。

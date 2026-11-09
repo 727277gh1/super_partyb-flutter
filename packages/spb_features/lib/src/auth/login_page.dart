@@ -636,7 +636,12 @@ class _LoginPageState extends State<LoginPage> {
             helperMaxLines: 2,
           ),
           // 服务端会归一化（去横线/小写），这里只做长度与可读性提示。
-          style: const TextStyle(fontFamily: 'monospace', letterSpacing: 2),
+          // 等宽 + 字距 2：8 位码分组更易读。走 `SpbType.mono` 是为了把
+          // `monoFallback`（CJK 兜底）一并带上（§6.81）。
+          style: SpbType.mono(
+            textTheme,
+            base: textTheme.bodyLarge,
+          )?.copyWith(letterSpacing: 2),
           onSubmitted: (_) => _handleHandoffSignIn(),
         ),
         const SizedBox(height: SpbSpacing.sm),
@@ -839,12 +844,14 @@ class _ShortCodeCard extends StatelessWidget {
           SelectableText(
             code.displayCode,
             key: const ValueKey('login-short-code-value'),
-            style: textTheme.headlineMedium?.copyWith(
-              fontFamily: 'monospace',
-              fontWeight: FontWeight.w700,
-              letterSpacing: 6,
-              color: scheme.onSurface,
-            ),
+            // 短码要「隔着桌子也能读」：headlineMedium（24）+ w700 + 字距 6。
+            // 等宽 + CJK 兜底由 SpbType.mono 一并给出（§6.81）。
+            style: SpbType.mono(textTheme, base: textTheme.headlineMedium)
+                ?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 6,
+                  color: scheme.onSurface,
+                ),
           ),
           const SizedBox(height: SpbSpacing.sm),
           Text(
