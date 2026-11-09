@@ -1647,3 +1647,95 @@ Semantics(container: semanticContainer, child: Padding(... child: Semantics(
   内容 + 详情」三栏布局用的，与本页「一列几排」无关；本页列数只能由
   **实际可用宽度**算（同一窗口里还有侧边栏/内边距时，`MediaQuery.sizeOf`
   算不准）。
+
+### 6.88 多端可用性的三处系统性缺口：安全区 / 触控目标 / 窄屏入口（2026-11）
+
+这轮逐页审查的结论不是「某页不好看」，而是**三类跨页面的系统性缺口**——
+它们都不会抛异常、不会溢出、不报黄黑条，只会静默地把功能变得不可用。
+
+#### 6.88.1 安全区：没有 AppBar 的页面与路由外置的页面
+
+`Scaffold` 只在**有 AppBar** 时替 body 避开状态栏/刘海；`SafeArea` 不是自动的。
+实测缺三处：
+
+| 页面 | 为什么此前是空的 |
+|---|---|
+| `login_page.dart` | 无 AppBar、`Center + SingleChildScrollView`，小屏/横屏首行顶到状态栏 |
+| `overlay_quick_capture_page.dart` 的全屏分支 | 透明 `Scaffold` + 卡片贴边，刘海与手势条压住输入框/按钮 |
+| `works_page.dart` | 移动端路由**在 shell 外**（没有 `NavigationBar` 承接底部手势条） |
+
+修法：登录页与 `works_page`（`top: false`）包 `SafeArea`；overlay 的安全区放在
+**卡片内部**而不是把整张卡片缩进——全屏时卡片底色仍须铺满四边，否则会露出
+下面那一页的内容；桌面悬浮窗 inset 为 0，等价空操作。
+
+移动端底部弹层（`apps/spb_mobile/lib/router.dart` 7 处 + `ConversationSearchSheet`）
+补 `useSafeArea: true`：此前只用 `viewInsets` 顶键盘，刘海/手势条区域会压住弹层
+的标题或底部按钮。
+
+#### 6.88.2 触控目标：显式 `VisualDensity.compact` 是 §6.77 的漏网
+
+§6.77 把密度分支收归主题（桌面 compact / 移动 standard），但当时只摘掉了全局
+`dense`，**逐实例写死的 `VisualDensity.compact` 仍在 8 处**（交付物面板的刷新与
+目录/文件行、发件箱丢弃、待确认刷新、任务面板的勾选框/刷新/编辑/上下移/删除、
+侧边栏收起）。桌面端看不出问题（本来就是 compact），移动端把 48dp 命中区压到
+**40dp**——勾选框更糟：`compact + shrinkWrap` 只剩 18dp 的可点区域。
+
+修法：交互控件不再显式传 `visualDensity`（跟随主题）；`goal_tasks_panel` 的
+`Checkbox` 是唯一特例——它需要 `shrinkWrap` 才能让行高不被撑开，故按
+`SpbTheme.isDesktopTheme(theme)` 分支：桌面紧凑、移动端用默认可点区域。
+
+#### 6.88.3 窄屏 AppBar：标题被挤到 0 宽，桌面没有刷新
+
+对话列表 AppBar 最多 6 个图标。实测 320dp、系统字号 2.0 时 `Text('对话')`
+的宽度是 **0**，且**没有溢出异常**（AppBar 不报黄黑条）——用户看不出自己在哪页。
+
+判据（与 §6.16 的对话页 AppBar 同一条）：按**频率**分档，低频入口只多一步、
+不消失。窄屏（`SpbBreakpoints.isCompact`，<720dp）只留新建/待确认/搜索，把
+工作台/习惯/设置收进 `PopupMenuButton`；宽屏全摆。菜单项用**不同 key**
+（`menu-group-list-*` vs `group-list-*`），避免同一 key 指向两种交互。
+
+顺带补上桌面端的**手动刷新**：列表只有 `RefreshIndicator`，而它需要 overscroll
+拖拽——鼠标滚轮滚不出、桌面 `ScrollBehavior` 也不把鼠标当拖动设备，于是桌面
+用户没有任何刷新入口（SSE 只推变更，拉漏的分页与缓存不会自愈）。移动端不加，
+下拉手势才是本端入口。
+
+⚠️ 平台判据必须读**主题**而不是 `dart:io` / `SpbEnv`：`flutter test` 里
+`defaultTargetPlatform` 恒为 android（§6.77 的同一判据），读真实宿主会让桌面
+专属入口出现在移动端用例里而**断言不会红**。新增 `SpbTheme.isDesktopPlatform`
+（及 `isDesktopTheme`），并修了一个**假绿**根因：`_build` 从未把注入的
+`platform` 写回 `ThemeData`，于是 `lightFor(TargetPlatform.linux)` 只改密度/字体，
+`Theme.of(context).platform` 仍是 android——桌面分支在测试里根本不可达。
+
+#### 6.88.4 顺带收口（同一轮审查发现，非系统性）
+
+- `works_page` / `work_detail` 的错误与空态改用共享 `EmptyState` / `ErrorState`
+  （此前是第三、第四份私有实现，图标尺寸也不一致）；`ErrorState` 新增可选
+  `retryKey`，保留各页既有的测试 key。
+- 三个多字段对话框补 `scrollable: true`（新建目标、编辑任务、清理策略）：
+  小屏 + 字号放大 + 键盘弹起会把底部按钮挤出屏幕。
+- 搜索页补清除按钮（AppBar 里没有「点外面清空」的入口）；只在有输入时渲染。
+- 工作详情输入区：发送按钮补 `tooltip: '发送'`（也是屏幕阅读器的名称）、空输入
+  置灰；移动端 `textInputAction: send`（软键盘直接能发），桌面端 Enter 发送 /
+  Shift+Enter 换行（与 `MessageComposer` 同一约定）。
+- `work_detail` 的步骤/事件/产物行去掉 `dense: true`：M3 下它同时压字号
+  （13px）与行高，显式样式也对抗不了（§6.77 的同一条坑）。
+
+#### 验证
+
+- `group_list_page_test.dart` 新增 3 条：窄屏标题仍有宽度 + 低频入口在菜单里
+  可用、桌面端有刷新且点击真的重拉（观察「清空 → 转圈 → 重现」，**不数 handler
+  次数**——`http_mock_adapter` 0.6 的 handler 只在注册时调用一次）、移动端主题
+  不渲染刷新入口。
+- `search_page_test.dart` 新增清除按钮用例（并断言清空**不**再发请求）。
+- `work_detail_page_test.dart` 新增输入区用例：空输入禁用、`tooltip` 存在、
+  `textInputAction == send`、命中区 ≥48dp。
+- `packages/spb_features` 全量 1445 条通过；`dart analyze .` 0 issue；
+  `packages/spb_design` 54 条通过（含 `ThemeData.platform` 写回后的字体/密度用例）。
+
+#### 未验证 / 有意不做
+
+- 本机是 Debian 12 LXC：无 `DISPLAY`、无真机（§9）。安全区/手势条的实际留白、
+  移动端软键盘「发送」键的视觉、桌面端刷新按钮的命中体验**均未手测**。
+- 不动 `SpbBreakpoints` 的三档语义（compact/medium/expanded）：那是三栏布局的
+  判据，与本节的「AppBar 分档」共用同一个宽度值但语义不同（§6.84 已说明）。
+- 不做 i18n（§6.12）。

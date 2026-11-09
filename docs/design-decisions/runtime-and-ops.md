@@ -253,28 +253,28 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 # 核对本节的数字（只查「标注了复现命令」的这几处，见 §6.19 的守卫清单）。
 
 # 决策时（issue #23 创建于 f446250）的基线：782
-# 当前（HEAD）量：1051
+# 当前（HEAD）量：1099
 cd packages/spb_features && grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart lib | wc -l
-# <!-- number-check: name=spb_features_hardcoded_zh value=1051 -->
+# <!-- number-check: name=spb_features_hardcoded_zh value=1099 -->
 
 # 全仓（9 个 packages + 2 个 apps 的 lib/）
-# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：1919
+# 决策时基线：约 1200（未单独记录）；当前（HEAD）量：2015
 grep -rhoP "'[^']*[\x{4e00}-\x{9fa5}][^']*'" --include=*.dart packages/*/lib apps/*/lib | wc -l
-# <!-- number-check: name=repo_hardcoded_zh value=1919 -->
+# <!-- number-check: name=repo_hardcoded_zh value=2015 -->
 
 # 是否已接入 i18n（应为空输出）
 grep -rn 'AppLocalizations\|flutter_localizations\|package:intl' --include=*.dart packages/*/lib apps/*/lib
 grep -rn 'localizationsDelegates\|supportedLocales' --include=*.dart apps/*/lib
 ```
 
-量级分布（HEAD，字符串字面量数）：`spb_features` 998、`spb_domain` 182、
-`spb_desktop` 183、`spb_models` 98、`spb_mobile` 95、`spb_platform` 79、
-`spb_api` 71、`spb_data` 39、`spb_core` 16、`spb_ui` 5、`spb_design` 3。
+量级分布（HEAD，字符串字面量数）：`spb_features` 1099、`spb_domain` 226、
+`spb_desktop` 201、`spb_models` 98、`spb_mobile` 110、`spb_platform` 110、
+`spb_api` 104、`spb_data` 39、`spb_core` 20、`spb_ui` 5、`spb_design` 3。
 （[§6.54](ui.md) 的工具批卡与「动态」面板、[§6.56](chat.md) 的用量读数区贡献了 `spb_features`
 增量的主要部分。）
 
-⚠️ **`spb_core` 从 0 涨到 16**：issue #40/#45 的诊断报告与错误分类文案（到 13），
-加 §6.57 的 `FileLogSink` 启动 / 轮转 / 写失败文案（到 16）——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
+⚠️ **`spb_core` 从 0 涨到 20**：issue #40/#45 的诊断报告与错误分类文案（到 13），
+加 §6.57 的 `FileLogSink` 启动 / 轮转 / 写失败文案（到 16），之后随功能增加涨到 20——正是「为什么不做」第 1 条说的「文案有一半在纯 Dart 层」的实例：领域/
 基础设施层的文案随功能增加而增长，而它们**不在 Widget 里**。
 
 #### 为什么不做
