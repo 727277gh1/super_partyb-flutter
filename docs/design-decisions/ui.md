@@ -1532,3 +1532,113 @@ static const double _mobileBodyBump = 1.0;
 - **不给 `ConversationPage` 加 golden**（成本/收益，见上）；
 - **不逐面板铺开**：面板基线数量与维护成本线性相关，只挑「字密度最集中、
   改错最难发现」的那一张。`group_gate_panel` / `turn_status` 等仍由行为单测覆盖。
+
+### 6.84 对话列表卡片化 + 列数跟随宽度（2026-11）
+
+用户报障：桌面端对话列表「太多空白」——窗口最大化后一行横跨 1400px，
+标题挤在左端、相对时间贴在最右端、中间整片空白。
+
+#### 根因：宽度完全不参与布局
+
+列表当时是「全宽一行 + `Divider`」，`ListView` 只按纵向排。实测同一份数据在
+**360 / 720 / 1000 / 1440** 四个宽度下行高完全相同（富卡片 86dp、纯标题行
+36dp）——宽度只让那一行变长，没有任何重排。即：桌面端的空白不是「卡片太少」，
+是「一行里只有两头有字」。
+
+#### 修法
+
+| 项 | 改法 |
+|---|---|
+| 列表项 | 全宽行 + `Divider` → 卡片：`Material(type: card)` + `SpbRadius.cardAll` + 1px `outlineVariant` 边框；卡片间距 `SpbSpacing.md`（横向纵向同一值） |
+| 列数 | `floor(可用宽度 / 320)`，`clamp(1, 4)`——按**最小卡片宽度**算，不按断点写死 |
+| 等高 | 每个视觉行 `IntrinsicHeight` + `Row(crossAxisAlignment: stretch)` + `Expanded`：行高 = 该行最高卡片，富卡片把空卡片撑齐 |
+| 分页 / footer | 仍是一个 `ListView.builder`（`itemCount` = 视觉行数 + 1 个全宽 footer），滚动控制器与预加载逻辑不变 |
+
+320 的依据：卡片标题行是「归档徽标 + 标题 + 相对时间」三段并排，再窄就重演
+§6.62 那类
+「trailing 先占宽、标题只剩几个像素」的失败。
+
+#### 实测（同一份 5 条数据的渲染结果，非估算）
+
+| 窗口宽 | 列数 | 卡片宽 | 富卡片高 |
+|---|---|---|---|
+| 360（手机） | 1 | 336 | 94 |
+| 800 | 2 | 382 | 94（同一行两卡等高） |
+| 1000 | 3 | 317 | 94 |
+| 1440 | 4 | 345 | 94 |
+| 1920 | **4（封顶）** | 465 | 94 |
+
+改前同宽度一律「一行 86dp、横跨整窗」。封顶 4 列的理由：不封顶时 4K 会排出
+十几列、每张都读不完——卡片数是**扫读密度**，不是像素利用率。
+
+#### 为什么不用 `GridView` / `Wrap` / `ListView(children:)`
+
+1. **`GridView`（`SliverGridDelegate`）**：只能按 `childAspectRatio` 或
+   `mainAxisExtent` **写死高度**。§6.80 已决定系统字号**不 clamp**，实测倍率
+   2.0 下同一张富卡片从 94 长到 178——固定高度的网格必然溢出。
+2. **`ListView(children: [...])` / `Wrap` 铺满全部卡片**：build 阶段就构建
+   **全部**条目（offset 分页可累积上百条），与
+   [`docs/memory-audit.md`](../memory-audit.md) G7 的「长列表必须懒构建」相反。
+3. **`Card` 组件**：见下（语义坑）。
+
+#### 踩到的坑：`Card` 会切断语义节点（差点静默回归 issue #24）
+
+第一版用了 `Card`。`accessibility_test.dart` 立刻红：
+
+```
+Expected: contains '对话操作（重命名/归档/删除）'
+```
+
+实测语义树从「一个节点同时有 label 与 actions」变成两层：
+
+| 节点 | 有 | 没有 |
+|---|---|---|
+| 外层 | `actions: customAction, longPress, tap` | **label** |
+| 子层 | `label: 标题 + 时间` | **actions** |
+
+即屏幕阅读器聚焦到的是一个**没有名字的按钮**。根因在 `Card.build`：
+
+```dart
+Semantics(container: semanticContainer, child: Padding(... child: Semantics(
+  explicitChildNodes: !semanticContainer, child: child)))
+```
+
+`semanticContainer: true`（默认）→ 外插一个 `container: true` 节点；
+`semanticContainer: false` → 内层变 `explicitChildNodes: true`，照样把
+标题拆成兄弟节点。**两种取值都拆**，没有可用的开关。
+
+修法是改用 `Material(type: MaterialType.card)`（Material 不碰语义），
+合并行为与本页改造前一致。视觉无损：`spb_design` 的 `CardTheme` 只设了
+`elevation`/圆角/`margin`，全都可以在 `Material` 上直接给。
+
+#### 守住它的用例（`group_list_page_test.dart` 新增 group，5 条）
+
+| 用例 | 钉住 |
+|---|---|
+| 移动端宽度（360）只有一列 | 卡片的左边界对齐、第二张在第一张**下方**、左右各留 12 内边距 |
+| 桌面窗口（800）并排 2 列 | 同 top、同宽、**同高**（`stretch` 生效，不是巧合相等） |
+| 列数跟随宽度（1000/1440/1920） | 1000→3、1440→4、1920 仍 4（封顶不是无上限） |
+| 最后一行的空位 | 奇数尾项落在左列、宽度与上面几行**相同**（占位不能把卡片拉宽） |
+| 系统字号 2.0 | `takeException()` 为 null 且富卡片高度 **> 94**（证明没有把高度钉死） |
+
+语义那条守卫是既有的 `accessibility_test.dart`（issue #24），本次没有新增用例
+——它是**当场抓到回归**的那一条。
+
+#### 未验证
+
+- 真机 / 真窗口观感：本机是 Debian 12 LXC，无 `DISPLAY`、无真机。上面的
+  「实测」是 `flutter test` 里的真实布局尺寸，能证明列数/等高/不溢出，
+  **不能**证明真机观感（同 [§9](../development.md) 描述的无头验证边界）。
+
+#### 有意不做
+
+- **不做瀑布流（masonry）**：高度参差需要第三方包或自绘布局，而 `stretch`
+  等高已经消除「犬牙交错」的视觉代价；
+- **不把列数做成用户可配置**：320/4 这两个数来自阅读宽度与扫读密度，不是偏好；
+- **不加 golden 基线**：本页不是「纯展示」组件（按钮/角标/空态/离线提示都随
+  状态变化），且 Ahem 字体下的基线与中文密度无关；列数/等高/不溢出已由 5 条
+  **矩形断言**用例钉住（改用 golden 反而会因状态差异频繁变红）；
+- **不改 `SpbBreakpoints`**（compact/medium/expanded）：那三档是给「列表 +
+  内容 + 详情」三栏布局用的，与本页「一列几排」无关；本页列数只能由
+  **实际可用宽度**算（同一窗口里还有侧边栏/内边距时，`MediaQuery.sizeOf`
+  算不准）。

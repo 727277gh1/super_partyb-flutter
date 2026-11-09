@@ -24,6 +24,7 @@
 
 - [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
+- [x] 对话列表卡片化 + 列数跟随宽度（移动端一列、桌面端并排 2~4 列，见 [§6.84](design-decisions/ui.md)）
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 [§6.22](design-decisions/testing.md)）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 [§6.14](design-decisions/chat.md)）
