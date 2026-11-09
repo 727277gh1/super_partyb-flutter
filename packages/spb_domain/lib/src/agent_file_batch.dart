@@ -125,6 +125,36 @@ Set<String> locateIdsOfAll(List<TimelineDisplayRow> rows) => {
   for (final row in rows) ...locateIdsOf(row),
 };
 
+/// 哪些「行主键」（`locateIdsOf(row).first`）重复了——即两行会拿到**同一个
+/// `GlobalKey` 实例**的情形。
+///
+/// ## 为什么需要这个纯函数
+///
+/// 主键重复时 `RowLocateRegistry.keyFor` 会把同一个 `GlobalKey` 发给两行，
+/// Flutter 抛 `Multiple widgets used the same GlobalKey`，**后出现的那行渲染
+/// 为空白**（§6.18 的真实事故；`docs/design-decisions/chat.md` 有原文描述：
+/// 「对话内容一滚动就会丢失，然后继续滚动又出现」）。
+///
+/// 而那条校验**只在 debug 跑**（`BuildOwner._debugVerifyGlobalKeyReservation`
+/// 由 `assert` 包住）——release 里什么都不报，用户看到的只有空白。故需要一条
+/// 可在 release 侧调用、且能在无 widget 环境断言的判据。
+///
+/// ## 为什么只查主键、不查别名
+///
+/// 别名（批量卡的非首成员）本来就可以出现在两行里：它们只登记「查询入口」，
+/// 不复制键实例。只有主键重复才会真的撞键。
+///
+/// 返回重复的主键（去重、保持首次出现顺序），无重复时为空列表。
+List<String> duplicateRowOwners(List<TimelineDisplayRow> rows) {
+  final seen = <String>{};
+  final dups = <String>{};
+  for (final row in rows) {
+    final owner = locateIdsOf(row).first;
+    if (!seen.add(owner)) dups.add(owner);
+  }
+  return dups.toList();
+}
+
 /// 事件的「秒」分组键：截断到秒，**不**用 `Date.parse`。
 ///
 /// 对齐 webapp `secondOf` 的 `createdAt.slice(0, 19)`：那里刻意不解析日期，

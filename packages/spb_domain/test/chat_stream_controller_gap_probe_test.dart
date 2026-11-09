@@ -1,4 +1,5 @@
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:test/test.dart';
@@ -265,6 +266,141 @@ void main() {
       await pumpEventQueue();
 
       expect(probeCalls(), 0);
+    });
+
+    test('整段替换丢掉了已加载的更早历史 → 记下丢弃量与翻页下界（§6.85）', () async {
+      // 首屏回填 20 条（seq 100..119），再推一条实时事件（seq 120）。
+      // 缺口修复页只有 1 条且 seq=900：**页最小值 900 高于缓冲里的全部事件**，
+      // 于是这 21 条已加载历史会被整段替换扔掉——用户滚到顶部才能重新翻回来。
+      SpbLog.clearRecentLogs();
+      final backfills = mockTimelineSequence([
+        [
+          for (var i = 100; i < 120; i++)
+            sseEvent(
+              EventTypes.userMessage,
+              id: 'e$i',
+              turnId: 't$i',
+              globalSeq: i,
+            ),
+        ],
+        [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'e900',
+            turnId: 't900',
+            globalSeq: 900,
+          ),
+        ],
+      ]);
+      final probeCalls = mockTimelineProbe(newestGlobalSeq: 900);
+
+      final c = ChatStreamController(
+        sse: sse,
+        api: api,
+        userId: 'usr_1',
+        replayGapProbeDelay: Duration.zero,
+        replayGapSettle: Duration.zero,
+      );
+      await c.start(groupId: 'grp_1');
+      await pumpEventQueue();
+      pushPersisted(id: 'e120', globalSeq: 120);
+      await pumpEventQueue();
+
+      sse.emitState(SseState.connected);
+      await pumpEventQueue();
+
+      expect(probeCalls(), 1);
+      expect(backfills(), 2);
+      final d = c.timelineDiagnostics();
+      expect(d.replayGapRepairs, 1);
+      expect(
+        d.lastReplaceDropped,
+        21,
+        reason: '20 条回填 + 1 条实时事件全部早于新页最小值 900，都是「已加载但会被扔掉」的历史',
+      );
+      expect(d.lastReplaceOldestBefore, 100, reason: '替换前的翻页下界');
+      expect(d.lastReplaceOldestAfter, 900, reason: '替换后的翻页下界被抬到新页最小值');
+
+      // 日志侧证据：这是 release 包里唯一能看出「这次替换扔了东西」的地方。
+      final warned = SpbLog.recentLogs.where(
+        (r) => r.fields['dropped_loaded_events'] == 21,
+      );
+      expect(warned, hasLength(1));
+      expect(warned.single.level, LogLevel.warn);
+      expect(warned.single.fields['oldest_after'], 900);
+      expect(
+        warned.single.fields['before_events'],
+        21,
+        reason: '替换前的缓冲条数（不是回填页条数）',
+      );
+      await c.dispose();
+    });
+
+    test('整段替换没丢掉已加载历史 → 丢弃量为 0，不写 warn', () async {
+      // 缺口页里含本地已有的最早那条（seq 1）→ 页最小值 1，缓冲里没有更早的
+      // 事件可以丢。这种替换是正常的（用户什么都不会丢），不该发 warn。
+      SpbLog.clearRecentLogs();
+      final backfills = mockTimelineSequence([
+        [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'e1',
+            turnId: 't1',
+            globalSeq: 1,
+          ),
+        ],
+        [
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'e1',
+            turnId: 't1',
+            globalSeq: 1,
+          ),
+          sseEvent(
+            EventTypes.userMessage,
+            id: 'e900',
+            turnId: 't900',
+            globalSeq: 900,
+          ),
+        ],
+      ]);
+      final probeCalls = mockTimelineProbe(newestGlobalSeq: 900);
+
+      final c = ChatStreamController(
+        sse: sse,
+        api: api,
+        userId: 'usr_1',
+        replayGapProbeDelay: Duration.zero,
+        replayGapSettle: Duration.zero,
+      );
+      await c.start(groupId: 'grp_1');
+      await pumpEventQueue();
+      pushPersisted(id: 'e2', globalSeq: 2);
+      await pumpEventQueue();
+
+      sse.emitState(SseState.connected);
+      await pumpEventQueue();
+
+      expect(probeCalls(), 1);
+      expect(backfills(), 2);
+      final d = c.timelineDiagnostics();
+      expect(d.replayGapRepairs, 1);
+      expect(d.lastReplaceDropped, 0);
+      expect(d.lastReplaceOldestBefore, 1);
+      expect(d.lastReplaceOldestAfter, 1, reason: '新页最小值与旧下界相同，区间没有被抬高');
+      // ⚠️ 不能断言「整段缓冲里没有任何 warn」：缺口探测自己就会写一条
+      // 「断线回放被截断」。只认**替换丢弃量**那一条，且它必须是 info。
+      final replaceLogs = SpbLog.recentLogs.where(
+        (r) => r.fields.containsKey('dropped_loaded_events'),
+      );
+      expect(replaceLogs, hasLength(1));
+      expect(replaceLogs.single.level, LogLevel.info);
+      expect(
+        replaceLogs.single.fields['dropped_loaded_events'],
+        0,
+        reason: '没丢东西时不该 warn（每次重连都会走替换，全 warn 会淹没真异常）',
+      );
+      await c.dispose();
     });
   });
 }

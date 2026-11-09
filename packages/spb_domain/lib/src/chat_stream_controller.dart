@@ -219,6 +219,16 @@ class ChatStreamController {
   /// 本次聚焦期间「回放被截断 → 整段回填」的次数。
   int _replayGapRepairs = 0;
 
+  /// 最近一次整段替换丢掉了多少条「已加载但不在这一页」的更早历史。
+  ///
+  /// 语义与用途见 [TimelineDiagnostics.lastReplaceDropped]：它是「中途丢了一大块
+  /// 内容、滚动才回来」那条通道的唯一数字证据。
+  int _lastReplaceDropped = 0;
+
+  /// 最近一次整段替换前后的翻页下界（`_oldestLoadedGlobalSeq`）。
+  int? _lastReplaceOldestBefore;
+  int? _lastReplaceOldestAfter;
+
   /// 挂起的缺口探测 / 已重试次数。
   Timer? _gapProbeTimer;
   int _gapProbeAttempts = 0;
@@ -1070,6 +1080,31 @@ class ChatStreamController {
       final fresh = events.where((e) => !known.contains(e.eventId)).toList();
       // 归并模式：与缓冲里切换期间到达的实时事件合并后按 globalSeq 重排
       // （归约器假定输入正序）。替换模式：整段换掉，修缺口（见方法文档）。
+      //
+      // ## 替换前先量一次「会丢掉多少已加载历史」（§6.85）
+      //
+      // 替换模式把缓冲换成**最新这一页**，并把历史边界重置成这一页的最小
+      // `globalSeq`。于是此前 `loadOlder` 翻出来的更早历史直接从时间线上消失
+      // **直到用户滚到顶部再翻一页才回来**——用户观感即「中途丢了一大块，
+      // 重新滚动才出现」。修复前日志只有 `对话历史回填完成 count=N`，看不出
+      // 这件事，故在换掉缓冲**之前**先把丢弃量记下来。
+      final int replaceDropped;
+      final int? replaceOldestBefore;
+      final int beforeLen = _buffer.length;
+      if (replaceBuffer) {
+        replaceOldestBefore = _oldestLoadedGlobalSeq;
+        final pageOldest = _minGlobalSeqOf(events);
+        replaceDropped = pageOldest == null
+            ? 0
+            : _buffer
+                  .where(
+                    (e) => (e.globalSeq ?? 0) > 0 && e.globalSeq! < pageOldest,
+                  )
+                  .length;
+      } else {
+        replaceDropped = 0;
+        replaceOldestBefore = null;
+      }
       final List<ChatEvent> merged;
       if (replaceBuffer) {
         merged = events;
@@ -1097,6 +1132,31 @@ class ChatStreamController {
       // 回填拉的是最新页），以本页为准也不会把翻页游标抬高到已加载区间内。
       _oldestLoadedGlobalSeq = _minGlobalSeqOf(events);
       _trimBuffer();
+      // 整段替换的丢弃量进日志与诊断快照（§6.85）。
+      //
+      // 只在**丢弃了已加载历史**时用 warn：那是用户能感知的「内容消失」，
+      // 且是「缺口修复」与「本来就只回填了一页」的分界线；没丢就只是 info
+      // （每次重连都会走一次替换，全 warn 会把真正的异常淹没）。
+      if (replaceBuffer) {
+        _lastReplaceDropped = replaceDropped;
+        _lastReplaceOldestBefore = replaceOldestBefore;
+        _lastReplaceOldestAfter = _oldestLoadedGlobalSeq;
+        final fields = {
+          'groupId': groupId,
+          'before_events': beforeLen,
+          'after_events': _buffer.length,
+          'page_events': events.length,
+          'dropped_loaded_events': replaceDropped,
+          'oldest_before': replaceOldestBefore,
+          'oldest_after': _oldestLoadedGlobalSeq,
+          'replay_gap_repairs': _replayGapRepairs,
+        };
+        if (replaceDropped > 0) {
+          SpbLog.warn('回放缺口修复整段替换：丢弃了已加载的更早历史（需重新翻页才取回）', fields);
+        } else {
+          SpbLog.info('回放缺口修复整段替换', fields);
+        }
+      }
       SpbLog.info('对话历史回填完成', {'groupId': groupId, 'count': events.length});
       // 回填后的基线写进诊断快照：
       // 报告里能分「一开始就只有 200 条」与「跑着跑着被裁到 200 条」。
@@ -1674,6 +1734,9 @@ class ChatStreamController {
       fromCache: _fromCache,
       replayGapRepairs: _replayGapRepairs,
       sseCursorPresent: (_sse.lastEventId ?? '').isNotEmpty,
+      lastReplaceDropped: _lastReplaceDropped,
+      lastReplaceOldestBefore: _lastReplaceOldestBefore,
+      lastReplaceOldestAfter: _lastReplaceOldestAfter,
     );
   }
 

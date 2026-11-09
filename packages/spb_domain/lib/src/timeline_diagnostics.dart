@@ -66,6 +66,9 @@ class TimelineDiagnostics {
     required this.fromCache,
     required this.replayGapRepairs,
     required this.sseCursorPresent,
+    this.lastReplaceDropped = 0,
+    this.lastReplaceOldestBefore,
+    this.lastReplaceOldestAfter,
   });
 
   /// 当前聚焦的 group（null = 全局模式，没有时间线）。
@@ -116,6 +119,30 @@ class TimelineDiagnostics {
   /// 连上时是否带得上游标（无游标 = 首次连接，服务端不会回放）。
   final bool sseCursorPresent;
 
+  /// 最近一次**整段替换**（`_backfill(replaceBuffer: true)`）丢掉了多少条
+  /// 「已经加载过、但不在这一页里」的更早历史。
+  ///
+  /// ## 为什么必须单独记这一条（一个被忽视的「内容消失」通道）
+  ///
+  /// 缺口修复是**整段换掉**缓冲（`merged = events`），并把历史边界重置成最新
+  /// 这一页的最小 `globalSeq`。于是用户此前靠 `loadOlder` 翻出来的更早历史
+  /// **直接从时间线上消失**——直到他滚到顶部触发 `_loadOlder`，那一段才被
+  /// 重新拉回来。用户观感就是「对话中途丢了一大块，重新滚动才出现」。
+  ///
+  /// 而修复前的日志只写 `对话历史回填完成 count=N`，看不出「这次把已加载的
+  /// M 条扔了」——那是「内容消失」与「本来就只回填了一页」的唯一区分点。
+  /// 故这里记下丢弃量，`toReportLines` 里也会写出来。
+  final int lastReplaceDropped;
+
+  /// 最近一次整段替换**之前**的翻页下界（`_oldestLoadedGlobalSeq`）。
+  ///
+  /// 与 [lastReplaceOldestAfter] 一起给出「覆盖区间被抬高的幅度」：
+  /// `before → after` 之间那段就是被丢弃、需要重新翻页才能回来的历史。
+  final int? lastReplaceOldestBefore;
+
+  /// 最近一次整段替换**之后**的翻页下界。
+  final int? lastReplaceOldestAfter;
+
   /// 只更新「计数与区间」这几个 **O(1)** 字段，其余（正文统计 / 逐轮明细）
   /// 保持原值。
   ///
@@ -159,6 +186,11 @@ class TimelineDiagnostics {
     fromCache: fromCache,
     replayGapRepairs: replayGapRepairs,
     sseCursorPresent: sseCursorPresent,
+    // 整段替换的丢弃量不是「裁剪」意义上的字段，但同样是 O(1) 计数，
+    // 顺带做部分更新（否则下一次裁剪会把它的值刷回默认 0）。
+    lastReplaceDropped: lastReplaceDropped,
+    lastReplaceOldestBefore: lastReplaceOldestBefore,
+    lastReplaceOldestAfter: lastReplaceOldestAfter,
   );
 
   /// 日志字段（snake_case，与 Go API 的 slog 约定一致）。
@@ -184,6 +216,9 @@ class TimelineDiagnostics {
       'from_cache': fromCache,
       'replay_gap_repairs': replayGapRepairs,
       'sse_cursor_present': sseCursorPresent,
+      'last_replace_dropped_older': lastReplaceDropped,
+      'last_replace_oldest_before': lastReplaceOldestBefore,
+      'last_replace_oldest_after': lastReplaceOldestAfter,
     };
   }
 
@@ -200,6 +235,9 @@ class TimelineDiagnostics {
       '裁剪: 共 $trimCount 次，最近一次丢 $lastTrimDropped 条、'
           '留 $lastTrimKept 条（${lastTrimPerTurn ? '按整轮' : '单轮逐条降级'}）',
       '回放缺口修复: $replayGapRepairs 次；连上时${sseCursorPresent ? '有' : '无'}游标',
+      // 「整段替换丢了多少已加载历史」：这一行是「内容中途消失、滚动才回来」
+      // 的**唯一**数字证据（见 [lastReplaceDropped]）。
+      '整段替换: ${_replaceLine()}',
       '数据来源: ${fromCache ? '本地缓存（离线）' : '网络'}',
     ];
     if (turns.isEmpty) {
@@ -218,6 +256,20 @@ class TimelineDiagnostics {
       lines.add('  … 另有 ${turns.length - turnLimit} 轮未列出');
     }
     return lines;
+  }
+
+  /// 「整段替换」在报告里的措辞。
+  ///
+  /// 三种情形必须分开写（只看 `replayGapRepairs` 会把三者混为一谈）：
+  /// 没触发过 / 触发了但没丢已加载历史 / 丢了一段且需重新翻页才取回。
+  String _replaceLine() {
+    if (lastReplaceDropped <= 0) {
+      return replayGapRepairs == 0 ? '无（未触发缺口修复）' : '最近一次未丢弃已加载历史';
+    }
+    final before = lastReplaceOldestBefore ?? '?';
+    final after = lastReplaceOldestAfter ?? '?';
+    return '最近一次丢弃已加载历史 $lastReplaceDropped 条'
+        '（翻页下界 $before → $after，须重新向上翻页才能取回）';
   }
 }
 

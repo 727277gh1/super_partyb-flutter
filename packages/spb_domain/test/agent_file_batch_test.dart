@@ -397,4 +397,59 @@ void main() {
       expect(ids, hasLength(5));
     });
   });
+
+  group('行主键唯一性（duplicateRowOwners）', () {
+    /// ## 这个 group 防的是什么
+    ///
+    /// 主键重复 = 两行拿到**同一个 `GlobalKey` 实例** = Flutter 的
+    /// `Multiple widgets used the same GlobalKey`（**只在 debug 跑**）= release
+    /// 里后出现的那行渲染为空白（§6.18 事故的原话：「一滚动就会丢失，继续滚动
+    /// 又出现」）。
+    ///
+    /// 页面侧靠 `_checkRowKeyOwners` 在 release 里检出来并写 warn 日志，
+    /// 而它的判据就是本函数。故这里必须钉住三件事：
+    /// ① 正常行集合不误报；② 真重复能被检出；③ **别名重叠不算重复**
+    /// （批内成员本来就允许跨行出现，它只是查询入口）。
+    test('正常行集合 → 空（含批量卡与单条相邻）', () {
+      final rows = groupFileEventsForDisplay([
+        _text('m1'),
+        for (var i = 0; i < 5; i++) _file('f$i.md', second: 0),
+        _text('m2', second: 1),
+      ]);
+      expect(duplicateRowOwners(rows), isEmpty);
+    });
+
+    test('同一 item 被渲染成两行 → 报出该主键', () {
+      final item = _text('m1');
+      final rows = [SingleItemRow(item), SingleItemRow(item)];
+      expect(duplicateRowOwners(rows), ['m1']);
+    });
+
+    test('多个重复：去重且保持首次出现顺序', () {
+      final rows = [
+        SingleItemRow(_text('m1')),
+        SingleItemRow(_text('m2', second: 1)),
+        SingleItemRow(_text('m1')),
+        SingleItemRow(_text('m2', second: 1)),
+        SingleItemRow(_text('m1')),
+      ];
+      expect(duplicateRowOwners(rows), ['m1', 'm2']);
+    });
+
+    test('别名重叠不算重复（批内成员出现在另一行时，两行仍各持己键）', () {
+      // 真会发生的形态：一张批量卡（f0..f4）+ 后面一条单条 f3（比如同一文件
+      // 又被拆出来单独显示）。主键是 'f0.md' 与 'f3.md'，不撞车——撞车的只会是
+      // 「两行的 `ids.first` 相同」，而别名不参与键的所有权。
+      final batch = groupFileEventsForDisplay([
+        for (var i = 0; i < 5; i++) _file('f$i.md', second: 0),
+      ]).single;
+      final rows = [batch, SingleItemRow(_file('f3.md', second: 0))];
+      expect(locateIdsOf(rows.first), contains('f3.md'));
+      expect(duplicateRowOwners(rows), isEmpty);
+    });
+
+    test('空时间线 → 空', () {
+      expect(duplicateRowOwners([]), isEmpty);
+    });
+  });
 }
