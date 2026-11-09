@@ -225,6 +225,18 @@ jobs:
       - name: Silent catch guard self-test
         run: bash tools/check_silent_catches_selftest.sh
 
+      # 字号只能来自 `SpbType` 令牌：裸 `fontSize: 12`、无理由的 `labelSmall`
+      # （11px）都不许再出现。§6.76 修过列表页、§6.78 修过 68 处聊天面板，
+      # 两次都是人工清扫——没有守卫就会在下一个页面长回来，而**任何测试都不会
+      # 红**（golden 只盖 12 张按钮/空态/spec 卡，面板一张都没有）。
+      - name: Type token check
+        run: bash tools/check_type_tokens.sh
+
+      # 上面那条守卫的假绿/假红风险（绘制场景被逼回字面量、注释被当成使用、
+      # 豁免无理由放行、扫描范围空转）各有断言。
+      - name: Type token guard self-test
+        run: bash tools/check_type_tokens_selftest.sh
+
       # 构建参数守卫：每个 release 构建 job 必须传 --dart-define=SPB_API_BASE_URL。
       # 不传则产物用 SpbEnv 默认值 http://127.0.0.1:8000，用户运行时报
       # 「远程计算机拒绝网络连接」——而 analyze/test/构建全部是绿的（2026-10

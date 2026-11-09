@@ -15,6 +15,7 @@
 | `tools/check_wiring_parity.sh` | 两端接线一致 |
 | `tools/check_unused_deps.sh` | 零 import 依赖 |
 | `tools/check_silent_catches.sh` | 静默吞异常 |
+| `tools/check_type_tokens.sh` | 字号必须来自 `SpbType` 令牌（禁止裸 `fontSize`、禁止无理由的 `labelSmall`） |
 | `tools/check_dollar_paren.sh` | 插值里 `$x(` 误写（分析器抓不到，issue #62） |
 | `tools/check_codegen.sh` | 生成物漂移 |
 | `tools/check_build_defines.sh` | 发布构建传 `--dart-define` |
