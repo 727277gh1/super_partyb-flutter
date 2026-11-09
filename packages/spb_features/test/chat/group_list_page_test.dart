@@ -1354,6 +1354,117 @@ void main() {
       expect(find.text('重新部署站点'), findsOneWidget);
     });
   });
+
+  /// 多列卡片布局（§6.84）。
+  ///
+  /// ## 为什么要量矩形
+  ///
+  /// 「列数」不是某个 widget 的属性，而是**布局结果**。用 `find.byKey` 拿
+  /// 卡片矩形量横坐标，才看得出「1 列时上下排、2 列时左右排」；只断言
+  /// 「能找到 5 张卡片」在单列布局下也成立，没有任何约束力。
+  group('多列卡片布局（§6.84）', () {
+    /// 固定窗口逻辑尺寸并注册复位。
+    Future<void> setWindow(WidgetTester tester, double w, double h) async {
+      tester.view.physicalSize = Size(w, h);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pump();
+    }
+
+    List<Map<String, dynamic>> fiveGroups() => [
+      groupWithGoalJson(id: 'g1', title: '富卡片对话'),
+      groupJson(id: 'g2', title: '第二个'),
+      groupJson(id: 'g3', title: '第三个'),
+      groupJson(id: 'g4', title: '第四个'),
+      groupJson(id: 'g5', title: '第五个'),
+    ];
+
+    testWidgets('移动端宽度（360）只有一列：卡片上下排、占满可用宽度', (tester) async {
+      mockPage(offset: 0, items: fiveGroups());
+      await pumpPage(tester);
+      await setWindow(tester, 360, 900);
+
+      final r1 = tester.getRect(find.byKey(const ValueKey('g1')));
+      final r2 = tester.getRect(find.byKey(const ValueKey('g2')));
+
+      expect(r2.left, r1.left, reason: '一列时两行左边界必须对齐');
+      expect(r2.top, greaterThan(r1.bottom), reason: '一列时第二张必须在第一张下方');
+      // 左右各留 12 个内边距（卡片不再贴边）。
+      expect(r1.left, 12);
+      expect(r1.right, closeTo(360 - 12, 0.01));
+    });
+
+    testWidgets('桌面窗口（800）并排 2 列，同一视觉行等高', (tester) async {
+      mockPage(offset: 0, items: fiveGroups());
+      await pumpPage(tester);
+      await setWindow(tester, 800, 900);
+
+      final r1 = tester.getRect(find.byKey(const ValueKey('g1')));
+      final r2 = tester.getRect(find.byKey(const ValueKey('g2')));
+      final r3 = tester.getRect(find.byKey(const ValueKey('g3')));
+
+      expect(r1.top, r2.top, reason: '两张卡片必须在同一视觉行');
+      expect(r2.left, greaterThan(r1.right), reason: '第二张在第一张右侧');
+      // 等高：富卡片把同一行的高度撑起来，空卡片跟随（`CrossAxisAlignment.stretch`）。
+      expect(r2.height, closeTo(r1.height, 0.01), reason: '同一行必须等高');
+      expect(r2.width, closeTo(r1.width, 0.01), reason: '同一行必须等宽');
+      expect(r3.top, greaterThan(r1.bottom), reason: '第三张换到第二行');
+    });
+
+    testWidgets('列数跟随宽度：1000 → 3 列、1440 → 4 列、1920 仍封顶 4 列', (tester) async {
+      mockPage(offset: 0, items: fiveGroups());
+      await pumpPage(tester);
+
+      for (final (width, expectedColumns) in <(double, int)>[
+        (1000, 3),
+        (1440, 4),
+        (1920, 4),
+      ]) {
+        await setWindow(tester, width, 900);
+        final firstRowTops = <double>[];
+        for (var i = 1; i <= expectedColumns; i++) {
+          firstRowTops.add(tester.getRect(find.byKey(ValueKey('g$i'))).top);
+        }
+        expect(
+          firstRowTops.toSet().length,
+          1,
+          reason: '$width 宽窗口下前 $expectedColumns 张必须在同一行',
+        );
+      }
+    });
+
+    testWidgets('最后一行的空位不渲染空卡片（卡片宽度与上一行一致）', (tester) async {
+      // 5 张卡片 + 800 宽（2 列）→ 第 3 行只有 g5 一张，右侧应留空。
+      mockPage(offset: 0, items: fiveGroups());
+      await pumpPage(tester);
+      await setWindow(tester, 800, 900);
+
+      final r1 = tester.getRect(find.byKey(const ValueKey('g1')));
+      final r5 = tester.getRect(find.byKey(const ValueKey('g5')));
+      expect(r5.left, r1.left, reason: '奇数尾项落在左侧第一位');
+      expect(r5.width, closeTo(r1.width, 0.01), reason: '尾行卡片不能因占位而变宽');
+    });
+
+    testWidgets('系统字号 2.0：卡片随内容长高（不写死高度、不溢出）', (tester) async {
+      // §6.80 决定**不** clamp 系统字号，所以布局不能用固定高度的网格
+      // （`GridView` 的 childAspectRatio / mainAxisExtent 都会在这里溢出）。
+      mockPage(offset: 0, items: fiveGroups());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(textScaler: TextScaler.linear(2.0)),
+            child: GroupListPage(api: api),
+          ),
+        ),
+      );
+      await settleIo(tester);
+
+      expect(tester.takeException(), isNull, reason: '倍率 2.0 下不应溢出');
+      final big = tester.getSize(find.byKey(const ValueKey('g1')));
+      // 正文 14 → 28，行高必须跟着涨；写死 94 就说明有人把高度钉死了。
+      expect(big.height, greaterThan(94));
+    });
+  });
 }
 
 /// 内存版 [GroupCacheStore]。

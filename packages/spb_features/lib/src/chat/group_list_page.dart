@@ -23,6 +23,32 @@ import 'group_management.dart';
 /// 主动看到的那个词，保持一致即可。
 const String defaultGroupTitle = '新对话';
 
+/// 卡片之间（横向与纵向）的间距。
+///
+/// 用 [SpbSpacing.md]（12）而不是更小的值：卡片之间靠**间距**表达分组，
+/// 不靠分隔线——间距太密时多列布局看起来像一张大表而不是一组卡片。
+const double _cardGap = SpbSpacing.md;
+
+/// 列表左右留白（卡片不再贴边）。
+///
+/// 与纵向按 [SpbSpacing.sm] 不同：左右要留出「卡片是浮在页面上」的余量，
+/// 贴边会让卡片与窗口边框糊在一起。
+const double _pageGutter = SpbSpacing.md;
+
+/// 单张卡片的最小宽度（决定**最多能并几列**）。
+///
+/// 320 的依据：卡片标题行是「归档徽标 + 标题 + 相对时间」三段并排，
+/// 再窄就会重演 §6.62 那类「内容被挤到 0 宽」的失败（`ListTile.trailing`
+/// 的先例）；同时 320 ≈ 移动端最小逻辑宽度，即「一列时刚好占满」。
+const double _minCardWidth = 320;
+
+/// 并排列数的上限。
+///
+/// 不设上限时 4K 窗口会排出 12 列、每张卡片只有 300 宽且一眼读不完
+/// ——卡片数是「扫读密度」，不是「像素利用率」。4 列在 1920 宽下每张约
+/// 460，仍属舒适阅读宽度。
+const int _maxColumns = 4;
+
 /// 对话列表页（offset 分页）。
 ///
 /// ## 分页约定：offset 而非游标
@@ -38,6 +64,22 @@ const String defaultGroupTitle = '新对话';
 ///
 /// 不用「加载更多」按钮：桌面端滚到底是自然动作，加按钮反而多一步。
 /// 用 [ScrollController] 监听接近底部时预加载（提前一屏），避免用户看到白屏等待。
+///
+/// ## 布局：卡片 + 列数跟随宽度（2026-11，§6.84）
+///
+/// 每条渲染成一张卡片，列数由**可用宽度**算（[_columnsFor]）：移动端一列，
+/// 桌面端并排 2~4 列。改之前是「全宽一行 + 分隔线」，桌面最大化时一行横跨
+/// 1400px、标题贴左、时间贴右、中间整片空白——宽度完全没被利用。
+///
+/// 刻意**不用** `GridView`：`SliverGridDelegate` 要么给 `childAspectRatio`、
+/// 要么给 `mainAxisExtent`，两者都是写死高度，而本项目的系统字号**不 clamp**
+/// （§6.80），2.0 缩放下固定高度必然溢出。故用「每视觉行一个 `Row` +
+/// `IntrinsicHeight`」，行高由该行最高的卡片决定，随字号自然增长。
+///
+/// 也刻意**不**改用 `ListView(children: [...])` 或 `Wrap` 铺满全部卡片：
+/// 那会在 build 阶段构建**全部**条目（分页可累积到上百条），与
+/// `docs/memory-audit.md` G7 的「共享行必须懒构建」相反。这里仍是
+/// `ListView.builder`，只多了一层「视觉行」的分块。
 class GroupListPage extends StatefulWidget {
   const GroupListPage({
     super.key,
@@ -858,30 +900,86 @@ class _GroupListPageState extends State<GroupListPage> {
           PointerDeviceKind.stylus,
         },
       ),
-      child: ListView.separated(
-        controller: _scrollController,
-        // RefreshIndicator 需要列表始终可滚动才能下拉（内容不足一屏时）。
-        physics: const AlwaysScrollableScrollPhysics(),
-        itemCount: _groups.length + 1,
-        separatorBuilder: (_, _) => const Divider(height: 1),
-        itemBuilder: (context, index) {
-          if (index == _groups.length) return _buildFooter();
-          final group = _groups[index];
-          return _GroupTile(
-            key: ValueKey(group.id),
-            group: group,
-            onTap: widget.onOpenGroup == null
-                ? null
-                : () => widget.onOpenGroup!(group),
-            // 动作进行中时禁用菜单，避免重复提交（见 _busyGroupId）。
-            onAction: widget.onGroupAction == null || _busyGroupId != null
-                ? null
-                : (action) => _handleAction(group, action),
-            onOpenSnapshotSite: widget.onOpenSnapshotSite,
-            fileSummary: widget.groupFileSummary?.call(group.id),
+      // 列数只能从**实际可用宽度**算出来，故套 `LayoutBuilder`：
+      // `MediaQuery.sizeOf` 是整窗宽度，窗口里还有侧边栏/内边距时算不准。
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final columns = _columnsFor(constraints.maxWidth - _pageGutter * 2);
+          // 视觉行数（向上取整）：最后一行的空位由 [_cardAt] 返回空盒占位，
+          // 否则最后一行会左对齐堆在第一名上、宽度与上面几行对不齐。
+          final rows = (_groups.length / columns).ceil();
+          return ListView.builder(
+            controller: _scrollController,
+            // RefreshIndicator 需要列表始终可滚动才能下拉（内容不足一屏时）。
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(
+              _pageGutter,
+              SpbSpacing.sm,
+              _pageGutter,
+              // 底部不给留白：footer（「没有更多了」/重试）自带 padding，
+              // 再加一层会让滚动到底时多一截空白。
+              0,
+            ),
+            itemCount: rows + 1,
+            itemBuilder: (context, index) {
+              if (index == rows) return _buildFooter();
+              return Padding(
+                padding: const EdgeInsets.only(bottom: _cardGap),
+                child: IntrinsicHeight(
+                  child: Row(
+                    // stretch：同一视觉行的卡片**等高**。
+                    //
+                    // 不 stretch 时「有目标/进度/文件的富卡片」与「只有标题的
+                    // 空卡片」并排，底边参差、行与行之间出现犬牙交错的空隙。
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    spacing: _cardGap,
+                    children: [
+                      for (var i = 0; i < columns; i++)
+                        Expanded(child: _cardAt(index * columns + i)),
+                    ],
+                  ),
+                ),
+              );
+            },
           );
         },
       ),
+    );
+  }
+
+  /// 按可用宽度算并排列数：移动端一列，桌面端 2~4 列。
+  ///
+  /// 公式是「按**最小宽度**能塞下几列」，而不是按断点写死（`SpbBreakpoints`
+  /// 那三档是给「列表 + 内容 + 详情」这种分栏用的，与本页无关）：
+  ///
+  /// | 可用宽度 | 列数 | 每张宽度 |
+  /// |---------|-----|---------|
+  /// | 336（360 手机） | 1 | 336 |
+  /// | 776（800 窗口） | 2 | 388 |
+  /// | 976（1000 窗口） | 3 | 325 |
+  /// | 1416（1440 窗口） | 4 | 354 |
+  /// | 1896（1920 窗口） | 4（封顶） | 474 |
+  static int _columnsFor(double usableWidth) {
+    if (!usableWidth.isFinite || usableWidth <= 0) return 1;
+    return (usableWidth / _minCardWidth).floor().clamp(1, _maxColumns);
+  }
+
+  /// 第 [index] 张卡片；超出已加载条目时返回空盒（占住该行剩下的列宽）。
+  Widget _cardAt(int index) {
+    if (index >= _groups.length) return const SizedBox.shrink();
+    final group = _groups[index];
+    return _GroupTile(
+      key: ValueKey(group.id),
+      group: group,
+      onTap: widget.onOpenGroup == null
+          ? null
+          : () => widget.onOpenGroup!(group),
+      // 动作进行中时禁用菜单，避免重复提交（见 _busyGroupId）。
+      onAction: widget.onGroupAction == null || _busyGroupId != null
+          ? null
+          : (action) => _handleAction(group, action),
+      onOpenSnapshotSite: widget.onOpenSnapshotSite,
+      fileSummary: widget.groupFileSummary?.call(group.id),
     );
   }
 
@@ -1004,7 +1102,13 @@ class _CacheNotice extends StatelessWidget {
   }
 }
 
-/// 单个对话条目。
+/// 单个对话条目（一张卡片）。
+///
+/// ## 为什么是卡片而不是「行 + 分隔线」
+///
+/// 卡片化不是为了好看，是**多列布局的前提**：并排两列以上时，靠 `Divider`
+/// 分隔的行会读成一张表（同一行左右两项被误认为相关），而卡片各自独立。
+/// 间距由外层的 `Row.spacing` / `Padding` 给（见 [_cardGap]），本类不画分隔线。
 ///
 /// ## 管理入口的触发方式：长按 + 右键
 ///
@@ -1237,10 +1341,10 @@ class _GroupTile extends StatelessWidget {
     // 旧行只有标题 + 相对时间；但 `GET /chat/groups` 本就每行携带
     // `current_goal`（含 progress）/ `active_session` / `goal`，全部被丢弃了。
     // 卡片把这些字段兑现成 UI，而长按/右键菜单、Semantics 与点击行为不变。
-    final tile = Padding(
-      // 垂直 8px 配合分隔线刚好是列表卡的标准密度；水平 16px 与页面边距一致。
+    final content = Padding(
+      // 卡片内边距：水平 12（卡片自己已有外留白）、垂直 8 保持列表密度。
       padding: const EdgeInsets.symmetric(
-        horizontal: SpbSpacing.lg,
+        horizontal: SpbSpacing.md,
         vertical: SpbSpacing.sm,
       ),
       child: Column(
@@ -1380,9 +1484,38 @@ class _GroupTile extends StatelessWidget {
       ),
     );
 
+    // 卡片外壳：圆角 + 底色 + 细边框，点击水波纹裁在圆角内。
+    //
+    // ## 为什么要自己给边框
+    //
+    // `spb_design` 的 `CardTheme` 是 `elevation: 0`（无阴影），卡片色与页面
+    // 底色只差一档（`surfaceContainerLow` vs `surface`）。单列时这层差异还够
+    // 分辨，**并排多列**时相邻卡片会糊成一片。1px `outlineVariant` 边框既能
+    // 分开相邻卡片，也不引入阴影（阴影逐张绘制，滚动时是持续成本）。
+    final card = Material(
+      // ⚠️ 用 `Material(type: card)` 而**不是** `Card`：`Card` 内部固定插一个
+      // 语义边界（`semanticContainer: true` 时 `Semantics(container: true)`，
+      // 为 false 时反而变 `Semantics(explicitChildNodes: true)`），两种都把
+      // 标题文字拆成**子节点**、把长按/右键菜单的语义动作留在外层——实测
+      // 语义树变成「外层有 actions 无 label / 子层有 label 无 actions」，
+      // 屏幕阅读器聚焦到的是一个没名字的按钮。Material 不碰语义，合并行为与
+      // 改造前一致（issue #24 的 `accessibility_test.dart` 就是这条守卫）。
+      //
+      // 视觉上两者等价：主题的 `CardTheme` 只设了 elevation/圆角/外边距。
+      type: MaterialType.card,
+      elevation: 0,
+      // 让水波纹被裁到圆角内，否则矩形水波纹会从圆角里露出直角。
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: SpbRadius.cardAll,
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+      child: InkWell(onTap: onTap, child: content),
+    );
+
     if (onAction == null) {
       // 只读用法也要可点：旧 ListTile 自带 onTap 水波纹，卡片化后补上。
-      return InkWell(onTap: onTap, child: tile);
+      return card;
     }
 
     // 用 GestureDetector 包一层而不是 ListTile.onLongPress：
@@ -1414,7 +1547,7 @@ class _GroupTile extends StatelessWidget {
             _openMenu(context, details.globalPosition),
         // 点击（进对话）交给内层 InkWell：GestureDetector 的 opaque 会吃掉
         // 手势，故只挂长按/右键，不设 onTap。
-        child: InkWell(onTap: onTap, child: tile),
+        child: card,
       ),
     );
   }
