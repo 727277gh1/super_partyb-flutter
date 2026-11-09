@@ -1228,6 +1228,10 @@ owner 绑定、写一条新绑定，`session_id` 留 NULL 由 pigo 首轮自产�
 > 后续变更（2026-11-06）：服务端不再留 NULL，而是**继承旧 owner 的 `session_id`**
 > （`chatbinding.Ensure` / `Bind(ResetKeepSession)`），即换 agent 只换归属与人设、
 > 不断开对话。下文「上下文会断开」的描述仅适用于该日期之前的行为。
+>
+> 后续变更（2026-11-09）：未指定 agent、平台自动匹配把消息改派给另一个 agent 时
+> 也**不再断开上下文**——服务端回退借用当前会话（turn metadata `session_fallback`，
+> 归属保持粘性不建行）。客户端无感，无需任何改动。
 
 Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，并为它加了
 一个「上下文会断开」的确认弹窗。同一个服务端语义，两个客户端表现不同：webapp 的
