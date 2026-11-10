@@ -10,6 +10,14 @@
 
 ## 5. 与 Go API 的契约（**最重要**）
 
+### 可视化交付偏好
+
+`GET/PUT /me/preferences` 新增 `spec_json: bool`（自动可视化引导，缺省关）和
+只读的 `spec_json_available: bool`（运维急停状态，缺失兼容为可用）。PUT 只发改动项，
+`false` 是显式关闭，省略则保留原值。GET 与 PUT 都返回权威值；急停不清空个人选择。
+保存后下一轮生效，所有会话共用。Go API 在有群工作区的 pigo 执行链注入 `spec_json`
+reminder，Agent 按任务需要生成 `.spec.json`；Flutter 复用现有只读文件预览。
+
 ### 5.1 认证模型
 
 **客户端不解析 JWT、不申请 API Key。**

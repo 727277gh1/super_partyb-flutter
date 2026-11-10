@@ -34,11 +34,13 @@ void main() {
     bool agentRecommend = true,
     bool goalJudge = false,
     bool goalDiscovery = false,
+    bool specJson = false,
     bool followUpSuggestAvailable = true,
     bool habitSuggestAvailable = true,
     bool agentRecommendAvailable = true,
     bool goalJudgeAvailable = true,
     bool goalDiscoveryAvailable = true,
+    bool specJsonAvailable = true,
     String defaultAgentId = '',
     String displayName = '',
     String avatarUrl = '',
@@ -60,11 +62,13 @@ void main() {
     agentRecommend: agentRecommend,
     goalJudge: goalJudge,
     goalDiscovery: goalDiscovery,
+    specJson: specJson,
     followUpSuggestAvailable: followUpSuggestAvailable,
     habitSuggestAvailable: habitSuggestAvailable,
     agentRecommendAvailable: agentRecommendAvailable,
     goalJudgeAvailable: goalJudgeAvailable,
     goalDiscoveryAvailable: goalDiscoveryAvailable,
+    specJsonAvailable: specJsonAvailable,
     defaultAgentId: defaultAgentId,
     displayName: displayName,
     avatarUrl: avatarUrl,
@@ -84,6 +88,7 @@ void main() {
     bool? agentRecommend,
     bool? goalJudge,
     bool? goalDiscovery,
+    bool? specJson,
     String? habitNotifyChannels,
   })?
   lastSave;
@@ -135,6 +140,7 @@ void main() {
                     bool? agentRecommend,
                     bool? goalJudge,
                     bool? goalDiscovery,
+                    bool? specJson,
                     String? habitNotifyChannels,
                   }) async {
                     saveCalls++;
@@ -148,6 +154,7 @@ void main() {
                       agentRecommend: agentRecommend,
                       goalJudge: goalJudge,
                       goalDiscovery: goalDiscovery,
+                      specJson: specJson,
                       habitNotifyChannels: habitNotifyChannels,
                     );
                     if (saveError != null) throw saveError;
@@ -668,7 +675,7 @@ void main() {
     });
   });
 
-  group('对话提醒开关（五个 reminder 运行时开关，各自只提交自己的键）', () {
+  group('对话提醒开关（六个 reminder 运行时开关，各自只提交自己的键）', () {
     testWidgets('初值来自权威值', (tester) async {
       await pumpCard(
         tester,
@@ -794,6 +801,59 @@ void main() {
       expect(lastSave!.agentRecommend, isNull, reason: '没碰的字段必须为 null');
     });
 
+    for (final initial in [false, true]) {
+      testWidgets('可视化交付开关从 $initial 切换，只提交本项并回读', (tester) async {
+        await pumpCard(
+          tester,
+          loaded: prefs(specJson: initial),
+          saveResult: () => prefs(specJson: !initial),
+        );
+        final finder = find.byKey(const ValueKey('pref-spec-json'));
+        expect(tester.widget<SwitchListTile>(finder).value, initial);
+        await tester.tap(finder);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+        await tester.pumpAndSettle();
+        expect(lastSave!.specJson, !initial);
+        expect(lastSave!.goalDiscovery, isNull);
+        expect(lastSave!.replyLanguage, isNull);
+        expect(tester.widget<SwitchListTile>(finder).value, !initial);
+        expect(
+          tester
+              .widget<FilledButton>(
+                find.byKey(const ValueKey('settings-prefs-save')),
+              )
+              .onPressed,
+          isNull,
+        );
+      });
+    }
+
+    testWidgets('可视化交付急停保留已开启的选择且不可修改', (tester) async {
+      await pumpCard(
+        tester,
+        loaded: prefs(specJson: true, specJsonAvailable: false),
+      );
+      final tile = tester.widget<SwitchListTile>(
+        find.byKey(const ValueKey('pref-spec-json')),
+      );
+      expect(tile.value, isTrue);
+      expect(tile.onChanged, isNull);
+      expect(find.byKey(const ValueKey('settings-prefs-save')), findsNothing);
+    });
+
+    testWidgets('可视化交付保存失败保留草稿并允许重试', (tester) async {
+      await pumpCard(tester, saveError: Exception('保存失败'));
+      final finder = find.byKey(const ValueKey('pref-spec-json'));
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-prefs-save')));
+      await tester.pumpAndSettle();
+      expect(lastSave!.specJson, isTrue);
+      expect(tester.widget<SwitchListTile>(finder).value, isTrue);
+      expect(find.byKey(const ValueKey('settings-prefs-save')), findsOneWidget);
+    });
+
     testWidgets('只动 goalDiscovery 时 body 只含 goal_discovery', (tester) async {
       await pumpCard(tester, loaded: prefs());
 
@@ -806,7 +866,7 @@ void main() {
       expect(lastSave!.goalJudge, isNull, reason: '没碰的字段必须为 null');
     });
 
-    testWidgets('未改动时不误报五个开关的改动', (tester) async {
+    testWidgets('未改动时不误报开关的改动', (tester) async {
       // _pendingChanges 逐字段比对：漏比对新键会让保存按钮在没真改时亮起。
       await pumpCard(
         tester,

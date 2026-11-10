@@ -19,6 +19,20 @@ import 'package:test/test.dart';
 /// 两者与群级同名开关是**不同层次**：本处是「以后新建的默认」，群级那个是
 /// 「这个对话现在开不开」。混用会让用户改了「默认」却发现老对话没变。
 void main() {
+  test('spec_json 缺失或脏值不自动开启，急停不抹掉个人选择', () {
+    for (final value in [null, false, 'true', 1]) {
+      final prefs = UserPreferences.fromJson({'spec_json': value});
+      expect(prefs.specJson, isFalse);
+      expect(prefs.specJsonAvailable, isTrue);
+    }
+    final prefs = UserPreferences.fromJson({
+      'spec_json': true,
+      'spec_json_available': false,
+    });
+    expect(prefs.specJson, isTrue);
+    expect(prefs.specJsonAvailable, isFalse);
+  });
+
   /// 服务端 `userPrefResponse` 的真实形状（`internal/server/user_preferences.go`）。
   Map<String, dynamic> prefsJson({
     bool? followUpSuggest,

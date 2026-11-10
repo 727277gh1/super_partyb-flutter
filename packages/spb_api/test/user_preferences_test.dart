@@ -385,6 +385,24 @@ void main() {
       expect(calls.single.body!.keys, hasLength(1));
     });
 
+    for (final enabled in [true, false]) {
+      test('specJson=$enabled 只更新本字段并回读权威值', () async {
+        adapter.onPut(
+          '/me/preferences',
+          (server) => server.reply(200, {
+            ...prefsJson(),
+            'spec_json': enabled,
+            'spec_json_available': false,
+          }),
+          data: Matchers.any,
+        );
+        final prefs = await api.updatePreferences(specJson: enabled);
+        expect(calls.single.body, {'spec_json': enabled});
+        expect(prefs.specJson, enabled);
+        expect(prefs.specJsonAvailable, isFalse);
+      });
+    }
+
     test('只传 goalDiscovery → body 恰好只有 goal_discovery 一个键', () async {
       adapter.onPut(
         '/me/preferences',

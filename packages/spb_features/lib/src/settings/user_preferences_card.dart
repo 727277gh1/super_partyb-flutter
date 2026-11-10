@@ -23,13 +23,13 @@ typedef LoadUserPreferences = Future<UserPreferences> Function();
 /// - `defaultAgentId: ''` 恢复「跟随系统默认」；
 /// - `replyLanguage` 用 `'auto'`（不是空串）表达「跟随输入」。
 ///
-/// ## 五个 reminder 开关的语义（2026-11 起）
+/// ## reminder 开关的语义（2026-11 起）
 ///
 /// [followUpSuggest] / [habitSuggest] / [agentRecommend] / [goalJudge] /
-/// [goalDiscovery] 都是**运行时开关**：改完下一轮生效、对该用户全部会话生效。
+/// [goalDiscovery] / [specJson] 都是**运行时开关**：改完下一轮生效、对该用户全部会话生效。
 /// 它们**不再**是「新建 group 的默认播种值」——群级 metadata 键与专用端点
 /// 已随服务端重构移除。缺省方向各不相同：`followUpSuggest` / `habitSuggest` /
-/// `goalJudge` / `goalDiscovery` 缺省关（判定/注入/误发现有真实成本），
+/// `goalJudge` / `goalDiscovery` / `specJson` 缺省关（判定/注入/误发现有真实成本），
 /// `agentRecommend` 缺省**开**（未表态时服务端下发 true）。
 ///
 /// 它们同样遵循「非 null 即提交」：传 `false` 是**有意义的显式关闭**，与
@@ -53,6 +53,7 @@ typedef SaveUserPreferences = Future<UserPreferences> Function({
   bool? agentRecommend,
   bool? goalJudge,
   bool? goalDiscovery,
+  bool? specJson,
   String? habitNotifyChannels,
 });
 
@@ -188,6 +189,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
   bool? _agentRecommend;
   bool? _goalJudge;
   bool? _goalDiscovery;
+  bool? _specJson;
 
   /// 草稿里的习惯推送渠道（勾选集合 + 显式关闭标志）。
   ///
@@ -248,6 +250,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     _agentRecommend = prefs.agentRecommend;
     _goalJudge = prefs.goalJudge;
     _goalDiscovery = prefs.goalDiscovery;
+    _specJson = prefs.specJson;
     _habitChannels = prefs.selectedHabitChannels.toSet();
     // `habitNotifyDisabled` 同时覆盖「存了 off」与「set=true 但值为空」
     // （两者服务端语义相同：不推送），与 webapp 的 `isOff` 同口径。
@@ -300,6 +303,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     bool? agentRecommend,
     bool? goalJudge,
     bool? goalDiscovery,
+    bool? specJson,
     String? habitNotifyChannels,
   })
   get _pendingChanges {
@@ -315,6 +319,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         agentRecommend: null,
         goalJudge: null,
         goalDiscovery: null,
+        specJson: null,
         habitNotifyChannels: null,
       );
     }
@@ -351,6 +356,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
       goalDiscovery: _goalDiscovery == saved.goalDiscovery
           ? null
           : _goalDiscovery,
+      specJson: _specJson == saved.specJson ? null : _specJson,
       habitNotifyChannels: channels == savedChannels ? null : channels,
     );
   }
@@ -366,6 +372,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         p.agentRecommend != null ||
         p.goalJudge != null ||
         p.goalDiscovery != null ||
+        p.specJson != null ||
         p.habitNotifyChannels != null;
   }
 
@@ -390,6 +397,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         agentRecommend: p.agentRecommend,
         goalJudge: p.goalJudge,
         goalDiscovery: p.goalDiscovery,
+        specJson: p.specJson,
         habitNotifyChannels: p.habitNotifyChannels,
       );
       if (!mounted) return;
@@ -664,12 +672,12 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     );
   }
 
-  /// 五个 reminder 的**运行时开关**（follow_up_suggest / habit_suggest /
-  /// agent_recommend / goal_judge / goal_discovery）。
+  /// reminder 的**运行时开关**（follow_up_suggest / habit_suggest /
+  /// agent_recommend / goal_judge / goal_discovery / spec_json）。
   ///
   /// ## 语义已变更（2026-11）：不再是「新建对话默认值」
   ///
-  /// 群级 metadata 开关与专用端点已随服务端重构移除；本区块的五个开关直接
+  /// 群级 metadata 开关与专用端点已随服务端重构移除；本区块的开关直接
   /// 决定「每一轮要不要注入」，改完下一轮生效、对该用户**全部会话**生效。
   /// 旧文案「仅影响之后新建的对话」已不再成立——照抄会让用户改完去老对话里
   /// 验证、发现没变化、误以为设置坏了。
@@ -678,7 +686,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
   ///
   /// - `agent_recommend` 缺省**开**（未表态即收提示，且没有判定成本，只有命中
   ///   才注入）；显式关闭（关掉后展示「已关闭」）是它最常见的操作；
-  /// - 另外四个缺省**关**（判定/注入/提案有真实成本，不该由平台默认替用户按下）。
+  /// - 其余开关缺省**关**（判定/注入/提案有真实成本，不该由平台默认替用户按下）。
   ///
   /// ## 急停置灰（`*_available`）
   ///
@@ -694,6 +702,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
     final agentRecommend = _agentRecommend ?? saved.agentRecommend;
     final goalJudge = _goalJudge ?? saved.goalJudge;
     final goalDiscovery = _goalDiscovery ?? saved.goalDiscovery;
+    final specJson = _specJson ?? saved.specJson;
 
     // 急停态：置灰 + 副标题换成原因说明。开关值保持原样（不解草稿）。
     Widget switchRow(
@@ -769,6 +778,14 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
           goalDiscovery,
           saved.goalDiscoveryAvailable,
           (v) => setState(() => _goalDiscovery = v),
+        ),
+        switchRow(
+          const ValueKey('pref-spec-json'),
+          '可视化交付物',
+          '适合时生成图表、表格和看板，并遵循你指定的格式',
+          specJson,
+          saved.specJsonAvailable,
+          (v) => setState(() => _specJson = v),
         ),
       ],
     );

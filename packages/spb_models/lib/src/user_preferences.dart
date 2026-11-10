@@ -76,6 +76,8 @@ class UserPreferences {
     this.goalJudgeAvailable = true,
     this.goalDiscovery = false,
     this.goalDiscoveryAvailable = true,
+    this.specJson = false,
+    this.specJsonAvailable = true,
     this.defaultAgentId = '',
     this.displayName = '',
     this.avatarUrl = '',
@@ -197,6 +199,12 @@ class UserPreferences {
   /// （GET 未下发前恒为 true）。
   final bool goalDiscoveryAvailable;
 
+  /// 自动可视化交付引导，默认关闭，保存后下一轮生效。
+  final bool specJson;
+
+  /// 运维急停只置灰，不覆盖已保存的个人选择。
+  final bool specJsonAvailable;
+
   /// 用户默认 agent（chat_router 兜底值）。空串 = 跟随系统默认。
   final String defaultAgentId;
 
@@ -294,6 +302,8 @@ class UserPreferences {
         // 缺省关（与 goal_judge 同向）。⚠️ 上游 #95：GET 未下发前恒为缺省。
         goalDiscovery: json['goal_discovery'] == true,
         goalDiscoveryAvailable: json['goal_discovery_available'] != false,
+        specJson: json['spec_json'] == true,
+        specJsonAvailable: json['spec_json_available'] != false,
         defaultAgentId: (json['default_agent_id'] ?? '').toString(),
         displayName: (json['display_name'] ?? '').toString(),
         avatarUrl: (json['avatar_url'] ?? '').toString(),
