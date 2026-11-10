@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,10 +21,22 @@ import 'support/mobile_harness.dart';
 /// ⚠️ 本文件由 `widget_test.dart` 按顶层用例边界拆出（issue #48）——
 /// 纯移动，未改动任何断言。共享夹具见 `support/mobile_harness.dart`。
 void main() {
-  testWidgets('首页卡片按归属计数并响应确认和目标 SSE，批量事件只重拉一次', (tester) async {
+  testWidgets('列表按快照展示，状态事件不更新，手动刷新和重新进入时取新数据', (tester) async {
     final sse = FakeSseClient();
-    var requests = 0;
+    var confirmationRequests = 0;
+    var groupRequests = 0;
     var pending = 1;
+    Map<String, dynamic> snapshot = {
+      'goal': {
+        'id': 'goal1',
+        'goal_text': '完成发布',
+        'current_task_id': 'TASK-001',
+      },
+      'tasks': [
+        {'task_id': 'TASK-001', 'title': '检查签名', 'status': 'pending'},
+      ],
+      'progress': {'total': 2, 'completed': 0},
+    };
     final h = await pumpApp(
       tester,
       sseClient: sse,
@@ -31,18 +45,26 @@ void main() {
       beforePump: (adapter) {
         adapter.onGet(
           '/chat/groups',
-          (server) => server.reply(200, {
-            'items': [
-              {'id': 'g1', 'title': '发布版本', 'status': 'active'},
-              {'id': 'g2', 'title': '其他对话', 'status': 'active'},
-            ],
+          (server) => server.replyCallback(200, (_) {
+            groupRequests++;
+            return {
+              'items': [
+                {
+                  'id': 'g1',
+                  'title': '发布版本',
+                  'status': 'active',
+                  'current_goal': snapshot,
+                },
+                {'id': 'g2', 'title': '其他对话', 'status': 'active'},
+              ],
+            };
           }),
           queryParameters: {'limit': 30, 'offset': 0},
         );
         adapter.onGet(
           '/chat/confirmations',
           (server) => server.replyCallback(200, (_) {
-            requests++;
+            confirmationRequests++;
             return {
               'items': [
                 for (var i = 0; i < pending; i++)
@@ -55,12 +77,29 @@ void main() {
         );
       },
     );
-    for (var i = 0; i < 3; i++) {
-      await tester.pump(const Duration(seconds: 1));
+    Future<void> settle() async {
+      for (var i = 0; i < 3; i++) {
+        await tester.pump(const Duration(seconds: 1));
+      }
     }
+
+    await settle();
     expect(find.text('待你确认 · 1 项'), findsOneWidget);
-    expect(find.text('待你确认 · 2 项'), findsNothing);
-    expect(requests, 1);
+    expect(find.text('0/2 步 · 检查签名'), findsOneWidget);
+    expect(confirmationRequests, 1);
+    expect(groupRequests, 1);
+    snapshot = {
+      'goal': {
+        'id': 'goal1',
+        'goal_text': '完成发布',
+        'current_task_id': 'TASK-002',
+      },
+      'tasks': [
+        {'task_id': 'TASK-002', 'title': '构建安装包', 'status': 'blocked'},
+      ],
+      'progress': {'total': 2, 'completed': 1, 'blocked': 1},
+    };
+    pending = 0;
     sse.push('goal_updated', {
       'eventId': 'goal_evt',
       'eventType': 'goal_updated',
@@ -68,22 +107,13 @@ void main() {
       'groupId': 'g1',
       'turnId': '',
       'createdAt': '2026-11-10T00:00:00Z',
-      'payload': {
-        'op': 'task_status',
-        'goal': {'id': 'goal1', 'goal_text': '完成发布'},
-        'tasks': [
-          {'task_id': 'TASK-001', 'title': '检查签名', 'status': 'in_progress'},
-          {'task_id': 'TASK-002', 'title': '构建安装包', 'status': 'blocked'},
-        ],
-        'progress': {'total': 2, 'completed': 0, 'blocked': 1},
-      },
+      'payload': {'op': 'task_status', ...snapshot},
     });
-    await tester.pump();
-    await tester.pump();
-    expect(find.text('0/2 步 · 检查签名'), findsOneWidget);
-    expect(find.text('1 项任务阻塞 · 构建安装包'), findsOneWidget);
-    pending = 0;
-    for (final type in ['confirmation_resolved', 'confirmation_expired']) {
+    for (final type in [
+      'confirmation_required',
+      'confirmation_resolved',
+      'confirmation_expired',
+    ]) {
       sse.push(type, {
         'eventId': 'evt_$type',
         'eventType': type,
@@ -94,20 +124,58 @@ void main() {
         'payload': {'confirmation_id': 'c0'},
       });
     }
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pump(const Duration(seconds: 1));
-    await tester.pumpAndSettle();
-    expect(requests, 2);
+    await settle();
+    expect(confirmationRequests, 1, reason: '停留列表时，确认事件不能触发额外查询');
+    expect(groupRequests, 1);
+    expect(find.text('待你确认 · 1 项'), findsOneWidget);
+    expect(find.text('0/2 步 · 检查签名'), findsOneWidget);
+    expect(find.textContaining('任务阻塞'), findsNothing);
+    // 两端的下拉刷新与桌面刷新按钮共用该入口。
+    unawaited(
+      tester
+          .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+          .onRefresh(),
+    );
+    await settle();
+    expect(confirmationRequests, 2);
+    expect(groupRequests, 2);
     expect(find.textContaining('待你确认'), findsNothing);
-    // 新凭证代际必须使旧确认列表失效，即使身份仍是 authenticated。
+    expect(find.text('1/2 步 · 构建安装包'), findsOneWidget);
+    expect(find.text('1 项任务阻塞 · 构建安装包'), findsOneWidget);
+    // 无确认事件也要在返回列表时重新读取；不能依赖上次事件将缓存标脏。
+    h.router.go(SpbRoutes.search);
+    await settle();
     pending = 2;
-    h.container.read(sessionRevisionProvider.notifier).advance();
-    for (var i = 0; i < 3; i++) {
-      await tester.pump(const Duration(seconds: 1));
-    }
-    expect(requests, 3);
+    h.router.go(SpbRoutes.conversations);
+    await settle();
+    expect(confirmationRequests, 3);
+    expect(groupRequests, 3);
     expect(find.text('待你确认 · 2 项'), findsOneWidget);
+    // push/pop 也必须识别顶部路由，不能只读底层列表的 URI。
+    final pushed = h.router.push<void>(SpbRoutes.search);
+    await settle();
+    pending = 1;
+    h.router.pop();
+    await pushed;
+    await settle();
+    expect(confirmationRequests, 4);
+    expect(groupRequests, 4);
+    expect(find.text('待你确认 · 1 项'), findsOneWidget);
+    // 移动端设置是另一个保留状态的 tab，返回时同样更新。
+    h.router.go(SpbRoutes.settings);
+    await settle();
+    pending = 2;
+    h.router.go(SpbRoutes.conversations);
+    await settle();
+    expect(confirmationRequests, 5);
+    expect(groupRequests, 5);
+    expect(find.text('待你确认 · 2 项'), findsOneWidget);
+    // 新凭证代际仍需隔离旧确认计数。
+    pending = 0;
+    h.container.read(sessionRevisionProvider.notifier).advance();
+    await settle();
+    expect(confirmationRequests, 6);
+    expect(find.textContaining('待你确认'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
   });
@@ -692,17 +760,8 @@ void main() {
     expect(body['action'], isNot('resolved'));
   });
 
-  testWidgets('收到确认卡事件后待确认角标自动重拉（不是等用户打开待确认页）', (tester) async {
-    // ## 这个用例防的是什么
-    //
-    // 首页卡片与角标直接使用 `pendingConfirmationsProvider`。此前先派生
-    // `pendingConfirmationCountProvider`，对话页在 items 变化时调的是
-    // `ref.invalidate(pendingConfirmationCountProvider)`——**失效的**：count
-    // 重建后读到的仍是被缓存的被依赖者，角标纹丝不动。
-    //
-    // 故观测点是**网络请求次数**：SSE 推来一帧确认卡后，
-    // `/chat/confirmations` 必须被重新请求一次。只断言「角标数字变了」抓不到
-    // 这个缺陷——数字可能因为其它 provider 重算而恰好正确。
+  testWidgets('对话内处理确认后返回列表重新读取角标', (tester) async {
+    // 只有列表需要这份计数；对话内处理确认不发列表查询，返回时加载新快照。
     var confirmationRequests = 0;
     final sse = FakeSseClient();
     // 从首页（对话列表 tab）起步再导航进对话页：角标 provider 的读取点是

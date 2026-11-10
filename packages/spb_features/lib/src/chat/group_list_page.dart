@@ -49,6 +49,9 @@ const double _minCardWidth = 320;
 /// 460，仍属舒适阅读宽度。
 const int _maxColumns = 4;
 
+/// 桌面列表限制阅读宽度，避免标题与操作区分散到超宽窗口两端。
+const double _desktopListMaxWidth = 1120;
+
 /// 对话列表页（offset 分页）。
 ///
 /// ## 分页约定：offset 而非游标
@@ -65,25 +68,15 @@ const int _maxColumns = 4;
 /// 不用「加载更多」按钮：桌面端滚到底是自然动作，加按钮反而多一步。
 /// 用 [ScrollController] 监听接近底部时预加载（提前一屏），避免用户看到白屏等待。
 ///
-/// ## 布局：卡片 + 列数跟随宽度（2026-11，§6.84）
+/// ## 布局（§6.84 / §6.89）
 ///
-/// 每条渲染成一张卡片，列数由**可用宽度**算（[_columnsFor]）：移动端一列，
-/// 桌面端并排 2~4 列。改之前是「全宽一行 + 分隔线」，桌面最大化时一行横跨
-/// 1400px、标题贴左、时间贴右、中间整片空白——宽度完全没被利用。
-///
-/// 刻意**不用** `GridView`：`SliverGridDelegate` 要么给 `childAspectRatio`、
-/// 要么给 `mainAxisExtent`，两者都是写死高度，而本项目的系统字号**不 clamp**
-/// （§6.80），2.0 缩放下固定高度必然溢出。故用「每视觉行一个 `Row` +
-/// `IntrinsicHeight`」，行高由该行最高的卡片决定，随字号自然增长。
-///
-/// 也刻意**不**改用 `ListView(children: [...])` 或 `Wrap` 铺满全部卡片：
-/// 那会在 build 阶段构建**全部**条目（分页可累积到上百条），与
-/// `docs/memory-audit.md` G7 的「共享行必须懒构建」相反。这里仍是
-/// `ListView.builder`，只多了一层「视觉行」的分块。
+/// 桌面使用限宽单列，统一标题、摘要和元信息的阅读顺序；移动端保持卡片布局。
+/// 两端均用 ListView.builder 懒构建，行高随内容与系统字号增长。
 class GroupListPage extends StatefulWidget {
   const GroupListPage({
     super.key,
     required this.api,
+    this.isActive = true,
     this.onOpenGroup,
     this.onGroupAction,
     this.onSearch,
@@ -98,7 +91,6 @@ class GroupListPage extends StatefulWidget {
     this.onRefreshConfirmations,
     this.onOpenConfirmations,
     this.groupUpdates,
-    this.goalUpdates,
     this.cache,
     this.userId,
     this.onSaveSnapshot,
@@ -109,6 +101,9 @@ class GroupListPage extends StatefulWidget {
   });
 
   final ChatApi api;
+
+  /// 路由可见性由宿主判断；子路由/tab 保留本页时，回来要重新取快照。
+  final bool isActive;
 
   /// group 变更通知流（`group_updated`，Transient）。
   ///
@@ -122,9 +117,6 @@ class GroupListPage extends StatefulWidget {
   /// 为 null 时不订阅——保持本页在未注入时是**纯拉取列表**（同
   /// [onOpenGroup] 等可选参数的取向），也让页面单测不必造一条假流。
   final Stream<GroupUpdate>? groupUpdates;
-
-  /// 完整目标快照更新，直接替换列表中的目标与任务摘要。
-  final Stream<GoalUpdate>? goalUpdates;
 
   /// 点击某个对话时的回调。
   final void Function(ChatGroup group)? onOpenGroup;
@@ -365,57 +357,35 @@ class _GroupListPageState extends State<GroupListPage> {
 
   /// [GroupListPage.groupUpdates] 的订阅。
   StreamSubscription<GroupUpdate>? _groupUpdatesSub;
-  StreamSubscription<GoalUpdate>? _goalUpdatesSub;
-
-  // 请求在途收到的快照优先于迟到的列表响应，防止恢复后的任务又显示阻塞。
-  final _pendingGoalUpdates = <String, GoalUpdate>{};
 
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
     _subscribeGroupUpdates();
-    _subscribeGoalUpdates();
-    _loadMore();
+    if (widget.isActive) _loadMore();
   }
 
   @override
   void didUpdateWidget(GroupListPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isActive && widget.isActive) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !widget.isActive) return;
+        // 宿主重新监听待确认 provider 时已经启动查询，避免再失效一次。
+        unawaited(_refresh(refreshConfirmations: false));
+      });
+    }
     if (oldWidget.groupUpdates != widget.groupUpdates) {
       unawaited(_groupUpdatesSub?.cancel());
       _groupUpdatesSub = null;
       _subscribeGroupUpdates();
     }
-    if (oldWidget.goalUpdates != widget.goalUpdates) {
-      unawaited(_goalUpdatesSub?.cancel());
-      _goalUpdatesSub = null;
-      _subscribeGoalUpdates();
-    }
-  }
-
-  void _subscribeGoalUpdates() {
-    _goalUpdatesSub = widget.goalUpdates?.listen((update) {
-      if (!mounted) return;
-      if (_loading) _pendingGoalUpdates[update.groupId] = update;
-      final index = _groups.indexWhere((g) => g.id == update.groupId);
-      if (index < 0) return;
-      setState(() {
-        _groups[index] = _groups[index].withCurrentGoal(update.snapshot);
-      });
-      unawaited(_saveCache());
-    });
-  }
-
-  ChatGroup _applyPendingGoal(ChatGroup group) {
-    final update = _pendingGoalUpdates[group.id];
-    return update == null ? group : group.withCurrentGoal(update.snapshot);
   }
 
   @override
   void dispose() {
     _groupUpdatesSub?.cancel();
-    _goalUpdatesSub?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -612,7 +582,7 @@ class _GroupListPageState extends State<GroupListPage> {
       setState(() {
         // 去重后追加：offset 分页在列表变动时会重复返回同一项。
         for (final g in page) {
-          if (_seenIds.add(g.id)) _groups.add(_applyPendingGoal(g));
+          if (_seenIds.add(g.id)) _groups.add(g);
         }
         // 返回数量不足一页即认为到底。
         //
@@ -646,7 +616,7 @@ class _GroupListPageState extends State<GroupListPage> {
           setState(() {
             _groups
               ..clear()
-              ..addAll(cached.map(_applyPendingGoal));
+              ..addAll(cached);
             _seenIds
               ..clear()
               ..addAll(cached.map((g) => g.id));
@@ -664,8 +634,6 @@ class _GroupListPageState extends State<GroupListPage> {
         _error = e;
         _loading = false;
       });
-    } finally {
-      if (generation == _loadGeneration) _pendingGoalUpdates.clear();
     }
   }
 
@@ -708,10 +676,9 @@ class _GroupListPageState extends State<GroupListPage> {
     await cache.save(userId, List.of(_groups));
   }
 
-  Future<void> _refresh() async {
-    widget.onRefreshConfirmations?.call();
+  Future<void> _refresh({bool refreshConfirmations = true}) async {
+    if (refreshConfirmations) widget.onRefreshConfirmations?.call();
     _loadGeneration++;
-    _pendingGoalUpdates.clear();
     setState(() {
       _groups.clear();
       _seenIds.clear();
@@ -1138,11 +1105,31 @@ class _GroupListPageState extends State<GroupListPage> {
           PointerDeviceKind.stylus,
         },
       ),
-      // 列数只能从**实际可用宽度**算出来，故套 `LayoutBuilder`：
-      // `MediaQuery.sizeOf` 是整窗宽度，窗口里还有侧边栏/内边距时算不准。
+      // 限宽和列数都取实际可用宽度，不能把侧边栏占用的空间算进来。
       child: LayoutBuilder(
         builder: (context, constraints) {
+          if (SpbTheme.isDesktopPlatform(context)) {
+            final gutter =
+                constraints.maxWidth > _desktopListMaxWidth + _pageGutter * 2
+                ? (constraints.maxWidth - _desktopListMaxWidth) / 2
+                : _pageGutter;
+            final width = constraints.maxWidth - gutter * 2;
+            return ListView.builder(
+              controller: _scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: EdgeInsets.fromLTRB(gutter, SpbSpacing.sm, gutter, 0),
+              itemCount: _groups.length + 1,
+              itemBuilder: (context, index) => index == _groups.length
+                  ? _buildFooter()
+                  : _cardAt(index, width),
+            );
+          }
           final columns = _columnsFor(constraints.maxWidth - _pageGutter * 2);
+          final cardWidth =
+              (constraints.maxWidth -
+                  _pageGutter * 2 -
+                  _cardGap * (columns - 1)) /
+              columns;
           // 视觉行数（向上取整）：最后一行的空位由 [_cardAt] 返回空盒占位，
           // 否则最后一行会左对齐堆在第一名上、宽度与上面几行对不齐。
           final rows = (_groups.length / columns).ceil();
@@ -1173,7 +1160,9 @@ class _GroupListPageState extends State<GroupListPage> {
                     spacing: _cardGap,
                     children: [
                       for (var i = 0; i < columns; i++)
-                        Expanded(child: _cardAt(index * columns + i)),
+                        Expanded(
+                          child: _cardAt(index * columns + i, cardWidth),
+                        ),
                     ],
                   ),
                 ),
@@ -1185,7 +1174,7 @@ class _GroupListPageState extends State<GroupListPage> {
     );
   }
 
-  /// 按可用宽度算并排列数：移动端一列，桌面端 2~4 列。
+  /// 移动端按可用宽度算卡片列数；桌面端独立使用限宽单列。
   ///
   /// 公式是「按**最小宽度**能塞下几列」，而不是按断点写死（`SpbBreakpoints`
   /// 那三档是给「列表 + 内容 + 详情」这种分栏用的，与本页无关）：
@@ -1203,17 +1192,19 @@ class _GroupListPageState extends State<GroupListPage> {
   }
 
   /// 第 [index] 张卡片；超出已加载条目时返回空盒（占住该行剩下的列宽）。
-  Widget _cardAt(int index) {
+  Widget _cardAt(int index, double cardWidth) {
     if (index >= _groups.length) return const SizedBox.shrink();
     final group = _groups[index];
     return _GroupTile(
       key: ValueKey(group.id),
       group: group,
+      compact: cardWidth - SpbSpacing.md * 2 < 400,
       onTap: widget.onOpenGroup == null
           ? null
           : () => widget.onOpenGroup!(group),
       // 动作进行中时禁用菜单，避免重复提交（见 _busyGroupId）。
-      onAction: widget.onGroupAction == null || _busyGroupId != null
+      actionsEnabled: _busyGroupId == null,
+      onAction: widget.onGroupAction == null
           ? null
           : (action) => _handleAction(group, action),
       onOpenSnapshotSite: widget.onOpenSnapshotSite,
@@ -1344,21 +1335,6 @@ class _CacheNotice extends StatelessWidget {
   }
 }
 
-/// 单个对话条目（一张卡片）。
-///
-/// ## 为什么是卡片而不是「行 + 分隔线」
-///
-/// 卡片化不是为了好看，是**多列布局的前提**：并排两列以上时，靠 `Divider`
-/// 分隔的行会读成一张表（同一行左右两项被误认为相关），而卡片各自独立。
-/// 间距由外层的 `Row.spacing` / `Padding` 给（见 [_cardGap]），本类不画分隔线。
-///
-/// ## 管理入口的触发方式：长按 + 右键
-///
-/// - **长按**：移动端唯一可行的方式（没有右键）；
-/// - **右键**：桌面端自然的方式（`GestureDetector.onSecondaryTapDown`）。
-///
-/// 两者都打开同一个菜单。**不用**滑动（`Dismissible`）直接删：删除不可恢复，
-/// 滑动太容易误触，且无法承载「改名/归档」这类同级动作。
 /// 对话状态徽标（对齐小程序 `work-list` 的 `_StatusChip`）。
 ///
 /// ## 为什么映射在客户端做
@@ -1405,12 +1381,15 @@ class _GroupStatusChip extends StatelessWidget {
   }
 }
 
+/// 单个对话卡片。常显菜单按钮与长按、右键共用管理入口，删除必须二次确认。
 class _GroupTile extends StatelessWidget {
   const _GroupTile({
     super.key,
     required this.group,
+    required this.compact,
     this.onTap,
     this.onAction,
+    this.actionsEnabled = true,
     this.onOpenSnapshotSite,
     this.fileSummary,
     this.agentNameOf,
@@ -1421,10 +1400,14 @@ class _GroupTile extends StatelessWidget {
   final int pendingCount;
   final bool pendingCountIsTruncated;
   final ChatGroup group;
+  final bool compact;
   final VoidCallback? onTap;
 
   /// 为 null 表示不提供管理入口（只读用法）。
   final void Function(GroupAction action)? onAction;
+
+  /// 请求期间保留按钮占位并禁用，避免卡片重排或重复提交。
+  final bool actionsEnabled;
 
   /// 打开快照站点（浏览器）。为 null 时不渲染该入口。
   ///
@@ -1457,16 +1440,26 @@ class _GroupTile extends StatelessWidget {
   }
 
   /// 打开菜单并把用户选择交给 [onAction]。
-  Future<void> _openMenu(BuildContext context, Offset position) async {
+  Future<void> _openMenu(BuildContext context, [Offset? globalPosition]) async {
+    final overlay =
+        Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
+    final anchor = context.findRenderObject()! as RenderBox;
+    // 按钮/语义动作锚定控件下沿；手势锚定指针，均转换到当前 Overlay 坐标。
+    final position = globalPosition == null
+        ? Rect.fromPoints(
+            anchor.localToGlobal(
+              Offset(0, anchor.size.height),
+              ancestor: overlay,
+            ),
+            anchor.localToGlobal(
+              anchor.size.bottomRight(Offset.zero),
+              ancestor: overlay,
+            ),
+          )
+        : overlay.globalToLocal(globalPosition) & Size.zero;
     final action = await showMenu<GroupAction>(
       context: context,
-      // 右键时菜单出现在指针处；长按时出现在条目中心。
-      position: RelativeRect.fromLTRB(
-        position.dx,
-        position.dy,
-        position.dx,
-        position.dy,
-      ),
+      position: RelativeRect.fromRect(position, Offset.zero & overlay.size),
       items: [
         const PopupMenuItem(
           key: ValueKey('group-action-rename'),
@@ -1643,7 +1636,10 @@ class _GroupTile extends StatelessWidget {
       GoalSnapshot.fromJson(group.currentGoal ?? const {}),
     );
     final progress = summary.progress;
+    final desktop = SpbTheme.isDesktopPlatform(context);
     final largeText = MediaQuery.textScalerOf(context).scale(14) > 18;
+    // 宽度由外层传入：等高卡片使用 IntrinsicHeight，内部不能嵌 LayoutBuilder。
+    final stacked = largeText || (onAction != null && compact);
     final title = Text(
       group.title,
       style: textTheme.titleSmall,
@@ -1657,6 +1653,12 @@ class _GroupTile extends StatelessWidget {
           ?.copyWith(color: scheme.onSurfaceVariant),
     );
 
+    final menuButton = onAction == null
+        ? null
+        : _GroupMenuButton(
+            onPressed: actionsEnabled ? (anchor) => _openMenu(anchor) : null,
+          );
+
     // 信息卡（对齐小程序 work-card 的密度）：标题行 + 目标行 + 进度条 +
     // 文件条 + 元信息行。各段**缺数据即不渲染**，避免满屏空占位。
     //
@@ -1665,167 +1667,199 @@ class _GroupTile extends StatelessWidget {
     // 旧行只有标题 + 相对时间；但 `GET /chat/groups` 本就每行携带
     // `current_goal`（含 progress）/ `active_session` / `goal`，全部被丢弃了。
     // 卡片把这些字段兑现成 UI，而长按/右键菜单、Semantics 与点击行为不变。
-    final content = Padding(
-      // 卡片内边距：水平 12（卡片自己已有外留白）、垂直 8 保持列表密度。
-      padding: const EdgeInsets.symmetric(
-        horizontal: SpbSpacing.md,
-        vertical: SpbSpacing.sm,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // ── 标题行：标题 + 状态徽标 + 相对时间（对齐小程序 work-card）──
-          //
-          // 归档态原先用「图标 + 已归档」文字，只在归档行出现；改成一枚**常显**
-          // 的状态徽标后（§6.89），活跃/归档两态同一视觉位置、同一阅读顺序，
-          // 也省掉标题行的图标宽度（窄屏卡片更不容易把标题挤没）。
-          // 大字号把元信息放到下一行，避免徽标和时间挤掉标题。
-          if (largeText) ...[
-            title,
-            const SizedBox(height: SpbSpacing.xs),
-            Wrap(
-              spacing: SpbSpacing.sm,
-              runSpacing: SpbSpacing.xs,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [status, updatedAt],
-            ),
-          ] else
-            Row(
-              children: [
-                Expanded(child: title),
-                const SizedBox(width: SpbSpacing.sm),
-                status,
-                const SizedBox(width: SpbSpacing.sm),
-                updatedAt,
-              ],
-            ),
-          // 待处理提示优先于目标与元信息；图标配文字，不只靠颜色区分。
-          if (pendingCount > 0) ...[
-            const SizedBox(height: SpbSpacing.sm),
-            _GroupAttentionLine(
-              icon: Icons.pending_actions_outlined,
-              label:
-                  '待你确认 · ${pendingCountIsTruncated ? '至少 ' : ''}$pendingCount 项',
-              color: scheme.primary,
-            ),
-          ],
-          if (summary.needsAttention) ...[
-            const SizedBox(height: SpbSpacing.xs),
-            _GroupAttentionLine(
-              icon: summary.errorCount > 0
-                  ? Icons.error_outline
-                  : Icons.pause_circle_outline,
-              label: _taskAttentionLabel(summary),
-              color: summary.errorCount > 0
-                  ? scheme.error
-                  : scheme.onSurfaceVariant,
-            ),
-          ],
-          // ── 目标行：结构化 goal 优先，旧列兑底（ChatGroup.currentGoalText）──
-          if (group.currentGoalText.isNotEmpty) ...[
-            const SizedBox(height: SpbSpacing.xs),
-            Text(
-              group.currentGoalText,
-              style: textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-          // ── 进度行：服务端 goal 快照的 progress（迁移 0022 后的字段）──
-          if (progress != null && progress.total > 0) ...[
-            const SizedBox(height: SpbSpacing.sm),
-            // 用 fraction 而不是 percent/100：服务端 percent 是整数截断，
-            // 1/3 会被舍成 33%（对齐 works_page 的同一取舍）。
-            LinearProgressIndicator(value: progress.ratio),
-            const SizedBox(height: SpbSpacing.xxs),
-            Text(
-              '${progress.completed}/${progress.total} 步'
-              '${summary.currentTaskLabel == null ? '' : ' · ${summary.currentTaskLabel}'}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: SpbType.listMeta(textTheme)
-                  ?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-          ],
-          // ── 文件条：本地已同步交付物统计（纯本地数据，零网络）──
-          if (fileSummary != null && !fileSummary!.isEmpty) ...[
-            const SizedBox(height: SpbSpacing.sm),
-            Row(
-              children: [
-                Icon(
-                  Icons.folder_outlined,
-                  size: SpbSpacing.md,
-                  color: scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: SpbSpacing.xs),
-                Expanded(
-                  child: Text(
-                    _fileSummaryText(),
-                    style: SpbType.listMeta(textTheme)
-                        ?.copyWith(color: scheme.onSurfaceVariant),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ],
-          // ── 元信息行：绑定 agent + 结项快照徽标 ──
-          if (group.activeSession != null || _snapshot != null) ...[
-            const SizedBox(height: SpbSpacing.xs),
-            Row(
-              children: [
-                if (group.activeSession != null) ...[
-                  Icon(
-                    Icons.smart_toy_outlined,
-                    size: SpbSpacing.md,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: SpbSpacing.xs),
-                  Flexible(
-                    child: Text(
-                      // 优先 agent 名称（注入映射），查不到回退 id（§6.89）。
-                      _agentLabel(group.activeSession!.agentId),
-                      style: SpbType.listMeta(textTheme)
-                          ?.copyWith(color: scheme.onSurfaceVariant),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: SpbSpacing.sm),
-                ],
-                // 结项快照状态徽标：只在归档行且有快照时出现。
-                //
-                // ## 为什么在元信息行而不是 trailing
-                //
-                // 「有没有结项记录」属于元信息，与「绑定了哪个 agent」
-                // 同一层级；塞进标题行会与归档徽标/时间挤在一起。
-                //
-                // ## 为什么 pending/failed 也要显示
-                //
-                // 用户点了归档后最想知道的是「结项记录好了没」。只显示 ready
-                // 会让生成中的状态看起来像「没做」。
-                if (_snapshot != null)
-                  _SnapshotBadge(
+    final content = desktop
+        ? _DesktopGroupContent(
+            group: group,
+            summary: summary,
+            pendingCount: pendingCount,
+            pendingCountIsTruncated: pendingCountIsTruncated,
+            updatedAt: updatedAt,
+            menuButton: menuButton,
+            agentLabel: group.activeSession == null
+                ? null
+                : _agentLabel(group.activeSession!.agentId),
+            fileSummary: fileSummary,
+            snapshotBadge: _snapshot == null
+                ? null
+                : _SnapshotBadge(
                     snapshot: _snapshot!,
-                    // 站点可打开时徽标变成可点入口（常显，不依赖 hover——
-                    // 触屏没有 hover）。站点不可用时保持纯展示。
                     onOpenSite:
                         _snapshot!.site.isOpenable && onOpenSnapshotSite != null
                         ? () => onOpenSnapshotSite!(_snapshot!)
                         : null,
                   ),
+          )
+        : Padding(
+            // 卡片内边距：水平 12（卡片自己已有外留白）、垂直 8 保持列表密度。
+            padding: const EdgeInsets.symmetric(
+              horizontal: SpbSpacing.md,
+              vertical: SpbSpacing.sm,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  crossAxisAlignment: stacked
+                      ? CrossAxisAlignment.start
+                      : CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: stacked
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                title,
+                                const SizedBox(height: SpbSpacing.xs),
+                                Wrap(
+                                  spacing: SpbSpacing.sm,
+                                  runSpacing: SpbSpacing.xs,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  children: [status, updatedAt],
+                                ),
+                              ],
+                            )
+                          : title,
+                    ),
+                    if (!stacked) ...[
+                      const SizedBox(width: SpbSpacing.sm),
+                      status,
+                      const SizedBox(width: SpbSpacing.sm),
+                      updatedAt,
+                    ],
+                    if (menuButton != null) ...[
+                      const SizedBox(width: SpbSpacing.xs),
+                      menuButton,
+                    ],
+                  ],
+                ),
+                // 待处理提示优先于目标与元信息；图标配文字，不只靠颜色区分。
+                if (pendingCount > 0) ...[
+                  const SizedBox(height: SpbSpacing.sm),
+                  _GroupAttentionLine(
+                    icon: Icons.pending_actions_outlined,
+                    label:
+                        '待你确认 · ${pendingCountIsTruncated ? '至少 ' : ''}$pendingCount 项',
+                    color: scheme.primary,
+                  ),
+                ],
+                if (summary.needsAttention) ...[
+                  const SizedBox(height: SpbSpacing.xs),
+                  _GroupAttentionLine(
+                    icon: summary.errorCount > 0
+                        ? Icons.error_outline
+                        : Icons.pause_circle_outline,
+                    label: _taskAttentionLabel(summary),
+                    color: summary.errorCount > 0
+                        ? scheme.error
+                        : scheme.onSurfaceVariant,
+                  ),
+                ],
+                // ── 目标行：结构化 goal 优先，旧列兑底（ChatGroup.currentGoalText）──
+                if (group.currentGoalText.isNotEmpty) ...[
+                  const SizedBox(height: SpbSpacing.xs),
+                  Text(
+                    group.currentGoalText,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                // ── 进度行：服务端 goal 快照的 progress（迁移 0022 后的字段）──
+                if (progress != null && progress.total > 0) ...[
+                  const SizedBox(height: SpbSpacing.sm),
+                  // 用 fraction 而不是 percent/100：服务端 percent 是整数截断，
+                  // 1/3 会被舍成 33%（对齐 works_page 的同一取舍）。
+                  LinearProgressIndicator(value: progress.ratio),
+                  const SizedBox(height: SpbSpacing.xxs),
+                  Text(
+                    '${progress.completed}/${progress.total} 步'
+                    '${summary.currentTaskLabel == null ? '' : ' · ${summary.currentTaskLabel}'}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: SpbType.listMeta(textTheme)
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+                // ── 文件条：本地已同步交付物统计（纯本地数据，零网络）──
+                if (fileSummary != null && !fileSummary!.isEmpty) ...[
+                  const SizedBox(height: SpbSpacing.sm),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.folder_outlined,
+                        size: SpbSpacing.md,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: SpbSpacing.xs),
+                      Expanded(
+                        child: Text(
+                          _fileSummaryText(),
+                          style: SpbType.listMeta(textTheme)
+                              ?.copyWith(color: scheme.onSurfaceVariant),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                // ── 元信息行：绑定 agent + 结项快照徽标 ──
+                if (group.activeSession != null || _snapshot != null) ...[
+                  const SizedBox(height: SpbSpacing.xs),
+                  Row(
+                    children: [
+                      if (group.activeSession != null) ...[
+                        Icon(
+                          Icons.smart_toy_outlined,
+                          size: SpbSpacing.md,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: SpbSpacing.xs),
+                        Flexible(
+                          child: Text(
+                            // 优先 agent 名称（注入映射），查不到回退 id（§6.89）。
+                            _agentLabel(group.activeSession!.agentId),
+                            style: SpbType.listMeta(textTheme)
+                                ?.copyWith(color: scheme.onSurfaceVariant),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: SpbSpacing.sm),
+                      ],
+                      // 结项快照状态徽标：只在归档行且有快照时出现。
+                      //
+                      // ## 为什么在元信息行而不是 trailing
+                      //
+                      // 「有没有结项记录」属于元信息，与「绑定了哪个 agent」
+                      // 同一层级；塞进标题行会与归档徽标/时间挤在一起。
+                      //
+                      // ## 为什么 pending/failed 也要显示
+                      //
+                      // 用户点了归档后最想知道的是「结项记录好了没」。只显示 ready
+                      // 会让生成中的状态看起来像「没做」。
+                      if (_snapshot != null)
+                        _SnapshotBadge(
+                          snapshot: _snapshot!,
+                          // 站点可打开时徽标变成可点入口（常显，不依赖 hover——
+                          // 触屏没有 hover）。站点不可用时保持纯展示。
+                          onOpenSite:
+                              _snapshot!.site.isOpenable &&
+                                  onOpenSnapshotSite != null
+                              ? () => onOpenSnapshotSite!(_snapshot!)
+                              : null,
+                        ),
+                    ],
+                  ),
+                ],
               ],
             ),
-          ],
-        ],
-      ),
-    );
+          );
 
-    // 卡片外壳：圆角 + 底色 + 细边框，点击水波纹裁在圆角内。
+    // 桌面行以底部分隔线区分；移动卡片保留圆角边框。
     //
     // ## 为什么要自己给边框
     //
@@ -1834,7 +1868,7 @@ class _GroupTile extends StatelessWidget {
     // 分辨，**并排多列**时相邻卡片会糊成一片。1px `outlineVariant` 边框既能
     // 分开相邻卡片，也不引入阴影（阴影逐张绘制，滚动时是持续成本）。
     final card = Material(
-      // ⚠️ 用 `Material(type: card)` 而**不是** `Card`：`Card` 内部固定插一个
+      // 用 Material 保留整行语义：Card 内部固定插一个
       // 语义边界（`semanticContainer: true` 时 `Semantics(container: true)`，
       // 为 false 时反而变 `Semantics(explicitChildNodes: true)`），两种都把
       // 标题文字拆成**子节点**、把长按/右键菜单的语义动作留在外层——实测
@@ -1842,19 +1876,21 @@ class _GroupTile extends StatelessWidget {
       // 屏幕阅读器聚焦到的是一个没名字的按钮。Material 不碰语义，合并行为与
       // 改造前一致（issue #24 的 `accessibility_test.dart` 就是这条守卫）。
       //
-      // 视觉上两者等价：主题的 `CardTheme` 只设了 elevation/圆角/外边距。
-      type: MaterialType.card,
+      type: desktop ? MaterialType.canvas : MaterialType.card,
+      color: desktop ? scheme.surface : null,
       elevation: 0,
       // 让水波纹被裁到圆角内，否则矩形水波纹会从圆角里露出直角。
       clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: SpbRadius.cardAll,
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
+      shape: desktop
+          ? Border(bottom: BorderSide(color: scheme.outlineVariant))
+          : RoundedRectangleBorder(
+              borderRadius: SpbRadius.cardAll,
+              side: BorderSide(color: scheme.outlineVariant),
+            ),
       child: InkWell(onTap: onTap, child: content),
     );
 
-    if (onAction == null) {
+    if (onAction == null || !actionsEnabled) {
       // 只读用法也要可点：旧 ListTile 自带 onTap 水波纹，卡片化后补上。
       return card;
     }
@@ -1865,10 +1901,8 @@ class _GroupTile extends StatelessWidget {
     //
     // ## 为什么包 Semantics（issue #24）
     //
-    // 重命名/归档/删除这三个动作**只能**从长按或右键菜单到达，键盘用户
-    // 与屏幕阅读器用户没有任何入口。Flutter 不会从「包了一个
-    // GestureDetector」推断出「这里有自定义动作」——必须显式声明
-    // `customSemanticsActions`。
+    // 常显按钮支持键盘和读屏；仍保留整卡的自定义动作，让读屏用户聚焦标题时
+    // 也能直接打开菜单。Flutter 不会从 GestureDetector 自动推断该动作。
     //
     // 用 `Semantics` 而非 `onLongPress` 参数：后者会挂上真正的长按手势，
     // 与上面只挂 onLongPressStart 的意图冲突。这里只补语义动作（屏幕阅读器
@@ -1876,9 +1910,7 @@ class _GroupTile extends StatelessWidget {
     return Semantics(
       customSemanticsActions: <CustomSemanticsAction, VoidCallback>{
         const CustomSemanticsAction(label: '对话操作（重命名/归档/删除）'): () {
-          // 无指针位置：菜单出现在屏幕中心（`showMenu` 在 position 为
-          // 零尺寸矩形时的行为）。屏幕阅读器用户看不到菜单贴在哪里。
-          _openMenu(context, Offset.zero);
+          _openMenu(context);
         },
       },
       child: GestureDetector(
@@ -1927,6 +1959,211 @@ class _GroupTile extends StatelessWidget {
     if (diff.inDays < 30) return '${diff.inDays} 天前';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
   }
+}
+
+/// 桌面单列的三个信息层次；只负责展示，整行导航与管理动作由外层统一处理。
+class _DesktopGroupContent extends StatelessWidget {
+  const _DesktopGroupContent({
+    required this.group,
+    required this.summary,
+    required this.pendingCount,
+    required this.pendingCountIsTruncated,
+    required this.updatedAt,
+    this.menuButton,
+    this.agentLabel,
+    this.fileSummary,
+    this.snapshotBadge,
+  });
+
+  final ChatGroup group;
+  final GroupGoalSummary summary;
+  final int pendingCount;
+  final bool pendingCountIsTruncated;
+  final Widget updatedAt;
+  final Widget? menuButton;
+  final String? agentLabel;
+  final GroupFileSummary? fileSummary;
+  final Widget? snapshotBadge;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final largeText = MediaQuery.textScalerOf(context).scale(14) > 18;
+    final task = summary.currentTaskLabel?.trim();
+    final goal = group.currentGoalText.trim();
+    final preview = task != null && task.isNotEmpty ? '当前任务：$task' : goal;
+    final progress = summary.progress;
+    final metadata = <String>[
+      if (group.isArchived)
+        '已归档'
+      else if (group.status.isNotEmpty && group.status != 'active')
+        group.status,
+      if (agentLabel != null) agentLabel!,
+      if (progress != null && progress.total > 0)
+        '${progress.completed}/${progress.total} 步',
+      if (fileSummary != null && !fileSummary!.isEmpty)
+        '已同步 ${fileSummary!.fileCount} 个文件',
+    ];
+    final indicators = <Widget>[
+      if (pendingCount > 0)
+        _GroupSummaryTag(
+          label: '待确认${pendingCountIsTruncated ? '至少' : ''} $pendingCount',
+          color: scheme.onPrimaryContainer,
+          background: scheme.primaryContainer,
+        ),
+      if (summary.errorCount > 0)
+        _GroupSummaryTag(
+          label: '失败 ${summary.errorCount}',
+          color: scheme.onErrorContainer,
+          background: scheme.errorContainer,
+        ),
+      if (summary.blockedCount > 0)
+        _GroupSummaryTag(
+          label: '阻塞 ${summary.blockedCount}',
+          color: scheme.onSurfaceVariant,
+          background: scheme.surfaceContainerHighest,
+        ),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: SpbSpacing.lg,
+        vertical: SpbSpacing.md,
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // 窄窗口与大字号优先留出标题空间；按钮始终在右侧，不随标签换行移动。
+          final stacked = constraints.maxWidth < 760 || largeText;
+          final title = Text(
+            group.title,
+            style: SpbType.cardTitle(theme.textTheme),
+            maxLines: largeText ? 2 : 1,
+            overflow: TextOverflow.ellipsis,
+          );
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                crossAxisAlignment: stacked
+                    ? CrossAxisAlignment.start
+                    : CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: stacked
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              title,
+                              const SizedBox(height: SpbSpacing.xs),
+                              Wrap(
+                                spacing: SpbSpacing.sm,
+                                runSpacing: SpbSpacing.xs,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [...indicators, updatedAt],
+                              ),
+                            ],
+                          )
+                        : title,
+                  ),
+                  if (!stacked) ...[
+                    for (final indicator in indicators) ...[
+                      const SizedBox(width: SpbSpacing.sm),
+                      indicator,
+                    ],
+                    const SizedBox(width: SpbSpacing.lg),
+                    updatedAt,
+                  ],
+                  if (menuButton != null) ...[
+                    const SizedBox(width: SpbSpacing.sm),
+                    menuButton!,
+                  ],
+                ],
+              ),
+              if (preview.isNotEmpty) ...[
+                const SizedBox(height: SpbSpacing.xs),
+                Text(
+                  preview,
+                  style: SpbType.body(theme.textTheme)
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                  maxLines: largeText ? 2 : 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+              if (metadata.isNotEmpty || snapshotBadge != null) ...[
+                const SizedBox(height: SpbSpacing.sm),
+                Wrap(
+                  spacing: SpbSpacing.md,
+                  runSpacing: SpbSpacing.xs,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (metadata.isNotEmpty)
+                      Text(
+                        metadata.join(' · '),
+                        style: SpbType.listMeta(theme.textTheme)
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                    if (snapshotBadge != null) snapshotBadge!,
+                  ],
+                ),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// 只强调需要关注的数量；原因与任务明细在对话内查看。
+class _GroupSummaryTag extends StatelessWidget {
+  const _GroupSummaryTag({
+    required this.label,
+    required this.color,
+    required this.background,
+  });
+
+  final String label;
+  final Color color;
+  final Color background;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(
+      horizontal: SpbSpacing.sm,
+      vertical: SpbSpacing.xxs,
+    ),
+    decoration: BoxDecoration(
+      color: background,
+      borderRadius: BorderRadius.circular(SpbRadius.pill),
+    ),
+    child: Text(
+      label,
+      style: SpbType.badge(Theme.of(context).textTheme)?.copyWith(color: color),
+    ),
+  );
+}
+
+/// 两端共用按钮和菜单锚点，避免各自复制删除确认等管理流程。
+class _GroupMenuButton extends StatelessWidget {
+  const _GroupMenuButton({this.onPressed});
+
+  final void Function(BuildContext anchor)? onPressed;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    key: const ValueKey('group-actions-menu'),
+    tooltip: '对话操作',
+    icon: const Icon(Icons.more_horiz),
+    color: Theme.of(context).colorScheme.onSurfaceVariant,
+    visualDensity: VisualDensity.standard,
+    constraints: const BoxConstraints(
+      minWidth: kMinInteractiveDimension,
+      minHeight: kMinInteractiveDimension,
+    ),
+    onPressed: onPressed == null ? null : () => onPressed!(context),
+  );
 }
 
 /// 提示仍属于卡片主点击区域，不增加窄小按钮或嵌套手势。

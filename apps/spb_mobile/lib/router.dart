@@ -269,7 +269,17 @@ List<RouteBase> buildMobileRoutes() {
           routes: [
             GoRoute(
               path: SpbRoutes.conversations,
-              builder: (context, state) => const _ConversationsTab(),
+              builder: (context, state) {
+                final delegate = GoRouter.of(context).routerDelegate;
+                // 子路由和移动端 tab 会保留列表实例；用当前落点识别真正返回列表。
+                return ListenableBuilder(
+                  listenable: delegate,
+                  builder: (context, _) => _ConversationsTab(
+                    isActive:
+                        delegate.state.uri.path == SpbRoutes.conversations,
+                  ),
+                );
+              },
               routes: [
                 GoRoute(
                   path: 'chat/:groupId',
@@ -429,15 +439,17 @@ class _AppShell extends StatelessWidget {
 /// 没有 `groupActionProvider` 那种多结果语义需要归一化。导航复用 `onOpenGroup`
 /// （见桌面端同一处的说明）。
 class _ConversationsTab extends ConsumerWidget {
-  const _ConversationsTab();
+  const _ConversationsTab({required this.isActive});
+
+  final bool isActive;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
-    ref.watch(pendingConfirmationUpdatesProvider);
-    final pending = ref.watch(pendingConfirmationsProvider);
+    final pending = isActive ? ref.watch(pendingConfirmationsProvider) : null;
     // 刷新/切换账号时 AsyncValue 可能保留旧数据，此处只接受本次成功结果。
-    final pendingSummary = pending.isLoading || pending.hasError
+    final pendingSummary =
+        pending == null || pending.isLoading || pending.hasError
         ? null
         : PendingConfirmationSummary.fromItems(pending.requireValue, limit: 50);
     // 本地交付物统计快照（与桌面端同构）：未加载完/失败时给 null（文件条
@@ -448,13 +460,13 @@ class _ConversationsTab extends ConsumerWidget {
     final agentNames = ref.watch(agentNamesProvider).value;
     return GroupListPage(
       api: api,
+      isActive: isActive,
       // group 变更实时增量更新（新建/删除/归档/改名）。
       //
       // 列表页自己无法收到事件：它不持有 SSE 连接（连接由对话页 `start()`
       // 建立）。本 provider 用 `ensureConnected` 确保连接在，再转发变更流
       // ——详见 provider 文档。
       groupUpdates: ref.watch(groupUpdatesProvider),
-      goalUpdates: ref.watch(goalUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       // 结项快照的两个客户端能力（与桌面端同构，实现差异在下面的方法里）。
@@ -468,7 +480,8 @@ class _ConversationsTab extends ConsumerWidget {
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
       pendingConfirmationCount: pendingSummary?.total ?? 0,
       pendingConfirmations: pendingSummary,
-      pendingConfirmationsUnavailable: pending.hasError && !pending.isLoading,
+      pendingConfirmationsUnavailable:
+          pending != null && pending.hasError && !pending.isLoading,
       onRefreshConfirmations: () =>
           ref.invalidate(pendingConfirmationsProvider),
       // 工作台（小程序 BFF）只有移动端接——它是为小程序/移动端做的投影层。

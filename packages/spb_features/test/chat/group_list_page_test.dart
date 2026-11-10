@@ -105,11 +105,11 @@ void main() {
 
   Future<void> pumpPage(
     WidgetTester tester, {
+    ThemeData? theme,
     void Function(ChatGroup)? onOpenGroup,
     Future<ChatGroup> Function(String)? onCreateGroup,
     GroupActionHandler? onGroupAction,
     Stream<GroupUpdate>? groupUpdates,
-    Stream<GoalUpdate>? goalUpdates,
     PendingConfirmationSummary? pendingConfirmations,
     bool pendingConfirmationsUnavailable = false,
     VoidCallback? onRefreshConfirmations,
@@ -125,13 +125,13 @@ void main() {
   }) async {
     await tester.pumpWidget(
       MaterialApp(
+        theme: theme,
         home: GroupListPage(
           api: api,
           onOpenGroup: onOpenGroup,
           onCreateGroup: onCreateGroup,
           onGroupAction: onGroupAction,
           groupUpdates: groupUpdates,
-          goalUpdates: goalUpdates,
           pendingConfirmations: pendingConfirmations,
           pendingConfirmationsUnavailable: pendingConfirmationsUnavailable,
           onRefreshConfirmations: onRefreshConfirmations,
@@ -1103,72 +1103,6 @@ void main() {
       expect(retries, 1);
     });
 
-    testWidgets('目标 SSE 清除阻塞提示，更新任务名称与缓存', (tester) async {
-      final group = groupWithGoalJson(id: 'g1');
-      final goal = group['current_goal'] as Map<String, dynamic>;
-      (goal['progress'] as Map<String, dynamic>)['blocked'] = 2;
-      mockPage(offset: 0, items: [group]);
-      final updates = StreamController<GoalUpdate>.broadcast();
-      addTearDown(updates.close);
-      await pumpPage(
-        tester,
-        goalUpdates: updates.stream,
-        cache: fakeCache,
-        userId: 'usr_1',
-      );
-      expect(find.text('2 项任务阻塞'), findsOneWidget);
-      updates.add(
-        const GoalUpdate(
-          op: 'task_status',
-          groupId: 'g1',
-          source: 'agent',
-          goal: {'id': 'goal_1', 'goal_text': '修复完成'},
-          tasks: [
-            {'task_id': 'TASK-006', 'title': '验证结果', 'status': 'in_progress'},
-          ],
-          progress: {'total': 7, 'completed': 5, 'blocked': 0},
-        ),
-      );
-      await settleIo(tester);
-      expect(find.text('2 项任务阻塞'), findsNothing);
-      expect(find.text('5/7 步 · 验证结果'), findsOneWidget);
-      expect((await fakeCache.load('usr_1')).single.currentGoalText, '修复完成');
-      updates.add(
-        const GoalUpdate(op: 'goal_delete', groupId: 'g1', source: 'user'),
-      );
-      await settleIo(tester);
-      expect(find.text('5/7 步 · 验证结果'), findsNothing);
-    });
-
-    testWidgets('首拉响应晚于目标事件时保留新快照', (tester) async {
-      adapter.onGet(
-        '/chat/groups',
-        (server) => server.reply(200, {
-          'items': [groupWithGoalJson(id: 'g1')],
-        }, delay: const Duration(seconds: 5)),
-        queryParameters: {'limit': 30, 'offset': 0},
-      );
-      final updates = StreamController<GoalUpdate>.broadcast();
-      addTearDown(updates.close);
-      await pumpPage(tester, goalUpdates: updates.stream);
-      updates.add(
-        const GoalUpdate(
-          op: 'task_status',
-          groupId: 'g1',
-          source: 'agent',
-          goal: {'id': 'goal_1', 'goal_text': '新目标'},
-          tasks: [
-            {'task_id': 'TASK-006', 'title': '新任务', 'status': 'in_progress'},
-          ],
-          progress: {'total': 7, 'completed': 5},
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 6));
-      expect(find.text('5/7 步 · 新任务'), findsOneWidget);
-      expect(find.text('4/7 步 · TASK-005'), findsNothing);
-    });
-
     for (final dark in [false, true]) {
       for (final layout in [
         (const Size(320, 812), 2.0),
@@ -1214,6 +1148,7 @@ void main() {
                   child: GroupListPage(
                     api: api,
                     onOpenGroup: (_) {},
+                    onGroupAction: (_, _) async => const GroupActionApplied(),
                     onOpenConfirmations: () {},
                     pendingConfirmationCount: 50,
                     pendingConfirmations: PendingConfirmationSummary.fromItems([
@@ -1232,6 +1167,15 @@ void main() {
             expect(tester.takeException(), isNull);
             expect(find.text('待你确认 · 至少 50 项'), findsOneWidget);
             expect(tester.getSize(find.text('发布桌面客户端')).width, greaterThan(40));
+            final menuButton = find.byTooltip('对话操作');
+            expect(tester.getSize(menuButton).width, greaterThanOrEqualTo(48));
+            expect(tester.getSize(menuButton).height, greaterThanOrEqualTo(48));
+            expect(
+              tester.getRect(menuButton).right,
+              lessThanOrEqualTo(
+                tester.getRect(find.byKey(const ValueKey('g1'))).right,
+              ),
+            );
             expect(find.bySemanticsLabel(RegExp('.*待你确认.*')), findsWidgets);
             expect(
               tester.getRect(find.text('50+')).right,
@@ -1535,25 +1479,28 @@ void main() {
       expect(find.text('结项记录生成中'), findsNothing);
     });
 
-    testWidgets('站点可打开时徽标可点（常显，不依赖 hover）', (tester) async {
-      ArchiveSnapshot? opened;
-      mockPage(offset: 0, items: [archivedWithSnapshot()]);
-      await pumpPage(
-        tester,
-        onOpenSnapshotSite: (snapshot) async {
-          opened = snapshot;
-          return true;
-        },
-      );
+    for (final platform in [TargetPlatform.android, TargetPlatform.linux]) {
+      testWidgets('$platform 站点可打开时徽标可点（常显，不依赖 hover）', (tester) async {
+        ArchiveSnapshot? opened;
+        mockPage(offset: 0, items: [archivedWithSnapshot()]);
+        await pumpPage(
+          tester,
+          theme: SpbTheme.lightFor(platform),
+          onOpenSnapshotSite: (snapshot) async {
+            opened = snapshot;
+            return true;
+          },
+        );
 
-      // 触屏没有 hover：入口必须常显可见。
-      expect(find.byIcon(Icons.open_in_new), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.open_in_new));
-      await tester.pump();
+        // 触屏没有 hover：入口必须常显可见。
+        expect(find.byIcon(Icons.open_in_new), findsOneWidget);
+        await tester.tap(find.byIcon(Icons.open_in_new));
+        await tester.pump();
 
-      expect(opened?.id, 'snap_1');
-      expect(opened?.site.accessUrl, '/_staging/ufs_sites/g-g1/');
-    });
+        expect(opened?.id, 'snap_1');
+        expect(opened?.site.accessUrl, '/_staging/ufs_sites/g-g1/');
+      });
+    }
 
     testWidgets('站点不可用时徽标是纯展示（没有 open_in_new）', (tester) async {
       mockPage(offset: 0, items: [archivedWithSnapshot(siteStatus: 'pending')]);
@@ -1653,14 +1600,177 @@ void main() {
     });
   });
 
-  /// 多列卡片布局（§6.84）。
+  group('桌面单列与信息层级', () {
+    for (final platform in [
+      TargetPlatform.linux,
+      TargetPlatform.windows,
+      TargetPlatform.macOS,
+    ]) {
+      testWidgets('$platform 缩放窗口保持单列、限宽、自然行高', (tester) async {
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        mockPage(
+          offset: 0,
+          items: [
+            groupWithGoalJson(id: 'g1', title: '发布版本'),
+            groupJson(id: 'g2', title: '只有标题'),
+            groupJson(id: 'g3', title: '第三条'),
+          ],
+        );
+        await pumpPage(
+          tester,
+          theme: SpbTheme.lightFor(platform),
+          onGroupAction: (_, _) async => const GroupActionApplied(),
+        );
+        for (final width in [640.0, 1000.0, 1440.0, 1920.0]) {
+          tester.view.physicalSize = Size(width, 900);
+          await tester.pumpAndSettle();
+          final first = tester.getRect(find.byKey(const ValueKey('g1')));
+          final second = tester.getRect(find.byKey(const ValueKey('g2')));
+          expect(second.left, first.left);
+          expect(second.width, first.width);
+          expect(second.top, greaterThanOrEqualTo(first.bottom));
+          expect(first.width, lessThanOrEqualTo(1120));
+          expect(first.center.dx, closeTo(width / 2, 0.1));
+          expect(second.height, lessThan(first.height), reason: '纯标题行不应被富内容撑高');
+          expect(tester.takeException(), isNull);
+        }
+      });
+    }
+
+    for (final dark in [false, true]) {
+      for (final layout in [
+        (const Size(320, 900), 2.0),
+        (const Size(812, 375), 1.0),
+        (const Size(1280, 800), 1.0),
+        (const Size(1280, 900), 2.0),
+      ]) {
+        testWidgets('桌面摘要 ${layout.$1} 字号 ${layout.$2} 深色 $dark', (
+          tester,
+        ) async {
+          tester.view.physicalSize = layout.$1;
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          final item = groupWithGoalJson(id: 'g1', title: '发布桌面客户端与安装包');
+          final goal = item['current_goal'] as Map<String, dynamic>;
+          goal['tasks'] = [
+            {
+              'task_id': 'TASK-005',
+              'title': '验证安装包与签名',
+              'status': 'in_progress',
+            },
+            {
+              'task_id': 'TASK-003',
+              'title': '构建安装包',
+              'status': 'error_stopped',
+              'error_reason': '构建环境缺少依赖',
+            },
+          ];
+          (goal['progress'] as Map<String, dynamic>).addAll(<String, int>{
+            'error_stopped': 1,
+            'blocked': 2,
+          });
+          item['active_session'] = {'agent_id': 'agent1', 'session_id': 's1'};
+          mockPage(offset: 0, items: [item]);
+          final opened = <ChatGroup>[];
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: dark
+                  ? SpbTheme.darkFor(TargetPlatform.linux)
+                  : SpbTheme.lightFor(TargetPlatform.linux),
+              home: MediaQuery(
+                data: MediaQueryData(
+                  size: layout.$1,
+                  textScaler: TextScaler.linear(layout.$2),
+                  disableAnimations: true,
+                ),
+                child: GroupListPage(
+                  api: api,
+                  onOpenGroup: opened.add,
+                  onGroupAction: (_, _) async => const GroupActionApplied(),
+                  agentNameOf: (_) => '交付助手',
+                  groupFileSummary: (_) =>
+                      const GroupFileSummary(fileCount: 18, totalBytes: 1024),
+                  pendingConfirmations: PendingConfirmationSummary.fromItems([
+                    ChatConfirmation.fromJson({
+                      'id': 'c1',
+                      'group_id': 'g1',
+                      'status': 'pending',
+                    }),
+                  ], limit: 1),
+                ),
+              ),
+            ),
+          );
+          await settleIo(tester);
+          expect(tester.takeException(), isNull);
+          expect(find.text('当前任务：验证安装包与签名'), findsOneWidget);
+          expect(find.text('待确认至少 1'), findsOneWidget);
+          expect(find.text('失败 1'), findsOneWidget);
+          expect(find.text('阻塞 2'), findsOneWidget);
+          expect(find.text('交付助手 · 4/7 步 · 已同步 18 个文件'), findsOneWidget);
+          expect(find.text('进行中'), findsNothing);
+          expect(find.text('把 500 报错定位并修掉'), findsNothing);
+          expect(find.textContaining('构建环境缺少依赖'), findsNothing);
+          expect(find.byType(LinearProgressIndicator), findsNothing);
+          final button = tester.getRect(find.byTooltip('对话操作'));
+          final row = tester.getRect(find.byKey(const ValueKey('g1')));
+          expect(row.contains(button.topLeft), isTrue);
+          expect(row.contains(button.bottomRight), isTrue);
+          expect(
+            tester.getSize(find.text('发布桌面客户端与安装包')).width,
+            greaterThan(120),
+          );
+          await tester.tap(find.text('当前任务：验证安装包与签名'));
+          expect(opened.single.id, 'g1');
+        });
+      }
+    }
+
+    testWidgets('无任务回退目标，无数据不补占位；归档与未知状态仍可识别', (tester) async {
+      mockPage(
+        offset: 0,
+        items: [
+          groupWithGoalJson(id: 'g1', currentTaskId: null, goalText: '完成验收'),
+          groupJson(id: 'g2', title: '只读标题', status: 'archived'),
+          groupJson(id: 'g3', title: '暂停的', status: 'paused'),
+        ],
+      );
+      await pumpPage(tester, theme: SpbTheme.lightFor(TargetPlatform.linux));
+      expect(find.text('完成验收'), findsOneWidget);
+      expect(find.textContaining('当前任务：'), findsNothing);
+      expect(find.text('已归档'), findsOneWidget);
+      expect(find.text('paused'), findsOneWidget);
+      expect(find.byTooltip('对话操作'), findsNothing);
+      expect(find.textContaining('null'), findsNothing);
+    });
+
+    testWidgets('单列分页仍可滚动加载后续对话', (tester) async {
+      mockPage(
+        offset: 0,
+        items: List.generate(30, (i) => groupJson(id: 'g$i', title: '对话 $i')),
+      );
+      await pumpPage(tester, theme: SpbTheme.lightFor(TargetPlatform.linux));
+      mockPage(
+        offset: 30,
+        items: [groupJson(id: 'next', title: '下一页')],
+      );
+      await tester.drag(find.byType(ListView), const Offset(0, -3000));
+      await settleIo(tester);
+      await tester.drag(find.byType(ListView), const Offset(0, -3000));
+      await settleIo(tester);
+      expect(find.text('下一页'), findsOneWidget);
+    });
+  });
+
+  /// 移动端宽屏保留多列卡片布局（§6.84）。
   ///
   /// ## 为什么要量矩形
   ///
   /// 「列数」不是某个 widget 的属性，而是**布局结果**。用 `find.byKey` 拿
   /// 卡片矩形量横坐标，才看得出「1 列时上下排、2 列时左右排」；只断言
   /// 「能找到 5 张卡片」在单列布局下也成立，没有任何约束力。
-  group('多列卡片布局（§6.84）', () {
+  group('移动端多列卡片布局（§6.84）', () {
     /// 固定窗口逻辑尺寸并注册复位。
     Future<void> setWindow(WidgetTester tester, double w, double h) async {
       tester.view.physicalSize = Size(w, h);
@@ -1692,7 +1802,7 @@ void main() {
       expect(r1.right, closeTo(360 - 12, 0.01));
     });
 
-    testWidgets('桌面窗口（800）并排 2 列，同一视觉行等高', (tester) async {
+    testWidgets('移动端宽屏（800）并排 2 列，同一视觉行等高', (tester) async {
       mockPage(offset: 0, items: fiveGroups());
       await pumpPage(tester);
       await setWindow(tester, 800, 900);

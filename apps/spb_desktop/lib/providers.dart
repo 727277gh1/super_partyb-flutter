@@ -1200,16 +1200,19 @@ final flushWithStrategyProvider = Provider.family<FlushWithStrategy, String>((
 // `GET /chat/confirmations` 身份来自网关注入的 `X-User-ID`（不需客户端传
 // userId）。用 FutureProvider 缓存首拉结果，并提供一个刷新入口。
 
-/// 待确认列表（首拉）。页面注入 `fetch` 时读它，刷新时调 `refresh`。
-final pendingConfirmationsProvider = FutureProvider<List<ChatConfirmation>>((
-  ref,
-) async {
-  ref.watch(sessionRevisionProvider);
-  if (ref.watch(authStateProvider.select((state) => state.isUnauthenticated))) {
-    return const [];
-  }
-  return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
-});
+/// 列表可见期间复用快照；离开后释放，下次进入重新拉取。
+final pendingConfirmationsProvider =
+    FutureProvider.autoDispose<List<ChatConfirmation>>((ref) async {
+      ref.watch(sessionRevisionProvider);
+      if (ref.watch(
+        authStateProvider.select((state) => state.isUnauthenticated),
+      )) {
+        return const [];
+      }
+      return ref
+          .watch(chatApiProvider)
+          .listConfirmationsTyped(status: 'pending');
+    });
 
 // ==================== 对话流 ====================
 
@@ -1309,40 +1312,6 @@ final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
   // （对话页建的聚焦模式）时是空操作，故不会抢走对话页的聚焦目标。
   unawaited(controller.ensureConnected());
   return controller.groupUpdates;
-});
-
-/// 列表与对话页共享同一条 SSE，不新增连接或逐卡请求。
-final goalUpdatesProvider = Provider.autoDispose<Stream<GoalUpdate>>((ref) {
-  final identity = ref.watch(currentUserIdProvider);
-  final userId = identity.isLoading || identity.hasError
-      ? null
-      : identity.value;
-  if (userId == null || userId.isEmpty) return const Stream.empty();
-  final controller = ref.watch(chatStreamControllerProvider(userId));
-  unawaited(controller.ensureConnected());
-  return controller.goalUpdates;
-});
-
-/// 仅列表可见时监听确认变化；短时间的连续事件合并为一次全局查询。
-final pendingConfirmationUpdatesProvider = Provider.autoDispose<void>((ref) {
-  final identity = ref.watch(currentUserIdProvider);
-  final userId = identity.isLoading || identity.hasError
-      ? null
-      : identity.value;
-  if (userId == null || userId.isEmpty) return;
-  final controller = ref.watch(chatStreamControllerProvider(userId));
-  Timer? refreshTimer;
-  final subscription = controller.confirmationChanges.listen((_) {
-    refreshTimer ??= Timer(const Duration(milliseconds: 250), () {
-      refreshTimer = null;
-      ref.invalidate(pendingConfirmationsProvider);
-    });
-  });
-  ref.onDispose(() {
-    refreshTimer?.cancel();
-    unawaited(subscription.cancel());
-  });
-  unawaited(controller.ensureConnected());
 });
 
 /// 无归属入口用例（**带附件**，走 mq-server 通用入站渠道）。

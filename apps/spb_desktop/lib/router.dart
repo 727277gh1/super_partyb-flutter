@@ -244,7 +244,15 @@ List<RouteBase> buildDesktopRoutes() {
     ),
     GoRoute(
       path: SpbRoutes.home,
-      builder: (context, state) => const _HomePage(),
+      builder: (context, state) {
+        final delegate = GoRouter.of(context).routerDelegate;
+        // 子路由和移动端 tab 会保留列表实例；用当前落点识别真正返回列表。
+        return ListenableBuilder(
+          listenable: delegate,
+          builder: (context, _) =>
+              _HomePage(isActive: delegate.state.uri.path == SpbRoutes.home),
+        );
+      },
       routes: [
         GoRoute(
           path: 'chat/:groupId',
@@ -353,16 +361,18 @@ class _LoginPage extends ConsumerWidget {
 /// 一种结果：拿到 [ChatGroup] 或抛错。为它单建一个 provider 只会多一层
 /// 间接调用，不会带来任何翻译能力（错误文案由页面统一展示 `e.message`）。
 class _HomePage extends ConsumerWidget {
-  const _HomePage();
+  const _HomePage({required this.isActive});
+
+  final bool isActive;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
     // 卡片与顶部角标共享同一次待确认查询。
-    ref.watch(pendingConfirmationUpdatesProvider);
-    final pending = ref.watch(pendingConfirmationsProvider);
+    final pending = isActive ? ref.watch(pendingConfirmationsProvider) : null;
     // 刷新/切换账号时 AsyncValue 可能保留旧数据，此处只接受本次成功结果。
-    final pendingSummary = pending.isLoading || pending.hasError
+    final pendingSummary =
+        pending == null || pending.isLoading || pending.hasError
         ? null
         : PendingConfirmationSummary.fromItems(pending.requireValue, limit: 50);
     // 本地交付物统计快照：未加载完/失败时给空 Map（文件条不显示，不阻断列表）。
@@ -375,6 +385,7 @@ class _HomePage extends ConsumerWidget {
     final agentNames = ref.watch(agentNamesProvider).value;
     return GroupListPage(
       api: api,
+      isActive: isActive,
       // group 变更实时增量更新（新建/删除/归档/改名）。
       //
       // 列表页自己无法收到事件：它不持有 SSE 连接（连接由对话页 `start()`
@@ -382,7 +393,6 @@ class _HomePage extends ConsumerWidget {
       // ——详见 provider 文档。
       //
       groupUpdates: ref.watch(groupUpdatesProvider),
-      goalUpdates: ref.watch(goalUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       // 结项快照的两个客户端能力：打开站点（浏览器）、保存下载字节。
@@ -422,7 +432,8 @@ class _HomePage extends ConsumerWidget {
       onOpenSettings: () => context.go(SpbRoutes.settings),
       pendingConfirmationCount: pendingSummary?.total ?? 0,
       pendingConfirmations: pendingSummary,
-      pendingConfirmationsUnavailable: pending.hasError && !pending.isLoading,
+      pendingConfirmationsUnavailable:
+          pending != null && pending.hasError && !pending.isLoading,
       onRefreshConfirmations: () =>
           ref.invalidate(pendingConfirmationsProvider),
       // 对话列表缓存（issue #26 切片 A）：断网冷启动时回落展示已缓存的列表，

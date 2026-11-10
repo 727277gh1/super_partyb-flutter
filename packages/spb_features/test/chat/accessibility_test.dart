@@ -6,6 +6,7 @@ import 'package:http_mock_adapter/http_mock_adapter.dart';
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_design/spb_design.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
@@ -197,32 +198,36 @@ void main() {
           .toList();
     }
 
-    testWidgets('有管理入口时，条目暴露「对话操作」自定义语义动作', (tester) async {
-      // 重命名/归档/删除**只能**从长按或右键菜单到达，键盘用户与屏幕阅读器
-      // 用户没有任何入口。Flutter 不会从「包了一个 GestureDetector」推断出
-      // 「这里有自定义动作」——必须显式声明 customSemanticsActions。
-      final handle = tester.ensureSemantics();
+    for (final platform in [TargetPlatform.android, TargetPlatform.linux]) {
+      testWidgets('$platform 有管理入口时，条目暴露「对话操作」自定义语义动作', (tester) async {
+        // 常显按钮必须有名称；标题仍保留自定义动作，读屏用户可在整卡直接操作。
+        final handle = tester.ensureSemantics();
 
-      mockPage([groupJson('报错排查')]);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: GroupListPage(
-            api: api,
-            onGroupAction: (_, _) async => const GroupActionApplied(),
+        mockPage([groupJson('报错排查')]);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: SpbTheme.lightFor(platform),
+            home: GroupListPage(
+              api: api,
+              onGroupAction: (_, _) async => const GroupActionApplied(),
+            ),
           ),
-        ),
-      );
-      await settleIo(tester);
-      expect(find.text('报错排查'), findsOneWidget);
+        );
+        await settleIo(tester);
+        expect(find.text('报错排查'), findsOneWidget);
 
-      expect(
-        customActions(tester, '报错排查'),
-        contains('对话操作（重命名/归档/删除）'),
-        reason: '没有这个动作，键盘/屏幕阅读器用户无法重命名或归档对话',
-      );
+        expect(
+          customActions(tester, '报错排查'),
+          contains('对话操作（重命名/归档/删除）'),
+          reason: '读屏聚焦标题时仍可直接打开管理菜单',
+        );
+        final buttonData = semanticsOf(tester, find.byTooltip('对话操作'));
+        expect(buttonData.tooltip, '对话操作');
+        expect(buttonData.hasAction(SemanticsAction.tap), isTrue);
 
-      handle.dispose();
-    });
+        handle.dispose();
+      });
+    }
 
     testWidgets('未注入管理入口（onGroupAction 为 null）时不暴露该动作', (tester) async {
       // 只读用法（如「选择对话」场景）不该给一个点了没反应的语义动作。
