@@ -84,7 +84,14 @@ void main() {
     gate = Completer<bool>();
 
     // 读到已经加载的历史，再加载下一页；不能只保护初始快照。
-    position.jumpTo(position.minScrollExtent + 60);
+    // 新页尚未全部排版，minScrollExtent 仍有估算部分；逐屏向上读到真实顶部。
+    for (var step = 0; step < 100; step++) {
+      position.pointerScroll(-500);
+      await tester.pumpAndSettle();
+      if (position.extentBefore < 1) break;
+    }
+    expect(position.extentBefore, lessThan(1));
+    position.pointerScroll(60);
     await tester.pumpAndSettle();
     expect(calls, 2, reason: '加载后的顶部位于负偏移，仍须触发下一页');
     final olderAnchor = find.text('消息 51');

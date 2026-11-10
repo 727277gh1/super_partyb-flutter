@@ -32,6 +32,7 @@ import 'perf_probe.dart';
 import 'row_locate_registry.dart';
 import 'thought_tile.dart';
 import 'thumbnail_memo.dart';
+import 'timeline_extent_cache.dart';
 import 'tool_call_batch_card.dart';
 import 'tool_call_tile.dart';
 import 'turn_status.dart';
@@ -728,6 +729,7 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 共享会让「同一段文件被拆成多行」时多行撞同一个 `GlobalKey`，
   /// 后出现的行渲染为空白（见该类的类文档）。
   final _rowKeys = RowLocateRegistry();
+  final _rowExtents = TimelineExtentCache();
 
   /// 内存账本登记令牌（[MemoryLedger.register] 的返回值）。
   ///
@@ -1214,6 +1216,8 @@ class _ConversationPageState extends State<ConversationPage> {
       //
       // 即便 id 不重复，保留它们也只是让上一个对话的正文留在内存里。
       _bubbleCache.clear();
+      _rowExtents.clear();
+      _lastRowsItems = null;
     }
   }
 
@@ -1241,6 +1245,7 @@ class _ConversationPageState extends State<ConversationPage> {
     if (items.isEmpty) {
       _timelineCenterId = null;
       _timelineOrigin = SpbSpacing.pagePadding.top;
+      _rowExtents.clear();
     }
     _evictThumbnailsOfDeletedFiles(items);
     setState(() => _items = items);
@@ -2329,6 +2334,7 @@ class _ConversationPageState extends State<ConversationPage> {
         _itemRowIndices[id] = i;
       }
     }
+    _rowExtents.updateRows(_rowIndices.keys.toList());
     // 与 rows 同步重算（它同样只取决于 `_items`）。放在这里而不是每次 build
     // 都扫一遍：重建时 `_items` 没变，结果必然相同。
     _keepAliveIds = _computeKeepAliveIds(_items);
@@ -2411,7 +2417,7 @@ class _ConversationPageState extends State<ConversationPage> {
     // minScrollExtent，既不猜测未构建行高，也不发 jumpTo 打断用户正在拖动的手势。
     // 两段都保持惰性构建，并按稳定 Key 找回重排后的 Element。
     SliverList buildRows({required bool older}) => SliverList(
-      delegate: SliverChildBuilderDelegate(
+      delegate: TimelineChildDelegate(
         (context, index) {
           final rowIndex = older ? split - index - 1 : split + index;
           if (rowIndex == rows.length) {
@@ -2420,6 +2426,11 @@ class _ConversationPageState extends State<ConversationPage> {
           return _buildTimelineRow(rows[rowIndex]);
         },
         childCount: older ? split : rows.length - split + 1,
+        extents: _rowExtents,
+        start: older ? 0 : split,
+        end: older ? split : rows.length,
+        reverse: older,
+        trailingExtent: older ? 0 : SpbSpacing.xxl,
         findChildIndexCallback: (key) {
           final index = indices[key];
           if (index == null || (index < split) != older) return null;
@@ -2429,8 +2440,6 @@ class _ConversationPageState extends State<ConversationPage> {
           final rowIndex = older ? split - index - 1 : split + index;
           return rowIndex == rows.length ? null : rowIndex;
         },
-        // 长正文跨多屏，避免缓存整条回复的绘制层；其他卡片在行内加回边界。
-        addRepaintBoundaries: false,
       ),
     );
 
@@ -2465,37 +2474,46 @@ class _ConversationPageState extends State<ConversationPage> {
           return false;
         },
         child: LayoutBuilder(
-          builder: (context, constraints) => CustomScrollView(
-            controller: _scrollController,
-            center: _timelineCenterKey,
-            // 起始留白属于坐标原点；真正的顶部 padding 随旧页向上移，
-            // 避免第一回翻页时删掉中心 padding，造成一小段额外位移。
-            anchor: (_timelineOrigin / constraints.maxHeight).clamp(0.0, 1.0),
-            semanticChildCount: rows.length,
-            // 预建 1.5 屏，沿用长 Markdown 的滚动预解析范围与有界 keep-alive。
-            scrollCacheExtent: const ScrollCacheExtent.viewport(1.5),
-            slivers: [
-              SliverPadding(
-                padding: EdgeInsets.fromLTRB(
-                  padding.left,
-                  padding.top,
-                  padding.right,
-                  0,
+          builder: (context, constraints) {
+            // 宽度与字体会改变真实行高，旧测量值不能跨排版条件沿用。
+            _rowExtents.updateLayout((
+              constraints.maxWidth,
+              MediaQuery.textScalerOf(context),
+              Theme.of(context).textTheme,
+              Directionality.of(context),
+            ));
+            return CustomScrollView(
+              controller: _scrollController,
+              center: _timelineCenterKey,
+              // 起始留白属于坐标原点；真正的顶部 padding 随旧页向上移，
+              // 避免第一回翻页时删掉中心 padding，造成一小段额外位移。
+              anchor: (_timelineOrigin / constraints.maxHeight).clamp(0.0, 1.0),
+              semanticChildCount: rows.length,
+              // 预建 1.5 屏，沿用长 Markdown 的滚动预解析范围与有界 keep-alive。
+              scrollCacheExtent: const ScrollCacheExtent.viewport(1.5),
+              slivers: [
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(
+                    padding.left,
+                    padding.top,
+                    padding.right,
+                    0,
+                  ),
+                  sliver: buildRows(older: true),
                 ),
-                sliver: buildRows(older: true),
-              ),
-              SliverPadding(
-                key: _timelineCenterKey,
-                padding: EdgeInsets.fromLTRB(
-                  padding.left,
-                  0,
-                  padding.right,
-                  padding.bottom,
+                SliverPadding(
+                  key: _timelineCenterKey,
+                  padding: EdgeInsets.fromLTRB(
+                    padding.left,
+                    0,
+                    padding.right,
+                    padding.bottom,
+                  ),
+                  sliver: buildRows(older: false),
                 ),
-                sliver: buildRows(older: false),
-              ),
-            ],
-          ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -2557,10 +2575,14 @@ class _ConversationPageState extends State<ConversationPage> {
     );
     return KeyedSubtree(
       key: locateKey,
-      child: switch (row) {
-        SingleItemRow(item: AssistantMessageItem()) => child,
-        _ => RepaintBoundary(child: child),
-      },
+      child: TimelineRowMeasure(
+        rowKey: locateKey,
+        extents: _rowExtents,
+        child: switch (row) {
+          SingleItemRow(item: AssistantMessageItem()) => child,
+          _ => RepaintBoundary(child: child),
+        },
+      ),
     );
   }
 
