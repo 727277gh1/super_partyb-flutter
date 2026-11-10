@@ -285,6 +285,7 @@ class _HitTile extends StatelessWidget {
     ConfirmationItem() => ('确认', Icons.help_outline),
     FeedbackRequestItem() => ('反馈', Icons.feedback_outlined),
     FollowUpSuggestionItem() => ('建议', Icons.lightbulb_outline),
+    VisualizationItem() => ('报告', Icons.bar_chart),
     GoalProgressItem() => ('目标', Icons.flag_outlined),
     GoalGateStoppedItem() => ('目标', Icons.flag_outlined),
     ScheduleCreatedItem() => ('排程', Icons.schedule_outlined),

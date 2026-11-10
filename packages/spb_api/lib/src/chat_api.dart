@@ -17,6 +17,33 @@ class ChatApi {
 
   final Dio _dio;
 
+  Future<VisualizationRevision> visualizationRevision(
+    String groupId,
+    String artifactId,
+    int revision,
+  ) async {
+    final res = await _get(
+      '/chat/groups/${Uri.encodeComponent(groupId)}/visualizations/${Uri.encodeComponent(artifactId)}/revisions/$revision',
+    );
+    return VisualizationRevision.fromJson(_asMap(res));
+  }
+
+  Future<VisualizationRecoveryPage> visualizationEvents(
+    String groupId, {
+    int after = 0,
+    int? through,
+  }) async {
+    final res = await _get(
+      '/chat/groups/${Uri.encodeComponent(groupId)}/visualization-events',
+      query: {
+        'after_global_seq': after,
+        if (through != null) 'through_global_seq': through,
+        'limit': 200,
+      },
+    );
+    return VisualizationRecoveryPage.fromJson(_asMap(res));
+  }
+
   // ==================== 分组 ====================
 
   /// `GET /chat/groups?status=&limit=&offset=`

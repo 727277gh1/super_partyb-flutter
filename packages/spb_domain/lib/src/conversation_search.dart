@@ -217,6 +217,8 @@ String? _searchableText(ConversationItem item) => switch (item) {
   // 用户可能记得「那个报告」也可能记得 `report.md`。
   AgentFileItem(:final displayName, :final fileName) =>
     displayName == fileName ? fileName : '$displayName\n$fileName',
+  VisualizationItem(:final reference) =>
+    '${reference.title}\n${reference.summary}',
   // 其余是交互控件 / 状态 / 建议：不参与搜索（见函数文档）。
   _ => null,
 };

@@ -18,11 +18,10 @@
 保存后下一轮生效，所有会话共用。Go API 在有群工作区的 pigo 执行链注入 `spec_json`
 reminder，Agent 按任务需要生成 `.spec.json`；Flutter 复用现有只读文件预览。
 
-### 持久化可视化 Artifact（协议已接入，UI 待接入）
+### 持久化可视化 Artifact
 
 服务端发布开关 `VISUALIZATION_PUBLISH_ENABLED` 默认关闭。`spb_models` 已识别
-`visualization.published` 并提供手写 DTO；时间线渲染、REST 客户端与独立恢复消费者
-尚未接入，不能将已知事件类型视为 UI 已支持。上面的文件预览链路仍是当前展示路径。
+`visualization.published` 并提供手写 DTO；`ChatApi`、`VisualizationItem`、独立恢复消费者与桌面/移动报告卡片均已接入。历史文件预览继续按原路径工作。
 
 客户端使用登录身份，路由前缀为 `/chat/groups/:group_id`，不使用 Agent API Key：
 
@@ -59,6 +58,13 @@ snake_case envelope（event_id/group_id/turn_id/event_type/seq/global_seq/source
 Outbox 至少一次投递，SSE、回放和恢复页可能重复或乱序到达；按 eventId 去重、
 globalSeq 排序，不能用普通 SSE 游标代替独立恢复水位。服务端目前为单进程 Broker，
 多实例实时广播需增加共享总线；持久化恢复接口提供最终补齐。
+
+独立事件集合不受普通 2000 条消息缓冲裁剪影响。水位只在当前 user/group 的内存中保存，
+冷启动从零重建；切组/销毁会停止旧恢复实例。回前台、SSE 建连/重连及前台每 30 秒触发对账。
+409 清理独立事件集合再重建。报告展开后才读取固定 revision，响应须匹配 group、Artifact、revision、
+profile、schema_version 与 published 状态；失败保留摘要并允许重试。未知版本不请求正文。
+共享样例副本位于 `packages/spb_features/test/fixtures/readonly-v1.json`，真源为 Go API Readonly v1。
+本机 widget 测试不能代替移动真机、桌面窗口和线上断网验收。
 
 ### 5.1 认证模型
 

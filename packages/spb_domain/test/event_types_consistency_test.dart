@@ -50,7 +50,7 @@ void main() {
 
   /// `goal_gate_stopped` → `goalGateStopped`。
   String toCamel(String snake) {
-    final parts = snake.split('_');
+    final parts = snake.split(RegExp('[_.]'));
     return parts.first +
         parts
             .skip(1)

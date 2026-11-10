@@ -1630,6 +1630,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     // （spb_mobile）不传 actions 也不包 Row，保持原样（见 AGENTS.md §6.4）。
     final conversation = ConversationPage(
       controller: controller,
+      loadVisualization: api.visualizationRevision,
+      onVisualizationForeground: controller.setVisualizationForeground,
       title: _appBarTitle,
       // 侧边栏开关（仅桌面端渲染本页）。
       actions: [

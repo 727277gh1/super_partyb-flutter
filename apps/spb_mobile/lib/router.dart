@@ -2235,6 +2235,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
 
     return ConversationPage(
       controller: controller,
+      loadVisualization: api.visualizationRevision,
+      onVisualizationForeground: controller.setVisualizationForeground,
       title: _appBarTitle,
       // 对话内搜索（搜已加载的时间线，含 agent 回复）。
       //

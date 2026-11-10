@@ -1,3 +1,5 @@
+import 'visualization_card.dart';
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show listEquals;
@@ -105,6 +107,8 @@ class ConversationPage extends StatefulWidget {
     this.onNewSession,
     this.onCancelTurn,
     this.onLoadOlder,
+    this.loadVisualization,
+    this.onVisualizationForeground,
     this.onReconnect,
     this.onDownloadAgentFile,
     this.onLoadThumbnailAgentFile,
@@ -353,6 +357,8 @@ class ConversationPage extends StatefulWidget {
   ///
   /// 为 null 时不展示「加载更早」入口（保持「只读时间线」用法）。
   final Future<bool> Function()? onLoadOlder;
+  final LoadVisualization? loadVisualization;
+  final void Function(bool)? onVisualizationForeground;
 
   /// 手动重连 SSE。
   ///
@@ -597,7 +603,13 @@ class ConversationPage extends StatefulWidget {
   State<ConversationPage> createState() => _ConversationPageState();
 }
 
-class _ConversationPageState extends State<ConversationPage> {
+class _ConversationPageState extends State<ConversationPage>
+    with WidgetsBindingObserver {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    widget.onVisualizationForeground?.call(state == AppLifecycleState.resumed);
+  }
+
   final _scrollController = ScrollController();
 
   /// 气泡常驻（keep-alive）的长度阈值：正文短于该值时**不**常驻。
@@ -975,6 +987,8 @@ class _ConversationPageState extends State<ConversationPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    widget.onVisualizationForeground?.call(true);
     _items = widget.controller.snapshot;
     _itemsSub = widget.controller.items.listen(_onItems);
     // 内存账本（docs/memory-audit.md §四）：本页三个可再生态各报一行读数，
@@ -1223,6 +1237,8 @@ class _ConversationPageState extends State<ConversationPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.onVisualizationForeground?.call(false);
     MemoryLedger.unregister(_thumbnailGauge);
     MemoryLedger.unregister(_bubbleGauge);
     MemoryLedger.unregister(_timelineGauge);
@@ -2650,6 +2666,11 @@ class _ConversationPageState extends State<ConversationPage> {
           : null,
       onSelectAgent: widget.onSelectAgent,
       onTap: _handleSubmit,
+    ),
+    VisualizationItem() => VisualizationCard(
+      key: ValueKey(item.id),
+      item: item,
+      load: widget.loadVisualization,
     ),
     GoalProgressItem() => SpecUiCard(
       doc: item.spec,

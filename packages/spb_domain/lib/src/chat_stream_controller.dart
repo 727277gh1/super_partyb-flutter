@@ -8,6 +8,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:uuid/uuid.dart';
 
 import 'conversation_item.dart';
+import 'visualization_recovery.dart';
 import 'event_reducer.dart';
 import 'execution_status.dart';
 import 'gate_decision.dart';
@@ -159,6 +160,90 @@ class ChatStreamController {
   static const int maxBufferEvents = 2000;
 
   final List<ChatEvent> _buffer = [];
+  final Map<String, ChatEvent> _visualizations = {};
+  VisualizationRecovery? _visualizationRecovery;
+  Timer? _visualizationTimer;
+  bool _visualizationForeground = true;
+
+  List<ChatEvent> _eventsWithVisualizations() {
+    if (_visualizations.isEmpty) return _buffer;
+    final visualizations = {..._visualizations};
+    for (final event in _buffer) {
+      if (event.eventType == EventTypes.visualizationPublished &&
+          (event.globalSeq ?? 0) > 0) {
+        visualizations[event.eventId] = event;
+      }
+    }
+    final pending = visualizations.values.toList()
+      ..sort((a, b) => a.globalSeq!.compareTo(b.globalSeq!));
+    final merged = <ChatEvent>[];
+    var index = 0;
+    for (final event in _buffer) {
+      if (event.eventType == EventTypes.visualizationPublished &&
+          visualizations.containsKey(event.eventId)) {
+        continue;
+      }
+      final seq = event.globalSeq;
+      while (seq != null &&
+          index < pending.length &&
+          pending[index].globalSeq! < seq) {
+        merged.add(pending[index++]);
+      }
+      merged.add(event);
+    }
+    merged.addAll(pending.skip(index));
+    return merged;
+  }
+
+  void _resetVisualizations() {
+    _visualizationRecovery?.stop();
+    _visualizationRecovery = null;
+    _visualizationTimer?.cancel();
+    _visualizationTimer = null;
+    _visualizations.clear();
+    final groupId = _groupId;
+    if (groupId == null || _disposed) return;
+    _visualizationRecovery = VisualizationRecovery(
+      groupId: groupId,
+      fetch: (after, through) =>
+          _api.visualizationEvents(groupId, after: after, through: through),
+      save: (items) {
+        if (_disposed || _groupId != groupId) return;
+        for (final event in items) {
+          _visualizations[event.eventId] = event;
+        }
+        if (items.isNotEmpty) _emit();
+      },
+      clear: () {
+        _visualizations.clear();
+        _emit();
+      },
+    );
+    setVisualizationForeground(_visualizationForeground);
+  }
+
+  /// 由宿主生命周期驱动；后台不轮询，回前台立即补齐。
+  void setVisualizationForeground(bool foreground) {
+    _visualizationForeground = foreground;
+    _visualizationTimer?.cancel();
+    _visualizationTimer = null;
+    if (!foreground || _disposed || _visualizationRecovery == null) return;
+    _refreshVisualizations();
+    _visualizationTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _refreshVisualizations(),
+    );
+  }
+
+  void _refreshVisualizations() {
+    if (!_visualizationForeground || _disposed) return;
+    unawaited(
+      _visualizationRecovery?.refresh().catchError((Object _) {
+            // 失败保留原水位，下一次对账重试。
+          }) ??
+          Future<void>.value(),
+    );
+  }
 
   /// 乐观回显 eventId 的单调计数（见 [injectLocalUserMessage] 里的碰撞说明）。
   int _echoSeq = 0;
@@ -479,7 +564,7 @@ class ChatStreamController {
 
   ReductionResult get _reduction {
     if (_reductionDirty || _cachedReduction == null) {
-      _cachedReduction = EventReducer.reduce(_buffer);
+      _cachedReduction = EventReducer.reduce(_eventsWithVisualizations());
       _reductionDirty = false;
     }
     return _cachedReduction!;
@@ -869,6 +954,7 @@ class ChatStreamController {
       // （设计文档 §7bis.7）。比轮询准确，也比「有默认路由」更接近
       // 「服务端可达」这个真正关心的条件。
       if (s == SseState.connected) {
+        _refreshVisualizations();
         unawaited(_outbox?.onConnectivityRestored() ?? Future<void>.value());
         // 断线期间错过的 `token_usage` 事件若不在回放窗口内，本地增量会偏小；
         // 重连即向服务端对一次账（成功才覆盖，失败保留本地读数）。同取向：
@@ -924,7 +1010,8 @@ class ChatStreamController {
   /// 置脏要在 `_emit()` **之前**：`_emit` 有 `_itemsController.isClosed` 的早退
   /// 分支，控制器已关闭时至少要保证 `snapshot` 不再返回旧归约。
   void _clearTimelineAndEmit() {
-    final hadTimeline = _buffer.isNotEmpty;
+    final hadTimeline = _buffer.isNotEmpty || _visualizations.isNotEmpty;
+    _resetVisualizations();
     _buffer.clear();
     _reductionDirty = true;
     if (hadTimeline) _emit();
@@ -1465,6 +1552,12 @@ class ChatStreamController {
     _reductionDirty = true;
     if (_coalesceIntoTail(event)) return;
     _buffer.add(event);
+    if (event.eventType == EventTypes.visualizationPublished) {
+      if (!event.transient && (event.globalSeq ?? 0) > 0) {
+        _visualizations[event.eventId] = event;
+      }
+      _refreshVisualizations();
+    }
     // 合并路径不会走到这里，而增量事件本就没有 globalSeq——故只需在真正
     // 追加时更新一次。
     _noteMaxGlobalSeq([event]);
@@ -2455,6 +2548,9 @@ class ChatStreamController {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _visualizationRecovery?.stop();
+    _visualizationTimer?.cancel();
+    _visualizations.clear();
     // 丢弃挂起的合并（其计时器回调会因控制器已关而提前返回）。
     _emitTimer?.cancel();
     _emitTimer = null;

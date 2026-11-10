@@ -573,6 +573,19 @@ class EventReducer {
           //     `writeConfirmationExpired`，由 TTL 回收触发）。
           _markConfirmationResolved(items, ev.turnId);
 
+        case EventTypes.visualizationPublished:
+          if (!items.any((item) => item.id == ev.eventId)) {
+            items.add(
+              VisualizationItem(
+                id: ev.eventId,
+                createdAt: ev.createdAt,
+                turnId: ev.turnId,
+                groupId: ev.groupId,
+                reference: VisualizationPublished.fromJson(ev.payload ?? {}),
+              ),
+            );
+          }
+
         case EventTypes.followUpSuggested:
           final suggestions = ev.followUpSuggestions;
           if (suggestions.isNotEmpty) {

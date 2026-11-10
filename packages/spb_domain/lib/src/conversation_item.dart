@@ -30,6 +30,19 @@ sealed class ConversationItem {
   final String turnId;
 }
 
+/// 只保存不可变版本引用，正文由 UI 按需加载。
+final class VisualizationItem extends ConversationItem {
+  const VisualizationItem({
+    required super.id,
+    required super.createdAt,
+    super.turnId,
+    required this.groupId,
+    required this.reference,
+  });
+  final String groupId;
+  final VisualizationPublished reference;
+}
+
 /// 用户发出的消息。
 final class UserMessageItem extends ConversationItem {
   const UserMessageItem({

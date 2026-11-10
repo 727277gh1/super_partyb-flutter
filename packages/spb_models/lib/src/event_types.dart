@@ -272,6 +272,7 @@ class EventTypes {
   // 除判定本集合外，还判定 `eventType.startsWith(agentFilePrefix)`——
   // 故本集合不含任何 `agent.file.*`，避免「既在集合里又被前缀覆盖」的冗余。
   static const Set<String> timelineVisible = {
+    visualizationPublished,
     userMessage,
     start,
     message,

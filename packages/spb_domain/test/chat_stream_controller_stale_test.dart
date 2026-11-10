@@ -466,7 +466,11 @@ void main() {
         ]);
 
         expect(c.snapshot, hasLength(2));
-        expect(async.pendingTimers, isEmpty, reason: '已终结的历史对话不得武装看门狗');
+        expect(
+          async.pendingTimers.where((timer) => !timer.isPeriodic),
+          isEmpty,
+          reason: '已终结的历史对话不得武装看门狗；可视化对账仍定期运行',
+        );
 
         async.elapse(timeout + const Duration(seconds: 1));
         expect(c.staleTurnIdsSnapshot, isEmpty, reason: '不得把所有历史对话都判成「仍在跑」');
@@ -508,7 +512,11 @@ void main() {
           ),
         );
 
-        expect(async.pendingTimers, isEmpty, reason: '终态到达后应取消计时器');
+        expect(
+          async.pendingTimers.where((timer) => !timer.isPeriodic),
+          isEmpty,
+          reason: '终态到达后应取消看门狗，保留可视化对账',
+        );
         expect(c.staleTurnIdsSnapshot, isEmpty);
 
         c.dispose();
