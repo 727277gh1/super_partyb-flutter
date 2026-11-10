@@ -18,6 +18,48 @@
 保存后下一轮生效，所有会话共用。Go API 在有群工作区的 pigo 执行链注入 `spec_json`
 reminder，Agent 按任务需要生成 `.spec.json`；Flutter 复用现有只读文件预览。
 
+### 持久化可视化 Artifact（协议已接入，UI 待接入）
+
+服务端发布开关 `VISUALIZATION_PUBLISH_ENABLED` 默认关闭。`spb_models` 已识别
+`visualization.published` 并提供手写 DTO；时间线渲染、REST 客户端与独立恢复消费者
+尚未接入，不能将已知事件类型视为 UI 已支持。上面的文件预览链路仍是当前展示路径。
+
+客户端使用登录身份，路由前缀为 `/chat/groups/:group_id`，不使用 Agent API Key：
+
+| GET 路径（接在上述前缀后） | 结果 |
+|---|---|
+| `/visualizations?artifact_key=...&cursor=...&limit=20` | `{items,next_cursor}`，固定 created_at/id 倒序摘要，key 精确匹配，limit 1–100 |
+| `/visualizations/:artifact_id` | 最新版本 DTO，仅用于列表/详情刷新 |
+| `/visualizations/:artifact_id/revisions/:revision` | 不可变版本的内容 DTO，历史事件必须读取此接口 |
+| `/visualization-events?after_global_seq=0&limit=100` | 独立恢复页，limit 1–200 |
+
+跨用户或跨 group 返回 404；版本读取先鉴权再处理 `If-None-Match`，ETag 绑定
+content_hash、artifact_id 和 revision，相同内容的新版本也有不同 ETag。
+缓存为 `private, no-cache`，客户端缓存键至少包含用户、group、Artifact 和 revision。
+
+SSE envelope 沿用 camelCase（`eventId/groupId/turnId/eventType/globalSeq`），payload
+统一为 snake_case：
+
+```json
+{"event_version":1,"artifact_id":"viz_...","artifact_key":"sales","revision":2,"profile":"partyb.readonly","schema_version":1,"title":"销售趋势","summary":"金额单位为元"}
+```
+
+事件不带 Spec；完整 revision DTO 带以上内容字段（不含 event_version）、group_id、
+turn_id、event_id、content_hash、created_at、status、spec，以及可选 data_as_of/sources。
+未知 event_version/profile/schema_version 保留摘要并提示不支持，不按 v1 解析。
+
+恢复页 `{items,through_global_seq,next_after_global_seq,has_more}` 中的 items 使用
+snake_case envelope（event_id/group_id/turn_id/event_type/seq/global_seq/source/created_at/payload），
+不带 user_id；当前登录身份就是读取边界。首次请求固定高水位 through_global_seq，
+后续页原样携带该参数，after_global_seq 使用上一页的 next_after_global_seq。
+客户端只有在成功保存本页事件后才能推进恢复游标；完成后新一轮省略 through 参数。
+即使 items 为空也使用服务端返回的水位。409 `cursor_reset_required` 表示水位超出
+当前服务端范围，需要从 0 重建缓存；400 `invalid_cursor` 表示参数无效。
+
+Outbox 至少一次投递，SSE、回放和恢复页可能重复或乱序到达；按 eventId 去重、
+globalSeq 排序，不能用普通 SSE 游标代替独立恢复水位。服务端目前为单进程 Broker，
+多实例实时广播需增加共享总线；持久化恢复接口提供最终补齐。
+
 ### 5.1 认证模型
 
 **客户端不解析 JWT、不申请 API Key。**

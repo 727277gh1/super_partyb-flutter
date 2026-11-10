@@ -1,4 +1,5 @@
 import 'event_types.dart';
+import 'visualization.dart';
 
 /// 聊天事件（SSE 推送与持久化共用）。
 ///
@@ -84,6 +85,12 @@ class ChatEvent {
   /// 是否为权威帧（完整快照，应替换累积的增量文本）。
   bool get isAuthoritativeFrame =>
       !transient && EventTypes.streamIncremental.contains(eventType);
+
+  /// 事件与 Schema 版本由 DTO 显式保留，未知版本交给调用方降级展示摘要。
+  VisualizationPublished? get visualization =>
+      eventType == EventTypes.visualizationPublished && payload != null
+      ? VisualizationPublished.fromJson(payload!)
+      : null;
 
   // ---------- payload 访问器 ----------
   //

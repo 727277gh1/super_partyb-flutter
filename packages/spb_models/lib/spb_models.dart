@@ -50,3 +50,4 @@ export 'src/miniapp.dart';
 export 'src/pagination.dart';
 export 'src/ufs_file_entry.dart';
 export 'src/user_preferences.dart';
+export 'src/visualization.dart';

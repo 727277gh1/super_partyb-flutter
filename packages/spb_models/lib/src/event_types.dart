@@ -209,11 +209,15 @@ class EventTypes {
   /// `SUM(json_extract(...))`），不是把事件加起来（缓冲有上限、会裁掉旧的）。
   static const tokenUsage = 'token_usage';
 
+  /// 不可变可视化版本已发布；渲染与恢复消费者另行接入。
+  static const visualizationPublished = 'visualization.published';
+
   /// 本客户端已知的全部事件类型。
   ///
   /// 新增事件时同步加进来；[ChatEvent.isKnown] 依赖它区分「服务端发了新事件」
   /// 与「契约漂移导致解析失败」。
   static const Set<String> all = {
+    visualizationPublished,
     tokenUsage,
     start,
     message,
