@@ -52,6 +52,9 @@ coverage/
 *.swo
 
 # ---- 平台构建产物 ----
+# `.kotlin/` 是 Kotlin 2.x 编译器进程的本地状态（`sessions/*.salive` 是「守护进程存活」标记，
+# 常为空文件或记录本机 PID），与 `.gradle/` 同类：换机器就没有意义，提交只会每次构建都变脏。
+apps/*/android/.kotlin/
 apps/*/android/.gradle/
 apps/*/android/local.properties
 apps/*/android/app/debug/
@@ -86,3 +89,17 @@ key.properties
 # pi harness 的目标追踪文件（objective / journal / task cursor），
 # 属本机会话状态而非项目源码，不入库。
 .pi/
+
+# AI Agent 技能（由外部 skills 仓库 git@git.atjog.com:aier/skills 安装到本机）
+#
+# 各 harness 的 skills 目录只是**本机安装副本**，不是项目源码：内容随安装版本漂移，
+# 提交后会和上游仓库变成两份各自演进的副本。需要技能就在本机跑安装命令。
+# `.skill-lock.json` 是安装清单（含 sourceUrl / computedHash），同属本机状态，不入库。
+.agents/
+.claude/
+.cursor/
+.gemini/
+.opencode/
+.codex/
+.github/skills/
+.skill-lock.json
