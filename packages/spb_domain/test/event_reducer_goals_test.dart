@@ -351,7 +351,7 @@ void main() {
       expect(item.reason, 'done');
       expect(item.autoTurnCount, 2);
       expect(item.maxAutoTurns, 5);
-      expect(item.userText, '将在 30 秒后自动继续（第 2/5 轮）');
+      expect(item.userText, '「自动实现目标」将在 30 秒后继续执行（第 2/5 轮）');
     });
 
     test('缺 delay_seconds 时仍产出，且**不编造秒数**', () {
@@ -363,7 +363,7 @@ void main() {
 
       final item = r.items.single as ScheduleCreatedItem;
       expect(item.delaySeconds, isNull);
-      expect(item.userText, '已排入下一轮自动继续');
+      expect(item.userText, '「自动实现目标」已安排下一轮执行');
       expect(item.userText, isNot(contains('秒')));
     });
 
@@ -372,7 +372,10 @@ void main() {
         ev(EventTypes.scheduleCreated, payload: {'delay_seconds': 45}),
       ]);
 
-      expect((r.items.single as ScheduleCreatedItem).userText, '将在 45 秒后自动继续');
+      expect(
+        (r.items.single as ScheduleCreatedItem).userText,
+        '「自动实现目标」将在 45 秒后继续执行',
+      );
     });
 
     test('只有上限没有已推进数时退化为「上限 N 轮」', () {
@@ -385,7 +388,7 @@ void main() {
 
       expect(
         (r.items.single as ScheduleCreatedItem).userText,
-        '将在 10 秒后自动继续（上限 5 轮）',
+        '「自动实现目标」将在 10 秒后继续执行（上限 5 轮）',
       );
     });
 
@@ -431,8 +434,8 @@ void main() {
       expect(item, isA<GoalGateStoppedItem>());
       final s = item as GoalGateStoppedItem;
       expect(s.reason, 'goal_completed');
-      expect(s.message, '目标已实现，自动推进已停用');
-      expect(s.turnCountLabel, '已自动推进 3 轮');
+      expect(s.message, '目标已实现，「自动实现目标」已关闭');
+      expect(s.turnCountLabel, '「自动实现目标」已执行 3 轮');
     });
 
     test('七种 reason 的文案与 miniapp 逐条一致', () {
@@ -441,13 +444,13 @@ void main() {
       // planning_stalled / goal_not_active 是滚动规划改造（2026-10）新增的
       // 停止原因；no_tasks 已不再产生，保留映射兼容历史事件。
       const expected = {
-        'goal_completed': '目标已实现，自动推进已停用',
-        'max_auto_turns_reached': '已达自动推进轮次上限，发送新消息后可继续',
-        'planning_stalled': '连续规划未产出任务，自动推进已暂停，需人工介入',
-        'goal_not_active': '目标已暂停或归档，自动推进已停用',
-        'no_tasks': '目标尚无任务列表，请先拆解任务后再启用自动推进',
-        'task_blocked': '存在受阻任务，自动推进已暂停，需人工介入',
-        'task_error_stopped': '存在出错停止的任务，自动推进已暂停，需人工介入',
+        'goal_completed': '目标已实现，「自动实现目标」已关闭',
+        'max_auto_turns_reached': '「自动实现目标」已达自动轮次上限，发送新消息可恢复',
+        'planning_stalled': '连续规划未产出任务，「自动实现目标」已暂停，需人工介入',
+        'goal_not_active': '目标已暂停或归档，「自动实现目标」已停止',
+        'no_tasks': '目标尚无任务列表，请先拆解任务后再启用「自动实现目标」',
+        'task_blocked': '存在受阻任务，「自动实现目标」已暂停，需人工介入',
+        'task_error_stopped': '存在出错停止的任务，「自动实现目标」已暂停，需人工介入',
       };
       for (final entry in expected.entries) {
         final r = EventReducer.reduce([
@@ -469,7 +472,7 @@ void main() {
       expect(r.items, hasLength(1));
       expect(
         (r.items.single as GoalGateStoppedItem).message,
-        '自动推进已停止',
+        '「自动实现目标」已停止',
         reason: '服务端新增原因时不能什么都不显示',
       );
     });
@@ -480,7 +483,7 @@ void main() {
       expect(r.items, hasLength(1));
       final s = r.items.single as GoalGateStoppedItem;
       expect(s.reason, '');
-      expect(s.message, '自动推进已停止');
+      expect(s.message, '「自动实现目标」已停止');
       expect(s.turnCountLabel, isNull, reason: '无计数时不渲染轮次行');
     });
 
@@ -492,11 +495,11 @@ void main() {
                   as GoalGateStoppedItem)
               .turnCountLabel;
 
-      expect(label({'auto_turn_count': 2}), '已自动推进 2 轮');
+      expect(label({'auto_turn_count': 2}), '「自动实现目标」已执行 2 轮');
       expect(label({'max_auto_turns': 10}), '上限 10 轮');
       expect(
         label({'auto_turn_count': 2, 'max_auto_turns': 10}),
-        '已自动推进 2/10 轮',
+        '「自动实现目标」已执行 2/10 轮',
       );
       expect(label({}), isNull);
     });

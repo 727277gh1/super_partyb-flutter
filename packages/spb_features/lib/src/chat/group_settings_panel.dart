@@ -320,14 +320,14 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
         _switchRow(
           key: const ValueKey('group-goal-gate-switch'),
           title: '自动实现目标',
-          subtitle: '开启后，Agent 会持续自动续跑直到目标达成',
+          subtitle: '开启后，Agent 会按任务列表自动执行，直到目标达成或需要你介入',
           value: enabled,
           onChanged: (onToggle == null || !canToggle) ? null : onToggle,
         ),
         if (!_hasGoal)
           _hint(
             context,
-            '请先设置目标',
+            '请先填写目标，再开启「自动实现目标」',
             key: const ValueKey('group-goal-gate-needs-goal'),
           ),
         if (onSaveTurns != null) ...[
@@ -359,7 +359,7 @@ class _GroupSettingsPanelState extends State<GroupSettingsPanel> {
               ),
             ],
           ),
-          _hint(context, '达到上限后自动续跑暂停，发一条新消息即可恢复'),
+          _hint(context, '「自动实现目标」达到自动轮次上限后暂停，发送新消息可恢复'),
         ],
       ],
     );

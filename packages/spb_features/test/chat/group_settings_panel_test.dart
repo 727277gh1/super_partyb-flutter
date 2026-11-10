@@ -231,7 +231,7 @@ void main() {
         find.byKey(const ValueKey('group-goal-gate-needs-goal')),
         findsOneWidget,
       );
-      expect(find.text('请先设置目标'), findsOneWidget);
+      expect(find.text('请先填写目标，再开启「自动实现目标」'), findsOneWidget);
       expect(switchEnabled(tester, 'group-goal-gate-switch'), isFalse);
     });
 

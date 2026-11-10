@@ -220,7 +220,7 @@ void main() {
         () => useCase.toggleGoalGate('grp_1', true),
         throwsA(
           isA<GroupSettingsFailure>()
-              .having((e) => e.message, 'message', '请先设置目标，再开启自动实现目标')
+              .having((e) => e.message, 'message', '请先填写目标，再开启「自动实现目标」')
               // 原始错误必须保留（供日志/诊断）。
               .having((e) => e.cause, 'cause', isA<HttpError>()),
         ),
@@ -327,7 +327,7 @@ void main() {
             body: '{error: goal_required, message: 开启「自动实现目标」前请先设置目标}',
           ),
         ),
-        '请先设置目标，再开启自动实现目标',
+        '请先填写目标，再开启「自动实现目标」',
       );
       expect(
         describeGroupSettingsError(

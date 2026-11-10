@@ -189,7 +189,51 @@ void main() {
         find.byKey(const ValueKey('auto-schedules-stop-all')),
       );
       expect(btn.onPressed, isNotNull);
-      expect(find.text('停用全部待触发（2）'), findsOneWidget);
+      expect(find.text('停用「自动实现目标」待执行计划（2）'), findsOneWidget);
+    });
+
+    testWidgets('目标与重试计划混合时，只统计可停用的目标计划', (tester) async {
+      useStubs(
+        initial: [
+          pending('sch_goal'),
+          ChatTurnSchedule.fromJson({
+            ...scheduleJson(id: 'sch_retry', message: '重试上一轮'),
+            'dedupe_key': 'retry:t_1',
+          }),
+        ],
+      );
+      await pumpPanel(tester);
+
+      expect(find.text('执行计划（2）'), findsOneWidget);
+      expect(find.text('重试上一轮'), findsOneWidget);
+      expect(find.text('停用「自动实现目标」待执行计划（1）'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('auto-schedules-stop-all')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('只有重试计划时仍展示列表，但停用按钮禁用', (tester) async {
+      useStubs(
+        initial: [
+          ChatTurnSchedule.fromJson({
+            ...scheduleJson(message: '重试上一轮'),
+            'dedupe_key': 'retry:t_1',
+          }),
+        ],
+      );
+      await pumpPanel(tester);
+
+      expect(find.text('重试上一轮'), findsOneWidget);
+      final button = find.byKey(const ValueKey('auto-schedules-stop-all'));
+      expect(tester.widget<FilledButton>(button).onPressed, isNull);
+      await tester.tap(button);
+      await tester.pump();
+      expect(stopCalls, 0);
     });
 
     testWidgets('全部已停用 → 禁用', (tester) async {
@@ -410,13 +454,13 @@ void main() {
       await tester.pump();
 
       expect(
-        find.text('已停用 2 个自动续跑排程'),
+        find.text('已停用 2 个「自动实现目标」执行计划'),
         findsOneWidget,
         reason: '条数是服务端 disabled_count 的权威回执，不能静默',
       );
     });
 
-    testWidgets('disabledCount == 0 → 「没有在途的自动续跑排程」（不是「已停用 0 个」）', (
+    testWidgets('disabledCount == 0 → 「没有待执行的「自动实现目标」计划」（不是「已停用 0 个」）', (
       tester,
     ) async {
       // 并发场景：列表回读时仍是 pending（另一端在点击后才停用），
@@ -433,7 +477,7 @@ void main() {
       await tester.pump();
 
       expect(
-        find.text('没有在途的自动续跑排程'),
+        find.text('没有待执行的「自动实现目标」计划'),
         findsOneWidget,
         reason: '「已停用 0 个」会像功能坏了；「没有在途」是有效结论',
       );

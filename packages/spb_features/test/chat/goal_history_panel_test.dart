@@ -337,7 +337,9 @@ void main() {
       expect(loadCalls, 2, reason: '不回读会留下与真相不符的列表');
     });
 
-    testWidgets('勾选「创建后自动推进」时回调收到 autoStart=true（Go 040855fe）', (tester) async {
+    testWidgets('勾选“创建后开启「自动实现目标」”时回调收到 autoStart=true（Go 040855fe）', (
+      tester,
+    ) async {
       useStubs(initial: [goal('goal_1')]);
       await pumpPanel(tester, currentGoalId: 'goal_1', wireCreate: true);
 

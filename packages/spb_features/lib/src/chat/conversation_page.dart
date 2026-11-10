@@ -3410,11 +3410,13 @@ class _ScheduleCreatedNotice extends StatelessWidget {
             color: scheme.onSurfaceVariant,
           ),
           const SizedBox(width: SpbSpacing.xs),
-          Text(
-            item.userText,
-            textAlign: TextAlign.center,
-            style: SpbType.listMeta(textTheme)
-                ?.copyWith(color: scheme.onSurfaceVariant),
+          Flexible(
+            child: Text(
+              item.userText,
+              textAlign: TextAlign.center,
+              style: SpbType.listMeta(textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
           ),
         ],
       ),

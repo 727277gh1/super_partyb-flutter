@@ -256,8 +256,8 @@ void main() {
         findsOneWidget,
         reason: 'goal_gate_stopped 必须渲染（此前落到 default 被静默丢弃）',
       );
-      expect(find.text('已达自动推进轮次上限，发送新消息后可继续'), findsOneWidget);
-      expect(find.text('已自动推进 5/5 轮'), findsOneWidget);
+      expect(find.text('「自动实现目标」已达自动轮次上限，发送新消息可恢复'), findsOneWidget);
+      expect(find.text('「自动实现目标」已执行 5/5 轮'), findsOneWidget);
     });
 
     testWidgets('目标达成用中性样式，不误渲染为错误卡', (tester) async {
@@ -275,7 +275,7 @@ void main() {
         ),
       );
 
-      expect(find.text('目标已实现，自动推进已停用'), findsOneWidget);
+      expect(find.text('目标已实现，「自动实现目标」已关闭'), findsOneWidget);
       // goal_completed 是**成功终态**，用错误红底会让用户以为失败了。
       expect(find.byType(Card), findsNothing);
       expect(tester.takeException(), isNull);
@@ -283,7 +283,9 @@ void main() {
   });
 
   group('ConversationPage 自动续跑排程（schedule_created）', () {
-    testWidgets('渲染「多久后继续」与轮次进度', (tester) async {
+    testWidgets('窄屏完整渲染「自动实现目标」的执行时间与轮次进度', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(320, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       mockTimeline();
       await startController(tester);
       await pumpPage(tester);
@@ -311,7 +313,8 @@ void main() {
         findsOneWidget,
         reason: 'schedule_created 必须渲染（此前落到 default 被静默丢弃）',
       );
-      expect(find.text('将在 30 秒后自动继续（第 2/5 轮）'), findsOneWidget);
+      expect(find.text('「自动实现目标」将在 30 秒后继续执行（第 2/5 轮）'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('缺 delay_seconds 时不编造秒数', (tester) async {
@@ -329,7 +332,7 @@ void main() {
         find.byKey(const ValueKey('schedule-created-notice')),
         findsOneWidget,
       );
-      expect(find.text('已排入下一轮自动继续'), findsOneWidget);
+      expect(find.text('「自动实现目标」已安排下一轮执行'), findsOneWidget);
       // 兜底文案里不能出现任何秒数（编造的时间会让用户真的去等它）。
       expect(find.textContaining('秒'), findsNothing);
     });

@@ -511,7 +511,7 @@ void main() {
       expect(find.text('weekly report'), findsOneWidget);
     });
   });
-  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 续跑 / 动态）', () {
+  group('侧边栏（桌面端接线：交付物 / 待办 / 目标 / 任务 / 执行计划 / 动态）', () {
     /// 进入对话页并补齐必要的 mock（/me + timeline + pending）。返回 fake UFS API
     /// 以观察侧边栏的取数。
     Future<FakeUfsApi> openChat(
@@ -610,7 +610,7 @@ void main() {
       expect(find.text('交付物'), findsNothing);
     });
 
-    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 续跑 / 动态）', (
+    testWidgets('展开后各 tab 齐全（交付物 / 待办 / 设置 / 目标 / 任务 / 执行计划 / 动态）', (
       tester,
     ) async {
       final sse = FakeSseClient();
@@ -624,8 +624,8 @@ void main() {
       // 标签自然换行，尾部入口也必须在可见范围内。
       await revealTab(tester, '目标');
       expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
-      await revealTab(tester, '续跑');
-      expect(find.byKey(const ValueKey('sidebar-tab-续跑')), findsOneWidget);
+      await revealTab(tester, '执行计划');
+      expect(find.byKey(const ValueKey('sidebar-tab-执行计划')), findsOneWidget);
       await revealTab(tester, '动态');
       expect(find.byKey(const ValueKey('sidebar-tab-动态')), findsOneWidget);
     });

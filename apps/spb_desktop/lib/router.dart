@@ -2093,7 +2093,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           //
                           // `tasksSource: manual` 必须显式传：它决定重新展开时能否
                           // 覆盖任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
-                          // `autoStart` 来自新建对话框的「创建后自动推进」勾选
+                          // `autoStart` 来自新建对话框的“创建后开启「自动实现目标」”勾选
                           //（Go 040855fe 的 auto_start，非 null 即提交）。
                           onCreate: (goalText, {autoStart = false}) =>
                               _runGoalWrite(
@@ -2178,7 +2178,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           ),
                         ),
                       ),
-                      // 续跑 tab：查看 / 停用 Goal Gate 自动续跑排程。
+                      // 执行计划 tab：查看计划，停用「自动实现目标」待执行计划。
                       //
                       // ## 为什么与「任务」分开而不是并入
                       //
@@ -2187,7 +2187,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                       // 「还剩什么事」，后者回答「它接下来还要自己跑几次、怎么叫停」
                       // ——不同实体、不同端点、不同时间方向（将来时 vs 现在时）。
                       ChatSidebarTab(
-                        label: '续跑',
+                        label: '执行计划',
                         icon: Icons.schedule_outlined,
                         content: AutoSchedulesPanel(
                           // 列表是独立端点（`GET /api/chat/groups/:id/auto-schedules`），
@@ -2199,7 +2199,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                           onStopAll: () => ref
                               .read(autoSchedulesUseCaseProvider)
                               .stopAll(widget.groupId),
-                          // tab 标签已命名「续跑」，不重复面板标题。
+                          // tab 标签已命名「执行计划」，不重复面板标题。
                           showHeader: false,
                           // 切对话时重拉（Flutter 会复用面板 State）。
                           reloadToken: widget.groupId,

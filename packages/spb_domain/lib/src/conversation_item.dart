@@ -501,37 +501,36 @@ final class GoalGateStoppedItem extends ConversationItem {
   /// webapp 时间线。漏映射不会报错——只会退化成下面的兜底文案，用户看不出
   /// 「规划推不动」与「目标已暂停」的区别（miniapp `7a952437` 修的正是这个）。
   ///
-  /// 兜底文案（未识别 reason）**不吞掉原因本身**：保留「自动推进已停止」
-  /// 作为结论，让用户至少知道当前状态，而不是什么都不显示。
+  /// 未识别 reason 时仍说明「自动实现目标」已停止，让用户知道当前状态。
   String get message {
     switch (reason) {
       case 'goal_completed':
-        return '目标已实现，自动推进已停用';
+        return '目标已实现，「自动实现目标」已关闭';
       case 'max_auto_turns_reached':
-        return '已达自动推进轮次上限，发送新消息后可继续';
+        return '「自动实现目标」已达自动轮次上限，发送新消息可恢复';
       case 'planning_stalled':
-        return '连续规划未产出任务，自动推进已暂停，需人工介入';
+        return '连续规划未产出任务，「自动实现目标」已暂停，需人工介入';
       case 'goal_not_active':
-        return '目标已暂停或归档，自动推进已停用';
+        return '目标已暂停或归档，「自动实现目标」已停止';
       case 'no_tasks':
-        return '目标尚无任务列表，请先拆解任务后再启用自动推进';
+        return '目标尚无任务列表，请先拆解任务后再启用「自动实现目标」';
       case 'task_blocked':
-        return '存在受阻任务，自动推进已暂停，需人工介入';
+        return '存在受阻任务，「自动实现目标」已暂停，需人工介入';
       case 'task_error_stopped':
-        return '存在出错停止的任务，自动推进已暂停，需人工介入';
+        return '存在出错停止的任务，「自动实现目标」已暂停，需人工介入';
       default:
-        return '自动推进已停止';
+        return '「自动实现目标」已停止';
     }
   }
 
-  /// 轮次进度文案（`已自动推进 3/10 轮`）；两个计数都缺时返回 null。
+  /// 轮次进度文案（`「自动实现目标」已执行 3/10 轮`）；两个计数都缺时返回 null。
   String? get turnCountLabel {
     final count = autoTurnCount;
     final max = maxAutoTurns;
     if (count == null && max == null) return null;
     if (count == null) return '上限 $max 轮';
-    if (max == null) return '已自动推进 $count 轮';
-    return '已自动推进 $count/$max 轮';
+    if (max == null) return '「自动实现目标」已执行 $count 轮';
+    return '「自动实现目标」已执行 $count/$max 轮';
   }
 }
 
@@ -570,7 +569,7 @@ final class ScheduleCreatedItem extends ConversationItem {
   /// 距下次自动继续的秒数（`payload.delay_seconds`）。
   ///
   /// 可为 null（异常载荷）：此时文案**不编造秒数**，退化为
-  /// 「已排入下一轮自动继续」（见 [userText]）。
+  /// `「自动实现目标」已安排下一轮执行`（见 [userText]）。
   final int? delaySeconds;
 
   /// 排程原因（`payload.reason`）。生产实测值为 `done`（上一轮正常结束）。
@@ -589,7 +588,7 @@ final class ScheduleCreatedItem extends ConversationItem {
   ///
   /// ## 为什么不编造秒数
   ///
-  /// [delaySeconds] 缺失时只说「已排入下一轮自动继续」，**不**兜底成「30 秒」
+  /// [delaySeconds] 缺失时只说已安排下一轮执行，**不**兜底成「30 秒」
   /// 之类。一个编造的时间会让用户真的去等它，而实际触发时刻无人知道——
   /// 宁可少说，不可说错（同 [GoalGateStoppedItem.message] 的兜底取向）。
   ///
@@ -601,11 +600,13 @@ final class ScheduleCreatedItem extends ConversationItem {
     final progress = _turnProgress;
     final delay = delaySeconds;
     if (delay == null) {
-      return progress == null ? '已排入下一轮自动继续' : '已排入下一轮自动继续（$progress）';
+      return progress == null
+          ? '「自动实现目标」已安排下一轮执行'
+          : '「自动实现目标」已安排下一轮执行（$progress）';
     }
     return progress == null
-        ? '将在 $delay 秒后自动继续'
-        : '将在 $delay 秒后自动继续（$progress）';
+        ? '「自动实现目标」将在 $delay 秒后继续执行'
+        : '「自动实现目标」将在 $delay 秒后继续执行（$progress）';
   }
 
   /// 轮次进度（`第 2/5 轮`）；两个计数都缺时返回 null。

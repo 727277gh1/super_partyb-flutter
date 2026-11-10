@@ -136,7 +136,7 @@ String describeGroupSettingsError(SpbError error) {
     // `goal_required` 是机器码，不一定出现在 `message` 里，故先按 body 整体匹配。
     if (error.statusCode == 400 &&
         (error.body?.contains('goal_required') ?? false)) {
-      return '请先设置目标，再开启自动实现目标';
+      return '请先填写目标，再开启「自动实现目标」';
     }
     final detail = _errorDetail(error.body);
     if (error.statusCode == 400) {

@@ -774,7 +774,7 @@ class _UserPreferencesCardState extends State<UserPreferencesCard> {
         switchRow(
           const ValueKey('pref-goal-discovery'),
           '目标发现',
-          '对话还没有目标时，Agent 发现值得跨轮推进的事会先向你提议（经你确认才建立目标）',
+          '对话还没有目标时，Agent 会先提议，经你确认才建立目标并开启「自动实现目标」',
           goalDiscovery,
           saved.goalDiscoveryAvailable,
           (v) => setState(() => _goalDiscovery = v),

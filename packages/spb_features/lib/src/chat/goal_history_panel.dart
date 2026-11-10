@@ -25,7 +25,7 @@ typedef SetGoalStatus = Future<void> Function(String goalId, GoalStatus status);
 /// 面板不掌握「当前是哪个 group」，也不该替用户选 `tasks_source`（见
 /// [GoalHistoryPanel.onCreate] 的说明）。
 ///
-/// `autoStart`：用户在新建对话框里勾选「创建后自动推进」时为 true（默认
+/// `autoStart`：用户在新建对话框里勾选“创建后开启「自动实现目标」”时为 true（默认
 /// false，服务端缺省同为 false）。对接 Go `040855fe` 的 `auto_start`：
 /// 一次调用完成「建 goal + 开 goal_gate」，避免两请求间出现
 /// 「goal 已存在但 gate 未开」的中间态。用**命名可选参**而不是把布尔
@@ -435,7 +435,7 @@ class CreateGoalDraft {
   /// 用户填写的目标文本（已 trim）。
   final String goalText;
 
-  /// 是否勾选「创建后自动推进」（服务端 `auto_start`，缺省 false）。
+  /// 是否勾选“创建后开启「自动实现目标」”（服务端 `auto_start`，缺省 false）。
   final bool autoStart;
 }
 
@@ -524,9 +524,9 @@ class _CreateGoalDialogState extends State<_CreateGoalDialog> {
             controlAffinity: ListTileControlAffinity.leading,
             dense: true,
             contentPadding: EdgeInsets.zero,
-            title: const Text('创建后自动推进'),
+            title: const Text('创建后开启「自动实现目标」'),
             subtitle: Text(
-              '开启 goal_gate，任务未完成时自动继续下一轮',
+              'Agent 会按任务列表自动执行，直到目标达成或需要你介入',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),

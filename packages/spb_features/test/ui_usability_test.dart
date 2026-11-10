@@ -139,7 +139,7 @@ void main() {
       tester.binding.platformDispatcher.clearTextScaleFactorTestValue,
     );
     final semantics = tester.ensureSemantics();
-    const labels = ['交付物', '待办', '设置', '目标', '任务', '续跑', '动态'];
+    const labels = ['交付物', '待办', '设置', '目标', '任务', '执行计划', '动态'];
     await tester.pumpWidget(
       MaterialApp(
         theme: SpbTheme.lightFor(TargetPlatform.linux),

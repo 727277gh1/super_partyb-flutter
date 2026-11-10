@@ -120,13 +120,13 @@ final class AutoSchedulesFailure implements Exception {
 /// 把 [SpbError] 翻译成用户能看懂的一句话。
 ///
 /// 复用 `GroupSettingsUseCase` 的翻译（同一套 `/chat/*` 端点的错误形态），
-/// 但把「设置」换成「自动续跑」——文案里的名词必须与被操作的实体一致，
+/// 但把「设置」换成「执行计划」——文案里的名词必须与被操作的实体一致，
 /// 否则用户会去找一个不存在的「设置」。
 String describeAutoSchedulesError(SpbError error) {
   if (error is AuthError && error.isUnauthorized) return '登录已过期，请重新登录';
-  if (error is AuthError && error.isForbidden) return '没有权限管理这个对话的自动续跑';
+  if (error is AuthError && error.isForbidden) return '没有权限管理这个对话的执行计划';
   if (error is HttpError) {
-    if (error.isForbidden) return '没有权限管理这个对话的自动续跑';
+    if (error.isForbidden) return '没有权限管理这个对话的执行计划';
     if (error.isNotFound) return '这个对话已不存在，请返回列表刷新';
     if (error.isConflict) return '排程状态已变化，请刷新后重试';
     if (error.isRateLimited) return '操作太频繁，请稍后再试';

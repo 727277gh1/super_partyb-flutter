@@ -6,12 +6,12 @@ import 'package:spb_models/spb_models.dart';
 
 import 'auto_schedules.dart';
 
-/// 加载当前 group 的自动续跑排程列表。
+/// 加载当前 group 的执行计划列表（含目标执行、重试等来源）。
 ///
 /// 装配层实现即 `AutoSchedulesUseCase.load(groupId)` 的薄包装。
 typedef LoadAutoSchedules = Future<List<ChatTurnSchedule>> Function();
 
-/// 停用当前 group 全部未触发的续跑排程，并返回**回读后的权威列表**。
+/// 停用当前 group 全部未触发的 Goal Gate 排程，并返回**回读后的权威列表**。
 ///
 /// 装配层实现即 `AutoSchedulesUseCase.stopAll(groupId)` 后取 `.items`。
 ///
@@ -28,7 +28,7 @@ typedef LoadAutoSchedules = Future<List<ChatTurnSchedule>> Function();
 /// 信号，面板据此给出「已停用 N 个 / 没有在途」的反馈。
 typedef StopAllAutoSchedules = Future<AutoSchedulesStopResult> Function();
 
-/// 自动续跑排程面板：查看 / 停用「Goal Gate 自动续跑」。
+/// 执行计划面板：查看全部来源的计划，停用「自动实现目标」待执行计划。
 ///
 /// ## 它解决什么（为什么必须有这个面板）
 ///
@@ -63,7 +63,7 @@ class AutoSchedulesPanel extends StatefulWidget {
     this.onStopAll,
     this.busy = false,
     this.showHeader = true,
-    this.emptyHint = '当前对话没有待触发的自动续跑',
+    this.emptyHint = '当前对话没有执行计划',
     this.reloadToken,
   });
 
@@ -180,8 +180,8 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
         //   或条目在点击与服务端之间已被触发），不是错误。
         // - disabledCount > 0 → 已停用 N 个。
         _notice = result.disabledCount > 0
-            ? '已停用 ${result.disabledCount} 个自动续跑排程'
-            : '没有在途的自动续跑排程';
+            ? '已停用 ${result.disabledCount} 个「自动实现目标」执行计划'
+            : '没有待执行的「自动实现目标」计划';
       });
     } on AutoSchedulesFailure catch (e) {
       if (!mounted) return;
@@ -198,15 +198,11 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
     }
   }
 
-  /// 是否存在**服务端停用谓词会命中**的条目。
-  ///
-  /// ## 为什么用 [ChatTurnSchedule.isPending] 而不是裸 `enabled`
-  ///
-  /// 停用端点的 SQL 谓词是 `enabled = 1 AND run_count < max_runs AND …`。
-  /// 一个 `enabled: true` 但次数已用尽的行**不会被撤销**——若按裸 `enabled`
-  /// 判可点，用户点下去得到「已停用 0 条」，看起来像功能坏了。
-  /// [ChatTurnSchedule.isPending] 与服务端同口径。
-  bool get _hasPending => _items.any((s) => s.isPending);
+  /// 列表包含重试等计划，但停用端点只处理 `goal_gate:` 前缀；按钮计数与
+  /// 可点状态必须按同一范围判断，避免让用户以为能停用全部自动执行。
+  int get _pendingGoalCount => _items
+      .where((s) => s.isPending && s.dedupeKey.startsWith('goal_gate:'))
+      .length;
 
   @override
   Widget build(BuildContext context) {
@@ -228,7 +224,7 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
               ),
               const SizedBox(height: SpbSpacing.sm),
               Text(
-                '自动续跑加载失败：$_error',
+                '执行计划加载失败：$_error',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall,
               ),
@@ -286,7 +282,7 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
       );
     }
 
-    final pendingCount = _items.where((s) => s.isPending).length;
+    final pendingCount = _pendingGoalCount;
 
     return ListView.builder(
       key: const ValueKey('auto-schedules-list'),
@@ -301,7 +297,7 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
               children: [
                 if (widget.showHeader)
                   Text(
-                    '自动续跑（${_items.length}）',
+                    '执行计划（${_items.length}）',
                     style: theme.textTheme.labelMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -313,7 +309,8 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
                     child: FilledButton.tonalIcon(
                       key: const ValueKey('auto-schedules-stop-all'),
                       // 无可撤销项时禁用：点下去只会得到「已停用 0 条」。
-                      onPressed: (_hasPending && !_stopping && !widget.busy)
+                      onPressed:
+                          (pendingCount > 0 && !_stopping && !widget.busy)
                           ? _stopAll
                           : null,
                       icon: _stopping
@@ -324,7 +321,9 @@ class _AutoSchedulesPanelState extends State<AutoSchedulesPanel> {
                             )
                           : const Icon(Icons.cancel_outlined),
                       label: Text(
-                        _hasPending ? '停用全部待触发（$pendingCount）' : '停用全部待触发',
+                        pendingCount > 0
+                            ? '停用「自动实现目标」待执行计划（$pendingCount）'
+                            : '停用「自动实现目标」待执行计划',
                       ),
                     ),
                   ),

@@ -1358,7 +1358,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           ),
           child: SizedBox(
             height: MediaQuery.of(sheetContext).size.height * 0.8,
-            // 设置与「自动续跑」共用同一弹层（而不是新加第 7 个 AppBar 入口——
+            // 设置与「执行计划」共用同一弹层（而不是新加第 7 个 AppBar 入口——
             // AppBar 已有 6 个，再加会挤压标题，见 AGENTS.md §6.10）。
             //
             // 两块各自可滚（都是 ListView），故用 Column + Expanded 给它们
@@ -1421,7 +1421,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
                   ),
                 ),
                 const Divider(height: 1),
-                // 「自动续跑」section。
+                // 「执行计划」section。
                 //
                 // ## 为什么放在设置弹层里而不是单独一个 AppBar 入口
                 //
@@ -1846,7 +1846,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
               //
               // `tasksSource: manual` 必须显式传：它决定重新展开时能否覆盖
               // 任务清单，`manual` = 人工创建，LLM 展开不会覆盖。
-              // `autoStart` 来自新建对话框的「创建后自动推进」勾选
+              // `autoStart` 来自新建对话框的“创建后开启「自动实现目标」”勾选
               //（Go 040855fe 的 auto_start，非 null 即提交）。与桌面端逐字同构。
               onCreate: (goalText, {autoStart = false}) => _runGoalWrite(
                 () => ref
