@@ -57,6 +57,108 @@ void main() {
     SpbLog.clearRecentLogs();
   });
 
+  testWidgets('多轮真实空 ID 增量完成后，上翻不会抢占其他回复的 GlobalKey', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    mockTimeline();
+    await startController(tester);
+    await pumpPage(tester);
+
+    final expectedTexts = <String>[];
+    final initialIds = <String>[];
+    for (var turn = 0; turn < 3; turn++) {
+      final turnId = 'turn-$turn';
+      final text = List.generate(
+        20,
+        (i) => '第 $turn 轮第 $i 段：完整的长回复正文。' * 5,
+      ).join('\n\n');
+      expectedTexts.add(text);
+      await pushEvent(
+        tester,
+        'start',
+        sseEvent('start', id: 'start-$turn', turnId: turnId, seq: turn * 3 + 1),
+      );
+      // 生产的 transient 帧 ID 为空、两个序号均为 0；同段增量会先在缓冲中合并。
+      for (final delta in [
+        text.substring(0, text.length ~/ 2),
+        text.substring(text.length ~/ 2),
+      ]) {
+        await pushEvent(
+          tester,
+          'message',
+          sseEvent(
+            'message',
+            id: '',
+            turnId: turnId,
+            seq: 0,
+            transient: true,
+            payload: {'content': delta},
+          ),
+        );
+        final id = controller.snapshot
+            .whereType<AssistantMessageItem>()
+            .last
+            .id;
+        if (initialIds.length == turn) {
+          initialIds.add(id);
+        } else {
+          expect(id, initialIds[turn], reason: '合并增量后仍使用首帧身份');
+        }
+      }
+      await pushEvent(
+        tester,
+        'message',
+        sseEvent(
+          'message',
+          id: 'final-$turn',
+          turnId: turnId,
+          seq: turn * 3 + 2,
+          payload: {'content': text},
+        ),
+      );
+      await pushEvent(
+        tester,
+        'done',
+        sseEvent('done', id: 'done-$turn', turnId: turnId, seq: turn * 3 + 3),
+      );
+      await tester.pumpAndSettle();
+    }
+    final replies = controller.snapshot
+        .whereType<AssistantMessageItem>()
+        .toList();
+    expect(replies.map((item) => item.text), expectedTexts);
+    expect(replies.map((item) => item.id), initialIds);
+    expect(initialIds, everyElement(isNotEmpty));
+    expect(initialIds.toSet(), hasLength(3));
+    expect(PerfProbe.rowKeyOwnerCollisions, 0);
+    expect(
+      SpbLog.recentLogs.where((entry) => entry.message.contains('行主键重复')),
+      isEmpty,
+    );
+
+    final list = find.byType(CustomScrollView).first;
+    final position = tester
+        .state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        )
+        .position;
+    final seen = <String>{};
+    for (var step = 0; step < 100; step++) {
+      await tester.drag(list, const Offset(0, 280));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      for (final element in find.byType(AssistantMessageBubble).evaluate()) {
+        final bubble = element.widget as AssistantMessageBubble;
+        final box = element.renderObject! as RenderBox;
+        final rect = box.localToGlobal(Offset.zero) & box.size;
+        if (rect.overlaps(tester.getRect(list))) seen.add(bubble.text);
+      }
+      if (position.pixels == 0) break;
+    }
+    expect(seen, unorderedEquals(expectedTexts), reason: '必须从末尾向上实际经过每一条回复');
+  });
+
   testWidgets('批量卡被缓冲区裁剪拆散后，每一行都渲染出来（不撞 GlobalKey）', (tester) async {
     tester.view.physicalSize = const Size(900, 1200);
     tester.view.devicePixelRatio = 1.0;

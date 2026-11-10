@@ -198,6 +198,18 @@ void main() {
       );
     });
 
+    testWidgets('全局缓存释放后已挂载图片仍复用字节，卸载后可以重新加载', (t) async {
+      final before = await buildImage(t, url: dataUrl, width: 100);
+      final bytes = bytesOf(before.image!.image);
+      clearDataUrlImageMemo();
+      final retained = await buildImage(t, url: dataUrl, width: 120);
+      expect(bytesOf(retained.image!.image), same(bytes));
+      expect((retained.image!.image as ResizeImage).width, 360);
+      await t.pumpWidget(const SizedBox());
+      final reloaded = await buildImage(t, url: dataUrl, width: 100);
+      expect(bytesOf(reloaded.image!.image), isNot(same(bytes)));
+    });
+
     testWidgets('缓存有界：超过条数上限后最旧的被淘汰（重新解码）', (t) async {
       // 32 条上限（与插件原实现同级）。这里逐条塞满再回看第一条：
       // 若被淘汰，拿到的字节实例就不可能是最初那份。

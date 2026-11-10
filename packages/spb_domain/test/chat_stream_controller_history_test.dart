@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
@@ -92,6 +93,80 @@ void main() {
   });
 
   group('加载更早历史（loadOlder 向上翻页）', () {
+    for (final nextGroup in ['grp_1', 'grp_2']) {
+      test('分页在途切到 $nextGroup，旧结果作废且不解除新请求的并发保护', () async {
+        final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+        addTearDown(c.dispose);
+        Map<String, dynamic> message(String id, String group, int seq) =>
+            sseEvent(
+              EventTypes.userMessage,
+              id: id,
+              groupId: group,
+              turnId: id,
+              globalSeq: seq,
+              payload: {'input': id},
+            );
+        mockTimeline(events: [message('initial', 'grp_1', 100)]);
+        await c.start(groupId: 'grp_1');
+
+        final oldGate = Completer<void>();
+        final newGate = Completer<void>();
+        var requests = 0;
+        // 请求在 interceptor 中真正挂起；replyCallback 的 data 不会等待 Future。
+        dio.interceptors.insert(
+          0,
+          InterceptorsWrapper(
+            onRequest: (options, handler) async {
+              final cursor = options.queryParameters['before_global_seq'];
+              if (cursor == null) {
+                handler.next(options);
+                return;
+              }
+              requests++;
+              final old = cursor == '100';
+              await (old ? oldGate.future : newGate.future);
+              handler.resolve(
+                Response(
+                  requestOptions: options,
+                  statusCode: 200,
+                  data: {
+                    'items': [
+                      old
+                          ? message('stale', 'grp_1', 90)
+                          : message('older', nextGroup, 190),
+                    ],
+                  },
+                ),
+              );
+            },
+          ),
+        );
+        final oldRequest = c.loadOlder();
+        await pumpEventQueue();
+        expect(requests, 1);
+        adapter.onGet(
+          '/chat/groups/$nextGroup/timeline',
+          (server) => server.reply(200, {
+            'items': [message('current', nextGroup, 200)],
+          }),
+          queryParameters: {'limit': 200},
+        );
+        await c.switchGroup(nextGroup);
+        final newRequest = c.loadOlder();
+        await pumpEventQueue();
+        expect(requests, 2, reason: '新上下文不能被旧分页阻塞');
+        oldGate.complete();
+        await oldRequest;
+        expect(c.bufferedEventIds, ['current'], reason: '旧页不能污染新快照和游标');
+        expect(await c.loadOlder(), isTrue);
+        expect(requests, 2, reason: '旧请求结束不能解除新请求的并发保护');
+        newGate.complete();
+        await newRequest;
+        expect(c.bufferedEventIds, ['older', 'current']);
+        expect(c.timelineDiagnostics().oldestLoadedGlobalSeq, 190);
+      });
+    }
+
     /// 挂载「更早一页」的 mock，并记录实际收到的游标。
     ///
     /// 用 `replyCallback` 而非 `reply`：游标是**请求参数**，必须断言它真的发出去了

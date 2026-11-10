@@ -155,22 +155,21 @@ class ThumbnailMemo {
     Object version,
     Future<List<int>?> Function() load,
   ) {
-    if (_versions[id] != version) {
-      if (_entries.containsKey(id)) {
-        _drop(id);
-        _invalidations++;
-      }
-      _versions[id] = version;
-    }
-
     final existing = _entries[id];
-    if (existing != null) {
+    if (existing != null && _versions[id] == version) {
       _hits++;
       return existing;
     }
 
     _misses++;
     final future = load();
+    // load 可能同步抛错：取得 Future 后再替换，避免留下没有条目的版本键，
+    // 也避免加载新版本失败时提前销毁仍可供旧版本请求使用的缓存。
+    if (existing != null) {
+      _drop(id);
+      _invalidations++;
+    }
+    _versions[id] = version;
     _entries[id] = future;
     if (_entries.length > maxEntries) _trimEntries();
     if (_entries.length > _peakEntries) _peakEntries = _entries.length;

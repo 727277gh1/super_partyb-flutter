@@ -135,7 +135,7 @@
 |---|---|---|---|---|
 | G6 | `contentHashOf` 在**主线程**对下载/上传的整份字节算 SHA256（`List<int>` 已全部驻留内存后同步计算） | `packages/spb_domain/lib/src/sync_state.dart`（`contentHashOf` / 新增 `contentHashOfAsync`）；调用点 `deliverable_sync.dart`（下载后判重）、`deliverable_upload.dart`（上传前比对 baseline） | 单个 100 MB 文件 = 主线程冻结约数百毫秒（帧预算 16.7 ms）；同步首轮会连续命中 | **新增 `contentHashOfAsync`**：> 8 KB 走 `Isolate.run` + `TransferableTypedData`（worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆；⚠️ `fromList` 自身会拷贝一次——实测确认，非所有权移交），≤ 8 KB 仍走同步路径（isolate 启动成本更高）。同步版 `contentHashOf` 保留（测试与小数据与异步版的回退路径） |
 | G7 | 交付物面板用 `ListView(children: _tree.map(...))`：build 阶段一次性构造**全部**节点 widget | `packages/spb_features/lib/src/chat/group_deliverables_panel.dart`（`_rows` getter + `ListView.builder`） | 5666 文件全量同步后，打开「交付物」tab 的一帧构造 5666 个 widget（目录节点是 `ExpansionTile`：StatefulWidget + controller），绝大部分滚出视口即丢弃；且每次 SSE 文件事件 bump `reloadToken` 都会重来一遍 | **flatten + `ListView.builder`**：可见行由「展开中的目录」递归派生（`_rows`），折叠的子树**不进行集合**（真正的懒，而非仅视觉隐藏）；展开状态由面板自持（`_userExpansion`，只记用户点过的目录）；缓存按 `(_tree identity, 展开修订号)` 双判据失效。行为对齐：顶层默认展开 / 深层默认折叠 / 点击折叠展开 / 同对话刷新保留 / 切对话重置 |
-| G10 | `GptMarkdown` 的 `imageBuilder` **未传**：Markdown 图片走插件默认 builder（`Image(image: NetworkImage(url))`），绕过 `cacheWidth` 降采样 | `packages/spb_features/lib/src/chat/assistant_message_bubble.dart`（`GptMarkdown(...)`）；插件 1.3.4 `shared_render.dart` 的 `imageSpan` 默认分支 | 一张 4000×3000 的截图 ≈ 48MB 位图进 imageCache，而它在气泡里最多 1024dp 宽 | **新增 `markdownImageBuilder`**（`spb_features/lib/src/chat/markdown_image.dart`）：`ResizeImage` 按「声明宽或视口宽 × DPR」封顶 `kImageDecodeCeilingLogicalWidth`（1024dp）；复刻默认实现的尺寸盒子 / `BoxFit.fill` / loading+error 占位；`data:` URL 补一份 32 条/32MB 的字节 LRU（插件那份是私有的，接管 builder 就等于接管了这条路径） |
+| G10 | `GptMarkdown` 的 `imageBuilder` **未传**：Markdown 图片走插件默认 builder（`Image(image: NetworkImage(url))`），绕过 `cacheWidth` 降采样 | `packages/spb_features/lib/src/chat/assistant_message_bubble.dart`（`GptMarkdown(...)`）；插件 1.3.0 `shared_render.dart` 的 `imageSpan` 默认分支 | 一张 4000×3000 的截图 ≈ 48MB 位图进 imageCache，而它在气泡里最多 1024dp 宽 | **新增 `markdownImageBuilder`**（`spb_features/lib/src/chat/markdown_image.dart`）：`ResizeImage` 按「声明宽或视口宽 × DPR」封顶 `kImageDecodeCeilingLogicalWidth`（1024dp）；复刻默认实现的尺寸盒子 / `BoxFit.fill` / loading+error 占位；`data:` URL 补一份 32 条/32MB 的字节 LRU（插件那份是私有的，接管 builder 就等于接管了这条路径） |
 | G9 | 全仓 `didHaveMemoryPressure` **零命中**：系统内存压力信号没有任何接收方 | `packages/spb_platform/lib/src/memory_pressure.dart`（新增）；两端 `main.dart` 接线 | 移动端是最需要这条信号的端（内存最紧张），收到压力时什么都不做，直到被系统杀掉 | **新增 `installMemoryPressureHandler`**：`WidgetsBindingObserver.didHaveMemoryPressure` → `imageCache.clear()` + `imageCache.clearLiveImages()` + app 层 `onRelease`。⚠️ 实测确认框架的 `RendererBinding.handleMemoryPressure()` **已经** `clear()`，但**不**清 live images（还有 listener 的图，例如正显示的预览大图）——`clearLiveImages()` 才是本模块独有的增量。故测试必须钉住 `liveImageCount`，只钉 `currentSize` 会是假绿 |
 | G8 | 会话页 `_thumbnailMemo` **无界**；键只有 `ufsFileId`，同路径新版本覆盖（id 不变、内容变）时不失效 | `packages/spb_features/lib/src/chat/conversation_page.dart`（缓存）；`agent_file_card.dart`（重拉判据） | 桌面端主窗口常驻，单对话滚过上千张图即累计数十 MB；覆盖写后旧缩略图一直显示到切对话 | **抽出 `ThumbnailMemo`**（`spb_features/lib/src/chat/thumbnail_memo.dart`）：条目数/字节数双上限（512 / 16MB，淘汰最旧写入）+ **版本令牌** `AgentFileItem.contentRevision`（`action`/`modifiedAt`/`deletedAt`/`sizeBytes`/`mimeType`）——令牌变了就逐出重拉，不依赖服务端带 mtime；删除事件按 id 逐出。**上限是安全上界不是实测最优值**，真机峰值由 `conversation.thumbnails` 账本读数回收后再校准（issue #70） |
 
@@ -143,19 +143,12 @@
 
 | # | 项 | 证据（file:line） | 为什么这轮不动 | 已登记 issue |
 |---|---|---|---|
-| J1 | `isStreaming` 翻转导致气泡**整棵 remount**：`child: isStreaming ? md : SelectionArea(child: md)`，`SelectionArea` 引入/移除使子树换父节点，`gpt_markdown` 的增量解析状态全丢 | `assistant_message_bubble.dart`（同处） | 影响是「回复完成瞬间」的一次重解析（不是持续卡顿）。修法要么常驻 `SelectionArea`（流式期间可选文本的语义变化），要么给 `md` 加 `GlobalKey` 保 Element——两者都有取舍，需产品确认「流式期间是否允许选中文本」 #72 |
+| J1 | 结束时切换父链导致 Markdown remount | `assistant_message_bubble.dart` | 已修：稳定 SelectionArea/SelectionContainer 父链，流式禁选；解析 State 和已定型段落复用、选择/恢复流式回归通过，见 performance.md §6.47（#72，Windows 待复核） |
 | J2 | `FileLogSink` 每条日志**同步写盘**（`writeAsBytesSync`，§6.57 有意如此） | `packages/spb_core/lib/src/log_file_sink.dart` | 这是 §6.57 明确记录的取舍：异步缓冲会在崩溃时丢最后一段，而「崩溃后仍能读到」正是该 sink 存在的唯一理由。真要优化应先降日志量，而不是改写法治 #73 |
 | J3 | 流式 fade 逐字动画（`charactersPerSecond: 600`） | `assistant_message_bubble.dart`（`GptMarkdown(animation: fade, ...)`） | 逐字揭示是**产品表达**而非性能缺陷；关掉会让长回复「一坨文字突然出现」。若要控成本，方向是「大回复降级为一次性显示」，须产品决定 #74 |
-| J4 | `_followBottom` 的 `animateTo` 在每批事件各重启一次（§6.47 已把**调度**去重为一次，但动画本身仍被打断重来） | `packages/spb_features/lib/src/chat/conversation_page.dart`（`_followBottom`） | 与 §6.47 修的不是同一处：那里修的是「一帧排多个 post-frame 回调」，这里是「动画被新事件打断后从当前位置继续」——实际观感受滚动距离与事件频率影响，需真机确认是否可感知 #75 |
-> 6 条待议项曾开 issue 讨论（#70 G8 / #71 G10 / #72 J1 / #73 J2 / #74 J3 / #75 J4），
-> 后续进展以 issue 为准，本表不再更新。其中 **G10 与 G8 已修**（G10 的处置依据是
-> 插件 1.3.4 源码——不再「猜」默认 builder 是否自带降采样；G8 的处置依据是
-> 「版本令牌 + 双上限」，**不依赖**真机峰值——上限只是安全上界，校准靠
-> `conversation.thumbnails` 账本读数回收），故待议降为 **4 条**（J1–J4）。
->
-> J1–J4 是**卡顿**方向。四类的共同前提是：
-> 本机无 `DISPLAY`、无真机（AGENTS.md §9），拿不到 `SPB_FRAME_TIMING` 的慢帧
-> 数据——**没有实测数据就调参，是把 K1–K3 那类已论证的取舍推翻重来**。
+| J4 | 追底动画被自己的像素通知和新事件反复重启 | `conversation_page.dart` | 已修：动画期间合并目标，完成后追最新高度；用户上滚停止、窗口缩放继续跟随，见 performance.md §6.47（#75，Windows 待复核） |
+> G8/G10 已修；J1/J4 于 2026-11-10 完成本地修复和结构回归，设备表现仍待复核。
+> J2/J3 保留既有取舍。完整根因与判据见 [性能设计](design-decisions/performance.md) §6.47。
 
 ### 6.3 与 §三（有意保留）的边界
 
@@ -247,8 +240,7 @@ WARN 里带上「已滚出窗口」的爬坡轨迹。
 - 第一轮：有意保留 **6 条**（K1–K6），均有 AGENTS.md 实测依据，本轮明确不动。
 - 第二轮（峰值/主线程口径）：已修 **5 条**（G6 哈希 isolate / G7 树 builder /
   G8 缩略图有界+版本令牌 / G9 内存压力 / G10 Markdown 图片降采样），待议
-  **4 条**（J1–J4）均仍**缺少真机或产品取舍依据**，不以猜测改动（#72–#75
-  开着；#70 G8 与 #71 G10 已结）。
+  J1/J4 已完成本地修复（见 §6.2），J2/J3 保留原有语义；Windows 表现仍待设备复核。
 - 第三轮（真机报告驱动）：已修 **2 条**（G11 脏检测整份读入 / G13 观测缺口），
   **1 条只补读数未消除**（G12 下载整份持有，等流式落盘契约改动）。
   判据来源是用户机器的 `rss=253.4MB peak=421.1MB imageCache=0.3MB breakdown=`——

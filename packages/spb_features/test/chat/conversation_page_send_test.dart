@@ -838,7 +838,11 @@ void main() {
       await pushContext(tester);
 
       // 时间线仍为空（没有任何 ConversationItem），但用量条已出现。
-      expect(find.byType(ListView), findsNothing, reason: '空时间线渲染的是空提示');
+      expect(
+        find.byType(CustomScrollView),
+        findsNothing,
+        reason: '空时间线渲染的是空提示',
+      );
       expect(
         find.byKey(const ValueKey('conversation-context-usage')),
         findsOneWidget,

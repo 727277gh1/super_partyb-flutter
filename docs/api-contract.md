@@ -199,6 +199,8 @@ data: <json>
 **「同一 turn 全部 `message` 事件拼接即完整回复」**（`final_message` 已废弃，迁移 0010 清空历史）。归约实现见 `packages/spb_domain/lib/src/event_reducer.dart`。
 
 **cursor 只记录落库事件的 ID**——Transient 事件无有效 ID（`globalSeq` 为 0），用它作游标会跳过其后的权威帧。
+增量帧的 `eventId` 为空、`seq` 也为 0，**不能直接用作列表 Key**；归约层为正文与
+思考段落生成稳定的本地展示标识，不写回事件，也不用于 SSE 游标（见 §6.85）。
 
 **`schedule_created` 已进时间线**（`EventTypes.timelineVisible` + 归约器显式 case + `_ScheduleCreatedNotice`）。
 

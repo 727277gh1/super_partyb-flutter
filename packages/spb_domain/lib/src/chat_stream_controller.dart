@@ -243,7 +243,9 @@ class ChatStreamController {
   final _fromCacheController = StreamController<bool>.broadcast();
 
   /// 正在执行 [loadOlder]（防止并发翻页把同一页插两次）。
-  bool _loadingOlder = false;
+  /// 绑定回填上下文：切组/重新回填后，旧请求不应阻塞新上下文的分页。
+  int? _loadingOlderToken;
+  bool get _loadingOlder => _loadingOlderToken == _backfillToken;
 
   /// 归约后的对话项流（每次事件到达推送全量列表）。
   //
@@ -1328,13 +1330,16 @@ class ChatStreamController {
     final cursor = _oldestLoadedGlobalSeq;
     if (cursor == null) return false;
 
-    _loadingOlder = true;
+    final token = _backfillToken;
+    _loadingOlderToken = token;
     try {
       final page = await _api.groupTimeline(
         groupId,
         limit: limit,
         beforeGlobalSeq: cursor.toString(),
       );
+      // 与回填使用同一代际，即使切走又切回同 group，旧页也不能混进新快照。
+      if (_disposed || token != _backfillToken) return false;
       final events = page.items.toList()
         ..sort((a, b) => (a.globalSeq ?? 0).compareTo(b.globalSeq ?? 0));
       if (events.isEmpty) return false;
@@ -1382,6 +1387,7 @@ class ChatStreamController {
       _setFromCache(false);
       return events.length >= limit;
     } catch (e) {
+      if (_disposed || token != _backfillToken) return false;
       SpbLog.warn('加载更早历史失败', {'error': e.toString()});
       if (e is SpbError && !_errorController.isClosed) {
         _errorController.add(e);
@@ -1389,7 +1395,7 @@ class ChatStreamController {
       // 失败一律返回 false：让调用方停下，避免在滚动中疯狂重试。
       return false;
     } finally {
-      _loadingOlder = false;
+      if (_loadingOlderToken == token) _loadingOlderToken = null;
     }
   }
 
@@ -1484,8 +1490,9 @@ class ChatStreamController {
   ///
   /// ## 为什么必须保留**第一条**的 eventId
   ///
-  /// 归约器用「首个增量帧的 `eventId`」当 [AssistantMessageItem.id]，而页面用
-  /// `ValueKey(item.id)` 复用 Element。若合并时改用最后一条的 id，流式期间 id
+  /// 归约器用首个增量帧的 `eventId`（为空时用首帧元数据生成本地标识）当
+  /// [AssistantMessageItem.id]，而页面用 `ValueKey(item.id)` 复用 Element。
+  /// 若合并时改用最后一条的 id / createdAt 等身份字段，流式期间 id
   /// 会逐条变化 → Element 反复重建 → `gpt_markdown` 的增量解析缓存（`_engine`）
   /// 每次重置 → 气泡**塌成一行再重新打字**（实测：一次 `pump` 内渲染字符数
   /// `12912 → 36`）。保留首条的 id 则 id 从段落诞生到被权威帧接管都恒定。

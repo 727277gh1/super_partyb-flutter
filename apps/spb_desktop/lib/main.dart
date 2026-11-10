@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_features/spb_features.dart' show clearDataUrlImageMemo;
 import 'package:spb_platform/spb_platform.dart';
 
 import 'app.dart';
@@ -87,6 +88,7 @@ void main() {
     // 无差别接线，将来若引擎补齐也无需改这里。
     installMemoryPressureHandler(
       onRelease: () {
+        clearDataUrlImageMemo();
         // 压力时刻的值最值得留一笔：它往往就是峰值。
         installedMemoryProbe?.sample(force: true);
         SpbLog.info('系统内存压力：已清空图片解码缓存');

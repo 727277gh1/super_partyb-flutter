@@ -393,7 +393,10 @@ void main() {
       }
 
       // 滚到顶触发一次翻页 → onLoadOlder 返回 false → `_reachedOldest = true`。
-      await tester.drag(find.byType(ListView).first, const Offset(0, 4000));
+      await tester.drag(
+        find.byType(CustomScrollView).first,
+        const Offset(0, 4000),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const ValueKey('conversation-search-open')));

@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent, ScrollDirection;
+import 'package:flutter/rendering.dart'
+    show RenderAbstractViewport, ScrollCacheExtent, ScrollDirection;
 
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
@@ -603,7 +605,7 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// Markdown 解析成本几乎全在「段数 × 每段长度」上。实测（本机 2026-10，
   /// debug）4 段 580 字符冷重建 68.0 ms，而一条 50 字符的短回复不到 1 ms
-  /// ——为它付「每帧仍要布局」的常驻成本是净亏。
+  /// ——不值得为它保留整棵子树的内存。
   ///
   /// 400 字符大致是「需要滚动才能看全」的分界，也是实测里冷重建开始明显
   /// （>10 ms）的量级。与 [_keepAliveWindow] 一起构成**有界**策略。
@@ -613,10 +615,8 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// ## 为什么必须有上限
   ///
-  /// `AutomaticKeepAliveClientMixin` 让子项留在树上，而
-  /// `RenderSliverMultiBoxAdaptor` 每帧仍要**布局**它们（keep-alive 的语义是
-  /// 「不回收」，不是「不布局」）。2000 条历史全常驻会把每帧布局成本变成
-  /// O(历史长度)——比它要解决的「重解析」还贵。
+  /// keep-alive 桶中的子项不参与每帧布局/绘制，但仍保留 Element、
+  /// RenderObject 与解析缓存，不能让常驻内存随全部历史增长。
   ///
   /// ## 为什么取「最近的」而不是「最长的」
   ///
@@ -662,8 +662,8 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// ## ⚠️ 为什么**只**缓存 `AssistantMessageItem`
   ///
-  /// 缓存的前提是「渲染输入可穷举成指纹」。气泡的输入只有四个显式字段
-  /// （`text` / `isStreaming` / `keepAlive` / `onLinkTap`），全部进指纹。
+  /// 气泡的渲染输入为 `text` / `isStreaming` / `keepAlive`，全部进指纹。
+  /// 链接回调由稳定方法转发，点击时读取当前 widget。
   ///
   /// 其余 item 的渲染输入**夹带页面状态**——`ConfirmationItem` 读 `_resolving`、
   /// `FeedbackRequestItem` 读 `_submittedFeedback` 与 `_feedbackTTL`、
@@ -682,8 +682,8 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 复用同一 widget 实例时子树的 `dependOnInheritedWidgetOfExactType` 依赖
   /// 关系仍在，框架会自己把该子树标记为需要重建。
   ///
-  /// `onLinkTap` 进指纹（`identical` 比较）：它是 `widget.onOpenLink`，装配层
-  /// 换回调时必须重建成新实例，否则点了走旧逻辑。
+  /// 装配层每次重建产生的新链接闭包不影响气泡缓存；[_handleOpenLink]
+  /// 保证缓存实例也能执行最新回调。
   final Map<String, ({Object fingerprint, Widget widget})> _bubbleCache = {};
 
   /// [_bubbleCache] 的上限。
@@ -866,9 +866,17 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 正在加载更早的历史（防止滚动过程中并发发多次请求）。
   bool _loadingOlder = false;
 
+  // 异步分页属于发起时的对话，旧请求完成不能覆盖新对话的终止/并发状态。
+  int _historyGeneration = 0;
+
+  // 两个 Sliver 以首个展示行作为固定分界；旧历史向上生长，已有内容坐标不变。
+  String? _timelineCenterId;
+  double _timelineOrigin = SpbSpacing.pagePadding.top;
+  static const _timelineCenterKey = ValueKey('timeline-center');
+
   /// 顶部触发阈值（像素）。
   ///
-  /// 不用 0：`ListView` 的滚动位置在快速滑动时可能一瞬间就到 0，留一点余量
+  /// 不用 0：快速滑动可能一瞬间就到顶部，留一点余量
   /// 可以提前取下一页，让「滑到顶」与「内容已就位」重合而不是先看到空白。
   static const double _loadOlderThreshold = 120;
 
@@ -956,6 +964,11 @@ class _ConversationPageState extends State<ConversationPage> {
   ///
   /// 见 [_scheduleFollowBottom] 的文档：一帧内多次请求只需执行一次。
   bool _followScheduled = false;
+
+  // 同一次自动滚动期间，像素通知和新 SSE 只合并目标，不重启动画。
+  bool _autoScrolling = false;
+  bool _jumpingToBottom = false;
+  bool _locatingItem = false;
 
   @override
   void initState() {
@@ -1188,6 +1201,10 @@ class _ConversationPageState extends State<ConversationPage> {
     if (oldWidget.historyKey != widget.historyKey ||
         oldWidget.controller != widget.controller) {
       _reachedOldest = false;
+      _loadingOlder = false;
+      _historyGeneration++;
+      _timelineCenterId = null;
+      _timelineOrigin = SpbSpacing.pagePadding.top;
       // 缩略图记忆按对话隔离：不清空就是按对话无限增长的内存（每张图一份
       // 字节），且上一个对话里同一 `ufsFileId` 的字节未必仍有效。
       _thumbnailMemo.clear();
@@ -1220,12 +1237,66 @@ class _ConversationPageState extends State<ConversationPage> {
   }
 
   void _onItems(List<ConversationItem> items) {
+    _preserveRegroupedHistoryPosition(items);
+    if (items.isEmpty) {
+      _timelineCenterId = null;
+      _timelineOrigin = SpbSpacing.pagePadding.top;
+    }
     _evictThumbnailsOfDeletedFiles(items);
     setState(() => _items = items);
 
     if (_following) {
       // 等一帧：新项尚未布局完成，此时 maxScrollExtent 还是旧值。
       _scheduleFollowBottom();
+    }
+  }
+
+  /// 页边界的工具/文件行可能合并成批量卡，固定分界行本身也会因此变高或变矮。
+  /// 此时以仍然可见且没有被合并的行重新定原点，偏移取旧布局的实际几何值。
+  /// 校正在下一次布局之前完成，不启动滚动动画，也不取消正在进行的拖动。
+  void _preserveRegroupedHistoryPosition(List<ConversationItem> items) {
+    final centerId = _timelineCenterId;
+    final previousRows = _lastRows;
+    if (_following ||
+        centerId == null ||
+        previousRows == null ||
+        _items.isEmpty ||
+        items.isEmpty ||
+        _items.first.id == items.first.id ||
+        !items.any((item) => item.id == _items.first.id) ||
+        !_scrollController.hasClients) {
+      return;
+    }
+    final nextIds = [
+      for (final row in groupTimelineForDisplay(items)) locateIdsOf(row),
+    ];
+    final previousCenter = previousRows
+        .map(locateIdsOf)
+        .where((ids) => ids.contains(centerId))
+        .firstOrNull;
+    final nextCenter = nextIds
+        .where((ids) => ids.contains(centerId))
+        .firstOrNull;
+    if (listEquals(previousCenter, nextCenter)) return;
+    final nextByOwner = {for (final ids in nextIds) ids.first: ids};
+    for (final row in previousRows) {
+      final ids = locateIdsOf(row);
+      if (!listEquals(ids, nextByOwner[ids.first])) continue;
+      final box = _rowKeys[ids.first]?.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      final viewport = RenderAbstractViewport.maybeOf(box);
+      if (viewport is! RenderBox) continue;
+      final top = box.localToGlobal(Offset.zero, ancestor: viewport).dy;
+      final position = _scrollController.position;
+      if (top >= position.viewportDimension || top + box.size.height <= 0) {
+        continue;
+      }
+      _timelineCenterId = ids.first;
+      // 折叠可能使锚点前的内容短于原来的屏幕空间。把原点放在可见行顶部，
+      // 避免负 pixels 被 ScrollPhysics 夹到新 minScrollExtent 后再次跳动。
+      _timelineOrigin = top.clamp(0.0, position.viewportDimension);
+      position.correctBy(_timelineOrigin - top - position.pixels);
+      return;
     }
   }
 
@@ -1302,8 +1373,10 @@ class _ConversationPageState extends State<ConversationPage> {
     _followScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _followScheduled = false;
-      _followBottom();
+      unawaited(_followBottom());
     });
+    // 动画结束或 metrics 通知可能发生在帧后；只注册回调不会主动请求下一帧。
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   /// 根据滚动位置更新 [_following]。
@@ -1335,6 +1408,13 @@ class _ConversationPageState extends State<ConversationPage> {
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
+    // 外部 jumpTo/搜索会先取消滚动 activity，但动画 Future 下一微任务
+    // 才结束；不能把这段时间内的用户定位误认成自动滚动。
+    final isAutomatic =
+        _jumpingToBottom ||
+        (_autoScrolling &&
+            position.userScrollDirection == ScrollDirection.idle &&
+            position.isScrollingNotifier.value);
 
     // 顶部触发加载更早历史。
     //
@@ -1343,15 +1423,19 @@ class _ConversationPageState extends State<ConversationPage> {
     // 套时序。
     //
     // ⚠️ 必须放在下面「内容不足一屏」的 early return **之前**：那种情况下
-    // `pixels == 0` 也正是「在顶部」，若在 early return 之后判断就会被跳过。
+    // `extentBefore == 0` 也正是「在顶部」，若在 early return 之后判断就会被跳过。
     // （实践中影响极小：首屏 `_backfill` 一次拉 200 条，短到填不满屏幕的对话
     // 基本意味着已全部加载。但把判断放在正确的位置不需要额外代价。）
-    if (position.pixels <= _loadOlderThreshold) {
+    if ((!isAutomatic ||
+            position.userScrollDirection == ScrollDirection.forward) &&
+        position.extentBefore <= _loadOlderThreshold) {
       unawaited(_maybeLoadOlder());
     }
 
-    // 内容不足一屏时 maxScrollExtent == 0，视为在底部。
-    if (position.maxScrollExtent <= 0) {
+    if (_locatingItem) return;
+
+    // 双向 Sliver 的最小偏移可为负，不能只看 maxScrollExtent。
+    if (position.maxScrollExtent <= position.minScrollExtent) {
       _following = true;
       return;
     }
@@ -1362,6 +1446,8 @@ class _ConversationPageState extends State<ConversationPage> {
       _following = false;
       return;
     }
+
+    if (isAutomatic) return;
 
     _following =
         position.pixels >= position.maxScrollExtent - _autoScrollThreshold;
@@ -1381,61 +1467,69 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 到达顶部附近时加载更早的一页（带并发与终止保护）。
   ///
   /// 只在 [_onScroll] 里调用，而那里已确认 `_scrollController.hasClients`；
-  /// 空列表时渲染的是 [EmptyState] 而非 `ListView`，控制器没有 client，
+  /// 空列表时渲染的是 [EmptyState] 而非时间线，控制器没有 client，
   /// 滚动通知根本不会产生。故这里不需要再判 `_items.isEmpty`。
   ///
-  /// ## 已知边界：前插后不补偿滚动位置
-  ///
-  /// 向 `ListView` 头部插入内容会把当前可见内容整体下推（Flutter 保持
-  /// `pixels` 不变），故翻页瞬间可视位置会跳到「新插入的那一页」。
-  ///
-  /// 正确的做法是记录插入前后的 `maxScrollExtent` 差值再补偿 `pixels`，但那需要
-  /// 与自动跟随（[_following]）协调——两者同时生效时会把用户从顶部拽到底部。
-  /// 本机无 DISPLAY、无法真机验证交互，靠猜写这段补偿只会得到一个「测试全绿但
-  /// 手感不对」的实现，故先不做，待有桌面环境时按实测手感补上。
+  /// 位置保持由 [_buildTimeline] 的固定分界完成，与请求完成及 items 发布的
+  /// 先后顺序无关；等待期间用户继续滚动也不会被拉回发起请求时的位置。
   Future<void> _maybeLoadOlder() async {
     final handler = widget.onLoadOlder;
     // 两重护栏：未注入 / 已到最早 / 正在加载。
     if (handler == null || _reachedOldest || _loadingOlder) return;
 
     _loadingOlder = true;
+    final generation = _historyGeneration;
     try {
       final hasMore = await handler();
-      if (!mounted) return;
+      if (!mounted || generation != _historyGeneration) return;
       // 返回 false = 已到最早，从此不再触发。
       if (!hasMore) setState(() => _reachedOldest = true);
     } on SpbError catch (e) {
       // 失败不标记 `_reachedOldest`：下次滚到顶可以重试。
-      if (mounted) _showMessage('加载更早历史失败：${e.message}');
+      if (mounted && generation == _historyGeneration) {
+        _showMessage('加载更早历史失败：${e.message}');
+      }
     } finally {
-      _loadingOlder = false;
+      if (generation == _historyGeneration) _loadingOlder = false;
     }
   }
 
   /// 滚到底（仅在 [_following] 时由调用方触发）。
-  void _followBottom() {
+  Future<void> _followBottom() async {
     PerfProbe.followBottomCalls++;
-    if (!mounted || !_following || !_scrollController.hasClients) return;
+    if (!mounted ||
+        !_following ||
+        _autoScrolling ||
+        !_scrollController.hasClients) {
+      return;
+    }
     final position = _scrollController.position;
     final target = position.maxScrollExtent;
     // 已在底部就不动（避免无谓的滚动通知与重绘）。
     if ((position.pixels - target).abs() < 1) return;
 
-    // 流式回复会在几十毫秒内连续到达多个事件，而滚动动画是 150ms。
-    // 若每次都用 animateTo，新动画会**取消**上一个并从当前位置重来，
-    // 永远追不上不断变大的 maxScrollExtent。故：
-    //   - 距离较小时（单条新消息）用动画，视觉平滑；
-    //   - 距离较大时（流式突发 / 惰性估算刚修正）直接 jump，保证一定到底。
-    if (target - position.pixels > position.viewportDimension) {
-      _scrollController.jumpTo(target);
-      return;
+    _autoScrolling = true;
+    try {
+      // 大跨度直接定位；小跨度完成当前动画后再追最新高度，避免每帧从头缓动。
+      if (target - position.pixels > position.viewportDimension) {
+        _jumpingToBottom = true;
+        try {
+          _scrollController.jumpTo(target);
+        } finally {
+          _jumpingToBottom = false;
+        }
+      } else {
+        await _scrollController.animateTo(
+          target,
+          duration: SpbDuration.fast,
+          curve: Curves.easeOut,
+        );
+      }
+    } finally {
+      _autoScrolling = false;
     }
-    _scrollController.animateTo(
-      target,
-      // 用令牌而非硬编码时长（见 docs/flutter-component-research.md §3.1）。
-      duration: SpbDuration.fast,
-      curve: Curves.easeOut,
-    );
+    // 惰性行高和流式内容可能已改变目标。用户上滚或搜索定位后不再接着追。
+    if (mounted && _following) _scheduleFollowBottom();
   }
 
   Future<void> _handleSubmit(String text) async {
@@ -1605,15 +1699,21 @@ class _ConversationPageState extends State<ConversationPage> {
       return;
     }
 
-    await Scrollable.ensureVisible(
-      targetContext,
-      // 用 `center` 而不是 `alignment: 0`：命中项周围的内容（同一轮的
-      // 上下文）比「目标贴顶」更有用，且贴顶时若上方有未加载历史会立即触发
-      // 翻页，把用户从目标处推走。
-      alignment: 0.5,
-      duration: SpbDuration.normal,
-      curve: Curves.easeOut,
-    );
+    _following = false;
+    _locatingItem = true;
+    try {
+      await Scrollable.ensureVisible(
+        targetContext,
+        // 用 `center` 而不是 `alignment: 0`：命中项周围的内容（同一轮的
+        // 上下文）比「目标贴顶」更有用，且贴顶时若上方有未加载历史会立即触发
+        // 翻页，把用户从目标处推走。
+        alignment: 0.5,
+        duration: SpbDuration.normal,
+        curve: Curves.easeOut,
+      );
+    } finally {
+      _locatingItem = false;
+    }
   }
 
   /// 把「被拒绝」翻译成用户可读的提示。
@@ -1641,7 +1741,16 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 只认 [AssistantMessageItem] 会漏掉「agent 正在思考、还没吐第一个字」这段
   /// ——而那恰恰是最需要能停的时候（实测长 turn 的思考段可达数十秒）。两者都由
   /// 归约层在同一套 `isStreaming` 语义下维护：增量帧置 true，`done`/权威帧置 false。
-  ConversationItem? get _streamingItem => _findStreamingItem(_items);
+  List<ConversationItem>? _lastStreamingItems;
+  ConversationItem? _lastStreamingItem;
+
+  ConversationItem? get _streamingItem {
+    if (!identical(_items, _lastStreamingItems)) {
+      _lastStreamingItems = _items;
+      _lastStreamingItem = _findStreamingItem(_items);
+    }
+    return _lastStreamingItem;
+  }
 
   /// 从 [items] 尾向找出当前仍在生成的项；null 表示没有进行中的生成。
   ///
@@ -1928,7 +2037,7 @@ class _ConversationPageState extends State<ConversationPage> {
     // ⚠️ `_turnProgressFor` 仍会扫一次 `_items`（数本 turn 的工具调用、找
     // 「是否已有正文」），但那是**带早退**的尾向扫描（遇到别的 turn 就
     // break），而不是全表。
-    final streaming = _findStreamingItem(_items);
+    final streaming = _streamingItem;
     final staleTurnItem = _staleTurnItemFor(streaming);
     final canCancelTurn = _canCancelTurnFor(streaming);
     final progress = _turnProgressFor(streaming);
@@ -2181,7 +2290,17 @@ class _ConversationPageState extends State<ConversationPage> {
     final rows = groupTimelineForDisplay(_items);
     _lastRows = rows;
     _lastRowsItems = _items;
-    _lastLocateIds = locateIdsOfAll(rows);
+    _rowKeys.recycle(locateIdsOfAll(rows));
+    _rowIndices = <Key, int>{};
+    _itemRowIndices = <String, int>{};
+    for (var i = 0; i < rows.length; i++) {
+      PerfProbe.timelineIndexVisits++;
+      final ids = locateIdsOf(rows[i]);
+      _rowIndices[_rowKeys.keyFor(ids)] = i;
+      for (final id in ids) {
+        _itemRowIndices[id] = i;
+      }
+    }
     // 与 rows 同步重算（它同样只取决于 `_items`）。放在这里而不是每次 build
     // 都扫一遍：重建时 `_items` 没变，结果必然相同。
     _keepAliveIds = _computeKeepAliveIds(_items);
@@ -2232,7 +2351,9 @@ class _ConversationPageState extends State<ConversationPage> {
     if (_rowOwnerCollisionLogged) return;
     _rowOwnerCollisionLogged = true;
     SpbLog.warn('时间线行主键重复：同帧两行会拿到同一个 GlobalKey（后出现的那行将渲染为空白）', {
-      'duplicate_owners': dups.join(','),
+      'duplicate_owners': dups
+          .map((id) => id.isEmpty ? '<empty>' : id)
+          .join(','),
       'rows': rows.length,
       'note': 'release 里 Flutter 的 GlobalKey 唯一性校验不运行——本日志即那条缺失的报错',
     });
@@ -2242,28 +2363,51 @@ class _ConversationPageState extends State<ConversationPage> {
   List<TimelineDisplayRow>? _lastRows;
   List<ConversationItem>? _lastRowsItems;
 
-  /// 与 [_lastRows] 同步算好的「当前行集合」（供 [_recycleRowKeys] 复用）。
-  ///
-  /// 与 rows 一起缓存而不是在回收时重算：`locateIdsOfAll` 也是 O(n)（实测
-  /// 2000 项约 0.18 ms），且它与分组看的是同一份 `rows`——分两次算会多一次
-  /// 全量扫描，还多一个「两份不一致」的可能。
-  Set<String> _lastLocateIds = const {};
-
-  /// 丢弃已不在时间线上的行所对应的 `GlobalKey`（issue #39）。
-  ///
-  /// 规则与理由见 [RowLocateRegistry.recycle]。在 [_buildTimeline] 里调用
-  /// （而不是 `_onItems`）：`rows` 已经算好了，零额外开销，且「当前行集合」
-  /// 就是渲染的事实来源。
-  void _recycleRowKeys() => _rowKeys.recycle(_lastLocateIds);
+  // 与展示行一起缓存：状态条重建不应重新遍历历史、登记全部 Key。
+  Map<Key, int> _rowIndices = const {};
+  Map<String, int> _itemRowIndices = const {};
 
   Widget _buildTimeline() {
     final rows = _displayRows();
-    _recycleRowKeys();
+    var centerIndex = _itemRowIndices[_timelineCenterId] ?? -1;
+    if (centerIndex < 0) {
+      // 首次载入、切组或裁剪掉分界行时重新选取，不能把旧对话的坐标沿用下来。
+      centerIndex = 0;
+      _timelineCenterId = locateIdsOf(rows.first).first;
+      _timelineOrigin = SpbSpacing.pagePadding.top;
+    }
+    final split = centerIndex;
+    final indices = _rowIndices;
 
+    // 中心之前按倒序向上布局，之后仍按时间顺序向下布局。前插历史只改变
+    // minScrollExtent，既不猜测未构建行高，也不发 jumpTo 打断用户正在拖动的手势。
+    // 两段都保持惰性构建，并按稳定 Key 找回重排后的 Element。
+    SliverList buildRows({required bool older}) => SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, index) {
+          final rowIndex = older ? split - index - 1 : split + index;
+          if (rowIndex == rows.length) {
+            return const SizedBox(height: SpbSpacing.xxl);
+          }
+          return _buildTimelineRow(rows[rowIndex]);
+        },
+        childCount: older ? split : rows.length - split + 1,
+        findChildIndexCallback: (key) {
+          final index = indices[key];
+          if (index == null || (index < split) != older) return null;
+          return older ? split - index - 1 : index - split;
+        },
+        semanticIndexCallback: (_, index) {
+          final rowIndex = older ? split - index - 1 : split + index;
+          return rowIndex == rows.length ? null : rowIndex;
+        },
+        // 长正文跨多屏，避免缓存整条回复的绘制层；其他卡片在行内加回边界。
+        addRepaintBoundaries: false,
+      ),
+    );
+
+    const padding = SpbSpacing.pagePadding;
     return ScrollConfiguration(
-      // 桌面端：Flutter 默认的 dragDevices **不含鼠标**，不加这个
-      // 鼠标拖拽无法滚动时间线（滚轮不受影响）。
-      // 见 docs/flutter-component-research.md §3.1。
       behavior: ScrollConfiguration.of(context).copyWith(
         dragDevices: {
           PointerDeviceKind.touch,
@@ -2272,117 +2416,123 @@ class _ConversationPageState extends State<ConversationPage> {
           PointerDeviceKind.stylus,
         },
       ),
-      child: ListView.builder(
-        controller: _scrollController,
-        padding: SpbSpacing.pagePadding,
-        // 正文可能高达几十屏，避免把整条回复录成一个可复用的绘制层。
-        // 用户反馈正文在中途滚动时整块消失、从顶部重滚才恢复；本机无头环境
-        // 尚未复现设备 GPU 的空白，先移除整行缓存这条可疑路径。
-        // 正文随视口重绘，其他卡片单独加回边界；Markdown 解析缓存与
-        // keep-alive 不受影响。目标设备上仍需复核显示与滚动性能。
-        addRepaintBoundaries: false,
-        // 预建范围从默认的 250 **像素** 改成 1.5 屏。
-        //
-        // ## 为什么
-        //
-        // 默认值只预建约半屏，而本时间线的行高差异极大（一行短消息 40px，
-        // 一条长回复可能上千 px）。快速滚动时新行来不及预解析，Markdown 的
-        // 冷解析（实测 4 段 580 字符 68.0 ms）全压在**帧内**，于是出现
-        // 「绝大多数帧很轻快、每隔十几帧突然卡一下」的黏连感。
-        //
-        // 实测（本机 2026-10，debug；60 条 4 段 Markdown 气泡，60 帧 × 150px）：
-        //
-        // | cacheExtent | 挂载 | 合计 | p90 | 最大 | >16.7ms |
-        // |---|---|---|---|---|---|
-        // | 默认 250px | 2 | 326.9ms | 16.77 | 20.92 | 6/60 |
-        // | viewport(1.0) | 3 | 277.6ms | 16.75 | 17.91 | 6/60 |
-        // | **viewport(1.5)** | **3** | **240.7ms** | **13.07** | **15.69** | **0/60** |
-        // | viewport(2.0) | 4 | 226.8ms | 13.14 | 16.05 | 0/60 |
-        //
-        // 取 1.5 而非 2.0：两者超时帧都是 0，但 1.5 挂载更少（3 vs 4）。
-        // 用 `viewport()` 而不是固定像素：固定像素在矮屏上预建太多、在高屏上
-        // 预建太少；`viewport(n)` 按视口比例缩放，两端都合适。
-        //
-        // ## 代价（诚实记录）
-        //
-        // 同时挂载的行数变多，每帧布局成本随之上升。但实测合计帧时**反而
-        // 下降**（326.9 → 240.7ms）——因为预建把工作从「帧内冷解析」挪到了
-        // 「本来就有空余的帧」。若将来发现内存或首屏变慢，这个值可以调回。
-        scrollCacheExtent: const ScrollCacheExtent.viewport(1.5),
-        // itemCount +1 给底部留白，避免最后一项紧贴输入框。
-        itemCount: rows.length + 1,
-        itemBuilder: (context, index) {
-          if (index == rows.length) {
-            return const SizedBox(height: SpbSpacing.xxl);
+      child: NotificationListener<Notification>(
+        onNotification: (notification) {
+          // 已在顶部时上拖可能没有像素变化；仍须尊重用户意图，停止追底并翻页。
+          if (notification is UserScrollNotification &&
+              notification.depth == 0 &&
+              notification.direction == ScrollDirection.forward) {
+            _following = false;
+            if (notification.metrics.extentBefore <= _loadOlderThreshold) {
+              unawaited(_maybeLoadOlder());
+            }
           }
-          final row = rows[index];
-          // 搜索定位用的 GlobalKey。
-          //
-          // ## 为什么用 `KeyedSubtree` 包一层，而不是把 GlobalKey 当行 key
-          //
-          // 下面那个 `ValueKey` 的作用是「同一逻辑项跨重建复用 Element」；
-          // 换成 `GlobalKey` 会让框架按「全局唯一」语义搬移 Element，
-          // 流式更新时的复用行为会变。两者目的不同，故各占一层。
-          //
-          // ## 批量卡为什么给每个成员都登记定位入口
-          //
-          // 搜索命中拿到的 `itemId` 是**具体某条**的 id（可能是批里的第 3 个
-          // 文件），而行 key 是首成员 id。若只登记首成员，搜到批内其他文件时
-          // `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——而那条明明就
-          // 在屏幕上。
-          //
-          // ⚠️ 登记的是**别名**，不是把同一个 `GlobalKey` 实例分给每个成员：
-          // 那样一旦这段文件被拆成多行（缓冲区裁剪 / 翻页拼接都会），多行就会
-          // 共用一个 `GlobalKey` → Flutter 抛 `Multiple widgets used the same
-          // GlobalKey` → 后出现的那几行**渲染为空白**。详见
-          // `RowLocateRegistry` 的类文档。
-          final locateKeys = locateIdsOf(row);
-          final locateKey = _rowKeys.keyFor(locateKeys);
-
-          final child = Padding(
-            // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
-            // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
-            // 避免流式更新时整列重建。
-            key: ValueKey(switch (row) {
-              SingleItemRow(:final item) => item.id,
-              AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
-              // 前缀隔开：工具批与文件批的首成员 id 都是服务端事件 id，不带
-              // 前缀时「同一秒生成的第一个文件」与「同一轮第一条工具调用」
-              // 理论上可能撞上同一个 key。
-              ToolCallBatchRow(:final calls) => 'tool-batch:${calls.first.id}',
-            }),
-            padding: const EdgeInsets.only(bottom: SpbSpacing.md),
-            child: switch (row) {
-              SingleItemRow(:final item) => _buildItem(item),
-              AgentFileBatchRow() => AgentFileBatchCard(
-                batch: row,
-                onDownload: widget.onDownloadAgentFile,
-                // 传**记忆化**的那个（而不是 `widget.onLoadThumbnailAgentFile`）：
-                // 批量卡的每个成员同样会在滚出 `cacheExtent` 后被 dispose，
-                // 滚回来重新 `initState`。走方法 tear-off 还额外得到稳定的
-                // 回调 identity（虽然子卡已不靠它判重拉）。
-                // 空 `ufsFileId` 的成员由批量卡自己拦（它判 `isEmpty` 后传 null）。
-                onLoadThumbnail: widget.onLoadThumbnailAgentFile == null
-                    ? null
-                    : _loadThumbnailMemoized,
-                onOpen: widget.onOpenAgentFile,
-                onReveal: widget.onRevealAgentFile,
-                onPreview: widget.onPreviewAgentFile,
-              ),
-              // 工具调用折叠卡：不需要任何页面回调（工具卡是纯展示，入参/输出
-              // 已在归约结果里），故不经过 [_buildItem]。
-              ToolCallBatchRow() => ToolCallBatchCard(batch: row),
-            },
-          );
-          return KeyedSubtree(
-            key: locateKey,
-            child: switch (row) {
-              SingleItemRow(item: AssistantMessageItem()) => child,
-              _ => RepaintBoundary(child: child),
-            },
-          );
+          // 图片加载、逐字 reveal、窗口缩放只改变布局尺寸，不一定产生像素通知。
+          // 内嵌代码块等滚动区域的 metrics 不参与时间线追底。
+          if (notification is ScrollMetricsNotification &&
+              notification.depth == 0 &&
+              _following) {
+            _scheduleFollowBottom();
+          }
+          return false;
         },
+        child: LayoutBuilder(
+          builder: (context, constraints) => CustomScrollView(
+            controller: _scrollController,
+            center: _timelineCenterKey,
+            // 起始留白属于坐标原点；真正的顶部 padding 随旧页向上移，
+            // 避免第一回翻页时删掉中心 padding，造成一小段额外位移。
+            anchor: (_timelineOrigin / constraints.maxHeight).clamp(0.0, 1.0),
+            semanticChildCount: rows.length,
+            // 预建 1.5 屏，沿用长 Markdown 的滚动预解析范围与有界 keep-alive。
+            scrollCacheExtent: const ScrollCacheExtent.viewport(1.5),
+            slivers: [
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(
+                  padding.left,
+                  padding.top,
+                  padding.right,
+                  0,
+                ),
+                sliver: buildRows(older: true),
+              ),
+              SliverPadding(
+                key: _timelineCenterKey,
+                padding: EdgeInsets.fromLTRB(
+                  padding.left,
+                  0,
+                  padding.right,
+                  padding.bottom,
+                ),
+                sliver: buildRows(older: false),
+              ),
+            ],
+          ),
+        ),
       ),
+    );
+  }
+
+  Widget _buildTimelineRow(TimelineDisplayRow row) {
+    // 外层 GlobalKey 同时用于搜索定位与 Sliver 的 findChildIndexCallback；
+    // 内层 ValueKey 区分单条/批量形态，折叠变化时保留正确的组件身份。
+    //
+    // ## 批量卡为什么给每个成员都登记定位入口
+    //
+    // 搜索命中拿到的 `itemId` 是**具体某条**的 id（可能是批里的第 3 个
+    // 文件），而行 key 是首成员 id。若只登记首成员，搜到批内其他文件时
+    // `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——而那条明明就
+    // 在屏幕上。
+    //
+    // ⚠️ 登记的是**别名**，不是把同一个 `GlobalKey` 实例分给每个成员：
+    // 那样一旦这段文件被拆成多行（缓冲区裁剪 / 翻页拼接都会），多行就会
+    // 共用一个 `GlobalKey` → Flutter 抛 `Multiple widgets used the same
+    // GlobalKey` → 后出现的那几行**渲染为空白**。详见
+    // `RowLocateRegistry` 的类文档。
+    final locateKeys = locateIdsOf(row);
+    final locateKey = _rowKeys.keyFor(locateKeys);
+
+    final child = Padding(
+      // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
+      // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
+      // 避免流式更新时整列重建。
+      key: ValueKey(switch (row) {
+        SingleItemRow(:final item) => item.id,
+        AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
+        // 前缀隔开：工具批与文件批的首成员 id 都是服务端事件 id，不带
+        // 前缀时「同一秒生成的第一个文件」与「同一轮第一条工具调用」
+        // 理论上可能撞上同一个 key。
+        ToolCallBatchRow(:final calls) => 'tool-batch:${calls.first.id}',
+      }),
+      padding: const EdgeInsets.only(bottom: SpbSpacing.md),
+      child: switch (row) {
+        SingleItemRow(:final item) => _buildItem(item),
+        AgentFileBatchRow() => AgentFileBatchCard(
+          batch: row,
+          onDownload: widget.onDownloadAgentFile,
+          // 传**记忆化**的那个（而不是 `widget.onLoadThumbnailAgentFile`）：
+          // 批量卡的每个成员同样会在滚出 `cacheExtent` 后被 dispose，
+          // 滚回来重新 `initState`。走方法 tear-off 还额外得到稳定的
+          // 回调 identity（虽然子卡已不靠它判重拉）。
+          // 空 `ufsFileId` 的成员由批量卡自己拦（它判 `isEmpty` 后传 null）。
+          onLoadThumbnail: widget.onLoadThumbnailAgentFile == null
+              ? null
+              : _loadThumbnailMemoized,
+          onOpen: widget.onOpenAgentFile,
+          onReveal: widget.onRevealAgentFile,
+          onPreview: widget.onPreviewAgentFile,
+        ),
+        // 工具调用折叠卡：不需要任何页面回调（工具卡是纯展示，入参/输出
+        // 已在归约结果里），故不经过 [_buildItem]。
+        ToolCallBatchRow() => ToolCallBatchCard(batch: row),
+      },
+    );
+    return KeyedSubtree(
+      key: locateKey,
+      child: switch (row) {
+        SingleItemRow(item: AssistantMessageItem()) => child,
+        _ => RepaintBoundary(child: child),
+      },
     );
   }
 
@@ -2395,7 +2545,6 @@ class _ConversationPageState extends State<ConversationPage> {
   /// | `text` | item | 正文，流式时每帧都变 |
   /// | `isStreaming` | item × `_staleTurnIds` | 超时兜底会让它从 true 变 false |
   /// | `keepAlive` | `_keepAliveIds` | 窗口滑动时逐条变化 |
-  /// | `onLinkTap` | `widget.onOpenLink` | 装配层换回调时必须换新实例 |
   ///
   /// `createdAt` / `turnId` / `agentId` / `id` **不**进指纹：前三个不参与渲染，
   /// 而 `id` 就是缓存的键本身（变了就是另一条记录）。
@@ -2404,11 +2553,10 @@ class _ConversationPageState extends State<ConversationPage> {
     final isStreaming =
         item.isStreaming && !_staleTurnIds.contains(item.turnId);
     final keepAlive = _keepAliveIds.contains(item.id);
-    final onLinkTap = widget.onOpenLink;
 
     final cached = _bubbleCache[item.id];
     if (cached != null &&
-        cached.fingerprint == (text, isStreaming, keepAlive, onLinkTap)) {
+        cached.fingerprint == (text, isStreaming, keepAlive)) {
       // 命中：交回**同一实例** → `Element.updateChild` 的
       // `child.widget == newWidget` 分支命中 → 子树连 build 都不跑。
       return cached.widget;
@@ -2421,7 +2569,7 @@ class _ConversationPageState extends State<ConversationPage> {
       key: ValueKey(item.id),
       text: text,
       isStreaming: isStreaming,
-      onLinkTap: onLinkTap,
+      onLinkTap: _handleOpenLink,
       // 滚出视口后不销毁（保留 Markdown 解析缓存）——仅限够长且是最近
       // 若干个的那几条，见 [_keepAliveMinChars] / [_keepAliveWindow]。
       keepAlive: keepAlive,
@@ -2437,11 +2585,16 @@ class _ConversationPageState extends State<ConversationPage> {
       }
     }
     _bubbleCache[item.id] = (
-      fingerprint: (text, isStreaming, keepAlive, onLinkTap),
+      fingerprint: (text, isStreaming, keepAlive),
       widget: bubble,
     );
     return bubble;
   }
+
+  // 装配层每次 SSE 重建都会生成新闭包；稳定入口让未变气泡保持缓存命中，
+  // 点击时再读取当前回调，兼顾回调更新和从 null 启用/禁用。
+  void _handleOpenLink(String url, String title) =>
+      widget.onOpenLink?.call(url, title);
 
   Widget _buildItem(ConversationItem item) => switch (item) {
     UserMessageItem(

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
@@ -128,6 +130,26 @@ class EventReducer {
     // 用索引而非对象引用，因为 copyWith 会替换对象。
     int? currentAssistantIdx;
     int? currentThoughtIdx;
+
+    // Go 的增量帧没有 eventId，seq/globalSeq 也为 0。直接把 eventId 当行 ID
+    // 会让多段正文共用空 Key，连权威帧到达后也保留冲突（copyWith 保留身份）。
+    // 用首帧元数据生成仅供展示的稳定 ID；同时间戳的新段加序号，避免毫秒精度
+    // 或同轮工具前后分段再次撞车。只在新建段落时计数，不随 token 数量变化，
+    // 因而与控制器合并增量的行为一致；前插其他历史也不会改变已有首帧的身份。
+    final anonymousTextCounts = <String, int>{};
+    String textItemId(ChatEvent event) {
+      if (event.eventId.isNotEmpty) return event.eventId;
+      final identity = jsonEncode([
+        event.groupId,
+        event.turnId,
+        event.eventType,
+        event.seq,
+        event.createdAt.microsecondsSinceEpoch,
+      ]);
+      final occurrence = anonymousTextCounts[identity] ?? 0;
+      anonymousTextCounts[identity] = occurrence + 1;
+      return 'local-text:$identity:$occurrence';
+    }
 
     // turnId + call_id → items 中的索引，用于把 tool_result 合并回对应的 call。
     //
@@ -296,7 +318,7 @@ class EventReducer {
               currentAssistantIdx = items.length;
               items.add(
                 AssistantMessageItem(
-                  id: ev.eventId,
+                  id: textItemId(ev),
                   createdAt: ev.createdAt,
                   text: text,
                   turnId: ev.turnId,
@@ -317,7 +339,7 @@ class EventReducer {
               currentAssistantIdx = items.length;
               items.add(
                 AssistantMessageItem(
-                  id: ev.eventId,
+                  id: textItemId(ev),
                   createdAt: ev.createdAt,
                   text: text,
                   turnId: ev.turnId,
@@ -331,7 +353,7 @@ class EventReducer {
             currentAssistantIdx = items.length;
             items.add(
               AssistantMessageItem(
-                id: ev.eventId,
+                id: textItemId(ev),
                 createdAt: ev.createdAt,
                 text: text,
                 turnId: ev.turnId,
@@ -356,7 +378,7 @@ class EventReducer {
               currentThoughtIdx = items.length;
               items.add(
                 ThoughtItem(
-                  id: ev.eventId,
+                  id: textItemId(ev),
                   createdAt: ev.createdAt,
                   text: text,
                   turnId: ev.turnId,
@@ -368,7 +390,7 @@ class EventReducer {
             currentThoughtIdx = items.length;
             items.add(
               ThoughtItem(
-                id: ev.eventId,
+                id: textItemId(ev),
                 createdAt: ev.createdAt,
                 text: text,
                 turnId: ev.turnId,

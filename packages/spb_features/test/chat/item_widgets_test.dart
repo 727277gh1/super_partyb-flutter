@@ -709,17 +709,19 @@ void main() {
       await tester.pump(SpbDuration.copyFeedback);
     });
 
-    testWidgets('流式透传 isStreaming 给渲染器，完成后用 SelectionArea 包裹', (tester) async {
+    testWidgets('流式透传 isStreaming 给渲染器，完成后启用选择', (tester) async {
       await tester.pumpWidget(
         _host(const AssistantMessageBubble(text: '半句话', isStreaming: true)),
       );
       await tester.pump();
 
-      // 流式：Markdown 渲染器收到 isStreaming=true，且不包 SelectionArea
-      //（尾部每帧重建，选择不稳定——见气泡类文档）。
+      // 父链保持稳定，流式阶段禁选，避免选择锚点随增量漂移。
       final streaming = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
       expect(streaming.isStreaming, isTrue);
-      expect(find.byType(SelectionArea), findsNothing);
+      expect(
+        SelectionContainer.maybeOf(tester.element(find.byType(GptMarkdown))),
+        isNull,
+      );
 
       // 完成后：isStreaming=false，且整段被 SelectionArea 包裹（可选择）。
       await tester.pumpWidget(_host(const AssistantMessageBubble(text: '半句话')));
@@ -728,6 +730,10 @@ void main() {
       final settled = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
       expect(settled.isStreaming, isFalse);
       expect(find.byType(SelectionArea), findsOneWidget);
+      expect(
+        SelectionContainer.maybeOf(tester.element(find.byType(GptMarkdown))),
+        isNotNull,
+      );
 
       // 收尾，避免 pending timer/ticker 警告。
       await tester.pumpWidget(const SizedBox.shrink());

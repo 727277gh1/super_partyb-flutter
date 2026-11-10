@@ -75,7 +75,7 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('无流式项时，一次 build 至多扫 1 遍 items（修复前 3 遍）', (tester) async {
+  testWidgets('无流式项且 items 未变时，状态重建不扫描历史', (tester) async {
     tester.view.physicalSize = const Size(900, 1200);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -97,19 +97,10 @@ void main() {
     await triggerBuild(tester, 1);
     await triggerBuild(tester, 2);
 
-    expect(
-      PerfProbe.visitedItems,
-      greaterThanOrEqualTo(n),
-      reason: '两次 build 至少要扫一遍才能确认「没有流式项」——若为 0，说明计数器没接上',
-    );
-    expect(
-      PerfProbe.visitedItems,
-      lessThanOrEqualTo(2 * n),
-      reason:
-          '两次 build 至多各扫 1 遍。修复前 `_streamingItem` 被 '
-          '_staleTurnItem / _canCancelTurn / _visibleActivity 各调一次，'
-          '实测约 3n/次 build。',
-    );
+    expect(PerfProbe.visitedItems, 0, reason: '当前流式项随不可变 items 缓存');
+    await pushNoPump(tester, 1, from: 1000);
+    await tester.pump();
+    expect(PerfProbe.visitedItems, n + 1, reason: 'items 变化必须重新扫描，不能沿用旧结论');
   });
 
   testWidgets('同一份 items 的多次 build 只算一次展示行', (tester) async {
@@ -133,11 +124,13 @@ void main() {
       0,
       reason: 'items 未变（identical 相同）时必须命中缓存',
     );
+    expect(PerfProbe.timelineIndexVisits, 0, reason: '行索引和 Key 注册也必须命中缓存');
 
     // 一次推送 → 一次重算，随后的第二次 build 命中缓存。
     await pushNoPump(tester, 1, from: 100);
     await tester.pump();
     expect(PerfProbe.displayRowsComputations, 1, reason: 'items 变了必须重算一次');
+    expect(PerfProbe.timelineIndexVisits, 6, reason: '新列表每行只登记一次');
     await tester.pump();
     expect(
       PerfProbe.displayRowsComputations,
@@ -191,12 +184,11 @@ void main() {
   // ── Markdown 气泡常驻（keep-alive） ────────────────────────────────
   //
   // 动机：`GptMarkdown` 的解析缓存（`_settled` 前缀）按 Element 存活。
-  // `ListView.builder` 的子项滚出 `cacheExtent` 就 dispose，缓存全丢——
+  // `SliverList` 的子项滚出 `cacheExtent` 就 dispose，缓存全丢——
   // 滚回来要重新解析。实测（本机 2026-10，debug）60 段 8900 字符的冷重建
   // **441.6 ms**，而 Element 复用（暖重建）只需 **30.3 ms**。
   //
-  // 但常驻**必须有界**：`RenderSliverMultiBoxAdaptor` 每帧仍要布局
-  // keep-alive 的子项，2000 条历史全常驻比它要解决的问题更贵。
+  // 常驻必须有界：keep-alive 桶虽不参与每帧布局，仍会持有全部子树和解析缓存。
 
   /// 一段够长（>= 400 字符）、含多段落的 Markdown。
   ///
@@ -449,6 +441,37 @@ void main() {
   });
 
   // ── 流式期间未变气泡不重建 ────────────────────────────────────────
+  testWidgets('宿主重建更换链接闭包不重建历史气泡，点击仍走最新回调', (tester) async {
+    mockTimeline();
+    await startController(tester);
+    final calls = <int>[];
+    Future<void> rebuild(int version) => tester.pumpWidget(
+      MaterialApp(
+        home: ConversationPage(
+          controller: controller,
+          onOpenLink: version == 0 ? null : (_, _) => calls.add(version),
+        ),
+      ),
+    );
+    await rebuild(1);
+    await pushReply(
+      tester,
+      id: 'link-reply',
+      text: '[打开链接](https://example.com)',
+      seq: 100,
+    );
+    await tester.pumpAndSettle();
+    PerfProbe.reset();
+    await rebuild(2);
+    await tester.pumpAndSettle();
+    expect(PerfProbe.assistantBubbleBuilds, 0, reason: '回调 identity 不应让全部缓存失效');
+    await tester.tap(find.text('打开链接', findRichText: true));
+    expect(calls, [2]);
+    await rebuild(0);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开链接', findRichText: true));
+    expect(calls, [2], reason: '禁用后不能执行旧回调');
+  });
   //
   // 动机：`SliverChildBuilderDelegate.shouldRebuild` **恒为 true**
   // （`scroll_delegate.dart`），故父级每一次 `setState` 都会重建全部已挂载行。
@@ -632,7 +655,7 @@ void main() {
 
     // ⚠️ 必须先 `startController` + `mockTimeline` 再 `pumpPage`：
     // `pumpPage` 只挂载页面，`_items` 要等控制器的快照推送。少了这一步
-    // 页面渲染的是 `EmptyState`（没有 `ListView`），`find` 会命中 0 个。
+    // 页面渲染的是 `EmptyState`（没有 `CustomScrollView`），`find` 会命中 0 个。
     mockTimeline();
     await startController(tester);
     await pumpPage(tester);
@@ -640,8 +663,8 @@ void main() {
     await tester.pump();
     expect(controller.snapshot, isNotEmpty, reason: '前置：时间线必须有内容');
 
-    final listView = tester.widget<ListView>(
-      find.byType(ListView, skipOffstage: false).first,
+    final listView = tester.widget<CustomScrollView>(
+      find.byType(CustomScrollView, skipOffstage: false).first,
     );
     final extent = listView.scrollCacheExtent;
     expect(

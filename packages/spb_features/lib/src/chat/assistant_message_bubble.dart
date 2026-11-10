@@ -12,8 +12,8 @@ import 'perf_probe.dart';
 /// ## 流式
 ///
 /// [isStreaming] 为 true 时启用逐字 reveal 动画（`fade`），由 `gpt_markdown`
-/// 内部驱动：settled 前缀缓存、只重建变化中的尾部，故长回复的单帧成本不随
-/// 回复增长。`isStreaming` 置 false 时残余文本 fast-forward 收尾。
+/// 内部驱动：settled 前缀缓存减少重复解析；已挂载长正文仍需布局，不能视为
+/// 常量成本。`isStreaming` 置 false 时残余文本 fast-forward 收尾。
 ///
 /// reveal 动画本身就是「仍在生成」的视觉信号，取代了旧版手工拼接的闪烁光标
 /// （`SelectableText` 无法在文本流中间内联 widget，`GptMarkdown` 同理；与其
@@ -21,9 +21,8 @@ import 'perf_probe.dart';
 ///
 /// ## 选择
 ///
-/// 完成后（`isStreaming == false`）用 [SelectionArea] 包裹以支持选择；流式中
-/// 尾部每帧重建、选择锚点不稳，故**不**包 [SelectionArea]。这与旧版「流式
-/// 不可选、完成后可选」的取舍一致。
+/// 始终保留 [SelectionArea] 与 [SelectionContainer] 的父链，只在完成后
+/// 启用选择。流式中禁选以避免锚点漂移；结束时不卸载 Markdown 解析器。
 ///
 /// ## 数学 / 链接
 ///
@@ -55,10 +54,8 @@ import 'perf_probe.dart';
 ///
 /// ## ⚠️ 为什么不能无界常驻
 ///
-/// `AutomaticKeepAliveClientMixin` 让子项**留在树上**，而
-/// `RenderSliverMultiBoxAdaptor` 每帧仍要**布局**它们（keep-alive 的语义是
-/// 「不回收」，不是「不布局」）。2000 条历史全常驻会把每帧布局成本变成
-/// O(历史长度)，比它要解决的「重解析」还贵。
+/// keep-alive 桶中的子项不参与每帧布局/绘制，但其 Element、RenderObject 与
+/// 解析结果仍占内存。2000 条历史全常驻会保留 2000 份子树与解析缓存。
 ///
 /// 故常驻是**页面决定的有界策略**（见 `ConversationPage` 的
 /// `_keepAliveMinChars` / `_keepAliveWindow`）：只给「够长、值得缓存」且
@@ -84,8 +81,8 @@ class AssistantMessageBubble extends StatefulWidget {
 
   /// 是否滚出视口后仍保留 Element（从而保留 Markdown 解析缓存）。
   ///
-  /// 默认 **false**：大多数气泡不值得常驻（短回复解析很快，且常驻要付
-  /// 每帧布局成本）。由调用方按「长度阈值 + 最近窗口」决定，见类文档。
+  /// 默认 **false**：短回复解析很快，不值得付出子树常驻内存。
+  /// 由调用方按「长度阈值 + 最近窗口」决定，见类文档。
   final bool keepAlive;
 
   @override
@@ -94,12 +91,31 @@ class AssistantMessageBubble extends StatefulWidget {
 
 class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
     with AutomaticKeepAliveClientMixin {
+  final _selectionDelegate = StaticSelectionContainerDelegate();
+  final _selectionAreaKey = GlobalKey<SelectionAreaState>();
+
+  // Markdown 缓存的 span 不随回调 identity 失效；稳定入口须读取当前 widget，
+  // 否则切换回调或从 null 启用链接后仍会执行旧闭包。
+  void _onLinkTap(String url, String title) =>
+      widget.onLinkTap?.call(url, title);
+
+  @override
+  void dispose() {
+    _selectionDelegate.dispose();
+    super.dispose();
+  }
+
   @override
   bool get wantKeepAlive => widget.keepAlive;
 
   @override
   void didUpdateWidget(AssistantMessageBubble oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isStreaming && widget.isStreaming) {
+      // 超时恢复等路径会重新进入流式。先撤掉选区/手柄，再禁用容器，
+      // 否则上层仍把手柄发给已 disabled 的 SelectionContainer。
+      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    }
     // ## 为什么必须显式调 `updateKeepAlive()`
     //
     // `AutomaticKeepAliveClientMixin` 的 `build` **只会申请、永不释放**：
@@ -130,7 +146,6 @@ class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
 
     final text = widget.text;
     final isStreaming = widget.isStreaming;
-    final onLinkTap = widget.onLinkTap;
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final dir = Directionality.of(context);
@@ -177,9 +192,7 @@ class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
       // 图片解码降采样（docs/memory-audit.md G10）。不传时插件用
       // `Image(image: NetworkImage(url))`——无 ResizeImage，按原图分辨率解码。
       imageBuilder: markdownImageBuilder,
-      onLinkTap: onLinkTap == null
-          ? null
-          : (url, title) => onLinkTap(url, title),
+      onLinkTap: _onLinkTap,
     );
 
     return Align(
@@ -193,15 +206,27 @@ class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
               color: scheme.surfaceContainerHighest,
               borderRadius: SpbRadius.bubbleAll,
             ),
-            child: isStreaming ? md : SelectionArea(child: md),
+            child: SelectionArea(
+              key: _selectionAreaKey,
+              child: Builder(
+                builder: (context) => isStreaming
+                    ? SelectionContainer.disabled(child: md)
+                    : SelectionContainer(
+                        // disabled → enabled 时必须显式传入上层 registrar；
+                        // 此次是 widget 更新，未必触发 didChangeDependencies。
+                        registrar: SelectionContainer.maybeOf(context),
+                        delegate: _selectionDelegate,
+                        child: md,
+                      ),
+              ),
+            ),
           ),
           // 整条正文的复制入口。
           //
           // ## 为什么**仅**非流式显示
           //
           // 流式中 [text] 每帧都在变，此时复制拿到的是半截内容：用户以为复制了
-          // 完整回复，粘出来却是残句。宁可此时没有入口——`SelectionArea` 在流式中
-          // 也刻意不包（同一取舍，见类文档）。
+          // 完整回复，粘出来却是残句。因此与流式禁选一起，仅在完成后启用。
           //
           // ## 为什么在气泡**下方**而不是内部
           //

@@ -3,7 +3,7 @@
 /// ## 它解决什么
 ///
 /// `gpt_markdown` 的**默认**图片路径是
-/// `Image(image: NetworkImage(url))`（1.3.4 `shared_render.dart` 的
+/// `Image(image: NetworkImage(url))`（1.3.0 `shared_render.dart` 的
 /// `imageSpan`），**没有** `cacheWidth`/`ResizeImage`——于是 agent 回复里
 /// 贴一张 4000×3000 的截图，就按原图分辨率解码 ≈ 48MB 位图进全局
 /// `imageCache`。而它显示在气泡里，逻辑宽最多 ~1024dp。
@@ -77,8 +77,7 @@ final LinkedHashMap<String, Uint8List> _dataUrlMemo =
     LinkedHashMap<String, Uint8List>();
 int _dataUrlMemoBytes = 0;
 
-/// 清空 `data:` URL 缓存（仅测试用：避免用例之间互相污染）。
-@visibleForTesting
+/// 释放可再生的全局字节缓存（系统内存压力时调用）；已显示图片由各自 State 持有。
 void clearDataUrlImageMemo() {
   _dataUrlMemo.clear();
   _dataUrlMemoBytes = 0;
@@ -94,43 +93,72 @@ Widget markdownImageBuilder(
   String url,
   double? width,
   double? height,
-) {
-  final provider = _providerFor(url);
-  final Widget child;
-  if (provider == null) {
-    // 解不出来（非法 base64 / 空数据）：与「网络图 404」同一个占位，
-    // 不抛异常、不阻断整条回复的渲染。
-    child = const CustomImageError();
-  } else {
-    child = Image(
-      image: ResizeImage(
-        provider,
-        // 解码上限（docs/memory-audit.md G10）：宽度上限 = 显示逻辑宽 × DPR。
-        width: imageDecodeCeilingFor(
-          displayLogicalWidth: _ceilingLogicalWidth(context, width),
-          view: View.maybeOf(context),
-        ),
-      ),
-      // 与插件默认实现一致（见文件头第 2 条）。
-      fit: BoxFit.fill,
-      loadingBuilder: (context, child, progress) {
-        if (progress == null) return child;
-        final total = progress.expectedTotalBytes;
-        return CustomImageLoading(
-          // 插件默认实现不 clamp；这里夹到 [0,1] 防止某些服务端给出的
-          // 累计字节数超过总长时占位组件收到越界值。
-          progress: total == null
-              ? 1
-              : (progress.cumulativeBytesLoaded / total).clamp(0.0, 1.0),
-        );
-      },
-      errorBuilder: (context, error, stackTrace) => const CustomImageError(),
-    );
+) => SizedBox(width: width, height: height, child: _MarkdownImage(url, width));
+
+class _MarkdownImage extends StatefulWidget {
+  const _MarkdownImage(this.url, this.width);
+
+  final String url;
+  final double? width;
+
+  @override
+  State<_MarkdownImage> createState() => _MarkdownImageState();
+}
+
+class _MarkdownImageState extends State<_MarkdownImage> {
+  // 全局 LRU 淘汰（尤其单张超过预算）后，已挂载图片仍复用同一份字节，
+  // 避免无关重建反复 Base64 解码、换 MemoryImage 缓存键并闪烁。
+  ImageProvider<Object>? _provider;
+
+  @override
+  void initState() {
+    super.initState();
+    _provider = _providerFor(widget.url);
   }
 
-  // 尺寸盒子：`=宽x高` 是逻辑像素的紧约束；都没写时原样传递（不约束），
-  // 与插件默认实现的 `SizedBox(width: width, height: height, ...)` 一致。
-  return SizedBox(width: width, height: height, child: child);
+  @override
+  void didUpdateWidget(_MarkdownImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) _provider = _providerFor(widget.url);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = _provider;
+    final Widget child;
+    if (provider == null) {
+      // 解不出来（非法 base64 / 空数据）：与「网络图 404」同一个占位，
+      // 不抛异常、不阻断整条回复的渲染。
+      child = const CustomImageError();
+    } else {
+      child = Image(
+        image: ResizeImage(
+          provider,
+          // 解码上限（docs/memory-audit.md G10）：宽度上限 = 显示逻辑宽 × DPR。
+          width: imageDecodeCeilingFor(
+            displayLogicalWidth: _ceilingLogicalWidth(context, widget.width),
+            view: View.maybeOf(context),
+          ),
+        ),
+        // 与插件默认实现一致（见文件头第 2 条）。
+        fit: BoxFit.fill,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+          final total = progress.expectedTotalBytes;
+          return CustomImageLoading(
+            // 插件默认实现不 clamp；这里夹到 [0,1] 防止某些服务端给出的
+            // 累计字节数超过总长时占位组件收到越界值。
+            progress: total == null
+                ? 1
+                : (progress.cumulativeBytesLoaded / total).clamp(0.0, 1.0),
+          );
+        },
+        errorBuilder: (context, error, stackTrace) => const CustomImageError(),
+      );
+    }
+
+    return child;
+  }
 }
 
 /// 解码宽度的**逻辑**上限：取「Markdown 声明的宽」与「基准上限」的较小者。

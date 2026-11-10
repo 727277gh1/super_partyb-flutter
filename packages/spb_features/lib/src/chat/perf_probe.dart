@@ -46,6 +46,9 @@ abstract final class PerfProbe {
   /// 事件触发 setState」应当增量为 0，「推一条新 item」增量为 1。
   static int displayRowsComputations = 0;
 
+  /// 构建 Sliver 行索引时遍历的行数；items 未变的重建应为 0。
+  static int timelineIndexVisits = 0;
+
   /// `_followBottom` 实际被执行的次数（含「已在底部直接返回」的调用）。
   ///
   /// 用来钉住「一次 items 推送最多调度一次跟随」：修复前 `_onItems` 与
@@ -70,6 +73,7 @@ abstract final class PerfProbe {
   static void reset() {
     visitedItems = 0;
     displayRowsComputations = 0;
+    timelineIndexVisits = 0;
     followBottomCalls = 0;
     assistantBubbleBuilds = 0;
     rowKeyOwnerCollisions = 0;

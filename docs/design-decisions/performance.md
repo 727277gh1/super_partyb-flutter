@@ -51,7 +51,7 @@ build 扫了多少条 item、展示行缓存是否命中、几个气泡真的重
 | `JsonEncoder.withIndent('  ').convert` | **4.7 µs/次** | 可忽略（但见下方「有意不做」第 3 条） |
 | 缩略图请求（修复前） | 1 张卡 + 3 条**无关**流式增量 → **1 → 4 次** | 每次 build 重拉 |
 
-**冷/暖差 4–15×** 是「滚动不顺」的主因：`ListView.builder` 的子项滚出
+**冷/暖差 4–15×** 是已测得的一项滚动成本：`ListView.builder` 的子项滚出
 `cacheExtent` 即 dispose，`gpt_markdown` 的增量解析缓存（`_settled` 前缀）
 随之全丢，滚回来要重解析。
 
@@ -59,7 +59,7 @@ build 扫了多少条 item、展示行缓存是否命中、几个气泡真的重
 
 | 修了什么 | 判据（回归用例钉住的事实） |
 |---|---|
-| **build 期线性扫描收敛** | 修复前 `_streamingItem` 被 `_staleTurnItem` / `_canCancelTurn` / `_visibleActivity` 各调一次（每次全量扫）→ 一次 build 扫 3 遍。现在 `build` 里算一次，尾向扫描遇 `turnId != streaming.turnId` 立即 `break`。用例断言 `PerfProbe.visitedItems <= 2 * n`（修复前实测 1200 > 400） |
+| **build 期线性扫描收敛** | 修复前 `_streamingItem` 被 `_staleTurnItem` / `_canCancelTurn` / `_visibleActivity` 各调一次（每次全量扫）→ 一次 build 扫 3 遍。现在 `build` 里算一次，尾向扫描遇 `turnId != streaming.turnId` 立即 `break`。后续按 items identity 缓存流式项：未变列表的两次重建扫描为 0，新列表扫描一次 |
 | **`_displayRows()` 缓存** | 按 `identical(_items, _lastRowsItems)` 缓存 `groupFileEventsForDisplay` + `locateIdsOfAll`（两者看同一份 `rows`，分两次算会多一次全量扫描 + 多一个「两份不一致」的可能）。用例断言 `displayRowsComputations == 1` |
 | **`_followBottom` 调度去重** | 一帧内多次推送只排一次 post-frame 回调（修复前每次 `_onItems` 各排一个，后一个动画会取消前一个）。用例断言 `followBottomCalls == 1`（修复前 5） |
 | **缩略图请求去重（两层）** | ① 卡片 `didUpdateWidget` 判据从「回调 identity」改为 `file.id` / `ufsFileId` / `isDeleted`——调用方每次 build 现包闭包，identity 判据**恒真**；② 页面层 `_thumbnailMemo` 按 `ufsFileId` 记忆化 `Future<List<int>?>`（缓存 Future 而非已完成值，才能同时去重**并发**请求）。失败也缓存：404/501 通常是永久性的。⚠️ **两层各有独立用例**——只回退卡片判据时页面用例仍绿（memo 兜住） |
@@ -123,10 +123,10 @@ build 扫了多少条 item、展示行缓存是否命中、几个气泡真的重
 
 | 决定 | 理由 |
 |---|---|
-| **只缓存 `AssistantMessageItem`** | 它的渲染输入只有 4 个显式字段（`text` / `isStreaming` / `keepAlive` / `onLinkTap`），指纹可穷举。其余 item 夹带页面状态（`ConfirmationItem` 读 `_resolving`、`FeedbackRequestItem` 读 `_submittedFeedback` 与 `_feedbackTTL`、`ErrorItem` 读 `_retryingTurnId`），逐项列必然漏一处，而漏掉的表现是「状态变了界面不变」 |
+| **只缓存 `AssistantMessageItem`** | 它的渲染输入只有 3 个显式字段（`text` / `isStreaming` / `keepAlive`），指纹可穷举。其余 item 夹带页面状态（`ConfirmationItem` 读 `_resolving`、`FeedbackRequestItem` 读 `_submittedFeedback` 与 `_feedbackTTL`、`ErrorItem` 读 `_retryingTurnId`），逐项列必然漏一处，而漏掉的表现是「状态变了界面不变」 |
 | 指纹含 `isStreaming` | 它是 item 字段 **× `_staleTurnIds`**（超时兜底会让 true 变 false），不是 item 自带值 |
 | 指纹含 `keepAlive` | 它是 `_keepAliveIds`（窗口滑动时逐条变） |
-| 指纹含 `onLinkTap` | 装配层换回调时不换新实例就会走旧逻辑 |
+| 链接走稳定方法入口 | 点击时读取当前回调；两端宿主重建产生的新闭包不让全部气泡缓存失效 |
 | **主题/语言/文本缩放不进指纹** | 它们走 `InheritedWidget`；复用同一实例时子树的 `dependOnInheritedWidgetOfExactType` 依赖关系仍在，框架会自己标记重建 |
 | `_bubbleCacheLimit = 200`，简单逐出（非 LRU） | 缓存只为「刚看过的那些」服务；维护「最近使用」要在命中路径上搬动元素，而命中路径正是要压到最便宜的那条 |
 | 切对话时 `_bubbleCache.clear()` | `item.id` 是服务端事件 id，跨对话**不保证唯一**；不清可能把 A 对话的气泡交给 B 对话的同 id 项 |
@@ -149,15 +149,9 @@ keep-alive 的上界用例抓住。
 
 - **本机无 `DISPLAY`、无真机**：所有数字是 build/layout 成本测量，不是真机
   帧率。`xvfb-run` 下渲染不稳定，**不能**把「窗口出现了」当作渲染正确的证据。
-- **release AOT 通常比 debug JIT 快 5–10×**：60 段 Markdown 的 441.6 ms 在
-  release 下估计 50–90 ms，仍超 16.7 ms 预算——但这个换算**没有实测**，故
-  §五 的取舍（缓存哪些、窗口多大）应在有桌面环境的机器上用
-  `SPB_FRAME_TIMING` 复核一次。
-- ~~`_looksLikeError` 的 `toLowerCase()` 是全量拷贝~~ → **已修**，见 §八。
-- **`_thumbnailMemo` 的键只有 `ufsFileId`**：同一路径被新版本覆盖时**不失效**
-  （服务端事件不带 mtime），会继续展示旧缩略图直到切对话。
-- **翻页 `loadOlder` 前插不补偿滚动位置**（既有行为）；`maxScrollExtent` 是
-  惰性估算，会跨若干帧逐步修正。
+- debug 的 build/layout 耗时不能换算成 Windows release FPS；真实 raster 与掉帧情况仍须在设备上采样。
+- 缩略图已按版本令牌失效并设双上限，见 §6.72。
+- 历史前插已由双向 Sliver 保持阅读位置，聚合边界变化时用可见行重定原点，见 [§6.85](chat.md)。
 
 #### 八、两处「偶发重帧」的热点（2026-10 补）
 
@@ -230,6 +224,26 @@ show ScrollCacheExtent;`。
 ⚠️ **守卫只能断言结构事实**（`scrollCacheExtent` 非 null、`style == viewport`、
 `value >= 1.0`）：帧耗时毫秒数随机器与 debug/release 漂移，本仓库禁止毫秒断言。
 改回固定小像素时没有任何**功能**测试会红——这正是这条结构守卫存在的理由。
+
+#### 九、长对话滚动回归评审（2026-11-10）
+
+报告中的空行有空 `eventId` 引起的 Key 冲突证据，数据未被裁剪；身份和分页修复见
+[§6.85](chat.md)。以下独立成本也已通过回归测试确认并修复：
+
+| 根因 | 修复与验证 |
+|---|---|
+| 自动追底的像素通知再次调用 `animateTo`，连固定目标也每帧重启 | 当前动画完成后读取最新目标；用户上滚立即退出。逐 16ms 推帧时 activity 保持同一实例，150ms 后落底；动画中新增内容仍能追到最新底部 |
+| 图片/reveal/窗口缩放改变高度，未必产生像素通知 | 监听时间线自身的 `ScrollMetricsNotification`；窗口缩小 200px 后仍贴底，已上滚阅读时不改变位置 |
+| 完成回复时插入 `SelectionArea`，销毁 Markdown 解析 State | 固定 `SelectionArea → SelectionContainer` 父链，只切换禁选状态；解析 State 和已定型段落实例保持不变，完成后可实际选中；恢复流式前清除选区和手柄 |
+| 两端宿主每次 SSE 重建生成新的链接闭包，使气泡缓存全部失效；插件缓存 span 还会保留旧回调 | 页面与气泡均通过稳定方法读取当前回调。宿主更换闭包时历史气泡 build 为 0，点击调用新回调，设为 null 后不再执行 |
+| 无关状态更新重复扫描所有行、注册 Key、查找流式项 | 派生索引随 items 缓存；列表未变时索引遍历与无流式项扫描均为 0，变更时重新计算 |
+| 缩略图加载同步抛错留下无条目的版本键 | 取得 Future 后再替换版本和缓存；失败不破坏旧版本，成功时才失效 |
+| data URL 超过全局缓存预算/缓存被释放后，已挂载图片重建又解码 | 图片 State 持有当前 provider；全局缓存清理后重建复用字节，换 URL 或卸载后才重载。两端内存压力回调同时释放全局 data URL 缓存 |
+
+评审还核对了 SSE 合并归约、两端宿主接线、图片降采样、timeline 批量持久化、同步下载/
+摘要和日志路径。同步写日志与逐字 fade 保持原有语义；整份下载的内存峰值仍是 §6.73
+记录的边界，当前报告同步在途为 0，不能据此解释本次滚动掉帧。上述结构测试不能证明
+Windows GPU/raster 的实际改善幅度；交付后需以同一长对话的设备采样复核。
 
 ### 6.59 内存审计与处置（2026-11）：无界集合加界 / 图片解码降采样 / batch 写入
 
@@ -379,17 +393,11 @@ clearLiveImages(): size=0 live=0  ← 本模块补的
 == 0` 恒真。修好后反向验证才有效：去掉 `clearLiveImages()` → 1 条红；去掉
 `onRelease` 调用 → 3 条红。
 
-#### 待议项（只登记，不动）
+#### 动画与日志的边界
 
-J1（`isStreaming` 翻转致气泡 remount，`SelectionArea`
-换父节点丢解析状态，#72）、J2（`FileLogSink` 同步写盘——[§6.57](runtime-and-ops.md) 的有意取舍，#73）、
-J3（流式逐字 fade 动画——产品表达，#74）、J4（`_followBottom` 动画被打断重来，#75）
-——逐条证据与「为什么这轮不动」见对账单 [§6.2](architecture.md)，后续讨论以各 issue 为准。共同前提：本机无 `DISPLAY`
-无真机，拿不到 `SPB_FRAME_TIMING` 慢帧数据；**没有实测数据就调参，是把
-K1–K3 那类已论证的取舍推翻重来**。
-
-（G10 原本也在这里。它的「需实测确认默认 builder 是否自带降采样」已在插件
-源码里得到确定答案，故已修——见下节。）
+J1（结束时 remount，#72）和 J4（追底动画重启，#75）已由 §6.47 第九节的回归
+修复，流式禁选和动画时长均保留。J2（同步日志，#73）与 J3（逐字 fade，#74）保持
+现有取舍；是否改变这些行为仍须依据真实设备采样。
 
 #### G10 图片降采样 + 内存采样通道（后续四项之二，2026-11）
 
@@ -397,7 +405,7 @@ G10 与「拿不到绝对内存曲线」是第二轮剩下的两个**不靠猜�
 已同时收口。细节与证据以对账单 `docs/memory-audit.md` §6.1 / §四 为准。
 
 **G10：Markdown 图片走我们自己的 `imageBuilder`。** 判据不是猜测，而是插件
-源码：`gpt_markdown` 1.3.4 `shared_render.dart` 的 `imageSpan` 默认分支是
+源码：`gpt_markdown` 1.3.0 `shared_render.dart` 的 `imageSpan` 默认分支是
 `Image(image: NetworkImage(url))`——**没有** `ResizeImage`/`cacheWidth`。于是
 agent 回复里一张 4000×3000 的截图就按原图解码 ≈ 48MB 位图进全局 imageCache，
 而它在气泡里最多 1024dp 宽；这是全仓最后一处未降采样的 `Image`。

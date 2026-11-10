@@ -170,6 +170,22 @@ void main() {
       expect(memo.stats.misses, 1);
     });
 
+    test('新版本加载同步失败保留旧版本缓存，后续成功时再失效', () async {
+      final memo = ThumbnailMemo();
+      final old = memo.resolve('x', 'v1', () async => [1, 2, 3]);
+      await old;
+      expect(
+        () => memo.resolve('x', 'v2', () => throw StateError('boom')),
+        throwsStateError,
+      );
+      expect(memo.resolve('x', 'v1', () async => fail('旧版本仍应命中')), same(old));
+      expect(memo.bytes, 3);
+      expect(memo.stats.invalidations, 0);
+      await memo.resolve('x', 'v2', () async => [4]);
+      expect(memo.stats.invalidations, 1);
+      expect(memo.bytes, 1);
+    });
+
     test('clear 清空条目与字节，但保留累计统计与峰值（诊断要看整页生命周期）', () async {
       final memo = ThumbnailMemo();
       await memo.resolve('a', 'v1', () async => [1, 2]);

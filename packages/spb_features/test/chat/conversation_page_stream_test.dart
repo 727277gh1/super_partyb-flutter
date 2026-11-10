@@ -105,11 +105,11 @@ void main() {
         );
       }
       await tester.pumpAndSettle();
-      // 取 ListView 的 controller 而不是 `find.byType(Scrollable).first`：
+      // 取 CustomScrollView 的 controller 而不是 `find.byType(Scrollable).first`：
       // 页面里还有其它可滚动区域（侧栏/输入区），`.first` 命中的不一定是
       // 时间线，而 `pointerScroll` 必须打在被测的那个 position 上。
       final position = tester
-          .widget<ListView>(find.byType(ListView))
+          .widget<CustomScrollView>(find.byType(CustomScrollView))
           .controller!
           .position;
       expect(
@@ -127,6 +127,87 @@ void main() {
     // 实现用 80px 容差判「是否在底部」——于是上滚 1 格（距底 53 < 80）仍被判
     // 在底部，`_onScroll` 末尾立刻 `_followBottom()` 拉回去，用户感觉「滚轮
     // 往上滚两下等于没滚」。
+    testWidgets('自动追底的同一目标只启动一次动画，150ms 后落到底部', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      final position = await seedOverflowing(tester);
+      await pushEvent(
+        tester,
+        EventTypes.userMessage,
+        sseEvent(
+          'user_message',
+          id: 'new',
+          turnId: 'new',
+          seq: 100,
+          payload: {'input': '新消息'},
+        ),
+      );
+      final activity = position.activity;
+      expect(activity, isA<DrivenScrollActivity>());
+      // 每帧泵一次，避免 pumpAndSettle 的大步长掩盖「每帧重启动画」。
+      await tester.pump(const Duration(milliseconds: 16));
+      for (var frame = 0; frame < 8; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        expect(position.activity, same(activity), reason: '动画自己的通知不能取消自身');
+      }
+      await tester.pump(const Duration(milliseconds: 32));
+      expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+    });
+
+    testWidgets('动画中内容继续增长仍追最新底部，用户上滚能立即退出', (tester) async {
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      final position = await seedOverflowing(tester);
+      Future<void> append(int n, String text) => pushEvent(
+        tester,
+        EventTypes.userMessage,
+        sseEvent(
+          'user_message',
+          id: 'new$n',
+          turnId: 'new$n',
+          seq: 100 + n,
+          payload: {'input': text},
+        ),
+      );
+      await append(1, '开始追底');
+      await tester.pump(const Duration(milliseconds: 16));
+      final activity = position.activity;
+      await append(2, List.filled(8, '正文继续增长').join('\n'));
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(position.activity, same(activity));
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+
+      await append(3, '再次追底');
+      await tester.pump(const Duration(milliseconds: 16));
+      position.pointerScroll(-53);
+      final stopped = position.pixels;
+      await append(4, '用户阅读历史时到达');
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(stopped, 1));
+    });
+
+    testWidgets('视口缩小时继续跟随底部，已上滚阅读时保持位置', (tester) async {
+      tester.view.physicalSize = const Size(800, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      mockTimeline();
+      await startController(tester);
+      await pumpPage(tester);
+      final position = await seedOverflowing(tester);
+      tester.view.physicalSize = const Size(800, 600);
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+      position.pointerScroll(-53);
+      await tester.pumpAndSettle();
+      final reading = position.pixels;
+      tester.view.physicalSize = const Size(800, 500);
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(reading, 1));
+    });
+
     testWidgets('在底部用滚轮上滚一格即脱离自动跟随', (tester) async {
       mockTimeline();
       await startController(tester);
@@ -258,7 +339,7 @@ void main() {
       expect(calls, 0, reason: '初始在底部，不应触发翻页');
 
       // 向上拖到底（内容溢出，可滚）。
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
 
       expect(calls, greaterThan(0), reason: '滚到顶部附近必须触发翻页');
@@ -294,7 +375,7 @@ void main() {
       //
       // 故：先拖到顶，再在阈值区间内**来回抖动**，制造多次「位置已变」信号。
       final gesture = await tester.startGesture(
-        tester.getCenter(find.byType(ListView)),
+        tester.getCenter(find.byType(CustomScrollView)),
       );
       for (var i = 0; i < 20; i++) {
         await gesture.moveBy(const Offset(0, 400));
@@ -333,7 +414,7 @@ void main() {
       await seedMessages(tester, 30);
       await tester.pumpAndSettle();
 
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
       final inA = calls;
       expect(inA, greaterThan(0));
@@ -347,9 +428,9 @@ void main() {
           return true;
         },
       );
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -200));
       await tester.pumpAndSettle();
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
 
       expect(calls, greaterThan(inA), reason: '换了对话后必须重新允许翻页（否则新对话永远翻不出历史）');
@@ -369,15 +450,15 @@ void main() {
       await seedMessages(tester, 30);
       await tester.pumpAndSettle();
 
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
       final afterFirst = calls;
       expect(afterFirst, greaterThan(0));
 
       // 再滚一次（回到顶部附近会再次触发滚动通知）。
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -200));
       await tester.pumpAndSettle();
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
 
       expect(calls, afterFirst, reason: '返回 false 之后不得再发请求（否则每次到顶都白拉一次）');
@@ -391,7 +472,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // 没有回调可注入，滚到顶也不应抛异常。
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     });
@@ -410,15 +491,15 @@ void main() {
       await seedMessages(tester, 30);
       await tester.pumpAndSettle();
 
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
       expect(calls, greaterThan(0));
       expect(find.textContaining('加载更早历史失败'), findsOneWidget);
 
       final afterFirst = calls;
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -200));
       await tester.pumpAndSettle();
-      await tester.drag(find.byType(ListView), const Offset(0, 5000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 5000));
       await tester.pumpAndSettle();
 
       expect(
@@ -441,8 +522,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // 空态渲染的是 _EmptyHint，没有 ListView 可滚。
-      expect(find.byType(ListView), findsNothing);
+      // 空态渲染的是 _EmptyHint，没有 CustomScrollView 可滚。
+      expect(find.byType(CustomScrollView), findsNothing);
       expect(calls, 0);
     });
   });

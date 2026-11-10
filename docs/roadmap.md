@@ -26,6 +26,9 @@
 - [x] 两端切账号身份与离线缓存归属失效（[issue #103](https://git.atjog.com/dever/super_partyb-flutter/issues/103)，见 [§6.90](design-decisions/auth.md)；本地修复与自动化回归）
 - [x] 对话列表刷新竞态、SSE 删除后复活及归档快照丢失（[issue #104](https://git.atjog.com/dever/super_partyb-flutter/issues/104)，见 [§6.91](design-decisions/ui.md)；本地修复与自动化回归）
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
+- [x] 流式回复空 ID 导致多轮正文滚动消失：已复现并修复，自动化回归通过（[issue #100](https://git.atjog.com/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；Windows release 待设备复核）
+- [x] 长对话性能评审：追底动画去重、Markdown 完成时保留解析状态、稳定链接回调、行索引缓存与图片缓存修复（见 [§6.47](design-decisions/performance.md)；本地回归通过，Windows release 待设备复核）
+- [x] 上翻加载历史保持阅读位置，分页在途切组隔离旧响应（[issue #100](https://git.atjog.com/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；本地回归通过，Windows release 待设备复核）
 - [x] 对话列表卡片化 + 列数跟随宽度（移动端一列、桌面端并排 2~4 列，见 [§6.84](design-decisions/ui.md)）
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 [§6.22](design-decisions/testing.md)）
 - [x] 消息发送 + 无归属入口（悬浮窗）
