@@ -13,7 +13,7 @@ import '../support/golden_fonts.dart';
 /// ## 为什么只挑 `SpecUiCard`（而不是把 features 铺满）
 ///
 /// issue #25 明确点名了「spec 卡」——它是本仓库**唯一由服务端 JSON 驱动**的
-/// 渲染器（`JsonUiSchema`），元素 type 有 12 种、每种的排版各不相同。它改错的
+/// 渲染器（`JsonUiSchema`），含多种元素类型、每种的排版各不相同。它改错的
 /// 代价高（服务端加一个 type，客户端渲染错了没人会发现——因为单测断言的是
 /// 「渲染了哪个 widget」而不是「长得对不对」）。
 ///

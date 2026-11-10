@@ -37,6 +37,7 @@
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 [§6.14](design-decisions/chat.md)）
 - [x] 发送的乐观回显（请求在飞时「发送中」，issue #52，见 [§6.50](design-decisions/chat.md)）
 - [x] 对话内搜索（搜已加载时间线，见 [§6.15](design-decisions/chat.md)）+ 窄屏 AppBar 溢出修复（issue #31，见 [§6.16](design-decisions/ui.md)）
+- [x] spec 看板：Table、六类 Chart、响应式 Stack/Grid、状态快照取值（见 [§6.9.4](design-decisions/runtime-and-ops.md)；本地回归与 golden 通过，设备效果待验收）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 自动同步（启动后一次 / 周期 N 分钟，默认关闭；仅桌面端装配，见 [§6.42](design-decisions/sync.md)）
 - [x] 进对话时按需同步（默认关闭；判定命中只提示、不静默下载，见 [§6.43](design-decisions/sync.md)）

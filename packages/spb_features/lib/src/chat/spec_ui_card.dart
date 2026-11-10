@@ -3,32 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 
-/// spec JSON（JsonUiSchema）渲染卡：消费 [SpecUiDocument]，按元素 type 分派。
-///
-/// ## 范围界定（这是受限渲染器，不是 webapp 的通用 renderer）
-///
-/// 服务端三类 spec 生产者只产出白名单 type（card/progress/metric/text/heading/
-/// button/list/listitem/separator/badge/alert/code）与两类动作
-/// （copy_text / send_next_input）——全部由**确定性 Go 代码**编译，非 LLM 生成
-/// UI。webapp 的 JsonUiSchemaRenderer 有 40+ type 分支，是为「将来可能有人用」
-/// 服务的；Flutter 只需要覆盖**实际产出**，未知 type 降级为不崩占位
-/// （服务端新增 type 时老客户端的其他部分照常渲染）。
-///
-/// ## 未知类型必须**照常下钻**（issue #27）
-///
-/// 真实生产看板（`dashboard.spec.json`）的容器是 `Stack` / `Grid`、叶子是
-/// `Chart` / `Table`——**都不在白名单里**。若未知类型直接截断，从 root 起第一跳
-/// 就把整棵子树吞掉，连白名单内的 `Metric`（「上证指数 3864.37」）也一起没了，
-/// 比「退回 JSON 原文」更差。故未知类型一律：
-///
-/// - **有子元素** → 递归渲染子元素（对齐 webapp `renderFallback`）；
-/// - **无子元素**（叶子） → 渲染占位标记，且打印**原始 type 字符串**。
-///
-/// ## 动作经 [onAction] 上抛，页面不直接产生副作用
-///
-/// 渲染层不知道「回填输入框」和「发送消息」怎么实现（那是 app 层装配），故只
-/// 上抛动作对象。copy_text 的语义按既有定案降级：**优先回填
-/// 输入框**（对齐 webapp onAppend 行为），剪贴板写入由调用方按平台能力决定。
+import 'spec_chart.dart';
+import 'spec_layout.dart';
+import 'spec_table.dart';
+
+/// 聊天卡片与工作区看板共用渲染器；文件预览不注入动作回调。
+/// 未知容器继续下钻，未知叶子显示类型提示，避免丢失可显示的内容。
 class SpecUiCard extends StatelessWidget {
   const SpecUiCard({super.key, required this.doc, this.onAction});
 
@@ -42,7 +22,9 @@ class SpecUiCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final d = doc;
     final root = d?.root;
-    if (d == null || root == null) return const SizedBox.shrink();
+    if (d == null || root == null || !root.visible) {
+      return const SizedBox.shrink();
+    }
 
     return _SpecElementView(
       element: root,
@@ -59,6 +41,7 @@ class SpecUiCard extends StatelessWidget {
 /// 单个 spec 元素的渲染（递归下钻 children）。
 class _SpecElementView extends StatelessWidget {
   const _SpecElementView({
+    super.key,
     required this.element,
     required this.doc,
     required this.isRoot,
@@ -87,33 +70,40 @@ class _SpecElementView extends StatelessWidget {
     List<SpecUiElement> children, {
     double spacing = SpbSpacing.sm,
   }) {
-    final next = {...visited, element.id};
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final child in children)
+        for (final child in _childViews(children))
           Padding(
             padding: EdgeInsets.only(bottom: spacing),
-            child: visited.contains(child.id)
-                // 成环：该分支到此为止（与解析层同一判据）。
-                ? const SizedBox.shrink()
-                : _SpecElementView(
-                    element: child,
-                    doc: doc,
-                    isRoot: false,
-                    onAction: onAction,
-                    visited: next,
-                  ),
+            child: child,
           ),
       ],
     );
   }
 
+  List<Widget> _childViews(List<SpecUiElement> children) {
+    if (visited.length >= 32) return const [];
+    final next = {...visited, element.id};
+    return [
+      for (final (index, child) in children.indexed)
+        if (child.visible && !next.contains(child.id))
+          _SpecElementView(
+            key: ValueKey('spec-element-${child.id}-$index'),
+            element: child,
+            doc: doc,
+            isRoot: false,
+            onAction: onAction,
+            visited: next,
+          ),
+    ];
+  }
+
   /// 叶子未知类型的占位标记。
   ///
-  /// 显示 [SpecUiElement.rawType] 而不是 `type.name`——枚举会把 `Stack` /
-  /// `Grid` / `Chart` 全部塌缩成 `unknown`，那种占位符没有诊断价值（issue #27）。
+  /// 显示 [SpecUiElement.rawType] 而不是 `type.name`——枚举会把 `CustomWidget` /
+  /// `Hologram` 全部塌缩成 `unknown`，那种占位符没有诊断价值（issue #27）。
   /// `rawType` 为空（服务端没写 `type` 字段）时才退回枚举名。
   Widget _unknownLeaf(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -136,6 +126,15 @@ class _SpecElementView extends StatelessWidget {
     final children = doc.directChildrenOf(element);
 
     switch (element.type) {
+      case SpecUiType.stack:
+      case SpecUiType.row:
+      case SpecUiType.column:
+      case SpecUiType.grid:
+        return SpecLayout(element: element, children: _childViews(children));
+      case SpecUiType.table:
+        return SpecTable(element: element);
+      case SpecUiType.chart:
+        return SpecChart(element: element, state: doc.state);
       case SpecUiType.card:
         final body = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -351,8 +350,6 @@ class _SpecElementView extends StatelessWidget {
 
       case SpecUiType.unknown:
         // 未知**容器**：照常下钻（对齐 webapp renderFallback），不阻断子树。
-        // 真实看板的 Stack / Grid 走这条路径——它们的子元素里有白名单类型
-        // （Metric / Alert），截断会让这些本来能渲染的内容消失（issue #27）。
         if (children.isNotEmpty) return _childrenColumn(children);
         // 未知**叶子**：没有可渲染的内容，给占位标记（带原始 type 名）。
         return _unknownLeaf(context);

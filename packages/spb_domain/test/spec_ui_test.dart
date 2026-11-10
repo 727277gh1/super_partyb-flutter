@@ -429,9 +429,8 @@ void main() {
         },
       })!;
 
-      // 枚举已塌缩为 unknown / listItem，但原始字符串必须可读——否则占位符
-      // 只能打印 `unknown`，用户与开发者都看不出缺的是哪个类型。
-      expect(doc.root!.type, SpecUiType.unknown);
+      // 已支持的布局类型也保留原始拼写，方便诊断服务端产物。
+      expect(doc.root!.type, SpecUiType.stack);
       expect(doc.root!.rawType, 'Stack');
       expect(doc.elements['a']!.rawType, 'Grid');
       // 大小写不同的白名单项：枚举归一，原文照留。

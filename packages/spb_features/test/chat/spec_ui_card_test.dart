@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 
+import '../support/spec_dashboard_fixture.dart';
+
 /// 包一层 MaterialApp（组件依赖 Theme 与 Directionality）。
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
@@ -357,87 +359,23 @@ void main() {
   // ==========================================================================
 
   group('真实生产看板（issue #27 回归）', () {
-    /// `super_partyb` `apps/miniapp/src/lib/spec-demo-fixtures.ts` 的
-    /// `realDashboardDoc`（注释自称「bcc 工作区实际产出的 dashboard.spec.json
-    /// 回归基准」）的 Dart 镜像。
-    ///
-    /// 形状要点：root 是 `Stack`、其下 `Grid`——**两者都不在白名单**；
-    /// 真正的数据在 `Metric` / `Alert`（白名单内）。
-    Map<String, dynamic> realDashboardSpec() => {
-      'root': 'dashboard',
-      'elements': {
-        'dashboard': {
-          'type': 'Stack',
-          'props': {'direction': 'vertical', 'gap': 'md'},
-          'children': ['kpi-row', 'trend-chart', 'alert-box', 'data-table'],
-        },
-        'kpi-row': {
-          'type': 'Grid',
-          'props': {'columns': 3, 'gap': 'md'},
-          'children': ['kpi-sh', 'kpi-sz', 'kpi-cyb'],
-        },
-        'kpi-sh': {
-          'type': 'Metric',
-          'props': {
-            'title': '上证指数',
-            'value': '3864.37',
-            'trend': 'down',
-            'change': '−0.47%',
-            'description': '7/21 收盘',
-          },
-          'children': <String>[],
-        },
-        'kpi-sz': {
-          'type': 'Metric',
-          'props': {
-            'title': '深证成指',
-            'value': '14264.29',
-            'trend': 'down',
-            'change': '−1.23%',
-          },
-          'children': <String>[],
-        },
-        'kpi-cyb': {
-          'type': 'Metric',
-          'props': {
-            'title': '创业板指',
-            'value': '3685.97',
-            'trend': 'down',
-            'change': '−0.16%',
-          },
-          'children': <String>[],
-        },
-        'trend-chart': {
-          'type': 'Chart',
-          'props': {'title': '三大指数近4日收盘走势', 'chartType': 'line'},
-          'children': <String>[],
-        },
-        'alert-box': {
-          'type': 'Alert',
-          'props': {'title': '关键信号', 'message': '7/17 单日急跌，随后两日震荡修复。'},
-          'children': <String>[],
-        },
-        'data-table': {
-          'type': 'Table',
-          'props': {'title': '收盘明细', 'pageSize': 5},
-          'children': <String>[],
-        },
-      },
-    };
-
-    testWidgets('未知容器不阻断子树：白名单叶子照常渲染', (tester) async {
+    testWidgets('真实看板布局与指标照常渲染', (tester) async {
       await tester.pumpWidget(
-        _host(SpecUiCard(doc: parseSpecUi(realDashboardSpec()))),
+        _host(
+          SingleChildScrollView(
+            child: SpecUiCard(doc: parseSpecUi(realDashboardSpec())),
+          ),
+        ),
       );
 
       // ## 这个断言就是 #14 的回归本身
       //
       // 修复前整棵树的可见文本只有 `[（不支持的组件类型：unknown）]`——
       // 因为 root 是 Stack（未知）→ 直接截断，下面的 Metric 全部消失。
-      expect(find.text('上证指数'), findsOneWidget);
-      expect(find.text('3864.37'), findsOneWidget);
-      expect(find.text('深证成指'), findsOneWidget);
-      expect(find.text('14264.29'), findsOneWidget);
+      expect(find.text('上证指数'), findsWidgets);
+      expect(find.text('3864.37'), findsWidgets);
+      expect(find.text('深证成指'), findsWidgets);
+      expect(find.text('14264.29'), findsWidgets);
       expect(find.text('创业板指'), findsOneWidget);
       expect(find.text('3685.97'), findsOneWidget);
 
@@ -445,18 +383,26 @@ void main() {
       expect(find.text('7/17 单日急跌，随后两日震荡修复。'), findsOneWidget);
     });
 
-    testWidgets('未知**叶子**（Chart / Table）渲染占位并打印原始类型名', (tester) async {
+    testWidgets('Chart / Table 渲染真实数据，不再显示占位', (tester) async {
       await tester.pumpWidget(
-        _host(SpecUiCard(doc: parseSpecUi(realDashboardSpec()))),
+        _host(
+          SingleChildScrollView(
+            child: SpecUiCard(doc: parseSpecUi(realDashboardSpec())),
+          ),
+        ),
       );
 
-      // Stack / Grid 是容器 → 下钻，不留占位。
+      // 生产看板的布局、图表与表格均走专用组件。
       expect(find.text('（不支持的组件类型：Stack）'), findsNothing);
       expect(find.text('（不支持的组件类型：Grid）'), findsNothing);
 
-      // Chart / Table 是叶子 → 留占位，且必须打印**原始**类型名。
-      expect(find.text('（不支持的组件类型：Chart）'), findsOneWidget);
-      expect(find.text('（不支持的组件类型：Table）'), findsOneWidget);
+      expect(find.text('（不支持的组件类型：Chart）'), findsNothing);
+      expect(find.text('（不支持的组件类型：Table）'), findsNothing);
+      expect(find.byType(DataTable), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('spec-chart-trend-chart')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('成环 / 超深的真实看板形态不崩', (tester) async {
@@ -487,7 +433,7 @@ void main() {
       );
 
       expect(tester.takeException(), isNull);
-      expect(find.text('上证指数'), findsOneWidget);
+      expect(find.text('上证指数'), findsWidgets);
     });
   });
 }

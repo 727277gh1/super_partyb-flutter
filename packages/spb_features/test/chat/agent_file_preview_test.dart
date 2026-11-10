@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 
+import '../support/spec_dashboard_fixture.dart';
+
 /// [showAgentFilePreview] 的渲染分支测试（issue #8：text / image / external）。
 ///
 /// ## 这里防的是什么
@@ -73,6 +75,27 @@ Future<void> _pumpPreview(
 }
 
 void main() {
+  testWidgets('窄屏文件预览完整读取 state 并展示看板图表和表格', (t) async {
+    await t.binding.setSurfaceSize(const Size(360, 800));
+    addTearDown(() => t.binding.setSurfaceSize(null));
+    await _pumpPreview(
+      t,
+      file: _file(
+        mimeType: 'application/json',
+        fileName: 'dashboard.spec.json',
+      ),
+      onPreview: AgentFilePreviewCallbacks(
+        loadBytes: (_) async => utf8.encode(jsonEncode(realDashboardSpec())),
+      ),
+    );
+    expect(find.byType(DataTable), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('spec-chart-trend-chart')),
+      findsOneWidget,
+    );
+    expect(find.text('3764.16'), findsOneWidget);
+    expect(t.takeException(), isNull);
+  });
   group('未注入能力：入口不渲染 / 不弹窗', () {
     testWidgets('onPreview 为 null 时不弹对话框', (t) async {
       await _pumpPreview(t, file: _file(), onPreview: null);

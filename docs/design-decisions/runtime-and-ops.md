@@ -92,7 +92,7 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 
 | 类型 | 客户端现状 | 结论 |
 |---|---|---|
-| `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`（12 个白名单 type，消费 `spec_ui` 事件） | ✅ 已实现——文件预览复用需补一层「从任意 JSON 里提取 schema」（webapp `extractSchemaFromUnknown` 会深度下探，客户端 `parseSpecUi` 只认裸 `{root, elements}`）。已另开 issue #14 |
+| `spec` | **已有渲染器**：`SpecUiCard` + `parseSpecUi`，覆盖基础卡片、布局、表格和图表 | ✅ 文件预览、状态快照及真实看板已接通，范围见 §6.9.4 |
 | `dashboard`（网格格式） | ✅ **已闭环——不做**。真实 `dashboard.spec.json` 走的是 `spec` 路径，网格格式**无已知生产者**（详见下节） | ✅ 不做 |
 | `map` | ✅ **已实现**（issue #12）：`MapSpecCard`（`CustomPaint` 归一化轨迹图）+ `parseMapSchema` / `MapProjection`（`spb_domain`）。**零新依赖**——详见下节 | ✅ 已完成 |
 
@@ -114,20 +114,18 @@ issue #12 登记了 webapp 有而客户端没有的 10 个面板。逐项核实�
 | 判断 | 实测事实 | 证据 |
 |---|---|---|
 | 「`map` 需底图 / 渲染技术栈」 | ❌ **错**。webapp `MapSchemaRenderer.tsx` 自称「一期轻量实现：**SVG 归一化轨迹图（无底图、无高德 JS key 依赖）**」，实现是 ~25 行投影数学（经纬度 → SVG 坐标，等比缩放 + 居中）+ marker 列表 + 「在高德地图打开」外链。**没有 SDK、没有瓦片、没有密钥** | `super_partyb` `apps/webapp/src/components/features/workbench-ui/MapSchemaRenderer.tsx:6`、`buildProjection` `:43` |
-| 「`dashboard` 需重型渲染组件」 | ⚠️ **要分两个渲染器**。① `DashboardRenderer.tsx`（`{type:"dashboard",components:[{type,layout}]}` 网格）只认 **3 个**类型：`stat-cards` / `table` / `chart`，共 **364 行**；② `JsonUiSchemaRenderer.tsx`（`{root,elements}`，即本客户端的 `spec`）。「重型」主要指 ②（`chart` 的 pie/bar/line/area 需图表库，webapp 用 `recharts`） | `DashboardRenderer.tsx:76/124/297`、`package.json` 的 `recharts` |
+| 「`dashboard` 需重型渲染组件」 | ⚠️ **要分两个渲染器**。① `DashboardRenderer.tsx`（`{type:"dashboard",components:[{type,layout}]}` 网格）只认 **3 个**类型：`stat-cards` / `table` / `chart`，共 **364 行**；② `JsonUiSchemaRenderer.tsx`（`{root,elements}`，即本客户端的 `spec`）。Web 的 ② 使用 `recharts`；Flutter 的六类图表以 `CustomPaint` 实现，不新增依赖 | `DashboardRenderer.tsx:76/124/297`、`package.json` 的 `recharts` |
 | 「`dashboard.spec.json` 是网格格式」 | ❌ **错**。上游**真实产出**的 `dashboard.spec.json` 是 **②的 `{root,elements}` 形状**（`Stack`/`Grid`/`Metric`/`Chart`/`Alert`/`Table`） | `super_partyb` `apps/miniapp/src/lib/spec-demo-fixtures.ts` 的 `realDashboardDoc`（注释自称「bcc 工作区实际产出的 dashboard.spec.json 回归基准」）；生产者是 `agent-skills` 的 `json-spec-builder`（其 SKILL.md 明写产出 `root`/`elements`） |
 | 网格格式有生产者吗 | **未找到**。全仓搜 `{type:"dashboard", components:[...]}` 只命中一个**测试用例**（`mapspec_test.go:84` 的「非 map 类型」负例） | `super_partyb` `apps/go-api/internal/workers/agentfilerender/mapspec_test.go:84` |
 
-**推论**：`dashboard` / `map` 的决策比原先设想的**轻得多**——
+**Flutter spec 的当前范围**：
 
-- `map`：**纯 SVG，零新依赖**，Flutter 用 `CustomPaint` 或 `Transform` + `Positioned` 即可；
-- `dashboard`：**真实产出走的是 `spec` 路径**（客户端已识别），缺的是**白名单覆盖**
-  与**未知容器下钻**，不是新渲染器。网格格式（`DashboardRenderer`）**没有已知生产者**，
-  可按「不做」处理。
+- `Stack` / `Row` / `Column` / `Grid` 按可用宽度和字号换行；`Table` 支持列别名、横向滚动、分页及结构化单元格。
+- `Chart` 支持 line / area / bar / pie / scatter / candlestick；支持 `data`、`dataKey`、多系列、X 键推断与 OHLC 别名。缺失值留空，K 线按实际价格缩放，桌面悬停和移动点击可读数值。
+- `$state` / `$bindState` 递归读取初始快照，支持 JSON Pointer 转义、数组索引和静态 `visible` 条件。没有声明 `series` 的真实指数看板按数值列推断系列。
+- 文件预览仍只读；表单双向写入、`setState` / `watch` 和通用动作执行不在这一实现范围。
 
-⚠️ 但核实同时暴露了 **issue #27**（`#14` 的回归）：真实看板虽被识别为 `spec`，
-却因 `unknown` 分支不递归 `children` 而退化成一行占位符——**修 #27 比做网格
-`dashboard` 渲染器更紧要**（前者影响现存真实产物，后者无生产者）。
+解析和数值范围在 `spb_domain`，布局及 Canvas 绘制在 `spb_features`；两端共用同一入口，不改 Go API。未知容器继续递归、未知叶子保留占位（延续 issue #27），不因新增组件丢失其他内容。测试用真实看板样例覆盖 360/900px、表格分页、六类图表与状态绑定，golden 锁定布局和绘图；真机触摸及桌面显示效果仍需设备验收。
 
 #### 6.9.5 `map` 已落地（issue #12）：实现要点与三个「不要重做」的坑
 

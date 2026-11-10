@@ -1,67 +1,12 @@
 /// 文件预览类型判定（纯逻辑，无 IO、无 Flutter）。
 ///
-/// ## 口径真源
+/// 文本内容按 map → spec → 原文分流：map 只认顶层格式，spec 支持嵌套提取。
+/// spec 复用 SpecUiCard，支持基础卡片、响应式布局、表格、六类图表及状态快照。
+/// 无法识别或 root 悬空时保留原文，避免把有效文件展示成空白。
 ///
-/// 对齐 webapp `apps/webapp/src/lib/workbench/file-preview.ts` 的
-/// `loadAgentFilePreview` + `isInlinePreviewableFile`（`lib/api/file-service.ts`）。
-///
-/// webapp 支持**六类**预览：
-///
-/// | 类型 | 本客户端 |
-/// |---|---|
-/// | `text` | ✅ 已实现 |
-/// | `image` | ✅ 已实现 |
-/// | `external`（跳 UFS 预览页） | ✅ 已实现 |
-/// | `spec`（`{root, elements}` 结构化表单） | ✅ 已实现（内容层判定，见 [resolveTextPreview]） |
-/// | `map`（`{type:"map", markers, routes}`） | ✅ 已实现（见 [MapTextPreview] / `MapSpecCard`） |
-/// | `dashboard`（网格格式） | ❌ 未实现（issue #12 剩余项，见下） |
-///
-/// `spec` / `map` 与 `dashboard`（网格格式）**不是一个决策**：客户端已有
-/// `SpecUiCard` + [parseSpecUi]，缺的只是「从任意 JSON 里把 schema 提取出来」，
-/// 故由 [extractSpecSchemaFromUnknown] 补上；`map` 的渲染器由
-/// [parseMapSchema] / `MapProjection`（纯 Dart）与 `MapSpecCard`（绘制）承载。
-/// 两者**都不需要**引入新渲染器/新依赖。
-///
-/// ## ⚠️ `dashboard` / `map` 的真实成本（2026-10 核实，修正早期判断）
-///
-/// 早期注释写的是「需**各自的渲染技术栈**」「`map` 需**底图**」——**与上游实测
-/// 不符**，容易把一件小活估成需要引 SDK 的大活：
-///
-/// - **`map`**：webapp `MapSchemaRenderer.tsx` 自称「一期轻量实现：SVG 归一化
-///   轨迹图（**无底图、无高德 JS key 依赖**）」，实现只有 ~25 行投影数学
-///   （经纬度 → SVG 坐标，等比缩放 + 居中）＋ marker 列表 ＋「在高德地图打开」
-///   外链。**没有地图 SDK，没有瓦片，没有密钥。** ✅ 已按此落地：见
-///   [parseMapSchema] / [MapProjection]（纯 Dart，可无图形环境测）与
-///   `spb_features` 的 `MapSpecCard`（`CustomPaint`）。
-/// - **`dashboard`**：webapp 有**两个不同**的渲染器，别混为一谈——
-///   ① `DashboardRenderer.tsx`（`{type:"dashboard", components:[{type,layout}]}`
-///   网格布局）只认 **3 个**组件类型（`stat-cards` / `table` / `chart`，共 364 行）；
-///   ② `JsonUiSchemaRenderer.tsx`（`{root, elements}`，即本客户端的 `spec`）。
-///   且**上游真实产出的 `dashboard.spec.json` 用的是 ②的形状**（见 `super_partyb`
-///   `apps/miniapp/src/lib/spec-demo-fixtures.ts` 的 `realDashboardDoc`，注释自称
-///   「bcc 工作区实际产出的 dashboard.spec.json 回归基准」，里面是
-///   `Stack`/`Grid`/`Metric`/`Chart`/`Alert`/`Table` 的 `root`/`elements` 结构）——
-///   **不是** ①的网格格式。网格格式**无已知生产者**，故不做。
-///
-/// ## 由此暴露的真实缺陷（issue #27，**已修**）
-///
-/// 上述真实看板**已被本客户端识别为 `spec`**（`resolveTextPreview` 命中），但
-/// 渲染结果是**一行「（不支持的组件类型：unknown）」**——因为它的容器类型
-/// `Stack` / `Grid` 与叶子 `Chart` / `Table` 都不在本客户端的 12 个白名单里，
-/// 而 [SpecUiCard] 的 `unknown` 分支**不递归 children**，于是连白名单内的
-/// `Metric`（「上证指数 3864.37」）也一起被吞掉。
-///
-/// 对照 webapp `JsonUiSchemaRenderer.renderFallback`：它在未知类型时**会**渲染
-/// `element.children`（`element.children.length > 0 && renderChildren(...)`）。
-/// 故这不是「webapp 也不支持」，而是**本客户端的降级策略比上游更保守**。
-///
-/// 已按该对照修正：未知类型**有子元素时照常下钻**，仅叶子留占位标记，且占位符
-/// 打印**原始 type 字符串**（`SpecUiElement.rawType`）而不是塌缩后的 `unknown`。
-/// 同一份真实看板的可见文本从 `[（不支持的组件类型：unknown）]` 变为
-/// `[上证指数, 3864.37, …]`。
-///
-/// 识别不出来时**一律退化为 `text`**（见 [resolveTextPreview]），而不是假装
-/// 识别出来推给 `external`——后者会让用户从「能看原文」退化成「跳出去」。
+/// `dashboard.spec.json` 的真实产物是 `{root,elements,state}`，走 spec 路径；
+/// 独立的 `{type:"dashboard",components:[...]}` 网格协议仍不支持。
+/// MapSpecCard 使用 CustomPaint 绘制无底图轨迹，并提供高德外链。
 library;
 
 import 'dart:convert';

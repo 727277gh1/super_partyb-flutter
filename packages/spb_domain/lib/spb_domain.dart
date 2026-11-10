@@ -108,6 +108,8 @@ export 'src/quick_capture_enqueue_usecase.dart';
 export 'src/quick_capture_usecase.dart';
 export 'src/routing_attribution.dart';
 export 'src/spec_ui.dart';
+export 'src/spec_binding.dart';
+export 'src/spec_chart.dart';
 export 'src/sync_auto_config.dart';
 export 'src/sync_cursor.dart';
 export 'src/sync_path.dart';

@@ -1,35 +1,17 @@
-/// spec JSON（JsonUiSchema）解析层——服务端 `spec_schema` 的纯 Dart 模型与解析。
-///
-/// ## 这是什么（只覆盖服务端确定编译的产出，不是通用渲染协议）
-///
-/// 服务端有三类 `spec_schema` 生产者，全部由**确定性 Go 代码**编译（非 LLM 生成 UI）：
-///
-/// | 生产者 | 事件 / 场景 | type 大小写 | 动作位置 |
-/// |---|---|---|---|
-/// | `chatgate/goal_gate_spec.go` buildTaskSpec | goal_gate_decision 进度卡 | **小写**（card/progress/metric） | 无 |
-/// | `chatgate/followup_suggest.go` BuildFollowUpSpecJSON | follow_up_suggested 建议卡 | **首字母大写**（Card/Text/Button） | `on.click[]`（字段名 `action`） |
-/// | `chatpipeline/classify_feedback.go` BuildClassifyFeedbackSpecJSON | 归属反馈卡 | 首字母大写 | `actions[]`（字段名 **`type`**） |
-///
-/// 三处连「动作字段叫 action 还是 type」都不一致——解析器必须同时覆盖，且对
-/// type 大小写不敏感。这些差异没有服务端契约保证，故客户端**降级优先**：
-/// 未知 type、悬空 children、环引用、缺字段一律不抛异常。
-///
-/// ## 为什么放在 spb_domain（而不是 spb_models）
-///
-/// 解析输出要被归约层与渲染组件共同消费，且「白名单之外视为 unknown」这个
-/// 判定是**领域规则**（决定 UI 降级策略）。spb_models 只做字段镜像，不含规则。
-///
-/// ## 安全约束
-///
-/// - **绝不抛异常**：spec 是服务端 payload 的一个字段，形状漂移不该炸掉时间线；
-/// - **环检测 + 深度上限**：children 是 id 引用，恶意/损坏数据可以自环；
-///   回放历史事件时栈溢出比渲染错误更糟。
+/// 聊天卡片与工作区 spec 看板的纯 Dart 模型。
+/// 状态绑定按文档快照求值；动作仍由客户端入口处理。
 library;
 
-/// 服务端实际会产出的元素类型（白名单，对齐 webapp JsonUiSchemaRenderer 的
-/// renderXxx 分发；大小写不敏感）。
+import 'spec_binding.dart';
+
 enum SpecUiType {
   card,
+  stack,
+  row,
+  column,
+  grid,
+  table,
+  chart,
   progress,
   metric,
   text,
@@ -52,12 +34,25 @@ enum SpecUiType {
   /// 从服务端原始 type 字符串解析（大小写不敏感）。
   static SpecUiType from(String? raw) {
     switch (raw?.toLowerCase().trim()) {
+      case 'stack':
+        return stack;
+      case 'row':
+        return row;
+      case 'column':
+        return column;
+      case 'grid':
+        return grid;
+      case 'table':
+        return table;
+      case 'chart':
+        return chart;
       case 'card':
         return card;
       case 'progress':
         return progress;
       case 'metric':
         return metric;
+      case 'paragraph':
       case 'text':
         return text;
       case 'heading':
@@ -66,6 +61,7 @@ enum SpecUiType {
         return button;
       case 'list':
         return list;
+      case 'list_item':
       case 'listitem':
         return listItem;
       case 'separator':
@@ -75,6 +71,8 @@ enum SpecUiType {
         return badge;
       case 'alert':
         return alert;
+      case 'codeblock':
+      case 'code_block':
       case 'code':
         return code;
       default:
@@ -85,7 +83,7 @@ enum SpecUiType {
 
 /// 元素上声明的动作。
 ///
-/// 服务端两类动作的位置与字段名都不一致（见文件头表格）：
+/// 服务端两类动作的位置与字段名都不一致：
 ///
 /// - follow_up：`on.click[]`，`{action: "copy_text", params: {text, label, agent_id?}}`
 /// - classify_feedback：`actions[]`，`{type: "send_next_input", label, nextInput}`
@@ -130,6 +128,7 @@ final class SpecUiElement {
     this.props = const {},
     this.childIds = const [],
     this.actions = const [],
+    this.visible = true,
   });
 
   /// 元素标识。**来自 elements 的 map 键**——goal_gate 的产出元素体内没有
@@ -143,15 +142,14 @@ final class SpecUiElement {
   /// ## 为什么必须保留（issue #27）
   ///
   /// [type] 是枚举，白名单外的类型全部塌缩成 [SpecUiType.unknown]，故
-  /// `type.name` 对 `Stack` / `Grid` / `Chart` 一律打印 `unknown`——占位符的
+  /// `type.name` 对 `CustomWidget` / `Hologram` 一律打印 `unknown`——占位符的
   /// **诊断价值为零**：用户与开发者都看不出到底缺哪个类型。
   ///
   /// 另注：原始字符串可能为空（服务端未写 `type` 字段），此时 [type] 也是
   /// [SpecUiType.unknown]。
   final String rawType;
 
-  /// 渲染所需的原始 props（title/content/value/label/hint 等）。
-  /// 不做字段级归一：不同 type 读的键不同，归一放渲染层。
+  /// 已解析状态绑定的 props；不同组件的字段别名仍由渲染层处理。
   final Map<String, Object?> props;
 
   /// 子元素 id 列表（**引用**，解析在 [SpecUiDocument.childrenOf]）。
@@ -160,15 +158,20 @@ final class SpecUiElement {
 
   final List<SpecUiAction> actions;
 
+  final bool visible;
+
   /// 读 props 里的字符串字段（缺省空串）。
   String prop(String key) => props[key]?.toString() ?? '';
 
   /// 读 props 里的数值字段（容忍 int/double/字符串）。
   double? propNum(String key) {
     final v = props[key];
-    if (v is num) return v.toDouble();
-    if (v is String) return double.tryParse(v);
-    return null;
+    final n = v is num
+        ? v.toDouble()
+        : v is String
+        ? double.tryParse(v)
+        : null;
+    return n != null && n.isFinite ? n : null;
   }
 
   @override
@@ -179,7 +182,13 @@ final class SpecUiElement {
 
 /// 解析完成的 spec 文档：root + 元素表 + 安全遍历。
 final class SpecUiDocument {
-  const SpecUiDocument({required this.rootId, required this.elements});
+  const SpecUiDocument({
+    required this.rootId,
+    required this.elements,
+    this.state = const {},
+  });
+
+  final Map<String, Object?> state;
 
   /// 根元素 id（`root` 字段）。可能指向不存在的元素（悬空 root）。
   final String rootId;
@@ -262,27 +271,33 @@ SpecUiDocument? parseSpecUi(Object? raw) {
   final rawElements = raw['elements'];
   if (rootId.isEmpty || rawElements is! Map) return null;
 
+  final rawState = raw['state'];
+  final state = <String, Object?>{
+    if (rawState is Map<Object?, Object?>)
+      for (final entry in rawState.entries)
+        if (entry.key is String) entry.key! as String: entry.value,
+  };
   final elements = <String, SpecUiElement>{};
   rawElements.forEach((key, value) {
     if (value is! Map) return; // 元素形状不对：跳过该元素，不影响其余。
     final id = key.toString();
     final rawType = value['type']?.toString() ?? '';
+    final resolvedProps = resolveSpecValue(value['props'], state);
     elements[id] = SpecUiElement(
       id: id,
       type: SpecUiType.from(rawType),
       rawType: rawType,
-      props: value['props'] is Map
-          ? Map<String, Object?>.from(value['props'] as Map)
-          : const {},
+      props: resolvedProps is Map<String, Object?> ? resolvedProps : const {},
       childIds: _stringList(value['children']),
       actions: _actions(value),
+      visible: specValueVisible(value['visible'], state),
     );
   });
 
-  return SpecUiDocument(rootId: rootId, elements: elements);
+  return SpecUiDocument(rootId: rootId, elements: elements, state: state);
 }
 
-/// 收集元素的动作：`actions[]` 与 `on.click[]` 两处都要扫（见文件头表格——
+/// 收集元素的动作：`actions[]` 与 `on.click[]` 两处都要扫（
 /// 两类生产者各写一处，字段名也不同：actions 用 `type`，on.click 用 `action`）。
 List<SpecUiAction> _actions(Map<Object?, Object?> element) {
   final out = <SpecUiAction>[];
