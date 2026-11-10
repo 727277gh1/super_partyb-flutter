@@ -65,170 +65,79 @@ void main() {
     isStreaming: isStreaming,
   );
 
-  group('deriveTurnStatus：没有进行中的轮次时不产出状态', () {
-    test('isStreaming 为 false → null（不画一条「执行中」）', () {
+  group('当前阶段与优先级', () {
+    test('没有运行轮次时不显示状态', () {
       expect(
         deriveTurnStatus(
           isStreaming: false,
-          activity: activity(),
-          toolCount: 5,
+          isStale: true,
+          executionStatus: exec(ExecutionStatusKind.queued),
         ),
         isNull,
       );
-    });
-
-    test('isStreaming 但什么派生量都没有 → null（正文在动，再加一条是噪声）', () {
       expect(deriveTurnStatus(isStreaming: true), isNull);
     });
-  });
 
-  group('deriveTurnStatus：优先级', () {
-    test('stalled 压过排队、工具、活动（它是关于前几者的结论）', () {
-      final s = deriveTurnStatus(
+    test('超时压过排队和工具，不再转圈', () {
+      final status = deriveTurnStatus(
         isStreaming: true,
         isStale: true,
+        phase: TurnStatusKind.runningWithTools,
         executionStatus: exec(ExecutionStatusKind.queued),
-        activity: activity(),
-        toolCount: 8,
-        lastToolName: 'Bash',
       )!;
-      expect(s.kind, TurnStatusKind.stalled);
-      expect(s.text, contains('长时间无进展'));
-      // 不转圈：与「无进展」自相矛盾。
-      expect(s.spinner, isFalse);
+      expect(status.kind, TurnStatusKind.stalled);
+      expect(status.spinner, isFalse);
+      expect(status.detail, isNull);
     });
 
-    test('排队 / 重试压过「已调用 N 个工具」（它们表示还没起跑）', () {
-      final s = deriveTurnStatus(
-        isStreaming: true,
-        executionStatus: exec(ExecutionStatusKind.retryScheduled, attempt: 3),
-        toolCount: 8,
-      )!;
-      expect(s.kind, TurnStatusKind.retrying);
-      expect(s.text, '正在安排第 3 次重试');
-      expect(s.spinner, isTrue);
-    });
-
-    test('有工具调用压过活动快照，且文案是「已调用 N 个工具」+ 最近工具名', () {
-      final s = deriveTurnStatus(
-        isStreaming: true,
-        activity: activity(lastEventType: 'thought'),
-        toolCount: 12,
-        lastToolName: 'bash',
-      )!;
-      expect(s.kind, TurnStatusKind.runningWithTools);
-      expect(s.text, '已调用 12 个工具');
-      expect(s.detail, '最近：bash');
-    });
-
-    test('只有活动快照 → 保留既有「执行中 · 已运行 X」文案', () {
-      final s = deriveTurnStatus(
-        isStreaming: true,
-        activity: activity(elapsedMs: 125000, lastEventType: 'tool_call'),
-      )!;
-      expect(s.kind, TurnStatusKind.running);
-      expect(s.text, '执行中 · 已运行 2 分 5 秒');
-      expect(s.detail, '最近：工具调用');
-    });
-  });
-
-  group('deriveTurnStatus：退化与不编造', () {
-    test('工具名为空 → 不拼出「最近：null」，退化为已运行时长', () {
-      final s = deriveTurnStatus(
-        isStreaming: true,
-        activity: activity(elapsedMs: 3000),
-        toolCount: 3,
-        lastToolName: '   ',
-      )!;
-      expect(s.text, '已调用 3 个工具');
-      expect(s.detail, '已运行 3 秒');
-    });
-
-    test('既没有工具名也没有活动 → detail 为 null（不是空串）', () {
-      final s = deriveTurnStatus(isStreaming: true, toolCount: 1)!;
-      expect(s.detail, isNull);
-    });
-
-    test('elapsedMs 为 0 / 负数 → 不出「已运行 0 秒」这类无信息补充', () {
-      for (final ms in [0, -1]) {
-        final s = deriveTurnStatus(
+    test('排队和重试压过已有正文', () {
+      for (final kind in ExecutionStatusKind.values) {
+        final status = deriveTurnStatus(
           isStreaming: true,
-          activity: activity(elapsedMs: ms),
-          toolCount: 2,
+          phase: TurnStatusKind.replying,
+          executionStatus: exec(kind),
         )!;
-        expect(s.text, '已调用 2 个工具');
-        expect(s.detail, isNull);
+        expect(
+          status.kind,
+          kind == ExecutionStatusKind.queued
+              ? TurnStatusKind.queued
+              : TurnStatusKind.retrying,
+        );
       }
     });
 
-    test('未知的 lastEventType 原样展示（不猜语义）', () {
-      final s = deriveTurnStatus(
+    test('已调用的工具只作摘要，不证明还在执行', () {
+      final status = deriveTurnStatus(
         isStreaming: true,
-        activity: activity(lastEventType: 'executor_started'),
+        toolCount: 12,
+        lastToolName: 'bash',
+        phase: TurnStatusKind.replying,
+        activity: activity(),
       )!;
-      expect(s.detail, '最近：executor_started');
+      expect(status.text, '正在回复');
+      expect(status.spinner, isFalse);
+      expect(status.detail, '已运行 2 秒 · 已调用 12 个工具 · 最近：bash');
     });
 
-    test('lastEventType 为空串 → 无 detail', () {
-      final s = deriveTurnStatus(
+    test('只有工具历史时回到通用执行态', () {
+      final status = deriveTurnStatus(isStreaming: true, toolCount: 3)!;
+      expect(status.kind, TurnStatusKind.running);
+      expect(status.text, '执行中');
+    });
+
+    test('准备阶段、空工具名与未知活动不编造内容', () {
+      expect(
+        deriveTurnStatus(isStreaming: true, isPreparing: true)!.text,
+        '正在准备响应',
+      );
+      final status = deriveTurnStatus(
         isStreaming: true,
-        activity: activity(lastEventType: '  '),
+        phase: TurnStatusKind.runningWithTools,
+        activeToolName: ' ',
+        activity: activity(elapsedMs: -1, lastEventType: 'executor_started'),
       )!;
-      expect(s.detail, isNull);
-    });
-  });
-
-  /// 「已送达、agent 未动」的兵底档（`isPreparing`）。
-  ///
-  /// 它补的是「发送后到首字返回之间底部什么都不说」那段空窗：此前四档
-  /// 全靠服务端主动发来的事件，而这段一个都没有。
-  group('deriveTurnStatus：preparing 兵底', () {
-    test('只有 isPreparing → 「正在准备响应」（与 webapp 逐字一致）', () {
-      final s = deriveTurnStatus(isStreaming: true, isPreparing: true)!;
-      expect(s.kind, TurnStatusKind.preparing);
-      expect(s.text, '正在准备响应');
-      // 仍在等，转圈不能停。
-      expect(s.spinner, isTrue);
-      expect(s.detail, isNull);
-    });
-
-    test('isStreaming 为 false → 仍是 null（没轮次就不画状态条）', () {
-      expect(deriveTurnStatus(isStreaming: false, isPreparing: true), isNull);
-    });
-
-    test('stale / 排队 / 工具 / 活动 都压过它（它们是更强的证据）', () {
-      expect(
-        deriveTurnStatus(
-          isStreaming: true,
-          isPreparing: true,
-          isStale: true,
-        )!.kind,
-        TurnStatusKind.stalled,
-      );
-      expect(
-        deriveTurnStatus(
-          isStreaming: true,
-          isPreparing: true,
-          executionStatus: exec(ExecutionStatusKind.queued),
-        )!.kind,
-        TurnStatusKind.queued,
-      );
-      expect(
-        deriveTurnStatus(
-          isStreaming: true,
-          isPreparing: true,
-          toolCount: 1,
-        )!.kind,
-        TurnStatusKind.runningWithTools,
-      );
-      expect(
-        deriveTurnStatus(
-          isStreaming: true,
-          isPreparing: true,
-          activity: activity(),
-        )!.kind,
-        TurnStatusKind.running,
-      );
+      expect(status.text, '正在执行工具');
+      expect(status.detail, '最近：executor_started');
     });
   });
 
@@ -403,7 +312,7 @@ void main() {
       );
     });
 
-    test('工具项不算（它没有 isStreaming），全部完成 → null', () {
+    test('已完成工具不冒充运行中的轮次', () {
       expect(streamingTurnIdOf([tool('t1'), tool('t2')]), isNull);
     });
 
@@ -412,136 +321,189 @@ void main() {
     });
   });
 
-  group('deriveTurnStatusFor（面板用：自己收整份时间线）', () {
-    test('没有流式项 → null', () {
-      expect(deriveTurnStatusFor(items: [tool('t1')], turnId: null), isNull);
+  group('从时间线派生阶段', () {
+    TurnStatusSummary? status(
+      List<ConversationItem> items, {
+      Set<String> stale = const {},
+      ExecutionStatus? execution,
+    }) => deriveTurnStatusFor(
+      items: items,
+      turnId: streamingTurnIdOf(items),
+      staleTurnIds: stale,
+      executionStatus: execution,
+    );
+
+    test('思考 → 工具 → 正文，旧思考和已完成工具不覆盖新正文', () {
+      final thought = ThoughtItem(
+        id: 'thought',
+        createdAt: DateTime.utc(2026),
+        turnId: 'turn_1',
+        text: '分析',
+        isStreaming: true,
+      );
+      expect(status([thought])!.kind, TurnStatusKind.thinking);
+      expect(
+        status([thought, tool('t1', output: null)])!.text,
+        '正在执行工具 · Read',
+      );
+      expect(status([thought, tool('t1')])!.text, '执行中');
+      expect(status([thought, tool('t1'), text('m1')])!.text, '正在回复');
     });
 
-    test('有工具调用 → runningWithTools，且 detail 是最近工具', () {
-      final items = [
+    test('权威正文落地后不退回旧思考，等待终态时显示执行中', () {
+      final thought = ThoughtItem(
+        id: 'thought',
+        createdAt: DateTime.utc(2026),
+        turnId: 'turn_1',
+        text: '分析',
+        isStreaming: true,
+      );
+      expect(status([thought, text('m1', isStreaming: false)])!.text, '执行中');
+    });
+
+    test('工具可先于正文独立开始，已终结的空结果工具不再等待', () {
+      expect(
+        status([tool('t1', output: null)])!.kind,
+        TurnStatusKind.runningWithTools,
+      );
+      final done = ToolCallItem(
+        id: 't1',
+        createdAt: DateTime.utc(2026),
+        turnId: 'turn_1',
+        name: 'Read',
+        isComplete: true,
+      );
+      expect(status([done]), isNull);
+    });
+
+    test('并行工具乱序完成时仍显示尚未完成的工具', () {
+      final pending = ToolCallItem(
+        id: 'pending',
+        createdAt: DateTime.utc(2026),
+        turnId: 'turn_1',
+        name: 'bash',
+      );
+      expect(status([pending, tool('done')])!.text, '正在执行工具 · bash');
+    });
+
+    test('超时后的工具阶段不继续转圈', () {
+      final summary = status([tool('t1', output: null)], stale: {'turn_1'})!;
+      expect(summary.kind, TurnStatusKind.stalled);
+      expect(summary.spinner, isFalse);
+    });
+
+    test('结束后收起状态，别的轮次活动不污染当前轮次', () {
+      expect(status([text('m1', isStreaming: false)]), isNull);
+      final summary = deriveTurnStatusFor(
+        items: [text('m1')],
+        turnId: 'turn_1',
+        activities: {'other': activity(turnId: 'other')},
+      )!;
+      expect(summary.text, '正在回复');
+      expect(summary.detail, isNull);
+    });
+
+    test('详情按原顺序列出当前轮次工具，不混入上一轮', () {
+      final progress = scanTurnProgress([
+        tool('old', turnId: 'old'),
+        tool('first'),
+        tool('second'),
         text('m1'),
-        tool('t1'),
-        ToolCallItem(
-          id: 't2',
-          createdAt: DateTime.utc(2026, 1, 1),
-          name: 'Bash',
-          turnId: 'turn_1',
-          isComplete: false,
-        ),
-      ];
-      final s = deriveTurnStatusFor(
-        items: items,
-        turnId: streamingTurnIdOf(items),
-      )!;
-      expect(s.kind, TurnStatusKind.runningWithTools);
-      expect(s.text, '已调用 2 个工具');
-      expect(s.detail, '最近：Bash');
-    });
-
-    test('staleTurnIds 命中 → stalled（面板与页面提示条不能互相矛盾）', () {
-      final items = [text('m1')];
-      final s = deriveTurnStatusFor(
-        items: items,
-        turnId: streamingTurnIdOf(items),
-        staleTurnIds: {'turn_1'},
-      )!;
-      expect(s.kind, TurnStatusKind.stalled);
-    });
-
-    test('默认显示活动快照（面板是集中视图，不按正文让位）', () {
-      final items = [text('m1', body: '正文')];
-      final s = deriveTurnStatusFor(
-        items: items,
-        turnId: streamingTurnIdOf(items),
-        activities: {'turn_1': activity(elapsedMs: 5000)},
-      )!;
-      expect(s.kind, TurnStatusKind.running);
-      expect(s.text, '执行中 · 已运行 5 秒');
-    });
-
-    test('showActivityWithContent: false → 已有正文时让位（对话页细条的规则）', () {
-      final items = [text('m1', body: '正文')];
-      final s = deriveTurnStatusFor(
-        items: items,
-        turnId: streamingTurnIdOf(items),
-        activities: {'turn_1': activity(elapsedMs: 5000)},
-        showActivityWithContent: false,
-      );
-      // 正文在动、没有工具、也没有排队 → 细条什么都不画（既有取舍）。
-      expect(s, isNull);
-    });
-
-    test('活动快照的 turnId 与当前 turn 不一致时不误用', () {
-      final items = [text('m1')];
-      final s = deriveTurnStatusFor(
-        items: items,
-        turnId: streamingTurnIdOf(items),
-        activities: {'turn_OTHER': activity(elapsedMs: 5000)},
-      );
-      expect(s, isNull);
+      ], turnId: 'turn_1');
+      expect(progress.tools.map((item) => item.id), ['first', 'second']);
+      expect(progress.toolCount, 2);
     });
   });
 
-  group('TurnStatusStrip（细条渲染）', () {
-    Future<void> pumpStrip(
-      WidgetTester tester,
-      TurnStatusSummary summary,
-    ) async {
+  group('统一状态栏', () {
+    testWidgets('按需展开详情，多个执行中工具也只有一个转圈', (tester) async {
       await tester.pumpWidget(
         MaterialApp(
-          home: Scaffold(body: TurnStatusStrip(summary: summary)),
+          home: Scaffold(
+            body: TurnStatusStrip(
+              summary: const TurnStatusSummary(
+                kind: TurnStatusKind.runningWithTools,
+                text: '正在执行工具 · Read',
+                detail: '已调用 2 个工具',
+              ),
+              tools: [tool('a', output: null), tool('b', output: null)],
+            ),
+          ),
         ),
       );
+      expect(find.byType(ToolCallTile), findsNothing);
+      await tester.tap(find.byTooltip('查看详情'));
       await tester.pump();
+      expect(find.text('已调用 2 个工具'), findsOneWidget);
+      expect(find.byType(ToolCallTile), findsNWidgets(2));
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      await tester.tap(find.byTooltip('收起详情'));
+      await tester.pump();
+      expect(find.byType(ToolCallTile), findsNothing);
+    });
+
+    for (final size in [const Size(375, 812), const Size(812, 375)]) {
+      for (final brightness in Brightness.values) {
+        testWidgets('窄屏/横屏大字号与减少动态效果：$size $brightness', (tester) async {
+          tester.view.physicalSize = size;
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          var cancelled = false;
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData(brightness: brightness),
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: const TextScaler.linear(2),
+                  disableAnimations: true,
+                ),
+                child: child!,
+              ),
+              home: Scaffold(
+                body: TurnStatusStrip(
+                  summary: const TurnStatusSummary(
+                    kind: TurnStatusKind.stalled,
+                    text: '长时间无进展 · 可能仍在后台运行',
+                    spinner: false,
+                    detail: '队列：总计 12345，你的 1234',
+                  ),
+                  showCancel: true,
+                  onCancel: () => cancelled = true,
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.byTooltip('查看详情'));
+          await tester.pump();
+          expect(tester.takeException(), isNull);
+          expect(find.byType(CircularProgressIndicator), findsNothing);
+          final stop = find.byKey(const ValueKey('conversation-cancel-turn'));
+          expect(tester.getSize(stop).shortestSide, greaterThanOrEqualTo(48));
+          await tester.tap(stop);
+          expect(cancelled, isTrue);
+        });
+      }
     }
 
-    testWidgets('主文案 + 补充项都渲染（各带稳定 key）', (tester) async {
-      await pumpStrip(
-        tester,
-        const TurnStatusSummary(
-          kind: TurnStatusKind.runningWithTools,
-          text: '已调用 12 个工具',
-          detail: '最近：bash',
+    testWidgets('运行中尊重减少动态效果，并保留阶段文案', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: MediaQuery(
+            data: MediaQueryData(disableAnimations: true),
+            child: Scaffold(
+              body: TurnStatusStrip(
+                summary: TurnStatusSummary(
+                  kind: TurnStatusKind.thinking,
+                  text: '思考中',
+                ),
+              ),
+            ),
+          ),
         ),
       );
-
-      expect(
-        find.byKey(const ValueKey('conversation-turn-status')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(const ValueKey('conversation-turn-status-text')),
-        findsOneWidget,
-      );
-      expect(find.text('已调用 12 个工具'), findsOneWidget);
-      expect(find.text('最近：bash'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    });
-
-    testWidgets('detail 为 null → 不渲染补充项（不是空串占位）', (tester) async {
-      await pumpStrip(
-        tester,
-        const TurnStatusSummary(kind: TurnStatusKind.running, text: '执行中'),
-      );
-
-      expect(
-        find.byKey(const ValueKey('conversation-turn-status-detail')),
-        findsNothing,
-      );
-    });
-
-    testWidgets('spinner 为 false → 用沙漏图标而不是转圈（stalled 档）', (tester) async {
-      await pumpStrip(
-        tester,
-        const TurnStatusSummary(
-          kind: TurnStatusKind.stalled,
-          text: '长时间无进展 · 可能仍在后台运行',
-          spinner: false,
-        ),
-      );
-
       expect(find.byType(CircularProgressIndicator), findsNothing);
-      expect(find.byIcon(Icons.hourglass_disabled_outlined), findsOneWidget);
+      expect(find.text('思考中'), findsOneWidget);
     });
   });
 }

@@ -57,7 +57,7 @@ class ThoughtTile extends StatelessWidget {
           color: scheme.onSurfaceVariant,
         ),
         title: Text(
-          isStreaming ? '思考中…' : '思考过程',
+          '思考过程',
           style: textTheme.labelMedium?.copyWith(
             color: scheme.onSurfaceVariant,
           ),

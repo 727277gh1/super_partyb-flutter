@@ -198,8 +198,8 @@ void main() {
     });
   });
 
-  group('底部状态条：工具进度优先于活动指示', () {
-    testWidgets('有工具调用的流式轮次 → 报「已调用 N 个工具」而不是「已运行 X」', (tester) async {
+  group('底部状态条：阶段与工具详情', () {
+    testWidgets('工具完成后显示执行态，展开可查看调用摘要', (tester) async {
       mockTimeline();
       await startController(tester);
       await pumpPage(tester);
@@ -212,16 +212,23 @@ void main() {
         findsOneWidget,
         reason: '调了 2 个工具的轮次，底部必须说清楚「它在干活」',
       );
-      expect(find.text('已调用 2 个工具'), findsOneWidget);
-      expect(find.text('最近：tool_1'), findsOneWidget);
+      expect(find.text('执行中'), findsOneWidget);
+      await tester.tap(find.byTooltip('查看详情'));
+      await tester.pump();
+      expect(find.textContaining('已调用 2 个工具'), findsOneWidget);
+      expect(find.textContaining('最近：tool_1'), findsOneWidget);
       // 更弱的信号（只报「已运行 X」）让位，否则两条同时出现会打架。
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsNothing,
       );
     });
 
-    testWidgets('没有工具调用时仍是原来的活动指示（不抢占既有行为）', (tester) async {
+    testWidgets('没有工具调用时使用同一状态栏显示思考阶段', (tester) async {
       mockTimeline();
       await startController(tester);
       await pumpPage(tester);
@@ -254,12 +261,16 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsOneWidget,
       );
       expect(
         find.byKey(const ValueKey('conversation-turn-status')),
-        findsNothing,
+        findsOneWidget,
       );
     });
 
@@ -289,12 +300,17 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('conversation-execution-status')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.queued ||
+                  widget.summary.kind == TurnStatusKind.retrying),
+        ),
         findsOneWidget,
       );
       expect(
         find.byKey(const ValueKey('conversation-turn-status')),
-        findsNothing,
+        findsOneWidget,
         reason: '两档共用同一槽位，判定顺序写反就会同时出现「在等」与「在跑」',
       );
     });

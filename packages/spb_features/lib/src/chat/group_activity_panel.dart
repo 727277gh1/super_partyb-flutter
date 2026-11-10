@@ -141,7 +141,6 @@ class _StatusRow extends StatelessWidget {
     final scheme = theme.colorScheme;
     final summary = status;
     // 没有进行中的轮次时用「静止」图标而不是转圈：转圈会让用户以为还在跑。
-    final spinner = summary?.spinner ?? false;
     final text = summary?.text ?? '当前没有进行中的轮次';
     final detail = summary?.detail;
 
@@ -158,35 +157,34 @@ class _StatusRow extends StatelessWidget {
           SizedBox(
             width: SpbSpacing.lg,
             height: SpbSpacing.lg,
-            child: spinner
-                ? CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: scheme.primary,
-                  )
-                : Icon(
-                    summary == null
-                        ? Icons.pause_circle_outline
-                        : Icons.hourglass_disabled_outlined,
-                    size: SpbSpacing.lg,
-                    color: scheme.onSurfaceVariant,
-                  ),
+            child: Icon(
+              summary == null
+                  ? Icons.pause_circle_outline
+                  : turnStatusIcon(summary.kind),
+              size: SpbSpacing.lg,
+              color: scheme.onSurfaceVariant,
+            ),
           ),
           const SizedBox(width: SpbSpacing.sm),
           Expanded(
-            child: Text(
-              text,
-              key: const ValueKey('activity-status-text'),
-              style: theme.textTheme.bodySmall,
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  text,
+                  key: const ValueKey('activity-status-text'),
+                  style: theme.textTheme.bodySmall,
+                ),
+                if (detail != null)
+                  Text(
+                    detail,
+                    key: const ValueKey('activity-status-detail'),
+                    style: SpbType.listMeta(theme.textTheme)
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+              ],
             ),
           ),
-          if (detail != null)
-            Text(
-              detail,
-              key: const ValueKey('activity-status-detail'),
-              style: SpbType.listMeta(theme.textTheme)
-                  ?.copyWith(color: scheme.onSurfaceVariant),
-            ),
         ],
       ),
     );

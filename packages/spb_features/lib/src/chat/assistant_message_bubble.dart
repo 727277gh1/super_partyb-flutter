@@ -150,28 +150,8 @@ class _AssistantMessageBubbleState extends State<AssistantMessageBubble>
     final textTheme = Theme.of(context).textTheme;
     final dir = Directionality.of(context);
 
-    // 空文本 + 流式中：显示「正在生成」占位，避免出现一个 0 高度气泡
-    // （用户会以为卡住）。
-    if (text.isEmpty && isStreaming) {
-      return Padding(
-        padding: SpbSpacing.bubblePadding,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: SpbSpacing.md,
-              height: SpbSpacing.md,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: scheme.primary,
-              ),
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            Text('正在生成…', style: textTheme.bodySmall),
-          ],
-        ),
-      );
-    }
+    // 等待反馈由轮次状态栏统一承担，空正文不再生成第二个 loading 气泡。
+    if (text.isEmpty && isStreaming) return const SizedBox.shrink();
 
     final md = GptMarkdown(
       text,

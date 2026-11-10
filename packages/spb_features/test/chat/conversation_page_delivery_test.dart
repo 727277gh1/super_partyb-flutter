@@ -39,7 +39,11 @@ void main() {
       await pushStreamingMessage(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-stale-turn')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.stalled),
+        ),
         findsOneWidget,
       );
     });
@@ -95,12 +99,20 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsNothing,
         reason: '「执行中 · 已运行 1 分」与「长时间无进展」自相矛盾',
       );
       expect(
-        find.byKey(const ValueKey('conversation-stale-turn')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.stalled),
+        ),
         findsOneWidget,
       );
     });
@@ -115,14 +127,22 @@ void main() {
       );
       await pushStreamingMessage(tester);
       expect(
-        find.byKey(const ValueKey('conversation-stale-turn')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.stalled),
+        ),
         findsOneWidget,
       );
 
       await pushStale(tester, const {});
 
       expect(
-        find.byKey(const ValueKey('conversation-stale-turn')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.stalled),
+        ),
         findsNothing,
         reason: 'turn 又动了（或已终结）时应立刻恢复',
       );
@@ -135,7 +155,11 @@ void main() {
       await pushStreamingMessage(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-stale-turn')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.stalled),
+        ),
         findsNothing,
       );
     });
@@ -151,7 +175,11 @@ void main() {
       await pushStreamingMessage(tester, turnId: 'turn_1');
 
       expect(
-        find.byKey(const ValueKey('conversation-stale-turn')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.stalled),
+        ),
         findsNothing,
         reason: '集合按 turnId 匹配，不得把无关 turn 判成 stale',
       );

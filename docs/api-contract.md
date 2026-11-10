@@ -285,7 +285,7 @@ timeline 还有**旧游标** `before_time` + `before_seq`（兼容保留）。**
 | `spb_domain` `EventReducer.lastTurnRunState` / `lastTurnMayBeRunning` / `lastRunningTurnId` | 纯查询：**结构推断**判据（回填路径，见下方「B1b 的修法」） |
 | `spb_domain` `ReductionResult.terminalTurnIds` | 归约时记录的终态 turn（`done` / `error` 不产出 item，只能这样派生） |
 | `spb_domain` `ChatStreamController` | per-turn 一次性计时器 + `staleTurnIds` 流 |
-| `spb_features` `conversation_page.dart` | 停光标 + `_StaleTurnNotice` 提示条 |
+| `spb_features` `conversation_page.dart` | 停光标 + `TurnStatusStrip` 的 stalled 状态 |
 
 #### 不改归约结果（**别退回「强制封段」**）
 

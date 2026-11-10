@@ -171,7 +171,7 @@ void main() {
       );
     });
 
-    testWidgets('有工具调用 → 「已调用 N 个工具」+ 最近工具名', (tester) async {
+    testWidgets('未完成工具决定当前阶段，历史次数放入摘要', (tester) async {
       await pumpPanel(
         tester,
         items: [
@@ -182,24 +182,27 @@ void main() {
       );
 
       // 「已调用 2 个工具」既是状态行文案也可能与卡片文案撞名 → 限定在状态行内。
-      expect(statusFinder(find.text('已调用 2 个工具')), findsOneWidget);
-      expect(statusFinder(find.text('最近：Bash')), findsOneWidget);
-      // 状态行在转圈（工具卡里的未完成工具另有自己的指示器，不限定范围会是 2 个）。
+      expect(statusFinder(find.text('正在执行工具 · Bash')), findsOneWidget);
+      expect(
+        statusFinder(find.textContaining('已调用 2 个工具 · 最近：Bash')),
+        findsOneWidget,
+      );
+      // 动态面板复用相同阶段，但不再与主状态栏同时转圈。
       expect(
         statusFinder(find.byType(CircularProgressIndicator)),
-        findsOneWidget,
+        findsNothing,
       );
     });
 
-    testWidgets('只有活动快照 → 保留既有「执行中 · 已运行 X」文案', (tester) async {
+    testWidgets('正文阶段优先于旧活动类型，时长作为补充', (tester) async {
       await pumpPanel(
         tester,
         items: [_Items.text('m1')],
         activities: {'turn_1': _activity(elapsedMs: 5000)},
       );
 
-      expect(find.text('执行中 · 已运行 5 秒'), findsOneWidget);
-      expect(find.text('最近：思考'), findsOneWidget);
+      expect(find.text('正在回复'), findsOneWidget);
+      expect(find.textContaining('已运行 5 秒'), findsOneWidget);
     });
 
     testWidgets('排队 / 重试状态优先显示', (tester) async {
@@ -244,10 +247,9 @@ void main() {
         activities: {'turn_1': _activity(turnId: 'turn_1')},
       );
 
-      // 当前轮次 = turn_2：它没有工具、也没有自己的活动快照 → 状态行说明
-      // 「没有进行中的轮次」（正文在流式但没有任何过程信号可报，细条本来也不画）。
+      // 当前轮次 = turn_2：显示当前正文阶段，不能混入上一轮工具与活动。
       // ⚠️ 工具调用列表**照旧**显示 OldTool——那是历史事实，与「现在在跑谁」无关。
-      expect(statusFinder(find.text('当前没有进行中的轮次')), findsOneWidget);
+      expect(statusFinder(find.text('正在回复')), findsOneWidget);
       // turn_1 的活动快照没有被误用（否则状态行会出现「最近：思考」）。
       expect(statusFinder(find.text('最近：思考')), findsNothing);
       expect(statusFinder(find.textContaining('已调用')), findsNothing);

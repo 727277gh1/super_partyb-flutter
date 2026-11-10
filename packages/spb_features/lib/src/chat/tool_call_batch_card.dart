@@ -28,7 +28,7 @@ import 'tool_call_tile.dart';
 ///
 /// 摘要只回答「调了几次」，不回答「现在这一步是什么」。一轮正在跑工具时把它
 /// 折起来，等于把用户唯一能看见的「它在干活」的证据藏掉（那正是
-/// `_TurnActivityIndicator` 存在的理由）。故 [ToolCallBatchRow.hasRunning]
+/// `TurnStatusStrip` 存在的理由）。故 [ToolCallBatchRow.hasRunning]
 /// 为真时默认展开。
 ///
 /// ## 为什么不做「失败 N 条」的徽标

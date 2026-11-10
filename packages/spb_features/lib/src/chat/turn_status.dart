@@ -3,26 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 
-/// 「当前这一轮在干什么」的统一口径。
+import 'tool_call_tile.dart';
+
+/// 当前轮次的统一展示口径，供主状态栏与两端动态面板共用。
 ///
-/// ## 为什么需要一个独立模块
-///
-/// 同一件事有**三个**消费点，而它们此前各写一份：
-///
-/// | 消费点 | 形态 |
-/// |---|---|
-/// | `ConversationPage` 底部槽位（排队/重试横幅） | 细条 |
-/// | `ConversationPage` 底部槽位（活动指示） | 细条 |
-/// | 侧边栏「动态」面板的状态行 | 面板内一行 |
-///
-/// 三处若各写一套文案，「排队中」在不同位置会变成不同说法，用户会以为是两件
-/// 不同的事。故文案与判据都收在这里，UI 只管渲染。
-///
-/// ## 与归约层的关系
-///
-/// 本模块**只读**归约结果（[ExecutionStatus] / [TurnActivitySnapshot] /
-/// `toolCount` 等派生量），不产出也不修改 [ConversationItem]——与 §5.8
-/// 「派生信号不改归约」同一取向。
+/// 这里只读归约结果，不产出或修改 ConversationItem，避免展示折叠影响
+/// 搜索、定位与终态判断（§5.8「派生信号不改归约」）。
 
 /// 当前轮次的状态类别。
 ///
@@ -35,14 +21,20 @@ enum TurnStatusKind {
   /// 上一轮失败，正在安排重试（`retry_scheduled`）。
   retrying,
 
-  /// 已起跑，还没有正文，也没有工具调用。
+  /// 轮次尚未终结，当前没有更具体的执行阶段。
   running,
 
   /// 已送达服务端、agent 尚未产出任何东西（`preparing`，见 [deriveTurnStatus]）。
   preparing,
 
-  /// 已起跑且已在调用工具（本模块新增的一档，见 [deriveTurnStatus]）。
+  /// 有尚未返回结果、也未终结的工具调用。
   runningWithTools,
+
+  /// 最近的内容是思考增量。
+  thinking,
+
+  /// 最近的内容是回复正文。
+  replying,
 
   /// 长时间无进展（客户端看门狗，见 §5.8）。
   stalled,
@@ -52,9 +44,8 @@ enum TurnStatusKind {
 ///
 /// ## 为什么 `text` 与 `detail` 分开
 ///
-/// 主文案回答「它在等 / 在跑 / 不动了」，右侧补充回答「跑到哪了」。窄屏下
-/// 补充项会被省略号截断（`detail` 是**可丢**的），故它不能承载判定信息——
-/// 把「已调用 12 个工具」整体塞进 `detail` 会让关键信息在窄屏消失。
+/// 主文案回答当前阶段；时长、队列规模和累计调用数放进可展开的详情。
+/// 状态判断只依赖主文案，详情在窄屏允许换行、滚动。
 final class TurnStatusSummary {
   const TurnStatusSummary({
     required this.kind,
@@ -68,11 +59,11 @@ final class TurnStatusSummary {
   /// 主文案（必有）。
   final String text;
 
-  /// 右侧补充（可丢）：`最近：bash` / `已运行 2 分 5 秒`。
+  /// 补充事实：队列规模、已运行时长、工具调用次数与最近工具名。
   final String? detail;
 
   /// 是否显示转圈。`stalled` 为 false——看门狗的含义是「我们没再收到进展」，
-  /// 继续转圈会与「长时间无进展」自相矛盾（见 `_StaleTurnNotice`）。
+  /// 正文输出时也不转圈，流式内容本身已经提供动态反馈。
   final bool spinner;
 
   @override
@@ -82,23 +73,8 @@ final class TurnStatusSummary {
 
 /// 派生当前轮次状态；null 表示**没有进行中的轮次**（不该显示任何状态条）。
 ///
-/// ## 优先级（自高到低）
-///
-/// 1. [TurnStatusKind.stalled] —— 看门狗已判定无进展。它是**关于前两者的
-///    结论**，压过一切：此时「排队中」「已调用 8 个工具」都是过期信息。
-/// 2. [ExecutionStatus] —— 排队 / 重试。它们表示「还没开始跑」，
-///    优先于「已经在跑」的证据（与 [ExecutionStatus] 类文档的分工一致）。
-/// 3. 有工具调用 → [TurnStatusKind.runningWithTools]。
-/// 4. [TurnActivitySnapshot] → [TurnStatusKind.running]。
-/// 5. [isPreparing]（已送达、agent 未动）→ [TurnStatusKind.preparing]。
-/// 6. 都没有 → null（流式正文本身在动，再加一条状态只是噪声——这是既有
-///    `_visibleActivityFor` 的取舍，本轮保留）。
-///
-/// ## 关于 [toolCount] 为什么可以不传
-///
-/// 它来自 `_items` 的尾向扫描（不是事件），页面已经算过一次（见
-/// `_findStreamingItem` 的「一次扫描」约定）。面板拿不到 items 时传 0 即可，
-/// 会退化成第 4/5 档——不会错，只是少了「已调用 N 个工具」这层细节。
+/// 超时、排队/重试优先于运行阶段；工具计数只作摘要，不能证明工具仍在执行。
+/// [phase] 来自同轮时间线的最近一步，避免旧思考或旧工具覆盖新的正文。
 TurnStatusSummary? deriveTurnStatus({
   required bool isStreaming,
   ExecutionStatus? executionStatus,
@@ -106,10 +82,11 @@ TurnStatusSummary? deriveTurnStatus({
   bool isStale = false,
   int toolCount = 0,
   String? lastToolName,
+  String? activeToolName,
+  TurnStatusKind? phase,
   bool isPreparing = false,
 }) {
   if (!isStreaming) return null;
-
   if (isStale) {
     return const TurnStatusSummary(
       kind: TurnStatusKind.stalled,
@@ -121,54 +98,63 @@ TurnStatusSummary? deriveTurnStatus({
   final elapsed = activity == null || activity.elapsedMs <= 0
       ? null
       : '已运行 ${formatTurnElapsed(activity.elapsedMs)}';
-
   if (executionStatus != null) {
+    final total = executionStatus.queueTotal;
+    final user = executionStatus.queueUser;
     return TurnStatusSummary(
       kind: executionStatus.kind == ExecutionStatusKind.retryScheduled
           ? TurnStatusKind.retrying
           : TurnStatusKind.queued,
       text: executionStatusLabel(executionStatus),
-      detail: elapsed,
+      detail: total != null && user != null ? '队列：总计 $total，你的 $user' : elapsed,
     );
   }
 
-  if (toolCount > 0) {
-    // 「最近：bash」只在有名字时出现——拼出「最近：null」比不说更糟
-    // （同 [TurnActivitySnapshot.lastEventType] 的取向）。
-    final last = (lastToolName ?? '').trim();
+  final last = (lastToolName ?? '').trim();
+  final details = <String>[
+    if (elapsed != null) elapsed,
+    if (toolCount > 0) '已调用 $toolCount 个工具',
+    if (last.isNotEmpty)
+      '最近：$last'
+    else if (_lastEventLabelOrNull(activity) case final label?)
+      label,
+  ];
+  final detail = details.isEmpty ? null : details.join(' · ');
+  if (phase != null) {
+    final active = (activeToolName ?? '').trim();
     return TurnStatusSummary(
-      kind: TurnStatusKind.runningWithTools,
-      text: '已调用 $toolCount 个工具',
-      detail: last.isEmpty ? elapsed : '最近：$last',
+      kind: phase,
+      text: switch (phase) {
+        TurnStatusKind.thinking => '思考中',
+        TurnStatusKind.replying => '正在回复',
+        TurnStatusKind.runningWithTools =>
+          active.isEmpty ? '正在执行工具' : '正在执行工具 · $active',
+        TurnStatusKind.preparing => '正在准备响应',
+        _ => '执行中',
+      },
+      detail: detail,
+      // 正文已经在流动，用静态图标保持状态可见，避免再叠一层动画。
+      spinner: phase != TurnStatusKind.replying,
     );
   }
-
-  if (activity != null) {
+  if (toolCount > 0 || activity != null) {
     return TurnStatusSummary(
       kind: TurnStatusKind.running,
-      text: '执行中 · 已运行 ${formatTurnElapsed(activity.elapsedMs)}',
-      detail: _lastEventLabel(activity),
+      text: '执行中',
+      detail: detail,
     );
   }
-
-  // 兵底：结构上这一轮尚未结束，但拿不到任何正面证据（与看门狗武装计时器
-  // 同一判据：`LastTurnRunState.preparing`）。
-  //
-  // 文案逐字对齐 webapp `Workbench.streamInitialPreparingTitle`（"正在准备响应"）：
-  // 两端口径一致，用户跨端对照时不会以为是两件事。
-  //
-  // 注意它**不是** `ExecutionStatus` 的兵底：那一条只在服务端发了
-  // `queue_state` / `retry_scheduled` 时才有值，而这里覆盖的是「连那条都没
-  // 有」的空窗（排队事件缺失 / 服务端还没开始排队）。
   if (isPreparing) {
     return const TurnStatusSummary(
       kind: TurnStatusKind.preparing,
       text: '正在准备响应',
     );
   }
-
   return null;
 }
+
+String? _lastEventLabelOrNull(TurnActivitySnapshot? activity) =>
+    activity == null ? null : _lastEventLabel(activity);
 
 /// 活动快照里的「最近一步」文案；无上一步时返回 null。
 ///
@@ -229,7 +215,7 @@ String executionStatusLabel(ExecutionStatus s) {
 /// 负数与缺失一律按 0 处理（服务端异常载荷不产出「已运行 -1 秒」）。
 ///
 /// 不加 `@visibleForTesting`：它现在也是生产路径的公共取文案入口
-/// （`_TurnActivityIndicator` 与 [TurnStatusStrip] 都调它）。
+/// （状态栏与动态面板共用）。
 String formatTurnElapsed(int elapsedMs) {
   final totalSeconds = elapsedMs <= 0 ? 0 : (elapsedMs / 1000).round();
   if (totalSeconds < 60) return '$totalSeconds 秒';
@@ -256,6 +242,9 @@ final class TurnProgress {
     this.toolCount = 0,
     this.lastToolName,
     this.hasAgentContent = false,
+    this.phase,
+    this.activeToolName,
+    this.tools = const [],
   });
 
   /// 没有进行中的轮次时的常量哨兵。
@@ -272,6 +261,13 @@ final class TurnProgress {
 
   /// 本 turn 是否已有非空正文。
   final bool hasAgentContent;
+
+  /// 最近一步的阶段；已完成工具之后先回到通用执行态，不能沿用更早正文。
+  final TurnStatusKind? phase;
+  final String? activeToolName;
+
+  /// 与进度同一次扫描取得，只有展开详情时才构建工具卡。
+  final List<ToolCallItem> tools;
 
   bool get isRunning => turnId != null;
 }
@@ -301,6 +297,9 @@ TurnProgress scanTurnProgress(
   var toolCount = 0;
   String? lastToolName;
   var hasAgentContent = false;
+  TurnStatusKind? phase;
+  String? activeToolName;
+  final tools = <ToolCallItem>[];
 
   for (var i = items.length - 1; i >= 0; i--) {
     onVisit?.call();
@@ -310,9 +309,27 @@ TurnProgress scanTurnProgress(
     if (item is ToolCallItem) {
       toolCount++;
       lastToolName ??= item.name;
+      tools.add(item);
+      phase ??= TurnStatusKind.running;
+      if (item.output == null && !item.isComplete) {
+        activeToolName ??= item.name;
+      }
     }
-    if (item is AssistantMessageItem && item.text.isNotEmpty) {
-      hasAgentContent = true;
+    if (item is AssistantMessageItem) {
+      if (item.text.isNotEmpty) hasAgentContent = true;
+      if (item.isStreaming) {
+        phase ??= item.text.isEmpty
+            ? TurnStatusKind.preparing
+            : TurnStatusKind.replying;
+      } else if (item.text.isNotEmpty) {
+        // 权威正文已落地、终态尚未到达：不能重新显示更早的思考阶段。
+        phase ??= TurnStatusKind.running;
+      }
+    }
+    if (item is ThoughtItem) {
+      phase ??= item.isStreaming
+          ? TurnStatusKind.thinking
+          : TurnStatusKind.running;
     }
   }
 
@@ -321,14 +338,16 @@ TurnProgress scanTurnProgress(
     toolCount: toolCount,
     lastToolName: lastToolName,
     hasAgentContent: hasAgentContent,
+    phase: activeToolName != null ? TurnStatusKind.runningWithTools : phase,
+    activeToolName: activeToolName,
+    tools: tools.reversed.toList(growable: false),
   );
 }
 
 /// 从 [items] 尾向找出当前仍在生成的 turnId；null 表示没有进行中的轮次。
 ///
-/// 与对话页的 `_findStreamingItem` 同一判据（只看 `AssistantMessageItem` /
-/// `ThoughtItem` 的 `isStreaming`）：面板只能拿到 items，拿不到页面的私有
-/// 派生量，两边判据不同就会“页面说还在跑、面板说已结束”。
+/// 与对话页的 `_findStreamingItem` 同一判据：正文/思考仍在流式，或工具
+/// 尚未返回且未终结。面板拿不到页面私有状态，必须使用同一套判据。
 ///
 /// ⚠️ 只看**最后**一个命中项：同 group 的 turn 串行执行，取最后一个即可
 /// 回答「现在是不是还在跑」；若遗的是某个很久以前丢过 `done` 的 turn，
@@ -339,6 +358,8 @@ String? streamingTurnIdOf(List<ConversationItem> items) {
     final streaming = switch (item) {
       AssistantMessageItem(:final isStreaming) => isStreaming,
       ThoughtItem(:final isStreaming) => isStreaming,
+      ToolCallItem(:final output, :final isComplete) =>
+        output == null && !isComplete,
       _ => false,
     };
     if (streaming) return item.turnId.isEmpty ? null : item.turnId;
@@ -351,97 +372,172 @@ String? streamingTurnIdOf(List<ConversationItem> items) {
 /// 与 [deriveTurnStatus] 的区别：本函数**自己**接受整份时间线与 `turnId`，
 /// 供拿不到页面私有派生量的装配层（两端 router 的面板）使用。
 ///
-/// [showActivityWithContent]：对话页的细条在已有正文时**不**显示活动快照
-/// （噪声）；而面板是「现在在干什么」的集中视图，即使正文在流式也照显示。
 TurnStatusSummary? deriveTurnStatusFor({
   required List<ConversationItem> items,
   required String? turnId,
   Map<String, TurnActivitySnapshot> activities = const {},
   Set<String> staleTurnIds = const {},
   ExecutionStatus? executionStatus,
-  bool showActivityWithContent = true,
   void Function()? onVisit,
 }) {
-  final progress = scanTurnProgress(items, turnId: turnId, onVisit: onVisit);
+  final progress = scanTurnProgress(
+    items,
+    turnId: executionStatus?.turnId ?? turnId,
+    onVisit: onVisit,
+  );
   if (!progress.isRunning) return null;
 
-  final hasContent = progress.hasAgentContent && !showActivityWithContent;
   return deriveTurnStatus(
     isStreaming: true,
     executionStatus: executionStatus,
-    activity: hasContent ? null : activities[progress.turnId!],
+    activity: activities[progress.turnId!],
     isStale: staleTurnIds.contains(progress.turnId),
     toolCount: progress.toolCount,
     lastToolName: progress.lastToolName,
+    activeToolName: progress.activeToolName,
+    phase: progress.phase,
   );
 }
 
-/// 轮次状态细条（对话页底部槽位用）。
-///
-/// ## 为什么与 `_ExecutionStatusBar` / `_TurnActivityIndicator` 并存而不合并
-///
-/// 那两个组件是既有实现、各自有用例钉住视觉与 key。本轮只**新增**「有工具
-/// 调用」这一档（[TurnStatusKind.runningWithTools]），故共用一个轻量渲染器：
-/// 文案由 [deriveTurnStatus] 统一给出，避免第四份文案副本。
-///
-/// ## 为什么 spinner 可关
-///
-/// `stalled` 档不转圈：看门狗的含义恰恰是「我们没再收到进展」，继续转圈会
-/// 与文案自相矛盾（同 `_StaleTurnNotice` 的取向）。
-class TurnStatusStrip extends StatelessWidget {
-  const TurnStatusStrip({super.key, required this.summary});
+/// 当前轮次的唯一动态状态栏；详情按需展开，避免多个工具同时转圈。
+class TurnStatusStrip extends StatefulWidget {
+  const TurnStatusStrip({
+    super.key,
+    required this.summary,
+    this.tools = const [],
+    this.showCancel = false,
+    this.onCancel,
+  });
 
   final TurnStatusSummary summary;
+  final List<ToolCallItem> tools;
+  final bool showCancel;
+  final VoidCallback? onCancel;
+
+  @override
+  State<TurnStatusStrip> createState() => _TurnStatusStripState();
+}
+
+class _TurnStatusStripState extends State<TurnStatusStrip> {
+  bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final summary = widget.summary;
     final detail = summary.detail;
+    final hasDetails = detail != null || widget.tools.isNotEmpty;
+    final animate = summary.spinner && !MediaQuery.disableAnimationsOf(context);
 
     return Material(
       key: const ValueKey('conversation-turn-status'),
-      // 与活动指示 / 执行等待同用 secondaryContainer：同一槽位的互斥状态。
       color: scheme.secondaryContainer,
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.md,
-          vertical: SpbSpacing.sm,
-        ),
-        child: Row(
+        padding: const EdgeInsets.symmetric(horizontal: SpbSpacing.md),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(
-              width: SpbSpacing.lg,
-              height: SpbSpacing.lg,
-              child: summary.spinner
-                  ? CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: scheme.onSecondaryContainer,
-                    )
-                  // 不转圈时占住同宽，避免文案左右跳动。
-                  : Icon(
-                      Icons.hourglass_disabled_outlined,
-                      size: SpbSpacing.lg,
-                      color: scheme.onSecondaryContainer,
-                    ),
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            Expanded(
-              child: Text(
-                summary.text,
-                key: const ValueKey('conversation-turn-status-text'),
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSecondaryContainer,
+            Row(
+              children: [
+                ExcludeSemantics(
+                  child: SizedBox(
+                    width: SpbSpacing.lg,
+                    height: SpbSpacing.lg,
+                    child: animate
+                        ? CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: scheme.onSecondaryContainer,
+                          )
+                        : Icon(
+                            turnStatusIcon(summary.kind),
+                            size: SpbSpacing.lg,
+                            color: scheme.onSecondaryContainer,
+                          ),
+                  ),
                 ),
-                overflow: TextOverflow.ellipsis,
-              ),
+                const SizedBox(width: SpbSpacing.sm),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: SpbSpacing.sm,
+                    ),
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        summary.text,
+                        key: const ValueKey('conversation-turn-status-text'),
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onSecondaryContainer,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                if (hasDetails)
+                  Semantics(
+                    expanded: _expanded,
+                    child: IconButton(
+                      key: const ValueKey('conversation-turn-details-toggle'),
+                      constraints: const BoxConstraints(
+                        minWidth: 48,
+                        minHeight: 48,
+                      ),
+                      tooltip: _expanded ? '收起详情' : '查看详情',
+                      onPressed: () => setState(() => _expanded = !_expanded),
+                      icon: Icon(
+                        _expanded ? Icons.expand_less : Icons.expand_more,
+                      ),
+                    ),
+                  ),
+                if (widget.showCancel)
+                  IconButton(
+                    key: const ValueKey('conversation-cancel-turn'),
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    tooltip: '停止生成',
+                    onPressed: widget.onCancel,
+                    icon: const Icon(Icons.stop_circle_outlined),
+                  ),
+              ],
             ),
-            if (detail != null)
-              Text(
-                detail,
-                key: const ValueKey('conversation-turn-status-detail'),
-                style: SpbType.listMeta(textTheme)
-                    ?.copyWith(color: scheme.onSecondaryContainer),
+            if (_expanded && hasDetails)
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(context).height * 0.3,
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: widget.tools.length + (detail == null ? 0 : 1),
+                  itemBuilder: (context, index) {
+                    if (detail != null && index == 0) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
+                        child: Text(
+                          detail,
+                          key: const ValueKey(
+                            'conversation-turn-status-detail',
+                          ),
+                          style: SpbType.listMeta(textTheme)
+                              ?.copyWith(color: scheme.onSecondaryContainer),
+                        ),
+                      );
+                    }
+                    final toolIndex = index - (detail == null ? 0 : 1);
+                    final tool = widget.tools[toolIndex];
+                    return ToolCallTile(
+                      // 异常回填可能缺失 id，索引保证同轮详情仍有唯一键。
+                      key: ValueKey((tool.id, toolIndex)),
+                      name: tool.name,
+                      args: tool.args,
+                      output: tool.output,
+                      isComplete: tool.isComplete,
+                    );
+                  },
+                ),
               ),
           ],
         ),
@@ -449,3 +545,14 @@ class TurnStatusStrip extends StatelessWidget {
     );
   }
 }
+
+/// 详情面板与减少动态效果模式使用相同的静态阶段图标。
+IconData turnStatusIcon(TurnStatusKind kind) => switch (kind) {
+  TurnStatusKind.stalled => Icons.hourglass_disabled_outlined,
+  TurnStatusKind.thinking => Icons.psychology_outlined,
+  TurnStatusKind.replying => Icons.edit_outlined,
+  TurnStatusKind.runningWithTools => Icons.build_outlined,
+  TurnStatusKind.retrying => Icons.refresh,
+  TurnStatusKind.queued || TurnStatusKind.preparing => Icons.hourglass_empty,
+  TurnStatusKind.running => Icons.play_circle_outline,
+};

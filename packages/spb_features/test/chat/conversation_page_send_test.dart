@@ -603,9 +603,16 @@ void main() {
       await pumpPage(tester);
       await pushQueue(tester, reason: 'session_busy');
 
-      final bar = find.byKey(const ValueKey('conversation-execution-status'));
+      final bar = find.byWidgetPredicate(
+        (widget) =>
+            widget is TurnStatusStrip &&
+            (widget.summary.kind == TurnStatusKind.queued ||
+                widget.summary.kind == TurnStatusKind.retrying),
+      );
       expect(bar, findsOneWidget, reason: '没有它，排队与「卡死」在 UI 上无法区分');
       expect(find.textContaining('正在等待当前会话完成'), findsOneWidget);
+      await tester.tap(find.byTooltip('查看详情'));
+      await tester.pump();
       expect(find.textContaining('队列：总计 3，你的 1'), findsOneWidget);
     });
 
@@ -693,7 +700,12 @@ void main() {
       await pumpPage(tester);
       await pushQueue(tester);
 
-      final bar = find.byKey(const ValueKey('conversation-execution-status'));
+      final bar = find.byWidgetPredicate(
+        (widget) =>
+            widget is TurnStatusStrip &&
+            (widget.summary.kind == TurnStatusKind.queued ||
+                widget.summary.kind == TurnStatusKind.retrying),
+      );
       expect(bar, findsOneWidget);
 
       await pushEvent(
@@ -711,7 +723,12 @@ void main() {
       await pumpPage(tester);
       await pushQueue(tester);
 
-      final bar = find.byKey(const ValueKey('conversation-execution-status'));
+      final bar = find.byWidgetPredicate(
+        (widget) =>
+            widget is TurnStatusStrip &&
+            (widget.summary.kind == TurnStatusKind.queued ||
+                widget.summary.kind == TurnStatusKind.retrying),
+      );
       expect(bar, findsOneWidget);
 
       await pushEvent(
@@ -734,7 +751,12 @@ void main() {
       await pumpPage(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-execution-status')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.queued ||
+                  widget.summary.kind == TurnStatusKind.retrying),
+        ),
         findsNothing,
       );
     });
@@ -746,7 +768,12 @@ void main() {
       await pushQueue(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-execution-status')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.queued ||
+                  widget.summary.kind == TurnStatusKind.retrying),
+        ),
         findsNothing,
       );
     });
@@ -781,7 +808,11 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsOneWidget,
       );
 
@@ -789,11 +820,20 @@ void main() {
       await pushQueue(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-execution-status')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.queued ||
+                  widget.summary.kind == TurnStatusKind.retrying),
+        ),
         findsOneWidget,
       );
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsNothing,
         reason: '同一槽位只展示一条，等待状态胜出',
       );
@@ -990,16 +1030,20 @@ void main() {
       await pushStreamingThought(tester);
       await pushActivity(tester, elapsedMs: 45000, lastEventType: 'bash');
 
-      final indicator = find.byKey(
-        const ValueKey('conversation-turn-activity'),
+      final indicator = find.byWidgetPredicate(
+        (widget) =>
+            widget is TurnStatusStrip &&
+            (widget.summary.kind == TurnStatusKind.thinking),
       );
       expect(
         indicator,
         findsOneWidget,
         reason: '空窗期必须给用户进展证据，否则他分不清「在干活」与「卡死」',
       );
+      await tester.tap(find.byTooltip('查看详情'));
+      await tester.pump();
       expect(find.textContaining('已运行 45 秒'), findsOneWidget);
-      expect(find.text('最近：bash'), findsOneWidget);
+      expect(find.textContaining('最近：bash'), findsOneWidget);
     });
 
     testWidgets('≥ 1 分钟拆成「X 分 Y 秒」（webapp 只给秒数，此处有意更易读）', (tester) async {
@@ -1009,6 +1053,8 @@ void main() {
       await pushStreamingThought(tester);
       await pushActivity(tester, elapsedMs: 125000, lastEventType: 'tool_call');
 
+      await tester.tap(find.byTooltip('查看详情'));
+      await tester.pump();
       expect(find.textContaining('已运行 2 分 5 秒'), findsOneWidget);
     });
 
@@ -1019,18 +1065,24 @@ void main() {
       await pushStreamingThought(tester);
       await pushActivity(tester, lastEventType: null);
 
+      await tester.tap(find.byTooltip('查看详情'));
+      await tester.pump();
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsOneWidget,
       );
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity-last')),
+        find.textContaining('最近：'),
         findsNothing,
         reason: '首帧活动不带上一步，拼出「最近：null」比不显示更糟',
       );
     });
 
-    testWidgets('已有正文时让位给真实内容（不插进度噪声）', (tester) async {
+    testWidgets('已有正文时显示静态回复阶段', (tester) async {
       mockTimeline();
       await startController(tester);
       await pumpPage(tester);
@@ -1038,21 +1090,38 @@ void main() {
       await pushActivity(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsNothing,
         reason: '正文在往下滚，再插一句「已运行」只是噪声',
       );
+      expect(find.text('正在回复'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
-    testWidgets('无活动事件时不展示（不凭空造进度）', (tester) async {
+    testWidgets('无活动事件时依据真实思考显示阶段，不编造时长', (tester) async {
       mockTimeline();
       await startController(tester);
       await pumpPage(tester);
       await pushStreamingThought(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
-        findsNothing,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TurnStatusStrip>(find.byType(TurnStatusStrip))
+            .summary
+            .detail,
+        isNull,
       );
     });
 
@@ -1063,7 +1132,11 @@ void main() {
       await pushStreamingThought(tester);
       await pushActivity(tester);
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsOneWidget,
       );
 
@@ -1079,13 +1152,17 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
         findsNothing,
         reason: 'done 会闭合流式段；活动快照仍残留在 State，必须靠流式判定排除',
       );
     });
 
-    testWidgets('未注入活动流时不展示（保持纯只读时间线用法）', (tester) async {
+    testWidgets('未注入活动流仍显示思考阶段，不编造时长', (tester) async {
       mockTimeline();
       await startController(tester);
       await pumpPage(tester, wireActivities: false);
@@ -1093,8 +1170,19 @@ void main() {
       await pushActivity(tester);
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
-        findsNothing,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TurnStatusStrip>(find.byType(TurnStatusStrip))
+            .summary
+            .detail,
+        isNull,
       );
     });
 
@@ -1107,9 +1195,20 @@ void main() {
       await pushActivity(tester, turnId: 'turn_other', elapsedMs: 99000);
 
       expect(
-        find.byKey(const ValueKey('conversation-turn-activity')),
-        findsNothing,
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TurnStatusStrip &&
+              (widget.summary.kind == TurnStatusKind.thinking),
+        ),
+        findsOneWidget,
         reason: '按 turnId 直查，不拿「最近一条活动」冒充当前 turn 的进度',
+      );
+      expect(
+        tester
+            .widget<TurnStatusStrip>(find.byType(TurnStatusStrip))
+            .summary
+            .detail,
+        isNull,
       );
     });
 

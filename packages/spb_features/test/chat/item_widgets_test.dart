@@ -662,14 +662,14 @@ void main() {
       expect(rendered, contains('code'));
     });
 
-    testWidgets('流式且文本为空时显示「正在生成」占位', (tester) async {
+    testWidgets('流式空正文由统一状态栏提供等待反馈', (tester) async {
       // 空文本 + 流式中：必须给占位，否则是 0 高度气泡（用户以为卡住）。
       await tester.pumpWidget(
         _host(const AssistantMessageBubble(text: '', isStreaming: true)),
       );
 
-      expect(find.text('正在生成…'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('正在生成…'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
 
       // 让动画控制器停下，避免 pending timer 警告。
       await tester.pumpWidget(const SizedBox.shrink());
@@ -754,12 +754,12 @@ void main() {
       expect(find.text('第一行思考\n第二行思考'), findsOneWidget);
     });
 
-    testWidgets('流式中标题为「思考中…」', (tester) async {
+    testWidgets('思考内容保留稳定标题，当前阶段由状态栏显示', (tester) async {
       await tester.pumpWidget(
         _host(const ThoughtTile(text: '思考内容', isStreaming: true)),
       );
 
-      expect(find.text('思考中…'), findsOneWidget);
+      expect(find.text('思考过程'), findsOneWidget);
     });
 
     testWidgets('长首行摘要被截断', (tester) async {
@@ -772,14 +772,14 @@ void main() {
   });
 
   group('ToolCallTile', () {
-    testWidgets('执行中显示「执行中」且带进度指示', (tester) async {
+    testWidgets('执行中显示「执行中」且使用静态图标', (tester) async {
       await tester.pumpWidget(
         _host(const ToolCallTile(name: 'bash', output: null)),
       );
 
       expect(find.text('bash'), findsOneWidget);
       expect(find.text('执行中'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
 
       await tester.pumpWidget(const SizedBox.shrink());
     });

@@ -1775,6 +1775,8 @@ class _ConversationPageState extends State<ConversationPage> {
       final streaming = switch (item) {
         AssistantMessageItem(:final isStreaming) => isStreaming,
         ThoughtItem(:final isStreaming) => isStreaming,
+        ToolCallItem(:final output, :final isComplete) =>
+          output == null && !isComplete,
         _ => false,
       };
       if (streaming) return item;
@@ -1782,22 +1784,16 @@ class _ConversationPageState extends State<ConversationPage> {
     return null;
   }
 
-  /// 当前处于超时兜底态的进行中项；null 表示没有。
-  ///
-  /// 「长时间无进展」与「流式」是两个不同的概念：stale 只说明客户端没再收到
-  /// 进展，turn 可能仍在后台跑。故它**不**改变 [ConversationItem]（不改文本、
-  /// 不改 `isComplete`），只让 UI 停掉光标并给出提示。
-  ConversationItem? _staleTurnItemFor(ConversationItem? streaming) {
-    if (streaming == null) return null;
-    return _staleTurnIds.contains(streaming.turnId) ? streaming : null;
-  }
-
   /// 停止当前轮次。
   Future<void> _handleCancelTurn() async {
     final handler = widget.onCancelTurn;
     // `turnId` 为空则不发请求：服务端路由是 `/chat/turns/:turn_id/cancel`，
     // 空 id 会打到 `/chat/turns//cancel`（语义不明的 404，见 issue #2 同源陷阱）。
-    final turnId = _streamingItem?.turnId ?? '';
+    final streaming = _streamingItem;
+    final turnId =
+        _executionStatus?.turnId ??
+        streaming?.turnId ??
+        _awaitingReplyTurnId(streaming);
     if (handler == null || turnId.isEmpty || _cancelling) return;
 
     setState(() => _cancelling = true);
@@ -1921,20 +1917,8 @@ class _ConversationPageState extends State<ConversationPage> {
     }
   }
 
-  /// 是否可以点「停止生成」。
-  ///
-  /// 两个条件：有流式项，且该项带着非空 [ConversationItem.turnId]。
-  /// 后者不可省：`turnId` 为空说明事件未携带该字段（历史数据或异常载荷），
-  /// 此时发不出正确的取消请求（见 [_handleCancelTurn]）。
-  /// 提交中（[_cancelling]）同样禁用，避免连点。
-  ///
-  /// 接受 [streaming]（由 `build` 算一次后传入）而不是自己再扫一遍：
-  /// 修复前这个 getter 与 `_staleTurnItem` / `_visibleActivity` 各自调用
-  /// `_streamingItem`，一次 build 就是 3 次 O(n) 尾向扫描。
-  bool _canCancelTurnFor(ConversationItem? streaming) {
-    if (_cancelling) return false;
-    return streaming != null && streaming.turnId.isNotEmpty;
-  }
+  /// 阶段已经确定有效 turnId 时才允许取消；请求在途禁用，避免重复提交。
+  bool _canCancelTurnFor(String turnId) => !_cancelling && turnId.isNotEmpty;
 
   /// 本 turn 的进度（工具调用数 + 最近工具名 + 是否已有正文）。
   ///
@@ -1957,37 +1941,27 @@ class _ConversationPageState extends State<ConversationPage> {
   /// 修复前是 `for (final item in _items)` 正向全表扫。改成倒扫 + 遇到**别的
   /// turn** 立即 break：同一 turn 的项在时间线上是连续的（归约器按事件顺序
   /// 追加），故只要看到 turnId 不同就说明已经扫完了这个 turn 的全部项，再往
-  /// 前都是更早的 turn——而较早的 turn 不可能是 [streaming] 的正文。
+  /// 前都是更早的 turn——而较早的 turn 不可能是当前轮次的正文。
   ///
-  /// ⚠️ 早退条件只能是 `turnId != streaming.turnId`，**不能**是
+  /// ⚠️ 早退条件只能是 `item.turnId != turnId`，**不能**是
   /// `is AssistantMessageItem`：同一 turn 中间可能夹着 `ToolCallItem` /
   /// `ThoughtItem`，用类型早退会漏掉工具轮之后的正文（那个 turn 就永远
   /// 挂着「执行中」）。同一理由也让它能顺手数完本 turn 的工具调用。
-  TurnProgress _turnProgressFor(ConversationItem? streaming) {
-    if (streaming == null || streaming.turnId.isEmpty) return TurnProgress.none;
+  TurnProgress _turnProgressFor(String turnId) {
+    if (turnId.isEmpty) return TurnProgress.none;
 
-    // 已判超时 → 让位给 [_StaleTurnNotice]。
-    if (_staleTurnIds.contains(streaming.turnId)) return TurnProgress.none;
+    // 已判超时 → 让位给 [TurnStatusKind.stalled]。
+    if (_staleTurnIds.contains(turnId)) return TurnProgress.none;
 
     return scanTurnProgress(
       _items,
-      turnId: streaming.turnId,
+      turnId: turnId,
       // 把计数上交给页面：`scanTurnProgress` 不依赖 Flutter，拿不到 PerfProbe。
       onVisit: () => PerfProbe.visitedItems++,
     );
   }
 
-  /// 该上屏的活动快照；null 表示不该显示。
-  ///
-  /// 已有正文 → 让位给真实内容。这条**只属于页面细条**：面板是「现在在干
-  /// 什么」的集中视图，即使正文在流式也照示。
-  TurnActivitySnapshot? _activityFor(TurnProgress progress) {
-    final turnId = progress.turnId;
-    if (turnId == null || progress.hasAgentContent) return null;
-    return _activities[turnId];
-  }
-
-  /// 「已送达服务端、agent 还没产出任何东西」的 turnId；空串 = 不显示细条。
+  /// 本次已送达且尚未终结、暂时没有流式项的 turnId；空串 = 不显示细条。
   ///
   /// ## 它补的是哪段空窗（用户报障）
   ///
@@ -2000,7 +1974,8 @@ class _ConversationPageState extends State<ConversationPage> {
   /// ## 判据（与看门狗同一个）
   ///
   /// [EventReducer.lastTurnRun] 的 `preparing`：最后一个 turn 只有用户侧项、
-  /// 没有终态。同一个判据也用于武装看门狗计时器，故「界面说在等」与
+  /// 没有终态。工具已返回、下一段内容尚未到达时也保留当前轮次。
+  /// 同一个判据也用于武装看门狗计时器，故「界面说在等」与
   /// 「超时提示判定无进展」永远不会自相矛盾。
   ///
   /// ## 三个「不显示」
@@ -2019,7 +1994,10 @@ class _ConversationPageState extends State<ConversationPage> {
     final sentTurnId = controller.lastSentTurnId;
     if (sentTurnId.isEmpty) return '';
     final run = controller.lastTurnRunSnapshot;
-    if (run.state != LastTurnRunState.preparing) return '';
+    if (run.state != LastTurnRunState.preparing &&
+        run.state != LastTurnRunState.streaming) {
+      return '';
+    }
     // 只认「刚发的那一轮」：若之后又发了新的一条（lastSentTurnId 已变），
     // 旧 turn 的 preparing 不再代表当前等待。
     return run.turnId == sentTurnId ? run.turnId : '';
@@ -2054,13 +2032,26 @@ class _ConversationPageState extends State<ConversationPage> {
     // 「是否已有正文」），但那是**带早退**的尾向扫描（遇到别的 turn 就
     // break），而不是全表。
     final streaming = _streamingItem;
-    final staleTurnItem = _staleTurnItemFor(streaming);
-    final canCancelTurn = _canCancelTurnFor(streaming);
-    final progress = _turnProgressFor(streaming);
-    final visibleActivity = _activityFor(progress);
-    // 「已送达、agent 未动」的空窗（用户报障：发了消息，底部什么都不说）。
-    // 判据与看门狗武装计时器同一个，详见 [_awaitingReplyTurnId]。
     final awaitingTurnId = _awaitingReplyTurnId(streaming);
+    final turnId =
+        _executionStatus?.turnId ?? streaming?.turnId ?? awaitingTurnId;
+    final progress = _turnProgressFor(turnId);
+    final canCancelTurn = _canCancelTurnFor(turnId);
+    final sameTurn = progress.turnId == turnId;
+    final turnStatus = deriveTurnStatus(
+      isStreaming:
+          streaming != null ||
+          _executionStatus != null ||
+          awaitingTurnId.isNotEmpty,
+      executionStatus: _executionStatus,
+      activity: _activities[turnId],
+      isStale: _staleTurnIds.contains(turnId),
+      toolCount: sameTurn ? progress.toolCount : 0,
+      lastToolName: sameTurn ? progress.lastToolName : null,
+      activeToolName: sameTurn ? progress.activeToolName : null,
+      phase: sameTurn ? progress.phase : null,
+      isPreparing: awaitingTurnId.isNotEmpty,
+    );
 
     return Scaffold(
       appBar: title == null
@@ -2071,9 +2062,8 @@ class _ConversationPageState extends State<ConversationPage> {
               actions: [
                 // 停止生成：仅在确有正在生成的轮次时可点。
                 //
-                // 选**禁用**而非隐藏：AppBar 宽度恒定，不会因状态切换而抖动；
-                // 且用户能看到「这里有一个停止按钮，只是现在没什么可停」。
-                if (widget.onCancelTurn != null) ...[
+                // 空闲时保留禁用入口；有主状态栏时取消操作随当前轮次展示。
+                if (widget.onCancelTurn != null && turnStatus == null) ...[
                   IconButton(
                     key: const ValueKey('conversation-cancel-turn'),
                     icon: const Icon(Icons.stop_circle_outlined),
@@ -2168,64 +2158,15 @@ class _ConversationPageState extends State<ConversationPage> {
             child: _items.isEmpty
                 ? EmptyState(message: widget.emptyHint)
                 : _buildTimeline(),
-          ), // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
-          // 的那条」，语义上与输入区相邻而非与时间线相邻。
-          // 执行中活动指示放在**时间线与待处理栏之间**：它描述的是「正在跑的
-          // 那个 turn 的进度」，语义上属于时间线；而待处理栏的语义属于输入区，
-          // 两者各贴各自的一端（见各自文档）。
-          // 执行等待/重试提示（queue_state / retry_scheduled）：与活动指示
-          // **共用同一槽位**，且优先于它。
-          //
-          // 判定依据：两者语义互斥——本提示是「还没开始跑（等名额/等重试）」，
-          // 活动指示是「已在跑但没正文」。若同时存在（例如旧的排队事件尚未被
-          // 起跑事件清掉，而心跳已先到），显示「在等」比显示「在跑」更保守也
-          // 更准（对齐 webapp `turn.activity && !turn.queueReason`）。
-          if (staleTurnItem != null)
-            const _StaleTurnNotice()
-          else if (_executionStatus != null)
-            _ExecutionStatusBar(status: _executionStatus!)
-          else if (progress.toolCount > 0)
-            // 有工具调用的轮次：报「已调 N 个工具 · 最近 X」。
-            //
-            // 这一档是新增的：此前调了 8 个工具的长回复里底部什么都没有
-            //（正文一出现，活动指示就按既有规则让位），用户看不出「它还在
-            // 干活」还是「已经停了」。
-            //
-            // `deriveTurnStatus` 在 `toolCount > 0` 时必定非 null（与上面的
-            // 判据同口径），故用 `!` 而不是再造一个兜底文案。
+          ),
+          // 同一轮只有一条主状态；消息和工具卡保留内容与静态状态。
+          if (turnStatus != null)
             TurnStatusStrip(
-              summary: deriveTurnStatus(
-                isStreaming: true,
-                activity: visibleActivity,
-                toolCount: progress.toolCount,
-                lastToolName: progress.lastToolName,
-              )!,
-            )
-          else if (visibleActivity != null)
-            _TurnActivityIndicator(activity: visibleActivity)
-          // 空窗兵底：消息已送达、agent 还没产出任何东西（见
-          // [_awaitingReplyTurnId]）。
-          //
-          // ## 为什么排在最后一档
-          //
-          // 上面四档都是**服务端给出了证据**的状态（stale 判定 / 排队原因 /
-          // 工具进度 / 活动心跳）。本档只是「没有任何证据、但结构上这一轮
-          // 还没结束」的兵底，有证据时当然不能盖过它。
-          //
-          // ## 为何 stale 时让位
-          //
-          // 看门狗已判定「很久没收到进展」时，「正在准备响应」就是过期信息
-          // （与工具数那一档同一条理由）。注意此时 `staleTurnItem` 为 null
-          // （没有流式项），故必须在这里单独判一次，否则用户会看到一条
-          // 永不消失的「正在准备响应」。
-          else if (awaitingTurnId.isNotEmpty &&
-              _staleTurnIds.contains(awaitingTurnId))
-            const _StaleTurnNotice()
-          else if (awaitingTurnId.isNotEmpty)
-            // `isStreaming: true` + `isPreparing: true` 必定非 null（首行
-            // 才判 isStreaming），故用 `!` 而不再造一个兵底文案。
-            TurnStatusStrip(
-              summary: deriveTurnStatus(isStreaming: true, isPreparing: true)!,
+              key: ValueKey('turn-status-$turnId'),
+              summary: turnStatus,
+              tools: sameTurn ? progress.tools : const [],
+              showCancel: widget.onCancelTurn != null,
+              onCancel: canCancelTurn ? _handleCancelTurn : null,
             ),
           // 离线队列（issue #30）：紧贴待处理栏**上方**。
           //
@@ -2947,7 +2888,7 @@ class _TtsStatusBar extends StatelessWidget {
 /// ## 为什么贴在时间线顶部
 ///
 /// 它是**资源占用读数**（每次压缩 / 每轮收尾刷新），与「当前在聊什么」无关，
-/// 故贴顶常驻；而 `_TurnActivityIndicator` 描述的是「正在跑的那个 turn」，
+/// 故贴顶常驻；而 `TurnStatusStrip` 描述的是「正在跑的那个 turn」，
 /// 语义上属于时间线底部。两者位置不同是**有意**的，不要为了对称把它们并排。
 ///
 /// ## 两行的语义不同，不可合并
@@ -3169,101 +3110,6 @@ String formatTokenCount(int n) {
   return '$n';
 }
 
-/// 执行等待/重试提示条：展示「尚未回复的原因」。
-///
-/// ## 为什么需要它
-///
-/// 「发了消息但迟迟没回复」有两种原因，而时间线上**都没有任何内容**：
-/// 排队等执行名额，或上一轮失败正在安排重试。没有本组件，两者与「卡死」
-/// 在 UI 上完全无法区分。
-///
-/// ## 文案逐字对齐 webapp
-///
-/// `apps/webapp/messages/zh.json` 与 `ChatMessageList.tsx` 的判定链：
-///
-/// | 条件 | 文案 |
-/// |---|---|
-/// | `retry_scheduled` | 正在安排第 {attempt} 次重试 |
-/// | `reason == session_busy` | 正在等待当前会话完成 |
-/// | `reason == user_concurrency_limit` | 正在等待用户并发额度 |
-/// | `reason == global_concurrency_limit` | 正在等待执行资源 |
-/// | 其余 | 正在等待执行 |
-///
-/// 另附 `队列：总计 {total}，你的 {user}`（webapp `queuePosition`）。
-///
-/// ## 视觉与 [_TurnActivityIndicator] 共用一套
-///
-/// 两者是同一槽位的互斥状态，故用同一颜色/圆角/旋转图标，只换文案与 Key
-/// ——用户看到的是「同一条提示位」在切换内容，而不是两套不相干的横幅。
-class _ExecutionStatusBar extends StatelessWidget {
-  const _ExecutionStatusBar({required this.status});
-
-  final ExecutionStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-    final total = status.queueTotal;
-    final user = status.queueUser;
-
-    return Material(
-      key: const ValueKey('conversation-execution-status'),
-      // 与活动指示同用 secondaryContainer（同一槽位的互斥状态，见类文档）。
-      color: scheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.md,
-          vertical: SpbSpacing.sm,
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: SpbSpacing.lg,
-              height: SpbSpacing.lg,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: scheme.onSecondaryContainer,
-              ),
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            Expanded(
-              child: Text(
-                executionStatusLabel(status),
-                key: const ValueKey('conversation-execution-status-text'),
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSecondaryContainer,
-                ),
-              ),
-            ),
-            // 队列规模只在两端都已知时显示：只给一个数字会让人以为它是
-            // 「总计」或「你的」中的某一个，反而歧义。
-            if (total != null && user != null)
-              Text(
-                '队列：总计 $total，你的 $user',
-                key: const ValueKey('conversation-execution-status-queue'),
-                style: SpbType.listMeta(textTheme)
-                    ?.copyWith(color: scheme.onSecondaryContainer),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 文案在 `turn_status.dart` 的 [executionStatusLabel]：侧边栏「动态」面板
-  /// 的状态行要用同一句话，在此处留一份副本就会出现两个说法（它已经被
-  /// [TurnStatusSummary] 引用）。
-}
-
-/// 执行中活动指示：在「已起跑但还没有正文」的空窗期展示「已运行 X · 最近：Y」。
-///
-/// ## 为什么需要它
-///
-/// 长 turn 的静默期可达数十秒（读代码 / 跑 bash / 等模型首 token）。此时时间线
-/// 一动不动，用户唯一的判断依据是「它是不是死了」。本组件把服务端 `turn_activity`
-/// 里的「已运行多久 + 上一步是什么」呈现出来，让等待有可见的进展。
-///
 /// 离线时间线提示条（issue #26 切片 B / issue #29）。
 ///
 /// ## 为什么需要它
@@ -3311,7 +3157,7 @@ class _OfflineTimelineNotice extends StatelessWidget {
             const SizedBox(width: SpbSpacing.sm),
             Expanded(
               child: Text(
-                // 不写「已中断」也不写「正在重试」：与 `_StaleTurnNotice` 同一
+                // 不写「已中断」也不写「正在重试」：与 `TurnStatusKind.stalled` 同一
                 // 原则——客户端不跟踪重试，没有证据就不编造。
                 '离线数据 · 当前显示的是本地缓存的历史',
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -3325,132 +3171,6 @@ class _OfflineTimelineNotice extends StatelessWidget {
     );
   }
 }
-
-/// 超时兜底提示条：长时间未收到进展。
-///
-/// ## 它解决什么问题
-///
-/// 流式标记只有 `done` / `start` 两条清除路径。一旦 `done` 丢失（turn worker
-/// 崩溃、长断线、回放窗口被打穿），UI 会**永久**停在流式态：光标不停闪、活动
-/// 指示器常驻、取消按钮永久可点（点下去得到 409）。
-///
-/// ## 为什么必须显式提示（而不是像 webapp 那样静默回 idle）
-///
-/// webapp 把 lifecycle 悄悄回 `idle` 即可——它没有常驻的取消按钮。本客户端有，
-/// 且 stale 时**故意保持可点**（turn 可能真在跑，而取消是用户唯一的出路）。
-/// 若同时把光标停掉又不解释，用户会看到「界面静止 + 一个可以点的停止按钮」，
-/// 无从判断到底是哪种状态。
-///
-/// ## 文案不编造
-///
-/// 只说「可能仍在后台运行，或已中断」——这是客户端**唯一能确证**的事：
-/// - 不写「已中断」：没有终态事件就没有证据（后端可能仍在跑）；
-/// - 不写「正在重试」：客户端不跟踪重试（`retry_scheduled` 走另一条通道）。
-class _StaleTurnNotice extends StatelessWidget {
-  const _StaleTurnNotice();
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      key: const ValueKey('conversation-stale-turn'),
-      // 与活动指示 / 等待提示同用 secondaryContainer：三者都是「临时状态条」，
-      // 视觉上应属同一族而非各造一套。
-      color: scheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.md,
-          vertical: SpbSpacing.sm,
-        ),
-        child: Row(
-          children: [
-            Icon(
-              Icons.hourglass_disabled_outlined,
-              size: SpbSpacing.lg,
-              color: scheme.onSecondaryContainer,
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            Expanded(
-              child: Text(
-                '长时间未收到新进展 · 任务可能仍在后台运行，或已中断',
-                style: Theme.of(context).textTheme.bodySmall
-                    ?.copyWith(color: scheme.onSecondaryContainer),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// ## 文案对齐 webapp
-///
-/// `apps/webapp/messages/zh.json`：
-/// - `turnActivity` = `执行中 · 已运行 {elapsed}`
-/// - `turnActivityJustStarted` = `刚开始`
-/// - `turnActivityLast` = `最近：{action}`
-///
-/// 两者用同一套措辞，便于用户跨端对照。
-class _TurnActivityIndicator extends StatelessWidget {
-  const _TurnActivityIndicator({required this.activity});
-
-  final TurnActivitySnapshot activity;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-    final last = activity.lastEventType;
-
-    return Material(
-      key: const ValueKey('conversation-turn-activity'),
-      // 与待处理栏同用 secondaryContainer：两者都是「临时状态条」，
-      // 视觉上应属同一族而非各造一套。
-      color: scheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: SpbSpacing.md,
-          vertical: SpbSpacing.sm,
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: SpbSpacing.lg,
-              height: SpbSpacing.lg,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: scheme.onSecondaryContainer,
-              ),
-            ),
-            const SizedBox(width: SpbSpacing.sm),
-            Expanded(
-              child: Text(
-                '执行中 · 已运行 ${formatTurnElapsed(activity.elapsedMs)}',
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSecondaryContainer,
-                ),
-              ),
-            ),
-            // 无上一步时不渲染该段：服务端首帧（刚起跑）不带 last_event_type，
-            // 拼出「最近：null」比不显示更糟。
-            if (last != null && last.isNotEmpty)
-              Text(
-                '最近：$last',
-                key: const ValueKey('conversation-turn-activity-last'),
-                style: SpbType.listMeta(textTheme)
-                    ?.copyWith(color: scheme.onSecondaryContainer),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// 已运行时长文案（毫秒 → 中文）已移到 `turn_status.dart` 的
-// [formatTurnElapsed]：对话页底部状态条与侧边栏「动态」面板要用同一句时长
-// 描述，两份副本必然漂移。
 
 /// 连接状态指示（AppBar 右侧）。
 ///

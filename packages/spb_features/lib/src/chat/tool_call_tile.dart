@@ -84,7 +84,7 @@ class _ToolCallTileState extends State<ToolCallTile> {
     final textTheme = Theme.of(context).textTheme;
 
     // 结果尚未返回 → 进行中。
-    final isRunning = widget.output == null;
+    final isRunning = widget.output == null && !widget.isComplete;
     final hasFailed = _hasFailed;
 
     final (IconData icon, Color color, String label) = switch ((
@@ -113,13 +113,8 @@ class _ToolCallTileState extends State<ToolCallTile> {
           SpbSpacing.lg,
           SpbSpacing.sm,
         ),
-        leading: isRunning
-            ? SizedBox(
-                width: SpbSpacing.lg,
-                height: SpbSpacing.lg,
-                child: CircularProgressIndicator(strokeWidth: 2, color: color),
-              )
-            : Icon(icon, size: SpbSpacing.lg, color: color),
+        // 主状态栏承担动态反馈，展开多个工具时也只保留静态阶段图标。
+        leading: Icon(icon, size: SpbSpacing.lg, color: color),
         title: Text(
           widget.name,
           // 工具名比入参正文大一档（w500 的 labelLarge），仍走等宽。

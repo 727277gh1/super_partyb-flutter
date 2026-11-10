@@ -49,6 +49,7 @@
 - [x] Windows「定位/打开交付物」落在默认视图（issue #97）：路径归一化 + `SHOpenFolderAndSelectItems` 原生定位，见 [§6.75](design-decisions/platform.md)（FFI 真机行为待 Windows 实测）
 - [x] 同步目录未选择时的默认值（[§6.57](design-decisions/runtime-and-ops.md)：`~/Documents/Super PartyB` → 应用数据目录，仅桌面端）
 - [x] 工具调用折叠 + 「动态」面板 + 流式进度条（[§6.54](design-decisions/ui.md)：展示层批卡、诊断→动态并两端可见、底部状态条报工具进度）
+- [x] 对话等待提示统一为轮次状态栏：阶段互斥、工具/时长详情按需展开、重复转圈移除（见 [§6.54](design-decisions/ui.md)；本地回归与两端接线验证通过，真机待复核）
 - [x] 全局错误兜底（issue #45：三道防线 + 静默 catch 守卫，见 [§6.24](design-decisions/testing.md)）
 - [x] 工程卫生批量（issue #47：`.gitattributes` / Dependabot / action pin / 三项严格模式 / release notes 由 `git log` 生成 / `tools/` 清单守卫，见 [§6.26](design-decisions/testing.md)）
 - [x] 移动端：BFF `/chat/miniapp/*` 接入
