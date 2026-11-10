@@ -733,6 +733,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 故 build 在 userId 就绪前只渲染加载态。
   String? _userId;
 
+  /// 聚焦前就持有控制器，避免首帧 build 建立 watch 前被 autoDispose 释放。
+  /// Widget 卸载时由 Riverpod 关闭；切换用户时显式关闭旧订阅。
+  ProviderSubscription<ChatStreamController>? _controllerSubscription;
+
   /// 是否正在解析 userId（防重复请求：`initState` 与 `didUpdateWidget` 都可能触发）。
   bool _resolvingUser = false;
 
@@ -1337,6 +1341,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
         final userId = await ref.read(currentUserIdProvider.future);
         if (!mounted) return;
+        if (_userId != userId) {
+          _controllerSubscription?.close();
+          _controllerSubscription = ref.listenManual(
+            chatStreamControllerProvider(userId),
+            (_, _) {},
+          );
+        }
         setState(() => _userId = userId);
         // `_focus` 失败不得阻断后面的探测：前者是「让时间线连上」，后者是
         // 「问一句有没有未同步的交付物」。两件事互不依赖，合并在一个 try 里

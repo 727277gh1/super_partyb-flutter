@@ -842,6 +842,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 故 build 在 userId 就绪前只渲染加载态。
   String? _userId;
 
+  /// 聚焦前就持有控制器，避免首帧 build 建立 watch 前被 autoDispose 释放。
+  /// Widget 卸载时由 Riverpod 关闭；切换用户时显式关闭旧订阅。
+  ProviderSubscription<ChatStreamController>? _controllerSubscription;
+
   /// 本对话「接下来由谁回答」的**本地选择**（`null` = 未覆盖，沿用服务端绑定）。
   ///
   /// 两个写入点（语义完全一致，都是本地值）：
@@ -1953,6 +1957,13 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         // 直接读 `.value` 只会拿到 null（issue #2 的根因）。
         final userId = await ref.read(currentUserIdProvider.future);
         if (!mounted) return;
+        if (_userId != userId) {
+          _controllerSubscription?.close();
+          _controllerSubscription = ref.listenManual(
+            chatStreamControllerProvider(userId),
+            (_, _) {},
+          );
+        }
         setState(() => _userId = userId);
         await _focus(userId);
       } while (_resolveAgain && mounted);

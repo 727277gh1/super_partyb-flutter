@@ -406,14 +406,7 @@ void main() {
     // `check_wiring_parity.sh` 也查不到这一条：它只比对两端**同名**参数集合，
     // 两端同时漏接不会有任何信号。
     //
-    // ## 为什么断言的是「流被接上」而不是「读数渲染出来」
-    //
-    // 基线是 `unawaited` 的 REST 请求，而 `chatStreamControllerProvider` 是
-    // `autoDispose.family`：进入路由时控制器会被换过一次（`_focus` 在异步间隙里
-    // 先 `read`、`build` 里的 `watch` 才建立），于是**首次**基线响应总是落在一个
-    // 已 dispose 的控制器上、被归属校验丢弃（实测）。要稳定断言渲染结果就得把
-    // 控制器注入进来，而 harness 没有这个覆盖点。故这里守接线，渲染与增量语义由
-    // `packages/spb_features/test/chat/conversation_page_usage_test.dart` 覆盖。
+    // 这里守调用点；读数渲染与增量语义由共享页面测试覆盖。
     await pumpApp(
       tester,
       initialLocation: SpbRoutes.chat('grp_usage'),
@@ -462,6 +455,7 @@ void main() {
   ) async {
     // 回归防线：若切对话仍走 `start()`，`SseClient.connect()` 会把续接游标
     // 置 null（丢 cursor 回放能力），且每次切对话都多一次建连往返。
+    // 首次聚焦也必须存活：只数 connect 会漏掉已释放的控制器建连、页面却收不到帧。
     final sse = FakeSseClient();
     final h = await pumpApp(
       tester,
@@ -503,6 +497,35 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     expect(sse.connectedPaths, hasLength(1), reason: '首次进入建立连接');
 
+    Future<void> expectLiveMessage(String groupId, String message) async {
+      sse.push('user_message', {
+        'eventId': 'evt_$groupId',
+        'eventType': 'user_message',
+        'groupId': groupId,
+        'turnId': 'turn_$groupId',
+        'userId': 'usr_REAL',
+        'seq': 1,
+        'createdAt': '2026-01-01T00:00:00Z',
+        'payload': {'input': message},
+      });
+      // 收尾取消本轮看门狗，避免测试结束后留下运行中计时器。
+      sse.push('done', {
+        'eventId': 'done_$groupId',
+        'eventType': 'done',
+        'groupId': groupId,
+        'turnId': 'turn_$groupId',
+        'userId': 'usr_REAL',
+        'seq': 2,
+        'createdAt': '2026-01-01T00:00:01Z',
+        'payload': <String, dynamic>{},
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text(message), findsOneWidget);
+    }
+
+    await expectLiveMessage('grp_1', '首次进入的实时消息');
+
     // 切到另一个 group（同一路由模式，不同 path 参数）。
     h.router.go(SpbRoutes.chat('grp_2'));
     await tester.pump();
@@ -513,6 +536,8 @@ void main() {
       hasLength(1),
       reason: 'SSE 是 user 级订阅，切 group 不得重连',
     );
+    expect(find.text('首次进入的实时消息'), findsNothing);
+    await expectLiveMessage('grp_2', '切换对话后的实时消息');
   });
 
   testWidgets('currentUserProvider 走 mock 的 /api/auth/me', (tester) async {
@@ -622,17 +647,7 @@ void main() {
     // 只验证 **router 的接线**：「注入的 onCancelTurn 会打到哪个端点、turnId 是否
     // 原样透传」。直接取树上 `ConversationPage` 的回调调一下，不依赖任何 SSE 事件。
     //
-    // ## 为什么不走「推流式帧 → 点按钮」的完整链路
-    //
-    // 那样写会卡在一个**既有的 bug** 上（与本任务无关，已实测）：
-    // `_ChatPage._focus()` 用 `ref.read(chatStreamControllerProvider(...))`，
-    // 而 `build()` 用 `ref.watch(...)`——对 `autoDispose.family` 而言这两次拿到
-    // 的**不是同一个实例**。于是 `start()` 跑在实例 A 上，页面拿的是未被启动的
-    // 实例 B，B 的 `items` 永远收不到事件（实测：回填的 timeline 也渲染不出来，
-    // 用 pristine 代码同样复现）。
-    //
-    // 「什么时候按钮可点、传哪个 turnId」由 spb_features 的
-    // `conversation_page_test.dart` 完整覆盖（那里直接构造控制器，没有这个问题）。
+    // 「什么时候按钮可点、传哪个 turnId」由共享页面测试覆盖。
     final hitPaths = <String>[];
     await pumpApp(
       tester,
@@ -708,8 +723,7 @@ void main() {
   ) async {
     // 只验证 **router 的接线**：注入的 onResolveFeedback 打到哪个端点、
     // correct 是否进请求体。直接取树上 ConversationPage 的回调调一下，
-    // 不依赖 SSE 事件（理由见上面的「停止生成」用例：完整链路会撞上
-    // _focus()/build() 拿到不同控制器实例的既有问题）。
+    // SSE 实时消息链路由上面的首次进入与切组用例覆盖。
     final hit = <(String, Object?)>[];
     await pumpApp(
       tester,

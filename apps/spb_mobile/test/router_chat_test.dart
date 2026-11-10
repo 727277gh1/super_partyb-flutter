@@ -864,12 +864,101 @@ void main() {
     });
   });
 
+  testWidgets('同一 userId 下跨两个 group 只建一次 SSE（切 group 走 switchGroup）', (
+    tester,
+  ) async {
+    // 回归防线：若切对话仍走 `start()`，`SseClient.connect()` 会把续接游标
+    // 置 null（丢 cursor 回放能力），且每次切对话都多一次建连往返。
+    // 首次聚焦也必须存活：只数 connect 会漏掉已释放的控制器建连、页面却收不到帧。
+    final sse = FakeSseClient();
+    final h = await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_1'),
+      mockGroups: false,
+      sseClient: sse,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        for (final gid in ['grp_1', 'grp_2']) {
+          adapter.onGet(
+            '/chat/groups/$gid/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': gid, 'limit': 20},
+          );
+        }
+      },
+    );
+
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    expect(sse.connectedPaths, hasLength(1), reason: '首次进入建立连接');
+
+    Future<void> expectLiveMessage(String groupId, String message) async {
+      sse.push('user_message', {
+        'eventId': 'evt_$groupId',
+        'eventType': 'user_message',
+        'groupId': groupId,
+        'turnId': 'turn_$groupId',
+        'userId': 'usr_REAL',
+        'seq': 1,
+        'createdAt': '2026-01-01T00:00:00Z',
+        'payload': {'input': message},
+      });
+      // 收尾取消本轮看门狗，避免测试结束后留下运行中计时器。
+      sse.push('done', {
+        'eventId': 'done_$groupId',
+        'eventType': 'done',
+        'groupId': groupId,
+        'turnId': 'turn_$groupId',
+        'userId': 'usr_REAL',
+        'seq': 2,
+        'createdAt': '2026-01-01T00:00:01Z',
+        'payload': <String, dynamic>{},
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text(message), findsOneWidget);
+    }
+
+    await expectLiveMessage('grp_1', '首次进入的实时消息');
+
+    // 切到另一个 group（同一路由模式，不同 path 参数）。
+    h.router.go(SpbRoutes.chat('grp_2'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+
+    expect(
+      sse.connectedPaths,
+      hasLength(1),
+      reason: 'SSE 是 user 级订阅，切 group 不得重连',
+    );
+    expect(find.text('首次进入的实时消息'), findsNothing);
+    await expectLiveMessage('grp_2', '切换对话后的实时消息');
+  });
+
   testWidgets('对话页停止生成：router 把 turnId 接到 POST /chat/turns/:id/cancel', (
     tester,
   ) async {
     // 只验证 **router 的接线**：直接取树上 `ConversationPage` 的回调调一下，
-    // 不依赖 SSE 事件（原因见桌面端同一用例的说明：`_focus` 用 `ref.read`、
-    // `build` 用 `ref.watch`，对 autoDispose.family 而言不是同一实例，是既有 bug）。
+    // SSE 实时消息链路由上面的首次进入与切组用例覆盖。
     // 「何时可点、传哪个 turnId」由 spb_features 的测试覆盖。
     final hitPaths = <String>[];
     await pumpApp(
@@ -1152,9 +1241,7 @@ void main() {
     // 测试里是自己传的，「router 忘了把 `controller.usageSummary` 传下去」
     // 在那里永远发现不了（§6.17 同一失败模式）。
     //
-    // 断言「流接上了」而非「读数渲染出来」：基线是 unawaited 的 REST 请求，
-    // 而控制器是 `autoDispose.family`，进路由时会被换过一次，首次响应总落在
-    // 已 dispose 的控制器上（实测）。渲染与增量语义见
+    // 这里守调用点；读数渲染与增量语义见
     // `packages/spb_features/test/chat/conversation_page_usage_test.dart`。
     await pumpApp(
       tester,
