@@ -1,0 +1,87 @@
+name: spb_mobile
+description: Super PartyB 移动端（Android / iOS）
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ---- 本工作区内部包 ----
+  spb_core:
+  spb_models:
+  spb_api:
+  spb_domain:
+  spb_data:
+  spb_design:
+  spb_ui:
+  spb_platform:
+  spb_features:
+
+  # ---- 传输层 ----
+  # 直接 import 了 dio 类型（providers.dart 构造 createDio 的返回值类型），
+  # 故必须显式声明，否则 analyzer 报 depend_on_referenced_packages。
+  dio: ^5.7.0
+
+  # ---- 微信 OpenSDK（唤起小程序登录，issue #92）----
+  #
+  # 为什么必须放在 App 而不是 spb_platform：插件声明会让**桌面端构建**也把
+  # 它拖进依赖树（见 spb_platform/pubspec.yaml 的同类教训）。spb_platform 只
+  # 定义 `WeChatOpenSdk` 契约，fluwx 的具体桥接在本 App（lib/wechat_open_sdk.dart）。
+  #
+  # 6.x 的 API 与网上老教程不同：唤起是 `open(target: MiniProgram(...))`，
+  # 不是 `launchWeChatMiniProgram(...)`（后者已在 6.0 移除）。
+  fluwx: ^6.0.6
+
+  # ---- 状态管理 ----
+  flutter_riverpod: ^3.0.0
+
+  # 测试里用 NativeDatabase.memory() 建内存库（避免走 path_provider 平台通道）。
+  # 运行时不需要 drift 类型（开库由 spb_data 的 openAppDatabaseLazy 封装）。
+  drift: ^2.28.0
+
+  # ---- 路由 ----
+  go_router: ^16.0.0
+
+  # ---- 移动端平台能力 ----
+  flutter_secure_storage: ^9.2.2   # Keychain / Keystore
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  url_launcher: ^6.3.1
+
+  cupertino_icons: ^1.0.8
+  app_links: ^7.2.1
+
+  # ---- 生物识别门禁（issue #94）----
+  #
+  # 与 fluwx 同一条理由：`spb_platform` 只放 `BiometricGate` 契约，插件声明
+  # 在本 App，桌面端构建不会被拖进移动端依赖。桥接见 `lib/biometric_gate.dart`。
+  #
+  # 3.x 的失败语义是**抛 `LocalAuthException`**（14 种错误码），不是返回
+  # false；映射集中在上面那个文件里，只有一处需要跟着插件升级改。
+  #
+  # 平台侧两个必需配置：Android `MainActivity` 继承 `FlutterFragmentActivity`；
+  # iOS Info.plist 声明 `NSFaceIDUsageDescription`。
+  local_auth: ^3.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # 测试用：mock HTTP 响应，禁止真实网络。必须显式声明，
+  # 否则 analyzer 报 depend_on_referenced_packages。
+  http_mock_adapter: ^0.6.1
+  # 测试用：替换 flutter_secure_storage 的 MethodChannel 后端，
+  # 使「待验证登录请求跨进程恢复」能在无平台通道的 flutter test 里跑。
+  plugin_platform_interface: ^2.1.8
+  flutter_secure_storage_platform_interface: ^1.1.2
+  build_runner: ^2.4.13
+
+flutter:
+  uses-material-design: true

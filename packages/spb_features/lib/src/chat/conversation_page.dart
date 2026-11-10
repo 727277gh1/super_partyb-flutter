@@ -1,0 +1,3694 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart'
+    show RenderAbstractViewport, ScrollCacheExtent, ScrollDirection;
+
+import 'package:spb_api/spb_api.dart';
+import 'package:spb_core/spb_core.dart';
+import 'package:spb_design/spb_design.dart';
+import 'package:spb_ui/spb_ui.dart';
+import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
+
+import 'agent_file_batch_card.dart';
+import 'agent_file_card.dart';
+import 'agent_file_preview.dart';
+import 'assistant_message_bubble.dart';
+import 'confirmation_card.dart';
+import 'conversation_search_sheet.dart';
+import 'feedback_request_card.dart';
+import 'flush_strategy_dialog.dart';
+import 'follow_up_chips.dart';
+import 'habit_auto_run_card.dart';
+import 'habit_suggestion_card.dart';
+import 'message_composer.dart';
+import 'outbox_bar.dart';
+import 'spec_ui_card.dart';
+import 'pending_messages_bar.dart';
+import 'perf_probe.dart';
+import 'row_locate_registry.dart';
+import 'thought_tile.dart';
+import 'thumbnail_memo.dart';
+import 'tool_call_batch_card.dart';
+import 'tool_call_tile.dart';
+import 'turn_status.dart';
+import 'user_message_bubble.dart';
+
+/// 溢出菜单的一项（窄屏时收纳 AppBar 的低频入口）。
+///
+/// 见 [ConversationPage.overflowItems] 与 issue #31。
+class ConversationOverflowItem {
+  const ConversationOverflowItem({
+    required this.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  /// 菜单项的测试键。
+  ///
+  /// **不要**复用宽屏那个 `IconButton` 的 key：同一个 key 指向两种交互会让
+  /// 断言的含义随窗口宽度漂移（宽屏找到按钮、窄屏找到菜单项）。
+  final Key key;
+
+  final IconData icon;
+
+  final String label;
+
+  /// 点击动作。null = 该项禁用（如 `_group` 未就绪）。
+  ///
+  /// ## 为什么是禁用而不是不传这一项
+  ///
+  /// 与 AppBar 图标同一取舍（见 [ConversationPage.actions] 的注释）：入口
+  /// 消失会让用户以为「本端不支持这个功能」，而置灰只说明「现在还用不了」。
+  final VoidCallback? onTap;
+}
+
+/// 对话页：时间线 + 输入框。
+///
+/// ## 数据来源
+///
+/// [controller] 的 `items` 流（归约后的 `List<ConversationItem>`）。页面**不做**
+/// 任何归约/合并——那是 `spb_domain` 的职责，页面只负责渲染。
+///
+/// ## 自动滚到底
+///
+/// 新项到达时若用户**已在底部附近**则自动滚到底；若用户正在向上翻看历史
+/// 则**不打扰**（否则滚动位置会被强制拽走，无法回看）。判定阈值见
+/// [_autoScrollThreshold]。
+///
+/// 这是桌面 IM 的标准行为：无条件自动滚动会让「用户正在读历史时来一条新消息」
+/// 变成一场与滚动的拔河。
+class ConversationPage extends StatefulWidget {
+  const ConversationPage({
+    super.key,
+    required this.controller,
+    this.title,
+    this.onResolveConfirmation,
+    this.onResolveFeedback,
+    this.onAcceptHabit,
+    this.onEditAndAcceptHabit,
+    this.onDismissHabit,
+    this.onSnoozeHabit,
+    this.onSpecAction,
+    this.onSelectAgent,
+    this.onSend,
+    this.onRetryTurn,
+    this.enableSearch = false,
+    this.overflowItems,
+    this.onFlush,
+    this.onFlushWithStrategy,
+    this.onNewSession,
+    this.onCancelTurn,
+    this.onLoadOlder,
+    this.onReconnect,
+    this.onDownloadAgentFile,
+    this.onLoadThumbnailAgentFile,
+    this.onOpenAgentFile,
+    this.onRevealAgentFile,
+    this.onPreviewAgentFile,
+    this.onOpenLink,
+    this.historyKey,
+    this.loadPending,
+    this.undoPending,
+    this.pendingReloadKey,
+    this.activities,
+    this.activitiesSnapshot,
+    this.contextUsage,
+    this.contextUsageSnapshot,
+    this.usageSummary,
+    this.usageSummarySnapshot,
+    this.executionStatus,
+    this.executionStatusSnapshot,
+    this.ttsStatus,
+    this.ttsStatusSnapshot,
+    this.staleTurnIds,
+    this.staleTurnIdsSnapshot,
+    this.outboxEntries,
+    this.outboxSnapshot,
+    this.onCancelOutbox,
+    this.onRetryOutbox,
+    this.onRemoveOutbox,
+    this.actions,
+    this.emptyHint = '还没有对话，输入消息开始吧',
+  });
+
+  final ChatStreamController controller;
+
+  /// AppBar 右侧追加的操作（不覆盖连接指示等内置项）。
+  ///
+  /// ## 为什么提供这个插槽而不要求调用方自建 Scaffold
+  ///
+  /// 桌面端要在 AppBar 放「交付物侧边栏开关」，但它不属于对话页的固有部件
+  /// （移动端没有侧边栏）。提供一个**只在尾部追加**的插槽，移动端不传即可，
+  /// 无需各平台自建一整套 Scaffold。
+  final List<Widget>? actions;
+
+  /// AppBar 标题。null 时不显示 AppBar。
+  ///
+  /// ## 为什么标题由调用方给，而不是页面自己拉 group
+  ///
+  /// 页面只拿到 `controller` 与一堆注入回调，**不持有** `ChatGroup`——权威
+  /// group 由两端 router 的 `_loadGroup()` 拉取（它们各自还要用它渲染设置
+  /// 面板 / Agent 标签）。故标题是装配层的事，页面只负责渲染。
+  ///
+  /// ⚠️ 两端装配层都传的是 **group.title**（对话名），而不是固定的「对话」：
+  /// 进入某个对话后 AppBar 必须回答「我在哪个对话里」，而列表页的 AppBar 已经
+  /// 叫「对话」——两处同名会让用户看不出自己是否真的进去了。
+  final String? title;
+
+  /// 确认卡选项回调。参数为（group id, 卡行 id, 选项文案）。
+  ///
+  /// ## 为什么必须带 groupId（issue #1）
+  ///
+  /// 真实写端点是 `POST /api/chat/groups/:group_id/confirmations/:id/resolve`
+  /// ——路径里必须有 group_id。只传 confirmationId 无法拼出该路径，
+  /// 调用方只能报 404（且是静默的）。
+  ///
+  /// 为 null 时确认卡按钮禁用。
+  final void Function(String groupId, String confirmationId, String option)?
+  onResolveConfirmation;
+
+  /// 归属反馈卡回调。参数为（回执 token, 是否准确）。
+  ///
+  /// 与 [onResolveConfirmation] 同理注入：真实写端点是
+  /// `POST /chat/feedback/:token/resolve`，页面只收集意图，请求与错误翻译
+  /// 归调用方（也使 widget test 无需 HTTP mock）。
+  ///
+  /// ## 返回 `Future` 而不是 `void`（与 [onResolveConfirmation] 不同）
+  ///
+  /// 归属反馈的回执是**一次性 CAS**，而确认卡的失败会由服务端在下个 turn 内
+  /// 回 `confirmation_resolved`/`confirmation_expired` 重新收敛；反馈没有这条
+  /// 回路。若回调不把结果交回来，页面就只能盲目置灰或什么都不做：
+  ///
+  /// - 盲目置灰 → 一次网络故障就把卡片变成只读，用户再无重试入口；
+  /// - 什么都不做 → 用户看到「点了没反应」（2026-10 的真实报障，当时还叠加了
+  ///   请求体键名错误，见 `ChatApi.resolveFeedback` 的说明）。
+  ///
+  /// 故这里要求返回 `Future`：成功才置灰，失败由页面提示并保留可重试。
+  /// 回调抛出的异常按「失败」处理（调用方无需自己吞）。
+  ///
+  /// 为 null 时反馈卡按钮禁用。
+  final Future<void> Function(String token, bool correct)? onResolveFeedback;
+
+  /// 习惯建议卡：接受（`action=accept`）。
+  ///
+  /// 服务端会据此建出 active pattern（`misc_extra.go` 的
+  /// `createPatternFromSuggestion`），所以这是**有副作用的写操作**，
+  /// app 层应给出成功/失败反馈。
+  ///
+  /// 为 null 时接受按钮不显示。
+  final void Function(HabitSuggestionItem suggestion)? onAcceptHabit;
+
+  /// 习惯建议卡：忽略（`action=dismiss`，服务端写 24h 冷却窗口）。
+  final void Function(HabitSuggestionItem suggestion)? onDismissHabit;
+
+  /// 习惯建议卡：就地编辑后接受（`action=edit_and_accept` + `pattern_patch`）。
+  ///
+  /// 与 [onAcceptHabit] 同属「建出 active pattern」的写操作，区别只是服务端
+  /// 会先把 patch 合并进候选值（`applyPatternPatch`，出现即覆盖、未出现即保留）。
+  ///
+  /// patch 的字段集由服务端下发的 `editable_fields` 决定（见
+  /// `HabitSuggestionEditor`），本页不做任何筛选。
+  ///
+  /// 为 null 时编辑入口不显示。
+  final void Function(
+    HabitSuggestionItem suggestion,
+    Map<String, dynamic> patch,
+  )?
+  onEditAndAcceptHabit;
+
+  /// 习惯建议卡：稍后提醒（`action=snooze` + 选中的时长）。
+  ///
+  /// 时长→`snooze_until` 的换算在 [HabitSnoozeOption.untilIso]（UTC），
+  /// 不由本页做：那是契约计算，归 `spb_models`，否则两个端会算出不同时区。
+  final void Function(HabitSuggestionItem suggestion, HabitSnoozeOption option)?
+  onSnoozeHabit;
+
+  /// spec 卡片上的动作回调（建议卡 `copy_text`、归属反馈卡 `send_next_input`）。
+  ///
+  /// 页面只上抛动作，由 app 层决定怎么处理（copy_text → 回填输入框、
+  /// send_next_input → 直接发送），保持「页面不持有 ChatApi」的分层约定。
+  final void Function(SpecUiAction action)? onSpecAction;
+
+  /// 把选中 Agent 切到指定 id（建议卡标注了 agent_id 时）。
+  ///
+  /// 与 [onSpecAction] 分开：切 agent 是**本地 UI 状态**，不是网络动作，
+  /// app 层只需 setState 即可，走同一回调会把两件事耦合。
+  final void Function(String agentId)? onSelectAgent;
+
+  /// 自定义发送逻辑。为 null 时用 `controller.send(input: text)`。
+  ///
+  /// 之所以可覆盖：悬浮窗等入口走 `QuickCaptureUseCase`（无归属），
+  /// 而本页是「已知 group」的常规发送。
+  final Future<void> Function(String text)? onSend;
+
+  /// 重发一个**已失败**的 turn（用原输入重新投递一轮）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `error` 事件是回合终态（服务端不会再产出任何内容），用户唯一的出路是
+  /// 把那段输入再发一次。没有这个入口，用户只能手动重打一遍——而重打的输入
+  /// 会变成一个**新 turn**，与失败那轮并列显示，历史里留下两条几乎一样的用户
+  /// 消息（webapp 的 `handleRetryTurn` 正是为此存在）。
+  ///
+  /// ## 为什么不复用 `onSend`
+  ///
+  /// `onSend` 的语义是「发一条**新**消息」：它走 `/users/:uid/chat/messages`
+  /// 的完整前置链（分类 → 路由 → 归属判定），并生成新的 `request_id`。
+  /// 重发要的是「锁定原 group + 原 agent，不再跑路由」，并**换一个新
+  /// `request_id`**（否则命中幂等去重，返回那个已失败的 turn，等于什么都没做）。
+  /// 这两点在装配层用 [ChatStreamController.send] 的 `groupId`/`agentId`/
+  /// `routingMode` 参数表达，页面不该知道。
+  ///
+  /// 参数是失败 turn 的输入文本与当时选中的 agent。
+  ///
+  /// 为 null 时错误条不展示「重发」按钮。
+  final Future<void> Function(String text, String? agentId)? onRetryTurn;
+
+  /// 「立即发送」：把服务端缓冲区里已 pending 的消息立即合并提交。
+  ///
+  /// null = 不显示该入口（如移动端或未接线时）。
+  ///
+  /// 与 [onSend] 的区别见 `MessageComposer` 的类文档：前者发**新的一条**，
+  /// 本回调推**已经排队的那批**。
+  ///
+  /// 返回 [FlushResult] 而非 `void`：服务端可能回 `confirmation_required`
+  /// （HTTP 200 但**什么都没提交**），需要选策略后重试。
+  final FlushPending? onFlush;
+
+  /// 按用户选定的冲突策略重新提交（[onFlush] 返回待确认时才会用到）。
+  final FlushWithStrategy? onFlushWithStrategy;
+
+  /// 「清空上下文」（同 group 新会话）的回调。null 时入口隐藏。
+  ///
+  /// 本页只负责透传给 [MessageComposer]（确认框与在途禁用都在那里），真实
+  /// 动作是 `POST /chat/groups/:gid/sessions/switch`（`force_new_session: true`），
+  /// 由 app 层注入——与 [onSend] 同一约定：页面不依赖 `spb_api`。
+  final Future<void> Function()? onNewSession;
+
+  /// 下载 agent 文件产物的回调。null 时下载按钮禁用。
+  ///
+  /// 页面不直接依赖 `spb_api`：真实下载（`UfsApi.download` + 落盘）由 app 层注入。
+  final Future<void> Function(AgentFileItem file)? onDownloadAgentFile;
+
+  /// 加载 agent 文件缩略图（仅图片类有意义）。返回字节则内联渲染，null/失败退化为图标。
+  ///
+  /// 与 [onDownloadAgentFile] 同取向：页面不依赖 `spb_api`，真实请求
+  /// （`UfsApi.thumbnail`）由 app 层注入。
+  ///
+  /// **未注入时卡片完全不发请求**（`AgentFileCard._maybeLoadThumbnail` 在
+  /// loader 为 null 时直接返回），故只读时间线用法不受影响。
+  final Future<List<int>?> Function(AgentFileItem file)?
+  onLoadThumbnailAgentFile;
+
+  /// 用系统默认程序打开 agent 文件（的本地副本）。
+  ///
+  /// 与 [onDownloadAgentFile] 同取向：页面不碰平台 IO，真实动作
+  /// （解析本地路径 → 必要时先下载 → `caps.openFile`）由 app 层注入。
+  ///
+  /// **为 null 时卡片不渲染该菜单项**（而非渲染一个点了没反应的项）。
+  /// 移动端就是这样：它注入 `NoopDesktopCapabilities`，`openFile` 恒 false，
+  /// 接上只会让用户点「打开」得到「无法打开文件」。
+  final OpenAgentFile? onOpenAgentFile;
+
+  /// 在系统文件管理器中定位 agent 文件。null 时不渲染该菜单项（同
+  /// [onOpenAgentFile]）。
+  final RevealAgentFile? onRevealAgentFile;
+
+  /// 文件预览能力（文本 / 图片 / 外部跳转）。
+  ///
+  /// 与 [onDownloadAgentFile] 同取向：页面不依赖 `spb_api`，真实取数
+  /// （`UfsApi.download`）与 URL 拼接由 app 层注入。
+  ///
+  /// **为 null 时卡片不渲染预览按钮**——只读时间线用法完全不受影响。
+  final AgentFilePreviewCallbacks? onPreviewAgentFile;
+
+  /// 打开 Markdown 回复里的链接。null 时链接不响应点击（仅保留样式）。
+  ///
+  /// 与 [onDownloadAgentFile] 同理：打开 URL 属平台 IO（桌面端走 `xdg-open` /
+  /// `open` / `explorer`，移动端走 `url_launcher`），页面只收集意图，由 app
+  /// 层注入。
+  final void Function(String url, String title)? onOpenLink;
+
+  /// 停止正在生成的轮次（入参是 [ConversationItem.turnId]）。
+  ///
+  /// ## 为什么用注入而不是直接调 `ChatApi.cancelTurn`
+  ///
+  /// 与 [onResolveConfirmation] 同理：本页只收集意图（用户点了停止），请求与
+  /// 错误翻译归调用方。页面不持有 `ChatApi`，故 widget test 里无需 HTTP mock
+  /// 就能验证「什么条件下可点、点了传什么 turnId」。
+  ///
+  /// 为 null 时**不展示**停止按钮（保持「只读时间线」用法）。
+  final Future<void> Function(String turnId)? onCancelTurn;
+
+  /// 向上翻页：加载更早的历史。
+  ///
+  /// 返回 `false` 表示「已到最早一条」，本页据此**停止**继续触发——否则每次滚动
+  /// 到顶部都会发一个注定为空的请求（服务端游标 `global_seq < 0` 恒无结果）。
+  ///
+  /// 为 null 时不展示「加载更早」入口（保持「只读时间线」用法）。
+  final Future<bool> Function()? onLoadOlder;
+
+  /// 手动重连 SSE。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `SseClient` 自带指数退避重连，但退避到 `maxRetries` 后会把状态置为
+  /// [SseState.failed] **永久停手**；而 `reconnecting` 期间遇到长退避时，用户
+  /// 也可能不想等。两种情况下用户都需要一个「现在就再试一次」的入口。
+  ///
+  /// ## 为什么用注入而不是直接调 `controller.reconnect()`
+  ///
+  /// 与 [onCancelTurn] 同理：页面只收集意图，请求归调用方。页面已在用
+  /// `controller` 读 items/连接状态，但重连是**动作**而非数据，注入后 widget
+  /// test 里不需要真 SseClient 就能验证「什么状态下可点、点了几次」。
+  ///
+  /// 为 null 时指示器不可点（保持纯展示）。
+  final VoidCallback? onReconnect;
+
+  /// 当前对话的身份（两端都传 `groupId`）。
+  ///
+  /// ## 为什么必须显式传，而不能自己看出来
+  ///
+  /// 翻页终止标记（「已到最早一条」）的**有效范围是「一个对话」**，换了对话必须
+  /// 重置。但本页无法自行察觉切换：SSE 是 user 级订阅，切 group 走的是
+  /// `ChatStreamController.switchGroup`——**控制器实例不变**，`_ChatPage` 也未带
+  /// `key`，故 State 被复用，`didUpdateWidget` 里 `oldWidget.controller ==
+  /// widget.controller`。
+  ///
+  /// 不重置的后果：在 A 对话翻到头后切到 B，`_reachedOldest` 仍是 true，B 的
+  /// 历史永远翻不出来（且毫无报错）。
+  ///
+  /// 不复用 [pendingReloadKey]：那个参数只在待处理栏接线时才存在，而翻页与它
+  /// 无关——两者的值碰巧都是 groupId，但耦合会让「只接线待处理栏」的用法
+  /// 静默带走翻页的正确性。
+  final String? historyKey;
+
+  /// 加载当前 group 的待处理收件箱消息。
+  ///
+  /// ## 为什么是「加载 + 撤销」两个回调，而不是收一个 `ChatApi`
+  ///
+  /// 撤销需要 **userId**（`POST /users/:uid/chat/messages/:id/undo`），而页面
+  /// 不该知道 userId 从哪来（那要走 `/api/auth/me`，两端时机不同）。注入后
+  /// 本页在 widget test 里可以完整验证（含 409 分支），不需要 HTTP mock。
+  ///
+  /// 为 null 时不展示待处理栏（保持「只读时间线」用法）。
+  final LoadPendingMessages? loadPending;
+
+  /// 撤销一条待处理消息（参数是 `ChatInboxMessage.id`，不是 turn id）。
+  final UndoPendingMessage? undoPending;
+
+  /// 变化时重新加载待处理消息（传 groupId）。
+  ///
+  /// 见 [PendingMessagesBar.reloadKey]：切换 group 时 State 会被复用，
+  /// 不靠这个键就会一直显示上一个 group 的待处理消息。
+  final String? pendingReloadKey;
+
+  /// 执行中活动快照流（`turn_activity`，Transient）。
+  ///
+  /// ## 它解决什么问题
+  ///
+  /// 执行器在「已起跑但还没吐出任何正文」的空窗期是静默的（读代码、跑 bash、
+  /// 等模型首 token），此时时间线不动，用户分不清「在干活」与「卡死了」。
+  /// 本流携带「已运行多久 + 上一步是什么」，用于展示进度。
+  ///
+  /// ## 为什么是 Map 而不是单条快照
+  ///
+  /// SSE 是 user 级订阅，一条流里可能同时存在多个 turn 的活动。单条快照只能
+  /// 表达「最近一次事件属于哪个 turn」，若那个 turn 不是当前流式的 turn，
+  /// 页面就无法拿到自己需要的那条。Map 按 turnId 索引，直查即得。
+  ///
+  /// 为 null 时不展示活动指示（与 [activitiesSnapshot] 一同省略）。
+  final Stream<Map<String, TurnActivitySnapshot>>? activities;
+
+  /// 首帧活动快照（供首屏渲染，避免等下一次推送）。
+  ///
+  /// 与 [activities] 的关系同 `controller.snapshot` 与 `controller.items`：
+  /// 快照是同步初值，流是后续增量。两者都要传，否则「事件在订阅前已到达」
+  /// 会让指示器到下一次心跳（约 15s）才出现。
+  final Map<String, TurnActivitySnapshot>? activitiesSnapshot;
+
+  /// 上下文用量流（`context_update` 归约输出）。
+  ///
+  /// ## 为什么渲染在顶部而不在时间线里
+  ///
+  /// 用量是**持续变化的一行状态数字**（每次压缩、每轮 pigo 收尾都会刷），
+  /// 不是对话正文。进时间线会不断插入/更新条目把对话冲散，而回看历史时
+  /// 旧值毫无意义。webapp 同样把它放在状态侧边栏（`WorkbenchStatusSidebar`）
+  /// 而非消息流。
+  ///
+  /// ## 与 [activities] 同取向
+  ///
+  /// 都是「调用方注入才订阅」的旁路状态：未注入时本页是纯只读时间线。
+  /// 为 null 时不展示用量区。
+  final Stream<ContextUsage?>? contextUsage;
+
+  /// 首帧用量快照（同步初值）。
+  ///
+  /// 读 `controller.contextUsageSnapshot` 是同步 getter，建立不了依赖，故首帧
+  /// 值必须由调用方显式传入（同 [activitiesSnapshot]）。
+  final ContextUsage? contextUsageSnapshot;
+
+  /// group 级 token 消耗合计流（`usage-summary` 基线 + `token_usage` 增量）。
+  ///
+  /// ## 与 [contextUsage] 的分工（两个量，不可合并）
+  ///
+  /// - 本参数：**账单**——这个对话总共烧了多少 token（服务端 SUM 聚合，
+  ///   单调递增）；
+  /// - [contextUsage]：**水位**——当前占多少上下文窗口（`context_update`
+  ///   快照，compaction 后会变小）。
+  ///
+  /// 两者都在顶部读数区展示但各自成行；塞进同一个「已用 / 窗口」会得到一个
+  /// 既不解释账单也不解释压缩的数字（webapp 状态侧栏为此拆成两段）。
+  ///
+  /// 为 null 时不展示消耗区（同 [contextUsage] 的「注入才订阅」取向）。
+  final Stream<GroupUsageSummary?>? usageSummary;
+
+  /// 首帧消耗快照（同步初值，同 [contextUsageSnapshot]）。
+  final GroupUsageSummary? usageSummarySnapshot;
+
+  /// 执行等待/重试状态流（`queue_state` / `retry_scheduled` 归约输出）。
+  ///
+  /// ## 它回答什么
+  ///
+  /// 「我发了消息，为什么还没回复」——是**在排队等名额**，还是**在重试**。
+  /// 两者在时间线上都没有任何内容，没有它就只能干等。
+  ///
+  /// ## 与 [activities] 的关系：同一槽位，本流优先
+  ///
+  /// [activities] 是「已在跑但没正文」，本流是「还没开始跑」。两者不会同时
+  /// 有意义，故共用时间线底部那一条状态位，且本流胜出（对齐 webapp 的
+  /// `turn.activity && !turn.queueReason` 判定）。
+  ///
+  /// 为 null 时不展示。未注入时本页不展示等待提示（同 [activities]）。
+  final Stream<ExecutionStatus?>? executionStatus;
+
+  /// 首帧等待状态（同步初值，同 [contextUsageSnapshot]）。
+  final ExecutionStatus? executionStatusSnapshot;
+
+  /// 语音播报状态流（`tts_started` / `tts_completed` / `tts_failed` 归约输出）。
+  ///
+  /// ## 只做状态展示，不引入播放
+  ///
+  /// 客户端既有决策是「TTS 仅下载不播放」（AGENTS.md §11：无音频播放插件）。
+  /// 本参数只驱动一条状态文字，**不**持有可播放句柄、**不**触发播放；
+  /// 音频文件仍走交付物同步链路。
+  ///
+  /// ## 为什么贴顶而不进时间线
+  ///
+  /// 语音是文本回复的衍生物，不是独立的一条回复。它又是「最近一次播报」的
+  /// 单值状态（终态事件在 turn 结束后才到达，那时已无流式项可关联），故与
+  /// [contextUsage] 同属**常驻读数区**，不进时间线。
+  ///
+  /// 为 null 时不展示。未注入时本页不展示播报状态。
+  final Stream<TtsStatus?>? ttsStatus;
+
+  /// 首帧播报状态（同步初值，同 [contextUsageSnapshot]）。
+  ///
+  /// 非空：无播报事件时为 [TtsPhase.idle]，UI 用 [TtsStatus.hasStatus] 判断。
+  final TtsStatus? ttsStatusSnapshot;
+
+  /// 「长时间无进展」的 turn 集合流（见 `ChatStreamController.staleTurnIds`）。
+  ///
+  /// ## 为什么由 app 层注入而不是页面自己计时
+  ///
+  /// 判据是「距最后一次事件」——而 `turn_activity` 是「执行器仍在跑」的直接
+  /// 证据却**不进 [controller.items]**（走 activities 通道）。页面只看得见
+  /// items，据此计时会把「只有工具心跳、尚无正文」的长 turn 误判成卡死。
+  ///
+  /// ## 语义是提示，不是终态
+  ///
+  /// 收到某个 turnId 时，本页**只**做两件事：停掉它的流式光标、让位提示条。
+  /// **不**禁用取消——turn 可能真在跑，而取消是用户此时唯一的出路。
+  ///
+  /// 未注入时不展示超时提示——保持本页在未接线时仍是纯只读时间线
+  /// （同 [onCancelTurn] / [activities] 的取向）。
+  final Stream<Set<String>>? staleTurnIds;
+
+  /// 超时集合的同步初值（同 [contextUsageSnapshot]）。
+  final Set<String>? staleTurnIdsSnapshot;
+
+  /// 离线队列的「待发送」条（issue #26 切片 C / issue #30）。
+  ///
+  /// null = 不展示（未接线时；页面单测不必造队列）。
+  ///
+  /// ## 为什么是「一个流 + 一个快照 + 三个回调」，而不是直接注入 `OutboxQueue`
+  ///
+  /// 与 `loadPending` / `undoPending` 同一取向：本包只做渲染与交互，网络/存储
+  /// 实现由 app 注入。且本包只依赖契约类型 `OutboxEntry`，不需要知道队列的
+  /// 重试/持久化实现。
+  ///
+  /// ## 为什么快照与流都要（同 `activities` 的取向）
+  ///
+  /// 页面可能在队列已有条目**之后**才挂载（从列表页点进来）。只看流会错过
+  /// 那一次推送，首帧显示为空。
+  final Stream<List<OutboxEntry>>? outboxEntries;
+
+  /// 队列快照（供首帧渲染）。
+  final List<OutboxEntry>? outboxSnapshot;
+
+  /// 取消一条待发送消息（返回 false = 被拒绝，条目正在投递中）。
+  final Future<bool> Function(String id)? onCancelOutbox;
+
+  /// 手动重试一条（针对彻底失败的条目）。
+  final Future<bool> Function(String id)? onRetryOutbox;
+
+  /// 丢弃一条（删除，不再投递）。
+  final Future<void> Function(String id)? onRemoveOutbox;
+
+  /// 是否在 AppBar 展示「在本对话中搜索」入口。
+  ///
+  /// ## 为什么由本页自己实现（而不是交给 app 层）
+  ///
+  /// 搜索命中后要**滚回时间线的某一条**，那需要本页的 `ScrollController` 与
+  /// 归约后的 `_items`。两者都是页面私有 State，app 层拿不到。故本参数是
+  /// **开关**，不是实现注入。
+  ///
+  /// ## 为什么默认 false
+  ///
+  /// 移动端 AppBar 此前已无余量（见 issue #31：≤412dp 溢出），若默认开启会
+  /// 把「未接线的调用方」也一起撑破。故默认关闭，由各端在确认空间足够后
+  /// 显式打开（桌面端有宽屏空间；移动端先修 AppBar 再开）。
+  final bool enableSearch;
+
+  /// 窄屏溢出菜单的条目。null = 不渲染溢出菜单（宽屏或未接线）。
+  ///
+  /// ## 为什么由调用方提供条目、页面负责渲染
+  ///
+  /// 三个低频入口（对话设置 / 任务清单 / 目标历史）的**动作**属于各端
+  /// （它们各自持有弹层与 State），而「在本对话中搜索」的**动作**属于本页
+  /// （需要页面的 `ScrollController` 与 `_items`）。
+  ///
+  /// 故页面把两者合成一个菜单：调用方给条目，页面把自己的搜索项**追加在
+  /// 末尾**并渲染整个菜单。若让调用方渲染菜单，搜索项就得由调用方触发——
+  /// 而它拿不到页面私有 State。
+  ///
+  /// 见 issue #31（窄屏 AppBar 溢出）。
+  final List<ConversationOverflowItem>? overflowItems;
+
+  final String emptyHint;
+
+  @override
+  State<ConversationPage> createState() => _ConversationPageState();
+}
+
+class _ConversationPageState extends State<ConversationPage> {
+  final _scrollController = ScrollController();
+
+  /// 气泡常驻（keep-alive）的长度阈值：正文短于该值时**不**常驻。
+  ///
+  /// ## 为什么需要阈值
+  ///
+  /// Markdown 解析成本几乎全在「段数 × 每段长度」上。实测（本机 2026-10，
+  /// debug）4 段 580 字符冷重建 68.0 ms，而一条 50 字符的短回复不到 1 ms
+  /// ——不值得为它保留整棵子树的内存。
+  ///
+  /// 400 字符大致是「需要滚动才能看全」的分界，也是实测里冷重建开始明显
+  /// （>10 ms）的量级。与 [_keepAliveWindow] 一起构成**有界**策略。
+  static const int _keepAliveMinChars = 400;
+
+  /// 常驻气泡的数量上限（从时间线尾部倒数的最近若干个）。
+  ///
+  /// ## 为什么必须有上限
+  ///
+  /// keep-alive 桶中的子项不参与每帧布局/绘制，但仍保留 Element、
+  /// RenderObject 与解析缓存，不能让常驻内存随全部历史增长。
+  ///
+  /// ## 为什么取「最近的」而不是「最长的」
+  ///
+  /// 用户的实际动作是「往下读 → 往回翻一点」。刚看过的几条最可能马上再被
+  /// 看到；而「最长的几条」可能早就滚到几千行以外，常驻它们只是白付布局
+  /// 成本。
+  static const int _keepAliveWindow = 12;
+
+  /// 本次 build 该常驻的气泡 `item.id` 集合（见 [_computeKeepAliveIds]）。
+  ///
+  /// 存字段而不是作为 [_buildItem] 的参数：后者要改 [_buildItem] 的签名
+  /// 并穿到 [_buildTimeline] 的 `itemBuilder`，而 `itemBuilder` 本来就能
+  /// 读 State。
+  Set<String> _keepAliveIds = const {};
+
+  /// 已构建的气泡 widget 缓存：`item.id` → (指纹, widget)。
+  ///
+  /// ## 它解决什么
+  ///
+  /// `SliverChildBuilderDelegate.shouldRebuild` **恒为 true**
+  /// （`scroll_delegate.dart`），故父级每一次 `setState` 都会重建**全部已挂载
+  /// 行**。而本页 `setState` 的来源很多：流式增量（`_onItems`）、
+  /// `turn_activity` 心跳、`ttsStatus`、`_staleTurnIds`、`outbox`、`pending`
+  /// ……其中大部分与「历史气泡的内容」毫无关系。
+  ///
+  /// 实测（本机 2026-10，debug）：页面上 5 条已完成长气泡 + 1 条流式气泡，
+  /// 推**一条**流式增量 → `PerfProbe.assistantBubbleBuilds` 增量 **6**
+  /// （即全部重建）；推一条 `turn_activity` 心跳同样 **6**。而单个长气泡的
+  /// **暖**重建实测 16.9–30.3 ms（冷重建 68–441 ms），6 个就是一次明显掉帧。
+  ///
+  /// ## 为什么复用 widget **实例**就能跳过重建
+  ///
+  /// `Element.updateChild`（`framework.dart`）的第一条分支是：
+  ///
+  /// ```dart
+  /// if (hasSameSuperclass && child.widget == newWidget) {
+  ///   ... newChild = child;   // 完全不 update
+  /// }
+  /// ```
+  ///
+  /// `Widget` 没有覆写 `==`，故 `==` 即 `identical`。同一实例交回去，整个子树
+  /// 连 `build` 都不会被调用。这就是缓存的全部机制。
+  ///
+  /// ## ⚠️ 为什么**只**缓存 `AssistantMessageItem`
+  ///
+  /// 气泡的渲染输入为 `text` / `isStreaming` / `keepAlive`，全部进指纹。
+  /// 链接回调由稳定方法转发，点击时读取当前 widget。
+  ///
+  /// 其余 item 的渲染输入**夹带页面状态**——`ConfirmationItem` 读 `_resolving`、
+  /// `FeedbackRequestItem` 读 `_submittedFeedback` 与 `_feedbackTTL`、
+  /// `ErrorItem` 读 `_retryingTurnId`、`FollowUpSuggestionItem` 读两个回调是否
+  /// 注入……逐项列指纹必然漏一处，而漏掉的表现是「状态变了界面不变」这种
+  /// 最难查的 bug。它们的构建成本又远低于 Markdown 解析（实测冷重建的 9–36×
+  /// 差距就来自 `GptMarkdown`），缓存它们收益不抵风险。
+  ///
+  /// ## ⚠️ 失效条件必须包含「本页 State 的输入」
+  ///
+  /// 指纹只有 item 字段是不够的：`_staleTurnIds` 会让 `isStreaming` 从 true
+  /// 变 false（超时兜底停光标），`_keepAliveIds` 随窗口滑动而变。两者都已进
+  /// 指纹（前者参与 `isStreaming` 的计算结果，后者单独一位）。
+  ///
+  /// 主题 / 语言 / 文本缩放的变化**不需要**进指纹：那些走 `InheritedWidget`，
+  /// 复用同一 widget 实例时子树的 `dependOnInheritedWidgetOfExactType` 依赖
+  /// 关系仍在，框架会自己把该子树标记为需要重建。
+  ///
+  /// 装配层每次重建产生的新链接闭包不影响气泡缓存；[_handleOpenLink]
+  /// 保证缓存实例也能执行最新回调。
+  final Map<String, ({Object fingerprint, Widget widget})> _bubbleCache = {};
+
+  /// [_bubbleCache] 的上限。
+  ///
+  /// 与 [_keepAliveWindow] 同取向：缓存只为「刚看过的那些」服务，无界就会随
+  /// 对话长度线性增长（每个 widget 实例虽小，但会拖住它的 `text` 字符串）。
+  /// 200 条足够覆盖「往下读、往回翻一点」的实际动作。
+  static const int _bubbleCacheLimit = 200;
+
+  /// 算出「该常驻」的气泡 id 集合（有界：最多 [_keepAliveWindow] 个）。
+  ///
+  /// 判据只有两个：
+  ///
+  /// 1. 是 [AssistantMessageItem]（只有它含 Markdown 解析缓存）；
+  /// 2. `text.length >= _keepAliveMinChars`（短的解析得快，不值得付常驻成本）。
+  ///
+  /// 从**尾部**倒扫：刚看过的几条最可能马上再被看到。凑满窗口即停。
+  ///
+  /// ## 为什么不看「是否在视口内」
+  ///
+  /// 在视口内的项本来就不会被 dispose（`cacheExtent` 内），不需要 keep-alive。
+  /// 常驻的意义恰在于「滚出去之后不丢」——故这 12 个名额应当给**即将滚出去**
+  /// 的那一段，而尾部倒扫恰好就是它。
+  static Set<String> _computeKeepAliveIds(List<ConversationItem> items) {
+    final ids = <String>{};
+    for (var i = items.length - 1; i >= 0; i--) {
+      if (ids.length >= _keepAliveWindow) break;
+      final item = items[i];
+      if (item is! AssistantMessageItem) continue;
+      if (item.text.length < _keepAliveMinChars) continue;
+      ids.add(item.id);
+    }
+    return ids;
+  }
+
+  /// 时间线上每个展示行的 `GlobalKey`，供搜索命中后滚动定位。
+  ///
+  /// 注册 + 回收的规则见 [RowLocateRegistry]（issue #39：此前只 `putIfAbsent`
+  /// 从不回收，跨 group 切换持续累积）。
+  ///
+  /// ⚠️ 同一行内多个 `item.id`（批量卡）只是**别名**，不共享键实例——
+  /// 共享会让「同一段文件被拆成多行」时多行撞同一个 `GlobalKey`，
+  /// 后出现的行渲染为空白（见该类的类文档）。
+  final _rowKeys = RowLocateRegistry();
+
+  /// 内存账本登记令牌（[MemoryLedger.register] 的返回值）。
+  ///
+  /// 读数闭包捕获本 State，故每个令牌都**必须**在 [dispose] 里注销——
+  /// 否则页面销毁后账本仍钉着整页数据（观测变成泄漏）。
+  late final int _thumbnailGauge;
+  late final int _bubbleGauge;
+  late final int _timelineGauge;
+
+  /// 缩略图字节的按文件记忆（`ufsFileId` → Future）。
+  ///
+  /// ## 为什么页面层还要再记一次（卡片自己已经缓存了）
+  ///
+  /// 卡片的 `_thumbnail` 活在该行的 `State` 里，而 `ListView.builder` 的
+  /// 子项一旦滚出 `cacheExtent` 就被 **dispose**（本页未混入
+  /// `AutomaticKeepAliveClientMixin`）。滚回来时 `initState` 重跑 → 又拉
+  /// 一次。用户上下滚动一个长对话就会重复拉同一张缩略图（每张一次 HTTP +
+  /// 解码）。
+  ///
+  /// ## 为什么缓存 Future 而不是 `List<int>?`
+  ///
+  /// 缓存 Future 能同时去重**并发**请求：两个成员指向同一文件、或快速
+  /// 滚出再滚回（上一次还没回来）时，`putIfAbsent` 让它们共享同一个
+  /// Future。若缓存已完成的值，并发窗口内仍会发两次。
+  ///
+  /// ## 失败也缓存
+  ///
+  /// 失败（404 / 501 / 网络错误）同样写入缓存——否则「无法缩略图」的卡片
+  /// 每滚一次就重试一次，而失败通常是**永久性**的（无缩略图能力 / 已删除），
+  /// 重试只是白跑。代价：服务端恢复后要切对话才能重试（可接受：缩略图是
+  /// 装饰，且重建页面比无限重试更便宜）。
+  ///
+  /// ## 切换对话时必须清空
+  ///
+  /// 键是 `ufsFileId`（全局唯一），但两个对话里出现同一个 id 的语义不同
+  /// （可能已被覆盖 / 删除）。更要紧的是：不清空就是**按对话无限增长**的
+  /// 内存（每张图一份字节）。故在 `didUpdateWidget` 的 groupId 变化处清空
+  /// ——用 [ConversationPage.historyKey] 作信号（它的文档已说明「有效范围
+  /// 是一个对话」），而不是 `widget.controller`（切 group 时那个实例不变）。
+  ///
+  /// ## 有界 + 版本令牌（docs/memory-audit.md G8 / issue #70）
+  ///
+  /// 两件事都由 [ThumbnailMemo] 承担，**不要**退回裸 `Map`：
+  ///
+  /// 1. **有界**：条目数与字节数双上限（[kThumbnailMemoMaxEntries] /
+  ///    [kThumbnailMemoMaxBytes]），淘汰最旧写入。此前无上限，桌面端常驻
+  ///    进程里「滚过多少张图就留多少份字节」，生产单对话可达上千张。
+  /// 2. **版本失效**：UFS 覆盖写是「id 不变、内容变」，故键仍是 `ufsFileId`，
+  ///    但交给 [ThumbnailMemo.resolve] 的版本令牌是
+  ///    [AgentFileItem.contentRevision]（随 `action` / `modifiedAt` /
+  ///    `deletedAt` / `sizeBytes` / `mimeType` 变化）。令牌变了就逐出旧条目
+  ///    重新加载——修掉「覆盖写之后旧缩略图一直显示到切对话」。
+  ///    这不依赖服务端事件带 mtime/etag（`AgentFileItem` 本来就没有），
+  ///    只需要 `agent.file.modified` 事件本身（它会带新的 `modifiedAt`）。
+  ///
+  /// 删除事件由 [_evictThumbnailsOfDeletedFiles] 按 id 逐出：被删的卡不再
+  /// 渲染缩略图，留着字节只是白占。
+  final _thumbnailMemo = ThumbnailMemo();
+
+  /// 取缩略图字节（按 `ufsFileId` + 版本令牌记忆化）。
+  ///
+  /// 只在已注入 `onLoadThumbnailAgentFile` 且该文件有 `ufsFileId` 时调用
+  /// （判据与传 `null` 的那条一致，见 [_buildItem]）。
+  Future<List<int>?> _loadThumbnailMemoized(AgentFileItem item) {
+    final id = item.ufsFileId!;
+    return _thumbnailMemo.resolve(
+      id,
+      item.contentRevision,
+      () => widget.onLoadThumbnailAgentFile!(item),
+    );
+  }
+
+  /// 已提交 resolve 的卡行 id（本地去重，避免重复点击发出两次请求）。
+  ///
+  /// 服务端有 CAS（`pending` → `resolved` 首次写入才生效），重复请求不会造成
+  /// 数据错误，但会让 UI 出现两次 loading。本地记录更简单直接。
+  final _resolving = <String>{};
+
+  /// 已提交 resolveFeedback 的回执 token（防重复点击，与 [_resolving] 同理）。
+  ///
+  /// 服务端 CAS 保证重复请求无数据错误，但会让 UI 出现两次 loading。
+  final _resolvingFeedback = <String>{};
+
+  /// 本地已提交回执的 token（乐观置灰）。
+  ///
+  /// 与 `FeedbackRequestItem.resolved` 的关系：后者是**服务端权威**（来自
+  /// `routing_feedback` 事件），本集合是「请求已发出」的本地事实。渲染时取
+  /// 两者之并——事件到达后置灰来源变成权威，事件永不到达时也不会退化成
+  /// 「没点过」。见 [_handleResolveFeedback] 的说明。
+  final _submittedFeedback = <String>{};
+
+  /// 当前生效的归属反馈有效期；null = 服务端未下发（不做失效判定）。
+  ///
+  /// 由控制器在拉取 turn 运行时参数时一并记下（见
+  /// `ChatStreamController.attributionFeedbackTTL`）。用它把已过期的卡片直接
+  /// 置灰，而不是等用户点下去才得到 404。
+  Duration? get _feedbackTTL => widget.controller.attributionFeedbackTTL;
+
+  /// 已提交过操作的**建议 id**（防重复点击，与上面两个同理）。
+  ///
+  /// 用 suggestionId 而非事件 id：resolved 事件到达后卡片会换成结果行，
+  /// 这中间的窗口靠本集合关掉，否则用户可以连点两下「让它自动做」
+  /// ——服务端会建出两条 pattern。
+  final _resolvingHabit = <String>{};
+
+  /// 追加到输入框的草稿通道（spec 卡 copy_text 动作的「回填输入框」路径）。
+  ///
+  /// 页面持有它并传给 [MessageComposer.draft]：spec 卡在**时间线里**，而输入框
+  /// 在页面底部，两者是兄弟节点，没有更近的共同祖先可放状态。
+  final _draft = ValueNotifier<String>('');
+
+  /// 正在提交「停止生成」请求。
+  ///
+  /// ## 为什么需要它（而不是只看 isStreaming）
+  ///
+  /// 停止是一次往返请求，而服务端的 `done` 事件要等**下一轮**才会到达。这中间
+  /// 的窗口里流式标记仍是 true，按钮会保持可点；用户再点一次会得到
+  /// `409 turn not cancellable (not queued/running)`——一个从用户视角看毫无道理
+  /// 的错误（他刚点了停止，界面却说不能停止）。用本地标记把窗口关掉。
+  ///
+  /// 不需要「请求失败就恢复」的特殊逻辑：finally 里无条件复位，若 `done` 已先
+  /// 到达，复位后按钮依然禁用（因为流式项已被 `_sealStreaming` 闭合）。
+  bool _cancelling = false;
+
+  /// 正在重发的 turn id（null = 没有）。
+  ///
+  /// 与 [_cancelling] 同一取向：重发是写操作，按钮在请求往返期间必须禁用，
+  /// 否则连点两次会产生两个新 turn。
+  String? _retryingTurnId;
+
+  /// 是否已到最早一条历史（[ConversationPage.onLoadOlder] 返回过 false）。
+  ///
+  /// 一旦为 true 就不再触发，避免在顶部反复发空请求。
+  bool _reachedOldest = false;
+
+  /// 正在加载更早的历史（防止滚动过程中并发发多次请求）。
+  bool _loadingOlder = false;
+
+  // 异步分页属于发起时的对话，旧请求完成不能覆盖新对话的终止/并发状态。
+  int _historyGeneration = 0;
+
+  // 两个 Sliver 以首个展示行作为固定分界；旧历史向上生长，已有内容坐标不变。
+  String? _timelineCenterId;
+  double _timelineOrigin = SpbSpacing.pagePadding.top;
+  static const _timelineCenterKey = ValueKey('timeline-center');
+
+  /// 顶部触发阈值（像素）。
+  ///
+  /// 不用 0：快速滑动可能一瞬间就到顶部，留一点余量
+  /// 可以提前取下一页，让「滑到顶」与「内容已就位」重合而不是先看到空白。
+  static const double _loadOlderThreshold = 120;
+
+  /// 「算作在底部」的阈值（像素）。
+  ///
+  /// 不用 0：列表内容高度与视口高度在滚动过程中有细微抖动（图片解码、
+  /// 字体加载），严格等于 maxScrollExtent 会导致自动滚动时断时续。
+  ///
+  /// ⚠️ 这个容差**只适用于「位置漂移」**（内容增长 / 惰性估算修正），
+  /// **不适用于用户主动上滚**——后者零容差，判据见 [_onScroll] 里的
+  /// `userScrollDirection`。两者混用会让滚轮上翻被「吃掉」几格。
+  static const double _autoScrollThreshold = 80;
+
+  StreamSubscription<List<ConversationItem>>? _itemsSub;
+  List<ConversationItem> _items = const [];
+
+  /// 时间线是否来自本地缓存（issue #29 切片 B）。
+  ///
+  /// 与 [_items] 同取向：存在 State 里 + 订阅推送时 setState。初值取控制器
+  /// 快照——页面可能在控制器已回落到缓存**之后**才挂载（如从列表页进入），
+  /// 只看流会错过那一次推送。
+  bool _timelineFromCache = false;
+  StreamSubscription<bool>? _fromCacheSub;
+
+  /// 离线队列快照（issue #30）。
+  List<OutboxEntry> _outbox = const [];
+  StreamSubscription<List<OutboxEntry>>? _outboxSub;
+
+  /// `turn_activity` 订阅与最近一次快照（按 turnId 索引）。
+  ///
+  /// 与 [_items] 同取向：存在 State 里 + 订阅推送时 setState。若在 build 里
+  /// 读 `controller.activitiesSnapshot`，那是同步 getter，建立不了依赖，
+  /// 事件到达时**不会**触发重建（指示器永远不出现）。
+  StreamSubscription<Map<String, TurnActivitySnapshot>>? _activitiesSub;
+  Map<String, TurnActivitySnapshot> _activities = const {};
+
+  /// `context_update` 订阅与最近一次用量快照。
+  ///
+  /// 与 [_activities] 同取向：存在 State 里 + 订阅推送时 setState。若在 build
+  /// 里读 `controller.contextUsageSnapshot`（同步 getter），事件到达时**不会**
+  /// 触发重建，用量区永远停在首帧值。
+  StreamSubscription<ContextUsage?>? _contextUsageSub;
+  ContextUsage? _contextUsage;
+
+  /// group 用量合计订阅与最近一次快照（与 [_contextUsage] 同取向）。
+  StreamSubscription<GroupUsageSummary?>? _usageSummarySub;
+  GroupUsageSummary? _usageSummary;
+
+  /// `queue_state` / `retry_scheduled` 订阅与最近一次等待状态。
+  ///
+  /// 与 [_contextUsage] 同取向：存 State + 订阅推送时 setState。
+  StreamSubscription<ExecutionStatus?>? _executionStatusSub;
+  ExecutionStatus? _executionStatus;
+
+  /// `tts_*` 订阅与最近一次播报状态。
+  ///
+  /// 与 [_executionStatus] 同取向：存 State + 订阅推送时 setState。
+  StreamSubscription<TtsStatus?>? _ttsStatusSub;
+
+  /// 最近一次播报状态；null 仅表示「尚未收到任何快照」，与 idle 区分开
+  /// （idle 是收到快照但无播报，null 是还没订阅到）。
+  TtsStatus? _ttsStatus;
+
+  /// `staleTurnIds` 订阅与最近一次超时集合。
+  ///
+  /// 与 [_activities] / [_contextUsage] 同取向：存在 State 里 + 订阅推送时
+  /// setState（在 build 里读一个同步 getter 建立不了依赖）。
+  StreamSubscription<Set<String>>? _staleTurnIdsSub;
+  Set<String> _staleTurnIds = const {};
+
+  /// 是否跟随底部。
+  ///
+  /// ## 为什么用状态标志而不是每次重新测量位置
+  ///
+  /// 直觉做法是在新项到达时测「当前位置是否在底部」。但**流式回复会在几十毫秒内
+  /// 连续到达多个事件**，而自动滚动是 150ms 动画——上一次动画还在路上时，
+  /// 新内容已把 maxScrollExtent 撞大，此时测量必然得到「不在底部」，
+  /// 于是自动跟随**永久停掉**（用户没做任何操作，消息却不再跟随）。
+  ///
+  /// 用标志位：只在**滚动事件**里更新它（用户上滑 → false，回到接近底部 → true）。
+  /// 新增内容本身不触发滚动事件，故不会误判。
+  bool _following = true;
+
+  /// 是否已排一次 post-frame 跟随（[_scheduleFollowBottom] 的去重标记）。
+  ///
+  /// 见 [_scheduleFollowBottom] 的文档：一帧内多次请求只需执行一次。
+  bool _followScheduled = false;
+
+  // 同一次自动滚动期间，像素通知和新 SSE 只合并目标，不重启动画。
+  bool _autoScrolling = false;
+  bool _jumpingToBottom = false;
+  bool _locatingItem = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _items = widget.controller.snapshot;
+    _itemsSub = widget.controller.items.listen(_onItems);
+    // 内存账本（docs/memory-audit.md §四）：本页三个可再生态各报一行读数，
+    // 诊断报告与高水位日志据此回答「RSS 花在谁身上」。读数闭包捕获本 State，
+    // 故**必须**在 dispose 里注销（否则观测本身成了泄漏源）。
+    _thumbnailGauge = MemoryLedger.register(
+      name: 'conversation.thumbnails',
+      label: '对话页缩略图',
+      read: () => MemoryGauge(
+        count: _thumbnailMemo.length,
+        bytes: _thumbnailMemo.bytes,
+      ),
+      warnCount: kThumbnailMemoMaxEntries,
+      warnBytes: kThumbnailMemoMaxBytes,
+    );
+    _bubbleGauge = MemoryLedger.register(
+      name: 'conversation.bubbles',
+      label: '对话页气泡缓存',
+      read: () =>
+          MemoryGauge(count: _bubbleCache.length, bytes: _bubbleCacheBytes()),
+      warnCount: _bubbleCacheLimit,
+    );
+    _timelineGauge = MemoryLedger.register(
+      name: 'conversation.timeline',
+      label: '对话页时间线',
+      read: () => MemoryGauge(count: _items.length, bytes: _timelineBytes()),
+      warnCount: ChatStreamController.maxBufferEvents,
+    );
+    _scrollController.addListener(_onScroll);
+    _subscribeActivities();
+    _subscribeContextUsage();
+    _subscribeUsageSummary();
+    _subscribeExecutionStatus();
+    _subscribeTtsStatus();
+    _subscribeStaleTurnIds();
+    _subscribeTimelineCache();
+    _subscribeOutbox();
+  }
+
+  /// 订阅离线队列（仅在调用方注入 [ConversationPage.outboxEntries] 时）。
+  ///
+  /// 与 `activities` 同取向的「注入才订阅」：未接线时页面是纯只读时间线。
+  void _subscribeOutbox() {
+    final stream = widget.outboxEntries;
+    if (stream == null) return;
+    _outbox = widget.outboxSnapshot ?? const [];
+    _outboxSub = stream.listen((rows) {
+      if (!mounted) return;
+      setState(() => _outbox = rows);
+    });
+  }
+
+  /// 订阅「时间线来自缓存」信号（切片 B / issue #29）。
+  ///
+  /// ## 为什么总是订阅（不像 activities 那样「注入才订阅」）
+  ///
+  /// 缓存是**控制器自带**的能力（构造时注入 `timelineCache`），不像
+  /// `activities` 那样需要调用方额外接线。故这里无需一个「是否注入」的开关：
+  /// 未注入缓存的控制器永远不会推 true，订阅是空转但不产生噪声。
+  ///
+  /// ## 初值必须取快照
+  ///
+  /// 从列表页进入对话时，`switchGroup`/`start` 的回落可能在**页面挂载之前**
+  /// 就完成了。只看流会错过那一次推送，提示条永远不出现。
+  void _subscribeTimelineCache() {
+    _timelineFromCache = widget.controller.timelineFromCacheSnapshot;
+    _fromCacheSub = widget.controller.timelineFromCache.listen((v) {
+      if (!mounted) return;
+      setState(() => _timelineFromCache = v);
+    });
+  }
+
+  /// 订阅活动流（仅在调用方传了 [ConversationPage.activities] 时）。
+  ///
+  /// 用「注入才订阅」而非「总是订阅 controller」：保持本页在未注入时是
+  /// **纯只读时间线**（同 [ConversationPage.onCancelTurn] 等注入参数的取向），
+  /// 且不白订阅一条无人消费的流。
+  void _subscribeActivities() {
+    final stream = widget.activities;
+    if (stream == null) return;
+    _activitiesSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _activities = snapshot);
+    });
+    _activities = widget.activitiesSnapshot ?? const {};
+  }
+
+  /// 订阅用量流（仅在调用方传了 [ConversationPage.contextUsage] 时）。
+  ///
+  /// 与 [_subscribeActivities] 同一取向：未注入时本页不展示用量区，也不白订阅。
+  void _subscribeContextUsage() {
+    final stream = widget.contextUsage;
+    if (stream == null) return;
+    _contextUsageSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _contextUsage = snapshot);
+    });
+    _contextUsage = widget.contextUsageSnapshot;
+  }
+
+  /// 订阅 group 用量合计流（仅在调用方传了 [ConversationPage.usageSummary] 时）。
+  void _subscribeUsageSummary() {
+    final stream = widget.usageSummary;
+    if (stream == null) return;
+    _usageSummarySub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _usageSummary = snapshot);
+    });
+    _usageSummary = widget.usageSummarySnapshot;
+  }
+
+  /// 订阅等待/重试状态流（仅在调用方传了 [ConversationPage.executionStatus] 时）。
+  void _subscribeExecutionStatus() {
+    final stream = widget.executionStatus;
+    if (stream == null) return;
+    _executionStatusSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _executionStatus = snapshot);
+    });
+    _executionStatus = widget.executionStatusSnapshot;
+  }
+
+  /// 订阅播报状态流（仅在调用方传了 [ConversationPage.ttsStatus] 时）。
+  void _subscribeTtsStatus() {
+    final stream = widget.ttsStatus;
+    if (stream == null) return;
+    _ttsStatusSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _ttsStatus = snapshot);
+    });
+    _ttsStatus = widget.ttsStatusSnapshot;
+  }
+
+  /// 订阅超时集合流（仅在调用方传了 [ConversationPage.staleTurnIds] 时）。
+  ///
+  /// 与 [_subscribeActivities] 同一取向：未注入时本页不展示超时提示，也不
+  /// 白订阅一条无人消费的流。
+  void _subscribeStaleTurnIds() {
+    final stream = widget.staleTurnIds;
+    if (stream == null) return;
+    _staleTurnIdsSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _staleTurnIds = snapshot);
+    });
+    _staleTurnIds = widget.staleTurnIdsSnapshot ?? const {};
+  }
+
+  @override
+  void didUpdateWidget(ConversationPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      _itemsSub?.cancel();
+      _items = widget.controller.snapshot;
+      _itemsSub = widget.controller.items.listen(_onItems);
+    }
+    // 活动流换了来源（或从未注入变为注入）：重订阅。
+    if (oldWidget.activities != widget.activities) {
+      unawaited(_activitiesSub?.cancel());
+      _activitiesSub = null;
+      _activities = const {};
+      _subscribeActivities();
+    }
+    // 用量流同理。
+    if (oldWidget.contextUsage != widget.contextUsage) {
+      unawaited(_contextUsageSub?.cancel());
+      _contextUsageSub = null;
+      _contextUsage = null;
+      _subscribeContextUsage();
+    }
+    // 消耗合计流同理。
+    if (oldWidget.usageSummary != widget.usageSummary) {
+      unawaited(_usageSummarySub?.cancel());
+      _usageSummarySub = null;
+      _usageSummary = null;
+      _subscribeUsageSummary();
+    }
+    // 等待/重试流同理。
+    if (oldWidget.executionStatus != widget.executionStatus) {
+      unawaited(_executionStatusSub?.cancel());
+      _executionStatusSub = null;
+      _executionStatus = null;
+      _subscribeExecutionStatus();
+    }
+    // 播报状态流同理。
+    if (oldWidget.ttsStatus != widget.ttsStatus) {
+      unawaited(_ttsStatusSub?.cancel());
+      _ttsStatusSub = null;
+      _ttsStatus = null;
+      _subscribeTtsStatus();
+    }
+    // 超时集合流同理。
+    if (oldWidget.staleTurnIds != widget.staleTurnIds) {
+      unawaited(_staleTurnIdsSub?.cancel());
+      _staleTurnIdsSub = null;
+      _staleTurnIds = const {};
+      _subscribeStaleTurnIds();
+    }
+    // 队列接线换了：重订 + 重取快照。
+    //
+    // ⚠️ 快照要**每次**重取（不能只在流变化时）：`outboxSnapshot` 来自
+    // Provider 的 `ref.watch(...).snapshot`，而 Provider 只在依赖变化时重建
+    // ——单靠它拿不到最新队列，必须配合流；反过来，流的值在两次推送之间也可能
+    // 落后于快照（页面刚重建）。两者都刷新才能保证不显示过期状态。
+    if (oldWidget.outboxEntries != widget.outboxEntries) {
+      unawaited(_outboxSub?.cancel());
+      _outboxSub = null;
+      _subscribeOutbox();
+    } else if (widget.outboxEntries != null) {
+      final snap = widget.outboxSnapshot;
+      if (snap != null && !identical(snap, _outbox)) {
+        _outbox = snap;
+      }
+    }
+    // 换了控制器（或换对话）：重订缓存信号并重取快照。
+    //
+    // 控制器携带 `timelineCache`，换 group 后 `_fromCache` 已在
+    // `switchGroup` 里复位——本页需要跟上那个新值。
+    if (oldWidget.controller != widget.controller) {
+      unawaited(_fromCacheSub?.cancel());
+      _fromCacheSub = null;
+      _timelineFromCache = widget.controller.timelineFromCacheSnapshot;
+      _subscribeTimelineCache();
+    }
+    // 换了对话就要重新给翻页一次机会：`_reachedOldest` 是上一个 group 的结论，
+    // 沿用会让新对话永远翻不到历史（见 [historyKey] 的说明）。
+    if (oldWidget.historyKey != widget.historyKey ||
+        oldWidget.controller != widget.controller) {
+      _reachedOldest = false;
+      _loadingOlder = false;
+      _historyGeneration++;
+      _timelineCenterId = null;
+      _timelineOrigin = SpbSpacing.pagePadding.top;
+      // 缩略图记忆按对话隔离：不清空就是按对话无限增长的内存（每张图一份
+      // 字节），且上一个对话里同一 `ufsFileId` 的字节未必仍有效。
+      _thumbnailMemo.clear();
+      // 气泡缓存同理：`item.id` 是服务端事件 id，跨对话**可能重复**（不同
+      // group 各自从 1 开始的事件 id 不保证唯一）。不清空就可能把一个对话的
+      // 气泡交给另一个对话的同 id 项——那会显示别人的回复。
+      //
+      // 即便 id 不重复，保留它们也只是让上一个对话的正文留在内存里。
+      _bubbleCache.clear();
+    }
+  }
+
+  @override
+  void dispose() {
+    MemoryLedger.unregister(_thumbnailGauge);
+    MemoryLedger.unregister(_bubbleGauge);
+    MemoryLedger.unregister(_timelineGauge);
+    _itemsSub?.cancel();
+    _activitiesSub?.cancel();
+    _contextUsageSub?.cancel();
+    _usageSummarySub?.cancel();
+    _executionStatusSub?.cancel();
+    _ttsStatusSub?.cancel();
+    _staleTurnIdsSub?.cancel();
+    _fromCacheSub?.cancel();
+    _outboxSub?.cancel();
+    _scrollController.dispose();
+    _draft.dispose();
+    super.dispose();
+  }
+
+  void _onItems(List<ConversationItem> items) {
+    _preserveRegroupedHistoryPosition(items);
+    if (items.isEmpty) {
+      _timelineCenterId = null;
+      _timelineOrigin = SpbSpacing.pagePadding.top;
+    }
+    _evictThumbnailsOfDeletedFiles(items);
+    setState(() => _items = items);
+
+    if (_following) {
+      // 等一帧：新项尚未布局完成，此时 maxScrollExtent 还是旧值。
+      _scheduleFollowBottom();
+    }
+  }
+
+  /// 页边界的工具/文件行可能合并成批量卡，固定分界行本身也会因此变高或变矮。
+  /// 此时以仍然可见且没有被合并的行重新定原点，偏移取旧布局的实际几何值。
+  /// 校正在下一次布局之前完成，不启动滚动动画，也不取消正在进行的拖动。
+  void _preserveRegroupedHistoryPosition(List<ConversationItem> items) {
+    final centerId = _timelineCenterId;
+    final previousRows = _lastRows;
+    if (_following ||
+        centerId == null ||
+        previousRows == null ||
+        _items.isEmpty ||
+        items.isEmpty ||
+        _items.first.id == items.first.id ||
+        !items.any((item) => item.id == _items.first.id) ||
+        !_scrollController.hasClients) {
+      return;
+    }
+    final nextIds = [
+      for (final row in groupTimelineForDisplay(items)) locateIdsOf(row),
+    ];
+    final previousCenter = previousRows
+        .map(locateIdsOf)
+        .where((ids) => ids.contains(centerId))
+        .firstOrNull;
+    final nextCenter = nextIds
+        .where((ids) => ids.contains(centerId))
+        .firstOrNull;
+    if (listEquals(previousCenter, nextCenter)) return;
+    final nextByOwner = {for (final ids in nextIds) ids.first: ids};
+    for (final row in previousRows) {
+      final ids = locateIdsOf(row);
+      if (!listEquals(ids, nextByOwner[ids.first])) continue;
+      final box = _rowKeys[ids.first]?.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      final viewport = RenderAbstractViewport.maybeOf(box);
+      if (viewport is! RenderBox) continue;
+      final top = box.localToGlobal(Offset.zero, ancestor: viewport).dy;
+      final position = _scrollController.position;
+      if (top >= position.viewportDimension || top + box.size.height <= 0) {
+        continue;
+      }
+      _timelineCenterId = ids.first;
+      // 折叠可能使锚点前的内容短于原来的屏幕空间。把原点放在可见行顶部，
+      // 避免负 pixels 被 ScrollPhysics 夹到新 minScrollExtent 后再次跳动。
+      _timelineOrigin = top.clamp(0.0, position.viewportDimension);
+      position.correctBy(_timelineOrigin - top - position.pixels);
+      return;
+    }
+  }
+
+  /// 逐出已被删除文件的缩略图（docs/memory-audit.md G8）。
+  ///
+  /// 删除事件本身不带 `ufsFileId`，但归约器 `_mergeAgentFile` 会保留创建时的
+  /// id，故合并后的 `AgentFileItem` 仍有 id。被删的卡不再渲染缩略图，留着
+  /// 字节只是白占——按 id 逐出是 O(1)，扫描是 O(条目数) 且只做 `isDeleted`
+  /// 判定（与每帧已有的展示行派生同量级）。
+  ///
+  /// 只在缓存非空时扫描：绝大多数对话没有任何图片交付物，不该为此付全表扫描。
+  void _evictThumbnailsOfDeletedFiles(List<ConversationItem> items) {
+    if (_thumbnailMemo.length == 0) return;
+    for (final item in items) {
+      if (item is! AgentFileItem || !item.isDeleted) continue;
+      final id = item.ufsFileId;
+      if (id != null && id.isNotEmpty) _thumbnailMemo.evict(id);
+    }
+  }
+
+  /// 气泡缓存里已解析正文的估算字节数（UTF-16：1 字符 = 2 字节）。
+  ///
+  /// 只算 [AssistantMessageBubble]（本页只缓存这一种）；其余类型不出现在
+  /// `_bubbleCache` 里，故无需分支。
+  int _bubbleCacheBytes() {
+    var chars = 0;
+    for (final entry in _bubbleCache.values) {
+      final widget = entry.widget;
+      if (widget is AssistantMessageBubble) chars += widget.text.length;
+    }
+    return chars * 2;
+  }
+
+  /// 时间线正文字符数的估算字节数（UTF-16）。
+  ///
+  /// 只统计带 `text` 的三类（用户/助手/思考）——文件卡、确认卡等持有的是
+  /// 结构化字段，量级远小于正文，逐项精确统计不值当。
+  int _timelineBytes() {
+    var chars = 0;
+    for (final item in _items) {
+      switch (item) {
+        case UserMessageItem(:final text):
+          chars += text.length;
+        case AssistantMessageItem(:final text):
+          chars += text.length;
+        case ThoughtItem(:final text):
+          chars += text.length;
+        default:
+          break;
+      }
+    }
+    return chars * 2;
+  }
+
+  /// 排一次「下一帧滚到底」（同一帧内重复请求只执行一次）。
+  ///
+  /// ## 为什么需要去重
+  ///
+  /// 一次推送会同时触发两条调度：
+  ///
+  /// 1. [_onItems] 直接排一个（新内容到达）；
+  /// 2. 新内容使 `maxScrollExtent` 变大 → 布局完成时派发滚动通知 →
+  ///    [_onScroll] 发现「跟随中但未到底」→ 再排一个。
+  ///
+  /// 两个回调都在同一帧的 post-frame 阶段执行，于是同一个目标被滚两次。
+  /// 更糟的是：第一次用 `animateTo`（150ms）后，第二次看到「距底已很小」
+  /// 而再起一个动画——新动画会**取消**上一个并从当前位置重来，视觉上反而
+  /// 抖一下。
+  ///
+  /// 用一个标记把「本帧已排」吞掉：两者语义相同（都是「滚到当前底部」），
+  /// 且回调里读的是**执行时**的 `maxScrollExtent`，故合并不会漏掉新高度。
+  void _scheduleFollowBottom() {
+    if (_followScheduled) return;
+    _followScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _followScheduled = false;
+      unawaited(_followBottom());
+    });
+    // 动画结束或 metrics 通知可能发生在帧后；只注册回调不会主动请求下一帧。
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// 根据滚动位置更新 [_following]。
+  ///
+  /// 程序触发的滚动也会走到这里，但它向底部移动，结果是 `_following`
+  /// 保持 true——正是期望的。
+  ///
+  /// ## 用户主动上滚必须**零容差**脱离跟随（否则滚轮前翻被「吃掉」）
+  ///
+  /// 曾只用距离判定（`pixels >= max - 80`）。但 Linux 桌面引擎一个滚轮 notch
+  /// 只有 **53 逻辑像素**（`fl_scrolling_manager.cc` 的 `kScrollOffsetMultiplier
+  /// = 53`，取自 Chromium），于是：
+  ///
+  /// ```
+  /// 在底部 pixels=2465 → 上滚 1 格 2412（距底 53 < 80）→ 仍判「在底部」
+  ///   → 立刻 _followBottom() 动画拉回 2465（150ms，肉眼可见）
+  /// 上滚 2 格 2359（距底 106 > 80）→ 才真正脱离
+  /// ```
+  ///
+  /// 即「滚轮往上滚两下等于没滚」。触摸拖拽一次几百像素，故只有滚轮明显。
+  ///
+  /// 判据改成看**滚动方向**：`ScrollDirection.forward` 就是「向内容开头方向
+  /// 移动」（`pointerScroll` 在 `delta < 0` 时设置、`applyUserOffset` 在拖拽时
+  /// 设置），滚轮与拖拽都覆盖。用户一旦朝上滚，意图就是「我要看更早的」，
+  /// 与「内容增长把位置顶偏了」是两件事，不该共享容差。
+  ///
+  /// ⚠️ 方向为 `idle` 时（没有用户输入）仍走距离判定——那是内容增长 / 惰性
+  /// 估算修正的路径，容差正是为它存在的。
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    // 外部 jumpTo/搜索会先取消滚动 activity，但动画 Future 下一微任务
+    // 才结束；不能把这段时间内的用户定位误认成自动滚动。
+    final isAutomatic =
+        _jumpingToBottom ||
+        (_autoScrolling &&
+            position.userScrollDirection == ScrollDirection.idle &&
+            position.isScrollingNotifier.value);
+
+    // 顶部触发加载更早历史。
+    //
+    // WHY 挂在滚动监听而不是另起 Timer / ScrollNotification：本页已有唯一的滚动
+    // 监听（[_onScroll]），翻页与自动跟随共享同一个「位置已变」信号，不需要第二
+    // 套时序。
+    //
+    // ⚠️ 必须放在下面「内容不足一屏」的 early return **之前**：那种情况下
+    // `extentBefore == 0` 也正是「在顶部」，若在 early return 之后判断就会被跳过。
+    // （实践中影响极小：首屏 `_backfill` 一次拉 200 条，短到填不满屏幕的对话
+    // 基本意味着已全部加载。但把判断放在正确的位置不需要额外代价。）
+    if ((!isAutomatic ||
+            position.userScrollDirection == ScrollDirection.forward) &&
+        position.extentBefore <= _loadOlderThreshold) {
+      unawaited(_maybeLoadOlder());
+    }
+
+    if (_locatingItem) return;
+
+    // 双向 Sliver 的最小偏移可为负，不能只看 maxScrollExtent。
+    if (position.maxScrollExtent <= position.minScrollExtent) {
+      _following = true;
+      return;
+    }
+
+    // 用户主动朝上滚（看更早内容）→ 立即脱离跟随，**不适用**容差。
+    // 理由与实测数据见本方法的文档。
+    if (position.userScrollDirection == ScrollDirection.forward) {
+      _following = false;
+      return;
+    }
+
+    if (isAutomatic) return;
+
+    _following =
+        position.pixels >= position.maxScrollExtent - _autoScrollThreshold;
+
+    // 跟随中仍未到底 → 继续追。
+    //
+    // ⚠️ 这一步不可省：`ListView.builder` 的 `maxScrollExtent` 是**惰性估算**的
+    // ——它只根据已构建的可见项推算。新增内容后，估算值会在后续若干帧里逐步
+    // 修正（实测：同一次推送后先报 321，几帧后才是真实的 1041）。
+    // 若只在新增项时滚一次，滚动会停在中间（实测停 321/1041，约 1/3 处）。
+    // 这里借「滚动会触发通知」这一点自我修正，直到真正到底。
+    if (_following) {
+      _scheduleFollowBottom();
+    }
+  }
+
+  /// 到达顶部附近时加载更早的一页（带并发与终止保护）。
+  ///
+  /// 只在 [_onScroll] 里调用，而那里已确认 `_scrollController.hasClients`；
+  /// 空列表时渲染的是 [EmptyState] 而非时间线，控制器没有 client，
+  /// 滚动通知根本不会产生。故这里不需要再判 `_items.isEmpty`。
+  ///
+  /// 位置保持由 [_buildTimeline] 的固定分界完成，与请求完成及 items 发布的
+  /// 先后顺序无关；等待期间用户继续滚动也不会被拉回发起请求时的位置。
+  Future<void> _maybeLoadOlder() async {
+    final handler = widget.onLoadOlder;
+    // 两重护栏：未注入 / 已到最早 / 正在加载。
+    if (handler == null || _reachedOldest || _loadingOlder) return;
+
+    _loadingOlder = true;
+    final generation = _historyGeneration;
+    try {
+      final hasMore = await handler();
+      if (!mounted || generation != _historyGeneration) return;
+      // 返回 false = 已到最早，从此不再触发。
+      if (!hasMore) setState(() => _reachedOldest = true);
+    } on SpbError catch (e) {
+      // 失败不标记 `_reachedOldest`：下次滚到顶可以重试。
+      if (mounted && generation == _historyGeneration) {
+        _showMessage('加载更早历史失败：${e.message}');
+      }
+    } finally {
+      if (generation == _historyGeneration) _loadingOlder = false;
+    }
+  }
+
+  /// 滚到底（仅在 [_following] 时由调用方触发）。
+  Future<void> _followBottom() async {
+    PerfProbe.followBottomCalls++;
+    if (!mounted ||
+        !_following ||
+        _autoScrolling ||
+        !_scrollController.hasClients) {
+      return;
+    }
+    final position = _scrollController.position;
+    final target = position.maxScrollExtent;
+    // 已在底部就不动（避免无谓的滚动通知与重绘）。
+    if ((position.pixels - target).abs() < 1) return;
+
+    _autoScrolling = true;
+    try {
+      // 大跨度直接定位；小跨度完成当前动画后再追最新高度，避免每帧从头缓动。
+      if (target - position.pixels > position.viewportDimension) {
+        _jumpingToBottom = true;
+        try {
+          _scrollController.jumpTo(target);
+        } finally {
+          _jumpingToBottom = false;
+        }
+      } else {
+        await _scrollController.animateTo(
+          target,
+          duration: SpbDuration.fast,
+          curve: Curves.easeOut,
+        );
+      }
+    } finally {
+      _autoScrolling = false;
+    }
+    // 惰性行高和流式内容可能已改变目标。用户上滚或搜索定位后不再接着追。
+    if (mounted && _following) _scheduleFollowBottom();
+  }
+
+  Future<void> _handleSubmit(String text) async {
+    // ## 为什么两个分支共用同一个错误处置
+    //
+    // `onSend` 是**生产路径**（两个 app 都注入了它，为了带上 agentId，见
+    // desktop/mobile router 的说明），而默认的 `controller.send` 才是
+    // 「未接线」时的兑底。两者都可能抛 [MessageQueuedError]（离线入队）
+    // ——若只包住其中一个，生产路径上的入队异常会变成**未捕获异常**：
+    // 用户看不到任何提示，消息虽然排上了队却无从得知。
+    try {
+      final custom = widget.onSend;
+      if (custom != null) {
+        await custom(text);
+      } else {
+        await widget.controller.send(input: text);
+      }
+    } on MessageQueuedError catch (e) {
+      // 已入离线队列（issue #30）：**不是**失败——用户打好的字没丢。
+      //
+      // ## 为什么不与下面的分支合并
+      //
+      // 两者都继承 SpbError，但用户的正确反应完全相反：这条要「等着，别重打」
+      // （重打会发两条），下面那条要「改一下再试」。合并成一句「发送失败」会让
+      // 用户以为消息丢了、然后重打一遍。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('网络不可用，已加入待发送：${e.message}')));
+    } on HttpError catch (e) {
+      // 服务端稳定业务码（Go `ceff2f81` 起）：409/429 默认的「HTTP 409」对用户
+      // 毫无意义，措辞要与服务端错误语义同义，并给出可行出路。
+      if (!mounted) return;
+      final String detail;
+      switch (e.errorCode) {
+        case 'group_unavailable':
+          // 目标对话已失效（如另一端已归档/不可用），服务端要求重新选对话。
+          detail = '目标对话已失效，请返回列表重新选择对话后发送';
+        case 'group_archived':
+          // 归档 ≠ 不存在：去「已归档」里恢复，而不是重新建对话
+          //（服务端 pipeline 与降级路径都回这个码，chat_stream.go:81/190）。
+          detail = '该对话已归档，请先恢复后再发送';
+        case 'queued_quota_exceeded':
+          // 排队轮次达到上限：等在跑的轮次结束后再发。
+          detail = '排队轮次已达上限，请稍等当前任务完成后再发送';
+        case 'workspace_quota_exceeded':
+          // 工作区并发配额用尽：同样是等待语义。
+          detail = '同时运行的任务已达上限，请稍后再试';
+        default:
+          detail = '发送失败：${e.message}';
+      }
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(detail)));
+    } on SpbError catch (e) {
+      // 发送失败：提示但不回滚输入（用户可能想重试同一段文字，
+      // 清空反而让他重打一遍）。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('发送失败：${e.message}')));
+    }
+  }
+
+  /// 重发一个失败的 turn（用原输入重新投递一轮）。
+  ///
+  /// ## 为什么直接发送而不是回填输入框
+  ///
+  /// 对齐 webapp 的 `handleRetryTurn`（`ChatMessageList.tsx:290`）：它同样
+  /// 直接重新投递。按钮文案是「重发」而不是「重新编辑」，语义就是「再跑一遍」。
+  /// 用户想改文案时可以直接在输入框里重打（那是发**新**消息，语义也不同）。
+  ///
+  /// 与 [FollowUpChips] 的 `onAppend` 不同：建议卡是「追问的起点」（服务端动作
+  /// 就是 `copy_text`），而这里是「把刚失败的那次重做」。
+  ///
+  /// 防重复点击靠 [_retryingTurnId]：重发是写操作，连点两次会产生两个 turn。
+  Future<void> _handleRetryTurn(ErrorItem error) async {
+    final handler = widget.onRetryTurn;
+    final turnId = error.turnId;
+    if (handler == null || turnId.isEmpty || _retryingTurnId != null) return;
+
+    // 找该 turn 的原用户输入与当时选中的 agent。
+    //
+    // 不能用「全局最后一条 UserMessageItem」：用户在失败后又发了几条时，那个
+    // 找到的是别人的输入。`turnId` 是可靠的关联键（error 与 user_message 同 turn）。
+    UserMessageItem? source;
+    for (var i = _items.length - 1; i >= 0; i--) {
+      final item = _items[i];
+      if (item is UserMessageItem && item.turnId == turnId) {
+        source = item;
+        break;
+      }
+    }
+    final text = source?.text ?? '';
+    // 找不到原输入（历史只回填到 error 之后）时不发请求：拿别的文本去发会把
+    // 「重发」变成「乱发一条」。按钮会因此在那种情况下无反应——比发错好。
+    if (text.isEmpty) return;
+
+    setState(() => _retryingTurnId = turnId);
+    try {
+      await handler(text, source?.agentId);
+    } on SpbError catch (e) {
+      // 重发本身又失败了（例如仍是同一个终态错误）：提示但**不**改归约结果
+      // ——新一轮的 error 事件会由服务端发出，页面会多出一条错误条。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('重发失败：${e.message}')));
+    } finally {
+      if (mounted) setState(() => _retryingTurnId = null);
+    }
+  }
+
+  /// 打开「在本对话中搜索」底部弹层。
+  ///
+  /// ## 为什么用弹层而不是新路由
+  ///
+  /// 与 AGENTS.md §6.10 的两端载体约定一致，但这里还有一个更硬的理由：
+  /// 搜索命中后要**滚回本页时间线的某一条**，而那需要本页的
+  /// `ScrollController` 与 `_rowKeys`。新路由会得到另一个页面实例
+  /// （State 不共享），滚不动原页面。
+  ///
+  /// ## 为什么把「是否还有更早历史」传下去
+  ///
+  /// 搜索只覆盖**已加载**的 items。若 `_reachedOldest` 为 false，面板必须
+  /// 告知用户「没搜到」不等于「不存在」（见 `ConversationSearchSheet`）。
+  ///
+  /// ## 为什么在 `await` 之后才滚动（而不是在 `onOpenHit` 里直接滚）
+  ///
+  /// 弹层占据下半屏，未关闭时 `ensureVisible` 会把目标滚到**被弹层遮住的
+  /// 位置**（它只保证「在滚动视口内」，不知道上层还有弹层）。而
+  /// `showModalBottomSheet` 返回的 Future 正是在弹层**完全退场后**完成，
+  /// 故这里 await 它、再滚动，不需要任何「等动画的固定延时」。
+  Future<void> _openSearch() async {
+    ConversationSearchHit? picked;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      // 高度按屏幕比例给：键盘弹出时 `viewInsets` 会把内容顶上去，
+      // 固定高度会让结果区被挤没。
+      builder: (sheetContext) => SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.7,
+        child: ConversationSearchSheet(
+          // 每次查询时现读，故弹层打开期间到达的新消息也能被搜到。
+          readItems: () => _items,
+          upperHistoryUnloaded: !_reachedOldest,
+          onOpenHit: (hit) {
+            picked = hit;
+            Navigator.of(sheetContext).maybePop();
+          },
+        ),
+      ),
+    );
+    if (!mounted || picked == null) return;
+    await _scrollToItem(picked!.itemId);
+  }
+
+  /// 把时间线滚到指定 `item.id` 的那一行。
+  Future<void> _scrollToItem(String itemId) async {
+    final targetContext = _rowKeys[itemId]?.currentContext;
+    if (targetContext == null) {
+      // 目标行未被构建（在视口外且 `ListView.builder` 尚未创建它）。
+      //
+      // 不静默失败：用户点了命中项却什么都没发生，会以为搜索坏了。给出
+      // 可执行的下一步（继续往上翻）比沉默好。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('该条在更早的位置，请向上滚动后重试')));
+      return;
+    }
+
+    _following = false;
+    _locatingItem = true;
+    try {
+      await Scrollable.ensureVisible(
+        targetContext,
+        // 用 `center` 而不是 `alignment: 0`：命中项周围的内容（同一轮的
+        // 上下文）比「目标贴顶」更有用，且贴顶时若上方有未加载历史会立即触发
+        // 翻页，把用户从目标处推走。
+        alignment: 0.5,
+        duration: SpbDuration.normal,
+        curve: Curves.easeOut,
+      );
+    } finally {
+      _locatingItem = false;
+    }
+  }
+
+  /// 把「被拒绝」翻译成用户可读的提示。
+  ///
+  /// 返回原结果，便于调用方继续用（当前无人用，但保持可组合）。
+  Future<bool> _withRejectionNotice(Future<bool> action, String notice) async {
+    final ok = await action;
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(notice)));
+    }
+    return ok;
+  }
+
+  /// 当前仍在生成的项；null 表示没有进行中的生成。
+  ///
+  /// ## 为什么取「最后一个」而不是「任意一个」
+  ///
+  /// `items` 按时间升序，而 `done` 会闭合**全部**流式段落（`_sealStreaming`），
+  /// 故同一时刻最多只有一个 turn 处于流式态。取最后一个与取任意一个等价，
+  /// 但「最后一个」在将来若出现多段并存时，仍指向最新（也就是用户最想停的）那个。
+  ///
+  /// ## 为什么 [ThoughtItem] 也算
+  ///
+  /// 只认 [AssistantMessageItem] 会漏掉「agent 正在思考、还没吐第一个字」这段
+  /// ——而那恰恰是最需要能停的时候（实测长 turn 的思考段可达数十秒）。两者都由
+  /// 归约层在同一套 `isStreaming` 语义下维护：增量帧置 true，`done`/权威帧置 false。
+  List<ConversationItem>? _lastStreamingItems;
+  ConversationItem? _lastStreamingItem;
+
+  ConversationItem? get _streamingItem {
+    if (!identical(_items, _lastStreamingItems)) {
+      _lastStreamingItems = _items;
+      _lastStreamingItem = _findStreamingItem(_items);
+    }
+    return _lastStreamingItem;
+  }
+
+  /// 从 [items] 尾向找出当前仍在生成的项；null 表示没有进行中的生成。
+  ///
+  /// ## 为什么抽成静态纯函数
+  ///
+  /// 修复前 `_streamingItem` 是个 getter，而一次 `build` 里它被
+  /// `_staleTurnItem` / `_canCancelTurn` / `_visibleActivity` 各调一次
+  /// ——3 次 O(n) 尾向扫描，叠上 AppBar 与 body 各自求值实测达 5 次。
+  /// 抽成「接受 items 的纯函数」后，`build` 开头算一次、把结果往下传。
+  ///
+  /// 用**静态**函数而不是实例方法：它不读任何 State 字段，测试也能直接调
+  /// （不需要先挂载页面）。
+  static ConversationItem? _findStreamingItem(List<ConversationItem> items) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      PerfProbe.visitedItems++;
+      final item = items[i];
+      final streaming = switch (item) {
+        AssistantMessageItem(:final isStreaming) => isStreaming,
+        ThoughtItem(:final isStreaming) => isStreaming,
+        _ => false,
+      };
+      if (streaming) return item;
+    }
+    return null;
+  }
+
+  /// 当前处于超时兜底态的进行中项；null 表示没有。
+  ///
+  /// 「长时间无进展」与「流式」是两个不同的概念：stale 只说明客户端没再收到
+  /// 进展，turn 可能仍在后台跑。故它**不**改变 [ConversationItem]（不改文本、
+  /// 不改 `isComplete`），只让 UI 停掉光标并给出提示。
+  ConversationItem? _staleTurnItemFor(ConversationItem? streaming) {
+    if (streaming == null) return null;
+    return _staleTurnIds.contains(streaming.turnId) ? streaming : null;
+  }
+
+  /// 停止当前轮次。
+  Future<void> _handleCancelTurn() async {
+    final handler = widget.onCancelTurn;
+    // `turnId` 为空则不发请求：服务端路由是 `/chat/turns/:turn_id/cancel`，
+    // 空 id 会打到 `/chat/turns//cancel`（语义不明的 404，见 issue #2 同源陷阱）。
+    final turnId = _streamingItem?.turnId ?? '';
+    if (handler == null || turnId.isEmpty || _cancelling) return;
+
+    setState(() => _cancelling = true);
+    try {
+      await handler(turnId);
+    } on SpbError catch (e) {
+      // 失败只提示、不崩。**不**清空流式标记：turn 可能仍在跑，
+      // 用户应当还能再试一次（而不是看着界面假装已停）。
+      if (mounted) _showMessage('停止失败：${e.message}');
+    } finally {
+      if (mounted) setState(() => _cancelling = false);
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _handleResolve(
+    String groupId,
+    String confirmationId,
+    String option,
+  ) async {
+    final callback = widget.onResolveConfirmation;
+    if (callback == null || _resolving.contains(confirmationId)) return;
+
+    setState(() => _resolving.add(confirmationId));
+    try {
+      callback(groupId, confirmationId, option);
+    } finally {
+      if (mounted) setState(() => _resolving.remove(confirmationId));
+    }
+  }
+
+  /// 建议卡点按：把建议文本回填到输入框（copy_text 的 onAppend 路径）。
+  ///
+  /// 走 [_draft] 而非直接发送：MessageComposer 在页面底部，时间线里的卡片
+  /// 无法直接访问它的 controller。
+  void _handleSuggestionAppend(String text) {
+    if (text.isEmpty) return;
+    _draft.value = text;
+  }
+
+  /// spec 卡片上的动作上抛给 app 层。
+  void _handleSpecAction(SpecUiAction action) {
+    widget.onSpecAction?.call(action);
+  }
+
+  /// 提交归属反馈（防重复点击；与 [_handleResolve] 同构）。
+  ///
+  /// ## 为什么这里比确认卡多一层「乐观置灰」与失败提示
+  ///
+  /// 确认卡有 `busy` 态，且服务端**一定会在同一个 turn 内**回
+  /// `confirmation_resolved`/`confirmation_expired`（它阻塞 turn）。归属反馈
+  /// 不阻塞任何东西，`routing_feedback` 是旁路事件：SSE 断线、回放窗口被
+  /// 穿透、或服务端写标注失败时，它可能永不到达。
+  ///
+  /// 而回执是**一次性 CAS**：重试的第二次必然 404。故「点了没反应」在这里
+  /// 不是体验问题，是功能失效——用户会把卡片当成坏的。
+  ///
+  /// 故：成功后才本地置灰（[item.resolved] 仍是权威，事件到达时两者一致），
+  /// 失败则提示且**保留可点**（不把一次网络故障变成只读卡）。
+  Future<void> _handleResolveFeedback(String token, bool correct) async {
+    final callback = widget.onResolveFeedback;
+    if (callback == null || _resolvingFeedback.contains(token)) return;
+
+    setState(() => _resolvingFeedback.add(token));
+    try {
+      await callback(token, correct);
+      if (mounted) setState(() => _submittedFeedback.add(token));
+    } on HttpError catch (e) {
+      // 404 / 409 feedback_not_applied 在这里有确定含义：token 已过期 /
+      // 已被消费 / 不是本人的请求（服务端把三者统一 404 避免存在性探针；
+      // Go `a18a017e` 起回放路径另发 409 code=feedback_not_applied，语义
+      // 相同——「这个回执永远不会再被接受」）。文案不能只说「提交失败」
+      // ——那会让用户反复重试一个永远不会成功的请求。
+      final notAppliable =
+          e.statusCode == 404 ||
+          (e.statusCode == 409 && e.errorCode == 'feedback_not_applied');
+      if (mounted) {
+        _showMessage(notAppliable ? '这条反馈已失效，无法再作答' : '反馈提交失败：${e.message}');
+      }
+    } on SpbError catch (e) {
+      if (mounted) _showMessage('反馈提交失败：${e.message}');
+    } catch (e) {
+      if (mounted) _showMessage('反馈提交失败：$e');
+    } finally {
+      if (mounted) setState(() => _resolvingFeedback.remove(token));
+    }
+  }
+
+  /// 提交习惯建议操作（接受 / 忽略 / 稍后），三个共用一个在途标记。
+  ///
+  /// ## 为什么三者共用一个集合
+  ///
+  /// 它们作用于**同一张卡**，且在途期间卡上三个按钮都应禁用（用户在等结果，
+  /// 不该再点另一个）。分三个集合反而要维护三份「另一个是否在途」的查询。
+  ///
+  /// 在途标记按 suggestionId 记录，且**在回调返回后立即清除**（不等 resolved
+  /// 事件到达）：若服务端广播延迟，一直禁用会让用户以为卡坏了；而服务端的 CAS
+  /// 已经能挡住真正的重复提交。
+  Future<void> _handleHabitAction(
+    HabitSuggestionItem suggestion,
+    void Function(HabitSuggestionItem suggestion) callback,
+  ) async {
+    if (!suggestion.canResolve ||
+        _resolvingHabit.contains(suggestion.suggestionId)) {
+      return;
+    }
+
+    setState(() => _resolvingHabit.add(suggestion.suggestionId));
+    try {
+      callback(suggestion);
+    } finally {
+      if (mounted) {
+        setState(() => _resolvingHabit.remove(suggestion.suggestionId));
+      }
+    }
+  }
+
+  /// 是否可以点「停止生成」。
+  ///
+  /// 两个条件：有流式项，且该项带着非空 [ConversationItem.turnId]。
+  /// 后者不可省：`turnId` 为空说明事件未携带该字段（历史数据或异常载荷），
+  /// 此时发不出正确的取消请求（见 [_handleCancelTurn]）。
+  /// 提交中（[_cancelling]）同样禁用，避免连点。
+  ///
+  /// 接受 [streaming]（由 `build` 算一次后传入）而不是自己再扫一遍：
+  /// 修复前这个 getter 与 `_staleTurnItem` / `_visibleActivity` 各自调用
+  /// `_streamingItem`，一次 build 就是 3 次 O(n) 尾向扫描。
+  bool _canCancelTurnFor(ConversationItem? streaming) {
+    if (_cancelling) return false;
+    return streaming != null && streaming.turnId.isNotEmpty;
+  }
+
+  /// 本 turn 的进度（工具调用数 + 最近工具名 + 是否已有正文）。
+  ///
+  /// ## 为什么三个量合成一次扫描
+  ///
+  /// 它们都要「从尾部往回转，遇到别的 turn 就停」。分开算就是多次带早退的
+  /// 扫描；合成一次后 [PerfProbe.visitedItems] 的上界不变（仍是一次尾向
+  /// 扫描），而底部状态条能同时拿到「调了几个工具」与「有没有正文」。
+  ///
+  /// 扫描本身在 [scanTurnProgress]（与两端「动态」面板共用同一口径），本方法
+  /// 只负责两件页面独有的事：stale 让位、把性能计数器接上。
+  ///
+  /// ## stale 时全部清零
+  ///
+  /// 继续显示「已调 8 个工具」会与「长时间无进展」自相矛盾——后者是关于前者
+  /// 的结论。活动快照同理（它是 Transient，断线后可能停在 State 里）。
+  ///
+  /// ## 「已有正文」为何从尾部倒扫
+  ///
+  /// 修复前是 `for (final item in _items)` 正向全表扫。改成倒扫 + 遇到**别的
+  /// turn** 立即 break：同一 turn 的项在时间线上是连续的（归约器按事件顺序
+  /// 追加），故只要看到 turnId 不同就说明已经扫完了这个 turn 的全部项，再往
+  /// 前都是更早的 turn——而较早的 turn 不可能是 [streaming] 的正文。
+  ///
+  /// ⚠️ 早退条件只能是 `turnId != streaming.turnId`，**不能**是
+  /// `is AssistantMessageItem`：同一 turn 中间可能夹着 `ToolCallItem` /
+  /// `ThoughtItem`，用类型早退会漏掉工具轮之后的正文（那个 turn 就永远
+  /// 挂着「执行中」）。同一理由也让它能顺手数完本 turn 的工具调用。
+  TurnProgress _turnProgressFor(ConversationItem? streaming) {
+    if (streaming == null || streaming.turnId.isEmpty) return TurnProgress.none;
+
+    // 已判超时 → 让位给 [_StaleTurnNotice]。
+    if (_staleTurnIds.contains(streaming.turnId)) return TurnProgress.none;
+
+    return scanTurnProgress(
+      _items,
+      turnId: streaming.turnId,
+      // 把计数上交给页面：`scanTurnProgress` 不依赖 Flutter，拿不到 PerfProbe。
+      onVisit: () => PerfProbe.visitedItems++,
+    );
+  }
+
+  /// 该上屏的活动快照；null 表示不该显示。
+  ///
+  /// 已有正文 → 让位给真实内容。这条**只属于页面细条**：面板是「现在在干
+  /// 什么」的集中视图，即使正文在流式也照示。
+  TurnActivitySnapshot? _activityFor(TurnProgress progress) {
+    final turnId = progress.turnId;
+    if (turnId == null || progress.hasAgentContent) return null;
+    return _activities[turnId];
+  }
+
+  /// 「已送达服务端、agent 还没产出任何东西」的 turnId；空串 = 不显示细条。
+  ///
+  /// ## 它补的是哪段空窗（用户报障）
+  ///
+  /// 发送后到首字返回之间，用户此前**看不到任何东西**：气泡里的「发送中」
+  /// 在响应落地那一刻就消失了（`UserMessageItem.pending`），而底部槽位原有
+  /// 四档全靠**服务端主动发来的事件**（`queue_state` / `turn_activity` /
+  /// 增量帧）——服务端还在建执行上下文时一个都没有。于是「它在跑」与
+  /// 「点了没反应」在 UI 上完全无法区分。
+  ///
+  /// ## 判据（与看门狗同一个）
+  ///
+  /// [EventReducer.lastTurnRun] 的 `preparing`：最后一个 turn 只有用户侧项、
+  /// 没有终态。同一个判据也用于武装看门狗计时器，故「界面说在等」与
+  /// 「超时提示判定无进展」永远不会自相矛盾。
+  ///
+  /// ## 三个「不显示」
+  ///
+  /// - **本会话没发过这个 turn**（[ChatStreamController.lastSentTurnId]）：
+  ///   重开一个历史里带破碎状态的对话时，不能把「几小时前那个没有终态的
+  ///   turn」说成「正在准备响应」——那是编造（详细取舍见该 getter）。
+  /// - **已有流式项**：agent 已开始吐字（空文本帧被归约层丢弃，故有项即有
+  ///   内容），让位给正文/思考。
+  /// - **时间线来自本地缓存**：那是「你看到的是旧历史」，不是「正在等回复」，
+  ///   顶部已有 `_OfflineTimelineNotice`；再报一条就是自相矛盾。
+  String _awaitingReplyTurnId(ConversationItem? streaming) {
+    if (streaming != null) return '';
+    if (_timelineFromCache) return '';
+    final controller = widget.controller;
+    final sentTurnId = controller.lastSentTurnId;
+    if (sentTurnId.isEmpty) return '';
+    final run = controller.lastTurnRunSnapshot;
+    if (run.state != LastTurnRunState.preparing) return '';
+    // 只认「刚发的那一轮」：若之后又发了新的一条（lastSentTurnId 已变），
+    // 旧 turn 的 preparing 不再代表当前等待。
+    return run.turnId == sentTurnId ? run.turnId : '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = widget.title;
+
+    // ## 本次 build 的全部派生查询都在这里算一次
+    //
+    // 修复前 `_streamingItem` 是个 getter，被 AppBar 的 `_canCancelTurn`、
+    // body 的 `_staleTurnItem` / `_visibleActivity` 各自调用——一次 build 就是
+    // 3 次 O(n) 尾向扫描（叠上 AppBar 与 body 各走一遍的求值，实测达 5 次）。
+    // 现在算一次，三个派生量全部从它派生。
+    //
+    // ⚠️ 计数器 [PerfProbe.visitedItems] 就挂在下面这两处扫描里，测试用
+    // 「一次 build 扫了多少条」钉住这个上界。
+    //
+    // ⚠️ `_turnProgressFor` 仍会扫一次 `_items`（数本 turn 的工具调用、找
+    // 「是否已有正文」），但那是**带早退**的尾向扫描（遇到别的 turn 就
+    // break），而不是全表。
+    final streaming = _streamingItem;
+    final staleTurnItem = _staleTurnItemFor(streaming);
+    final canCancelTurn = _canCancelTurnFor(streaming);
+    final progress = _turnProgressFor(streaming);
+    final visibleActivity = _activityFor(progress);
+    // 「已送达、agent 未动」的空窗（用户报障：发了消息，底部什么都不说）。
+    // 判据与看门狗武装计时器同一个，详见 [_awaitingReplyTurnId]。
+    final awaitingTurnId = _awaitingReplyTurnId(streaming);
+
+    return Scaffold(
+      appBar: title == null
+          ? null
+          : AppBar(
+              title: Text(title, overflow: TextOverflow.ellipsis),
+              // 连接状态指示：SSE 断线时用户需要知道「不是没回复，是断了」。
+              actions: [
+                // 停止生成：仅在确有正在生成的轮次时可点。
+                //
+                // 选**禁用**而非隐藏：AppBar 宽度恒定，不会因状态切换而抖动；
+                // 且用户能看到「这里有一个停止按钮，只是现在没什么可停」。
+                if (widget.onCancelTurn != null) ...[
+                  IconButton(
+                    key: const ValueKey('conversation-cancel-turn'),
+                    icon: const Icon(Icons.stop_circle_outlined),
+                    tooltip: '停止生成',
+                    onPressed: canCancelTurn ? _handleCancelTurn : null,
+                  ),
+                  const SizedBox(width: SpbSpacing.xs),
+                ],
+                // 调用方追加的操作（如桌面端的交付物侧边栏开关），
+                // 放在连接指示**之前**：连接状态是全局性的，固定在最右侧。
+                ...?widget.actions,
+                // 对话内搜索：搜的是**已加载的时间线**（含 agent 回复），
+                // 与全局搜索页（只搜用户输入、跨对话）互补。
+                //
+                // 放在 widget.actions **之后**：它是页面固有能力，而 actions
+                // 是各端追加的。
+                if (widget.enableSearch)
+                  IconButton(
+                    key: const ValueKey('conversation-search-open'),
+                    icon: const Icon(Icons.search),
+                    tooltip: '在本对话中搜索',
+                    onPressed: _openSearch,
+                  ),
+                // 窄屏溢出菜单（issue #31）：收纳调用方交来的低频入口，并把
+                // 「在本对话中搜索」追加在末尾。
+                //
+                // 搜索项**总是**追加：窄屏不摆 `conversation-search-open`
+                // 图标（没地方），但功能不能因此消失。两项的 `key` 不同
+                // （`conversation-search-open` vs `menu-conversation-search`），
+                // 故测试能分别断言两种布局下的路径。
+                if (widget.overflowItems != null)
+                  _OverflowMenu(
+                    items: widget.overflowItems!,
+                    onSearch: _openSearch,
+                  ),
+                StreamBuilder<SseState>(
+                  stream: widget.controller.connectionState,
+                  initialData: widget.controller.currentState,
+                  builder: (context, snapshot) => _ConnectionIndicator(
+                    state: snapshot.data,
+                    onReconnect: widget.onReconnect,
+                  ),
+                ),
+                const SizedBox(width: SpbSpacing.sm),
+              ],
+            ),
+      body: Column(
+        children: [
+          // 离线数据提示（issue #29 切片 B）：贴最顶。
+          //
+          // 与下面几条状态条的语义不同：那几条说的是「这一轮/这个 turn」的状态，
+          // 而本提示说的是「你看到的整份历史都来自本地缓存」——它修饰的是
+          // **整个时间线**，故贴顶且独立成条（与切片 A 的
+          // `GroupListPage._CacheNotice` 同一取向）。
+          if (_timelineFromCache) const _OfflineTimelineNotice(),
+          // 上下文用量 + token 消耗：贴在时间线**上方**（顶部读数区），不进时间线。
+          //
+          // 与下面两条状态条的位置差异是有意的：用量是「资源占用」的常驻读数，
+          // 与输入/待处理无关，故贴顶；而活动指示描述「正在跑的那个 turn」，
+          // 语义上贴时间线底部。
+          //
+          // 两行（消耗 / 上下文）同时存在时不拆成两条 bar：它们回答的是同一个
+          // 问题（「这个对话贵不贵、快不快要压缩」），并在同一个槽位里对齐比较。
+          if ((_contextUsage != null && _contextUsage!.hasData) ||
+              (_usageSummary != null && _usageSummary!.hasData))
+            _UsageBar(contextUsage: _contextUsage, groupUsage: _usageSummary),
+          // 语音播报状态：同样贴顶（常驻读数区）。
+          //
+          // 与下面「等待/活动」槽位分开是有意的：那两个回答「为什么还没回复」，
+          // 而播报是**回复已生成之后**的异步衍生状态，与等待无关；挤进同一槽位
+          // 会让「在等重试」与「语音失败」互相遮挡。
+          if (_ttsStatus != null && _ttsStatus!.hasStatus)
+            _TtsStatusBar(status: _ttsStatus!),
+          Expanded(
+            child: _items.isEmpty
+                ? EmptyState(message: widget.emptyHint)
+                : _buildTimeline(),
+          ), // 待处理消息栏紧贴输入框上方：它描述的是「我刚发出去、还没被处理
+          // 的那条」，语义上与输入区相邻而非与时间线相邻。
+          // 执行中活动指示放在**时间线与待处理栏之间**：它描述的是「正在跑的
+          // 那个 turn 的进度」，语义上属于时间线；而待处理栏的语义属于输入区，
+          // 两者各贴各自的一端（见各自文档）。
+          // 执行等待/重试提示（queue_state / retry_scheduled）：与活动指示
+          // **共用同一槽位**，且优先于它。
+          //
+          // 判定依据：两者语义互斥——本提示是「还没开始跑（等名额/等重试）」，
+          // 活动指示是「已在跑但没正文」。若同时存在（例如旧的排队事件尚未被
+          // 起跑事件清掉，而心跳已先到），显示「在等」比显示「在跑」更保守也
+          // 更准（对齐 webapp `turn.activity && !turn.queueReason`）。
+          if (staleTurnItem != null)
+            const _StaleTurnNotice()
+          else if (_executionStatus != null)
+            _ExecutionStatusBar(status: _executionStatus!)
+          else if (progress.toolCount > 0)
+            // 有工具调用的轮次：报「已调 N 个工具 · 最近 X」。
+            //
+            // 这一档是新增的：此前调了 8 个工具的长回复里底部什么都没有
+            //（正文一出现，活动指示就按既有规则让位），用户看不出「它还在
+            // 干活」还是「已经停了」。
+            //
+            // `deriveTurnStatus` 在 `toolCount > 0` 时必定非 null（与上面的
+            // 判据同口径），故用 `!` 而不是再造一个兜底文案。
+            TurnStatusStrip(
+              summary: deriveTurnStatus(
+                isStreaming: true,
+                activity: visibleActivity,
+                toolCount: progress.toolCount,
+                lastToolName: progress.lastToolName,
+              )!,
+            )
+          else if (visibleActivity != null)
+            _TurnActivityIndicator(activity: visibleActivity)
+          // 空窗兵底：消息已送达、agent 还没产出任何东西（见
+          // [_awaitingReplyTurnId]）。
+          //
+          // ## 为什么排在最后一档
+          //
+          // 上面四档都是**服务端给出了证据**的状态（stale 判定 / 排队原因 /
+          // 工具进度 / 活动心跳）。本档只是「没有任何证据、但结构上这一轮
+          // 还没结束」的兵底，有证据时当然不能盖过它。
+          //
+          // ## 为何 stale 时让位
+          //
+          // 看门狗已判定「很久没收到进展」时，「正在准备响应」就是过期信息
+          // （与工具数那一档同一条理由）。注意此时 `staleTurnItem` 为 null
+          // （没有流式项），故必须在这里单独判一次，否则用户会看到一条
+          // 永不消失的「正在准备响应」。
+          else if (awaitingTurnId.isNotEmpty &&
+              _staleTurnIds.contains(awaitingTurnId))
+            const _StaleTurnNotice()
+          else if (awaitingTurnId.isNotEmpty)
+            // `isStreaming: true` + `isPreparing: true` 必定非 null（首行
+            // 才判 isStreaming），故用 `!` 而不再造一个兵底文案。
+            TurnStatusStrip(
+              summary: deriveTurnStatus(isStreaming: true, isPreparing: true)!,
+            ),
+          // 离线队列（issue #30）：紧贴待处理栏**上方**。
+          //
+          // ## 为什么两条并存而不是合并
+          //
+          // 它们回答两个不同的问题：本栏是「我这边还没发出去」（客户端队列），
+          // 待处理栏是「服务端还在攒批」（`chat_inbox_messages`）。断网时先入
+          // 客户端队列；联网投递成功后服务端才开始攒批——两者**可以同时非空**。
+          // 合并会让「消息到底在哪一端」变得不可知。
+          //
+          // ## 为什么在待处理栏之上
+          //
+          // 本栏的条目**更早**（还没到服务端），故离输入框更远——视觉上
+          // 「越靠外 = 越早期」与时间顺序一致。
+          if (widget.outboxEntries != null)
+            OutboxBar(
+              entries: _outbox,
+              // 取消 / 重试被拒绝时给出反馈（见 `_rejectNotice`）。
+              //
+              // ## 为什么要在页面包装一层，而不是把回调直接透传
+              //
+              // 回调返回 false 表示**拒绝**（条目正在投递中 / 存储删除失败）。
+              // 组件层不做乐观移除，但若什么都不说，用户点了「取消」看到列表
+              // 没变，会以为按钮坏了——于是再点几次。必须说明原因。
+              onCancel: widget.onCancelOutbox == null
+                  ? null
+                  : (id) => _withRejectionNotice(
+                      widget.onCancelOutbox!(id),
+                      '这条消息正在发送中，稍候再取消',
+                    ),
+              onRetry: widget.onRetryOutbox,
+              onRemove: widget.onRemoveOutbox,
+            ),
+          if (widget.loadPending != null && widget.undoPending != null)
+            PendingMessagesBar(
+              load: widget.loadPending!,
+              undo: widget.undoPending!,
+              // 本栏也提供发送入口：它展示的正是「将要被提交的那几条」，
+              // 多条 pending 时的策略选择需要这个上下文。
+              flush: widget.onFlush,
+              flushWithStrategy: widget.onFlushWithStrategy,
+              reloadKey: widget.pendingReloadKey ?? '',
+            ),
+          MessageComposer(
+            onSubmit: _handleSubmit,
+            onFlush: widget.onFlush,
+            onFlushWithStrategy: widget.onFlushWithStrategy,
+            onNewSession: widget.onNewSession,
+            draft: _draft,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 时间线展示行（聚合后的结果）。
+  ///
+  /// ## 为什么在渲染前算一次，而不是在 `itemBuilder` 里
+  ///
+  /// 聚合是**全量**的（分组需要看到整段才能判断「连续同秒」），且 `ListView`
+  /// 会多次调用 `itemBuilder`（滚动/重建）。在 builder 里算会把 O(n) 的分组
+  /// 变成 O(n·可见项) 次重复计算，且每次得到新对象会让 `ValueKey` 失效。
+  ///
+  /// 放在 `_buildTimeline` 里（而不是 `itemBuilder` 里）：每次 build 至多算
+  /// 一次，且 `itemBuilder` 拿到的是**同一批对象**，`ValueKey` 不会失效。
+  ///
+  /// ## 按 `identical` 缓存（为什么需要）
+  ///
+  /// 「一次推送只 build 一次」这个前提并不成立：
+  ///
+  /// - `setState` 之后紧跟的布局修正、滚动通知触发的重建、父层传入新参数
+  ///   ……都会再 build 一次，而 `_items` 没变；
+  /// - 流式期间状态条（activity / executionStatus / ttsStatus）每几秒更新
+  ///   一次，每次都是一次完整 build。
+  ///
+  /// 每次重算全量分组是纯浪费（实测 2000 项约 0.26 ms/次，本机 2026-10）。
+  ///
+  /// 用 `identical(_items, _lastRowsItems)` 作判据而不是在 `_onItems` 里置脏：
+  ///
+  /// - [ConversationItem] **没有** `==`（也不该有：它的字段含文本与工具输出，
+  ///   逐字段比较比分组本身还贵），故不能用「内容相等」判。
+  /// - `_items` 只在三处被赋值，全部是**控制器新建的 List**（`snapshot` 或
+  ///   推送的列表），故 identity 变化即代表内容可能变——**不会**出现「同一个
+  ///   List 被就地修改」的情况。
+  /// - 置脏标记需要每个改 `_items` 的地方都记得置；identity 判据不需要任何
+  ///   配合，少一处可忘的地方。
+  List<TimelineDisplayRow> _displayRows() {
+    final cached = _lastRows;
+    if (cached != null && identical(_items, _lastRowsItems)) return cached;
+
+    PerfProbe.displayRowsComputations++;
+    // 两趟展示层聚合：同 turn 同秒的文件→批量卡，连续同 turn 的工具调用→折叠卡。
+    // 入口在 `spb_domain`（`groupTimelineForDisplay`），口径不放在这里：它不是
+    // 渲染细节（阈值与分组规则三端应一致，且需能在无头环境逐条断言）。
+    final rows = groupTimelineForDisplay(_items);
+    _lastRows = rows;
+    _lastRowsItems = _items;
+    _rowKeys.recycle(locateIdsOfAll(rows));
+    _rowIndices = <Key, int>{};
+    _itemRowIndices = <String, int>{};
+    for (var i = 0; i < rows.length; i++) {
+      PerfProbe.timelineIndexVisits++;
+      final ids = locateIdsOf(rows[i]);
+      _rowIndices[_rowKeys.keyFor(ids)] = i;
+      for (final id in ids) {
+        _itemRowIndices[id] = i;
+      }
+    }
+    // 与 rows 同步重算（它同样只取决于 `_items`）。放在这里而不是每次 build
+    // 都扫一遍：重建时 `_items` 没变，结果必然相同。
+    _keepAliveIds = _computeKeepAliveIds(_items);
+    _checkRowKeyOwners(rows);
+    return rows;
+  }
+
+  /// 跨行主键去重的临时集合（避免每次重算展示行都新分配一个 `Set`）。
+  ///
+  /// 只在 [_displayRows] 里用，且用 `clear()` 而不是重建——2000 行的插入
+  /// 实测远低于分组本身（0.26 ms/次），但也不该每帧付一次分配代价。
+  final Set<String> _ownerScratch = <String>{};
+
+  /// 已经报过一次主键撞车（同一页面实例内只报一次，避免刷满 500 条环形缓冲）。
+  bool _rowOwnerCollisionLogged = false;
+
+  /// release 侧的 `GlobalKey` 撞车自检（§6.18 那类缺陷的可观测化）。
+  ///
+  /// ## 为什么必须自己检
+  ///
+  /// `Multiple widgets used the same GlobalKey` 是 `BuildOwner` 在 **debug**
+  /// 下用 `assert` 校验的；release 构建里那条校验根本不跑，用户看到的只有
+  /// 「整行空白，滚回来又出来」——正是 `docs/design-decisions/chat.md` §6.18
+  /// 里用户报障的原话。而在报障现场拿到 release 包+日志时，若没有这条自检，
+  /// 就只能靠「猜」区分「键撞车」与「绘制层没画」。
+  ///
+  /// 判据极简：行主键（`locateIdsOf(row).first`）在本次行集合里唯一。不唯一时
+  /// [RowLocateRegistry.keyFor] **必然**把同一个 `GlobalKey` 实例发给两行。
+  ///
+  /// ## 为什么放在 `_displayRows()` 而不是 `itemBuilder`
+  ///
+  /// 行集合只在这里变化（`identical(_items, _lastRowsItems)` 命中缓存时直接
+  /// 返回），故检查是「每次重算一次」而不是每帧一次；且行集合正是撞车的
+  /// 事实来源，检查时机与它同频。
+  void _checkRowKeyOwners(List<TimelineDisplayRow> rows) {
+    _ownerScratch.clear();
+    List<String>? dups;
+    for (final row in rows) {
+      final owner = locateIdsOf(row).first;
+      if (!_ownerScratch.add(owner)) {
+        (dups ??= <String>[]).add(owner);
+        if (dups.length >= 3) break;
+      }
+    }
+    if (dups == null) return;
+
+    PerfProbe.rowKeyOwnerCollisions++;
+    if (_rowOwnerCollisionLogged) return;
+    _rowOwnerCollisionLogged = true;
+    SpbLog.warn('时间线行主键重复：同帧两行会拿到同一个 GlobalKey（后出现的那行将渲染为空白）', {
+      'duplicate_owners': dups
+          .map((id) => id.isEmpty ? '<empty>' : id)
+          .join(','),
+      'rows': rows.length,
+      'note': 'release 里 Flutter 的 GlobalKey 唯一性校验不运行——本日志即那条缺失的报错',
+    });
+  }
+
+  /// [_displayRows] 的缓存（与 [_lastRowsItems] 成对，`identical` 作判据）。
+  List<TimelineDisplayRow>? _lastRows;
+  List<ConversationItem>? _lastRowsItems;
+
+  // 与展示行一起缓存：状态条重建不应重新遍历历史、登记全部 Key。
+  Map<Key, int> _rowIndices = const {};
+  Map<String, int> _itemRowIndices = const {};
+
+  Widget _buildTimeline() {
+    final rows = _displayRows();
+    var centerIndex = _itemRowIndices[_timelineCenterId] ?? -1;
+    if (centerIndex < 0) {
+      // 首次载入、切组或裁剪掉分界行时重新选取，不能把旧对话的坐标沿用下来。
+      centerIndex = 0;
+      _timelineCenterId = locateIdsOf(rows.first).first;
+      _timelineOrigin = SpbSpacing.pagePadding.top;
+    }
+    final split = centerIndex;
+    final indices = _rowIndices;
+
+    // 中心之前按倒序向上布局，之后仍按时间顺序向下布局。前插历史只改变
+    // minScrollExtent，既不猜测未构建行高，也不发 jumpTo 打断用户正在拖动的手势。
+    // 两段都保持惰性构建，并按稳定 Key 找回重排后的 Element。
+    SliverList buildRows({required bool older}) => SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, index) {
+          final rowIndex = older ? split - index - 1 : split + index;
+          if (rowIndex == rows.length) {
+            return const SizedBox(height: SpbSpacing.xxl);
+          }
+          return _buildTimelineRow(rows[rowIndex]);
+        },
+        childCount: older ? split : rows.length - split + 1,
+        findChildIndexCallback: (key) {
+          final index = indices[key];
+          if (index == null || (index < split) != older) return null;
+          return older ? split - index - 1 : index - split;
+        },
+        semanticIndexCallback: (_, index) {
+          final rowIndex = older ? split - index - 1 : split + index;
+          return rowIndex == rows.length ? null : rowIndex;
+        },
+        // 长正文跨多屏，避免缓存整条回复的绘制层；其他卡片在行内加回边界。
+        addRepaintBoundaries: false,
+      ),
+    );
+
+    const padding = SpbSpacing.pagePadding;
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(
+        dragDevices: {
+          PointerDeviceKind.touch,
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.trackpad,
+          PointerDeviceKind.stylus,
+        },
+      ),
+      child: NotificationListener<Notification>(
+        onNotification: (notification) {
+          // 已在顶部时上拖可能没有像素变化；仍须尊重用户意图，停止追底并翻页。
+          if (notification is UserScrollNotification &&
+              notification.depth == 0 &&
+              notification.direction == ScrollDirection.forward) {
+            _following = false;
+            if (notification.metrics.extentBefore <= _loadOlderThreshold) {
+              unawaited(_maybeLoadOlder());
+            }
+          }
+          // 图片加载、逐字 reveal、窗口缩放只改变布局尺寸，不一定产生像素通知。
+          // 内嵌代码块等滚动区域的 metrics 不参与时间线追底。
+          if (notification is ScrollMetricsNotification &&
+              notification.depth == 0 &&
+              _following) {
+            _scheduleFollowBottom();
+          }
+          return false;
+        },
+        child: LayoutBuilder(
+          builder: (context, constraints) => CustomScrollView(
+            controller: _scrollController,
+            center: _timelineCenterKey,
+            // 起始留白属于坐标原点；真正的顶部 padding 随旧页向上移，
+            // 避免第一回翻页时删掉中心 padding，造成一小段额外位移。
+            anchor: (_timelineOrigin / constraints.maxHeight).clamp(0.0, 1.0),
+            semanticChildCount: rows.length,
+            // 预建 1.5 屏，沿用长 Markdown 的滚动预解析范围与有界 keep-alive。
+            scrollCacheExtent: const ScrollCacheExtent.viewport(1.5),
+            slivers: [
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(
+                  padding.left,
+                  padding.top,
+                  padding.right,
+                  0,
+                ),
+                sliver: buildRows(older: true),
+              ),
+              SliverPadding(
+                key: _timelineCenterKey,
+                padding: EdgeInsets.fromLTRB(
+                  padding.left,
+                  0,
+                  padding.right,
+                  padding.bottom,
+                ),
+                sliver: buildRows(older: false),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimelineRow(TimelineDisplayRow row) {
+    // 外层 GlobalKey 同时用于搜索定位与 Sliver 的 findChildIndexCallback；
+    // 内层 ValueKey 区分单条/批量形态，折叠变化时保留正确的组件身份。
+    //
+    // ## 批量卡为什么给每个成员都登记定位入口
+    //
+    // 搜索命中拿到的 `itemId` 是**具体某条**的 id（可能是批里的第 3 个
+    // 文件），而行 key 是首成员 id。若只登记首成员，搜到批内其他文件时
+    // `_rowKeys` 里找不到，会退化成「请向上滚动」的提示——而那条明明就
+    // 在屏幕上。
+    //
+    // ⚠️ 登记的是**别名**，不是把同一个 `GlobalKey` 实例分给每个成员：
+    // 那样一旦这段文件被拆成多行（缓冲区裁剪 / 翻页拼接都会），多行就会
+    // 共用一个 `GlobalKey` → Flutter 抛 `Multiple widgets used the same
+    // GlobalKey` → 后出现的那几行**渲染为空白**。详见
+    // `RowLocateRegistry` 的类文档。
+    final locateKeys = locateIdsOf(row);
+    final locateKey = _rowKeys.keyFor(locateKeys);
+
+    final child = Padding(
+      // 稳定 Key：单条用归约层的 item.id；批量卡用首成员 id（归约层保证
+      // 同一逻辑项 id 不变，故批的 key 也稳定）。Flutter 据此复用 Element，
+      // 避免流式更新时整列重建。
+      key: ValueKey(switch (row) {
+        SingleItemRow(:final item) => item.id,
+        AgentFileBatchRow(:final files) => 'batch:${files.first.id}',
+        // 前缀隔开：工具批与文件批的首成员 id 都是服务端事件 id，不带
+        // 前缀时「同一秒生成的第一个文件」与「同一轮第一条工具调用」
+        // 理论上可能撞上同一个 key。
+        ToolCallBatchRow(:final calls) => 'tool-batch:${calls.first.id}',
+      }),
+      padding: const EdgeInsets.only(bottom: SpbSpacing.md),
+      child: switch (row) {
+        SingleItemRow(:final item) => _buildItem(item),
+        AgentFileBatchRow() => AgentFileBatchCard(
+          batch: row,
+          onDownload: widget.onDownloadAgentFile,
+          // 传**记忆化**的那个（而不是 `widget.onLoadThumbnailAgentFile`）：
+          // 批量卡的每个成员同样会在滚出 `cacheExtent` 后被 dispose，
+          // 滚回来重新 `initState`。走方法 tear-off 还额外得到稳定的
+          // 回调 identity（虽然子卡已不靠它判重拉）。
+          // 空 `ufsFileId` 的成员由批量卡自己拦（它判 `isEmpty` 后传 null）。
+          onLoadThumbnail: widget.onLoadThumbnailAgentFile == null
+              ? null
+              : _loadThumbnailMemoized,
+          onOpen: widget.onOpenAgentFile,
+          onReveal: widget.onRevealAgentFile,
+          onPreview: widget.onPreviewAgentFile,
+        ),
+        // 工具调用折叠卡：不需要任何页面回调（工具卡是纯展示，入参/输出
+        // 已在归约结果里），故不经过 [_buildItem]。
+        ToolCallBatchRow() => ToolCallBatchCard(batch: row),
+      },
+    );
+    return KeyedSubtree(
+      key: locateKey,
+      child: switch (row) {
+        SingleItemRow(item: AssistantMessageItem()) => child,
+        _ => RepaintBoundary(child: child),
+      },
+    );
+  }
+
+  /// 构建（或复用）一条助手气泡。
+  ///
+  /// 复用机制与理由见 [_bubbleCache]。这里的指纹是气泡**全部**的渲染输入：
+  ///
+  /// | 字段 | 来源 | 为什么进指纹 |
+  /// |---|---|---|
+  /// | `text` | item | 正文，流式时每帧都变 |
+  /// | `isStreaming` | item × `_staleTurnIds` | 超时兜底会让它从 true 变 false |
+  /// | `keepAlive` | `_keepAliveIds` | 窗口滑动时逐条变化 |
+  ///
+  /// `createdAt` / `turnId` / `agentId` / `id` **不**进指纹：前三个不参与渲染，
+  /// 而 `id` 就是缓存的键本身（变了就是另一条记录）。
+  Widget _buildAssistantBubble(AssistantMessageItem item) {
+    final text = item.text;
+    final isStreaming =
+        item.isStreaming && !_staleTurnIds.contains(item.turnId);
+    final keepAlive = _keepAliveIds.contains(item.id);
+
+    final cached = _bubbleCache[item.id];
+    if (cached != null &&
+        cached.fingerprint == (text, isStreaming, keepAlive)) {
+      // 命中：交回**同一实例** → `Element.updateChild` 的
+      // `child.widget == newWidget` 分支命中 → 子树连 build 都不跑。
+      return cached.widget;
+    }
+
+    final bubble = AssistantMessageBubble(
+      // 带 key：缓存命中时同一实例出现在同一位置，key 不是必需的；但被逐出后
+      // 重建、或同一 id 换了内容时，key 能让 Element 复用而不是重挂（保留
+      // `gpt_markdown` 的增量解析状态）。
+      key: ValueKey(item.id),
+      text: text,
+      isStreaming: isStreaming,
+      onLinkTap: _handleOpenLink,
+      // 滚出视口后不销毁（保留 Markdown 解析缓存）——仅限够长且是最近
+      // 若干个的那几条，见 [_keepAliveMinChars] / [_keepAliveWindow]。
+      keepAlive: keepAlive,
+    );
+
+    if (_bubbleCache.length >= _bubbleCacheLimit) {
+      // 简单逐出：清掉最早插入的那一批（Dart 的 `Map` 保持插入顺序）。
+      // 不做 LRU——维护「最近使用」需要在每次命中时搬动元素，而命中路径正是
+      // 要压到最便宜的那条。
+      final drop = _bubbleCache.keys.take(_bubbleCacheLimit ~/ 2).toList();
+      for (final k in drop) {
+        _bubbleCache.remove(k);
+      }
+    }
+    _bubbleCache[item.id] = (
+      fingerprint: (text, isStreaming, keepAlive),
+      widget: bubble,
+    );
+    return bubble;
+  }
+
+  // 装配层每次 SSE 重建都会生成新闭包；稳定入口让未变气泡保持缓存命中，
+  // 点击时再读取当前回调，兼顾回调更新和从 null 启用/禁用。
+  void _handleOpenLink(String url, String title) =>
+      widget.onOpenLink?.call(url, title);
+
+  Widget _buildItem(ConversationItem item) => switch (item) {
+    UserMessageItem(
+      :final text,
+      :final pending,
+      :final routingReason,
+      :final routingSwitched,
+    ) =>
+      UserMessageBubble(
+        text: text,
+        pending: pending,
+        routingReason: routingReason,
+        routingSwitched: routingSwitched,
+      ),
+    // `isStreaming` 与超时集合求交：判超时后停掉光标。
+    //
+    // ⚠️ 只影响光标，**不改归约结果**——若 turn 其实仍在跑、增量帧随后到达，
+    // 段落会自然恢复流式态（不会出现重复气泡，因为归约输入未变）。
+    AssistantMessageItem() => _buildAssistantBubble(item),
+    ThoughtItem(:final text, :final isStreaming) => ThoughtTile(
+      text: text,
+      isStreaming: isStreaming && !_staleTurnIds.contains(item.turnId),
+    ),
+    ToolCallItem(:final name, :final args, :final output, :final isComplete) =>
+      ToolCallTile(
+        name: name,
+        args: args,
+        output: output,
+        isComplete: isComplete,
+      ),
+    ConfirmationItem() => ConfirmationCard(
+      question: item.question,
+      options: item.options,
+      resolved: item.resolved,
+      busy: _resolving.contains(item.confirmationId),
+      // 用卡行 id 而非 item.id（事件 id）——见 ConfirmationItem.confirmationId。
+      // 未携带 confirmation_id 的异常事件禁用按钮，不退化用事件 id 去试。
+      onResolve: item.canResolve
+          ? (option) =>
+                _handleResolve(item.groupId, item.confirmationId, option)
+          : null,
+    ),
+    FollowUpSuggestionItem() => FollowUpChips(
+      suggestions: item.suggestions,
+      // 带 agent 标注的语义：点建议时先切 Agent（若标注了）再追加到输入框。
+      //
+      // 为什么从「点了直接发送」改为「回填输入框」：服务端给建议卡的动作就是
+      // copy_text（「点击复制问题，可修改后再发送」），webapp 同样走
+      // onAppend——建议是**追问的起点**，用户常要改几个字再发。直接发出去
+      // 会把「我要改一下」变成「发错了再重来」。
+      //
+      // onSpecAction / onSelectAgent 都未注入时（旧调用方）退化为点击即发送。
+      richSuggestions: [
+        for (var i = 0; i < item.suggestions.length; i++)
+          FollowUpSuggestion(
+            text: item.suggestions[i],
+            agentId: item.agentIdAt(i),
+          ),
+      ],
+      onAppend: (widget.onSpecAction != null || widget.onSelectAgent != null)
+          ? _handleSuggestionAppend
+          : null,
+      onSelectAgent: widget.onSelectAgent,
+      onTap: _handleSubmit,
+    ),
+    GoalProgressItem() => SpecUiCard(
+      doc: item.spec,
+      // 进度卡里的按钮（goal_gate 的 spec 无动作，这里主要是向前兼容）。
+      onAction: _handleSpecAction,
+    ),
+    // 孤儿归属事件（同 turn 用户气泡不在缓冲里时的回退，如空文本消息被跳过 /
+    // 缓冲裁剪边界）。归约层是唯一守门员：无聊的孤儿已被丢弃，能走到这里的
+    // 都是有信息量的（新建 / 切换 / 未知原因），故这里**不再过滤**——上一版
+    // 在这里再判一次 isRoutineRoutingReason，会误杀「reason 无聊但
+    // switched=true」的行（页面看不到 switched，归约层凭它放行）。
+    RoutingNoticeItem(:final reason) => _RoutingNotice(reason: reason),
+    GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
+    ScheduleCreatedItem() => _ScheduleCreatedNotice(item: item),
+    DiagnosticNoticeItem() => _DiagnosticNotice(item: item),
+    ErrorItem(:final message, :final isRecoverable) => ErrorBanner(
+      // 重发是「用原输入再跑一轮」，按钮文案用「重发」而不是「重试」——
+      // 后者容易被读成「重试这个请求」（不产生新 turn），而实际会产生新 turn。
+      message: message,
+      onRetry:
+          (widget.onRetryTurn != null &&
+              isRecoverable &&
+              item.turnId.isNotEmpty)
+          ? () => _handleRetryTurn(item)
+          : null,
+      retryLabel: _retryingTurnId == item.turnId ? '重发中…' : '重发',
+    ),
+    FeedbackRequestItem() => FeedbackRequestCard(
+      question: item.question,
+      options: item.options,
+      // 已作答的两个来源：服务端的 `routing_feedback` 事件（权威），或本地提交
+      // 成功后的标记（见 [_submittedFeedback]）。后者不是多余的——回执成功后
+      // 只有服务端广播能置灰，而它可能因 SSE 断线/回放窗口缺失而永不到达，
+      // 届时用户会看到「点了没反应」并反复重试（第二次必然 404）。
+      resolved: item.resolved || _submittedFeedback.contains(item.token),
+      // 已失效是**另一个**状态，不能并进 resolved：
+      //
+      //   请求事件的 payload 不带 expires_at，而回执过期后服务端统一返 404。
+      //   没有它时「还没答」与「已经失效」在客户端看来完全一样——用户点一张
+      //   早就过期的卡得到 404，表现就是「点了没反应」。
+      //
+      // 传 expired 而不是把它折进 resolved：后者会把标题写成「已反馈」，
+      // 而用户其实没答过（把未发生的事显示成已发生）。
+      //
+      // `_feedbackTTL` 为 null（旧版后端未下发）时 isExpired 恒 false。
+      expired: item.isExpired(ttl: _feedbackTTL),
+      busy: _resolvingFeedback.contains(item.token),
+      // 四个条件都要满足才给可点按钮：
+      //   - app 层注入了回执通道（未注入时点了没反应，不如直接禁用）；
+      //   - token 非空（服务端按 token 直查请求，一次性 CAS，缺它必然失败）；
+      //   - 尚未作答；
+      //   - **未超过服务端下发的有效期**（否则点下去必然 404）。
+      onResolve:
+          (widget.onResolveFeedback != null &&
+              item.canResolve &&
+              !item.isExpired(ttl: _feedbackTTL))
+          ? (correct) => _handleResolveFeedback(item.token, correct)
+          : null,
+    ),
+    HabitSuggestionItem() => HabitSuggestionCard(
+      suggestion: item,
+      busy: _resolvingHabit.contains(item.suggestionId),
+      // 三个回调都需 app 层注入：本页不持有 HabitApi（分层约定，
+      // 且 widget test 因此不需要 HTTP mock）。
+      //
+      // 注意卡片上的回调签名是 `VoidCallback`（无参）——卡自己知道是哪条建议，
+      // 页面用闭包把 item 带进去，而不是把 item 再传一遍。
+      onAccept: widget.onAcceptHabit == null
+          ? null
+          : () => _handleHabitAction(item, widget.onAcceptHabit!),
+      // 编辑回调带 patch：页面用闭包把 item 与 patch 一起交给 app 层，
+      // 卡片只需知道「用户改了什么」（见 HabitSuggestionCard._openEditor）。
+      onEditAndAccept: widget.onEditAndAcceptHabit == null
+          ? null
+          : (patch) => _handleHabitAction(
+              item,
+              (x) => widget.onEditAndAcceptHabit!(x, patch),
+            ),
+      onDismiss: widget.onDismissHabit == null
+          ? null
+          : () => _handleHabitAction(item, widget.onDismissHabit!),
+      onSnooze: widget.onSnoozeHabit == null
+          ? null
+          : (option) => _handleHabitAction(
+              item,
+              (x) => widget.onSnoozeHabit!(x, option),
+            ),
+    ),
+    AgentFileItem() => AgentFileCard(
+      file: item,
+      onDownload: widget.onDownloadAgentFile,
+      // 缩略图回调是**按 file 绑定**的：卡片侧 `onLoadThumbnail` 无参，
+      // 故在此把 item 闭包进去。
+      //
+      // `ufsFileId` 为空时传 null：卡片自己只判 `isImage` / `isDeleted`，
+      // 不判「有没有可拉的 id」。不在此拦住就会发出
+      // `GET /api/files//thumbnails/256`（一个 404），对每张无 id 的卡白跑一趟。
+      //
+      // ⚠️ 该闭包每次 build 都是新实例——故卡片的 `didUpdateWidget` **不能**
+      // 拿回调 identity 判「要不要重拉」（那会让每次 build 都重拉）。它改按
+      // 文件身份判，详见 `AgentFileCard.didUpdateWidget` 的文档。
+      //
+      // 另走 [_loadThumbnailMemoized] 而不是直接调 widget 回调：卡片滚出
+      // `cacheExtent` 会被 dispose，滚回来重跑 `initState`——不记忆化就会
+      // 反复拉同一张图。
+      onLoadThumbnail:
+          widget.onLoadThumbnailAgentFile == null ||
+              (item.ufsFileId ?? '').isEmpty
+          ? null
+          : () => _loadThumbnailMemoized(item),
+      // 直接透传（不包闭包）：卡片侧这两个回调本来就收 file 入参。
+      // 未注入时传 null，卡片据此不渲染对应菜单项。
+      onOpen: widget.onOpenAgentFile,
+      onReveal: widget.onRevealAgentFile,
+      onPreview: widget.onPreviewAgentFile,
+    ),
+    HabitAutoRunItem() => HabitAutoRunCard(item: item),
+  };
+}
+
+/// 语音播报状态条：展示播报进行到哪一步 / 为什么失败。
+///
+/// ## 只做状态展示（不播放）
+///
+/// 客户端既有决策是「TTS 仅下载不播放」（AGENTS.md §11：无音频播放插件）。
+/// 本组件**只**渲染一行状态文字，不提供播放控件，也不持有音频句柄；
+/// 音频文件本身仍走交付物同步（见 `tts_audio_path.dart`）。
+///
+/// ## 三态文案
+///
+/// | 阶段 | 文案 | 来源 |
+/// |---|---|---|
+/// | idle | （不展示） | —— 由调用方 [TtsStatus.hasStatus] 拦住 |
+/// | started | 正在生成语音… | 逐字对齐 webapp `ChatMessageList` |
+/// | completed | 语音已生成 | 本轮额外展示（见下） |
+/// | failed | 服务端 `message`，兜底「语音生成失败。」 | webapp 同 |
+///
+/// ## ⚠️ 与 webapp 的**有意偏离**：completed 也展示
+///
+/// webapp 的注释写明「完成不额外提示」（`ttsStatus === "starting"` 与
+/// `"failed"` 两个分支，无 completed 分支）。本任务验收明确要求「三种状态
+/// 各自渲染」，且完成态确实承载信息（分段数），故这里显式展示。
+/// 若将来要求逐字对齐 webapp，删掉 completed 分支即可。
+class _TtsStatusBar extends StatelessWidget {
+  const _TtsStatusBar({required this.status});
+
+  final TtsStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final failed = status.phase == TtsPhase.failed;
+    final parts = status.parts;
+
+    return Material(
+      key: const ValueKey('conversation-tts-status'),
+      // 失败用 errorContainer 与其它状态条区分：它是**需要用户知道**的负面
+      // 结果（服务端文案也强调「本次文本回复不受影响」，即"别担心，但要知道"）；
+      // 进行中/完成用中性的 surfaceContainerHighest（同上下文用量条）。
+      color: failed ? scheme.errorContainer : scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            if (status.phase == TtsPhase.started)
+              SizedBox(
+                width: SpbSpacing.lg,
+                height: SpbSpacing.lg,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: scheme.onSurfaceVariant,
+                ),
+              )
+            else
+              Icon(
+                failed ? Icons.warning_amber_outlined : Icons.graphic_eq,
+                size: SpbSpacing.lg,
+                color: failed
+                    ? scheme.onErrorContainer
+                    : scheme.onSurfaceVariant,
+              ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                _text(status),
+                key: const ValueKey('conversation-tts-status-text'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: failed
+                      ? scheme.onErrorContainer
+                      : scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            // 已完成段数：只在有值时显示（started 阶段无从得知）。
+            if (parts != null && parts > 0 && status.phase != TtsPhase.failed)
+              Text(
+                '$parts 段',
+                key: const ValueKey('conversation-tts-status-parts'),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 状态文案。
+  ///
+  /// 失败优先用服务端给的 `message`（已是可直接展示的中文，且区分「全失败」与
+  /// 「部分成功」两种情形），缺失时兜底——与 webapp 的
+  /// `turn.ttsErrorMessage || "语音生成失败。"` 同口径。
+  static String _text(TtsStatus s) {
+    switch (s.phase) {
+      case TtsPhase.idle:
+        // 调用方用 hasStatus 拦住 idle，不应走到这里；给出空串而非抛异常，
+        // 避免上游漏判时把整页崩掉。
+        return '';
+      case TtsPhase.started:
+        return '正在生成语音…';
+      case TtsPhase.completed:
+        return '语音已生成';
+      case TtsPhase.failed:
+        final msg = s.message;
+        return (msg != null && msg.isNotEmpty) ? msg : '语音生成失败。';
+    }
+  }
+}
+
+/// 顶部读数区：token 消耗（账单）+ 上下文窗口（水位）。
+///
+/// ## 为什么贴在时间线顶部
+///
+/// 它是**资源占用读数**（每次压缩 / 每轮收尾刷新），与「当前在聊什么」无关，
+/// 故贴顶常驻；而 `_TurnActivityIndicator` 描述的是「正在跑的那个 turn」，
+/// 语义上属于时间线底部。两者位置不同是**有意**的，不要为了对称把它们并排。
+///
+/// ## 两行的语义不同，不可合并
+///
+/// - 「Token 消耗」（[GroupUsageSummary]）：`token_usage` 事件求和，**计费口径**
+///   ——这个对话总共烧了多少 token，单调递增；
+/// - 「上下文」（[ContextUsage]）：`context_update` 快照，**窗口水位**
+///   ——当前占多少窗口，compaction 后会变小。
+///
+/// 塞进同一个「已用 / 窗口」会得到一个既不解释账单也不解释压缩的数字
+/// （webapp `WorkbenchStatusSidebar` 的注释逐字说明过这一点）。
+///
+/// ## 对齐 webapp
+///
+/// `apps/webapp/messages/zh.json`：`tokensBurned`/`tokenInput`/`tokenOutput`/
+/// `tokenCached`/`tokenRequests`/`contextWindow`。取值口径与
+/// `WorkbenchStatusSidebar` 一致：
+///
+/// - 消耗 = `input + output`（**cached 不加总**——它是 input 的子集，加了就
+///   重复计数）；只在 `calls > 0`（有账单记录）时渲染，否则连零行都不出
+///   ——「还没有记录」与「消耗为 0」是两回事；
+/// - 缓存只在 `cached_tokens > 0` 时括注；
+/// - 上下文只在 `used` 与 `size` 都已知时显示 token 行；
+/// - 费用只在 `amount > 0` 时显示（Go 后端从不发射，实际运行时不存在）。
+///
+/// ## `first_at` 的提示
+///
+/// `token_usage` 事件从引入该能力的部署时点起才有，数字不覆盖更早的历史 turn。
+/// 故把首条事件时间以 Tooltip（移动端长按）的形式挂在消耗行上：
+/// 「统计自 X 起（更早的会话无记录）」——不弹、不阻塞，但想核实的人能找到。
+class _UsageBar extends StatefulWidget {
+  const _UsageBar({required this.contextUsage, required this.groupUsage});
+
+  final ContextUsage? contextUsage;
+  final GroupUsageSummary? groupUsage;
+
+  @override
+  State<_UsageBar> createState() => _UsageBarState();
+}
+
+/// 默认**收起为一行**，点按展开明细。
+///
+/// 早期实现把「Token 消耗 / 输入输出明细 / 上下文水位」纵向堆三行，占掉
+/// 接近三行正文的高度——它是**读数**，不该比正文更占地方。现改为：
+///
+/// - 收起态：`Wrap` 并排「Token 消耗 150 · 请求 3 次」与「上下文 50K / 200K」
+///   （窄屏 Wrap 自动换行到第二行——仍是行内折行，不会溢出，§6.16）；
+/// - 明细行（输入 / 缓存 / 输出）**只在展开时**渲染，右上角箭头提示可展开；
+/// - 整条 bar 可点（`behavior: translucent`，空白处也算命中）。
+class _UsageBarState extends State<_UsageBar> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final totals = (widget.groupUsage != null && widget.groupUsage!.hasData)
+        ? widget.groupUsage!.totals
+        : null;
+    final usage = (widget.contextUsage != null && widget.contextUsage!.hasData)
+        ? widget.contextUsage
+        : null;
+    final cost = usage?.cost;
+    final style = textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
+
+    final chips = <Widget>[
+      if (totals != null)
+        Text(
+          'Token 消耗 ${formatTokenCount(totals.burnedTokens)} · 请求 ${totals.calls} 次',
+          key: const ValueKey('conversation-usage-tokens'),
+          style: style,
+        ),
+      if (usage != null)
+        Text(
+          // 只在两端都已知时拼「X / Y」：只有 used 时拼出「12K / null」
+          // 比只显示「12K」更糟（用户会以为窗口未知是缺陷）。
+          (usage.used != null && usage.size != null)
+              ? '上下文 ${formatTokenCount(usage.used!)} / ${formatTokenCount(usage.size!)}'
+              : '上下文 ${formatTokenCount(usage.used ?? usage.size ?? 0)}',
+          key: const ValueKey('conversation-context-usage-tokens'),
+          style: style,
+        ),
+      // 费用：Go 后端从不发射（见 ContextUsage 类文档），故实际运行时
+      // 这一段不渲染。不用 0 伪造——「未提供」与「花了 0 元」是两回事。
+      if (cost != null && cost.amount > 0)
+        Text(
+          '费用 \$${cost.amount.toStringAsFixed(4)} ${cost.currency}',
+          key: const ValueKey('conversation-context-usage-cost'),
+          style: SpbType.listMeta(textTheme)
+              ?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+    ];
+
+    final hasDetail = totals != null;
+
+    return Material(
+      key: const ValueKey('conversation-context-usage'),
+      // 与连接/活动条区分：用量是中性读数而非「临时状态」，用 surfaceContainer
+      // 而非 secondaryContainer，视觉上不与「正在执行」混淆。
+      color: scheme.surfaceContainerHighest,
+      child: InkWell(
+        // 没有明细可展开时整个收起点按无意义，不吞手势。
+        onTap: hasDetail ? () => setState(() => _expanded = !_expanded) : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: SpbSpacing.md,
+            vertical: SpbSpacing.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.data_usage,
+                    size: SpbSpacing.md,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: SpbSpacing.sm),
+                  Expanded(
+                    // Wrap 而非 Row：320dp 下放不下时折到第二行（仍是行内折行，
+                    // 不会 RenderFlex overflow），AGENTS.md §6.16 的窄屏取向。
+                    child: Wrap(
+                      spacing: SpbSpacing.md,
+                      runSpacing: 2,
+                      children: chips,
+                    ),
+                  ),
+                  if (hasDetail)
+                    Tooltip(
+                      message: _expanded ? '收起明细' : '展开明细（输入 / 缓存 / 输出）',
+                      child: Icon(
+                        _expanded
+                            ? Icons.keyboard_arrow_up
+                            : Icons.keyboard_arrow_down,
+                        size: SpbSpacing.lg,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
+              ),
+              // 明细行只在展开时渲染——收起态只保留一行读数。
+              if (hasDetail && _expanded)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    top: SpbSpacing.xs,
+                    left: SpbSpacing.md + SpbSpacing.sm,
+                  ),
+                  child: _UsageTotalsLines(totals: totals),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 消耗的明细行（**只在展开时**渲染）。
+///
+/// 总量行（「Token 消耗 X · 请求 N 次」）已上提为收起态的 chip（见
+/// [_UsageBarState]），这里只剩「输入 / 缓存 / 输出」一行：拆出去的目的是
+/// 让默认视图只占一行，明细点开才看。
+///
+/// 缓存是 input 的子集：只括注，不参与加总（加总即双计）。
+class _UsageTotalsLines extends StatelessWidget {
+  const _UsageTotalsLines({required this.totals});
+
+  final GroupUsageTotals totals;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final style = textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
+    final cached = totals.cachedTokens;
+    final firstAt = totals.firstAtTime;
+
+    final detail =
+        '输入 ${formatTokenCount(totals.inputTokens)}'
+        '${cached > 0 ? '（缓存 ${formatTokenCount(cached)}）' : ''}'
+        ' · 输出 ${formatTokenCount(totals.outputTokens)}';
+
+    Widget line = Text(
+      detail,
+      key: const ValueKey('conversation-usage-breakdown'),
+      style: style,
+    );
+
+    if (firstAt != null) {
+      line = Tooltip(
+        message:
+            '统计自 ${firstAt.year}-'
+            '${firstAt.month.toString().padLeft(2, '0')}-'
+            '${firstAt.day.toString().padLeft(2, '0')}'
+            ' 起（更早的会话无记录）',
+        child: line,
+      );
+    }
+    return line;
+  }
+}
+
+/// token 数文案（与 webapp `formatTokenCount` 逐字对齐）。
+///
+/// webapp 口径：≥ 1000 时用 K，整数不带小数（`12K`）、非整数一位小数（`12.5K`）；
+/// < 1000 时直接输出数字。
+///
+/// 负数按 0 处理：服务端异常载荷不应产出「已用 -1」这种读数。
+@visibleForTesting
+String formatTokenCount(int n) {
+  if (n <= 0) return '0';
+  if (n >= 1000) {
+    final k = n / 1000;
+    return k % 1 == 0 ? '${k.toInt()}K' : '${k.toStringAsFixed(1)}K';
+  }
+  return '$n';
+}
+
+/// 执行等待/重试提示条：展示「尚未回复的原因」。
+///
+/// ## 为什么需要它
+///
+/// 「发了消息但迟迟没回复」有两种原因，而时间线上**都没有任何内容**：
+/// 排队等执行名额，或上一轮失败正在安排重试。没有本组件，两者与「卡死」
+/// 在 UI 上完全无法区分。
+///
+/// ## 文案逐字对齐 webapp
+///
+/// `apps/webapp/messages/zh.json` 与 `ChatMessageList.tsx` 的判定链：
+///
+/// | 条件 | 文案 |
+/// |---|---|
+/// | `retry_scheduled` | 正在安排第 {attempt} 次重试 |
+/// | `reason == session_busy` | 正在等待当前会话完成 |
+/// | `reason == user_concurrency_limit` | 正在等待用户并发额度 |
+/// | `reason == global_concurrency_limit` | 正在等待执行资源 |
+/// | 其余 | 正在等待执行 |
+///
+/// 另附 `队列：总计 {total}，你的 {user}`（webapp `queuePosition`）。
+///
+/// ## 视觉与 [_TurnActivityIndicator] 共用一套
+///
+/// 两者是同一槽位的互斥状态，故用同一颜色/圆角/旋转图标，只换文案与 Key
+/// ——用户看到的是「同一条提示位」在切换内容，而不是两套不相干的横幅。
+class _ExecutionStatusBar extends StatelessWidget {
+  const _ExecutionStatusBar({required this.status});
+
+  final ExecutionStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final total = status.queueTotal;
+    final user = status.queueUser;
+
+    return Material(
+      key: const ValueKey('conversation-execution-status'),
+      // 与活动指示同用 secondaryContainer（同一槽位的互斥状态，见类文档）。
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: SpbSpacing.lg,
+              height: SpbSpacing.lg,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                executionStatusLabel(status),
+                key: const ValueKey('conversation-execution-status-text'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+            // 队列规模只在两端都已知时显示：只给一个数字会让人以为它是
+            // 「总计」或「你的」中的某一个，反而歧义。
+            if (total != null && user != null)
+              Text(
+                '队列：总计 $total，你的 $user',
+                key: const ValueKey('conversation-execution-status-queue'),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 文案在 `turn_status.dart` 的 [executionStatusLabel]：侧边栏「动态」面板
+  /// 的状态行要用同一句话，在此处留一份副本就会出现两个说法（它已经被
+  /// [TurnStatusSummary] 引用）。
+}
+
+/// 执行中活动指示：在「已起跑但还没有正文」的空窗期展示「已运行 X · 最近：Y」。
+///
+/// ## 为什么需要它
+///
+/// 长 turn 的静默期可达数十秒（读代码 / 跑 bash / 等模型首 token）。此时时间线
+/// 一动不动，用户唯一的判断依据是「它是不是死了」。本组件把服务端 `turn_activity`
+/// 里的「已运行多久 + 上一步是什么」呈现出来，让等待有可见的进展。
+///
+/// 离线时间线提示条（issue #26 切片 B / issue #29）。
+///
+/// ## 为什么需要它
+///
+/// 回填失败时用缓存渲染，若不给任何提示，用户看到的是**一份陈旧且不再更新
+/// 的历史**——他会以为「对方没再说话」，而不是「我掉线了」。
+///
+/// ## 为什么没有「重试」按钮（与 `GroupListPage._CacheNotice` 不同）
+///
+/// 列表页那条可以「重试」是因为重试的代价小（一次列表请求）。对话页的重试
+/// 要重拉整段 timeline 并**重建缓冲**，而重连本身已有入口（AppBar 的连接
+/// 指示器 `onReconnect`）——再加一个按钮会让两个入口做同一件事，且用户很难
+/// 分辨它们。故这里只陈述事实。
+///
+/// ## 为什么没有时间戳（同样与列表页那条不同）
+///
+/// 列表缓存的 `fetchedAt` 是**整表写入**的单一时刻，问「多旧」有意义。
+/// timeline 缓存是**增量 upsert**（分页逐段追加），整 group 没有单一写入
+/// 时刻；拿最大/最小 `cachedAt` 都不代表「这份历史有多旧」。与其编一个
+/// 看起来精确实则误导的时间，不如只说「可能不是最新」。
+class _OfflineTimelineNotice extends StatelessWidget {
+  const _OfflineTimelineNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Material(
+      key: const ValueKey('conversation-offline-timeline'),
+      // 与 `GroupListPage._CacheNotice` 同色：提示而非警告（数据是**有效**的，
+      // 只是旧）——与错误色区分开。
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                // 不写「已中断」也不写「正在重试」：与 `_StaleTurnNotice` 同一
+                // 原则——客户端不跟踪重试，没有证据就不编造。
+                '离线数据 · 当前显示的是本地缓存的历史',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 超时兜底提示条：长时间未收到进展。
+///
+/// ## 它解决什么问题
+///
+/// 流式标记只有 `done` / `start` 两条清除路径。一旦 `done` 丢失（turn worker
+/// 崩溃、长断线、回放窗口被打穿），UI 会**永久**停在流式态：光标不停闪、活动
+/// 指示器常驻、取消按钮永久可点（点下去得到 409）。
+///
+/// ## 为什么必须显式提示（而不是像 webapp 那样静默回 idle）
+///
+/// webapp 把 lifecycle 悄悄回 `idle` 即可——它没有常驻的取消按钮。本客户端有，
+/// 且 stale 时**故意保持可点**（turn 可能真在跑，而取消是用户唯一的出路）。
+/// 若同时把光标停掉又不解释，用户会看到「界面静止 + 一个可以点的停止按钮」，
+/// 无从判断到底是哪种状态。
+///
+/// ## 文案不编造
+///
+/// 只说「可能仍在后台运行，或已中断」——这是客户端**唯一能确证**的事：
+/// - 不写「已中断」：没有终态事件就没有证据（后端可能仍在跑）；
+/// - 不写「正在重试」：客户端不跟踪重试（`retry_scheduled` 走另一条通道）。
+class _StaleTurnNotice extends StatelessWidget {
+  const _StaleTurnNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      key: const ValueKey('conversation-stale-turn'),
+      // 与活动指示 / 等待提示同用 secondaryContainer：三者都是「临时状态条」，
+      // 视觉上应属同一族而非各造一套。
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.hourglass_disabled_outlined,
+              size: SpbSpacing.lg,
+              color: scheme.onSecondaryContainer,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                '长时间未收到新进展 · 任务可能仍在后台运行，或已中断',
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSecondaryContainer),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// ## 文案对齐 webapp
+///
+/// `apps/webapp/messages/zh.json`：
+/// - `turnActivity` = `执行中 · 已运行 {elapsed}`
+/// - `turnActivityJustStarted` = `刚开始`
+/// - `turnActivityLast` = `最近：{action}`
+///
+/// 两者用同一套措辞，便于用户跨端对照。
+class _TurnActivityIndicator extends StatelessWidget {
+  const _TurnActivityIndicator({required this.activity});
+
+  final TurnActivitySnapshot activity;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final last = activity.lastEventType;
+
+    return Material(
+      key: const ValueKey('conversation-turn-activity'),
+      // 与待处理栏同用 secondaryContainer：两者都是「临时状态条」，
+      // 视觉上应属同一族而非各造一套。
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.md,
+          vertical: SpbSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: SpbSpacing.lg,
+              height: SpbSpacing.lg,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                '执行中 · 已运行 ${formatTurnElapsed(activity.elapsedMs)}',
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+            // 无上一步时不渲染该段：服务端首帧（刚起跑）不带 last_event_type，
+            // 拼出「最近：null」比不显示更糟。
+            if (last != null && last.isNotEmpty)
+              Text(
+                '最近：$last',
+                key: const ValueKey('conversation-turn-activity-last'),
+                style: SpbType.listMeta(textTheme)
+                    ?.copyWith(color: scheme.onSecondaryContainer),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// 已运行时长文案（毫秒 → 中文）已移到 `turn_status.dart` 的
+// [formatTurnElapsed]：对话页底部状态条与侧边栏「动态」面板要用同一句时长
+// 描述，两份副本必然漂移。
+
+/// 连接状态指示（AppBar 右侧）。
+///
+/// 非已连接态时变为可点的「重连」入口；已连接态是纯展示。
+/// AppBar 上的溢出菜单（窄屏收纳低频入口）。
+///
+/// ## 为什么用 `PopupMenuButton` 而不是 `MenuAnchor`
+///
+/// `PopupMenuButton` 自带定位、键盘导航与关闭语义，且 `itemBuilder` 在每次
+/// 打开时重建——后者正好让「`_group` 刚加载完」这类状态在下次打开菜单时生效。
+/// `MenuAnchor` 需要自己管 `MenuController` 与关闭时机，收益为零。
+///
+/// ## 菜单项的禁用而不是隐藏
+///
+/// [ConversationOverflowItem.onTap] 为 null 的项渲染成**禁用**（`enabled: false`），
+/// 与 AppBar 图标同一取舍：入口消失会让用户以为「本端不支持」，置灰只说明
+/// 「现在还用不了」。
+class _OverflowMenu extends StatelessWidget {
+  const _OverflowMenu({required this.items, required this.onSearch});
+
+  final List<ConversationOverflowItem> items;
+
+  /// 「在本对话中搜索」的动作（由页面提供，见 [ConversationPage.overflowItems]）。
+  final VoidCallback onSearch;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<VoidCallback>(
+      key: const ValueKey('conversation-overflow-menu'),
+      tooltip: '更多',
+      // 回调用 `value` 而不是 `onSelected` + 枚举：条目本身就是「做什么」，
+      // 再引入一个枚举只会多一层需要同步维护的映射。禁用项不进入
+      // `onSelected`（`PopupMenuItem.enabled: false` 不可点）。
+      onSelected: (action) => action(),
+      itemBuilder: (context) => [
+        for (final item in items)
+          PopupMenuItem<VoidCallback>(
+            key: item.key,
+            value: item.onTap,
+            enabled: item.onTap != null,
+            child: _OverflowMenuRow(icon: item.icon, label: item.label),
+          ),
+        // 搜索始终可用（它不依赖 `_group`）：搜的是已加载的时间线。
+        const PopupMenuDivider(),
+        PopupMenuItem<VoidCallback>(
+          key: const ValueKey('menu-conversation-search'),
+          value: onSearch,
+          child: const _OverflowMenuRow(icon: Icons.search, label: '在本对话中搜索'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 溢出菜单的一行（图标 + 文案）。
+class _OverflowMenuRow extends StatelessWidget {
+  const _OverflowMenuRow({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(icon, size: SpbSpacing.lg),
+      const SizedBox(width: SpbSpacing.md),
+      Text(label),
+    ],
+  );
+}
+
+class _ConnectionIndicator extends StatelessWidget {
+  const _ConnectionIndicator({required this.state, this.onReconnect});
+
+  final SseState? state;
+
+  /// 手动重连回调。为 null（或已连接）时不可点。
+  final VoidCallback? onReconnect;
+
+  /// 是否渲染点击手势。
+  ///
+  /// ## 为什么已连接态必须**不渲染**手势，而不是渲染一个 `onTap: null`
+  ///
+  /// 指示器就在 AppBar 右侧、紧邻常用区域。已连接时它每秒都会重绘（心跳虽不进
+  /// 业务流，但状态流会在重连时变动），一个仍然存在的 `InkWell` 会：
+  /// 1. 在水波纹与 `Semantics` 上把图标宣告成「可点」，而它其实什么都不做；
+  /// 2. 在触屏上把「误碰一下」变成一次无意义的重连（重连会 teardown 当前流，
+  ///    正在传输的帧会被丢掉）。
+  ///
+  /// 故这里按状态换 widget 树，而不是给同一个树换个空回调。
+  bool get _clickable => onReconnect != null && state != SseState.connected;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final (IconData icon, Color color, String tooltip) = switch (state) {
+      SseState.connected => (Icons.cloud_done_outlined, scheme.tertiary, '已连接'),
+      SseState.connecting => (Icons.cloud_queue, scheme.primary, '连接中'),
+      SseState.reconnecting => (Icons.cloud_off_outlined, scheme.error, '重连中…'),
+      SseState.failed => (Icons.cloud_off, scheme.error, '连接失败'),
+      SseState.idle || null => (Icons.cloud_outlined, scheme.outline, '未连接'),
+    };
+
+    // 内边距在两个分支下**相同**：否则可点/不可点切换时图标会左右移动
+    // （与停止按钮选「禁用而非隐藏」同一个理由：AppBar 宽度必须恒定）。
+    final iconWidget = Padding(
+      padding: const EdgeInsets.all(SpbSpacing.sm),
+      child: Icon(icon, size: SpbSpacing.lg, color: color),
+    );
+
+    return Tooltip(
+      key: const ValueKey('conversation-connection-indicator'),
+      message: _clickable ? '$tooltip（点击重连）' : tooltip,
+      child: _clickable
+          ? InkWell(
+              onTap: onReconnect,
+              customBorder: const CircleBorder(),
+              child: iconWidget,
+            )
+          : iconWidget,
+    );
+  }
+}
+
+/// 归属判定提示。
+class _RoutingNotice extends StatelessWidget {
+  const _RoutingNotice({this.reason});
+
+  final String? reason;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // 文案与气泡徽标共用同一映射（[routingAttributionNotice]）：新建/切换用
+    // 短标签，未知原因原样透传；映射后仍为 null（理论上到不了——归约层已把
+    // 无聊孤儿丢弃）时退回旧的通用文案。
+    final notice = routingAttributionNotice(reason: reason);
+    final text = notice?.label ?? '已自动判定归属';
+    return Align(
+      alignment: Alignment.center,
+      child: Text(
+        text,
+        style: SpbType.listMeta(Theme.of(context).textTheme)
+            ?.copyWith(color: scheme.onSurfaceVariant),
+      ),
+    );
+  }
+}
+
+/// 错误项。
+/// 目标自动推进停止提示（`goal_gate_stopped`）。
+///
+/// ## 为什么用窄条而不是错误卡
+///
+/// 「自动推进停止」不是错误：`goal_completed` 是**成功终态**。用
+/// `ErrorBanner` 的红底会让「目标已实现」看起来像失败。故与
+/// [_RoutingNotice] 同一形式（居中窄条 + 弱化色），只在有轮次信息时补一行副文案。
+///
+/// ## 文案来自领域层，不在这里 switch reason
+///
+/// 映射规则（reason → 中文）属于领域知识，且需与 miniapp 逐条一致，故放在
+/// [GoalGateStoppedItem.message]（可无头单测）。本组件只负责排版。
+class _GoalGateStoppedNotice extends StatelessWidget {
+  const _GoalGateStoppedNotice({required this.item});
+
+  final GoalGateStoppedItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final turns = item.turnCountLabel;
+
+    return Align(
+      alignment: Alignment.center,
+      child: Column(
+        key: const ValueKey('goal-gate-stopped-notice'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            item.message,
+            textAlign: TextAlign.center,
+            style: SpbType.listMeta(textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          if (turns != null)
+            Text(
+              turns,
+              textAlign: TextAlign.center,
+              style: SpbType.listMeta(textTheme)
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 自动续跑排程提示（`schedule_created`）。
+///
+/// ## 为什么与 [_GoalGateStoppedNotice] 同形式但分开一个组件
+///
+/// 两者语义相反（即将继续 vs 已停止），且**可能交替出现**（一轮排程 → 下轮
+/// 熔断停止）。用同一组件会让「停止」与「继续」看起来一模一样，而那正是用户
+/// 最需要分清的两个结论。故文案与图标都不同，排版形式保持一致（都是居中窄条）。
+///
+/// ## 为什么用 timer 图标而不是 info
+///
+/// 「过多久会接着跑」是**时间**语义，timer 能直接传达「等待中」。
+/// 用 info 会与 [_DiagnosticNotice] 的图标撞车。
+///
+/// ## 文案来自领域层
+///
+/// 秒数与轮次的拼接规则属领域知识（且需处理字段缺失的退化），故放在
+/// [ScheduleCreatedItem.userText]（可无头单测）。本组件只负责排版。
+class _ScheduleCreatedNotice extends StatelessWidget {
+  const _ScheduleCreatedNotice({required this.item});
+
+  final ScheduleCreatedItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Align(
+      alignment: Alignment.center,
+      child: Row(
+        key: const ValueKey('schedule-created-notice'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.timer_outlined,
+            size: SpbSpacing.lg,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: SpbSpacing.xs),
+          Text(
+            item.userText,
+            textAlign: TextAlign.center,
+            style: SpbType.listMeta(textTheme)
+                ?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 诊断提示（`pigo_session_missing`）。
+///
+/// ## 为什么单独一个组件而不是复用 [_RoutingNotice]
+///
+/// 两者的可见度不同：归属判定是每次路由都可能出现的常规信息，而「会话绑定
+/// 失效」是**罕见且重要**的降级事件（用户会直接感知为上下文丢失）。用同一
+/// 弱化样式会让这条关键线索在长对话里被忽略。故用带图标的浅色窄条，但**不用**
+/// 错误红底——服务端已经处理了（新建会话继续），用户需要的是解释而非告警。
+class _DiagnosticNotice extends StatelessWidget {
+  const _DiagnosticNotice({required this.item});
+
+  final DiagnosticNoticeItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      key: const ValueKey('diagnostic-notice'),
+      color: scheme.surfaceContainerHighest,
+      child: Padding(
+        padding: SpbSpacing.cardPadding,
+        child: Row(
+          children: [
+            Icon(
+              Icons.info_outline,
+              size: SpbSpacing.lg,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: SelectableText(
+                item.content,
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
