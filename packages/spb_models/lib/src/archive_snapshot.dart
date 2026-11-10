@@ -129,12 +129,21 @@ class ArchiveSnapshot {
 /// 重启卡 rendering），此时用户仍能下载 md/html。故 [status] 与
 /// [ArchiveSnapshot.status] 正交，不要用前者推断后者。
 class ArchiveSnapshotSite {
-  const ArchiveSnapshotSite({required this.status, this.slug, this.accessUrl});
+  const ArchiveSnapshotSite({
+    required this.status,
+    this.slug,
+    this.accessUrl,
+    this.environment,
+  });
+
+  /// 服务端的真实站点环境；旧缓存缺失时保持未知，不从 URL 猜测公开状态。
+  final String? environment;
+  bool get canPublish => isReady && environment == 'staging';
 
   /// `none`（从未建）/ `pending`（渲染中）/ `ready` / `failed`。
   final String status;
 
-  /// UFS 站点 slug（`g-{group_id}`）。改名会破坏稳定 URL，故多轮归档复用同一 slug。
+  /// UFS 站点 slug。首版保留旧地址，后续版本带版本号，历史链接继续可读。
   final String? slug;
 
   /// 站点访问 URL。
@@ -155,12 +164,14 @@ class ArchiveSnapshotSite {
   factory ArchiveSnapshotSite.fromJson(Map<String, dynamic> json) =>
       ArchiveSnapshotSite(
         status: (json['status'] as String?) ?? 'none',
+        environment: json['environment'] as String?,
         slug: json['slug'] as String?,
         accessUrl: json['access_url'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
     'status': status,
+    if (environment != null) 'environment': environment,
     if (slug != null) 'slug': slug,
     if (accessUrl != null) 'access_url': accessUrl,
   };

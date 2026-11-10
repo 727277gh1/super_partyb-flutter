@@ -1389,6 +1389,7 @@ void main() {
       String snapshotStatus = 'ready',
       bool downloadAvailable = true,
       String siteStatus = 'ready',
+      String? environment = 'staging',
       String? accessUrl = '/_staging/ufs_sites/g-g1/',
       bool withMarkdown = true,
       bool withHtml = true,
@@ -1404,6 +1405,7 @@ void main() {
         'download_available': downloadAvailable,
         'site': {
           'status': siteStatus,
+          if (environment != null) 'environment': environment,
           'slug': accessUrl == null ? null : 'g-g1',
           'access_url': accessUrl,
         },
@@ -1546,6 +1548,38 @@ void main() {
       expect(find.text('下载结项记录（HTML）'), findsNothing);
     });
 
+    testWidgets('公开发布先确认，取消不发请求', (tester) async {
+      mockPage(offset: 0, items: [archivedWithSnapshot()]);
+      final actions = <GroupAction>[];
+      await pumpPage(
+        tester,
+        onGroupAction: (group, action) async {
+          actions.add(action);
+          return const GroupActionRejected('测试完成');
+        },
+      );
+      Future<void> openPublish() async {
+        await tester.longPress(find.text('写小说'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('公开发布站点'));
+        await tester.pumpAndSettle();
+      }
+
+      await openPublish();
+      expect(actions, isEmpty);
+      expect(
+        find.byKey(const ValueKey('snapshot-publish-dialog')),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(actions, isEmpty);
+      await openPublish();
+      await tester.tap(find.byKey(const ValueKey('snapshot-publish-confirm')));
+      await tester.pumpAndSettle();
+      expect(actions.single, isA<PublishSnapshotSite>());
+    });
+
     testWidgets('staging 站点显示「公开发布」；production 不显示', (tester) async {
       mockPage(offset: 0, items: [archivedWithSnapshot()]);
       await pumpPage(
@@ -1556,11 +1590,16 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('公开发布站点'), findsOneWidget);
 
-      // 换成 production URL：`/ufs_sites/` 不带 `/_staging/` 前缀。
+      // URL 即使残留 staging 字样，也必须服从明确的 production 环境。
       await tester.pumpWidget(const SizedBox());
       mockPage(
         offset: 0,
-        items: [archivedWithSnapshot(accessUrl: '/ufs_sites/g-g1/')],
+        items: [
+          archivedWithSnapshot(
+            environment: 'production',
+            accessUrl: '/_staging/ufs_sites/g-g1/',
+          ),
+        ],
       );
       await pumpPage(
         tester,

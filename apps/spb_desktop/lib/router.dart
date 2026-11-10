@@ -3086,7 +3086,12 @@ class _WorkDetailPage extends ConsumerWidget {
 Future<bool> _openSnapshotSite(ArchiveSnapshot snapshot) async {
   final raw = snapshot.site.accessUrl;
   if (raw == null || raw.isEmpty) return false;
-  final url = _snapshotAbsoluteUrl(raw);
+  final uri = resolveArchiveSiteUrl(
+    raw,
+    ufsBaseUrl: SpbEndpoints.current.ufsBaseUrl,
+  );
+  if (uri == null) return false;
+  final url = uri.toString();
   try {
     await openInBrowser(url);
     return true;
@@ -3094,17 +3099,6 @@ Future<bool> _openSnapshotSite(ArchiveSnapshot snapshot) async {
     SpbLog.warn('打开结项站点失败', {'error': '$e'});
     return false;
   }
-}
-
-/// 把可能是相对的 `access_url` 补成绝对 URL。
-///
-/// 已是绝对 URL（含 scheme）时原样返回——生产配置了
-/// `ARCHIVE_SNAPSHOT_SITE_BASE_URL` 就是这个形态。
-String _snapshotAbsoluteUrl(String raw) {
-  final parsed = Uri.tryParse(raw);
-  if (parsed != null && parsed.hasScheme) return raw;
-  final origin = Uri.parse(SpbEndpoints.current.ufsBaseUrl).origin;
-  return '$origin${raw.startsWith('/') ? '' : '/'}$raw';
 }
 
 /// 保存快照下载的字节（`GroupListPage.onSaveSnapshot` 的装配）。

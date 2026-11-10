@@ -66,6 +66,14 @@ profile、schema_version 与 published 状态；失败保留摘要并允许重�
 共享样例副本位于 `packages/spb_features/test/fixtures/readonly-v1.json`，真源为 Go API Readonly v1。
 本机 widget 测试不能代替移动真机、桌面窗口和线上断网验收。
 
+### 归档结项站点
+
+`archive_snapshot.site.environment` 明确返回 `staging` 或 `production`；旧服务端或缓存缺失时按未知处理，不根据 URL 推断公开权限。公开入口仅在 ready + staging 时出现，执行前必须确认对话摘要可公开。
+
+`access_url` 由 PartyB 使用对外基址构造：staging 走 `/_staging/ufs_sites/{slug}/`，production 走 `/ufs_sites/{slug}/`。相对路径按 UFS origin 补全；与已配置 UFS 不同源的内网地址及非 HTTP 链接拒绝打开。系统浏览器需要独立的网关登录会话。
+
+归档版本使用独立站点，v1 保留历史 slug，后续为 `g-{group_id}-v{version}`。重新部署返回 202/pending，由 Worker 从既有 manifest 重建；正文和历史版本保持不变。
+
 ### 5.1 认证模型
 
 **客户端不解析 JWT、不申请 API Key。**

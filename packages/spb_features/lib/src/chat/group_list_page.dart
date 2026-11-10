@@ -1532,19 +1532,8 @@ class _GroupTile extends StatelessWidget {
               title: Text('重新部署站点'),
             ),
           ),
-          // 发布：只在 **staging** 且 ready 时出现。
-          //
-          // ## 判定依据：URL 里有没有 `/_staging/`
-          //
-          // group DTO 的 `site` 子对象**不含 environment**（Go
-          // `archive_snapshot_dto.go` 只给 status/slug/access_url），故只能从
-          // access_url 推断：staging 是 `{base}/_staging/ufs_sites/{slug}/`，
-          // production 是 `{base}/ufs_sites/{slug}/`（见设计文档 §13）。
-          //
-          // 不用「不含 /ufs_sites/」判断——两者都含。也不要靠 `environment`
-          // 字段：它不存在，读出来永远是 null，会让发布项永远显示。
-          if (_snapshot!.site.isReady &&
-              (_snapshot!.site.accessUrl?.contains('/_staging/') ?? false))
+          // 环境由服务端明确给出，旧缓存或未知环境不提供公开入口。
+          if (_snapshot!.site.canPublish)
             PopupMenuItem(
               key: const ValueKey('group-action-publish-site'),
               value: PublishSnapshotSite(_snapshot!.id),
@@ -1576,6 +1565,29 @@ class _GroupTile extends StatelessWidget {
       if (title == null) return;
       onAction?.call(RenameGroup(title));
       return;
+    }
+
+    if (action is PublishSnapshotSite) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          key: const ValueKey('snapshot-publish-dialog'),
+          title: const Text('公开发布结项站点？'),
+          content: const Text('发布后，任何拿到链接的人都能阅读对话摘要和工作区信息。请确认内容可以公开。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const ValueKey('snapshot-publish-confirm'),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('确认公开'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !context.mounted) return;
     }
 
     // 删除不可恢复，必须确认。

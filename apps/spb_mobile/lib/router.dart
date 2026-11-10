@@ -2721,7 +2721,11 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
 Future<bool> _openSnapshotSite(ArchiveSnapshot snapshot) async {
   final raw = snapshot.site.accessUrl;
   if (raw == null || raw.isEmpty) return false;
-  final url = Uri.parse(_snapshotAbsoluteUrl(raw));
+  final url = resolveArchiveSiteUrl(
+    raw,
+    ufsBaseUrl: SpbEndpoints.current.ufsBaseUrl,
+  );
+  if (url == null) return false;
   try {
     return await launchUrl(url, mode: LaunchMode.externalApplication);
   } on Object catch (e) {
@@ -2748,15 +2752,4 @@ Future<void> _saveSnapshotFile(String fileName, List<int> bytes) async {
   final root = Directory(p.join(dir.path, 'downloads', 'archive'));
   if (!await root.exists()) await root.create(recursive: true);
   await File(p.join(root.path, safe)).writeAsBytes(bytes, flush: true);
-}
-
-/// 把可能是相对的 `access_url` 补成绝对 URL。
-///
-/// 同桌面端：已是绝对 URL 时原样返回；否则用 UFS 基地址的 origin 拼
-/// （不用 API 基地址——它带 `/pba` 前缀，路径会全错）。
-String _snapshotAbsoluteUrl(String raw) {
-  final parsed = Uri.tryParse(raw);
-  if (parsed != null && parsed.hasScheme) return raw;
-  final origin = Uri.parse(SpbEndpoints.current.ufsBaseUrl).origin;
-  return '$origin${raw.startsWith('/') ? '' : '/'}$raw';
 }

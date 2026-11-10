@@ -19,6 +19,7 @@ void main() {
     'download_available': true,
     'site': {
       'status': 'ready',
+      'environment': 'staging',
       'slug': 'g-grp_1',
       'access_url': '/_staging/ufs_sites/g-grp_1/',
     },
@@ -27,6 +28,31 @@ void main() {
       'html': '/chat/groups/grp_1/archive-snapshots/snap_1/html',
     },
   };
+
+  test('公开入口只认明确环境，不能从 URL 猜测', () {
+    expect(
+      const ArchiveSnapshotSite(
+        status: 'ready',
+        accessUrl: '/_staging/ufs_sites/a/',
+      ).canPublish,
+      isFalse,
+    );
+    expect(
+      const ArchiveSnapshotSite(
+        status: 'ready',
+        environment: 'production',
+        accessUrl: '/_staging/ufs_sites/a/',
+      ).canPublish,
+      isFalse,
+    );
+    expect(
+      const ArchiveSnapshotSite(
+        status: 'pending',
+        environment: 'staging',
+      ).canPublish,
+      isFalse,
+    );
+  });
 
   group('ArchiveSnapshot.fromJson', () {
     test('ready 快照：所有字段正确解析', () {
@@ -39,6 +65,8 @@ void main() {
       expect(s.createdAt, DateTime.utc(2024, 3, 5, 8, 9).toLocal());
       expect(s.downloadAvailable, isTrue);
       expect(s.site.status, 'ready');
+      expect(s.site.environment, 'staging');
+      expect(s.site.canPublish, isTrue);
       expect(s.site.slug, 'g-grp_1');
       expect(s.site.accessUrl, '/_staging/ufs_sites/g-grp_1/');
       expect(s.links?.markdown, contains('/markdown'));
@@ -124,6 +152,7 @@ void main() {
       expect(back.createdAt, original.createdAt);
       expect(back.downloadAvailable, original.downloadAvailable);
       expect(back.site.status, original.site.status);
+      expect(back.site.environment, original.site.environment);
       expect(back.site.slug, original.site.slug);
       expect(back.site.accessUrl, original.site.accessUrl);
       expect(back.links?.markdown, original.links?.markdown);
