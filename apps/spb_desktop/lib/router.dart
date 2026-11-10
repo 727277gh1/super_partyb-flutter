@@ -358,10 +358,13 @@ class _HomePage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
-    // 角标数量：拉取失败静默为 0（不阻断对话列表）。
-    final pendingCount = ref
-        .watch(pendingConfirmationCountProvider)
-        .maybeWhen(data: (n) => n, orElse: () => 0);
+    // 卡片与顶部角标共享同一次待确认查询。
+    ref.watch(pendingConfirmationUpdatesProvider);
+    final pending = ref.watch(pendingConfirmationsProvider);
+    // 刷新/切换账号时 AsyncValue 可能保留旧数据，此处只接受本次成功结果。
+    final pendingSummary = pending.isLoading || pending.hasError
+        ? null
+        : PendingConfirmationSummary.fromItems(pending.requireValue, limit: 50);
     // 本地交付物统计快照：未加载完/失败时给空 Map（文件条不显示，不阻断列表）。
     // 加载完成后 provider 发新值，本 widget 重建，文件条自然出现。
     // 用 `.value` 而非 `watch(future)`：本页不该因快照重算而整页重建（同
@@ -379,6 +382,7 @@ class _HomePage extends ConsumerWidget {
       // ——详见 provider 文档。
       //
       groupUpdates: ref.watch(groupUpdatesProvider),
+      goalUpdates: ref.watch(goalUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       // 结项快照的两个客户端能力：打开站点（浏览器）、保存下载字节。
@@ -416,7 +420,11 @@ class _HomePage extends ConsumerWidget {
       // 用 `go` 而非 `push`：`/settings` 是**同级**顶层页面（对话列表 ↔ 设置），
       // 不是从列表「深入」的一层（`onOpenWorks` / `onOpenHabits` 才是深入）。
       onOpenSettings: () => context.go(SpbRoutes.settings),
-      pendingConfirmationCount: pendingCount,
+      pendingConfirmationCount: pendingSummary?.total ?? 0,
+      pendingConfirmations: pendingSummary,
+      pendingConfirmationsUnavailable: pending.hasError && !pending.isLoading,
+      onRefreshConfirmations: () =>
+          ref.invalidate(pendingConfirmationsProvider),
       // 对话列表缓存（issue #26 切片 A）：断网冷启动时回落展示已缓存的列表，
       // 而不是白屏。
       //
@@ -504,15 +512,7 @@ class _PendingConfirmationsPageState
             }
           }),
         );
-        // 刷新计数角标。
-        //
-        // ## 为什么 invalidate 被依赖者而不是 count
-        //
-        // `pendingConfirmationCountProvider` 是
-        // `await ref.watch(pendingConfirmationsProvider.future)` 的派生值。
-        // 只 invalidate count 时它重建后读到的仍是**被缓存的**
-        // `pendingConfirmationsProvider` 结果——角标不会变（本行原先正是
-        // 这个失效调用）。invalidate 被依赖者，count 会因 watch 依赖自动重算。
+        // 首页卡片与全局角标共用这份列表；刷新源数据，避免复用旧计数。
         ref.invalidate(pendingConfirmationsProvider);
         return items;
       },
@@ -2566,15 +2566,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       if (!isFirstSync && hasNew) _deliverablesReloadToken++;
     });
 
-    // ## 为什么 invalidate 的是 `pendingConfirmationsProvider` 而不是 count
-    //
-    // count provider 的实现是 `await ref.watch(pendingConfirmationsProvider
-    // .future)`——它的值**派生**自被依赖者。只 invalidate count 时，它重建
-    // 后读到的仍是被缓存的 `pendingConfirmationsProvider` 结果，角标纹丝不动
-    // （这正是本文件 :421 处那个失效调用的根因）。
-    //
-    // 刷新被依赖者则两条都生效：`pendingConfirmationsProvider` 重拉，count
-    // 因 watch 依赖被自动重算。
+    // 对话页处理确认后使首页数据失效，下次返回时重新查询。
+    // 必须失效源列表；只刷新派生计数会继续读取旧的缓存结果。
     if (confirmationsChanged) {
       ref.invalidate(pendingConfirmationsProvider);
     }

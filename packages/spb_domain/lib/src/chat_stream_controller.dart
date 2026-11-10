@@ -114,6 +114,7 @@ class ChatStreamController {
       StreamController<ExecutionStatus?>.broadcast();
   final _ttsStatusController = StreamController<TtsStatus?>.broadcast();
   final _groupUpdatesController = StreamController<GroupUpdate>.broadcast();
+  final _confirmationChangesController = StreamController<void>.broadcast();
 
   /// 目标变更通知流（`goal_updated`）。
   ///
@@ -308,6 +309,9 @@ class ChatStreamController {
   /// B 端侧栏要实时出现，而列表页在全局模式下运行。故 [_onFrame] 对
   /// `group_updated` 的 group 过滤有**例外**（见那里的注释）。
   Stream<GroupUpdate> get groupUpdates => _groupUpdatesController.stream;
+
+  /// 跨对话待确认失效信号；列表统一重拉，避免每张卡片各查一次。
+  Stream<void> get confirmationChanges => _confirmationChangesController.stream;
 
   /// 目标变更通知流（`goal_updated`，逐条通知）。
   ///
@@ -2008,6 +2012,12 @@ class ChatStreamController {
       return;
     }
 
+    if (event.eventType == EventTypes.confirmationRequired ||
+        event.eventType == EventTypes.confirmationResolved ||
+        event.eventType == EventTypes.confirmationExpired) {
+      _confirmationChangesController.add(null);
+    }
+
     final gid = _groupId;
     if (gid != null && event.groupId.isNotEmpty && event.groupId != gid) {
       return;
@@ -2479,6 +2489,7 @@ class ChatStreamController {
     await _staleTurnIdsController.close();
     await _fromCacheController.close();
     await _groupUpdatesController.close();
+    await _confirmationChangesController.close();
     await _goalUpdatesController.close();
     await _errorController.close();
     await _stateController.close();

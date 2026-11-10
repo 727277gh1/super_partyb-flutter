@@ -14,6 +14,27 @@ import 'support/chat_stream_controller_harness.dart';
 void main() {
   setUpHarness();
 
+  test('其他对话的确认签发、解决与过期均通知列表，普通消息不触发', () async {
+    final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');
+    mockTimeline();
+    await c.start(groupId: 'grp_1');
+    var changes = 0;
+    final sub = c.confirmationChanges.listen((_) => changes++);
+    for (final type in [
+      EventTypes.confirmationRequired,
+      EventTypes.confirmationResolved,
+      EventTypes.confirmationExpired,
+      EventTypes.message,
+    ]) {
+      sse.push(type, sseEvent(type, id: 'evt_$type', groupId: 'grp_other'));
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(changes, 3);
+    expect(c.snapshot, isEmpty, reason: '通知不能把其他对话内容混入当前时间线');
+    await sub.cancel();
+    await c.dispose();
+  });
+
   group('gate 决策通道', () {
     test('gateDecisionsSnapshot 含 adaptive_decision（不再静默丢弃）', () async {
       final c = ChatStreamController(sse: sse, api: api, userId: 'usr_1');

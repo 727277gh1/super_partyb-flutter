@@ -434,9 +434,12 @@ class _ConversationsTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(chatApiProvider);
-    final pendingCount = ref
-        .watch(pendingConfirmationCountProvider)
-        .maybeWhen(data: (n) => n, orElse: () => 0);
+    ref.watch(pendingConfirmationUpdatesProvider);
+    final pending = ref.watch(pendingConfirmationsProvider);
+    // 刷新/切换账号时 AsyncValue 可能保留旧数据，此处只接受本次成功结果。
+    final pendingSummary = pending.isLoading || pending.hasError
+        ? null
+        : PendingConfirmationSummary.fromItems(pending.requireValue, limit: 50);
     // 本地交付物统计快照（与桌面端同构）：未加载完/失败时给 null（文件条
     // 不显示，不阻断列表）。加载完成后 provider 发新值，本 widget 重建。
     final fileSummaries = ref.watch(groupFileSummariesProvider).value;
@@ -451,6 +454,7 @@ class _ConversationsTab extends ConsumerWidget {
       // 建立）。本 provider 用 `ensureConnected` 确保连接在，再转发变更流
       // ——详见 provider 文档。
       groupUpdates: ref.watch(groupUpdatesProvider),
+      goalUpdates: ref.watch(goalUpdatesProvider),
       onOpenGroup: (group) => context.go(SpbRoutes.chat(group.id)),
       onGroupAction: ref.watch(groupActionProvider),
       // 结项快照的两个客户端能力（与桌面端同构，实现差异在下面的方法里）。
@@ -462,7 +466,11 @@ class _ConversationsTab extends ConsumerWidget {
       agentNameOf: agentNames == null ? null : (id) => agentNames[id],
       onSearch: () => context.go(SpbRoutes.search),
       onOpenConfirmations: () => context.go(SpbRoutes.confirmations),
-      pendingConfirmationCount: pendingCount,
+      pendingConfirmationCount: pendingSummary?.total ?? 0,
+      pendingConfirmations: pendingSummary,
+      pendingConfirmationsUnavailable: pending.hasError && !pending.isLoading,
+      onRefreshConfirmations: () =>
+          ref.invalidate(pendingConfirmationsProvider),
       // 工作台（小程序 BFF）只有移动端接——它是为小程序/移动端做的投影层。
       onOpenWorks: () => context.push(SpbRoutes.works),
       // 习惯：两端都接（端点与页面都是共享的，见 `spb_features` 的 `HabitsPage`）。
@@ -533,15 +541,7 @@ class _PendingConfirmationsPageState
             }
           }),
         );
-        // 刷新计数角标。
-        //
-        // ## 为什么 invalidate 被依赖者而不是 count
-        //
-        // `pendingConfirmationCountProvider` 是
-        // `await ref.watch(pendingConfirmationsProvider.future)` 的派生值。
-        // 只 invalidate count 时它重建后读到的仍是被缓存的
-        // `pendingConfirmationsProvider` 结果——角标不会变（本行原先正是
-        // 这个失效调用）。invalidate 被依赖者，count 会因 watch 依赖自动重算。
+        // 首页卡片与全局角标共用这份列表；刷新源数据，避免复用旧计数。
         ref.invalidate(pendingConfirmationsProvider);
         return items;
       },
@@ -2093,20 +2093,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     // 「动态」弹层是独立 route，页面 setState 不会让它重建 → 显式转一次。
     _bumpActivitySheet();
 
-    // ## 为什么要刷新待确认角标
-    //
-    // 确认卡事件（`confirmation_required` / `confirmation_resolved`）会进入
-    // 归约结果，但对话列表页的角标读的是另一个 provider
-    //（`pendingConfirmationCountProvider`）。不刷新的话，用户要等下次进入
-    // 列表页或打开待确认页才能看到角标变化。
-    //
-    // ## 为什么 invalidate 被依赖者而不是 count
-    //
-    // count provider 是 `await ref.watch(pendingConfirmationsProvider.future)`
-    // 的**派生值**。只 invalidate count 时，它重建后读到的仍是被缓存的
-    // `pendingConfirmationsProvider` 结果——角标纹丝不动（本文件 :399 处那个
-    // 失效调用就是这个根因）。刷新被依赖者则两条都生效：前者重拉，后者因
-    // watch 依赖被自动重算。
+    // 对话页处理确认后使首页数据失效，下次返回时重新查询。
+    // 必须失效源列表；只刷新派生计数会继续读取旧的缓存结果。
     //
     // 首次建基线不刷新：对话列表页本就在拉，再刷一次是重复请求。
     final confIds = <String>{

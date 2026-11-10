@@ -99,6 +99,7 @@ export 'src/execution_status.dart';
 export 'src/file_preview.dart';
 export 'src/gate_decision.dart';
 export 'src/goal_update.dart';
+export 'src/group_attention.dart';
 export 'src/group_cache.dart';
 export 'src/group_sync_probe.dart';
 export 'src/local_deliverable_path.dart';

@@ -1351,23 +1351,11 @@ final flushWithStrategyProvider = Provider.family<FlushWithStrategy, String>((
 final pendingConfirmationsProvider = FutureProvider<List<ChatConfirmation>>((
   ref,
 ) async {
-  return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
-});
-
-/// 当前待确认数量（供对话列表页角标）。
-final pendingConfirmationCountProvider = FutureProvider<int>((ref) async {
-  try {
-    final items = await ref.watch(pendingConfirmationsProvider.future);
-    return items.length;
-  } on Object catch (e) {
-    // 拉取失败不阻断对话列表渲染：角标静默为 0。
-    //
-    // 记 debug（issue #45）：角标为 0 与「确实没有待确认」**视觉上无法区分**
-    // ——用户会以为没什么要处理的，而实际上是拉取失败了。这条日志是唯一的
-    // 区分依据。（与桌面端同型，两端都有此 provider。）
-    SpbLog.debug('待确认角标拉取失败，本次按 0 显示', {'error': e.toString()});
-    return 0;
+  ref.watch(sessionRevisionProvider);
+  if (ref.watch(authStateProvider.select((state) => state.isUnauthenticated))) {
+    return const [];
   }
+  return ref.watch(chatApiProvider).listConfirmationsTyped(status: 'pending');
 });
 
 // ==================== 对话流 ====================
@@ -1447,6 +1435,40 @@ final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
   // （对话页建的聚焦模式）时是空操作，故不会抢走对话页的聚焦目标。
   unawaited(controller.ensureConnected());
   return controller.groupUpdates;
+});
+
+/// 列表与对话页共享同一条 SSE，不新增连接或逐卡请求。
+final goalUpdatesProvider = Provider.autoDispose<Stream<GoalUpdate>>((ref) {
+  final identity = ref.watch(currentUserIdProvider);
+  final userId = identity.isLoading || identity.hasError
+      ? null
+      : identity.value;
+  if (userId == null || userId.isEmpty) return const Stream.empty();
+  final controller = ref.watch(chatStreamControllerProvider(userId));
+  unawaited(controller.ensureConnected());
+  return controller.goalUpdates;
+});
+
+/// 仅列表可见时监听确认变化；短时间的连续事件合并为一次全局查询。
+final pendingConfirmationUpdatesProvider = Provider.autoDispose<void>((ref) {
+  final identity = ref.watch(currentUserIdProvider);
+  final userId = identity.isLoading || identity.hasError
+      ? null
+      : identity.value;
+  if (userId == null || userId.isEmpty) return;
+  final controller = ref.watch(chatStreamControllerProvider(userId));
+  Timer? refreshTimer;
+  final subscription = controller.confirmationChanges.listen((_) {
+    refreshTimer ??= Timer(const Duration(milliseconds: 250), () {
+      refreshTimer = null;
+      ref.invalidate(pendingConfirmationsProvider);
+    });
+  });
+  ref.onDispose(() {
+    refreshTimer?.cancel();
+    unawaited(subscription.cancel());
+  });
+  unawaited(controller.ensureConnected());
 });
 
 /// 带附件的无归属入口用例（悬浮输入窗用）。

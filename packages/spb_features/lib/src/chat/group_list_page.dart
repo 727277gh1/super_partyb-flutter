@@ -93,8 +93,12 @@ class GroupListPage extends StatefulWidget {
     this.onOpenSettings,
     this.onCreateGroup,
     this.pendingConfirmationCount = 0,
+    this.pendingConfirmations,
+    this.pendingConfirmationsUnavailable = false,
+    this.onRefreshConfirmations,
     this.onOpenConfirmations,
     this.groupUpdates,
+    this.goalUpdates,
     this.cache,
     this.userId,
     this.onSaveSnapshot,
@@ -118,6 +122,9 @@ class GroupListPage extends StatefulWidget {
   /// 为 null 时不订阅——保持本页在未注入时是**纯拉取列表**（同
   /// [onOpenGroup] 等可选参数的取向），也让页面单测不必造一条假流。
   final Stream<GroupUpdate>? groupUpdates;
+
+  /// 完整目标快照更新，直接替换列表中的目标与任务摘要。
+  final Stream<GoalUpdate>? goalUpdates;
 
   /// 点击某个对话时的回调。
   final void Function(ChatGroup group)? onOpenGroup;
@@ -206,6 +213,11 @@ class GroupListPage extends StatefulWidget {
 
   /// 跨 group 的待确认数量（角标）。> 0 时显示角标。
   final int pendingConfirmationCount;
+
+  /// 跨对话待确认索引；null 表示尚未取得有效结果，不展示虚假零值。
+  final PendingConfirmationSummary? pendingConfirmations;
+  final bool pendingConfirmationsUnavailable;
+  final VoidCallback? onRefreshConfirmations;
 
   /// 打开待确认收件箱页。
   ///
@@ -353,12 +365,17 @@ class _GroupListPageState extends State<GroupListPage> {
 
   /// [GroupListPage.groupUpdates] 的订阅。
   StreamSubscription<GroupUpdate>? _groupUpdatesSub;
+  StreamSubscription<GoalUpdate>? _goalUpdatesSub;
+
+  // 请求在途收到的快照优先于迟到的列表响应，防止恢复后的任务又显示阻塞。
+  final _pendingGoalUpdates = <String, GoalUpdate>{};
 
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
     _subscribeGroupUpdates();
+    _subscribeGoalUpdates();
     _loadMore();
   }
 
@@ -370,11 +387,35 @@ class _GroupListPageState extends State<GroupListPage> {
       _groupUpdatesSub = null;
       _subscribeGroupUpdates();
     }
+    if (oldWidget.goalUpdates != widget.goalUpdates) {
+      unawaited(_goalUpdatesSub?.cancel());
+      _goalUpdatesSub = null;
+      _subscribeGoalUpdates();
+    }
+  }
+
+  void _subscribeGoalUpdates() {
+    _goalUpdatesSub = widget.goalUpdates?.listen((update) {
+      if (!mounted) return;
+      if (_loading) _pendingGoalUpdates[update.groupId] = update;
+      final index = _groups.indexWhere((g) => g.id == update.groupId);
+      if (index < 0) return;
+      setState(() {
+        _groups[index] = _groups[index].withCurrentGoal(update.snapshot);
+      });
+      unawaited(_saveCache());
+    });
+  }
+
+  ChatGroup _applyPendingGoal(ChatGroup group) {
+    final update = _pendingGoalUpdates[group.id];
+    return update == null ? group : group.withCurrentGoal(update.snapshot);
   }
 
   @override
   void dispose() {
     _groupUpdatesSub?.cancel();
+    _goalUpdatesSub?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -571,7 +612,7 @@ class _GroupListPageState extends State<GroupListPage> {
       setState(() {
         // 去重后追加：offset 分页在列表变动时会重复返回同一项。
         for (final g in page) {
-          if (_seenIds.add(g.id)) _groups.add(g);
+          if (_seenIds.add(g.id)) _groups.add(_applyPendingGoal(g));
         }
         // 返回数量不足一页即认为到底。
         //
@@ -605,7 +646,7 @@ class _GroupListPageState extends State<GroupListPage> {
           setState(() {
             _groups
               ..clear()
-              ..addAll(cached);
+              ..addAll(cached.map(_applyPendingGoal));
             _seenIds
               ..clear()
               ..addAll(cached.map((g) => g.id));
@@ -623,6 +664,8 @@ class _GroupListPageState extends State<GroupListPage> {
         _error = e;
         _loading = false;
       });
+    } finally {
+      if (generation == _loadGeneration) _pendingGoalUpdates.clear();
     }
   }
 
@@ -666,7 +709,9 @@ class _GroupListPageState extends State<GroupListPage> {
   }
 
   Future<void> _refresh() async {
+    widget.onRefreshConfirmations?.call();
     _loadGeneration++;
+    _pendingGoalUpdates.clear();
     setState(() {
       _groups.clear();
       _seenIds.clear();
@@ -873,10 +918,21 @@ class _GroupListPageState extends State<GroupListPage> {
       if (widget.onOpenConfirmations != null)
         IconButton(
           key: const ValueKey('group-list-confirmations'),
-          icon: Badge(
-            isLabelVisible: widget.pendingConfirmationCount > 0,
-            label: Text('${widget.pendingConfirmationCount}'),
-            child: const Icon(Icons.pending_actions),
+          // 计数参与布局，避免大字号或 50+ 角标被窗口右缘裁掉。
+          icon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.pending_actions),
+              if (widget.pendingConfirmationCount > 0) ...[
+                const SizedBox(width: SpbSpacing.xs),
+                Badge(
+                  label: Text(
+                    '${widget.pendingConfirmationCount}'
+                    '${widget.pendingConfirmations?.isTruncated == true ? '+' : ''}',
+                  ),
+                ),
+              ],
+            ],
           ),
           tooltip: '待确认',
           onPressed: widget.onOpenConfirmations,
@@ -1009,6 +1065,25 @@ class _GroupListPageState extends State<GroupListPage> {
             // 滚到中间就看不见「这是缓存」了）。
             if (_fromCache)
               _CacheNotice(fetchedAt: _cacheFetchedAt, onRetry: _refresh),
+            if (widget.pendingConfirmationsUnavailable)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: SpbSpacing.md),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '待确认信息暂不可用',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    if (widget.onRefreshConfirmations != null)
+                      TextButton(
+                        onPressed: widget.onRefreshConfirmations,
+                        child: const Text('重试'),
+                      ),
+                  ],
+                ),
+              ),
             Expanded(child: _buildBody()),
           ],
         ),
@@ -1144,6 +1219,9 @@ class _GroupListPageState extends State<GroupListPage> {
       onOpenSnapshotSite: widget.onOpenSnapshotSite,
       fileSummary: widget.groupFileSummary?.call(group.id),
       agentNameOf: widget.agentNameOf,
+      pendingCount: widget.pendingConfirmations?.byGroup[group.id] ?? 0,
+      pendingCountIsTruncated:
+          widget.pendingConfirmations?.isTruncated ?? false,
     );
   }
 
@@ -1336,8 +1414,12 @@ class _GroupTile extends StatelessWidget {
     this.onOpenSnapshotSite,
     this.fileSummary,
     this.agentNameOf,
+    this.pendingCount = 0,
+    this.pendingCountIsTruncated = false,
   });
 
+  final int pendingCount;
+  final bool pendingCountIsTruncated;
   final ChatGroup group;
   final VoidCallback? onTap;
 
@@ -1557,6 +1639,24 @@ class _GroupTile extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
+    final summary = GroupGoalSummary(
+      GoalSnapshot.fromJson(group.currentGoal ?? const {}),
+    );
+    final progress = summary.progress;
+    final largeText = MediaQuery.textScalerOf(context).scale(14) > 18;
+    final title = Text(
+      group.title,
+      style: textTheme.titleSmall,
+      maxLines: largeText ? 2 : 1,
+      overflow: TextOverflow.ellipsis,
+    );
+    final status = _GroupStatusChip(status: group.status);
+    final updatedAt = Text(
+      _relativeTime(group.updatedAt),
+      style: SpbType.listMeta(textTheme)
+          ?.copyWith(color: scheme.onSurfaceVariant),
+    );
+
     // 信息卡（对齐小程序 work-card 的密度）：标题行 + 目标行 + 进度条 +
     // 文件条 + 元信息行。各段**缺数据即不渲染**，避免满屏空占位。
     //
@@ -1580,26 +1680,48 @@ class _GroupTile extends StatelessWidget {
           // 归档态原先用「图标 + 已归档」文字，只在归档行出现；改成一枚**常显**
           // 的状态徽标后（§6.89），活跃/归档两态同一视觉位置、同一阅读顺序，
           // 也省掉标题行的图标宽度（窄屏卡片更不容易把标题挤没）。
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  group.title,
-                  style: textTheme.titleSmall,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const SizedBox(width: SpbSpacing.sm),
-              _GroupStatusChip(status: group.status),
-              const SizedBox(width: SpbSpacing.sm),
-              Text(
-                _relativeTime(group.updatedAt),
-                style: SpbType.listMeta(textTheme)
-                    ?.copyWith(color: scheme.onSurfaceVariant),
-              ),
-            ],
-          ),
+          // 大字号把元信息放到下一行，避免徽标和时间挤掉标题。
+          if (largeText) ...[
+            title,
+            const SizedBox(height: SpbSpacing.xs),
+            Wrap(
+              spacing: SpbSpacing.sm,
+              runSpacing: SpbSpacing.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [status, updatedAt],
+            ),
+          ] else
+            Row(
+              children: [
+                Expanded(child: title),
+                const SizedBox(width: SpbSpacing.sm),
+                status,
+                const SizedBox(width: SpbSpacing.sm),
+                updatedAt,
+              ],
+            ),
+          // 待处理提示优先于目标与元信息；图标配文字，不只靠颜色区分。
+          if (pendingCount > 0) ...[
+            const SizedBox(height: SpbSpacing.sm),
+            _GroupAttentionLine(
+              icon: Icons.pending_actions_outlined,
+              label:
+                  '待你确认 · ${pendingCountIsTruncated ? '至少 ' : ''}$pendingCount 项',
+              color: scheme.primary,
+            ),
+          ],
+          if (summary.needsAttention) ...[
+            const SizedBox(height: SpbSpacing.xs),
+            _GroupAttentionLine(
+              icon: summary.errorCount > 0
+                  ? Icons.error_outline
+                  : Icons.pause_circle_outline,
+              label: _taskAttentionLabel(summary),
+              color: summary.errorCount > 0
+                  ? scheme.error
+                  : scheme.onSurfaceVariant,
+            ),
+          ],
           // ── 目标行：结构化 goal 优先，旧列兑底（ChatGroup.currentGoalText）──
           if (group.currentGoalText.isNotEmpty) ...[
             const SizedBox(height: SpbSpacing.xs),
@@ -1613,15 +1735,17 @@ class _GroupTile extends StatelessWidget {
             ),
           ],
           // ── 进度行：服务端 goal 快照的 progress（迁移 0022 后的字段）──
-          if (_progress != null && _progress!.total > 0) ...[
+          if (progress != null && progress.total > 0) ...[
             const SizedBox(height: SpbSpacing.sm),
             // 用 fraction 而不是 percent/100：服务端 percent 是整数截断，
             // 1/3 会被舍成 33%（对齐 works_page 的同一取舍）。
-            LinearProgressIndicator(value: _progress!.ratio),
+            LinearProgressIndicator(value: progress.ratio),
             const SizedBox(height: SpbSpacing.xxs),
             Text(
-              '${_progress!.completed}/${_progress!.total} 步'
-              '${_currentTaskSuffix()}',
+              '${progress.completed}/${progress.total} 步'
+              '${summary.currentTaskLabel == null ? '' : ' · ${summary.currentTaskLabel}'}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: SpbType.listMeta(textTheme)
                   ?.copyWith(color: scheme.onSurfaceVariant),
             ),
@@ -1769,25 +1893,16 @@ class _GroupTile extends StatelessWidget {
     );
   }
 
-  /// 服务端 goal 快照的进度（无 goal / 无 progress / 无任务时为 null）。
-  ///
-  /// 数据来自 `GET /chat/groups` 每行都带的 `current_goal`（服务端
-  /// `loadGroupGoalSnapshots` 固定 2 次查询批量取，零额外请求）。
-  GoalProgress? get _progress {
-    final p = group.currentGoal?['progress'];
-    if (p is! Map) return null;
-    return GoalProgress.fromJson(Map<String, dynamic>.from(p));
-  }
-
-  /// 当前任务后缀（` · TASK-005`）；无 current_task_id 时空串。
-  ///
-  /// 该字段只在 group DTO 的快照里下发（见 `Goal.currentTaskId` 的说明）。
-  String _currentTaskSuffix() {
-    final raw = group.currentGoal?['goal'];
-    if (raw is! Map) return '';
-    final task = Map<String, dynamic>.from(raw)['current_task_id'] as String?;
-    if (task == null || task.isEmpty) return '';
-    return ' · $task';
+  String _taskAttentionLabel(GroupGoalSummary summary) {
+    final counts = [
+      if (summary.errorCount > 0) '${summary.errorCount} 项任务失败',
+      if (summary.blockedCount > 0) '${summary.blockedCount} 项任务阻塞',
+    ].join(' · ');
+    final task = summary.problemTask;
+    if (task == null) return counts;
+    final title = task.title.trim().isEmpty ? task.taskId : task.title.trim();
+    final reason = task.errorReason?.trim();
+    return '$counts · $title${reason == null || reason.isEmpty ? '' : '：$reason'}';
   }
 
   /// 文件条文案：`18 个文件 · 3.4 MB · 3 天前同步`。
@@ -1812,6 +1927,38 @@ class _GroupTile extends StatelessWidget {
     if (diff.inDays < 30) return '${diff.inDays} 天前';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
   }
+}
+
+/// 提示仍属于卡片主点击区域，不增加窄小按钮或嵌套手势。
+class _GroupAttentionLine extends StatelessWidget {
+  const _GroupAttentionLine({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      ExcludeSemantics(
+        child: Icon(icon, size: SpbSpacing.lg, color: color),
+      ),
+      const SizedBox(width: SpbSpacing.xs),
+      Expanded(
+        child: Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: color),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    ],
+  );
 }
 
 /// 结项快照的状态徽标（只读，不可点）。

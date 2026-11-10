@@ -109,6 +109,10 @@ void main() {
     Future<ChatGroup> Function(String)? onCreateGroup,
     GroupActionHandler? onGroupAction,
     Stream<GroupUpdate>? groupUpdates,
+    Stream<GoalUpdate>? goalUpdates,
+    PendingConfirmationSummary? pendingConfirmations,
+    bool pendingConfirmationsUnavailable = false,
+    VoidCallback? onRefreshConfirmations,
     VoidCallback? onOpenHabits,
     VoidCallback? onOpenSettings,
     GroupCacheStore? cache,
@@ -127,6 +131,10 @@ void main() {
           onCreateGroup: onCreateGroup,
           onGroupAction: onGroupAction,
           groupUpdates: groupUpdates,
+          goalUpdates: goalUpdates,
+          pendingConfirmations: pendingConfirmations,
+          pendingConfirmationsUnavailable: pendingConfirmationsUnavailable,
+          onRefreshConfirmations: onRefreshConfirmations,
           onOpenHabits: onOpenHabits,
           onOpenSettings: onOpenSettings,
           cache: cache,
@@ -1024,6 +1032,222 @@ void main() {
   // ==================== 信息卡（goal / 进度 / agent / 文件条） ====================
 
   group('信息卡渲染', () {
+    testWidgets('同卡展示待确认、异常原因和任务名，点击仍进入所属对话', (tester) async {
+      final group = groupWithGoalJson(id: 'g1');
+      final goal = group['current_goal'] as Map<String, dynamic>;
+      goal['tasks'] = [
+        {
+          'id': 'row5',
+          'task_id': 'TASK-005',
+          'title': '发布客户端',
+          'status': 'in_progress',
+        },
+        {
+          'task_id': 'TASK-003',
+          'title': '构建检查',
+          'status': 'error_stopped',
+          'error_reason': '测试未通过',
+        },
+      ];
+      (goal['progress'] as Map<String, dynamic>)['error_stopped'] = 1;
+      mockPage(
+        offset: 0,
+        items: [
+          group,
+          groupJson(id: 'g2'),
+        ],
+      );
+      final summary = PendingConfirmationSummary.fromItems([
+        ChatConfirmation.fromJson({
+          'id': 'c1',
+          'group_id': 'g1',
+          'status': 'pending',
+        }),
+      ], limit: 1);
+      String? opened;
+      await pumpPage(
+        tester,
+        pendingConfirmations: summary,
+        onOpenGroup: (group) => opened = group.id,
+      );
+      expect(find.text('待你确认 · 至少 1 项'), findsOneWidget);
+      expect(find.text('1 项任务失败 · 构建检查：测试未通过'), findsOneWidget);
+      expect(find.text('4/7 步 · 发布客户端'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('待你确认 · 至少 1 项')).dy,
+        lessThan(tester.getTopLeft(find.text('把 500 报错定位并修掉')).dy),
+      );
+      await tester.tap(find.text('待你确认 · 至少 1 项'));
+      expect(opened, 'g1');
+      await pumpPage(
+        tester,
+        pendingConfirmations: PendingConfirmationSummary.fromItems(
+          [],
+          limit: 50,
+        ),
+      );
+      expect(find.textContaining('待你确认'), findsNothing);
+    });
+
+    testWidgets('确认查询失败给重试入口，不显示零项待确认', (tester) async {
+      mockPage(offset: 0, items: [groupJson(id: 'g1')]);
+      var retries = 0;
+      await pumpPage(
+        tester,
+        pendingConfirmationsUnavailable: true,
+        onRefreshConfirmations: () => retries++,
+      );
+      expect(find.text('待确认信息暂不可用'), findsOneWidget);
+      expect(find.textContaining('待你确认'), findsNothing);
+      await tester.tap(find.text('重试'));
+      expect(retries, 1);
+    });
+
+    testWidgets('目标 SSE 清除阻塞提示，更新任务名称与缓存', (tester) async {
+      final group = groupWithGoalJson(id: 'g1');
+      final goal = group['current_goal'] as Map<String, dynamic>;
+      (goal['progress'] as Map<String, dynamic>)['blocked'] = 2;
+      mockPage(offset: 0, items: [group]);
+      final updates = StreamController<GoalUpdate>.broadcast();
+      addTearDown(updates.close);
+      await pumpPage(
+        tester,
+        goalUpdates: updates.stream,
+        cache: fakeCache,
+        userId: 'usr_1',
+      );
+      expect(find.text('2 项任务阻塞'), findsOneWidget);
+      updates.add(
+        const GoalUpdate(
+          op: 'task_status',
+          groupId: 'g1',
+          source: 'agent',
+          goal: {'id': 'goal_1', 'goal_text': '修复完成'},
+          tasks: [
+            {'task_id': 'TASK-006', 'title': '验证结果', 'status': 'in_progress'},
+          ],
+          progress: {'total': 7, 'completed': 5, 'blocked': 0},
+        ),
+      );
+      await settleIo(tester);
+      expect(find.text('2 项任务阻塞'), findsNothing);
+      expect(find.text('5/7 步 · 验证结果'), findsOneWidget);
+      expect((await fakeCache.load('usr_1')).single.currentGoalText, '修复完成');
+      updates.add(
+        const GoalUpdate(op: 'goal_delete', groupId: 'g1', source: 'user'),
+      );
+      await settleIo(tester);
+      expect(find.text('5/7 步 · 验证结果'), findsNothing);
+    });
+
+    testWidgets('首拉响应晚于目标事件时保留新快照', (tester) async {
+      adapter.onGet(
+        '/chat/groups',
+        (server) => server.reply(200, {
+          'items': [groupWithGoalJson(id: 'g1')],
+        }, delay: const Duration(seconds: 5)),
+        queryParameters: {'limit': 30, 'offset': 0},
+      );
+      final updates = StreamController<GoalUpdate>.broadcast();
+      addTearDown(updates.close);
+      await pumpPage(tester, goalUpdates: updates.stream);
+      updates.add(
+        const GoalUpdate(
+          op: 'task_status',
+          groupId: 'g1',
+          source: 'agent',
+          goal: {'id': 'goal_1', 'goal_text': '新目标'},
+          tasks: [
+            {'task_id': 'TASK-006', 'title': '新任务', 'status': 'in_progress'},
+          ],
+          progress: {'total': 7, 'completed': 5},
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      expect(find.text('5/7 步 · 新任务'), findsOneWidget);
+      expect(find.text('4/7 步 · TASK-005'), findsNothing);
+    });
+
+    for (final dark in [false, true]) {
+      for (final layout in [
+        (const Size(320, 812), 2.0),
+        (const Size(375, 812), 1.0),
+        (const Size(812, 375), 1.0),
+        (const Size(1280, 800), 2.0),
+      ]) {
+        testWidgets('待处理卡片布局 ${layout.$1} 字号 ${layout.$2} 深色 $dark', (
+          tester,
+        ) async {
+          tester.view.physicalSize = layout.$1;
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          final group = groupWithGoalJson(id: 'g1', title: '发布桌面客户端');
+          final goal = group['current_goal'] as Map<String, dynamic>;
+          goal['tasks'] = [
+            {
+              'task_id': 'TASK-005',
+              'title': '验证安装包并检查签名与兼容性',
+              'status': 'in_progress',
+            },
+            {
+              'task_id': 'TASK-003',
+              'title': '构建安装包',
+              'status': 'error_stopped',
+              'error_reason': '等待修复构建环境缺少的依赖后继续验证',
+            },
+          ];
+          (goal['progress'] as Map<String, dynamic>)['error_stopped'] = 1;
+          mockPage(offset: 0, items: [group]);
+          final semantics = tester.ensureSemantics();
+          try {
+            await tester.pumpWidget(
+              MaterialApp(
+                theme: dark
+                    ? SpbTheme.darkFor(TargetPlatform.android)
+                    : SpbTheme.lightFor(TargetPlatform.android),
+                home: MediaQuery(
+                  data: MediaQueryData(
+                    textScaler: TextScaler.linear(layout.$2),
+                    disableAnimations: true,
+                  ),
+                  child: GroupListPage(
+                    api: api,
+                    onOpenGroup: (_) {},
+                    onOpenConfirmations: () {},
+                    pendingConfirmationCount: 50,
+                    pendingConfirmations: PendingConfirmationSummary.fromItems([
+                      for (var i = 0; i < 50; i++)
+                        ChatConfirmation.fromJson({
+                          'id': 'c$i',
+                          'group_id': 'g1',
+                          'status': 'pending',
+                        }),
+                    ], limit: 50),
+                  ),
+                ),
+              ),
+            );
+            await settleIo(tester);
+            expect(tester.takeException(), isNull);
+            expect(find.text('待你确认 · 至少 50 项'), findsOneWidget);
+            expect(tester.getSize(find.text('发布桌面客户端')).width, greaterThan(40));
+            expect(find.bySemanticsLabel(RegExp('.*待你确认.*')), findsWidgets);
+            expect(
+              tester.getRect(find.text('50+')).right,
+              lessThanOrEqualTo(layout.$1.width),
+            );
+            expect(
+              tester.getSize(find.byKey(const ValueKey('g1'))).height,
+              greaterThan(48),
+            );
+          } finally {
+            semantics.dispose();
+          }
+        });
+      }
+    }
+
     testWidgets('带 goal 快照：显示目标文本 + 进度条 + 当前任务', (tester) async {
       mockPage(offset: 0, items: [groupWithGoalJson(id: 'g1')]);
       await pumpPage(tester);

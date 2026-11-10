@@ -19,6 +19,99 @@ import 'support/desktop_harness.dart';
 /// ⚠️ 本文件由 `widget_test.dart` 按顶层用例边界拆出（issue #48）——
 /// 纯移动，未改动任何断言。共享夹具见 `support/desktop_harness.dart`。
 void main() {
+  testWidgets('首页卡片按归属计数并响应确认和目标 SSE，批量事件只重拉一次', (tester) async {
+    final sse = FakeSseClient();
+    var requests = 0;
+    var pending = 1;
+    final h = await pumpApp(
+      tester,
+      sseClient: sse,
+      mockGroups: false,
+      mockPendingConfirmations: false,
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/chat/groups',
+          (server) => server.reply(200, {
+            'items': [
+              {'id': 'g1', 'title': '发布版本', 'status': 'active'},
+              {'id': 'g2', 'title': '其他对话', 'status': 'active'},
+            ],
+          }),
+          queryParameters: {'limit': 30, 'offset': 0},
+        );
+        adapter.onGet(
+          '/chat/confirmations',
+          (server) => server.replyCallback(200, (_) {
+            requests++;
+            return {
+              'items': [
+                for (var i = 0; i < pending; i++)
+                  {'id': 'c$i', 'group_id': 'g1', 'status': 'pending'},
+                {'id': 'other', 'group_id': 'not_loaded', 'status': 'pending'},
+              ],
+            };
+          }),
+          queryParameters: {'status': 'pending', 'limit': 50},
+        );
+      },
+    );
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(seconds: 1));
+    }
+    expect(find.text('待你确认 · 1 项'), findsOneWidget);
+    expect(find.text('待你确认 · 2 项'), findsNothing);
+    expect(requests, 1);
+    sse.push('goal_updated', {
+      'eventId': 'goal_evt',
+      'eventType': 'goal_updated',
+      'userId': 'usr_TEST',
+      'groupId': 'g1',
+      'turnId': '',
+      'createdAt': '2026-11-10T00:00:00Z',
+      'payload': {
+        'op': 'task_status',
+        'goal': {'id': 'goal1', 'goal_text': '完成发布'},
+        'tasks': [
+          {'task_id': 'TASK-001', 'title': '检查签名', 'status': 'in_progress'},
+          {'task_id': 'TASK-002', 'title': '构建安装包', 'status': 'blocked'},
+        ],
+        'progress': {'total': 2, 'completed': 0, 'blocked': 1},
+      },
+    });
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('0/2 步 · 检查签名'), findsOneWidget);
+    expect(find.text('1 项任务阻塞 · 构建安装包'), findsOneWidget);
+    pending = 0;
+    for (final type in ['confirmation_resolved', 'confirmation_expired']) {
+      sse.push(type, {
+        'eventId': 'evt_$type',
+        'eventType': type,
+        'userId': 'usr_TEST',
+        'groupId': 'g1',
+        'turnId': 'turn1',
+        'createdAt': '2026-11-10T00:00:00Z',
+        'payload': {'confirmation_id': 'c0'},
+      });
+    }
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    expect(requests, 2);
+    expect(find.textContaining('待你确认'), findsNothing);
+    // 新凭证代际必须使旧确认列表失效，即使身份仍是 authenticated。
+    pending = 2;
+    h.container.read(sessionRevisionProvider.notifier).advance();
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(seconds: 1));
+    }
+    expect(requests, 3);
+    expect(find.text('待你确认 · 2 项'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('首页渲染对话列表（用 mock 数据，无真实网络）', (tester) async {
     final dio = createDio(baseUrl: 'https://api.test/pba');
     final adapter = DioAdapter(dio: dio);
@@ -196,8 +289,8 @@ void main() {
   testWidgets('收到确认卡事件后待确认角标自动重拉（不是等用户打开待确认页）', (tester) async {
     // ## 这个用例防的是什么
     //
-    // 对话列表页的角标读 `pendingConfirmationCountProvider`，它派生自
-    // `pendingConfirmationsProvider`。此前对话页在 items 变化时调的是
+    // 首页卡片与角标直接使用 `pendingConfirmationsProvider`。此前先派生
+    // `pendingConfirmationCountProvider`，对话页在 items 变化时调的是
     // `ref.invalidate(pendingConfirmationCountProvider)`——**失效的**：count
     // 重建后读到的仍是被缓存的被依赖者，角标纹丝不动。
     //

@@ -26,6 +26,7 @@
 - [x] 两端切账号身份与离线缓存归属失效（[issue #103](https://git.atjog.com/dever/super_partyb-flutter/issues/103)，见 [§6.90](design-decisions/auth.md)；本地修复与自动化回归）
 - [x] 对话列表刷新竞态、SSE 删除后复活及归档快照丢失（[issue #104](https://git.atjog.com/dever/super_partyb-flutter/issues/104)，见 [§6.91](design-decisions/ui.md)；本地修复与自动化回归）
 - [x] 页面可用性修复（[issue #105](https://git.atjog.com/dever/super_partyb-flutter/issues/105)）：聊天顶部操作分行、同步设置草稿离开保护、首屏同步入口、桌面表单限宽、侧栏换行与触控/语义补齐；本地自动化及离屏截图验证通过，真机待复核。登录非主路径折叠为 #98 的部分完成。
+- [x] 对话卡片待确认计数、任务失败/阻塞摘要与当前任务名称（[issue #106](https://git.atjog.com/dever/super_partyb-flutter/issues/106)，见 [§6.89](design-decisions/ui.md)）：两端接入同一全局查询与 SSE，完整性边界、实时更新和大字号布局已通过本地自动化及离屏检查；真机待复核。
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
 - [x] 流式回复空 ID 导致多轮正文滚动消失：已复现并修复，自动化回归通过（[issue #100](https://git.atjog.com/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；Windows release 待设备复核）
 - [x] 长对话性能评审：追底动画去重、Markdown 完成时保留解析状态、稳定链接回调、行索引缓存与图片缓存修复（见 [§6.47](design-decisions/performance.md)；本地回归通过，Windows release 待设备复核）
