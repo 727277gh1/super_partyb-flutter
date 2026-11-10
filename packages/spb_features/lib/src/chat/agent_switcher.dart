@@ -226,39 +226,44 @@ class _AgentSwitcherState extends State<AgentSwitcher> {
 
   Widget _buildTrigger(BuildContext context) {
     final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: SpbSpacing.sm,
-        vertical: SpbSpacing.xs,
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        minHeight: SpbTheme.isDesktopPlatform(context) ? 36 : 48,
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
-          const SizedBox(width: SpbSpacing.xs),
-          if (!widget.compact)
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 140),
-              child: Text(
-                _currentLabel,
-                key: const ValueKey('agent-switcher-label'),
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelLarge,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: SpbSpacing.sm,
+          vertical: SpbSpacing.xs,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.smart_toy_outlined, size: SpbSpacing.lg),
+            const SizedBox(width: SpbSpacing.xs),
+            if (!widget.compact)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
+                child: Text(
+                  _currentLabel,
+                  key: const ValueKey('agent-switcher-label'),
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge,
+                ),
               ),
-            ),
-          // 当前 agent 已不在可选列表里（归档/删除）：给出标记，否则用户会
-          // 疑惑「为什么这个 agent 在菜单里找不到」。
-          if (_currentMissing)
-            Tooltip(
-              message: '当前 Agent 已不可用',
-              child: Icon(
-                Icons.warning_amber_outlined,
-                size: SpbSpacing.lg,
-                color: theme.colorScheme.error,
+            // 当前 agent 已不在可选列表里（归档/删除）：给出标记，否则用户会
+            // 疑惑「为什么这个 agent 在菜单里找不到」。
+            if (_currentMissing)
+              Tooltip(
+                message: '当前 Agent 已不可用',
+                child: Icon(
+                  Icons.warning_amber_outlined,
+                  size: SpbSpacing.lg,
+                  color: theme.colorScheme.error,
+                ),
               ),
-            ),
-          const Icon(Icons.arrow_drop_down, size: SpbSpacing.lg),
-        ],
+            const Icon(Icons.arrow_drop_down, size: SpbSpacing.lg),
+          ],
+        ),
       ),
     );
   }

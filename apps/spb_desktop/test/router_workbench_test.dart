@@ -560,28 +560,12 @@ void main() {
       return ufs;
     }
 
-    /// 把 tab 条横向滚到露出 [label] 那个 tab。
-    ///
-    /// ## 为什么必须滚动
-    ///
-    /// 侧边栏宽 320px，tab 条是**横向可滚的** `ListView.builder`。它的子项是
-    /// **懒构建**的：超出 `cacheExtent`（默认 250px）的 tab 根本不在树里，
-    /// `find.byKey` 会得到 0 个——那不是「tab 被删了」，而是「还没构建」。
-    /// tab 数量增加到 7 个后，「动态」正好落到可视区 + cacheExtent 之外。
-    ///
-    /// 故断言尾部 tab 之前必须先滚到它——`scrollUntilVisible` 会驱动
-    /// `ListView` 构建出目标项。真实用户横向滚动一下也能看到，这是
-    /// **测试驱动方式的问题，不是 UI 缺陷**。
+    /// 标签换行后全部可直接点击，不再需要先横向滚动。
     Future<void> revealTab(WidgetTester tester, String label) async {
-      await tester.scrollUntilVisible(
-        find.byKey(ValueKey('sidebar-tab-$label')),
-        80,
-        scrollable: find.descendant(
-          of: find.byKey(const ValueKey('sidebar-tabbar')),
-          matching: find.byType(Scrollable),
-        ),
+      expect(
+        find.byKey(ValueKey('sidebar-tab-$label')).hitTestable(),
+        findsOneWidget,
       );
-      await tester.pumpAndSettle();
     }
 
     testWidgets('默认不展开：开关存在但侧边栏不可见，未取数', (tester) async {
@@ -637,8 +621,7 @@ void main() {
 
       expect(find.byKey(const ValueKey('sidebar-tab-交付物')), findsOneWidget);
       expect(find.byKey(const ValueKey('sidebar-tab-待办')), findsOneWidget);
-      // 尾部 tab 在 320px 侧边栏里落在可视区外（tab 条横向可滚且懒构建），
-      // 断言前先滚到它们。
+      // 标签自然换行，尾部入口也必须在可见范围内。
       await revealTab(tester, '目标');
       expect(find.byKey(const ValueKey('sidebar-tab-目标')), findsOneWidget);
       await revealTab(tester, '续跑');
@@ -647,7 +630,7 @@ void main() {
       expect(find.byKey(const ValueKey('sidebar-tab-动态')), findsOneWidget);
     });
 
-    /// 把 tab 条横向滚到露出 [label] 那个 tab，然后点它。
+    /// 确认标签可点后再选择。
     Future<void> tapTab(WidgetTester tester, String label) async {
       await revealTab(tester, label);
       await tester.tap(find.byKey(ValueKey('sidebar-tab-$label')));
@@ -1023,16 +1006,11 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('toggle-deliverables')));
       await tester.pumpAndSettle();
 
-      // 切到「任务」tab（它在 320px 侧边栏里落在可视区外，需先横滚）。
-      await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('sidebar-tab-任务')),
-        80,
-        scrollable: find.descendant(
-          of: find.byKey(const ValueKey('sidebar-tabbar')),
-          matching: find.byType(Scrollable),
-        ),
+      // 切到换行后直接可见的「任务」tab。
+      expect(
+        find.byKey(const ValueKey('sidebar-tab-任务')).hitTestable(),
+        findsOneWidget,
       );
-      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('sidebar-tab-任务')));
       await tester.pumpAndSettle();
 
@@ -1439,6 +1417,12 @@ void main() {
         tokenStore: InMemoryTokenStore(),
         initialLocation: SpbRoutes.login,
       );
+
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-other-methods')),
+      );
+      await tester.tap(find.byKey(const ValueKey('login-other-methods')));
+      await tester.pumpAndSettle();
 
       expect(
         find.byKey(const ValueKey('login-import-session')),

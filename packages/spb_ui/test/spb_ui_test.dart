@@ -8,6 +8,25 @@ Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
   group('ErrorBanner', () {
+    testWidgets('移动端重试按钮至少 48dp，浅深主题均可点击', (tester) async {
+      var retries = 0;
+      for (final theme in [SpbTheme.light(), SpbTheme.dark()]) {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: theme,
+            home: Scaffold(
+              body: Center(
+                child: ErrorBanner(message: '下载失败', onRetry: () => retries++),
+              ),
+            ),
+          ),
+        );
+        final retry = find.byType(TextButton);
+        expect(tester.getSize(retry).shortestSide, greaterThanOrEqualTo(48));
+        await tester.tap(retry);
+      }
+      expect(retries, 2);
+    });
     testWidgets('渲染文案，且调用方传入的 key 落在最外层容器上', (tester) async {
       await tester.pumpWidget(
         _host(

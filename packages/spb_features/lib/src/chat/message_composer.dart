@@ -376,6 +376,10 @@ class _MessageComposerState extends State<MessageComposer> {
     ColorScheme scheme,
     TextTheme textTheme,
   ) {
+    final hintStyle = SpbType.listMeta(textTheme)!;
+    final hintFontSize = hintStyle.fontSize!;
+    final hintScale =
+        MediaQuery.textScalerOf(context).scale(hintFontSize) / hintFontSize;
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: SpbSpacing.md,
@@ -477,11 +481,11 @@ class _MessageComposerState extends State<MessageComposer> {
           //
           // `availableWidth` 是**这一栏**的宽度（本控件从 `LayoutBuilder`
           // 拿到的约束），不是窗口宽度：侧边栏展开时窗口 1280 而这一栏 455。
-          if (!SpbBreakpoints.isCompact(availableWidth))
+          // 放大字号后也要为输入框保留空间，避免横屏时说明挤出多行输入框。
+          if (!SpbBreakpoints.isCompact(availableWidth / hintScale))
             Text(
               'Enter 发送 · Shift+Enter 换行',
-              style: SpbType.listMeta(textTheme)
-                  ?.copyWith(color: scheme.onSurfaceVariant),
+              style: hintStyle.copyWith(color: scheme.onSurfaceVariant),
             ),
         ],
       ),

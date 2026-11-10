@@ -310,14 +310,14 @@ class _SyncRunSectionState extends State<SyncRunSection> {
         Text(
           // 两句话把两条通道说清：自动同步不回传（防「我改的怎么没了」），
           // 回传是显式动作（防用户以为必须手动同步才能让 agent 感知）。
-          '手动与自动的同步都只从云端拉取到本地；本地改动要用「回传改动」显式交给 agent。',
+          '下载云端交付物到本地。本地修改需通过「回传改动」单独上传。',
           style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
         ),
         if (widget.hasUnsavedChanges) ...[
           const SizedBox(height: SpbSpacing.xs),
           Text(
             // 与按钮禁用配对：不说明原因，用户只会看到「按钮是灰的」。
-            '上方设置有未保存的改动，先点右上角「保存」再同步（否则本轮仍用旧配置）。',
+            '同步设置有未保存的改动，请先点右上角「保存」再同步。',
             key: const ValueKey('sync-unsaved-hint'),
             style: textTheme.bodySmall?.copyWith(color: scheme.error),
           ),

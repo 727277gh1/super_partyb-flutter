@@ -480,6 +480,9 @@ class _SettingsPageState extends State<SettingsPage>
 
   /// 「已保存」提示是否可见。
   bool _savedHint = false;
+  bool _confirmingLeave = false;
+
+  static const double _contentMaxWidth = 880;
 
   /// 单文件上限输入框（MB）。用 TextEditingController 才能保留用户输入的
   /// 中间态（如清空后重新输入），而受控于 draft 会把它立刻改写掉。
@@ -907,9 +910,9 @@ class _SettingsPageState extends State<SettingsPage>
     });
   }
 
-  Future<void> _save() async {
+  Future<bool> _save() async {
     final draft = _draft;
-    if (draft == null || _saving) return;
+    if (draft == null || _saving) return false;
 
     setState(() {
       _saving = true;
@@ -919,7 +922,7 @@ class _SettingsPageState extends State<SettingsPage>
 
     try {
       await widget.saveSettings(draft);
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() {
         _saving = false;
         _saved = draft;
@@ -927,12 +930,69 @@ class _SettingsPageState extends State<SettingsPage>
       });
       // 保存后重算统计：目录可能变了（旧统计已失效）。
       unawaited(_loadStats());
+      return !_dirty;
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() {
         _saving = false;
         _error = '保存失败：$e';
       });
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('保存失败，修改已保留，请重试')));
+      return false;
+    }
+  }
+
+  Future<void> _confirmLeave(Object? result) async {
+    if (_confirmingLeave || _saving || !_dirty) return;
+    _confirmingLeave = true;
+    try {
+      final save = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          scrollable: true,
+          title: const Text('有未保存的修改'),
+          content: const Text('保存后离开，或放弃这次同步设置的修改。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('继续编辑'),
+            ),
+            TextButton(
+              key: const ValueKey('settings-discard-leave'),
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('放弃修改'),
+            ),
+            FilledButton(
+              key: const ValueKey('settings-save-leave'),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('保存并离开'),
+            ),
+          ],
+        ),
+      );
+      if (save == null || !mounted) return;
+      if (save && !await _save()) return;
+      if (!mounted) return;
+      if (!save) {
+        setState(() {
+          _draft = _saved;
+          _syncMaxSizeField(_saved!);
+        });
+      }
+      // 等 PopScope 收到新的 canPop，避免再次拦截已经确认的返回操作。
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) {
+        final handled = await Navigator.of(context).maybePop(result);
+        // 分支根页先交给 Router；整个应用都没有上一页时才完成系统返回。
+        if (!handled && mounted) {
+          final router = Router.maybeOf(context);
+          final routed = await router?.routerDelegate.popRoute() ?? false;
+          if (!routed && mounted) await SystemNavigator.pop();
+        }
+      }
+    } finally {
+      _confirmingLeave = false;
     }
   }
 
@@ -1148,30 +1208,57 @@ class _SettingsPageState extends State<SettingsPage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        // 标签导航。用显式 controller 而不是 DefaultTabController：本页的
-        // 内容不是 TabBarView（见 _buildBody 的说明），只需 TabController
-        // 提供指示器与选中态。
-        bottom: TabBar(
-          key: const ValueKey('settings-tabs'),
-          controller: _tabs,
-          tabs: const [
-            Tab(key: ValueKey('settings-tab-general'), text: '通用'),
-            Tab(key: ValueKey('settings-tab-sync'), text: '交付物同步'),
+    return PopScope<Object?>(
+      canPop: !_dirty && !_saving,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) unawaited(_confirmLeave(result));
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.title),
+          // 标签导航。用显式 controller 而不是 DefaultTabController：本页的
+          // 内容不是 TabBarView（见 _buildBody 的说明），只需 TabController
+          // 提供指示器与选中态。
+          bottom: TabBar(
+            key: const ValueKey('settings-tabs'),
+            controller: _tabs,
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            tabs: const [
+              Tab(key: ValueKey('settings-tab-general'), text: '通用'),
+              Tab(key: ValueKey('settings-tab-sync'), text: '交付物同步'),
+            ],
+          ),
+          actions: [
+            if (_dirty)
+              TextButton(
+                key: const ValueKey('settings-save'),
+                onPressed: _saving ? null : _save,
+                child: Text(_saving ? '保存中…' : '保存'),
+              ),
           ],
         ),
-        actions: [
-          if (_dirty)
-            TextButton(
-              key: const ValueKey('settings-save'),
-              onPressed: _saving ? null : _save,
-              child: Text(_saving ? '保存中…' : '保存'),
-            ),
-        ],
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _contentMaxWidth),
+            child: _buildBody(),
+          ),
+        ),
+        bottomNavigationBar: _dirty
+            ? SafeArea(
+                top: false,
+                child: Padding(
+                  padding: SpbSpacing.cardPadding,
+                  child: Text(
+                    _saving ? '正在保存修改…' : '同步设置有未保存的修改，请点右上角「保存」',
+                    key: const ValueKey('settings-unsaved-notice'),
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              )
+            : null,
       ),
-      body: _buildBody(),
     );
   }
 
@@ -1285,11 +1372,6 @@ class _SettingsPageState extends State<SettingsPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // 四条通道说明：先给地图再看开关。没有它，下面四个开关与一个按钮
-              // 的关系只能靠用户自己猜（这正是本次整合要消除的歧义）。
-              _SyncChannelsCard(schedulesEnabled: widget.showAutoSync),
-              const SizedBox(height: SpbSpacing.lg),
-
               const SectionTitle('同步目录', highlight: true),
               _DirectoryCard(
                 localRoot: draft.localRoot,
@@ -1315,6 +1397,20 @@ class _SettingsPageState extends State<SettingsPage>
                         }
                       },
               ),
+              const SizedBox(height: SpbSpacing.lg),
+
+              // 常用操作靠近目录；仍只执行已保存设置，草稿不能越过禁用检查。
+              if (widget.runSync != null) ...[
+                SyncRunSection(
+                  runSync: widget.runSync!,
+                  localRoot: draft.localRoot,
+                  hasUnsavedChanges: _dirty,
+                  scanDirtyFiles: widget.scanDirtyFiles,
+                  uploadChanges: widget.uploadChanges,
+                ),
+                const SizedBox(height: SpbSpacing.lg),
+              ],
+              _SyncChannelsCard(schedulesEnabled: widget.showAutoSync),
               const SizedBox(height: SpbSpacing.lg),
 
               const SectionTitle('同步范围', highlight: true),
@@ -1470,19 +1566,6 @@ class _SettingsPageState extends State<SettingsPage>
               ),
 
               const SizedBox(height: SpbSpacing.lg),
-
-              // 立即同步 + 本轮结果 + 回传改动。放在同步标签的末尾：上面的配置
-              if (widget.runSync != null)
-                SyncRunSection(
-                  runSync: widget.runSync!,
-                  // 目录取 draft：用户刚选的目录在点「保存」前不能用于同步（由
-                  // hasUnsavedChanges 禁用按钮保证），但提示「尚未选目录」必须
-                  // 看 draft，否则刚配好目录却仍被告知没配。
-                  localRoot: draft.localRoot,
-                  hasUnsavedChanges: _dirty,
-                  scanDirtyFiles: widget.scanDirtyFiles,
-                  uploadChanges: widget.uploadChanges,
-                ),
             ],
           ),
         ),
@@ -1731,91 +1814,28 @@ class _SyncChannelsCard extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    final rows = <(IconData, String, String)>[
-      (
-        Icons.cloud_download_outlined,
-        '立即同步',
-        '手动跑一轮，结果就在按钮下方。与自动同步走同一条链路，不会多下一份。',
-      ),
-      if (schedulesEnabled)
-        (Icons.power_outlined, '启动后自动同步一次', '打开应用并登录成功后自动拉一轮，之后不再自己动。'),
-      if (schedulesEnabled)
-        (
-          Icons.repeat_outlined,
-          '周期同步',
-          '应用运行期间每隔一段时间拉一轮（可选 15/30/60/180 分钟）。'
-              '人不在应用里时，只有它能让本地目录保持新鲜。',
-        ),
-      if (schedulesEnabled)
-        (
-          Icons.chat_bubble_outline,
-          '进入对话时按需同步',
-          '打开某个对话时先查该对话有没有新交付物，有才提示，不会静默下载。',
-        ),
-      (
-        Icons.upload_outlined,
-        '回传改动（唯一上传通道）',
-        '上面四条都只把云端内容拉到本地。本地改过的文件要回传给 agent，'
-            '必须显式勾选后回传。',
-      ),
-    ];
-
     return Card(
       key: const ValueKey('settings-sync-channels'),
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: SpbSpacing.cardPadding,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('同步有四条下行通道', style: textTheme.titleSmall),
-            const SizedBox(height: SpbSpacing.xs),
-            Text(
-              // 先给结论再给列表：用户扫一眼就能知道「它们共用同一套配置」。
-              '它们共用下方的目录、范围与过滤设置；'
-              '未登录或未选择同步目录时，自动同步不会启动。',
-              style: textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+      child: ExpansionTile(
+        title: const Text('同步方式说明'),
+        subtitle: Text(schedulesEnabled ? '支持手动和自动下载' : '本设备仅支持手动下载'),
+        childrenPadding: SpbSpacing.cardPadding,
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            schedulesEnabled
+                ? '可立即同步，也可设置启动时、定时或进入对话时检查更新。所有下载共用本页的目录、范围与过滤设置。'
+                : '点击「立即同步」下载交付物。移动端不在后台定时下载，请在需要时打开应用同步。',
+            style: textTheme.bodyMedium,
+          ),
+          const SizedBox(height: SpbSpacing.sm),
+          Text(
+            '下载不会上传本地修改。需要交给 Agent 的改动，请先扫描并勾选文件，再选择「回传改动」。',
+            style: textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
             ),
-            const SizedBox(height: SpbSpacing.md),
-            for (final row in rows)
-              Padding(
-                padding: const EdgeInsets.only(bottom: SpbSpacing.sm),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(row.$1, size: 16, color: scheme.onSurfaceVariant),
-                    const SizedBox(width: SpbSpacing.sm),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(row.$2, style: textTheme.bodyMedium),
-                          Text(
-                            row.$3,
-                            style: textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            if (!schedulesEnabled)
-              Text(
-                // 移动端不装配排程器：写了开关也不会响。如实说明，而不是
-                // 默默少列三行让用户以为本端漏做了。
-                '本端只会手动同步：后台定时任务在移动系统上会被冻结，'
-                '排一个不会响的计时器等于误引导。',
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

@@ -71,8 +71,13 @@ class ErrorBanner extends StatelessWidget {
               style: TextButton.styleFrom(
                 foregroundColor: scheme.onErrorContainer,
                 padding: const EdgeInsets.symmetric(horizontal: SpbSpacing.md),
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                minimumSize: Size(
+                  48,
+                  SpbTheme.isDesktopPlatform(context) ? 32 : 48,
+                ),
+                tapTargetSize: SpbTheme.isDesktopPlatform(context)
+                    ? MaterialTapTargetSize.shrinkWrap
+                    : MaterialTapTargetSize.padded,
               ),
               child: Text(retryLabel),
             ),

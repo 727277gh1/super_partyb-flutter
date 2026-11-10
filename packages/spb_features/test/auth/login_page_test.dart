@@ -31,6 +31,7 @@ void main() {
     onEmailSignIn,
     Future<String?> Function(String code)? onHandoffSignIn,
     Size? size,
+    bool expandAlternatives = true,
   }) async {
     // 窗口尺寸：默认 800×600。改小可复现「内容过高溢出」这类布局问题
     // （手机横屏 / 错误 banner 撑开的场景）。
@@ -53,9 +54,61 @@ void main() {
       ),
     );
     await tester.pump();
+    if (expandAlternatives &&
+        find
+            .byKey(const ValueKey('login-other-methods'))
+            .evaluate()
+            .isNotEmpty) {
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-other-methods')),
+      );
+      await tester.tap(find.byKey(const ValueKey('login-other-methods')));
+      await tester.pumpAndSettle();
+    }
   }
 
   group('登录页渲染', () {
+    testWidgets('手机首屏收起备选方式，展开后错误跟随字段且草稿保留', (tester) async {
+      await pumpLogin(
+        tester,
+        size: const Size(375, 812),
+        expandAlternatives: false,
+        onSignIn: () async => null,
+        onWeChatSignIn: (_) async => null,
+        onEmailSignIn: (_, _) async => '邮箱不可用，请核对地址',
+        onHandoffSignIn: (_) async => null,
+        onImportSession: (_) async => null,
+      );
+      final alternatives = find.byKey(const ValueKey('login-other-methods'));
+      expect(alternatives.hitTestable(), findsOneWidget);
+      expect(find.byKey(const ValueKey('login-email-field')), findsNothing);
+      await tester.tap(alternatives);
+      await tester.pumpAndSettle();
+      final email = find.byKey(const ValueKey('login-email-field'));
+      await tester.ensureVisible(email);
+      await tester.enterText(email, 'user@example.com');
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-email-button')),
+      );
+      await tester.tap(find.byKey(const ValueKey('login-email-button')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(email).decoration!.errorText,
+        '邮箱不可用，请核对地址',
+      );
+      expect(find.byKey(const ValueKey('login-error')), findsNothing);
+      await tester.ensureVisible(find.text('其他登录方式'));
+      await tester.tap(find.text('其他登录方式'));
+      await tester.pumpAndSettle();
+      expect(email, findsNothing);
+      await tester.tap(find.text('其他登录方式'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(email).controller!.text,
+        'user@example.com',
+      );
+      expect(tester.takeException(), isNull);
+    });
     testWidgets('展示 SSO 登录按钮与说明文案', (tester) async {
       await pumpLogin(tester, onSignIn: () async => null);
 
@@ -387,7 +440,7 @@ void main() {
       expect(find.byKey(const ValueKey('login-email-button')), findsNothing);
     });
 
-    testWidgets('注入后展示输入框与按钮（始终可见，不像粘贴那样收起）', (tester) async {
+    testWidgets('展开备选方式后展示邮箱输入框与按钮', (tester) async {
       await pumpLogin(
         tester,
         onSignIn: () async => null,
@@ -502,7 +555,7 @@ void main() {
       await tester.pumpAndSettle();
     });
 
-    testWidgets('失败原因展示在错误条（与 onSignIn 同语义）', (tester) async {
+    testWidgets('失败原因展示在邮箱字段旁', (tester) async {
       await pumpLogin(
         tester,
         onSignIn: () async => null,
@@ -739,7 +792,13 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('login-import-field')))
+            .decoration!
+            .errorText,
+        isNotNull,
+      );
       expect(find.text('认不出粘贴的内容'), findsOneWidget);
     });
 
@@ -815,7 +874,13 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('login-import-field')))
+            .decoration!
+            .errorText,
+        isNotNull,
+      );
       expect(find.textContaining('导入失败'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -848,7 +913,13 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('login-import-confirm')));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const ValueKey('login-import-field')))
+            .decoration!
+            .errorText,
+        isNotNull,
+      );
       expect(tester.takeException(), isNull, reason: '错误态不得溢出（可滚动兑底）');
     });
   });

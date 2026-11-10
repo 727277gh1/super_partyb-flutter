@@ -42,11 +42,7 @@ class ChatSidebarTab {
 ///
 /// 把交付物 / 待办 / Gate 决策 / 工具调用等面板组织成可切换的 tab。
 ///
-/// ## 为什么用自定义 tab 行而不是 Material TabBar
-///
-/// TabBar 需要嵌在 AppBar 里（Scaffold），而侧边栏本身就是 Scaffold body
-/// 的一部分，再嵌一层 Scaffold/AppBar 会导致双 AppBar。自定义行只是一个
-/// 可滚动按钮组，没有多余的 chrome。
+/// 标签自动折行：320dp 侧栏也要能直接看见所有面板入口，放大字号时自然增高。
 ///
 /// ## 为什么用 IndexedStack
 ///
@@ -107,7 +103,9 @@ class _ChatSidebarState extends State<ChatSidebar> {
   @override
   void initState() {
     super.initState();
-    _index = widget.initialIndex.clamp(0, (widget.tabs.length - 1).clamp(0, 1));
+    _index = widget.tabs.isEmpty
+        ? 0
+        : widget.initialIndex.clamp(0, widget.tabs.length - 1);
     // 初始 tab 当然算已激活——不记的话首屏会渲染成空占位。
     _visited.add(_index);
   }
@@ -117,7 +115,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
     super.didUpdateWidget(oldWidget);
     // tabs 缩短后保持 index 合法。
     if (_index >= widget.tabs.length) {
-      _index = (widget.tabs.length - 1).clamp(0, 1);
+      _index = widget.tabs.isEmpty ? 0 : widget.tabs.length - 1;
     }
     // 钳制可能把当前下标换成一个从没访问过的值（如 tabs 从 2 个缩到 1 个时
     // 从 1 变 0）。当前 tab **必须**是已激活的，否则首屏变成空占位。
@@ -205,22 +203,20 @@ class _ChatSidebarState extends State<ChatSidebar> {
     final scheme = theme.colorScheme;
     final active = theme.colorScheme.primary;
 
-    return SizedBox(
-      height: 44,
-      child: ListView.builder(
+    return Padding(
+      padding: const EdgeInsets.all(SpbSpacing.xs),
+      child: Wrap(
         key: const ValueKey('sidebar-tabbar'),
-        scrollDirection: Axis.horizontal,
-        itemCount: widget.tabs.length,
-        itemBuilder: (context, i) {
+        spacing: SpbSpacing.xs,
+        runSpacing: SpbSpacing.xs,
+        children: List.generate(widget.tabs.length, (i) {
           final tab = widget.tabs[i];
           final selected = i == _index;
           final showBadge = tab.badge > 0;
 
-          return Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: SpbSpacing.xxs,
-              vertical: SpbSpacing.xs,
-            ),
+          return Semantics(
+            selected: selected,
+            button: true,
             child: InkWell(
               key: ValueKey<String>('sidebar-tab-${tab.label}'),
               borderRadius: BorderRadius.circular(SpbRadius.sm),
@@ -229,6 +225,9 @@ class _ChatSidebarState extends State<ChatSidebar> {
                 _visited.add(i);
               }),
               child: Container(
+                constraints: BoxConstraints(
+                  minHeight: SpbTheme.isDesktopTheme(theme) ? 36 : 48,
+                ),
                 padding: const EdgeInsets.symmetric(
                   horizontal: SpbSpacing.sm,
                   vertical: SpbSpacing.xxs,
@@ -269,7 +268,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
               ),
             ),
           );
-        },
+        }),
       ),
     );
   }

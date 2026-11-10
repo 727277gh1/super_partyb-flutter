@@ -1587,47 +1587,16 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     );
   }
 
-  /// AppBar 的操作按钮。
+  /// 顶部操作：Agent、交付物与待办始终可见；低频入口在窄屏收进菜单。
   ///
-  /// ## 为什么按宽度分两套（issue #31）
-  ///
-  /// 移动端 AppBar 曾经塞了 7 个常驻元素（AgentSwitcher + 5 个 IconButton +
-  /// 连接指示器），合计约 366dp，在常见手机宽度下**溢出**：360dp 达 66px、
-  /// 390dp 36px、412dp 14px（实测，见 issue #31）。
-  ///
-  /// 溢出后右侧图标被黄黑条覆盖/裁切，用户点不到。且本机无 `DISPLAY`
-  /// （AGENTS.md §9），此前的 widget test 用默认 800dp 窗口，掩盖了它。
-  ///
-  /// ## 分档依据：频率与是否需要一眼可见
-  ///
-  /// | 入口 | 窄屏 | 宽屏 | 理由 |
-  /// |---|---|---|---|
-  /// | AgentSwitcher | 常驻 | 常驻 | 「这段对话由谁回答」是全局属性，随时要切 |
-  /// | 交付物 / 待办 | 常驻 | 常驻 | **带徽标**，回答「现在有什么在等我」，必须一眼可见 |
-  /// | 对话设置 / 任务清单 / 目标历史 | 收进菜单 | 独立图标 | 低频弹层，多一步不痛 |
-  /// | 对话内搜索 | 收进菜单 | 独立图标 | 同上（宽屏由页面的 `enableSearch` 摆出） |
-  ///
-  /// ## 阈值为什么是 `SpbBreakpoints.compact`（720dp）
-  ///
-  /// 而不是「刚好放得下」的实测值（440dp 左右）：后者是**内容相关的**
-  /// ——AgentSwitcher 的宽度随 agent 名字变化（实测 94.3dp，上限 140dp+），
-  /// 按「刚好」设阈值会在换个长名字的 agent 后又溢出。720dp 以下一律是
-  /// 单栏窄屏，是这类取舍的天然分界。
-  ///
-  /// 副作用（**有意**）：既有 widget test 用默认 800dp 窗口，落在「宽屏」档，
-  /// 故它们的交互路径完全不变（仍可直接 `find` 那些 `ValueKey`）。
-  ///
-  /// ## 溢出菜单为什么交给 `ConversationPage` 渲染
-  ///
-  /// 因为「在本对话中搜索」需要页面的 `ScrollController` 与 `_items`
-  /// （命中后要滚回时间线），那是页面私有 State。故页面提供一个
-  /// `overflowItems` 插槽，本端把三个低频入口与搜索开关一起交给它。
+  /// ConversationPage 按聊天栏的实际宽度把常用操作分到独立工具行，避免
+  /// 长 Agent 名挤掉标题。菜单仍由页面渲染，才能复用它的对话内搜索状态。
   List<Widget> _appBarActions() {
     final narrow = SpbBreakpoints.isCompact(MediaQuery.sizeOf(context).width);
     return [
       // Agent 切换：
       //
-      // 放在 AppBar 而非底部弹层里：它是「这段对话由谁回答」的全局属性，
+      // 放在聊天顶部：它是「这段对话由谁回答」的全局属性，
       // 用户在对话过程中随时可能要换，不该先开设置弹层再切。
       //
       // `_group` 未就绪时 `currentAgentId` 为 null，入口会显示「自动路由」
@@ -1644,10 +1613,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
           _selectedAgentId = agentId;
         }),
         currentAgentId: _effectiveAgentId,
-        // 极窄屏（< 360dp）只显示图标：名字最多占 140dp，配上三个常驻图标
-        // 在 320dp 下仍会溢出 10px（issue #31）。名字在菜单的勾选项里可见，
-        // 故省它不丢信息。
-        compact: MediaQuery.sizeOf(context).width < 360,
+        // 窄屏由 ConversationPage 把这些操作移到独立工具行，保留当前名称。
       ),
       // 交付物入口（按对话浏览本次产出的文件）。
       //

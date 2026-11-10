@@ -8,6 +8,8 @@ import 'package:spb_ui/spb_ui.dart';
 
 import 'auth_state.dart';
 
+enum _LoginField { email, handoff, session }
+
 /// 登录页。
 ///
 /// ## 认证形态：RFC 8252 §7.3 loopback（桌面端）
@@ -163,6 +165,7 @@ class _LoginPageState extends State<LoginPage> {
 
   /// 本页自己捕获的失败原因（优先于 `widget.state.message`）。
   String? _localError;
+  _LoginField? _errorField;
 
   /// 「粘贴导入」区域是否展开（默认收起，不喧宾夺主）。
   bool _importExpanded = false;
@@ -277,7 +280,10 @@ class _LoginPageState extends State<LoginPage> {
     super.didUpdateWidget(oldWidget);
     // 外部状态变化（如路由守卫把错误塞进 AuthState）时清掉本地错误，
     // 避免显示的是上一次点击留下的陈旧消息。
-    if (oldWidget.state.message != widget.state.message) _localError = null;
+    if (oldWidget.state.message != widget.state.message) {
+      _localError = null;
+      _errorField = null;
+    }
   }
 
   Future<void> _handleSignIn() async {
@@ -285,6 +291,7 @@ class _LoginPageState extends State<LoginPage> {
     setState(() {
       _busy = true;
       _localError = null;
+      _errorField = null;
     });
 
     String? error;
@@ -315,6 +322,7 @@ class _LoginPageState extends State<LoginPage> {
     setState(() {
       _wechatBusy = true;
       _localError = null;
+      _errorField = null;
     });
 
     String? error;
@@ -344,6 +352,7 @@ class _LoginPageState extends State<LoginPage> {
     if (handler == null || _emailBusy) return;
 
     final email = _emailController.text.trim();
+    _errorField = _LoginField.email;
     if (email.isEmpty) {
       // 空输入直接提示，省掉一次必然失败的请求。
       setState(() => _localError = '请先输入邮箱地址');
@@ -384,6 +393,7 @@ class _LoginPageState extends State<LoginPage> {
     if (handler == null || _handoffBusy) return;
 
     final code = _handoffController.text.trim();
+    _errorField = _LoginField.handoff;
     if (code.isEmpty) {
       setState(() => _localError = '请先输入登录码');
       return;
@@ -422,6 +432,7 @@ class _LoginPageState extends State<LoginPage> {
     if (handler == null || _importing) return;
 
     final raw = _importController.text.trim();
+    _errorField = _LoginField.session;
     if (raw.isEmpty) {
       setState(() => _localError = '请先粘贴会话内容');
       return;
@@ -455,7 +466,10 @@ class _LoginPageState extends State<LoginPage> {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     // 本地错误优先：它是用户刚触发的那次操作的结果。
-    final error = _localError ?? widget.state.message;
+    final error = _errorField == null
+        ? (_localError ?? widget.state.message)
+        : null;
+    final desktop = SpbTheme.isDesktopPlatform(context);
 
     return Scaffold(
       // 本页**没有 AppBar**，`Scaffold` 因此不会替 body 避开刘海/手势条：
@@ -520,6 +534,12 @@ class _LoginPageState extends State<LoginPage> {
                       ],
                       FilledButton.icon(
                         key: const ValueKey('login-wechat-button'),
+                        style: desktop
+                            ? FilledButton.styleFrom(
+                                backgroundColor: scheme.secondaryContainer,
+                                foregroundColor: scheme.onSecondaryContainer,
+                              )
+                            : null,
                         // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
                         // 登录流程（state/PKCE 会互相覆盖）。
                         onPressed: _busy || _wechatBusy || _emailBusy
@@ -534,12 +554,20 @@ class _LoginPageState extends State<LoginPage> {
                                 ),
                               )
                             : const Icon(Icons.chat_bubble_outline),
-                        label: Text(_wechatBusy ? '请在微信中确认…' : '微信一键登录'),
+                        label: Text(
+                          _wechatBusy
+                              ? '请在微信中确认…'
+                              : desktop
+                              ? '用微信小程序登录'
+                              : '微信一键登录',
+                        ),
                       ),
                       const SizedBox(height: SpbSpacing.sm),
                       Text(
                         _shortCode == null
-                            ? '将打开微信小程序，确认后自动返回本应用。'
+                            ? desktop
+                                  ? '在手机微信小程序中输入本机显示的登录码。'
+                                  : '将打开微信小程序，确认后自动返回本应用。'
                             : '打开微信 → 搜索或「发现 → 小程序」进入「${widget.miniProgramName}」→「我的 → 输入登录码」，填入上面的码。',
                         textAlign: TextAlign.center,
                         style: textTheme.bodySmall?.copyWith(
@@ -550,6 +578,12 @@ class _LoginPageState extends State<LoginPage> {
                     ],
                     FilledButton.icon(
                       key: const ValueKey('login-sso-button'),
+                      style: !desktop && widget.onWeChatSignIn != null
+                          ? FilledButton.styleFrom(
+                              backgroundColor: scheme.secondaryContainer,
+                              foregroundColor: scheme.onSecondaryContainer,
+                            )
+                          : null,
                       // 加载中禁用，避免重复发起授权（会产生多个 state）。
                       onPressed: _busy || _wechatBusy || _emailBusy
                           ? null
@@ -575,17 +609,31 @@ class _LoginPageState extends State<LoginPage> {
                         color: scheme.onSurfaceVariant,
                       ),
                     ),
-                    if (widget.onEmailSignIn != null) ...[
+                    if (widget.onEmailSignIn != null ||
+                        widget.onHandoffSignIn != null ||
+                        widget.onImportSession != null) ...[
                       const SizedBox(height: SpbSpacing.lg),
-                      _buildEmailSection(context),
-                    ],
-                    if (widget.onHandoffSignIn != null) ...[
-                      const SizedBox(height: SpbSpacing.lg),
-                      _buildHandoffSection(context),
-                    ],
-                    if (widget.onImportSession != null) ...[
-                      const SizedBox(height: SpbSpacing.lg),
-                      _buildImportSection(context),
+                      ExpansionTile(
+                        key: const ValueKey('login-other-methods'),
+                        title: const Text('其他登录方式'),
+                        subtitle: Text(
+                          [
+                            if (widget.onEmailSignIn != null) '邮箱',
+                            if (widget.onHandoffSignIn != null) '登录码',
+                            if (widget.onImportSession != null) '导入会话',
+                          ].join(' · '),
+                        ),
+                        // 收起时保留已填写的内容和错误，再展开可继续原流程。
+                        maintainState: true,
+                        children: [
+                          if (widget.onEmailSignIn != null)
+                            _buildEmailSection(context),
+                          if (widget.onHandoffSignIn != null)
+                            _buildHandoffSection(context),
+                          if (widget.onImportSession != null)
+                            _buildImportSection(context),
+                        ],
+                      ),
                     ],
                   ],
                 ),
@@ -641,6 +689,8 @@ class _LoginPageState extends State<LoginPage> {
             counterText: '',
             helperText: '在手机微信里打开「${widget.miniProgramName}」→ 我的 → 在别的设备上登录',
             helperMaxLines: 2,
+            errorText: _errorField == _LoginField.handoff ? _localError : null,
+            errorMaxLines: 3,
           ),
           // 服务端会归一化（去横线/小写），这里只做长度与可读性提示。
           // 等宽 + 字距 2：8 位码分组更易读。走 `SpbType.mono` 是为了把
@@ -712,10 +762,12 @@ class _LoginPageState extends State<LoginPage> {
           enableSuggestions: false,
           textInputAction: TextInputAction.go,
           onSubmitted: (_) => _handleEmailSignIn(),
-          decoration: const InputDecoration(
-            border: OutlineInputBorder(),
+          decoration: InputDecoration(
+            border: const OutlineInputBorder(),
             labelText: '邮箱地址',
             hintText: 'you@example.com',
+            errorText: _errorField == _LoginField.email ? _localError : null,
+            errorMaxLines: 3,
           ),
         ),
         const SizedBox(height: SpbSpacing.sm),
@@ -774,9 +826,14 @@ class _LoginPageState extends State<LoginPage> {
             // 凭证不该被输入法记录或拼写检查（会进系统词典/云同步）。
             autocorrect: false,
             enableSuggestions: false,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              border: const OutlineInputBorder(),
+              labelText: '会话内容',
               hintText: 'id_token=eyJ…; refresh_token=…',
+              errorText: _errorField == _LoginField.session
+                  ? _localError
+                  : null,
+              errorMaxLines: 3,
             ),
           ),
           const SizedBox(height: SpbSpacing.sm),

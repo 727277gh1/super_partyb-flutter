@@ -429,7 +429,7 @@ void main() {
         localRoot: '/root',
       );
 
-      expect(find.textContaining('只从云端拉取到本地'), findsOneWidget);
+      expect(find.textContaining('下载云端交付物到本地'), findsOneWidget);
       expect(find.byKey(const ValueKey('upload-section')), findsNothing);
       expect(find.byKey(const ValueKey('upload-scan-button')), findsNothing);
       expect(find.byKey(const ValueKey('upload-submit-button')), findsNothing);
@@ -444,7 +444,7 @@ void main() {
         localRoot: '/root',
       );
 
-      expect(find.textContaining('本地改动要用「回传改动」显式交给 agent'), findsOneWidget);
+      expect(find.textContaining('本地修改需通过「回传改动」单独上传'), findsOneWidget);
     });
 
     testWidgets('注入回传回调后才展示入口', (tester) async {

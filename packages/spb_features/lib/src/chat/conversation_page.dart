@@ -2022,7 +2022,18 @@ class _ConversationPageState extends State<ConversationPage> {
 
   @override
   Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) =>
+          _buildPage(context, constraints.maxWidth),
+    );
+  }
+
+  Widget _buildPage(BuildContext context, double availableWidth) {
     final title = widget.title;
+    // 按当前栏宽分行，侧栏展开后的桌面聊天区也需要给标题留空间。
+    final separateActions =
+        SpbBreakpoints.isCompact(availableWidth) &&
+        (widget.actions?.isNotEmpty ?? false);
 
     // ## 本次 build 的全部派生查询都在这里算一次
     //
@@ -2068,7 +2079,7 @@ class _ConversationPageState extends State<ConversationPage> {
                 ],
                 // 调用方追加的操作（如桌面端的交付物侧边栏开关），
                 // 放在连接指示**之前**：连接状态是全局性的，固定在最右侧。
-                ...?widget.actions,
+                if (!separateActions) ...?widget.actions,
                 // 对话内搜索：搜的是**已加载的时间线**（含 agent 回复），
                 // 与全局搜索页（只搜用户输入、跨对话）互补。
                 //
@@ -2106,6 +2117,23 @@ class _ConversationPageState extends State<ConversationPage> {
             ),
       body: Column(
         children: [
+          if (separateActions)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: SpbSpacing.md,
+                  vertical: SpbSpacing.xs,
+                ),
+                child: Wrap(
+                  key: const ValueKey('conversation-toolbar'),
+                  spacing: SpbSpacing.xs,
+                  runSpacing: SpbSpacing.xs,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: widget.actions!,
+                ),
+              ),
+            ),
           // 离线数据提示（issue #29 切片 B）：贴最顶。
           //
           // 与下面几条状态条的语义不同：那几条说的是「这一轮/这个 turn」的状态，
@@ -3506,9 +3534,11 @@ class _ConnectionIndicator extends StatelessWidget {
 
     // 内边距在两个分支下**相同**：否则可点/不可点切换时图标会左右移动
     // （与停止按钮选「禁用而非隐藏」同一个理由：AppBar 宽度必须恒定）。
-    final iconWidget = Padding(
-      padding: const EdgeInsets.all(SpbSpacing.sm),
-      child: Icon(icon, size: SpbSpacing.lg, color: color),
+    final iconWidget = SizedBox.square(
+      dimension: SpbTheme.isDesktopPlatform(context) ? 32 : 48,
+      child: Center(
+        child: Icon(icon, size: SpbSpacing.lg, color: color),
+      ),
     );
 
     return Tooltip(

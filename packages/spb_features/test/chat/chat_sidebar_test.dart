@@ -248,21 +248,18 @@ void main() {
     });
 
     testWidgets('initialIndex 指向的 tab 视为已激活（不渲染空占位）', (tester) async {
-      // 注：`initialIndex` 会被 `clamp(0, (len-1).clamp(0, 1))` 限制在 0..1
-      // （**既有行为**，见 `_ChatSidebarState.initState`——不是本 issue 引入的）。
-      // 这里断言的是：无论钳制到哪个下标，那个 tab 必须是已激活的（不能是
-      // 空占位）。故用 initialIndex=1 避开钳制干扰。
-      final counts = await pumpCounting(tester, initialIndex: 1);
+      // 第三个及之后的入口也能直接激活，不能再钳制到第二项。
+      final counts = await pumpCounting(tester, initialIndex: 2);
 
-      expect(counts, {'A': 0, 'B': 1, 'C': 0});
+      expect(counts, {'A': 0, 'B': 0, 'C': 1});
     });
 
     testWidgets('initialIndex 越界被钳制后，钳到的那个 tab 仍是已激活的', (tester) async {
       // 防的是：钳制把 `_index` 换成一个未访问过的值 → 首屏渲染成空占位。
       final counts = await pumpCounting(tester, initialIndex: 99);
 
-      // 钳到 1（见上一条注释），该 tab 已构建。
-      expect(counts, {'A': 0, 'B': 1, 'C': 0});
+      // 钳到最后一项，该 tab 已构建。
+      expect(counts, {'A': 0, 'B': 0, 'C': 1});
       expect(tester.takeException(), isNull);
     });
 

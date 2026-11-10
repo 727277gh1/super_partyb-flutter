@@ -544,6 +544,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('login-other-methods')),
+      );
+      await tester.tap(find.byKey(const ValueKey('login-other-methods')));
+      await tester.pumpAndSettle();
+
       // 导入区默认收起（它是备选路径，展开着会让登录页看起来有两条对等入口）
       // ——必须先展开才能断言输入框存在。
       //
@@ -819,7 +825,7 @@ void main() {
       );
     });
 
-    testWidgets('极窄屏（<360dp）AgentSwitcher 隐藏名字，避免溢出', (tester) async {
+    testWidgets('极窄屏（<360dp）AgentSwitcher 分行后保留名字', (tester) async {
       tester.view.physicalSize = const Size(320, 844);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() {
@@ -838,8 +844,8 @@ void main() {
 
       expect(
         find.byKey(const ValueKey('agent-switcher-label')),
-        findsNothing,
-        reason: '320dp 下名字（最多 140dp）放不下，只留图标（issue #31）',
+        findsOneWidget,
+        reason: '常用操作分行后保留当前 Agent 名称（issue #105）',
       );
       expect(find.byKey(const ValueKey('agent-switcher')), findsOneWidget);
       expect(tester.takeException(), isNull);
