@@ -258,6 +258,31 @@ void main() {
     });
   });
 
+  group(
+    'withTitle：只换标题（issue #87，group_updated op=title / group_title_updated）',
+    () {
+      test('改名返回副本，其余字段原样保留', () {
+        final g = mkGroup(
+          goal: '旧列目标',
+          metadata: {
+            'tts': {'enabled': true},
+          },
+        );
+        final renamed = g.withTitle('新名字');
+        expect(renamed.title, '新名字');
+        expect(renamed.id, g.id);
+        expect(renamed.currentGoalText, '旧列目标');
+        expect(renamed.ttsEnabled, isTrue, reason: 'metadata 不得丢失');
+        expect(renamed.createdAt, g.createdAt);
+      });
+
+      test('同标题返回原实例（调用方据此跳过 setState）', () {
+        final g = mkGroup();
+        expect(identical(g.withTitle('某个对话'), g), isTrue);
+      });
+    },
+  );
+
   group('ChatGroup.toJson（本地缓存 round-trip，issue #26）', () {
     /// 断言 round-trip 后**关键字段**一致。
     ///

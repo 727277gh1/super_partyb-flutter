@@ -110,6 +110,34 @@ class ChatGroup {
     archiveSnapshot: archiveSnapshot,
   );
 
+  /// 返回一个只替换 [title] 的副本。
+  ///
+  /// ## 为什么需要它（而不是各页面自己拼一份）
+  ///
+  /// `group_updated(op=title)` / `group_title_updated` 只携带新标题（
+  /// [ChatGroup] 没有 `copyWith`），对话页要把权威快照就地改名（AppBar
+  /// 实时跟新，issue #87）。与 [withMetadata] / [withCurrentGoal] 同一取向：
+  /// 事件只描述一个字段，副本也只换一个字段。
+  ///
+  /// 调用方无需预先判空：新标题与现值相同时返回原实例（调用方可用 `identical`
+  /// 跳过 setState）。
+  ChatGroup withTitle(String next) {
+    if (next == title) return this;
+    return ChatGroup(
+      id: id,
+      userId: userId,
+      title: next,
+      status: status,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      goal: goal,
+      metadata: metadata,
+      activeSession: activeSession,
+      currentGoal: currentGoal,
+      archiveSnapshot: archiveSnapshot,
+    );
+  }
+
   bool get isArchived => status == 'archived';
 
   // ⚠️ 群级 `follow_up_suggest` / `habit_suggest` 的 metadata getter 已移除
