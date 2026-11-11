@@ -673,10 +673,18 @@ Windows / Linux 的滚轮与 Android 的拖动，检查滚动距离、正文项�
 传空列表会渲染「还没有 gate 决策」的空态，把「没接数据」说成「没有决策」。
 
 **移动端弹层必须自己刷新**：`showModalBottomSheet` 是**独立 route**，页面的
-`setState` 不会让它重建。故 router 用 `_activityTick`（`ValueNotifier<int>`）当哨兵，
-`_bumpActivitySheet()` 从 items / activities / executionStatus / staleTurnIds 四个回调
-各调一次，弹层包在 `ValueListenableBuilder` 里。关掉时把 `_activityTick` 置 null 并
-`dispose`（否则事件会持续写一个已无人监听、甚至已 dispose 的 notifier）。
+`setState` 不会让它重建。故 router 用哨兵（`ValueNotifier<int>`）+ `ValueListenableBuilder`，
+现在**两个**弹层各一个：`_activityTick`（动态，items / activities / executionStatus /
+staleTurnIds 四个回调）与 `_todosTick`（待办，items / 确认 busy 态）。统一入口是
+`_bumpOpenSheets()`——两个弹层互斥（都是 modal），故同一回调里两个都转，比让调用方
+判断「现在开的是哪个」更不容易漏。关掉时把哨兵置 null 并 `dispose`（否则事件会持续写
+一个已无人监听、甚至已 dispose 的 notifier）。
+
+⚠️ 待办弹层曾漏了这一层（2026-11 修）：同一个 `_bumpActivitySheet` 只喂了「动态」。
+后果不是少一个转圈：卡被解决后弹层仍列着它、按钮还能点，第二次 POST 会被服务端拒，
+而用户看不到任何反馈（**点了没反应**）。回归：`apps/spb_mobile/test/router_list_test.dart`
+「对话页待办入口」尾部——推 `confirmation_resolved` 后断言 `todo-conf-<id>` 从**打开着的**
+弹层里消失。
 
 #### 三、C：流式进度（`TurnStatusStrip`）
 

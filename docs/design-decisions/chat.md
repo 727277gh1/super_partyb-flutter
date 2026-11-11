@@ -1244,8 +1244,8 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 
 | 动作 | 现在的客户端行为 | 服务端 |
 |---|---|---|
-| 点选 agent | 只改本地 `_selectedAgentId`，**不发请求、不弹确认**；AppBar 标签立刻跟着变 | 什么都不发生 |
-| 点选「自动路由」 | 同上，但清成 null 并置 `_autoRouting`；标签变「自动路由」 | 什么都不发生 |
+| 点选 agent | 只写本地 `AgentChoiceStore`（键 = groupId），**不发请求、不弹确认**；AppBar 标签立刻跟着变 | 什么都不发生 |
+| 点选「自动路由」 | 同上，但写 `AgentChoiceAuto`（不是清成 null——三态，见下）；标签变「自动路由」 | 什么都不发生 |
 | 发消息 | `agent_id` = **有效值**（标签上那个）+ `routing.mode=manual`；有效值为 null 时不带 `agent_id`、`mode=auto` | 入队事务里重绑（见上） |
 | 「清空上下文」 | **输入栏的独立按钮**（`MessageComposer.onNewSession`）：先弹确认框，确认后调 `/sessions/switch`（`force_new_session: true`），成功弹「已清空上下文」 | 立即归档 + 新绑定，`session_id` 置空 |
 
@@ -1255,10 +1255,11 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
   可传 null，菜单里没有任何会发请求的项）；「清空上下文」在
   `MessageComposer.onNewSession`。**不能合并**——合并后清空会退化成只改本地值，
   旧会话根本没被归档。
-- 两端 router 的三态：`_selectedAgentId`（`String?`，null = 未覆盖）+ `_autoRouting`
-  （bool，显式自动路由），合并成 `_effectiveAgentId`：显式自动 → null；否则本地
-  选择；再否则服务端绑定。AppBar 标签、菜单勾选、发送的 `agent_id`、开新会话
-  **四者同源**，否则会「标签写 A、发出去的是自动路由」。
+- 两端 router 的三态在**应用级** store 里：`AgentChoiceAuto` / `AgentChoiceAgent(id)` /
+  没有条目，由 `AgentChoiceStore.choiceFor(groupId)` 合并成 `_effectiveAgentId`：
+  显式自动 → null；具体 agent → 该 id；没有条目 → 服务端绑定。AppBar 标签、菜单勾选、
+  发送的 `agent_id`、开新会话 **四者同源**，否则会「标签写 A、发出去的是自动路由」。
+  类型与语义在 `packages/spb_domain/lib/src/agent_choice.dart`（纯 Dart，可单测）。
 
 > 为什么必须三态：webapp 的 `agentByGroup[groupId]` 就是 `undefined | null | string`
 > ——`undefined`（未选）与 `null`（显式自动路由）**发出去的请求不一样**吗？
@@ -1281,10 +1282,15 @@ Flutter 侧则是在点选时立刻 `POST /chat/groups/:gid/sessions/switch`，�
 2. **建议卡的 agent 标注从「一次性」变成「持久」**。两者现在共用同一个本地值
    （webapp 同样如此：`FollowUpSuggestCard` 写的也是 `agentByGroup[groupId]`）。
    副作用是点过一次建议卡之后，后续消息仍由该 agent 回答——直到用户改选或换对话。
-3. **选择在换对话时清空**，不回落到「上次在这个对话里选过谁」（webapp 的
-   `agentByGroup` 在本次会话内按 group 分别记忆）。Flutter 的对话页是每 group 一个
-   路由，State 复用由 `didUpdateWidget` 处理；保持「换对话即回到服务端绑定」比维护
-   一份跨页缓存更简单，且与「刷新后回落到 `active_session`」的行为一致。
+3. ~~**选择在换对话时清空**~~（2026-11 已改）。上一版把选择放在页面 State 的字段里，
+   换对话 `didUpdateWidget` 清空、返回列表则随 State 销毁一起丢。代价不只是样式：
+   重进对话后回落成服务端绑定值 → AppBar 显示某个具体 agent，而下一条消息按
+   `manual` + 那个人发出——**用户选的「自动」被静默改成「手动指定某人」**。
+   现改为应用级 `AgentChoiceStore`（`groupId → AgentChoice`，容量 256、按最久未写
+   淘汰、不参与 `resetAll`），与 webapp 的 `agentByGroup[groupId]` 同构：离开会话
+   再回来选择仍在；换对话天然不串味（键不同），且不再需要任何显式清除点。
+   回归：`apps/spb_desktop/test/router_chat_test.dart`「选『自动』后返回列表再进来」、
+   `apps/spb_mobile/test/router_list_test.dart`「对话页选 Agent…」（切走再切回）。
 
 #### 三端统一：命名、位置、确认框（2026-11）
 
@@ -1333,10 +1339,10 @@ router：它是 UI 决策，放两处就变成两份实现、两份测试。
 后者不带 `agent_id` → `mode=auto`，服务端按消息内容匹配（可能换人）。webapp 的
 首项「自动路由（AI 选择）」、小程序 `work-detail` 抽屉的 `selectedAgentId: null`
 都是这个语义，故本轮补齐：菜单/弹层首行加「自动路由」，它是**唯一**能把选择清
-回去的入口（`_autoRouting` 三态见上表下方）。
+回去的入口（`AgentChoice` 三态见上表下方）。
 
 同时修掉一个由此暴露的**既有缺陷**：`onSend` 原本发的是原始本地值
-（`_selectedAgentId`），而标签显示的是 `_effectiveAgentId`。新打开一个已有绑定的
+（那次改动前的「页面局部选择」），而标签显示的是 `_effectiveAgentId`。新打开一个已有绑定的
 对话（本地值仍为 null）时，标签写着「写作助手」，消息却以 `mode=auto` 发出——
 服务端 `auto_agent` 可能换个人回答，而那个 agent 没有绑定行 → 拿不到 `session_id`
 （见 super_partyb AGENTS.md「自动路由的代价」）。现在发的一律是有效值：
@@ -1589,16 +1595,36 @@ _emit();                   // ← 回填返回后才推
 枚举不出全量轮次：序号每来一轮就整体后移，且 `?turn=3` 的含义随加载范围漂移。
 故 URL 里放的是服务端的 `turn_id`（`chatid.NewID()` = `uuid4().hex`），与 webapp 逐字相同。
 
-#### 作用域：只在**已加载**的轮次内定位（不自动补页）
+#### 作用域：已加载区间 + **有界**自动补页（#108）
 
-目标轮不在已加载区间 → 给可见提示「该轮对话不在已加载的消息范围内（先向上滚动
-加载更早的历史再试）」，**不移动视口**。与 webapp v0 同一取舍：补页会和「首屏滚到底 +
-滚到顶自动翻页 + 锚点定位」三方抢滚动位置，而本端的翻页位置保持依赖两个 Sliver 的
-固定分界——把它与一次外部定位混在同一帧，出错方式是「位置莫名偏移几百像素」。
+v1 只定位已加载区间，越界就给一句「不在已加载范围内，先向上翻」。2026-11 起改为
+**有界自动补页**（[issue #108](https://git.atjog.com/dever/super_partyb-flutter/issues/108)）：
+目标轮更早时自动向上拉页（每页 50），命中后落位。上限由
+`ConversationPage.anchorBackfillPages` 控制（默认 5 页 = 250 轮，`0` = 关闭补页，
+退回 v1 行为）——深链不得把整个历史拖下来。
 
-`missing` **不**写入 `_anchorHandled`：用户向上翻页把目标轮载入后应当**自动补跳**。
-代价是每次 items 变化都重试一次定位（几次数组扫描）——故提示与 `onAnchorResolved`
-回调**都**按锚点值去重：同一个事实不该被重复消费。
+三个**放弃条件**（满足即停，不下「不存在」结论）：
+
+| 条件 | 为什么 |
+|---|---|
+| `_following == false`（用户接管了视口） | 用户已经在自己翻，再替他补页并拽走视口 = 抢滚动位置 |
+| `_reachedOldest` / 补页返回空 | 到顶了，目标轮确实不在服务端历史里 |
+| 预算耗尽 | 见上，有界 |
+
+失败/中止只记日志，**不**升格成「该轮不存在」——那是两件不同的事。
+
+补页与落位**解耦**：补页期间不落位；命中后由下一次 `_resolveAnchor` 统一落位。
+这避免了「补页插入新行」与「首屏滚到底 / 搬分界行」在同一帧抢滚动位置。
+
+`_anchorPending` 贯穿**整个定位链**（含补页）：只护住「一次落位」不够——items 连推
+会并行起若干条定位链、各发一页请求。另加 `_scheduleAnchorRetry`（post-frame 兜底
+重试）：items 可能在占位窗口内发布，被防重入挡掉后整条链会半路卡死，而 URL 里的
+`?turn=` 还在。
+
+补页预算耗尽仍未命中 → **一次** SnackBar（按锚点值去重）+ 升格为常驻提示卡
+（`conversation-anchor-notice`，「回到最新」的 `notice` 槽位，点它 = 放弃锚点）。
+只给会消失的 SnackBar 是不够的：锚点值还在 URL 里、用户还被钉在底部，而恢复跟随的
+按钮上没有任何文字说明为什么他在这儿（issue #87 回归的教训）。
 
 目标轮即最后一轮 ≡ 跟随最新：不进锚点态、不高亮、不钉住滚动。
 
@@ -1666,10 +1692,12 @@ _emit();                   // ← 回填返回后才推
 - `packages/spb_domain/test/turn_anchor_test.dart`（12 条）：归一化（含拒绝非法形态、
   接受非 hex 合法形态）、`findTurnIndex` / `turnAnchorItemId`（跳过空 id 与发送中回显）、
   `isLatestTurn`（无归属项不干扰、越界为 false）。
-- `packages/spb_features/test/chat/conversation_page_anchor_test.dart`（5 条）：命中历史轮次
+- `packages/spb_features/test/chat/conversation_page_anchor_test.dart`（8 条）：命中历史轮次
   （贴顶 + 高亮 + 视口逐像素不动 + 「回到最新」）、用户自己滚回底部（退出锚点态、
   不被下一批 items 拽回）、越界（一条提示、停在底部、不补跳）、即最后一轮（不高亮、
-  仍跟随）、换锚点值 / 切对话（重新定位 / 全部清掉）。
+  仍跟随）、换锚点值 / 切对话（重新定位 / 全部清掉）、**补页 3 层命中**（断言请求的
+  游标序列与最终几何）、**预算耗尽**（只提示一次 → 常驻卡 → 点掉后恢复跟随）、
+  **补页期间用户自己滚走**（只发一页就停手）。
   ⚠️ 夹具必须按真实顺序推 `start` → `user_message` → `message` → `done`：少推
   `start`，下一轮的 `message` 会被当成同一段的权威帧**原地替换**上一轮回复，历史就
   没真正堆起来（本次踩到，夹具只剩 11 个 item 而断言仍绿）。
@@ -1682,7 +1710,7 @@ _emit();                   // ← 回填返回后才推
 | 不做 | 原因 |
 |---|---|
 | 轮次导航面板（上一轮 / 下一轮） | 无 UI 载体则纯死代码；webapp 有面板，本端先只做「跳进去」 |
-| 越界自动补页 | 见「作用域」；bounded backfill 见 [issue #108](https://git.atjog.com/dever/super_partyb-flutter/issues/108) |
+| 无界的「一直往前拉直到找到」 | 有界见「作用域」；一次深链拖下整个历史既慢又抢滚动条 |
 | 清理 URL 的 `?turn=` | 见上，与 webapp 同取舍 |
 | OS 层深链（`partyb://chat/<gid>?turn=`） | 需 dispatcher + 冷启动暂存 + 门禁（auth.md §6.71），桌面端还要协议注册与单实例转发；见 [issue #109](https://git.atjog.com/dever/super_partyb-flutter/issues/109) |
 
