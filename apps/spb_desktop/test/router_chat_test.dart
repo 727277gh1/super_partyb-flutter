@@ -1012,6 +1012,236 @@ void main() {
       reason: '自动路由必须发 auto；发 manual 会强制用 group 绑定，等于没切',
     );
   });
+
+  testWidgets('选「自动」后再选回具体 agent：标签与新会话参数都要跟上（issue #87）', (tester) async {
+    // ## 本用例钉住什么
+    //
+    // 选 agent_b → 选「自动」→ 再选回 agent_b 的**第三步**。修复前第三步
+    // 静默失败：`didUpdateWidget` 里那两条守卫分别只在「换了对话」与
+    // 「上次没拿到列表」时重建，没有覆盖「同一对话内选择变化」——`currentAgentId`
+    // 已经变回 agent_b，而菜单仍把「agent_b」那一项禁用（它读的是初始化时
+    // 快照下来的旧值）。用户看到的菜单在撒谎，且 `_select` 的同值短路会
+    // 把二次点选丢弃，下一条消息仍按 auto 发出。
+    final sendHit = <Map<String, dynamic>>[];
+    await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      mockGroups: false,
+      sseClient: FakeSseClient(),
+      loadAgents: () async => const [
+        Agent(id: 'agent_a', name: '写作助手'),
+        Agent(id: 'agent_b', name: '代码助手'),
+      ],
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x',
+          (server) => server.reply(200, {
+            'id': 'grp_x',
+            'user_id': 'usr_REAL',
+            'title': '测试对话',
+            'active_session': {
+              'agent_id': 'agent_a',
+              'session_id': 'up_1',
+              'role': 'owner',
+            },
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+        adapter.onPost(
+          '/users/usr_REAL/chat/messages',
+          (server) => server.replyCallback(200, (options) {
+            sendHit.add(options.data! as Map<String, dynamic>);
+            return {'id': 'turn_1', 'group_id': 'grp_x', 'status': 'queued'};
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    String label(WidgetTester tester) => tester
+        .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+        .data!;
+
+    // 第一步：选 agent_b（与上一条用例同路径，作为基线）。
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-option-agent_b')));
+    await tester.pumpAndSettle();
+    expect(label(tester), '代码助手');
+
+    // 第二步：选「自动」——本地值回 null，标签回「自动路由」。
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+    await tester.pumpAndSettle();
+    expect(label(tester), '自动路由');
+
+    // 第三步（修复前静默失败）：再选回 agent_b。菜单必须不再禁用它。
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    final again = tester.widget<CheckedPopupMenuItem<AgentPick>>(
+      find.byKey(const ValueKey('agent-option-agent_b')),
+    );
+    expect(
+      again.enabled,
+      isTrue,
+      reason: '同对话内切回具体 agent：菜单项不得仍是禁用态（修复前读了初始快照）',
+    );
+    await tester.tap(find.byKey(const ValueKey('agent-option-agent_b')));
+    await tester.pumpAndSettle();
+    expect(label(tester), '代码助手', reason: '切回后标签必须跟上');
+
+    // 下一条消息按 manual + agent_b 发出（而非停留在 auto）。
+    await tester.enterText(find.byType(TextField).last, '再聊一句');
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+    expect(sendHit.last['agent_id'], 'agent_b');
+    expect((sendHit.last['routing']! as Map)['mode'], 'manual');
+  });
+  testWidgets('选「自动」后返回列表再进来：标签与发送模式都还是「自动」（issue #87 后续）', (tester) async {
+    // ## 本用例钉住什么
+    //
+    // 本地 agent 选择原先存在页面 State 的字段里，`didUpdateWidget` 一换对话
+    // 就清空；页面被销毁（返回列表）更是直接丢。后果不是"仅样式"：重进对话
+    // 后回落成服务端绑定值 → 标签显示某个具体 agent，且下一条消息按
+    // `routing.mode=manual` + 那个人发出 —— 用户选的"自动路由"被静默改掉。
+    //
+    // webapp 的 `agentByGroup[groupId]` 是应用级 map（离开会话再回来选择仍在），
+    // 故本端也必须是应用级（`agentChoiceStoreProvider`）。
+    final sendHit = <Map<String, dynamic>>[];
+    final h = await pumpApp(
+      tester,
+      initialLocation: SpbRoutes.chat('grp_x'),
+      sseClient: FakeSseClient(),
+      loadAgents: () async => const [
+        Agent(id: 'agent_a', name: '写作助手'),
+        Agent(id: 'agent_b', name: '代码助手'),
+      ],
+      beforePump: (adapter) {
+        adapter.onGet(
+          '/api/auth/me',
+          (server) => server.reply(200, {
+            'id': 'usr_REAL',
+            'email': 'a@b.c',
+            'name': 'Test',
+            'role': 'member',
+            'roles': ['member'],
+            'permissions': <String>[],
+            'status': 'active',
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x',
+          (server) => server.reply(200, {
+            'id': 'grp_x',
+            'user_id': 'usr_REAL',
+            'title': '测试对话',
+            // 服务端绑定是 agent_a：旧实现重进后就是它顶替了用户的"自动"。
+            'active_session': {
+              'agent_id': 'agent_a',
+              'session_id': 'up_1',
+              'role': 'owner',
+            },
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_x/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_x', 'limit': 20},
+        );
+        adapter.onPost(
+          '/users/usr_REAL/chat/messages',
+          (server) => server.replyCallback(200, (options) {
+            sendHit.add(options.data! as Map<String, dynamic>);
+            return {'id': 'turn_1', 'group_id': 'grp_x', 'status': 'queued'};
+          }),
+          data: Matchers.any,
+        );
+      },
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    String label() => tester
+        .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+        .data!;
+
+    await tester.tap(find.byKey(const ValueKey('agent-switcher')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+    await tester.pumpAndSettle();
+    expect(label(), '自动路由');
+
+    // 返回列表（页面销毁）→ 再进同一对话。
+    h.router.go(SpbRoutes.home);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    h.router.go(SpbRoutes.chat('grp_x'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(
+      label(),
+      '自动路由',
+      reason: '用户在本对话选了「自动」，重进后必须仍是「自动」，不得被服务端绑定 agent_a 顶替',
+    );
+
+    await tester.enterText(find.byType(TextField).last, '再来一句');
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+    expect(
+      sendHit.last['agent_id'],
+      isNull,
+      reason: '自动路由不得带 agent_id（带了就等于指定某人，服务端不会走 auto_agent）',
+    );
+    expect((sendHit.last['routing']! as Map)['mode'], 'auto');
+  });
+
   group('登录后回跳（消费 from 参数）', () {
     testWidgets('未认证访问 /settings → 落在 /login?from=%2Fsettings', (tester) async {
       final h = await pumpApp(

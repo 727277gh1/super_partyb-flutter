@@ -292,6 +292,81 @@ void main() {
   });
 
   group('菜单内容', () {
+    testWidgets('currentAgentId 在同一页内变化后，菜单勾选与禁用跟着重建', (tester) async {
+      // ## 这个用例钉住什么（issue #87 的选 agent 半边）
+      //
+      // 选 agent 是纯本地的，但 AppBar 的 rebuild 由**父页**驱动：路由里
+      // `selectAgent` 后 setState，把新的 `currentAgentId` 传下来。State 若
+      // 不在 `didUpdateWidget` 里同步派生状态，菜单就会拿初始化时的旧值——
+      // 「agent_a → 自动 → 再点 agent_a」的第三步静默失败（项仍禁用，
+      // `_select` 的同值短路再把二次点选丢弃，下一条消息仍按 auto 发）。
+      // StateSetter 只为拿到外层 setState；ignore 否则分析器报未使用。
+      // ignore: unused_local_variable
+      late StateSetter setOuter;
+      String? current = 'a1';
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            appBar: AppBar(
+              actions: [
+                StatefulBuilder(
+                  builder: (context, setState) {
+                    setOuter = setState;
+                    return AgentSwitcher(
+                      loadAgents: () async => [
+                        agent('a1', '写作助手'),
+                        agent('a2', '代码助手'),
+                      ],
+                      selectAgent: (agentId) =>
+                          setState(() => current = agentId),
+                      currentAgentId: current,
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 选 a2：本地值经回调变为 a2，外层重建。
+      await openMenu(tester);
+      await tester.tap(find.byKey(const ValueKey('agent-option-a2')));
+      await tester.pumpAndSettle();
+      expect(current, 'a2');
+
+      // 再开菜单：勾选与禁用必须反映**新**值（a2 勾选禁用，a1 可点）。
+      await openMenu(tester);
+      final a2 = tester.widget<CheckedPopupMenuItem<Object?>>(
+        find.byKey(const ValueKey('agent-option-a2')),
+      );
+      final a1 = tester.widget<CheckedPopupMenuItem<Object?>>(
+        find.byKey(const ValueKey('agent-option-a1')),
+      );
+      expect(a2.checked, isTrue, reason: '菜单重建后勾选跟着 currentAgentId 走');
+      expect(a2.enabled, isFalse);
+      expect(a1.enabled, isTrue);
+      await tester.tap(find.byKey(const ValueKey('agent-option-auto')));
+      await tester.pumpAndSettle();
+      expect(current, isNull);
+
+      // 自动 → 再选回 a1：修复前 a1 的菜单项仍禁用（读了初始快照），点击
+      // 被吞，本地值停在 null——下一条消息依旧 auto。
+      await openMenu(tester);
+      final a1Again = tester.widget<CheckedPopupMenuItem<Object?>>(
+        find.byKey(const ValueKey('agent-option-a1')),
+      );
+      expect(
+        a1Again.enabled,
+        isTrue,
+        reason: 'currentAgentId 变化后菜单不得再用旧快照禁用其它项',
+      );
+      await tester.tap(find.byKey(const ValueKey('agent-option-a1')));
+      await tester.pumpAndSettle();
+      expect(current, 'a1');
+    });
+
     testWidgets('当前 agent 被勾选', (tester) async {
       await pumpSwitcher(
         tester,
