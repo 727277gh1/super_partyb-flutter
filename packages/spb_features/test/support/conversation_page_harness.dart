@@ -260,6 +260,12 @@ Future<void> pumpPage(
   RevealAgentFile? onRevealAgentFile,
   AgentFilePreviewCallbacks? onPreviewAgentFile,
   Future<bool> Function()? onLoadOlder,
+
+  /// 深链锚点（`?turn=<turnId>`）：见 [ConversationPage.anchorTurnId]。
+  String? anchorTurnId,
+
+  /// 锚点定位结果回调（断言「jumped / missing / followingLatest」）。
+  void Function(TurnAnchorOutcome)? onAnchorResolved,
   FlushPending? onFlush,
   FlushWithStrategy? onFlushWithStrategy,
   LoadPendingMessages? loadPending,
@@ -316,6 +322,8 @@ Future<void> pumpPage(
         onRevealAgentFile: onRevealAgentFile,
         onPreviewAgentFile: onPreviewAgentFile,
         onLoadOlder: onLoadOlder,
+        anchorTurnId: anchorTurnId,
+        onAnchorResolved: onAnchorResolved,
         onFlush: onFlush,
         onFlushWithStrategy: onFlushWithStrategy,
         loadPending: loadPending,
@@ -378,11 +386,12 @@ Future<void> pushConnectionState(WidgetTester tester, SseState state) async {
   await tester.pump();
 }
 
-/// 直接替换页面 widget（保留 State），用于模拟「切 group」。
+/// 直接替换页面 widget（保留 State），用于模拟「切 group」或「换锚点」。
 Future<void> rebuildPage(
   WidgetTester tester, {
   required Future<bool> Function() onLoadOlder,
   required String historyKey,
+  String? anchorTurnId,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -391,6 +400,7 @@ Future<void> rebuildPage(
         title: '测试对话',
         onLoadOlder: onLoadOlder,
         historyKey: historyKey,
+        anchorTurnId: anchorTurnId,
       ),
     ),
   );

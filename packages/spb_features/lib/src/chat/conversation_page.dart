@@ -117,6 +117,8 @@ class ConversationPage extends StatefulWidget {
     this.onPreviewAgentFile,
     this.onOpenLink,
     this.historyKey,
+    this.anchorTurnId,
+    this.onAnchorResolved,
     this.loadPending,
     this.undoPending,
     this.pendingReloadKey,
@@ -394,6 +396,32 @@ class ConversationPage extends StatefulWidget {
   /// 无关——两者的值碰巧都是 groupId，但耦合会让「只接线待处理栏」的用法
   /// 静默带走翻页的正确性。
   final String? historyKey;
+
+  /// 深链锚点：要落到「哪一轮」（`?turn=<turnId>`）。
+  ///
+  /// 由装配层从路由参数取来（`/chat/{groupId}?turn={turnId}`），页面只负责
+  /// **落位与状态**。空 / 非法值（[normalizeTurnAnchor] 归一后为 null）等价于
+  /// 「没有锚点」，页面不做任何事——锚点来自 URL，任何人都能改，页面不能因为
+  /// 一个脏参数抛异常或把自己钉在某处。
+  ///
+  /// ## 作用域只有「已加载」的轮次（v1）
+  ///
+  /// 首屏回填 200 条事件 + 实时流累积，早期轮次可能根本不在
+  /// [ChatStreamController.snapshot] 里。目标轮不在区间时**不移动视口**，只给
+  /// 一次可见提示（见 [TurnAnchorOutcome.missing]）——静默停在底部会让用户
+  /// 以为「深链坏了」，而自动补页会与「首屏滚到底 + 滚到顶翻页 + 锚点定位」
+  /// 三方抢滚动位置（webapp v0 同一取舍，见 `chat.md` §6.92）。
+  final String? anchorTurnId;
+
+  /// 锚点定位结果（每个锚点值**每个结果**至多回调一次）。
+  ///
+  /// `missing` 也会随每次 items 变化重试定位（以便用户向上翻页把目标轮载入后
+  /// **自动补跳**），但回调与提示都按锚点值去重——否则翻页过程中会反复刷屏、
+  /// 回调也会被当成「新的失败」重复消费。
+  ///
+  /// 页面自己会给出 `missing` 的可见提示（它持有 `ScaffoldMessenger`），本回调
+  /// 是给装配层做「清地址栏 / 统计 / 埋点」用的——不透传不会影响正确性。
+  final void Function(TurnAnchorOutcome outcome)? onAnchorResolved;
 
   /// 加载当前 group 的待处理收件箱消息。
   ///
@@ -984,6 +1012,30 @@ class _ConversationPageState extends State<ConversationPage>
   bool _jumpingToBottom = false;
   bool _locatingItem = false;
 
+  // ---------- 深链锚点（`?turn=<turnId>`）----------
+
+  /// 已定位到且仍在「锚点态」的轮次；null = 跟随最新。
+  ///
+  /// 锚点态意味着**用户被显式送到了历史里的某一轮**，期间任何「自动滚到底」
+  /// 都必须让路（[_following] + [_scheduleFollowBottom] 那条通路正是它挡的）。
+  /// 与 webapp 的 `anchoredTurnId` 同一语义；小程序侧对应 `userScrolledUp`。
+  String? _anchoredTurnId;
+
+  /// 已成功处理过的锚点值（命中或「即最后一轮」）。
+  ///
+  /// ## 为什么 missing **不**写入
+  ///
+  /// 用户向上翻页把目标轮载入后，应该**自动补跳**，而不是被首次判定永久钉死。
+  /// 代价是每次 items 变化都重试一次定位——那只是几次数组扫描，且提示已按锚点值
+  /// 去重（见 [_anchorNoticeFor]），不会刷屏。
+  String? _anchorHandled;
+
+  /// 正在尝试中的锚点值（防重入：定位要等帧，期间 items 可能再推一次）。
+  String? _anchorPending;
+
+  /// 已经给过「不在已加载范围」提示的锚点值（去重）。
+  String? _anchorNoticeFor;
+
   @override
   void initState() {
     super.initState();
@@ -1026,6 +1078,9 @@ class _ConversationPageState extends State<ConversationPage>
     _subscribeStaleTurnIds();
     _subscribeTimelineCache();
     _subscribeOutbox();
+    // 控制器可能**已经有**快照（从列表页进来就是这种）：只看 items 流会错过
+    // 那一次推送，深链就永远不生效。
+    _maybeResolveAnchor();
   }
 
   /// 订阅离线队列（仅在调用方注入 [ConversationPage.outboxEntries] 时）。
@@ -1221,6 +1276,15 @@ class _ConversationPageState extends State<ConversationPage>
       _historyGeneration++;
       _timelineCenterId = null;
       _timelineOrigin = SpbSpacing.pagePadding.top;
+      // 锚点态是「上一个对话的某一轮」：不重置就会在一个新对话里高亮一个
+      // 不存在的 turnId（高亮永不出现），且 `_following` 被错误地钉成 false。
+      // （锚点态与搜索定位都会把 `_following` 置 false，而它本来只该描述
+      //  「用户正在滚这个对话」——换了对话就是新的会话态。）
+      _anchoredTurnId = null;
+      _anchorHandled = null;
+      _anchorPending = null;
+      _anchorNoticeFor = null;
+      _following = true;
       // 缩略图记忆按对话隔离：不清空就是按对话无限增长的内存（每张图一份
       // 字节），且上一个对话里同一 `ufsFileId` 的字节未必仍有效。
       _thumbnailMemo.clear();
@@ -1232,6 +1296,14 @@ class _ConversationPageState extends State<ConversationPage>
       _bubbleCache.clear();
       _rowExtents.clear();
       _lastRowsItems = null;
+    }
+    // 锚点值变了（同一个 group 里点了另一条搜索命中 / 轮次列表里的另一轮）：
+    // 重置「已处理」并重新定位。不重置的话 URL 已换成新 turnId，页面却停在
+    // 上一个锚点（用户看到的是「点了没反应」）。
+    if (oldWidget.anchorTurnId != widget.anchorTurnId ||
+        oldWidget.controller != widget.controller ||
+        oldWidget.historyKey != widget.historyKey) {
+      _maybeResolveAnchor();
     }
   }
 
@@ -1266,10 +1338,225 @@ class _ConversationPageState extends State<ConversationPage>
     _evictThumbnailsOfDeletedFiles(items);
     setState(() => _items = items);
 
+    // 事件集合变了 → 再试一次锚点（首屏 / 缓存 / SSE 三条路径都走这里，
+    // 不依赖某一条加载完成回调，避开「其中一条改完忘了接」）。
+    _maybeResolveAnchor();
+
     if (_following) {
       // 等一帧：新项尚未布局完成，此时 maxScrollExtent 还是旧值。
       _scheduleFollowBottom();
     }
+  }
+
+  // ---------- 深链锚点（`?turn=<turnId>`）----------
+
+  /// 尝试把视口落到 [ConversationPage.anchorTurnId] 指定的那一轮。
+  ///
+  /// ## 调用点（三个，缺一不可）
+  ///
+  /// 1. [_onItems]：首屏回填 / 本地缓存 / 实时流三条路径都经过这里；
+  /// 2. [initState]：页面挂载时控制器**已经有**快照（从列表页进来就是这种），
+  ///    只看流会错过那一次；
+  /// 3. [didUpdateWidget]：同一个 State 被复用（切 group / 换锚点）。
+  ///
+  /// ## 为什么先不判 missing
+  ///
+  /// `_items` 为空时「没加载」不是「不存在」。判了就是首帧必弹一次
+  /// 「该轮不在已加载范围」，而它下一页就加载到了。
+  void _maybeResolveAnchor() {
+    final target = normalizeTurnAnchor(widget.anchorTurnId);
+    if (target == null) {
+      // 参数没了（回到列表 / 手动导航）：立即退出锚点态，恢复跟随新消息。
+      // 不从 `_following` 反推——那是滚动行为的状态，而这里说的是「不再有锚点」。
+      if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
+      _anchorHandled = null;
+      _anchorPending = null;
+      _anchorNoticeFor = null;
+      return;
+    }
+    if (_anchorHandled == target || _anchorPending == target) return;
+    if (_items.isEmpty) return;
+
+    _anchorPending = target;
+    // 放到下一帧：既避开「在 effect 里同步 setState」，也让首屏「滚到底」先
+    // 完成——否则两者逐帧抢滚动位置，谁最后写谁赢，结果取决于帧时序。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _anchorPending != target) return;
+      _anchorPending = null;
+      // 期间锚点可能已换（用户又点了一条命中的搜索结果）。
+      if (normalizeTurnAnchor(widget.anchorTurnId) != target) return;
+      unawaited(_resolveAnchor(target));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// 定位到目标轮，并按结果决定是否进入锚点态。
+  Future<void> _resolveAnchor(String target) async {
+    final index = findTurnIndex(_items, target);
+    final itemId = turnAnchorItemId(_items, target);
+    if (index < 0 || itemId == null) {
+      // 越界：**不移动视口**（停在底部），但必须说话。
+      // 静默是这类功能最坏的失败：用户点了链接看到的是对话末尾，
+      // 会以为「深链坏了 / 我点错了」，而实际只是历史还没加载到。
+      if (_anchorNoticeFor != target) {
+        _anchorNoticeFor = target;
+        _showMessage('该轮对话不在已加载的消息范围内（先向上滚动加载更早的历史再试）');
+        // 只在**首次**判定越界时上报：后续每次 items 变化都会重试（为了补跳），
+        // 但那是同一个事实，不是新的一次失败。
+        widget.onAnchorResolved?.call(TurnAnchorOutcome.missing);
+      }
+      return;
+    }
+
+    if (isLatestTurn(_items, target)) {
+      // 定位到最后一轮 ≡ 跟随最新：不进锚点态（不亮、不钉住滚动），
+      // 否则用户「跳回最新」之后还得手动滚到底才能继续看新消息。与两端同取舍。
+      _anchorHandled = target;
+      if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
+      _resumeFollowing();
+      widget.onAnchorResolved?.call(TurnAnchorOutcome.followingLatest);
+      return;
+    }
+
+    // 先钉住「不跟随」，再落位：否则落位后的帧里一旦有新事件，
+    // `_onItems` 的跟随逻辑会把视口从刚跳到的那一轮拽回底部。
+    _following = false;
+    _anchorHandled = target;
+    setState(() => _anchoredTurnId = target);
+    await _scrollToTurn(itemId);
+    widget.onAnchorResolved?.call(TurnAnchorOutcome.jumped);
+  }
+
+  /// 把时间线落到指定 `item.id` 的那一行（锚点专用）。
+  ///
+  /// 与搜索用的 [_scrollToItem] 有两处刻意不同：
+  ///
+  /// 1. **贴顶（alignment: 0）**而不居中：用户是从这一轮**往下读**的，居中会把
+  ///    更早的、他刚跳过的内容顶到上方，把目标轮挤到屏中；webapp 同样是
+  ///    `align: "start"`。而搜索是「找到那一句」——周围上下文更有用，故那里用 0.5。
+  /// 2. **未构建时换中心**（[_recenterOnOwner]）而不是弹「请向上滚动」：搜索是
+  ///    用户主动找东西，让他自己滚是合理的；而深链的期望是「点到就到」，
+  ///    说「请自己滚」等于把功能推回给用户。
+  Future<void> _scrollToTurn(String itemId) async {
+    final rows = _displayRows();
+    final rowIndex = _itemRowIndices[itemId];
+    if (rowIndex == null || rowIndex < 0 || rowIndex >= rows.length) return;
+
+    final targetContext = _rowKeys[itemId]?.currentContext;
+    if (targetContext != null) {
+      _locatingItem = true;
+      try {
+        await Scrollable.ensureVisible(
+          targetContext,
+          alignment: 0,
+          duration: SpbDuration.normal,
+          curve: Curves.easeOut,
+        );
+      } finally {
+        _locatingItem = false;
+      }
+      return;
+    }
+    await _recenterOnOwner(locateIdsOf(rows[rowIndex]).first);
+  }
+
+  /// 把时间线的**固定分界行**搬到 [ownerId]，然后落到那里。
+  ///
+  /// ## 为什么这是本端唯一不靠估算的落位原语
+  ///
+  /// 时间线是两向 `CustomScrollView`（`center: _timelineCenterKey`）：分界之前的
+  /// 行在 `reverse: true` 的 Sliver 里向上生长，分界之后的行向下生长。于是：
+  ///
+  /// - 任意一行一旦成为分界行，它就变成「较新」那一段的 **index 0**；
+  /// - 它的目标偏移能用 `getOffsetToReveal` 从**真实几何**算出来，不估算任何
+  ///   未构建行高（本文件明确不猜：见 `_buildTimeline` 上方「既不猜测未构建行高」）。
+  ///
+  /// ## 为什么搬完分界行还要先 `jumpTo(minScrollExtent)` 再精调
+  ///
+  /// 「分界行一定会被构建」这个直觉是**错的**，踩过：
+  ///
+  /// 搬分界行只改了两条 Sliver 的**内容**，没改滚动偏移。若此时视口停在旧
+  /// 位置（比如旧 maxScrollExtent = 4197），新布局会把 pixels 夹到**新的**
+  /// maxScrollExtent（≈3600）——视口仍在内容深处，而刚成为 index 0 的目标行
+  /// 在**分界处**、离视口很远，于是它根本没被 `SliverList` 构建，
+  /// `_rowKeys[ownerId]!.currentContext` 是 null，`getOffsetToReveal` 无从下手
+  /// （表现为「点了深链没反应」，而且没有任何异常）。
+  ///
+  /// 故这里是两步：先把分界处移到视口（`minScrollExtent`），让目标行**落地成
+  /// 真实几何**，再等一帧、按住真实几何精调。分两步不会闪：第一次跳过去
+  /// 的位置就已是「分界贴顶」，与终态相差仅一个 `origin` 偏移。
+  ///
+  /// 代价：这是一次**跳变**（不播动画）。可接受——用户点了一个「跳到某一轮」
+  /// 的入口，期望的是立刻到那里，而长距离滚动动画反而会让他等着。
+  Future<void> _recenterOnOwner(String ownerId) async {
+    if (!mounted || !_scrollController.hasClients) return;
+    _locatingItem = true;
+    try {
+      setState(() {
+        _timelineCenterId = ownerId;
+        _timelineOrigin = SpbSpacing.pagePadding.top;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || !_scrollController.hasClients) return;
+
+      // 第一步：分界处进视口（否则目标行不会被构建，见上）。
+      final position = _scrollController.position;
+      _scrollController.jumpTo(position.minScrollExtent);
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || !_scrollController.hasClients) return;
+
+      // 第二步：按**真实几何**贴顶（不猜行高）。
+      final box = _rowKeys[ownerId]?.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) return;
+      final viewport = RenderAbstractViewport.maybeOf(box);
+      if (viewport == null) return;
+      final offset = viewport.getOffsetToReveal(box, 0).offset;
+      _scrollController.jumpTo(
+        offset.clamp(position.minScrollExtent, position.maxScrollExtent),
+      );
+    } finally {
+      _locatingItem = false;
+    }
+  }
+
+  /// 记录「是否跟随最新」，并在**回到跟随**时退出锚点态。
+  ///
+  /// ## 为什么用户自己滚回底部也要清锚点
+  ///
+  /// 锚点态的含义是「你被送到了历史里的某一轮」。用户手动滚到底（或滚到该轮
+  /// 之后的所有内容都已看完）后，他就**不再**在那一轮了：高亮与「回到最新」
+  /// 入口继续留着只是噪音，而且下一次新事件到达时，`_following` 早已是 true，
+  /// 却仍会因为 `_anchoredTurnId` 不空而高亮一段用户已经离开的内容。
+  ///
+  /// 清它时顺手把该锚点值记进 `_anchorHandled`：URL 里的 `?turn=` 仍在（深链
+  /// 应可重现），不记就会在下一批 items 到达时**又**把他拽回那一轮。
+  void _setFollowing(bool value) {
+    final was = _following;
+    _following = value;
+    if (!value || was || _anchoredTurnId == null) return;
+    final anchor = normalizeTurnAnchor(widget.anchorTurnId);
+    if (anchor != null) _anchorHandled = anchor;
+    setState(() => _anchoredTurnId = null);
+  }
+
+  /// 恢复「跟随最新」并滚到底（`已就位` 类结果与手动「回到最新」共用）。
+  void _resumeFollowing() {
+    _following = true;
+    _scheduleFollowBottom();
+  }
+
+  /// 「回到最新」：清锚点态、恢复跟随。
+  ///
+  /// ## 为什么要把 `_anchorHandled` 记成当前锚点值（而不是清成 null）
+  ///
+  /// 地址栏里仍带着 `?turn=` 是**有意的**（深链应当刷新可重现，与 webapp 同取舍）。
+  /// 若把它清成 null，下一批 items 到达时会重建锚点判定 → 直接把用户从底部
+  /// 再拽回那一轮，表现为「点了回到最新又跳回去了」。只有换到**别的值**才重新定位。
+  void _backToLatest() {
+    final anchor = normalizeTurnAnchor(widget.anchorTurnId);
+    if (anchor != null) _anchorHandled = anchor;
+    if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
+    _resumeFollowing();
   }
 
   /// 页边界的工具/文件行可能合并成批量卡，固定分界行本身也会因此变高或变矮。
@@ -1457,7 +1744,7 @@ class _ConversationPageState extends State<ConversationPage>
 
     // 双向 Sliver 的最小偏移可为负，不能只看 maxScrollExtent。
     if (position.maxScrollExtent <= position.minScrollExtent) {
-      _following = true;
+      _setFollowing(true);
       return;
     }
 
@@ -1470,8 +1757,9 @@ class _ConversationPageState extends State<ConversationPage>
 
     if (isAutomatic) return;
 
-    _following =
-        position.pixels >= position.maxScrollExtent - _autoScrollThreshold;
+    _setFollowing(
+      position.pixels >= position.maxScrollExtent - _autoScrollThreshold,
+    );
 
     // 跟随中仍未到底 → 继续追。
     //
@@ -2171,9 +2459,32 @@ class _ConversationPageState extends State<ConversationPage>
           if (_ttsStatus != null && _ttsStatus!.hasStatus)
             _TtsStatusBar(status: _ttsStatus!),
           Expanded(
-            child: _items.isEmpty
-                ? EmptyState(message: widget.emptyHint)
-                : _buildTimeline(),
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: _items.isEmpty
+                      ? EmptyState(message: widget.emptyHint)
+                      : _buildTimeline(),
+                ),
+                // 「回到最新」浮动入口：只在锚点态下出现。
+                //
+                // ## 为什么必须有它（而不能靠用户自己滑）
+                //
+                // 锚点态下自动跟随是**关掉**的（否则新事件会把用户从刚跳到
+                // 的那一轮拽回底部）。于是用户在历史里看不到新消息也回不去，
+                // 只能手动往下滑到底——而“底”在哪里他并不知道。webapp 在同一
+                // 状态下也给了这个出口（`backToLatest`）。
+                if (_anchoredTurnId != null)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: SpbSpacing.sm,
+                    child: Center(
+                      child: _BackToLatestButton(onTap: _backToLatest),
+                    ),
+                  ),
+              ],
+            ),
           ),
           // 同一轮只有一条主状态；消息和工具卡保留内容与静态状态。
           if (turnStatus != null)
@@ -2380,7 +2691,7 @@ class _ConversationPageState extends State<ConversationPage>
           if (rowIndex == rows.length) {
             return const SizedBox(height: SpbSpacing.xxl);
           }
-          return _buildTimelineRow(rows[rowIndex]);
+          return _buildTimelineRow(context, rows[rowIndex]);
         },
         childCount: older ? split : rows.length - split + 1,
         extents: _rowExtents,
@@ -2476,7 +2787,7 @@ class _ConversationPageState extends State<ConversationPage>
     );
   }
 
-  Widget _buildTimelineRow(TimelineDisplayRow row) {
+  Widget _buildTimelineRow(BuildContext context, TimelineDisplayRow row) {
     // 外层 GlobalKey 同时用于搜索定位与 Sliver 的 findChildIndexCallback；
     // 内层 ValueKey 区分单条/批量形态，折叠变化时保留正确的组件身份。
     //
@@ -2536,10 +2847,65 @@ class _ConversationPageState extends State<ConversationPage>
         rowKey: locateKey,
         extents: _rowExtents,
         child: switch (row) {
-          SingleItemRow(item: AssistantMessageItem()) => child,
-          _ => RepaintBoundary(child: child),
+          SingleItemRow(item: AssistantMessageItem()) => _maybeHighlight(
+            context,
+            row,
+            locateKeys.first,
+            child,
+          ),
+          _ => RepaintBoundary(
+            child: _maybeHighlight(context, row, locateKeys.first, child),
+          ),
         },
       ),
+    );
+  }
+
+  /// 给「被深链锚点定位到的那一轮」加一层可见高亮（否则不包任何东西）。
+  ///
+  /// ## 为什么高亮要包在行的**最外层**、且只画装饰
+  ///
+  /// 高亮要横跨该轮的**所有**行（用户消息 + 回复 + 工具卡），故必须按「行属于
+  /// 哪一轮」判断，而不是按项。而它又**不能改变行高**：本页的行高会被
+  /// `TimelineRowMeasure` 记进 `TimelineExtentCache`，供两向滚动的分界与位置
+  /// 补偿使用。加 Padding/外边距会让行高随「亮/不亮」变化 → 缓存值失效 →
+  /// 滚动位置莫名漂移。故这里只画背景与内描边（尺寸与不亮时逐像素相同）。
+  ///
+  /// ## 为什么用「背景 + 内描边」而不是边框色/阴影
+  ///
+  /// 时间线里已经有两类强调色：失败横幅与确认卡的边框。高亮若也用边框色，
+  /// 三者会靠占位在同一行里互相抢注意力；半透明的主色底 + 细描边只说明
+  /// 「你跳到的是这一段」，不参与任何状态语义。
+  Widget _maybeHighlight(
+    BuildContext context,
+    TimelineDisplayRow row,
+    String owner,
+    Widget child,
+  ) {
+    final anchored = normalizeTurnAnchor(_anchoredTurnId);
+    if (anchored == null) return child;
+    final rowTurnId = switch (row) {
+      SingleItemRow(:final item) => item.turnId,
+      AgentFileBatchRow(:final files) => files.first.turnId,
+      ToolCallBatchRow(:final calls) => calls.first.turnId,
+    };
+    final turn = normalizeTurnAnchor(rowTurnId);
+    if (turn == null || turn != anchored) return child;
+
+    final scheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      // 键必须按**行**唯一（不是按轮次）：同一轮的多行是 SliverList 的兄弟节点，
+      // 兄弟间重复键会直接抛 `Duplicate keys found`。`owner` 就是行主键。
+      key: ValueKey('turn-highlight-$owner'),
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.06),
+        border: Border.all(
+          color: scheme.primary.withValues(alpha: 0.35),
+          width: 2,
+        ),
+        borderRadius: SpbRadius.cardAll,
+      ),
+      child: child,
     );
   }
 
@@ -3187,6 +3553,56 @@ class _OfflineTimelineNotice extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 「回到最新」浮动按钮（锚点态专用，见 `_ConversationPageState._backToLatest`）。
+///
+/// ## 为什么是浮在时间线底部，而不是放进 AppBar
+///
+/// 回答的是「我被送到历史里了，怎么回去」——这是**与滚动位置相关**的动作，
+/// 放在它影响的那个区域（时间线底部，也就是「最新」的方向）；放进 AppBar 会
+/// 与一堆全局入口并列，看起来像「刷新」而不是「回到底部」。
+///
+/// 纯展示组件（只收一个回调），故不需要任何页面状态。
+class _BackToLatestButton extends StatelessWidget {
+  const _BackToLatestButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Material(
+      key: const ValueKey('conversation-back-to-latest'),
+      elevation: 3,
+      color: scheme.surfaceContainerHigh,
+      shape: const StadiumBorder(),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: SpbSpacing.md,
+            vertical: SpbSpacing.sm,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.arrow_downward, size: 16, color: scheme.primary),
+              const SizedBox(width: SpbSpacing.xs),
+              Text(
+                '回到最新',
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: scheme.onSurface,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
