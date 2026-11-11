@@ -118,6 +118,7 @@ class ConversationPage extends StatefulWidget {
     this.onOpenLink,
     this.historyKey,
     this.anchorTurnId,
+    this.anchorBackfillPages = defaultAnchorBackfillPages,
     this.onAnchorResolved,
     this.loadPending,
     this.undoPending,
@@ -404,14 +405,37 @@ class ConversationPage extends StatefulWidget {
   /// 「没有锚点」，页面不做任何事——锚点来自 URL，任何人都能改，页面不能因为
   /// 一个脏参数抛异常或把自己钉在某处。
   ///
-  /// ## 作用域只有「已加载」的轮次（v1）
+  /// ## 作用域：已加载的轮次 + 有界补页（issue #108）
   ///
   /// 首屏回填 200 条事件 + 实时流累积，早期轮次可能根本不在
-  /// [ChatStreamController.snapshot] 里。目标轮不在区间时**不移动视口**，只给
-  /// 一次可见提示（见 [TurnAnchorOutcome.missing]）——静默停在底部会让用户
-  /// 以为「深链坏了」，而自动补页会与「首屏滚到底 + 滚到顶翻页 + 锚点定位」
-  /// 三方抢滚动位置（webapp v0 同一取舍，见 `chat.md` §6.92）。
+  /// [ChatStreamController.snapshot] 里。目标轮不在区间时，页面会经
+  /// [onLoadOlder] **自动向上补页**，最多 [anchorBackfillPages] 页；补到即落位，
+  /// 补不到才给一次可见提示（[TurnAnchorOutcome.missing]）。
+  ///
+  /// ## 为什么不无限补
+  ///
+  /// 一次深链把整个历史拉下来既是几十个请求，也让「点一下等多久」不可控；
+  /// 而补页会同时驱动「首屏滚到底」与「滚到顶翻页」两条既有通路，页数必须
+  /// 有界才能让三者不互相抢滚动位置（见 `chat.md` §6.92）。
   final String? anchorTurnId;
+
+  /// 锚点越界时最多自动向上补几页历史（issue #108）。
+  ///
+  /// `0` = 不补页（只认已加载范围）。默认 [defaultAnchorBackfillPages]。
+  ///
+  /// ## 单独开参数而不是写死常量
+  ///
+  /// 上限是**可测、可调**的行为参数：页面测试要能构造「第 3 页才命中」与
+  /// 「页数用尽」，不靠堆几十轮真实历史；装配层将来若发现 5 页不够（长对话
+  /// 的分享链接），也只改这一处。
+  final int anchorBackfillPages;
+
+  /// [anchorBackfillPages] 的默认值：5 页。
+  ///
+  /// 每页是 `onLoadOlder` 的一批（服务端 `before_global_seq` 分页，客户端按
+  /// 200 条首屏 + 之后每页 50 条），5 页 ≈ 250~1000 条事件，覆盖「几天前的
+  /// 一轮」。
+  static const int defaultAnchorBackfillPages = 5;
 
   /// 锚点定位结果（每个锚点值**每个结果**至多回调一次）。
   ///
@@ -1036,12 +1060,30 @@ class _ConversationPageState extends State<ConversationPage>
   /// 已经给过「不在已加载范围」提示的锚点值（去重）。
   String? _anchorNoticeFor;
 
+  /// 锚点解析失败后是否已把提示**升格为常驻入口**（issue #87 回归）。
+  ///
+  /// SnackBar 几秒就消失，而锚点值仍在 widget 上：不清掉它，后续每批 items
+  /// 都会重试一次注定失败的定位，且用户被钉在底部（跟随在启动时被关了）。
+  /// true 时浮动层渲染为提示卡（见 `_BackToLatestButton.notice`），点它 =
+  /// 放弃锚点。与 [_anchorNoticeFor] 同时清零（换锚点 / 清锚点 / 换对话）。
+  bool _anchorStickyNotice = false;
+
+  /// 锚点越界时还能向更早历史补几页（issue #108）。
+  ///
+  /// 锚点值 / 对话变化时重置为 [ConversationPage.anchorBackfillPages]；
+  /// 每次补页消耗一页，用尽即给结论（不再继续拉历史）。
+  int _anchorBackfillBudget = 0;
+
+  /// 是否**真的**为当前锚点补过页（决定「找不到」的提示文案）。
+  bool _anchorBackfillUsed = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.onVisualizationForeground?.call(true);
     _items = widget.controller.snapshot;
+    _anchorBackfillBudget = widget.anchorBackfillPages;
     _itemsSub = widget.controller.items.listen(_onItems);
     // 内存账本（docs/memory-audit.md §四）：本页三个可再生态各报一行读数，
     // 诊断报告与高水位日志据此回答「RSS 花在谁身上」。读数闭包捕获本 State，
@@ -1284,6 +1326,9 @@ class _ConversationPageState extends State<ConversationPage>
       _anchorHandled = null;
       _anchorPending = null;
       _anchorNoticeFor = null;
+      _anchorStickyNotice = false;
+      _anchorBackfillBudget = widget.anchorBackfillPages;
+      _anchorBackfillUsed = false;
       _following = true;
       // 缩略图记忆按对话隔离：不清空就是按对话无限增长的内存（每张图一份
       // 字节），且上一个对话里同一 `ufsFileId` 的字节未必仍有效。
@@ -1303,6 +1348,14 @@ class _ConversationPageState extends State<ConversationPage>
     if (oldWidget.anchorTurnId != widget.anchorTurnId ||
         oldWidget.controller != widget.controller ||
         oldWidget.historyKey != widget.historyKey) {
+      // 新锚点值 = 新的预算：上一个锚点补过的页不算在它头上（否则换了锚点
+      // 就只能补剩下的几页，长对话的分享链接会莫名变成「找不到」）。失败态
+      // 提示也一并清掉：换了目标就不是「上一个找不到」了。
+      _anchorBackfillBudget = widget.anchorBackfillPages;
+      _anchorBackfillUsed = false;
+      if (_anchorStickyNotice) {
+        setState(() => _anchorStickyNotice = false);
+      }
       _maybeResolveAnchor();
     }
   }
@@ -1363,12 +1416,23 @@ class _ConversationPageState extends State<ConversationPage>
   ///
   /// `_items` 为空时「没加载」不是「不存在」。判了就是首帧必弹一次
   /// 「该轮不在已加载范围」，而它下一页就加载到了。
+  ///
+  /// ## 为什么 `_anchorPending` 要保留到定位**结束**
+  ///
+  /// 补页会让 items 连推几次（每次推都走这里）。若在排帧后就清除占位，
+  /// 补页期间会并行起若干次定位，每次都可能再发一页请求并抢一次滚动位置。
+  /// 占位保持到 [_resolveAnchor] 的 finally，一次只跑一个定位链。
   void _maybeResolveAnchor() {
     final target = normalizeTurnAnchor(widget.anchorTurnId);
     if (target == null) {
       // 参数没了（回到列表 / 手动导航）：立即退出锚点态，恢复跟随新消息。
       // 不从 `_following` 反推——那是滚动行为的状态，而这里说的是「不再有锚点」。
-      if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
+      if (_anchoredTurnId != null || _anchorStickyNotice) {
+        setState(() {
+          _anchoredTurnId = null;
+          _anchorStickyNotice = false;
+        });
+      }
       _anchorHandled = null;
       _anchorPending = null;
       _anchorNoticeFor = null;
@@ -1382,9 +1446,11 @@ class _ConversationPageState extends State<ConversationPage>
     // 完成——否则两者逐帧抢滚动位置，谁最后写谁赢，结果取决于帧时序。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _anchorPending != target) return;
-      _anchorPending = null;
       // 期间锚点可能已换（用户又点了一条命中的搜索结果）。
-      if (normalizeTurnAnchor(widget.anchorTurnId) != target) return;
+      if (normalizeTurnAnchor(widget.anchorTurnId) != target) {
+        _anchorPending = null;
+        return;
+      }
       unawaited(_resolveAnchor(target));
     });
     WidgetsBinding.instance.ensureVisualUpdate();
@@ -1392,39 +1458,137 @@ class _ConversationPageState extends State<ConversationPage>
 
   /// 定位到目标轮，并按结果决定是否进入锚点态。
   Future<void> _resolveAnchor(String target) async {
-    final index = findTurnIndex(_items, target);
-    final itemId = turnAnchorItemId(_items, target);
-    if (index < 0 || itemId == null) {
-      // 越界：**不移动视口**（停在底部），但必须说话。
-      // 静默是这类功能最坏的失败：用户点了链接看到的是对话末尾，
-      // 会以为「深链坏了 / 我点错了」，而实际只是历史还没加载到。
-      if (_anchorNoticeFor != target) {
-        _anchorNoticeFor = target;
-        _showMessage('该轮对话不在已加载的消息范围内（先向上滚动加载更早的历史再试）');
-        // 只在**首次**判定越界时上报：后续每次 items 变化都会重试（为了补跳），
-        // 但那是同一个事实，不是新的一次失败。
-        widget.onAnchorResolved?.call(TurnAnchorOutcome.missing);
+    try {
+      var index = findTurnIndex(_items, target);
+      var itemId = index < 0 ? null : turnAnchorItemId(_items, target);
+      if (index < 0 || itemId == null) {
+        // 目标轮不在已加载范围：先尝试**有界补页**（issue #108）。
+        //
+        // 补页请求发出后**不**在这里继续判定：本页的 `_items` 还没变（归约器
+        // 在零延迟 Timer 里发新列表），拿旧列表判定等于「刚发出请求就宣布找不到」。
+        // 新列表到达后 `_onItems` → [_maybeResolveAnchor] 会重跑一次定位，
+        // 补页是否命中由那一次回答。
+        if (await _backfillAnchorPage(target)) {
+          _scheduleAnchorRetry(target);
+          return;
+        }
+        _finishAnchorMissing(target);
+        return;
       }
-      return;
-    }
 
-    if (isLatestTurn(_items, target)) {
-      // 定位到最后一轮 ≡ 跟随最新：不进锚点态（不亮、不钉住滚动），
-      // 否则用户「跳回最新」之后还得手动滚到底才能继续看新消息。与两端同取舍。
+      if (isLatestTurn(_items, target)) {
+        // 定位到最后一轮 ≡ 跟随最新：不进锚点态（不亮、不钉住滚动），
+        // 否则用户「跳回最新」之后还得手动滚到底才能继续看新消息。与两端同取舍。
+        _anchorHandled = target;
+        if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
+        _resumeFollowing();
+        widget.onAnchorResolved?.call(TurnAnchorOutcome.followingLatest);
+        return;
+      }
+
+      // 先钉住「不跟随」，再落位：否则落位后的帧里一旦有新事件，
+      // `_onItems` 的跟随逻辑会把视口从刚跳到的那一轮拽回底部。
+      _following = false;
       _anchorHandled = target;
-      if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
-      _resumeFollowing();
-      widget.onAnchorResolved?.call(TurnAnchorOutcome.followingLatest);
-      return;
+      setState(() => _anchoredTurnId = target);
+      await _scrollToTurn(itemId);
+      widget.onAnchorResolved?.call(TurnAnchorOutcome.jumped);
+    } finally {
+      // 占位贯穿整个定位（含补页），到这里才释放：见 [_maybeResolveAnchor]。
+      if (_anchorPending == target) _anchorPending = null;
     }
+  }
 
-    // 先钉住「不跟随」，再落位：否则落位后的帧里一旦有新事件，
-    // `_onItems` 的跟随逻辑会把视口从刚跳到的那一轮拽回底部。
-    _following = false;
-    _anchorHandled = target;
-    setState(() => _anchoredTurnId = target);
-    await _scrollToTurn(itemId);
-    widget.onAnchorResolved?.call(TurnAnchorOutcome.jumped);
+  /// 为 [target] 补一页更早的历史；返回 true = 已发出请求，应等新 items 再判。
+  ///
+  /// 返回 false 表示**这一轮没有下一次机会**，调用方应就地给结论
+  /// （见 [_finishAnchorMissing]）：没有补页通道（未注入 [onLoadOlder] 或
+  /// 预算为 0）、预算用尽、已到最早、用户接管了视口、或请求失败。
+  ///
+  /// ## 为什么把预算记在页面上而不是挂在请求上
+  ///
+  /// 补页是被 items 变化一串串重试驱动的（见 [_resolveAnchor]），申请与完成
+  /// 不在同一个调用栈里；预算只能跟着「这个锚点值」活，换锚点 / 换对话才重置。
+  ///
+  /// ## 为什么用户一离开底部就放弃
+  ///
+  /// 补页会改变 `maxScrollExtent` 并把新行插到视口上方。用户若在这期间自己
+  /// 滚了（[_following] 变 false），继续补页就是在**替他**改视口内容——正是
+  /// 「我只想往上翻两屏，结果它一顿往下塞历史」那种体验。深链的价值是「点到
+  /// 就到」，不是「强行把整段历史拉到你眼前」。
+  Future<bool> _backfillAnchorPage(String target) async {
+    final handler = widget.onLoadOlder;
+    if (handler == null || _anchorBackfillBudget <= 0) return false;
+    if (_reachedOldest || _loadingOlder) return false;
+    if (!_following) return false;
+
+    _anchorBackfillBudget--;
+    _anchorBackfillUsed = true;
+    _loadingOlder = true;
+    final generation = _historyGeneration;
+    try {
+      final hasMore = await handler();
+      if (!mounted || generation != _historyGeneration) return false;
+      if (!hasMore) setState(() => _reachedOldest = true);
+      return hasMore;
+    } on SpbError catch (e) {
+      // 失败不标记 `_reachedOldest`：下次滚到顶（或再点一次深链）可以重试。
+      if (mounted && generation == _historyGeneration) {
+        _showMessage('加载更早历史失败：${e.message}');
+      }
+      return false;
+    } finally {
+      if (generation == _historyGeneration) _loadingOlder = false;
+    }
+  }
+
+  /// 补页请求落地后**再判一次**锚点。
+  ///
+  /// ## 为什么不能只靠 items 推送给的 [_maybeResolveAnchor]
+  ///
+  /// 新 items 可能恰好在 [_resolveAnchor] 占住 `_anchorPending` 的窗口里发布
+  /// （归约器用零延迟 Timer 发布，与请求完成的先后取决于调度）。那一次通知会
+  /// 被防重入挡掉；若之后再没有 items 变化（补页到底、或这页恰好没有任何
+  /// 新事件），锚点就永远停在半路——没有异常、没有提示。
+  void _scheduleAnchorRetry(String target) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_anchorPending == target) return; // 仍在处理，交给它收尾
+      if (normalizeTurnAnchor(widget.anchorTurnId) != target) return;
+      _maybeResolveAnchor();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// 锚点确实无法命中时的收尾：SnackBar + 常驻提示卡 + 上报，**不移动视口**。
+  ///
+  /// 静默是这类功能最坏的失败：用户点了链接看到的是对话末尾，会以为「深链
+  /// 坏了 / 我点错了」，而实际只是历史还没加载到（或那一轮已被删除）。
+  ///
+  /// ## 为什么 SnackBar 之外还要常驻提示卡（issue #87 回归）
+  ///
+  /// SnackBar 几秒就消失；而锚点值仍在 widget 上——不清掉它，后续每批 items
+  /// 都会重试一次注定失败的定位，且用户被钉在底部（跟随在启动时被关掉）。
+  /// [_anchorStickyNotice] 把浮动层换成常驻提示卡（带「返回最新」出口），
+  /// 点它 = [_backToLatest]（该锚点记入 [_anchorHandled] 防拽回）。
+  ///
+  /// 提示按锚点值去重（[_anchorNoticeFor]），且只在**首次**判定失败时上报
+  /// [TurnAnchorOutcome.missing]：后续 items 变化仍会重试（为了补跳），但那是
+  /// 同一个事实，不是新的一次失败。
+  void _finishAnchorMissing(String target) {
+    if (_anchorNoticeFor != target) {
+      _anchorNoticeFor = target;
+      _showMessage(
+        _anchorBackfillUsed
+            ? '已向上加载更早的历史，仍未找到这一轮（可能已被删除）'
+            : '该轮对话不在已加载的消息范围内（先向上滚动加载更早的历史再试）',
+      );
+      widget.onAnchorResolved?.call(TurnAnchorOutcome.missing);
+    }
+    // 常驻提示与 SnackBar 文案分开：前者必须短（一行浮层），后者可以解释原因。
+    if (!_anchorStickyNotice) {
+      setState(() => _anchorStickyNotice = true);
+    }
   }
 
   /// 把时间线落到指定 `item.id` 的那一行（锚点专用）。
@@ -1555,7 +1719,13 @@ class _ConversationPageState extends State<ConversationPage>
   void _backToLatest() {
     final anchor = normalizeTurnAnchor(widget.anchorTurnId);
     if (anchor != null) _anchorHandled = anchor;
-    if (_anchoredTurnId != null) setState(() => _anchoredTurnId = null);
+    final hadState = _anchoredTurnId != null || _anchorStickyNotice;
+    if (hadState) {
+      setState(() {
+        _anchoredTurnId = null;
+        _anchorStickyNotice = false;
+      });
+    }
     _resumeFollowing();
   }
 
@@ -2466,21 +2636,27 @@ class _ConversationPageState extends State<ConversationPage>
                       ? EmptyState(message: widget.emptyHint)
                       : _buildTimeline(),
                 ),
-                // 「回到最新」浮动入口：只在锚点态下出现。
+                // 浮动层：锚点态的两个出口共用同一位置——
+                // 1) 已定位到历史轮次 → 「回到最新」；
+                // 2) 解析失败（补页无果）→ 常驻提示卡（issue #87 回归修法）。
                 //
-                // ## 为什么必须有它（而不能靠用户自己滑）
+                // ## 为什么失败态要常驻而不是只靠 SnackBar
                 //
-                // 锚点态下自动跟随是**关掉**的（否则新事件会把用户从刚跳到
-                // 的那一轮拽回底部）。于是用户在历史里看不到新消息也回不去，
-                // 只能手动往下滑到底——而“底”在哪里他并不知道。webapp 在同一
-                // 状态下也给了这个出口（`backToLatest`）。
-                if (_anchoredTurnId != null)
+                // 提示会消失，锚点值不会：它仍挂在 widget 上，随后的每批
+                // items 都会重试定位，且跟随仍是关的（启动时被关掉）。
+                // 常驻卡片给了用户唯一的出口「返回最新」，点了才恢复跟随。
+                if (_anchoredTurnId != null || _anchorStickyNotice)
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: SpbSpacing.sm,
                     child: Center(
-                      child: _BackToLatestButton(onTap: _backToLatest),
+                      child: _BackToLatestButton(
+                        onTap: _backToLatest,
+                        notice: _anchorStickyNotice
+                            ? '未找到该轮对话（可能已加载上限之外或已删除）'
+                            : null,
+                      ),
                     ),
                   ),
               ],
@@ -3567,16 +3743,73 @@ class _OfflineTimelineNotice extends StatelessWidget {
 /// 放在它影响的那个区域（时间线底部，也就是「最新」的方向）；放进 AppBar 会
 /// 与一堆全局入口并列，看起来像「刷新」而不是「回到底部」。
 ///
-/// 纯展示组件（只收一个回调），故不需要任何页面状态。
+/// ## `notice` 槽位（issue #87 的回归修法）
+///
+/// 锚点解析失败（目标轮不在已加载范围且补页无果）时，**没有**任何入口能让
+/// 用户把 URL 里的 `?turn=` 交出去——提示是 SnackBar，几秒就消失，而锚点
+/// 值仍挂在 widget 上：随后的每一批 items 都会重试一次注定失败的定位，且
+/// 期间用户永远不能跟随新消息（`_following` 恰好在启动时刻被关掉了）。
+/// 故这里复用本按钮的浮层位置作为常驻出口：`notice` 非 null 时它变成一条
+/// **提示卡**（不可点「回到最新」，点它=放弃该锚点）——锚点态的两个出口
+/// （「回到最新」/「找不到」）共用同一个视觉位置，用户不需要学第二个 UI。
+///
+/// 纯展示组件（只收回调与提示文案），故不需要任何页面状态。
 class _BackToLatestButton extends StatelessWidget {
-  const _BackToLatestButton({required this.onTap});
+  const _BackToLatestButton({required this.onTap, this.notice});
 
   final VoidCallback onTap;
+
+  /// 非 null = 锚点解析失败态：渲染提示卡而不是「回到最新」。
+  final String? notice;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    if (notice != null) {
+      return Material(
+        key: const ValueKey('conversation-anchor-notice'),
+        elevation: 3,
+        color: scheme.surfaceContainerHigh,
+        shape: const RoundedRectangleBorder(borderRadius: SpbRadius.cardAll),
+        child: InkWell(
+          borderRadius: SpbRadius.cardAll,
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: SpbSpacing.md,
+              vertical: SpbSpacing.sm,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.manage_search,
+                  size: 16,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: SpbSpacing.sm),
+                Flexible(
+                  child: Text(
+                    notice!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: SpbSpacing.sm),
+                Text(
+                  '返回最新',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return Material(
       key: const ValueKey('conversation-back-to-latest'),
       elevation: 3,

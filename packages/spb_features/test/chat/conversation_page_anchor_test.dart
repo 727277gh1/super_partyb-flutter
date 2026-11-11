@@ -286,6 +286,12 @@ void main() {
     expect(find.textContaining('不在已加载的消息范围'), findsOneWidget);
     // 不移动视口：越界时停在底部（首屏的正常落点），而不是停在顶部/半空。
     expect(atBottom(tester), isTrue);
+    // 失败态同样升格为常驻提示卡（issue #87 回归）：没有补页通道（未注入
+    // onLoadOlder），但用户仍需一个出口。
+    expect(
+      find.byKey(const ValueKey('conversation-anchor-notice')),
+      findsOneWidget,
+    );
     // 越界不进锚点态 → 不该出现「回到最新」。
     expect(
       find.byKey(const ValueKey('conversation-back-to-latest')),
@@ -429,6 +435,220 @@ void main() {
       findsNothing,
     );
     expect(atBottom(tester), isTrue);
+  });
+
+  // ==================== 越界自动补页（issue #108）====================
+
+  /// 挂一页「更早的历史」（`GET timeline` 的响应形态）。
+  ///
+  /// 夹具刻意用**最扁的形状**：每个 `seq` 两条事件（`user_message` + `done`），
+  /// 本组用例验证的是「补页与落位的协作」，不是归约器对一轮内多种事件的归并
+  /// （那在 `conversation_page_timeline_test.dart`）。
+  ///
+  /// ⚠️ `done` **不能省**：只有 `start`/`done` 会让轮次进入「执行中 / 已结束」，
+  /// 而缺 `done` 的轮次会被控制器的超时兠底（`_syncStaleWatch`）挂上一个 5 分钟
+  /// 定时器——用例结束时变成「A Timer is still pending」这种与断言无关的失败。
+  ///
+  /// 每页 50 个 seq = 100 条事件 ≥ `controller.loadOlder` 的 `limit(50)`，于是
+  /// `hasMore` 为 true——补页会继续。
+  ///
+  /// [cursorLog] 非 null 时把**被请求的游标**按到达顺序记进去（`null` = 首屏）：
+  /// 补页次数与顺序是本组用例的核心断言，而它只能从「服务端收到哪个 cursor」
+  /// 看出来（从页面侧数回调次数会被落位后那次滚动翻页混进来）。
+  void mockPage(int start, int end, {int? before, List<int?>? cursorLog}) {
+    adapter.onGet(
+      '/chat/groups/grp_1/timeline',
+      (server) {
+        cursorLog?.add(before);
+        return server.reply(200, {
+          'items': [
+            for (var seq = start; seq <= end; seq++) ...[
+              sseEvent(
+                EventTypes.userMessage,
+                id: 'e$seq',
+                turnId: _hex(seq),
+                seq: seq * 2,
+                payload: {'input': '第 $seq 条'},
+              ),
+              sseEvent(
+                EventTypes.done,
+                id: 'e${seq}d',
+                turnId: _hex(seq),
+                seq: seq * 2 + 1,
+              ),
+            ],
+          ],
+        });
+      },
+      queryParameters: {
+        'limit': before == null ? 200 : 50,
+        if (before != null) 'before_global_seq': '$before',
+      },
+    );
+  }
+
+  /// 推进「补页 → items → 落位」的链。
+  ///
+  /// 每一轮要两件事同时发生，故不能只 `pumpAndSettle`：
+  ///
+  /// - **真实时区**里等 dio mock 的响应（补页走 `controller.loadOlder`，那是
+  ///   真 HTTP 栈；FakeAsync 时区里永远不会完成——见 harness 的 pushEvent 注释）；
+  /// - **FakeAsync 时区**里 `pump`：归约器的零延迟 Timer、post-frame 重试、
+  ///   `endOfFrame` 都不是真实计时器。
+  ///
+  /// 多轮是必要的：目标轮在第 3 页时，链条是「请求页 2 → items → 重判 → 请求
+  /// 页 3 → items → 搬分界行 → 精调」，每环各占一帧。
+  Future<void> driveBackfill(WidgetTester tester, {int rounds = 14}) async {
+    for (var i = 0; i < rounds; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 5)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    // 收尾：把还挂着的零延迟/短定时器泵干净。不泵会把「还有 pending Timer」
+    // 留给测试框架，在末尾报成与本用例无关的失败（实测踩过）。
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('锚点越界自动补页：目标轮在第 3 页也能落到该轮并高亮', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    // 服务端收到的游标（null = 首屏），按到达顺序。
+    final cursors = <int?>[];
+    mockTimeline();
+    mockPage(101, 135, cursorLog: cursors); // 首屏：只拿到最近的 35 轮
+    mockPage(51, 100, before: 202, cursorLog: cursors); // 补页 1
+    mockPage(1, 50, before: 102, cursorLog: cursors); // 补页 2：目标轮在这里
+    // 视口落到历史顶部后，既有的「在顶部就翻页」会再要一页；不挂上 mock 会让
+    // dio 报 NetworkError，把用例的失败原因搞模糊。
+    mockPage(1, 0, before: 2, cursorLog: cursors);
+    await startController(tester);
+
+    final outcomes = <TurnAnchorOutcome>[];
+    await pumpPage(
+      tester,
+      anchorTurnId: _hex(5),
+      onLoadOlder: () => controller.loadOlder(),
+      onAnchorResolved: outcomes.add,
+    );
+    await driveBackfill(tester);
+
+    expect(outcomes, [TurnAnchorOutcome.jumped]);
+    // 补页顺序：首屏 → 101 → 51（目标轮所在页）。若补页没停或顺序反了，这里
+    // 会先出现别的游标——这是「命中即止」在**服务端侧**的证据。
+    expect(cursors.take(3), [
+      null,
+      202,
+      102,
+    ], reason: '目标轮在第 3 页：只应补两页，且游标逐页向前推');
+    // 高亮落到该轮（按行渲染，行键 = 该条事件的 id）。
+    expect(find.byKey(const ValueKey('turn-highlight-e5')), findsOneWidget);
+    // 真的落上去了：贴顶（alignment: 0），且下方仍有大量内容。
+    expect(tester.getTopLeft(find.text('第 5 条')).dy, lessThan(120));
+    expect(timelinePosition(tester).extentAfter, greaterThan(300));
+    expect(
+      find.byKey(const ValueKey('conversation-back-to-latest')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('自动补页有上界：页数用尽仍未命中 → 提示一次「已向上加载」', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    mockPage(101, 135);
+    mockPage(51, 100, before: 202);
+    mockPage(1, 50, before: 102);
+    await startController(tester);
+
+    var requests = 0;
+    final outcomes = <TurnAnchorOutcome>[];
+    await pumpPage(
+      tester,
+      // 任何一页都没有这个 turnId。
+      anchorTurnId: _hex(4242),
+      // 上限压到 2 页：不靠堆几十页真数据来验证「有界」。
+      anchorBackfillPages: 2,
+      onLoadOlder: () {
+        requests++;
+        return controller.loadOlder();
+      },
+      onAnchorResolved: outcomes.add,
+    );
+    await driveBackfill(tester);
+
+    expect(requests, 2, reason: '上限 2 页：第 3 次不应再发请求');
+    expect(outcomes, [TurnAnchorOutcome.missing]);
+    // 文案要与「根本没法补页」区分：用户知道我们真的往上找过了。
+    expect(find.textContaining('已向上加载更早的历史'), findsOneWidget);
+    expect(atBottom(tester), isTrue);
+    // 失败态有常驻提示卡（issue #87 回归）：SnackBar 会消失，但用户需要
+    // 一个出口把锚点交出去——否则页面永远钉在底部、不跟随新消息。
+    expect(
+      find.byKey(const ValueKey('conversation-anchor-notice')),
+      findsOneWidget,
+    );
+    // 点它 = 放弃锚点：常驻卡消失、恢复跟随（新一轮到达能拽回底部）。
+    await tester.tap(find.byKey(const ValueKey('conversation-anchor-notice')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('conversation-anchor-notice')),
+      findsNothing,
+    );
+    await pushTurn(tester, turnId: _hex(78), input: '放弃锚点后的新一轮', seq: 901);
+    await tester.pumpAndSettle();
+    expect(atBottom(tester), isTrue, reason: '放弃锚点后恢复跟随');
+
+    // 再推一轮新消息：不重复提示（按锚点值去重）、也不乱拉历史。
+    await pushTurn(tester, turnId: _hex(77), input: '补页之后的新一轮', seq: 900);
+    await tester.pumpAndSettle();
+    expect(requests, 2);
+    expect(find.textContaining('已向上加载更早的历史'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('conversation-anchor-notice')),
+      findsNothing,
+      reason: '已放弃锚点：提示不再回来（除非换了新的锚点值）',
+    );
+    expect(atBottom(tester), isTrue);
+  });
+
+  testWidgets('补页期间用户自己滚走 → 不再替他补页、不抢视口', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    mockPage(101, 135);
+    mockPage(51, 100, before: 202);
+    await startController(tester);
+
+    var requests = 0;
+    await pumpPage(
+      tester,
+      anchorTurnId: _hex(4242),
+      onLoadOlder: () async {
+        requests++;
+        // 用户在这期间自己上翻（停在半空），不再处于「跟随最新」。
+        //
+        // 只能 `jumpTo`，不能在这里 `tester.pump()`：这个回调是在 post-frame
+        // 里被调的，帧阶段不是 idle，再泵一帧会直接断言失败。
+        final position = timelinePosition(tester);
+        position.jumpTo(position.maxScrollExtent * 0.5);
+        return true; // 服务端还有更早的历史，但我们已不该继续拉
+      },
+    );
+    await driveBackfill(tester);
+
+    expect(requests, 1, reason: '用户接管视口后必须停手：继续补页会在他读的位置上方不停插内容');
+    // 视口停在用户放的地方，没有被锚点或补页抢回底部。
+    expect(atBottom(tester), isFalse);
+    expect(timelinePosition(tester).extentAfter, greaterThan(100));
   });
 }
 

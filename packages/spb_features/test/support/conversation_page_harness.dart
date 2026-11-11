@@ -264,6 +264,10 @@ Future<void> pumpPage(
   /// 深链锚点（`?turn=<turnId>`）：见 [ConversationPage.anchorTurnId]。
   String? anchorTurnId,
 
+  /// 锚点越界自动补页的页数上限（issue #108）：见
+  /// [ConversationPage.anchorBackfillPages]。不传则用页面默认值。
+  int? anchorBackfillPages,
+
   /// 锚点定位结果回调（断言「jumped / missing / followingLatest」）。
   void Function(TurnAnchorOutcome)? onAnchorResolved,
   FlushPending? onFlush,
@@ -323,6 +327,8 @@ Future<void> pumpPage(
         onPreviewAgentFile: onPreviewAgentFile,
         onLoadOlder: onLoadOlder,
         anchorTurnId: anchorTurnId,
+        anchorBackfillPages:
+            anchorBackfillPages ?? ConversationPage.defaultAnchorBackfillPages,
         onAnchorResolved: onAnchorResolved,
         onFlush: onFlush,
         onFlushWithStrategy: onFlushWithStrategy,
