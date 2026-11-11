@@ -1109,4 +1109,117 @@ void main() {
       );
     });
   });
+
+  group('深链锚点（`?turn=`）', () {
+    /// 真实形态的 turnId（32 位 hex，对齐 Go `chatid.NewID`）。
+    const turnId = '0123456789abcdef0123456789abcdef';
+
+    test('SpbRoutes.chat 带锚点时拼查询参数，非法值退化为不带锚点', () {
+      // 新增的锚点参数**不能**把普通跳转也带上 `?turn=`：没有锚点时 URL 必须
+      // 与之前逐字相同（登录回跳、通知去重等都以它为键）。
+      expect(SpbRoutes.chat('grp_1'), '/chat/grp_1');
+      expect(SpbRoutes.chat('grp_1', turn: turnId), '/chat/grp_1?turn=$turnId');
+      // 非法值当没传（与页面侧同一归一化），而不是把任意串拼进 URL。
+      expect(SpbRoutes.chat('grp_1', turn: '有空格 的'), '/chat/grp_1');
+      expect(SpbRoutes.chat('grp_1', turn: ''), '/chat/grp_1');
+    });
+
+    testWidgets('深链 /chat/grp_x?turn=<turnId> 把锚点传给对话页', (tester) async {
+      // ## 本用例防的是什么
+      //
+      // 路由读了 `?turn=` 却**没传给 `ConversationPage`** 时，编译、分析、页面
+      // 自身测试全部照常通过，而用户点了「跳到那一轮」只得到对话末尾——功能
+      // 静默失效。故这里直接断言树上那个 widget 的参数。
+      await pumpApp(
+        tester,
+        initialLocation: SpbRoutes.chat('grp_x', turn: turnId),
+        mockGroups: false,
+        sseClient: FakeSseClient(),
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+        },
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      final page = tester.widget<ConversationPage>(
+        find.byType(ConversationPage),
+      );
+      expect(
+        page.anchorTurnId,
+        turnId,
+        reason: 'router 漏传 anchorTurnId → 深链只切对话，不落位',
+      );
+    });
+
+    testWidgets('非法锚点值当没传（不把任意串交给页面）', (tester) async {
+      // 锚点来自 URL，任何人都能改；它最终会参与行键比较，故必须在入口挡掉。
+      await pumpApp(
+        tester,
+        initialLocation: '/chat/grp_x?turn=turn-bad!',
+        mockGroups: false,
+        sseClient: FakeSseClient(),
+        beforePump: (adapter) {
+          adapter.onGet(
+            '/api/auth/me',
+            (server) => server.reply(200, {
+              'id': 'usr_REAL',
+              'email': 'a@b.c',
+              'name': 'Test',
+              'role': 'member',
+              'roles': ['member'],
+              'permissions': <String>[],
+              'status': 'active',
+            }),
+          );
+          adapter.onGet(
+            '/chat/groups/grp_x/timeline',
+            (server) => server.reply(200, {
+              'items': <Map<String, dynamic>>[],
+              'next_before_global_seq': '',
+            }),
+            queryParameters: {'limit': 200},
+          );
+          adapter.onGet(
+            '/users/usr_REAL/chat/messages/pending',
+            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+            queryParameters: {'group_id': 'grp_x', 'limit': 20},
+          );
+        },
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
+
+      final page = tester.widget<ConversationPage>(
+        find.byType(ConversationPage),
+      );
+      expect(page.anchorTurnId, isNull);
+    });
+  });
 }

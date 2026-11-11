@@ -65,7 +65,16 @@ class SpbRoutes {
   static const login = '/login';
 
   /// 对话时间线路径。
-  static String chat(String groupId) => '/chat/$groupId';
+  ///
+  /// [turn] 非空时带上深链锚点（`?turn=<turnId>`）：进入后直接落到那一轮
+  /// （见 `ConversationPage.anchorTurnId` 与 `docs/api-contract.md` 的说明）。
+  /// 锚点值是服务端的 `turn_id`（搜索命中 / 轮次列表都带着它），**不是**「第 N 轮」。
+  static String chat(String groupId, {String? turn}) {
+    final anchor = normalizeTurnAnchor(turn);
+    return anchor == null
+        ? '/chat/$groupId'
+        : '/chat/$groupId?$kTurnAnchorParam=$anchor';
+  }
 
   static const chatPattern = '/chat/:groupId';
 
@@ -258,7 +267,13 @@ List<RouteBase> buildDesktopRoutes() {
           path: 'chat/:groupId',
           builder: (context, state) {
             final groupId = state.pathParameters['groupId'] ?? '';
-            return _ChatPage(groupId: groupId);
+            return _ChatPage(
+              groupId: groupId,
+              // 深链锚点：只认合法值（非法值当没传，不能把任意串拼进键比较）。
+              anchorTurnId: normalizeTurnAnchor(
+                state.uri.queryParameters[kTurnAnchorParam],
+              ),
+            );
           },
         ),
         GoRoute(
@@ -473,7 +488,12 @@ class _SearchPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return SearchPage(
       search: ref.watch(searchChatProvider),
-      onOpenHit: (hit) => context.go(SpbRoutes.chat(hit.groupId)),
+      onOpenHit: (hit) => context.go(
+        // 带上 turn 锚点：命中的就是**某一轮**，跳到会话内那一轮而不是只切会话。
+        // 目标轮不在首屏已加载区间时，对话页会提示「不在已加载范围」
+        // 而不是静默停在底部。
+        SpbRoutes.chat(hit.groupId, turn: hit.turnId),
+      ),
     );
   }
 }
@@ -528,7 +548,9 @@ class _PendingConfirmationsPageState
         return items;
       },
       groupTitleOf: (gid) => _titles.titleOf(gid),
-      onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
+      // 待确认事项属于**某一轮**：带锚点进去才能直接看到它上下文。
+      onOpenGroup: (groupId, turnId) =>
+          context.go(SpbRoutes.chat(groupId, turn: turnId)),
       onResolve: (c, action) async {
         await api.resolveConfirmation(c.groupId, c.id, action: action);
       },
@@ -676,7 +698,9 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
         return r.patternId;
       },
       // 习惯执行产生的对话就是普通对话，直接跳过去（同 `_MyTurnsPage`）。
-      onOpenTurn: (groupId, _) => context.go(SpbRoutes.chat(groupId)),
+      // 带 turn 锚点：用户点的是「那一次执行」，落到那一轮而非对话末尾。
+      onOpenTurn: (groupId, turnId) =>
+          context.go(SpbRoutes.chat(groupId, turn: turnId)),
       // ---------- 编辑 + 按规则查记录 ----------
       //
       // 两者都只发改动字段 / 只查单条规则，见 `HabitPatch` 与 `HabitRunsPage`
@@ -714,9 +738,13 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
 /// 进入时把控制器聚焦到该 group（`switchGroup` 会回填 timeline）；
 /// 退出时 Provider autoDispose 自动断开 SSE。
 class _ChatPage extends ConsumerStatefulWidget {
-  const _ChatPage({required this.groupId});
+  const _ChatPage({required this.groupId, this.anchorTurnId});
 
   final String groupId;
+
+  /// 深链锚点（`?turn=<turnId>`）：由路由参数取来，透传给对话页落位。
+  /// 空 = 没有锚点（普通进入）。
+  final String? anchorTurnId;
 
   @override
   ConsumerState<_ChatPage> createState() => _ChatPageState();
@@ -1633,6 +1661,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       loadVisualization: api.visualizationRevision,
       onVisualizationForeground: controller.setVisualizationForeground,
       title: _appBarTitle,
+      // 深链锚点（`/chat/{gid}?turn={turnId}`）：只在已加载的轮次内定位，
+      // 越界时由页面自己提示（与移动端构造点必须一致）。
+      anchorTurnId: widget.anchorTurnId,
       // 侧边栏开关（仅桌面端渲染本页）。
       actions: [
         // Agent 切换：
