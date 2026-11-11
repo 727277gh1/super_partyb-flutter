@@ -1221,6 +1221,22 @@ final timelineCacheStoreProvider = Provider<TimelineCacheStore>((ref) {
   return DriftTimelineCacheStore(ref.watch(appDatabaseProvider));
 });
 
+/// 本地 agent 选择（`groupId → 该对话接下来由谁回答`，三态见 [AgentChoice]）。
+///
+/// ## 为什么是应用级 Provider 而不是页面 State
+///
+/// 语义是「**这个对话**接下来由谁回答」，生命周期与对话绑定：选完返回列表、
+/// 再进来仍应是用户选的那个（含「自动路由」）。放页面 State 里则随页面销毁
+/// 而丢 → 重进回落成服务端绑定值，界面显示某个具体 agent、发送走 `manual`，
+/// 用户选的「自动」被静默改掉。webapp 的 `agentByGroup[groupId]` 同样是应用级
+/// map（见 super_partyb `useChatStore`），此处与之对齐。
+///
+/// 不参与 `resetAll`：它不存凭证、不存与服务端冲突的事实，只是本端的 UI
+/// 选择；换账号后 groupId 也不同（旧条目自然不会命中）。
+final agentChoiceStoreProvider = Provider<AgentChoiceStore>((ref) {
+  return AgentChoiceStore();
+});
+
 /// 离线写队列的持久化（issue #26 切片 C / issue #30）。
 ///
 /// 与上面两个 store 的关键差异：**它不是可丢弃数据**。队列装的是用户敲进去、

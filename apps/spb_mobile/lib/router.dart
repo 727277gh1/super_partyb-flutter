@@ -884,30 +884,35 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 本状态与之对齐：**发送成功后不清**——清了就等于「每条消息都要重新选一次
   /// Agent」，而 AppBar 上明明写着当前是谁。
   ///
-  /// ## 唯一的清除点：换对话
+  /// ## 选择存在**应用级** store 里，不是本 State 的字段
   ///
-  /// [didUpdateWidget]（State 会被 Flutter 复用，不清就泄漏到下一个对话）。
-  /// 换对话后回落到新 group 的 `activeSession.agentId`。
-  String? _selectedAgentId;
-
-  /// 用户是否**显式**选了「自动路由」（把选择交回服务端 `auto_agent`）。
+  /// 语义是「**这个对话**接下来由谁回答」，生命周期与对话绑定而不是与某次
+  /// 页面实例绑定：选完返回列表再进来，AppBar 仍应写用户选的那个（含
+  /// 「自动路由」），下一条消息也仍按同一模式发出。webapp 的
+  /// `agentByGroup[groupId]` 就是应用级 map，本处与之对齐。
   ///
-  /// 必须与 `_selectedAgentId == null`（未覆盖）区分：两者都没有具体 agent，
-  /// 但语义相反——前者是「让平台挑」（`routing.mode=auto`、不带 `agent_id`），
-  /// 后者是「沿用这个对话已有的绑定」。一个 `String?` 表达不了三态
-  /// （未覆盖 / 显式自动 / 具体 agent），webapp 的 `agentByGroup[groupId]`
-  /// 正是 `undefined | null | string` 三态同构。
-  bool _autoRouting = false;
+  /// 曾把选择放在 State 字段里，代价是**返回即丢**：重进对话回落成服务端
+  /// 绑定值 → 界面显示某个具体 agent（不是用户选的），且发送时带 `manual`
+  /// ——用户选的「自动」被静默改成「手动指定某人」。故这里只读 store，
+  /// 键是 `widget.groupId`（换对话天然不串味，无需在 [didUpdateWidget] 清）。
+  AgentChoice? get _localChoice =>
+      ref.read(agentChoiceStoreProvider).choiceFor(widget.groupId);
 
-  /// 「本对话当前由谁回答」的**有效**值：显式自动路由 → null；否则本地
-  /// 选择优先，再否则服务端绑定。
+  /// 「本对话当前由谁回答」的**有效**值：
+  ///
+  /// - 显式选过「自动」→ null（走 `routing.mode=auto`，不带 `agent_id`）；
+  /// - 显式选过某个 agent → 该 id；
+  /// - 没选过 → 服务端绑定 `activeSession.agentId`（兜底，不是权威）。
   ///
   /// AppBar 标签、菜单勾选、发送的 `agent_id`、「同 Agent 开新会话」都用它
   /// ——四者必须同源，否则会出现「标签写着 A，发出去的是自动路由」这类
   /// 自相矛盾。
-  String? get _effectiveAgentId => _autoRouting
-      ? null
-      : (_selectedAgentId ?? _group?.activeSession?.agentId);
+  String? get _effectiveAgentId {
+    final choice = _localChoice;
+    if (choice is AgentChoiceAgent) return choice.agentId;
+    if (choice is AgentChoiceAuto) return null;
+    return _group?.activeSession?.agentId;
+  }
 
   /// 是否正在解析 userId（防重复请求）。
   bool _resolvingUser = false;
@@ -1124,12 +1129,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 先置空再拉：State 被 Flutter 复用，不置空会让新对话的设置弹层
       // 短暂显示上一个对话的目标与开关。
       _group = null;
-      // 建议卡的 agent 标注同理：它是**上一个对话**里某条建议的标注，带进
-      // 新对话会让第一条消息发给一个用户没在这个对话里选过的 agent
-      // （且服务端会据此改写新对话的绑定，见 [_selectedAgentId] 的说明）。
-      // 清掉后回落到新 group 的 `activeSession.agentId`（[_effectiveAgentId]）。
-      _selectedAgentId = null;
-      _autoRouting = false;
+      // 本地 agent 选择**不用**在这里清：它存在应用级 store 里、以 groupId
+      // 为键（见 [_localChoice]），换对话天然不串味；带进新对话的只会是**该
+      // 对话自己**的历史选择，那正是我们要的（webapp 的 `agentByGroup` 同一
+      // 语义）。
       _resolveUserAndFocus();
       _loadGroup();
     }
@@ -1143,7 +1146,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// ## 为什么只有它需要服务端调用
   ///
   /// 换 agent 不需要（选中的 agent 随下一条消息的 `agent_id` 发出，服务端在
-  /// 入队事务里重绑，见 [_selectedAgentId]）。而「清空上下文」要求**现在**就
+  /// 入队事务里重绑，见 [_localChoice]）。而「清空上下文」要求**现在**就
   /// 划出分界线——它没有「下一条消息」可以搭载，故必须显式调端点。
   ///
   /// ## 成功后做什么
@@ -1153,7 +1156,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 2. 弹一句「已清空上下文」。
   ///
   /// 确认框在 `MessageComposer`（拥有按钮的那个组件），不在这里：它是 UI 决策，
-  /// 放在两个 router 里就变成两份实现。也不清 [_selectedAgentId]——清空上下文
+  /// 放在两个 router 里就变成两份实现。也不清本地 agent 选择——清空上下文
   /// 保留当前 agent，这是它与「换 agent」的唯一区别。
   ///
   /// ## 有意**不**刷新时间线
@@ -1312,27 +1315,38 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// `_ChatPage` 实例（State 不共享），`_resolvingConfirmations` 的 busy 态
   /// 与时间线内联卡就不一致了。
   Future<void> _openTodos() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      useSafeArea: true,
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (sheetContext, setSheetState) => SizedBox(
-          height: MediaQuery.sizeOf(sheetContext).height * 0.8,
-          child: GroupTodosPanel(
-            // 按轮次聚合（纯函数在领域层，见 TurnGroup 类文档）。
-            turns: groupItemsByTurn(_items),
-            onResolveConfirmation: _resolveConfirmation,
-            resolvingIds: _resolvingConfirmations,
-            // 切 group 时清空折叠状态（旧对话的展开位置对新对话无意义）。
-            reloadKey: widget.groupId,
-            // 弹层自带拖拽条，不再重复面板标题。
-            showHeader: false,
+    final tick = ValueNotifier<int>(0);
+    _todosTick = tick;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        useSafeArea: true,
+        // 必须经哨兵重建：页面 `setState` 到不了这个独立 route（见 [_todosTick]）。
+        builder: (sheetContext) => ValueListenableBuilder<int>(
+          valueListenable: tick,
+          builder: (context, _, child) => SizedBox(
+            height: MediaQuery.sizeOf(sheetContext).height * 0.8,
+            child: GroupTodosPanel(
+              // 按轮次聚合（纯函数在领域层，见 TurnGroup 类文档）。
+              turns: groupItemsByTurn(_items),
+              onResolveConfirmation: _resolveConfirmation,
+              resolvingIds: _resolvingConfirmations,
+              // 切 group 时清空折叠状态（旧对话的展开位置对新对话无意义）。
+              reloadKey: widget.groupId,
+              // 弹层自带拖拽条，不再重复面板标题。
+              showHeader: false,
+            ),
           ),
         ),
-      ),
-    );
+      );
+    } finally {
+      // 关掉后摘掉哨兵：否则事件会持续 bump 一个无人监听的 notifier，
+      // 而 dispose 之后的写入会抛。
+      _todosTick = null;
+      tick.dispose();
+    }
   }
 
   /// 提交确认卡作答。
@@ -1355,6 +1369,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   ) {
     if (_resolvingConfirmations.contains(confirmationId)) return;
     setState(() => _resolvingConfirmations.add(confirmationId));
+    // 转一次：待办弹层里的 busy 态是**唯一**的“我点上了”反馈，而弹层不会
+    // 跟着页面 setState 重建（见 [_todosTick]）。
+    _bumpOpenSheets();
     ref
         .read(chatApiProvider)
         .resolveConfirmation(
@@ -1365,6 +1382,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
         .whenComplete(() {
           if (mounted) {
             setState(() => _resolvingConfirmations.remove(confirmationId));
+            _bumpOpenSheets();
           }
         })
         .catchError((Object e) {
@@ -1645,11 +1663,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       AgentSwitcher(
         loadAgents: ref.watch(loadAgentsProvider),
         // 选 agent = 纯本地（对齐 webapp 的 `setAgentForGroup`）：不发请求、
-        // 不弹确认，随下一条消息的 `agent_id` 生效。
+        // 不弹确认，随下一条消息的 `agent_id` 生效。写进应用级 store（键是
+        // groupId），故**返回列表再进来选择仍在**（见 [_localChoice]）。
         selectAgent: (agentId) => setState(() {
-          // null = 用户明确选了自动路由（见 [_autoRouting]）。
-          _autoRouting = agentId == null;
-          _selectedAgentId = agentId;
+          ref
+              .read(agentChoiceStoreProvider)
+              .remember(
+                widget.groupId,
+                // null = 用户明确选了自动路由（三态之一，见 AgentChoice）。
+                agentId == null
+                    ? const AgentChoiceAuto()
+                    : AgentChoiceAgent(agentId),
+              );
         }),
         currentAgentId: _effectiveAgentId,
         // 窄屏由 ConversationPage 把这些操作移到独立工具行，保留当前名称。
@@ -1779,8 +1804,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     ];
   }
 
-  /// 有打开的「动态」弹层时转一次（见 [_activityTick] 的文档）。
-  void _bumpActivitySheet() => _activityTick?.value++;
+  /// 有打开的弹层时各转一次（见 [_activityTick] / [_todosTick] 的文档）。
+  ///
+  /// 两个弹层互斥（都是 `showModalBottomSheet`），故同一个回调里两个都转——
+  /// 比让每处调用方自己判断「现在开的是哪个」更不容易漏。
+  void _bumpOpenSheets() {
+    _activityTick?.value++;
+    _todosTick?.value++;
+  }
 
   /// 「动态」弹层打开时的刷新哨兵；null 表示当前没有打开的弹层。
   ///
@@ -1796,6 +1827,18 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 不用 provider：这些数据都在 `_ChatPage` 的 State 里（见本文件多处注释：
   /// 用弹层而非新路由正是为了共享这份 State）。
   ValueNotifier<int>? _activityTick;
+
+  /// 「待办」弹层打开时的刷新哨兵；null 表示当前没有打开的弹层。
+  ///
+  /// ## 为什么它也必须存在（与 [_activityTick] 同一根因）
+  ///
+  /// `_openTodos` 的 builder 闭包在弹层打开时**只跑一次**，而它捕获的是那一刻的
+  /// `_items` 与 `_resolvingConfirmations`。而这两个值随后都会变：SSE 推来
+  /// `done` / 确认卡被解决 → `_items` 换新；点「确认」→ 该 id 进 busy 集。
+  /// 页面 `setState` 只重建页面，弹层是**独立 route**，于是打开着的待办列表
+  /// 一直停在旧数据上：卡还在、按钮还能点、busy 转圈永远不出现（用户以为没点上，
+  /// 再点一次又是一次 POST）。这与 [_activityTick] 是同一类缺陷，修法也相同。
+  ValueNotifier<int>? _todosTick;
 
   /// 打开「动态」底部弹层。
   ///
@@ -2082,14 +2125,14 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onStaleTurnIdsChanged(Set<String> ids) {
     if (!mounted) return;
     setState(() => _staleTurnIds = ids);
-    _bumpActivitySheet();
+    _bumpOpenSheets();
   }
 
   /// 监听 controller.activities：驱动对话页的空窗期进度指示。
   void _onActivitiesChanged(Map<String, TurnActivitySnapshot> activities) {
     if (!mounted) return;
     setState(() => _activities = activities);
-    _bumpActivitySheet();
+    _bumpOpenSheets();
   }
 
   /// 监听 controller.contextUsage：驱动对话页顶部的用量读数。
@@ -2136,8 +2179,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       _items = items;
       if (!isFirstSync && hasNew) _deliverablesReloadToken++;
     });
-    // 「动态」弹层是独立 route，页面 setState 不会让它重建 → 显式转一次。
-    _bumpActivitySheet();
+    // 弹层（「动态」/「待办」）是独立 route，页面 setState 不会让它们重建
+    // → 显式转一次（见 [_activityTick] / [_todosTick]）。
+    _bumpOpenSheets();
 
     // 对话页处理确认后使首页数据失效，下次返回时重新查询。
     // 必须失效源列表；只刷新派生计数会继续读取旧的缓存结果。
@@ -2162,7 +2206,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   void _onExecutionStatusChanged(ExecutionStatus? status) {
     if (!mounted) return;
     setState(() => _executionStatus = status);
-    _bumpActivitySheet();
+    _bumpOpenSheets();
   }
 
   /// 监听 controller.ttsStatus：驱动对话页的播报状态条。
@@ -2188,22 +2232,29 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   ///    无事可做（也不能拿 null 去拼快照）。
   /// 3. **快照为 null 时忽略**：goal 字段缺失的异常载荷不得清空现有目标
   ///    （否则面板上的目标会凭空消失）。
-  /// 监听 controller.groupUpdates：把 Goal Gate 自动停用的 metadata 套进 _group。
+  /// 监听 controller.groupUpdates：把变更套进 _group（metadata / title 两个分支）。
   ///
-  /// ## 只处理 metadata 分支
+  /// ## 处理哪两个分支
   ///
-  /// 本页不渲染 group 的标题/状态（那是列表页的事），`created`/`deleted`/
-  /// `title` 等 op 对设置面板无影响，处理它们只会白费一次 setState。
+  /// - **metadata**：设置面板的开关由它渲染，Goal Gate 自动停用要实时套上；
+  /// - **title**：AppBar 正在渲染标题。改名可以发生在别处（列表页菜单 /
+  ///   另一台设备），对话页必须实时跟上，否则「改了名，AppBar 还是旧的」
+  ///   （issue #87）。手动改名是 `group_updated(op=title)`，Title Gate
+  ///   重置/重命名是 `group_title_updated`——两者都归一到该分支。
   ///
-  /// ## 三条守卫
+  /// 其余 op（created / deleted / archived…）与本页无关：列表页自己订阅
+  /// 同一条流处理。
   ///
-  /// 1. **只处理本对话**：SSE 是 user 级订阅，会收到别的 group 的变更
-  ///    （`groupUpdates` 刻意不过滤 group）。套错会把本页开关改掉。
-  /// 2. **_group 未就绪时忽略**：初始 `_loadGroup` 会拿到最新 metadata。
-  /// 3. **metadata 为 null 时忽略**：不得用空 map 覆盖现有值
-  ///    （否则面板会显示假的「全部关闭」）。
+  /// ## 守卫
   ///
-  /// ## 为什么整体替换而不深合并
+  /// 1. **_group 未就绪时忽略**：初始 `_loadGroup` 会拿到最新状态。
+  /// 2. **只套本对话**：SSE 是 user 级订阅，会收到别的 group 的变更
+  ///    （`groupUpdates` 刻意不过滤 group）。套错会把本页开关/标题改掉。
+  /// 3. **无变化跳过**：判定逻辑在 `GroupUpdate.applyTo`（两端共用）——
+  ///    op 不适用 / 字段缺失 / groupId 不匹配时返回**原对象**，据此跳过
+  ///    无意义的 setState。
+  ///
+  /// ## 为什么 metadata 整体替换而不深合并
   ///
   /// payload 的 metadata 是**完整**的 `chat_groups.metadata`（Go
   /// `updateGroupMetadata` 返回整个 map）。服务端的删除语义是「把键移除」
@@ -2213,9 +2264,6 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     if (!mounted) return;
     final group = _group;
     if (group == null) return;
-    // 判定逻辑在 GroupUpdate.applyTo（两端共用，见其文档）：
-    // op 非 metadata / groupId 不匹配 / metadata 缺失时返回**原对象**，
-    // 据此跳过无意义的 setState。
     final next = update.applyTo(group);
     if (identical(next, group)) return;
     setState(() => _group = next);
@@ -2260,8 +2308,8 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       loadVisualization: api.visualizationRevision,
       onVisualizationForeground: controller.setVisualizationForeground,
       title: _appBarTitle,
-      // 深链锚点（`/chat/{gid}?turn={turnId}`）：只在已加载的轮次内定位，
-      // 越界时由页面自己提示（与桌面端构造点必须一致）。
+      // 深链锚点（`/chat/{gid}?turn={turnId}`）：目标轮不在已加载区间时，页面
+      // 会在预算内自动向上补页，补不到才提示（与桌面端构造点必须一致）。
       anchorTurnId: widget.anchorTurnId,
       // 对话内搜索（搜已加载的时间线，含 agent 回复）。
       //
@@ -2510,7 +2558,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       //
       // 发完**不清**（对齐 webapp 的 `agentByGroup[groupId]`）：清了就等于
       // 「每条消息都要重新选一次 Agent」，而 AppBar 上明明写着当前是谁。
-      // 清除点只有换对话（见 [_selectedAgentId] 的文档）。
+      // 不必清的理由见 [_localChoice]（键是 groupId，换对话不串味）。
       onSend: (text) => controller.send(
         input: text,
         // 发的是 `_effectiveAgentId` 而不是原始本地值：AppBar 标签显示的就是
@@ -2550,8 +2598,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 标签随后就会跟着变）——对齐 webapp FollowUpSuggestCard 的「先切人再追加」，
       // 那边也是写 `agentByGroup[groupId]`，与选择器共用同一个值。
       onSelectAgent: (agentId) => setState(() {
-        _autoRouting = false;
-        _selectedAgentId = agentId;
+        ref
+            .read(agentChoiceStoreProvider)
+            .remember(widget.groupId, AgentChoiceAgent(agentId));
       }),
     );
   }

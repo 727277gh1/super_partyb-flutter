@@ -411,6 +411,33 @@ void main() {
             },
           }),
         );
+        // 第二个对话（grp_n）：只为验证"切走再切回"不丢本地选择。
+        adapter.onGet(
+          '/chat/groups/grp_n',
+          (server) => server.reply(200, {
+            'id': 'grp_n',
+            'user_id': 'usr_REAL',
+            'title': '另一个对话',
+            'active_session': {
+              'agent_id': 'agent_a',
+              'session_id': 'up_2',
+              'role': 'owner',
+            },
+          }),
+        );
+        adapter.onGet(
+          '/chat/groups/grp_n/timeline',
+          (server) => server.reply(200, {
+            'items': <Map<String, dynamic>>[],
+            'next_before_global_seq': '',
+          }),
+          queryParameters: {'limit': 200},
+        );
+        adapter.onGet(
+          '/users/usr_REAL/chat/messages/pending',
+          (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
+          queryParameters: {'group_id': 'grp_n', 'limit': 20},
+        );
         adapter.onGet(
           '/chat/groups/grp_m/timeline',
           (server) => server.reply(200, {
@@ -510,7 +537,26 @@ void main() {
           .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
           .data,
       '自动路由',
-      reason: '显式自动路由优先于服务端绑定（_autoRouting 短路 _effectiveAgentId）',
+      reason: '显式自动路由优先于服务端绑定（AgentChoiceAuto 短路 _effectiveAgentId）',
+    );
+
+    // 切到另一个对话再切回来：选择存在应用级 store 里（键是 groupId），不得
+    // 回落到服务端绑定 agent_a（旧实现把选择放页面 State，`didUpdateWidget`
+    // 一换对话就清 → 回来显示"写作助手"，且下一条消息按 manual + agent_a 发出）。
+    h.router.go(SpbRoutes.chat('grp_n'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    h.router.go(SpbRoutes.chat('grp_m'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('agent-switcher-label')))
+          .data,
+      '自动路由',
+      reason: '重进对话后「自动」必须还在（选择与应用级 store 对齐 webapp 的 agentByGroup）',
     );
   });
 
@@ -758,6 +804,35 @@ void main() {
       reason: '⚠️ action 必须是动作词；写成 resolved 这类状态词会被服务端拒绝',
     );
     expect(body['action'], isNot('resolved'));
+
+    // ## 弹层必须跟着状态变（本次修的缺陷）
+    //
+    // 待办弹层是 `showModalBottomSheet`（**独立 route**），它的 builder 闭包只在
+    // 打开时跑一次、捕获那一刻的 `_items`。修复前：卡被解决后页面 `setState` 只
+    // 重建页面，弹层纹丝不动——卡还在、按钮还能点，而服务端已经拒了第二次请求。
+    expect(
+      find.byKey(const ValueKey('todo-conf-conf_row_1')),
+      findsOneWidget,
+      reason: '前置：弹层里确实渲染了这张卡',
+    );
+    sse.push('confirmation_resolved', {
+      'eventId': 'evt_2',
+      'eventType': 'confirmation_resolved',
+      'groupId': 'grp_t',
+      'turnId': 'turn_1',
+      'userId': 'usr_REAL',
+      'seq': 2,
+      'createdAt': '2026-01-01T00:00:01Z',
+      'payload': <String, dynamic>{},
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(
+      find.byKey(const ValueKey('todo-conf-conf_row_1')),
+      findsNothing,
+      reason: '卡已解决：打开着的待办弹层必须立刻不再列它（修复前停在旧快照上）',
+    );
   });
 
   testWidgets('对话内处理确认后返回列表重新读取角标', (tester) async {
@@ -863,6 +938,7 @@ void main() {
     h.router.go(SpbRoutes.conversations);
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(minutes: 6));
     await tester.pump(const Duration(seconds: 2));
 
     expect(
