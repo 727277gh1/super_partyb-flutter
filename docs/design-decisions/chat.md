@@ -1567,3 +1567,127 @@ _emit();                   // ← 回填返回后才推
 - **真机**：本机无 `DISPLAY`（[§9](../development.md)），结论来自 domain 单测 +
   `flutter test`，没有在真实弱网下观察「空态那一帧」的实际时长与观感。
 - 未做：回填在途的加载态（见「代价」）。
+
+### 6.92 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（2026-11）
+
+对齐 webapp / 小程序的 `?turn=` 深链（`super_partyb` 提交 `ef899781` 与 `61ed75ab`）。
+**Go API 一行没改**：这是纯客户端路由 + 落位问题，服务端早已给出 `turn_id`。
+
+#### 要解决的三件事
+
+| 入口 | 缺陷 |
+|---|---|
+| 全局搜索命中（`SearchPage.onOpenHit`） | 只有 `hit.groupId` 被用到，`hit.turnId` 被丢掉 |
+| 待确认收件箱（`onOpenGroup(groupId, turnId)`） | 同上 |
+| 习惯执行历史 / 我的轮次（`onOpenTurn(groupId, turnId)`） | 同上（桌面端「我的轮次」仍弹详情对话框，见 §6.10） |
+
+点一条命中只切换对话、落到末尾，用户还得自己找那一条。
+
+#### 锚点键用 `turnId`，不用「第 N 轮」
+
+`GET /chat/groups/:gid/turns` 是 `ORDER BY created_at DESC LIMIT ?` 且**无游标**，
+枚举不出全量轮次：序号每来一轮就整体后移，且 `?turn=3` 的含义随加载范围漂移。
+故 URL 里放的是服务端的 `turn_id`（`chatid.NewID()` = `uuid4().hex`），与 webapp 逐字相同。
+
+#### 作用域：只在**已加载**的轮次内定位（不自动补页）
+
+目标轮不在已加载区间 → 给可见提示「该轮对话不在已加载的消息范围内（先向上滚动
+加载更早的历史再试）」，**不移动视口**。与 webapp v0 同一取舍：补页会和「首屏滚到底 +
+滚到顶自动翻页 + 锚点定位」三方抢滚动位置，而本端的翻页位置保持依赖两个 Sliver 的
+固定分界——把它与一次外部定位混在同一帧，出错方式是「位置莫名偏移几百像素」。
+
+`missing` **不**写入 `_anchorHandled`：用户向上翻页把目标轮载入后应当**自动补跳**。
+代价是每次 items 变化都重试一次定位（几次数组扫描）——故提示与 `onAnchorResolved`
+回调**都**按锚点值去重：同一个事实不该被重复消费。
+
+目标轮即最后一轮 ≡ 跟随最新：不进锚点态、不高亮、不钉住滚动。
+
+#### 落位原语：搬 `CustomScrollView.center`，不是 `ensureVisible`
+
+时间线是两向 `CustomScrollView(center: _timelineCenterKey)`：分界之前的行在
+`reverse: true` 的 Sliver 里向上生长。远处历史行的 `GlobalKey.currentContext` 是
+**null**（`SliverList` 只构建视口附近项），`Scrollable.ensureVisible` 够不着；估算
+未构建行高是本文件明确拒绝的做法（见 §6.47 的布局高度缓存）。
+
+故未构建时走 `_recenterOnOwner`：把固定分界行搬到目标行（目标行随即成为「较新」
+那一段的 index 0），再按**真实几何** `getOffsetToReveal` 贴顶。
+
+⚠️ **搬分界行不等于目标行会被构建**（本次踩到）：搬完分界行只改了两条 Sliver 的
+内容，滚动偏移还是旧值——若视口原本停在旧的 `maxScrollExtent`（如 4197），新布局
+把 pixels 夹到新的 max（≈3600），视口仍在内容深处，刚成为 index 0 的目标行在**分界
+处**、离视口很远，于是它根本没被构建，`currentContext` 仍是 null，`getOffsetToReveal`
+无从下手。表现是「点了深链没反应」，**且没有任何异常**。修法是两步：先
+`jumpTo(minScrollExtent)` 把分界处移进视口（让目标行落地成真实几何），等一帧，再
+按真实几何精调。第一次跳到的位置已是「分界贴顶」，与终态只差一个 `origin` 偏移，
+故不闪。
+
+#### 高亮：画装饰，不改布局
+
+被锚定的那一轮的所有行（用户消息 + 回复 + 工具卡）都加一层
+`DecoratedBox`（主色底 `α .06` + 2px 描边）。它**不能改变行高**：行高会经
+`TimelineRowMeasure` 记进 `TimelineExtentCache`，供两向滚动的分界与位置补偿使用，
+「亮/不亮」导致的行高变化会让缓存值失效、滚动位置漂移。故只画背景与**内**描边。
+
+高亮键按**行**唯一（`turn-highlight-<行主键>`），不按轮次：同一轮的多行是
+`SliverList` 的兄弟节点，兄弟间重复键会直接抛 `Duplicate keys found`。
+
+高亮生命周期**跟状态走**（`_anchoredTurnId`），不用小程序那样的 3 秒计时器——
+本端有 `_following` 这个真状态可用。退出锚点态的四个口子：
+
+| 触发 | 位置 |
+|---|---|
+| 点「回到最新」 | `_backToLatest()` |
+| 锚点值本身就是最后一轮 | `_resolveAnchor()` 的 `followingLatest` 分支 |
+| 用户**自己**滚回底部 | `_setFollowing(true)`（滚动监听里唯一写 `_following` 的入口） |
+| 换锚点值 / 换对话 | `_maybeResolveAnchor()` / `didUpdateWidget` 的重置段 |
+
+「用户自己滚回底部」那条容易漏：锚点态的含义是「你被送到了历史里的某一轮」，
+滚到底就不再在那一轮了；不清就会挂着一个无用的「回到最新」，且下一次新事件到达
+时还高亮着用户已经离开的那段内容。清它时同样把该值记进 `_anchorHandled`——URL 里
+的 `?turn=` 还在，不记就会在下一批 items 到达时**又**把用户拽回那一轮。
+
+#### 地址栏里的 `?turn=` **不**清理
+
+与 webapp 一致：深链应当刷新可重现。代价是「回到最新」之后 URL 仍指向旧轮次，故
+`_backToLatest()` 把该值记进 `_anchorHandled`（而不是清 null）——否则下一批 items
+到达时会重建锚点判定，把用户从底部再拽回那一轮。
+
+#### 归一化：不按 hex 写死
+
+`normalizeTurnAnchor` = `trim` → 小写 → 去连字符（兼容 `8-4-4-4-12` uuid 写法）→
+形态校验（`[0-9a-z_]{0,64}`），非法值返回 null（当没传，不抛）。
+
+**刻意不写成「32 位 hex 否则 null」**：那会把任何未预料到的 id 形态变成**完全静默**
+的失效（返回 null ⇒ 页面什么都不做 ⇒ 用户看到「点了没反应」）。webapp 卡 hex 是因为
+它要把锚点拼进 CSS 选择器（注入面），本端没有那个面。
+
+#### 覆盖
+
+- `packages/spb_domain/test/turn_anchor_test.dart`（12 条）：归一化（含拒绝非法形态、
+  接受非 hex 合法形态）、`findTurnIndex` / `turnAnchorItemId`（跳过空 id 与发送中回显）、
+  `isLatestTurn`（无归属项不干扰、越界为 false）。
+- `packages/spb_features/test/chat/conversation_page_anchor_test.dart`（5 条）：命中历史轮次
+  （贴顶 + 高亮 + 视口逐像素不动 + 「回到最新」）、用户自己滚回底部（退出锚点态、
+  不被下一批 items 拽回）、越界（一条提示、停在底部、不补跳）、即最后一轮（不高亮、
+  仍跟随）、换锚点值 / 切对话（重新定位 / 全部清掉）。
+  ⚠️ 夹具必须按真实顺序推 `start` → `user_message` → `message` → `done`：少推
+  `start`，下一轮的 `message` 会被当成同一段的权威帧**原地替换**上一轮回复，历史就
+  没真正堆起来（本次踩到，夹具只剩 11 个 item 而断言仍绿）。
+- `apps/spb_desktop/test/router_chat_test.dart` / `apps/spb_mobile/test/router_chat_test.dart`
+  各 3 条：`SpbRoutes.chat` 的 URL 形态（无锚点时逐字不变、非法值退化）、深链把
+  `anchorTurnId` 真的传进 `ConversationPage`、非法值当没传。
+
+#### 有意不做
+
+| 不做 | 原因 |
+|---|---|
+| 轮次导航面板（上一轮 / 下一轮） | 无 UI 载体则纯死代码；webapp 有面板，本端先只做「跳进去」 |
+| 越界自动补页 | 见「作用域」；bounded backfill 见 [issue #108](https://git.atjog.com/dever/super_partyb-flutter/issues/108) |
+| 清理 URL 的 `?turn=` | 见上，与 webapp 同取舍 |
+| OS 层深链（`partyb://chat/<gid>?turn=`） | 需 dispatcher + 冷启动暂存 + 门禁（auth.md §6.71），桌面端还要协议注册与单实例转发；见 [issue #109](https://git.atjog.com/dever/super_partyb-flutter/issues/109) |
+
+#### 未验证
+
+- **真机**：本机无 `DISPLAY`、无真机（[§9](../development.md)）。widget test 能证明
+  状态机与落位参数（含「搬分界行」两步法的最终几何），**不能**证明真机上那次跳变的
+  观感（两帧之间的中间位置是否可见）。长列表上的首帧观感待真机复核。
