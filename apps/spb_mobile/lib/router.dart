@@ -69,7 +69,12 @@ class SpbRoutes {
   /// 与 [login] 同一约定：守卫与路由表用同一个常量。
   static const lock = '/lock';
 
-  static String chat(String groupId) => '/chat/$groupId';
+  static String chat(String groupId, {String? turn}) {
+    final anchor = normalizeTurnAnchor(turn);
+    return anchor == null
+        ? '/chat/$groupId'
+        : '/chat/$groupId?$kTurnAnchorParam=$anchor';
+  }
 
   /// 搜索页（搜消息正文，不是对话标题）。
   ///
@@ -283,8 +288,13 @@ List<RouteBase> buildMobileRoutes() {
               routes: [
                 GoRoute(
                   path: 'chat/:groupId',
-                  builder: (context, state) =>
-                      _ChatPage(groupId: state.pathParameters['groupId'] ?? ''),
+                  builder: (context, state) => _ChatPage(
+                    groupId: state.pathParameters['groupId'] ?? '',
+                    // 深链锚点：只认合法值（非法值当没传）。
+                    anchorTurnId: normalizeTurnAnchor(
+                      state.uri.queryParameters[kTurnAnchorParam],
+                    ),
+                  ),
                 ),
                 GoRoute(
                   path: 'search',
@@ -559,7 +569,9 @@ class _PendingConfirmationsPageState
         return items;
       },
       groupTitleOf: (gid) => _titles.titleOf(gid),
-      onOpenGroup: (groupId, turnId) => context.go(SpbRoutes.chat(groupId)),
+      // 待确认事项属于**某一轮**：带锚点进去才能直接看到它上下文。
+      onOpenGroup: (groupId, turnId) =>
+          context.go(SpbRoutes.chat(groupId, turn: turnId)),
       onResolve: (c, action) async {
         await api.resolveConfirmation(c.groupId, c.id, action: action);
       },
@@ -579,7 +591,10 @@ class _SearchPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return SearchPage(
       search: ref.watch(searchChatProvider),
-      onOpenHit: (hit) => context.push(SpbRoutes.chat(hit.groupId)),
+      onOpenHit: (hit) => context.push(
+        // 带上 turn 锚点：命中的就是**某一轮**，跳到会话内那一轮而不是只切会话。
+        SpbRoutes.chat(hit.groupId, turn: hit.turnId),
+      ),
     );
   }
 }
@@ -714,7 +729,10 @@ class _HabitsPageState extends ConsumerState<_HabitsPage> {
         );
         return r.patternId;
       },
-      onOpenTurn: (groupId, _) => context.go(SpbRoutes.chat(groupId)),
+      // 习惯执行产生的对话就是普通对话，直接跳过去（带 turn 锚点：用户点的
+      // 是「那一次执行」，落到那一轮而非对话末尾）。
+      onOpenTurn: (groupId, turnId) =>
+          context.go(SpbRoutes.chat(groupId, turn: turnId)),
       // 编辑 + 按规则查记录：与桌面端逐字同构。
       onEdit: (h, patch) => api.patchHabit(
         h.id,
@@ -823,9 +841,13 @@ SettingsTab _settingsTabFromQuery(GoRouterState state) =>
 
 /// 对话时间线。
 class _ChatPage extends ConsumerStatefulWidget {
-  const _ChatPage({required this.groupId});
+  const _ChatPage({required this.groupId, this.anchorTurnId});
 
   final String groupId;
+
+  /// 深链锚点（`?turn=<turnId>`）：由路由参数取来，透传给对话页落位。
+  /// 空 = 没有锚点（普通进入）。
+  final String? anchorTurnId;
 
   @override
   ConsumerState<_ChatPage> createState() => _ChatPageState();
@@ -2238,6 +2260,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       loadVisualization: api.visualizationRevision,
       onVisualizationForeground: controller.setVisualizationForeground,
       title: _appBarTitle,
+      // 深链锚点（`/chat/{gid}?turn={turnId}`）：只在已加载的轮次内定位，
+      // 越界时由页面自己提示（与桌面端构造点必须一致）。
+      anchorTurnId: widget.anchorTurnId,
       // 对话内搜索（搜已加载的时间线，含 agent 回复）。
       //
       // ## 为什么按宽度给（issue #33）
