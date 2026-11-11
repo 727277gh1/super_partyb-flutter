@@ -92,6 +92,7 @@ export 'src/deliverable_sync_usecase.dart';
 export 'src/deliverable_upload.dart';
 export 'src/conflict_path.dart';
 export 'src/local_file_reader.dart';
+export 'src/agent_choice.dart';
 export 'src/agent_groups.dart';
 export 'src/deliverable_upload_adapters.dart';
 export 'src/deliverable_upload_usecase.dart';
