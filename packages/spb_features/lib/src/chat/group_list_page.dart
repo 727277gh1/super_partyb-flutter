@@ -1148,6 +1148,20 @@ class _GroupListPageState extends State<GroupListPage> {
             itemCount: rows + 1,
             itemBuilder: (context, index) {
               if (index == rows) return _buildFooter();
+              // **单列时不套 IntrinsicHeight**：「等高」只在同一行有 ≥2 张时
+              // 成立，单列每行只有它自己，撑出来的就是它自己的高度。
+              // 而 IntrinsicHeight 的成本不低：它对子树做一次
+              // `getIntrinsicHeight`，Flutter **不缓存**内在尺寸、逐层递归，
+              // 等于让卡片里每个节点多走一遍 layout——滚动时每新建一行都要付。
+              // 逐像素等价的写法就是桌面端单列分支那个（见上面
+              // `isDesktopPlatform` 分支）；由
+              // `group_list_page_test.dart`「单列不套 IntrinsicHeight」钉住。
+              if (columns == 1) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: _cardGap),
+                  child: _cardAt(index, cardWidth),
+                );
+              }
               return Padding(
                 padding: const EdgeInsets.only(bottom: _cardGap),
                 child: IntrinsicHeight(
@@ -1650,7 +1664,7 @@ class _GroupTile extends StatelessWidget {
     final progress = summary.progress;
     final desktop = SpbTheme.isDesktopPlatform(context);
     final largeText = MediaQuery.textScalerOf(context).scale(14) > 18;
-    // 宽度由外层传入：等高卡片使用 IntrinsicHeight，内部不能嵌 LayoutBuilder。
+    // 宽度由外层传入：多列等高卡片使用 IntrinsicHeight，内部不能嵌 LayoutBuilder。
     final stacked = largeText || (onAction != null && compact);
     final title = Text(
       group.title,

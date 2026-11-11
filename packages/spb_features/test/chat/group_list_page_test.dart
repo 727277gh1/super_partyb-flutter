@@ -1841,6 +1841,39 @@ void main() {
       expect(r1.right, closeTo(360 - 12, 0.01));
     });
 
+    /// 单列时不套 `IntrinsicHeight`（每行只有一张，「等高」没有对象可等）。
+    ///
+    /// ## 为什么断言「有没有」而不是毫秒
+    ///
+    /// 本机无 `DISPLAY`、无真机（AGENTS.md §9），毫秒进断言就是 flaky。
+    /// 而这里的成本是**结构事实**：`IntrinsicHeight` 对整个子树做一次
+    /// `getIntrinsicHeight`，Flutter **不缓存**内在尺寸、逐层递归 ——
+    /// 相当于让卡片里每个节点都多走一遍 layout。
+    ///
+    /// 「等高」只在同一行有 ≥2 张时成立。单列时每行只有它自己，撑出来的
+    /// 高度就是它自己的高度，与不套逐像素相同 —— 桌面端单列路径本来就没套
+    /// （`group_list_page.dart` `_buildBody` 的 `isDesktopPlatform` 分支）。
+    testWidgets('单列不套 IntrinsicHeight，多列仍套', (tester) async {
+      mockPage(offset: 0, items: fiveGroups());
+      await pumpPage(tester);
+
+      await setWindow(tester, 360, 900);
+      // 前置：卡片确实渲染了，否则 findsNothing 会因为「什么都没渲染」而假绿。
+      expect(find.byKey(const ValueKey('g1')), findsOneWidget);
+      expect(
+        find.byType(IntrinsicHeight),
+        findsNothing,
+        reason: '单列时它只是让整张卡片多走一次内在尺寸测量',
+      );
+
+      await setWindow(tester, 800, 900);
+      expect(
+        find.byType(IntrinsicHeight),
+        findsWidgets,
+        reason: '多列仍需等高，不能把它一起删掉',
+      );
+    });
+
     testWidgets('移动端宽屏（800）并排 2 列，同一视觉行等高', (tester) async {
       mockPage(offset: 0, items: fiveGroups());
       await pumpPage(tester);
