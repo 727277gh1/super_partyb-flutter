@@ -61,6 +61,8 @@ library;
 //   GroupUpdate / GroupUpdateOp   —— group 变更通知（group_updated 归约输出，驱动列表实时刷新）
 //   routingAttributionNotice 等   —— 归属徽标派生（routing_selected → 气泡徽标，无聊原因不展示）
 //   TurnGroup / groupItemsByTurn —— 对话项按 turn 分组（侧边栏待办/工具调用面板用，纯逻辑）
+//   normalizeTurnAnchor / findTurnIndex / turnAnchorItemId / isLatestTurn —— 「跳到某一轮」
+//                                     锚点契约（`?turn=` 深链与轮次导航共用，纯逻辑）
 //   resolvePreviewKind / FilePreviewKind —— 文件预览类型判定（text/image/external，纯逻辑）
 //   resolveTextPreview / TextPreviewPayload —— 内容层判定（map / spec 文档 or 原文，纯逻辑）
 //   extractSpecSchemaFromUnknown          —— 从任意 JSON 深度下探提取 spec schema
@@ -123,6 +125,7 @@ export 'src/tool_call_batch.dart';
 export 'src/tts_audio_path.dart';
 export 'src/tts_status.dart';
 export 'src/turn_activity.dart';
+export 'src/turn_anchor.dart';
 export 'src/turn_detail.dart';
 export 'src/turn_group.dart';
 export 'src/sync_scope_config.dart';
