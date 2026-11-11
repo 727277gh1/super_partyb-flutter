@@ -977,7 +977,7 @@ void main() {
       expect(group.goalGateEnabled, isTrue, reason: '异常载荷不得把开关全清成关（那会制造另一种错显）');
     });
 
-    testWidgets('非 metadata 分支的 group 变更不影响设置面板', (tester) async {
+    testWidgets('title 事件改标题，其余字段原样保留', (tester) async {
       final group = gateOnGroup();
       final titleEvent = ChatEvent.fromJson({
         'eventId': 'e4',
@@ -989,12 +989,38 @@ void main() {
 
       final update = GroupUpdate.fromEvent(titleEvent)!;
       expect(update.op, GroupUpdateOp.title);
+      // 设置面板仍不因标题重建（本页不渲染标题），但 `applyTo` 现在会返回
+      // 改名后的副本供对话页的 AppBar 消费（issue #87）。
+      final updated = update.applyTo(group);
+      expect(identical(updated, group), isFalse);
+      expect(updated.title, '改了名');
+      expect(updated.goalGateEnabled, isTrue);
+      expect(updated.currentGoalText, '把同步做稳');
+
+      // 标题相同时返回原实例（调用方据此跳过 setState）。
       expect(
-        identical(update.applyTo(group), group),
+        identical(update.applyTo(updated), updated),
         isTrue,
-        reason: '本页不渲染标题，不应因标题变更重建设置面板',
+        reason: '同标题的重复事件不应触发重绘',
       );
-      expect(group.goalGateEnabled, isTrue);
+    });
+
+    testWidgets('手动改名的 group_updated(op=title) 同样套用', (tester) async {
+      final group = gateOnGroup();
+      final renamed = ChatEvent.fromJson({
+        'eventId': 'e5',
+        'groupId': 'grp_1',
+        'eventType': EventTypes.groupUpdated,
+        'payload': {
+          'op': 'title',
+          'group': {'id': 'grp_1', 'title': '列表页改的名'},
+        },
+        'createdAt': '2026-09-28T10:11:12.345Z',
+      });
+
+      final update = GroupUpdate.fromEvent(renamed)!;
+      expect(update.op, GroupUpdateOp.title);
+      expect(update.applyTo(group).title, '列表页改的名');
     });
   });
 }

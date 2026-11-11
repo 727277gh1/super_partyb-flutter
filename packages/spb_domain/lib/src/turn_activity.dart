@@ -283,28 +283,44 @@ class GroupUpdate {
   ///
   /// ## 为什么抽成方法（而不是在每个页面的回调里各写一遍）
   ///
-  /// 两个端（desktop / mobile）的对话页都要做「收到 metadata 变更 → 更新
-  /// 本页 _group」这件事，写在两处必然漂移；且抽出来之后可以用真实的
+  /// 两个端（desktop / mobile）的对话页都要做「收到变更 → 更新本页
+  /// `_group`」这件事，写在两处必然漂移；且抽出来之后可以用真实的
   /// 「事件 → 套用 → 面板渲染」链写测试，而不是在测试里重写一遍逻辑。
   ///
-  /// ## 只处理 metadata 分支
+  /// ## 处理 metadata 与 title 两个分支
   ///
-  /// 对话页不渲染 group 的标题/状态（那是列表页的事），`created`/`deleted`/
-  /// `title` 等 op 对设置面板无影响，处理它们只会白费一次 setState。
+  /// - **metadata**：对话页渲染 metadata 的开关（设置面板），Goal Gate
+  ///   自动停用时要实时套上。
+  /// - **title**：对话页的 AppBar 就在渲染标题（`_appBarTitle`）。改名可以
+  ///   发生在别处（列表页菜单、另一台设备），对话页必须实时跟上，否则
+  ///   「改了名，AppBar 还是旧的」（issue #87）。手动改名由服务端发
+  ///   `group_updated(op=title)`，Title Gate 重置/改名发
+  ///   `group_title_updated`——两者都归一到本分支。
   ///
   /// ## 不适用的情形返回**原对象**（不是 null）
   ///
   /// 调用方据此判断「有无变化」：返回同一实例则不 setState。
   ///
-  /// - op 不是 [GroupUpdateOp.metadata]；
-  /// - [metadata] 为 null（不得用空 map 覆盖现有值，否则面板显示假的「全关」）；
+  /// - op 不是 [GroupUpdateOp.metadata] / [GroupUpdateOp.title]；
+  /// - metadata 分支的 metadata 为 null（不得用空 map 覆盖现有值，否则面板
+  ///   显示假的「全关」）；title 分支的 title 为 null / 空（不能把 group 名
+  ///   清空）；
   /// - [groupId] 与 group 不匹配（SSE 是 user 级订阅，会收到别的 group 的变更）。
   ChatGroup applyTo(ChatGroup group) {
-    if (op != GroupUpdateOp.metadata) return group;
     if (groupId != group.id) return group;
-    final next = metadata;
-    if (next == null) return group;
-    return group.withMetadata(next);
+    switch (op) {
+      case GroupUpdateOp.metadata:
+        final next = metadata;
+        if (next == null) return group;
+        return group.withMetadata(next);
+      case GroupUpdateOp.title:
+        final next = title;
+        if (next == null || next.isEmpty) return group;
+        if (next == group.title) return group;
+        return group.withTitle(next);
+      default:
+        return group;
+    }
   }
 
   @override
