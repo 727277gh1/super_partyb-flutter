@@ -29,10 +29,10 @@
 # ## 用法
 #
 #   bash tools/check_android_signing.sh                     # 静态配置检查
-#   bash tools/check_android_signing.sh <apk>               # 追加：产物签名比对（需 apksigner）
+#   bash tools/check_android_signing.sh <apk>               # 追加：产物签名比对
 #
-# 缺 `keytool` / `apksigner` 时跳过对应检查并打印提示——守卫的存在感不应该变成
-# 「没装 JDK 就交不了代码」。
+# 缺 `keytool` / `python3` 时跳过对应检查并打印提示——守卫的存在感不应该变成
+# 「没装 JDK 就交不了代码」（CI 两者都有，故 CI 上是全量检查）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -95,30 +95,83 @@ else
 fi
 
 # ── 4) 可选：校验产物实际签名 ──────────────────────────────────────────
+#
+# 不用 `apksigner`：它属于 build-tools，路径随 SDK 版本漂移，且首次用于 CI 时
+# 只往 stderr 吐错（实测 `apksigner 读不出 … 的签名证书` 而拿不到任何细节）。
+# APK 的证书就在 **APK Signing Block**（v2 / v3）里，用 python3 直接解：
+# 纯标准库、无 SDK 依赖，得到的 SHA-256 与 `apksigner --print-certs` 一致
+# （都是证书 DER 的 SHA-256）。
 if [ "$#" -ge 1 ]; then
   apk=$1
   [ -f "$apk" ] || fail "未找到 APK：$apk"
 
-  sdk=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
-  signer=""
-  if [ -n "$sdk" ] && [ -d "$sdk/build-tools" ]; then
-    signer=$(ls -d "$sdk"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
-  fi
-
-  if [ -n "$signer" ] && [ -x "$signer" ]; then
-    apk_fp=$(
-      "$signer" verify --print-certs "$apk" 2>/dev/null |
-        sed -nE 's/^Signer #1 certificate SHA-256 digest:[[:space:]]*//p' | head -1 | normalize_fp
-    )
-    [ -n "$apk_fp" ] || fail "apksigner 读不出 $apk 的签名证书"
-    [ "$apk_fp" = "$EXPECTED_SHA256" ] ||
-      fail "产物签名与仓库内的调试密钥不一致：
-    产物 $apk_fp
-    期望 $EXPECTED_SHA256
-  说明这次构建没用上 debug.keystore（回退到了 ~/.android/debug.keystore？）。"
-    echo "✅ 产物签名与仓库内调试密钥一致"
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "未找到 python3，跳过产物签名比对"
   else
-    warn "未找到 apksigner（\$ANDROID_SDK_HOME/build-tools/*/apksigner），跳过产物签名比对"
+    apk_sha=$(python3 - "$apk" <<'PYAPK'
+import hashlib
+import struct
+import sys
+
+path = sys.argv[1]
+data = open(path, "rb").read()
+
+# 1) 定位 central directory（EOCD 在文件尾部，后面可能还有注释，故从后往前找）。
+eocd = data.rfind(b"PK\x05\x06")
+if eocd < 0:
+    sys.exit("不是 zip/APK")
+cd_off = struct.unpack("<I", data[eocd + 16 : eocd + 20])[0]
+
+# 2) APK Signing Block 紧贴 central directory 之前，尾部 16 字节是魔数。
+if cd_off < 24 or data[cd_off - 16 : cd_off] != b"APK Sig Block 42":
+    sys.exit("没有 APK Signing Block（只有 v1/jarsigner 签名？）")
+
+size_in_footer = struct.unpack("<Q", data[cd_off - 24 : cd_off - 16])[0]
+block_start = cd_off - size_in_footer - 8
+pairs = data[block_start + 8 : cd_off - 24]
+
+
+def take_lp(buf, off):
+    """取一个 uint32 长度前缀的切片。"""
+    (n,) = struct.unpack("<I", buf[off : off + 4])
+    return buf[off + 4 : off + 4 + n], off + 4 + n
+
+
+# 3) 拆出 id → value 的成对列表。
+found = {}
+i = 0
+while i < len(pairs):
+    (plen,) = struct.unpack("<Q", pairs[i : i + 8])
+    (pid,) = struct.unpack("<I", pairs[i + 8 : i + 12])
+    found[pid] = pairs[i + 12 : i + 8 + plen]
+    i += 8 + plen
+
+# 4) v2(0x7109871a) / v3(0xf05368c0)：signers → signer → signed data →
+#    [digests, certificates, attributes]，证书是每项长度前缀的 DER。
+for pid in (0x7109871A, 0xF05368C0):
+    value = found.get(pid)
+    if value is None:
+        continue
+    signers, _ = take_lp(value, 0)
+    signer, _ = take_lp(signers, 0)
+    signed_data, off = take_lp(signer, 0)
+    _digests, off = take_lp(signed_data, 0)
+    certs_blob, _ = take_lp(signed_data, off)
+    cert, _ = take_lp(certs_blob, 0)
+    print(hashlib.sha256(cert).hexdigest())
+    break
+else:
+    sys.exit("签名块里没有 v2/v3 证书")
+PYAPK
+    ) || fail "无法从 $apk 解析签名证书（详见上面的原因）"
+
+    if [ "$apk_sha" != "$EXPECTED_SHA256" ]; then
+      fail "产物签名与仓库内的调试密钥不一致：
+    产物 ${apk_sha}
+    期望 $EXPECTED_SHA256
+  说明这次构建没用上 debug.keystore（回退到了 ~/.android/debug.keystore？）"
+    fi
+    echo "✅ 产物签名与仓库内调试密钥一致"
   fi
 fi
 

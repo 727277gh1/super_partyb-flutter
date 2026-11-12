@@ -838,10 +838,18 @@ if (repoDebugKeystoreFile.exists()) {
 | 文件存在**且被 git 跟踪**（再断言没被 `.gitignore` 命中） | 只在本机存在 = 没修，CI 依旧换钥匙 |
 | Gradle 里确实 `getByName("debug")` + `storeFile = repoDebugKeystoreFile` | 文件在但没人用（回退仍是默认行为） |
 | 证书指纹 == 脚本里钉住的常量 | 有人 `rm` 后重新生成：文件还在、接线也在，但签名换了 |
-| （可选）传入 APK 时用 `apksigner` 比对产物实际证书 | Gradle 接线对、产物却由别的 key 签（走了回退） |
+| （可选）传入 APK 时比对产物实际证书 | Gradle 接线对、产物却由别的 key 签（走了回退） |
 
 `ci.yml` 的 android job 在**构建前**跑静态检查、**构建后**再比对产物证书；
 `release.yml` 只跑静态检查——那里若配了 secrets，产物本就该由**发布**密钥签名。
+
+> ⚠️ 产物比对**没有**用 `apksigner`：它属于 build-tools，路径随 SDK 版本漂移，
+> 而且第一次接到 CI 上就翻车——`apksigner verify --print-certs` 在该 runner 上
+> 只往 stderr 吐错，脚本拿到空输出，报出来的是「读不出证书」而不是真正的原因。
+> 改成用 python3 直接解 **APK Signing Block**（v2 `0x7109871a` / v3 `0xf05368c0`，
+> `signers → signer → signed data → certificates`），取证书 DER 的 SHA-256——
+> 与 `apksigner --print-certs` 报的是同一个值，且零 SDK 依赖、失败时能给出
+> 「没有 APK Signing Block」这种可读原因。
 
 #### 代价与边界
 
