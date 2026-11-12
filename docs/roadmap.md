@@ -40,7 +40,7 @@
 - [x] 发送的乐观回显（请求在飞时「发送中」，issue #52，见 [§6.50](design-decisions/chat.md)）
 - [x] 对话内搜索（搜已加载时间线，见 [§6.15](design-decisions/chat.md)）+ 窄屏 AppBar 溢出修复（issue #31，见 [§6.16](design-decisions/ui.md)）
 - [x] 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（搜索命中 / 待确认收件箱 / 习惯执行历史 / 我的轮次四处入口都带上锚点，落位 + 高亮 + 「回到最新」，见 [§6.92](design-decisions/chat.md)）：本地自动化回归通过，真机跳变观感待复核；越界自动补页（[#108](https://git.atjog.com/dever/super_partyb-flutter/issues/108)）与 OS 层深链（[#109](https://git.atjog.com/dever/super_partyb-flutter/issues/109)）未做
-- [x] 轮次导航刻度条（会话右侧竖置刻度：常驻横杠 + hover 显示各轮问题前 24 字 + 刻度列可滚 + 点击跳转；触屏改开 48dp 列表弹层、窄屏走「更多」菜单，见 [§6.94](design-decisions/chat.md)）：本地自动化回归通过；hover 观感、触控板手感与真机触屏点按待复核
+- [x] 轮次导航刻度条（会话右侧竖置刻度：常驻横杠 + hover 显示各轮问题前 24 字 + 刻度列可滚 + 点击跳转；触屏改开 48dp 列表弹层、窄屏走「更多」菜单，见 [§6.94](design-decisions/chat.md)）：本地自动化回归通过（含面板淡入淡出 / 横杠伸缩的动效用例与「减少动效」降级）；hover 观感、触控板手感与真机触屏点按待复核
 - [x] spec 看板：Table、六类 Chart、响应式 Stack/Grid、状态快照取值（见 [§6.9.4](design-decisions/runtime-and-ops.md)；本地回归与 golden 通过，设备效果待验收）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）
 - [x] 自动同步（启动后一次 / 周期 N 分钟，默认关闭；仅桌面端装配，见 [§6.42](design-decisions/sync.md)）

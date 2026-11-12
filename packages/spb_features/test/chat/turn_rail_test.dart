@@ -41,18 +41,24 @@ void main() {
     required List<TurnRailEntry> entries,
     String? activeTurnId,
     void Function(String turnId)? onJump,
+    VoidCallback? onOpenList,
     double height = 400,
+    bool disableAnimations = false,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(
-          body: Center(
-            child: SizedBox(
-              height: height,
-              child: TurnRail(
-                entries: entries,
-                activeTurnId: activeTurnId,
-                onJump: onJump ?? (_) {},
+        home: MediaQuery(
+          data: MediaQueryData(disableAnimations: disableAnimations),
+          child: Scaffold(
+            body: Center(
+              child: SizedBox(
+                height: height,
+                child: TurnRail(
+                  entries: entries,
+                  activeTurnId: activeTurnId,
+                  onJump: onJump ?? (_) {},
+                  onOpenList: onOpenList,
+                ),
               ),
             ),
           ),
@@ -229,6 +235,143 @@ void main() {
     await tester.pump();
     expect(jumped, entries[1].turnId);
     expect(openedList, 1);
+  });
+
+  // ---------- 动效（§6.94「动效」）----------
+
+  /// 面板当前的肉眼不透明度（`AnimatedOpacity` → `FadeTransition` 的实时值）。
+  ///
+  /// 断言「有渐变」只能读实时值：`tester.widget<AnimatedOpacity>().opacity` 是
+  /// **目标值**，从它看不出有没有中间帧（那正是本组用例要防的「其实是闪现」）。
+  double panelAlpha(WidgetTester tester) {
+    // 从面板往上找：`InkWell` 的 hover/ripple 也会造出 `FadeTransition`，
+    // 直接 `find.byType` 会命中多个。最近的祖先就是面板自己那层。
+    final fade = tester.widget<FadeTransition>(
+      find
+          .ancestor(
+            of: find.byKey(const ValueKey('turn-rail-panel')),
+            matching: find.byType(FadeTransition),
+          )
+          .first,
+    );
+    return fade.opacity.value;
+  }
+
+  testWidgets('面板是渐变淡入，不是闪现（第一帧未完成）', (tester) async {
+    await pumpRail(tester, entries: entriesOf(3));
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: Offset.zero);
+    addTearDown(gesture.removePointer);
+    await tester.pump();
+    await gesture.moveTo(
+      tester.getCenter(find.byKey(const ValueKey('turn-rail-ticks'))),
+    );
+
+    // 第一帧：面板已在树上，但还几乎透明。
+    await tester.pump();
+    expect(find.byKey(const ValueKey('turn-rail-panel')), findsOneWidget);
+    expect(panelAlpha(tester), lessThan(0.5));
+
+    // 半程：介于 0 与 1 之间 → 确实在渐变，而不是「一帧到位」。
+    await tester.pump(kTurnRailMotion ~/ 2);
+    final mid = panelAlpha(tester);
+    expect(mid, greaterThan(0));
+    expect(mid, lessThan(1));
+
+    await tester.pumpAndSettle();
+    expect(panelAlpha(tester), 1);
+  });
+
+  testWidgets('指针离开：先淡出，播完才从树上移除', (tester) async {
+    final entries = entriesOf(3);
+    await pumpRail(tester, entries: entries);
+    final gesture = await hover(
+      tester,
+      find.byKey(const ValueKey('turn-rail-ticks')),
+    );
+    expect(panelAlpha(tester), 1);
+
+    // 移开到窗口左上角（离开刻度列与面板）。
+    await gesture.moveTo(Offset.zero);
+    await tester.pump();
+    // 还在树上（否则永远看不到出场动画），但目标已是不透明 0。
+    expect(find.byKey(const ValueKey('turn-rail-panel')), findsOneWidget);
+    await tester.pump(kTurnRailFadeOut ~/ 2);
+    expect(panelAlpha(tester), lessThan(1));
+    // 收起过程中不能拦住点击：它已经不可见，但还占着那 264px。
+    expect(
+      tester
+          .widget<IgnorePointer>(
+            find
+                .ancestor(
+                  of: find.byKey(const ValueKey('turn-rail-panel')),
+                  matching: find.byType(IgnorePointer),
+                )
+                // 多层祖先（Material 等也可能插入忽略指针的包装）；
+                // 最近的一层就是面板自己那层。
+                .first,
+          )
+          .ignoring,
+      isTrue,
+    );
+
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('turn-rail-panel')), findsNothing);
+  });
+
+  testWidgets('指针靠近：非激活横杠「填满」一点（不靠 tooltip 提示可点）', (tester) async {
+    final entries = entriesOf(3);
+    await pumpRail(tester, entries: entries, activeTurnId: turnB);
+
+    double tickWidth(String turnId) =>
+        tester
+            .widget<Container>(
+              find.descendant(
+                of: find.byKey(ValueKey('turn-rail-tick-$turnId')),
+                matching: find.byType(Container),
+              ),
+            )
+            .constraints
+            ?.maxWidth ??
+        0;
+
+    expect(tickWidth(turnA), kTurnRailTickWidthIdle);
+
+    await hover(tester, find.byKey(const ValueKey('turn-rail-ticks')));
+
+    expect(tickWidth(turnA), kTurnRailTickWidthHover);
+    // 激活格不跟着变：长度是它「我是当前轮」的身份，不该被悬停抹平。
+    expect(tickWidth(turnB), kTurnRailTickWidthActive);
+  });
+
+  testWidgets('面板标题给出「第几 / 共几轮」', (tester) async {
+    await pumpRail(tester, entries: entriesOf(3), activeTurnId: turnB);
+    await hover(tester, find.byKey(const ValueKey('turn-rail-ticks')));
+
+    expect(find.text('第 2 / 3 轮'), findsOneWidget);
+  });
+
+  testWidgets('系统开启「减少动效」：不过渡、收起后立即移除', (tester) async {
+    final entries = entriesOf(3);
+    await pumpRail(tester, entries: entries, disableAnimations: true);
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: Offset.zero);
+    addTearDown(gesture.removePointer);
+    await tester.pump();
+    await gesture.moveTo(
+      tester.getCenter(find.byKey(const ValueKey('turn-rail-ticks'))),
+    );
+
+    // 单帧就到位（时长 0）。
+    await tester.pump();
+    expect(panelAlpha(tester), 1);
+
+    await gesture.moveTo(Offset.zero);
+    await tester.pump();
+    // 不等 `onEnd`：立即摘掉（否则会留 80ms 的不可见命中区）。
+    expect(find.byKey(const ValueKey('turn-rail-panel')), findsNothing);
   });
 
   testWidgets('没有轮次时不占位（空对话不该出现一条空刻度列）', (tester) async {

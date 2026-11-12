@@ -38,6 +38,37 @@ const double kTurnRailListPadding = 8;
 /// 拿不到上下文，只能再排一帧，表现为「打开时先闪一下顶部」。
 const double kTurnRailPanelRowHeight = 26;
 
+/// 横杠的静止尺寸（激活 / 非激活）。
+const double kTurnRailTickWidthIdle = 8;
+const double kTurnRailTickWidthActive = 13;
+
+/// 指针在刻度条上时非激活横杠长到的宽度。
+///
+/// 这是「刻度条是活的」的唯一静态证据：鼠标靠近时整列**填满**一点，
+/// 离开时收回。它同时解决了「16px 的细线看不出可点」的问题——不靠 tooltip、
+/// 不靠说明文字。
+const double kTurnRailTickWidthHover = 11;
+
+/// 面板淡入 + 横杠伸缩的时长。
+///
+/// ## 为什么是 150ms（`SpbDuration.fast`）而不是 250~300ms
+///
+/// 这个面板会被频繁召唤（每次划过右侧就出现），时长一长就变成「拖沓」；
+/// 而它又不是纯装饰，慢一点没有信息收益。150ms 与 Material 的 hover 类反馈
+/// 同档，读起来是「跟手」而不是「播动画」。
+///
+/// 附带的好处是**帧数少**：在远程桌面的软件光栅下（§6.74 / issue #110），
+/// 每帧都要整窗 present，150ms ≈ 9 帧；300ms 就要 18 帧。同样的观感，
+/// 一半的代价。
+const Duration kTurnRailMotion = SpbDuration.fast;
+
+/// 面板**收起**的时长。
+///
+/// 比展开更快（`SpbDuration.instant`）：离场应当「立刻腾出视野」，且此时用户
+/// 的注意力已经移走了。进出不对称是这类浮层的常规做法（Material 的
+/// tooltip/menu 也是出场快、入场慢）。
+const Duration kTurnRailFadeOut = SpbDuration.instant;
+
 /// 时间线右侧的轮次导航刻度条（竖置「齿轮」）。
 ///
 /// ## 交互（三条，都来自同一个心智模型：目录）
@@ -45,7 +76,7 @@ const double kTurnRailPanelRowHeight = 26;
 /// | 操作 | 结果 |
 /// |---|---|
 /// | 常驻 | 每轮一根横杠；当前轮那根**更长、更亮**（primary） |
-/// | 鼠标悬停 | 左侧浮出面板，逐行显示「序号 + 该轮问题摘要」 |
+/// | 鼠标悬停 | 横杠微微一长（「这列是活的」），左侧浮出面板显示「序号 + 该轮问题摘要」 |
 /// | 点横杠 / 点面板行 | 跳到那一轮（回调 [onJump]）；滚轮可滚刻度列本身 |
 ///
 /// ## 为什么默认只画横杠，而不是常驻摘要列表
@@ -58,7 +89,7 @@ const double kTurnRailPanelRowHeight = 26;
 ///
 /// 压缩到铺满在 200 轮时每格 < 3px：既点不中（触摸目标远小于 44dp），也表达
 /// 不出「这一段很长」。固定步距 + 自身滚动保住可点性与可读性；代价是「看不到
-/// 全局」，故激活格会自动滚进视野（[_revealActive]）。
+/// 全局」，故激活格会自动滚进视野（[_TurnRailState._reveal]）。
 ///
 /// ## 为什么面板浮在正文上，而不是把时间线挤窄
 ///
@@ -66,17 +97,33 @@ const double kTurnRailPanelRowHeight = 26;
 /// 软件光栅下就是一次整窗重绘（§6.74 与 issue #110 是同一类）。
 /// 面板用 `Stack` 叠在消息流上方，时间线布局在 hover 前后**逐像素不变**。
 ///
-/// ## 为什么没有动画
+/// ## 动效：只有三处，都是「状态变了才有」，且全部可关
 ///
-/// 面板插入/移除不做淡入淡出：整窗 alpha 混合在软件光栅下是本条链路里最贵的
-/// 一类操作，而这个面板出现得越「干脆」越像滚动条而非内容。附带好处是
-/// `MediaQuery.disableAnimations` 无需特判。
+/// 初版是零动画（理由是软件光栅下 alpha 混合太贵）。这个结论现在收窄为：
+/// **连续/整窗**的动效仍然不做（页面过渡、`allowSnapshotting`、常驻发光），
+/// 但**事件驱动、≤150ms、局部脏矩形**的微过渡代价可以忽略——它们每帧只重绘
+/// 264×300 的面板或 16×7 的格子，而不是整窗 Markdown。故：
+///
+/// | 动效 | 触发 | 手段 | 时长 |
+/// |---|---|---|---|
+/// | 面板淡入 + 从右滑出 10px | 指针进入刻度列 | `FadeTransition` + `SlideTransition`（纯合成，控制器见 [_TurnRailState._panelAnim]） | [kTurnRailMotion] |
+/// | 面板淡出 | 指针离开 | 同上（出场更快，见 [kTurnRailFadeOut]） | [kTurnRailFadeOut] |
+/// | 横杠伸缩 / 当前轮换格 | 悬停、激活轮变化 | `AnimatedContainer`（只重排 16×7 的格子） | [kTurnRailMotion] |
+///
+/// 三条约束：
+///
+/// 1. **不引入 `AnimatedSize` / 尺寸过渡**：面板宽度恒定 264（浮层不挤正文），
+///    高度直接撑满可用高度；尺寸动画才是会带动时间线重排的那一类；
+/// 2. **不做循环动画**（呼吸、脉冲）：它会让远程桌面**持续**整窗 present，
+///    正是 issue #110 的成因；
+/// 3. `MediaQuery.disableAnimations`（系统「减少动效」）时全部时长为 0，
+///    此时面板收起后**立即**从树上移除（不等 `onEnd`）。
 ///
 /// ## 触屏端（平板 / 折叠屏展开 / 横屏手机，宽度 ≥ 720）
 ///
 /// 没有 hover 就没有面板，而**点横杠仍然可用**（跳转不依赖面板）。但「只能盲点」
 /// 不是合格的导航：用户看不到各轮摘要，也数不出共有几轮。故调用方可以传
-/// [onOpenList]：**触摸**点刻度 → 打开整屏列表（[showTurnListSheet]，48dp 行高），
+/// [onOpenList]：**触摸**点刻度 → 打开整屏列表（`showTurnListSheet`，48dp 行高），
 /// 鼠标点刻度 → 维持直跳。判据用 `TapDownDetails.kind`（输入设备自带），不做
 /// 平台嗅探——同一台设备接上鼠标时行为会自动切回桌面语义。
 ///
@@ -108,9 +155,22 @@ class TurnRail extends StatefulWidget {
   State<TurnRail> createState() => _TurnRailState();
 }
 
-class _TurnRailState extends State<TurnRail> {
+class _TurnRailState extends State<TurnRail>
+    with SingleTickerProviderStateMixin {
   final _tickController = ScrollController();
   final _panelController = ScrollController();
+
+  /// 面板的出现/消失（0 = 完全收起，1 = 完全展开）。
+  ///
+  /// ## 为什么用显式 controller 而不是 `AnimatedOpacity`
+  ///
+  /// `ImplicitlyAnimatedWidget` 在**首次挂载**时直接取目标值，不播动画。而面板
+  /// 是「指针进来才挂上」的（收起时不在树上，否则它会（虽然不可见）占着那 264px
+  /// 的命中区），于是 `AnimatedOpacity` 的入场永远是闪现——看着像没做动效。
+  /// 显式 controller 从 0 开始 `forward()`，入场就真的有中间帧。
+  late final AnimationController _panelAnim;
+  late final Animation<double> _panelOpacity;
+  late final Animation<Offset> _panelSlide;
 
   /// 指针是否在刻度列 / 面板上（两者共同决定面板是否展开）。
   ///
@@ -121,6 +181,13 @@ class _TurnRailState extends State<TurnRail> {
   /// 触发 `onExit` → `setState` → 面板移除 → 指针落在正文上 → 再也回不来）。
   bool _overTicks = false;
   bool _overPanel = false;
+
+  /// 面板是否还挂在树上。
+  ///
+  /// 与 [_expanded] 分离是为了让**淡出**有机会播完：指针离开时立刻开始反向
+  /// 动画，但要留到 `dismissed` 状态再移除，否则永远看不到出场动画（等于没有
+  /// 动效，只是延迟出现）。
+  bool _panelMounted = false;
 
   /// 最近一次按下的设备类型（见 [TurnRail.onOpenList]）。
   ///
@@ -133,6 +200,22 @@ class _TurnRailState extends State<TurnRail> {
   @override
   void initState() {
     super.initState();
+    _panelAnim = AnimationController(
+      vsync: this,
+      duration: kTurnRailMotion,
+      reverseDuration: kTurnRailFadeOut,
+    )..addStatusListener(_handlePanelStatus);
+    final curved = CurvedAnimation(
+      parent: _panelAnim,
+      curve: Curves.easeOutCubic,
+    );
+    _panelOpacity = curved;
+    _panelSlide = Tween<Offset>(
+      // 从刻度列那一侧滑出 10px（0.04 × 264）：位移比缩放更像浮层，且不改变
+      // 命中区域大小（缩放会）。
+      begin: const Offset(0.04, 0),
+      end: Offset.zero,
+    ).animate(curved);
     // 首帧就把激活格滚进视野：长对话的激活轮通常是最新那几轮，不滚的话刻度列
     // 永远停在最早一段，「我在哪」要用户自己去找。
     _scheduleReveal();
@@ -146,9 +229,37 @@ class _TurnRailState extends State<TurnRail> {
 
   @override
   void dispose() {
+    _panelAnim.dispose();
     _tickController.dispose();
     _panelController.dispose();
     super.dispose();
+  }
+
+  /// 动效时长（系统开了「减少动效」时为 0）。
+  Duration _motion(BuildContext context, Duration duration) =>
+      MediaQuery.disableAnimationsOf(context) ? Duration.zero : duration;
+
+  /// 面板淡出播完 → 真正从树上移除。
+  ///
+  /// 重入期间（用户又回来了）状态不是 `dismissed`，这里什么都不做。
+  void _handlePanelStatus(AnimationStatus status) {
+    if (status != AnimationStatus.dismissed) return;
+    if (!mounted || _expanded || !_panelMounted) return;
+    setState(() => _panelMounted = false);
+  }
+
+  /// 让 controller 追上「当前要不要展开」。
+  void _syncPanelAnimation() {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _panelAnim.duration = reduceMotion ? Duration.zero : kTurnRailMotion;
+    _panelAnim.reverseDuration = reduceMotion
+        ? Duration.zero
+        : kTurnRailFadeOut;
+    if (_expanded) {
+      _panelAnim.forward();
+    } else {
+      _panelAnim.reverse();
+    }
   }
 
   void _setOver({bool? ticks, bool? panel}) {
@@ -159,7 +270,10 @@ class _TurnRailState extends State<TurnRail> {
     setState(() {
       _overTicks = nextTicks;
       _overPanel = nextPanel;
+      // 展开时先把面板挂上（controller 还是 0），让淡入有起点。
+      if (_expanded && !wasExpanded) _panelMounted = true;
     });
+    if (_expanded != wasExpanded) _syncPanelAnimation();
     if (_expanded && !wasExpanded) _scheduleReveal();
   }
 
@@ -179,6 +293,11 @@ class _TurnRailState extends State<TurnRail> {
   ///
   /// 面板刚插入的那一帧还未布局，`position.maxScrollExtent` 仍是 0；此时 `jumpTo`
   /// 会被 clamp 到 0，等于「打开就停在顶部」。
+  ///
+  /// ## 为什么是 `jumpTo` 而不是动画滚动
+  ///
+  /// 面板是「随着指针出现」的，里面的列表跟着动画滚会与淡入叠成两段运动，
+  /// 读起来像页面在晃；而且滚动动画是连续帧，恰恰是远程桌面最贵的一类。
   void _scheduleReveal() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -221,6 +340,9 @@ class _TurnRailState extends State<TurnRail> {
   @override
   Widget build(BuildContext context) {
     if (widget.entries.isEmpty) return const SizedBox.shrink();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    // 减少动效时不等淡出回调：收起就立刻摘掉（那 80ms 的不可见命中区没有意义）。
+    final showPanel = _panelMounted && (_expanded || !reduceMotion);
     return SizedBox(
       // 面板 + 刻度列的总宽：这个盒子整体叠在时间线之上（见类文档），
       // 未展开时除刻度列外**不接收指针**（`SizedBox` 没有可命中的子节点）。
@@ -228,7 +350,7 @@ class _TurnRailState extends State<TurnRail> {
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          if (_expanded)
+          if (showPanel)
             Positioned(
               top: 0,
               bottom: 0,
@@ -251,6 +373,9 @@ class _TurnRailState extends State<TurnRail> {
   Widget _buildTicks(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final activeIndex = _activeIndex;
+    final motion = _motion(context, kTurnRailMotion);
+    // 指针在刻度条上（刻度列或面板）时整列「填满」一点：不说话的「可点」提示。
+    final boost = _expanded;
     return MouseRegion(
       onEnter: (_) => _setOver(ticks: true),
       onExit: (_) => _setOver(ticks: false),
@@ -277,12 +402,24 @@ class _TurnRailState extends State<TurnRail> {
               alignment: Alignment.centerRight,
               // 横杠：激活的那根更长更亮。长度差而非只换颜色，是因为色差在
               // 高对比主题 / 色弱用户那里可能不可辨，而长度差永远可辨。
-              child: Container(
+              //
+              // 尺寸变化只波及这个 16×7 的格子（`itemExtent` 固定，列表不重排）。
+              child: AnimatedContainer(
+                duration: motion,
+                curve: Curves.easeOutCubic,
                 margin: const EdgeInsets.only(right: SpbSpacing.xxs),
-                width: isActive ? 13 : 8,
-                height: isActive ? 4 : 2,
+                width: isActive
+                    ? kTurnRailTickWidthActive
+                    : (boost
+                          ? kTurnRailTickWidthHover
+                          : kTurnRailTickWidthIdle),
+                height: isActive ? 4 : (boost ? 2.5 : 2),
                 decoration: BoxDecoration(
-                  color: isActive ? scheme.primary : scheme.outlineVariant,
+                  color: isActive
+                      ? scheme.primary
+                      : (boost
+                            ? scheme.onSurfaceVariant.withValues(alpha: 0.55)
+                            : scheme.outlineVariant),
                   borderRadius: const BorderRadius.all(Radius.circular(2)),
                 ),
               ),
@@ -293,77 +430,150 @@ class _TurnRailState extends State<TurnRail> {
     );
   }
 
+  /// 面板标题：告诉用户「这是第几轮 / 共几轮」。
+  ///
+  /// 面板只有 264px，标题挤占的是一行的空间，但它换掉了另一种更贵的做法：
+  /// 用户点开列表后仍要靠数行数来定位自己（刻度条上又没有数字）。
+  String get _panelTitle {
+    final total = widget.entries.length;
+    final index = _activeIndex;
+    return index < 0 ? '共 $total 轮' : '第 ${index + 1} / $total 轮';
+  }
+
   Widget _buildPanel(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final activeIndex = _activeIndex;
+    final fadeIn = _motion(context, kTurnRailMotion);
     return MouseRegion(
       onEnter: (_) => _setOver(panel: true),
       onExit: (_) => _setOver(panel: false),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          SpbSpacing.sm,
-          kTurnRailListPadding,
-          SpbSpacing.sm,
-          kTurnRailListPadding,
-        ),
-        child: Material(
-          key: const ValueKey('turn-rail-panel'),
-          elevation: 6,
-          color: scheme.surfaceContainerHigh,
-          borderRadius: SpbRadius.cardAll,
-          clipBehavior: Clip.antiAlias,
-          child: ListView.builder(
-            controller: _panelController,
-            primary: false,
-            padding: const EdgeInsets.symmetric(vertical: SpbSpacing.xs),
-            itemExtent: kTurnRailPanelRowHeight,
-            itemCount: widget.entries.length,
-            itemBuilder: (context, i) {
-              final entry = widget.entries[i];
-              final isActive = i == activeIndex;
-              return InkWell(
-                key: ValueKey('turn-rail-row-${entry.turnId}'),
-                onTap: () => widget.onJump(entry.turnId),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: SpbSpacing.sm,
-                  ),
-                  color: isActive ? scheme.primaryContainer : null,
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 24,
-                        child: Text(
-                          '${entry.index}',
-                          textAlign: TextAlign.right,
-                          style: SpbType.listMeta(theme.textTheme)?.copyWith(
-                            color: isActive
-                                ? scheme.onPrimaryContainer
-                                : scheme.onSurfaceVariant,
-                          ),
+      child: FadeTransition(
+        opacity: _panelOpacity,
+        child: SlideTransition(
+          position: _panelSlide,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              SpbSpacing.sm,
+              kTurnRailListPadding,
+              SpbSpacing.sm,
+              kTurnRailListPadding,
+            ),
+            // 收起过程中不要拦住点击：此时面板已经不可见，但还在树上 80ms。
+            child: IgnorePointer(
+              ignoring: !_expanded,
+              child: Material(
+                key: const ValueKey('turn-rail-panel'),
+                elevation: 6,
+                color: scheme.surfaceContainerHigh,
+                borderRadius: SpbRadius.cardAll,
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        SpbSpacing.sm + 3,
+                        SpbSpacing.xs,
+                        SpbSpacing.sm,
+                        SpbSpacing.xxs,
+                      ),
+                      child: Text(
+                        _panelTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: SpbType.listMeta(theme.textTheme)
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                    ),
+                    Divider(height: 1, color: scheme.outlineVariant),
+                    Expanded(
+                      child: ListView.builder(
+                        controller: _panelController,
+                        primary: false,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: SpbSpacing.xxs,
+                        ),
+                        itemExtent: kTurnRailPanelRowHeight,
+                        itemCount: widget.entries.length,
+                        itemBuilder: (context, i) => _buildRow(
+                          context,
+                          theme,
+                          scheme,
+                          widget.entries[i],
+                          isActive: i == activeIndex,
+                          duration: fadeIn,
                         ),
                       ),
-                      const SizedBox(width: SpbSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          entry.label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: isActive
-                                ? scheme.onPrimaryContainer
-                                : scheme.onSurface,
-                            fontWeight: isActive ? FontWeight.w600 : null,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              );
-            },
+              ),
+            ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRow(
+    BuildContext context,
+    ThemeData theme,
+    ColorScheme scheme,
+    TurnRailEntry entry, {
+    required bool isActive,
+    required Duration duration,
+  }) {
+    return InkWell(
+      key: ValueKey('turn-rail-row-${entry.turnId}'),
+      onTap: () => widget.onJump(entry.turnId),
+      hoverColor: scheme.primary.withValues(alpha: 0.07),
+      child: AnimatedContainer(
+        duration: duration,
+        curve: Curves.easeOutCubic,
+        // 当前轮：底色 + 左侧 3px 主色标记。两层都要，因为底色在浅色主题里
+        // 与 hover 色接近，而竖标记是「我在这一行」的确定性信号。
+        color: isActive ? scheme.primaryContainer : null,
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: duration,
+              curve: Curves.easeOutCubic,
+              width: 3,
+              height: kTurnRailPanelRowHeight,
+              color: isActive
+                  ? scheme.primary
+                  : scheme.primary.withValues(alpha: 0),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            SizedBox(
+              width: 24,
+              child: Text(
+                '${entry.index}',
+                textAlign: TextAlign.right,
+                style: SpbType.listMeta(theme.textTheme)?.copyWith(
+                  color: isActive
+                      ? scheme.onPrimaryContainer
+                      : scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: Text(
+                entry.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: isActive
+                      ? scheme.onPrimaryContainer
+                      : scheme.onSurface,
+                  fontWeight: isActive ? FontWeight.w600 : null,
+                ),
+              ),
+            ),
+            const SizedBox(width: SpbSpacing.xs),
+          ],
         ),
       ),
     );
