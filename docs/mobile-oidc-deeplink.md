@@ -156,16 +156,24 @@ issuer 已由 `SPB_OIDC_ISSUER` 注入。硬编码域名会让 staging / 双栈�
 网关 `/.well-known` 路由）与客户端发版不同步。两种都认，切换默认值只是
 改一行，不会出现「新版客户端 + 旧服务端」就登不上的窗口。
 
-**当前默认仍是自定义 scheme**：`OidcCallbackUri.redirectUri` 未变。切换前提
-是 IdP 侧把 `https://<host>/idp/app/callback` 注册进 `redirectUris`
-（id-provider#8 的数据变更部分），否则 authorize 会以
-`400 invalid_request` 拒绝。
+**当前默认已切到 claimed HTTPS**（2026-11，见 `design-decisions/auth.md` §6.91）：
+`OidcCallbackUri.preferredRedirectUri()` 在 issuer 为 `https` 时返回
+`<issuer>/app/callback`，否则退回 `partyb://oidc/callback`（本地
+`http://127.0.0.1:3000/idp` 下 claimed HTTPS 不是可注册形态）。切换的前提已满足：
+两个环境的移动端 client 都已把两种形态注册进 `oauth_clients.redirectUris`
+（bcc：`tbcc` / `tbcc6`；dever：`dever` / `dever6` / `dever-preview` /
+`dever6-preview`），IdP 也已挂载 `/idp/app/callback` 落地页。
+
+即使 App Links 没验证成功也不至于登不上：回调会落到 IdP 落地页，那里有
+「打开 App」按钮把 code 用 `partyb://oidc/callback` 交回来——代价是多一次点击。
+因此现在的影响是「判错方向 = 多一步」，不再是「scheme 可被抢注」。
 
 **服务端前置**（跨仓库，均不在本仓库）：
 
 1. 网关 `configs/gateway.yaml` 的 `verification_files` 返回
    `/.well-known/assetlinks.json`（`Content-Type: application/json`，
-   含包名 + 签名指纹）—— api-gateway#12，代码已就绪，**未部署**；
+   含包名 + 签名指纹）—— api-gateway#12，代码已就绪（2026-11 补上 dever 域名），
+   需与下次网关部署一起生效；
 2. IdP 注册 claimed HTTPS 回调 —— id-provider#8，代码已就绪，**未部署**；
 3. 指纹必须对应**实际分发的那份 APK**：换签名密钥后不同步更新，已安装
    用户的 App Links 会静默失效。

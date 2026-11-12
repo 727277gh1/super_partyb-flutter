@@ -185,4 +185,33 @@ void main() {
       endsWith(OidcCallbackUri.claimedHttpsPath),
     );
   });
+
+  // 优先级：issuer 是 https → claimed HTTPS（操作系统能验证域名归属）；
+  // 否则退回自定义 scheme（http 下 claimed HTTPS 不是可注册形态）。
+  group('preferredRedirectUri（移动端应注册的回调）', () {
+    test('https issuer → claimed HTTPS', () {
+      expect(
+        OidcCallbackUri.preferredRedirectUri(issuer: issuer),
+        'https://tbcc.atjog.com/idp/app/callback',
+      );
+    });
+
+    test('http issuer（本地开发）→ 自定义 scheme', () {
+      // 本地 IdP 跑在 http://127.0.0.1:3000/idp：claimed HTTPS 的整个前提
+      // 是「域名 + TLS」，这里必须退回 scheme，否则 authorize 直接 400。
+      expect(
+        OidcCallbackUri.preferredRedirectUri(
+          issuer: Uri.parse('http://127.0.0.1:3000/idp'),
+        ),
+        'partyb://oidc/callback',
+      );
+    });
+
+    test('issuer 不可解析 → 自定义 scheme（不抛异常）', () {
+      expect(
+        OidcCallbackUri.preferredRedirectUri(issuer: Uri.parse('')),
+        'partyb://oidc/callback',
+      );
+    });
+  });
 }

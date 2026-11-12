@@ -80,6 +80,37 @@ class OidcCallbackUri {
     return base.replace(path: '$basePath$claimedHttpsPath');
   }
 
+  /// 移动端**应当注册**的回调地址（按优先级）。
+  ///
+  /// ## 优先级：claimed HTTPS > 自定义 scheme
+  ///
+  /// RFC 8252 §7.2 要求优先用 claimed HTTPS（`https://<issuer>/app/callback`）：
+  /// 自定义 scheme 没有归属校验——任何装了同一 scheme 的 App 都能抢走回调。
+  /// 当前 PKCE（public client，verifier 在 Keystore）能保证「抢到 code 也换不到
+  /// token」，所以现在的影响是**登录 DoS** 而不是接管；但这层保障完全依赖于
+  /// 「PKCE 不被关掉」，把入口换到操作系统能验证归属的那一种才算真正修掉。
+  ///
+  /// ## 什么时候退回自定义 scheme
+  ///
+  /// 1. **issuer 不是 https**（本地开发 `http://127.0.0.1:3000/idp`）：claimed
+  ///    HTTPS 的整个前提是「域名 + TLS」，http 下它不是可注册的回调形态；
+  /// 2. issuer 解析不出 host（配置缺失）。
+  ///
+  /// ## 万一 App Links / Universal Links 没生效
+  ///
+  /// 回调地址会先落到 IdP 的落地页（`internal/server/app_callback.go`），页面上
+  /// 有一个「打开 App」按钮，用 `partyb://oidc/callback` 把 code 交回来——所以
+  /// 判错方向的代价是**多一次点击**，不是登不进去。
+  static String preferredRedirectUri({Uri? issuer}) {
+    final claimed = claimedHttpsRedirectUri(issuer: issuer);
+    if (claimed != null &&
+        claimed.scheme == 'https' &&
+        claimed.host.isNotEmpty) {
+      return claimed.toString();
+    }
+    return redirectUri;
+  }
+
   /// [uri] 是否是本应用的 OIDC 回调（两种形态都认）。
   ///
   /// 判定**必须**比较 scheme + host + path 三要素，只看 scheme 会让

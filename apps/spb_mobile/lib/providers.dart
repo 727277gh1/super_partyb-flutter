@@ -138,16 +138,24 @@ final tokenStoreProvider = Provider<TokenStore>((ref) {
 
 /// OIDC 配置（编译期注入，见 `SpbEnv.oidcIssuer` 等）。
 ///
-/// ⚠️ `redirectUri` **覆盖**为 [OidcCallbackUri.redirectUri]
-/// （`partyb://oidc/callback`），而不是 `SpbEnv.oidcRedirectUri`
-/// （默认是网关回调）。理由：网关把 `redirect_uri` 硬编码为自己的地址
-/// （实测见 `docs/oidc-verification.md` §1.2），用它的话回调永远落在网关、
-/// 客户端拿不到 code。移动端要拿 code 必须声明自己的回调地址。
+/// ⚠️ `redirectUri` **覆盖**为 [OidcCallbackUri.preferredRedirectUri]
+/// （issuer 是 https 时用 claimed HTTPS `<issuer>/app/callback`，否则
+/// `partyb://oidc/callback`），而不是 `SpbEnv.oidcRedirectUri`（默认是网关回调）。
+/// 理由：网关把 `redirect_uri` 硬编码为自己的地址（实测见
+/// `docs/oidc-verification.md` §1.2），用它的话回调永远落在网关、客户端拿不到
+/// code。移动端要拿 code 必须声明自己的回调地址，而且该地址必须在 IdP 的
+/// `oauth_clients.redirectUris` 里（两个环境的移动端 client 都已注册两种形态）。
 ///
-/// `clientSecret` 传 null：生产不在客户端内嵌密钥（这也意味着当前 IdP 的
-/// 非 public client 形态下换不到 token，见 `docs/mobile-oidc-deeplink.md`）。
+/// 为什么优先 claimed HTTPS：自定义 scheme 没有归属校验，任何 App 都能抢回调；
+/// 操作系统校验域名归属的那一种才能真正消除这条（详见
+/// `OidcCallbackUri.preferredRedirectUri` 的说明）。
+///
+/// `clientSecret` 传 null：生产不在客户端内嵌密钥（移动端 client 是 public
+/// client，走 PKCE 换 token，见 `docs/mobile-oidc-deeplink.md`）。
 final oidcConfigProvider = Provider<OidcConfig>((ref) {
-  return OidcConfig.fromEnv().copyWithRedirectUri(OidcCallbackUri.redirectUri);
+  return OidcConfig.fromEnv().copyWithRedirectUri(
+    OidcCallbackUri.preferredRedirectUri(),
+  );
 });
 
 /// OIDC 客户端（刷新凭证用）。

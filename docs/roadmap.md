@@ -59,7 +59,7 @@
 - [ ] 移动端 OIDC 登录闭环（IdP 侧已于 2026-11-06 注册 `partyb://oidc/callback`，剩真机回跳验证，见 `docs/mobile-oidc-deeplink.md` §3）
 - [x] 微信 OpenSDK 唤起小程序（方案 B）：`spb_platform` 契约 + fluwx 桥接 + 登录页接入，服务端零改动（待开放平台 appid 与真机，见 issue #92）
 - [x] App 内「微信一键登录」：小程序会话 → 标准 OIDC 授权码（客户端编排 + 服务端兑换端点 + URL Scheme 生成均已上线，剩真机验证，见 `docs/wechat-one-click-login.md`、id-provider#10、flutter#80）
-- [x] 移动端 claimed HTTPS 回调（Android App Links）客户端侧：`autoVerify` 过滤器（双栈两域名）+ `OidcCallbackUri.matches` 双形态 + manifest/plist 漂移守卫测试（服务端 `assetlinks.json` 与 IdP `redirectUris` 已就绪但**未部署**，见 `docs/mobile-oidc-deeplink.md` §2.3、api-gateway#12、id-provider#8）
+- [x] 移动端 claimed HTTPS 回调（Android App Links）：`autoVerify` 过滤器（双栈两域名）+ `OidcCallbackUri.matches` 双形态 + manifest/plist 漂移守卫测试。**2026-11 默认已切到 claimed HTTPS**（`OidcCallbackUri.preferredRedirectUri`：issuer 为 https 时用 `<issuer>/app/callback`，否则退回 scheme；两个环境的 `redirectUris` 均已注册，网关 `assetlinks.json` 已补 dever 域名），剩真机验证 `pm get-app-links` 为 verified（见 `docs/mobile-oidc-deeplink.md` §2.3、`design-decisions/auth.md` §6.91）
 - [x] CI 流水线（`.github/workflows/ci.yml`：quality / build-linux / build-android / build-windows）
 - [x] 发布流水线（`.github/workflows/release.yml`：tag 触发四端出包 → GitHub Release）
 - [x] Windows 出包（GitHub Actions `windows-2022`，见 `docs/windows-release.md`）
