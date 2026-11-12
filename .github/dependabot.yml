@@ -29,14 +29,34 @@
 #   里的约束（本仓库的约束是刻意选的，如 `flutter: ">=3.47.0"` 对齐 CI 的
 #   `FLUTTER_VERSION`）。只在「现有约束无法装新版本」时才改约束。
 #
-# ## ⚠️ Dependabot 对 `resolution: workspace` 的支持需实测
+# ## ✅ Dependabot 认 `resolution: workspace`（2026-11-12 实测）
 #
 # 根 `pubspec.yaml` 用了 Dart Pub Workspaces（`workspace:` 列出 11 个成员，
-# 每个成员声明 `resolution: workspace`）。Dependabot 的 `pub` ecosystem 对
-# 该特性的支持**未经验证**——若它不认，会报「无法解析依赖」而静默不开 PR。
+# 每个成员声明 `resolution: workspace`）。实测：它**能**解析并只改根
+# `pubspec.lock`（PR #34/#35 的 diff 只有 lock、没有碰任何 `pubspec.yaml`），
+# 即 workspace 支持没问题。
 #
-# 那时退化为「只升 github-actions」（下面第二段）也比完全没有好：action 的
-# 供应链风险（见下）比依赖陈旧更紧迫。
+# ## ⚠️ 但它解出的 lock 可能在本仓 CI 的 Flutter 版本下**不可满足**
+#
+# 这两条 PR 卡在 `Resolve dependencies`（`flutter pub get --enforce-lockfile`）：
+#
+# ```
+# < test 1.31.1 (was 1.32.0)
+# < test_api 0.7.12 (was 0.7.14)
+# < test_core 0.6.18 (was 0.6.20)
+# Unable to satisfy `pubspec.yaml` using `pubspec.lock`.
+# ```
+#
+# 根因：`test 1.32.0` 要 `test_api 0.7.14`，而 **Flutter 3.47.5 自带的
+# `flutter_test` 精确钉 `test_api: 0.7.12`**（见 SDK 的
+# `packages/flutter_test/pubspec.yaml`）。Dependabot 的解析环境与 CI 的
+# `FLUTTER_VERSION` 引脚不同，于是它提出的版本在本仓**永远装不上**——
+# 这类 PR 不是「还没修」，是**不可落地**，且任何「自动回写 lock」的补丁都
+# 只能把 lock 改回 1.31.1，下一轮 dependabot 再提 1.32.0（死循环）。
+#
+# 故下面用 `ignore` 排除被 `flutter_test` 钉住的那一串。它们不会永久停滞：
+# `FLUTTER_VERSION` 升级时 lock 会随之自然前进（`pub upgrade` 重新解析）。
+# 详细复盘见 `docs/design-decisions/build-and-release.md` §6.93。
 version: 2
 updates:
   # ── Dart / Flutter 依赖 ────────────────────────────────────────────
@@ -49,6 +69,13 @@ updates:
       timezone: Asia/Shanghai
     open-pull-requests-limit: 5
     versioning-strategy: increase-if-necessary
+    # 被 Flutter SDK 钉死的包：见文件头「解出的 lock 可能不可满足」一节的
+    # 实测数据。`test` 的上限由 `flutter_test` 的 `test_api` 精确 pin 决定，
+    # 提上来也装不上，只会制造永远红的 PR。
+    ignore:
+      - dependency-name: test
+      - dependency-name: test_api
+      - dependency-name: test_core
     # 让 PR 带上标签，便于在 Gitea/GitHub 里筛选。
     labels:
       - dependencies

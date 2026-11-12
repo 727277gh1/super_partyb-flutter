@@ -656,6 +656,80 @@ Restart Manager 的关闭序列（MS「Restart Manager — Guidelines for Applic
 - **不把 `preventClose` 关掉**：那会让「关窗即隐藏」失效（§6.4 的既有行为），
   也解决不了问题——RM 的 `WM_QUERYENDSESSION` 仍无人应答。
 
+### 6.93 dependabot 的 pub PR 永远红：lock 被 `flutter_test` 的精确 pin 判死（2026-11-12）
+
+#### 症状
+
+Dependabot 每周为 `pub` 生态开 PR（`increase-if-necessary`），diff **只有根
+`pubspec.lock`**、测试与构建全绿，唯独 `quality` job 的 `Resolve dependencies`
+失败：
+
+```
+< test 1.31.1 (was 1.32.0)
+< test_api 0.7.12 (was 0.7.14)
+< test_core 0.6.18 (was 0.6.20)
+Unable to satisfy `pubspec.yaml` using `pubspec.lock`.
+```
+
+`build-*` 三个 job 反而是绿的——它们用的是不带 `--enforce-lockfile` 的
+`flutter pub get`，会**默默重解析**成一个我能装上的 lock。于是失败只集中在
+一条 step 上，看起来像「代码有问题」。
+
+#### 根因：本仓 Flutter 版本钉死了 `test` 的上限
+
+| 包 | 版本 | 要求的 `test_api` / `test_core` |
+|---|---|---|
+| `test` 1.31.1 | 本仓 lock（正确） | `test_api 0.7.12` / `test_core 0.6.18` |
+| `test` 1.32.0 | dependabot 提的 | `test_api 0.7.14` / `test_core 0.6.20` |
+| `flutter_test`（Flutter **3.47.5** 自带） | CI 的 `FLUTTER_VERSION` | **精确钉 `test_api: 0.7.12`** |
+
+`flutter_test` 是 SDK 包、用 `test_api: <精确版本>` 声明——它排在依赖图上游，
+于是 `test` 永远越不过 1.31.1。Dependabot 的解析环境与 CI 的 `FLUTTER_VERSION`
+引脚不同（它看到的是更新的 Flutter 依赖图），所以它算出的 lock 在本仓
+**不可落地**。
+
+这不是「Dependabot 不支持 Pub Workspaces」——实测它**能**正确处理单一
+lockfile（diff 里一行 `pubspec.yaml` 都没改）。
+
+#### 为什么不能用「CI 自动回写 lock」修
+
+两条看似更聪明的路子都不成立：
+
+1. **dependabot PR 上跑 `flutter pub get` 再提交回 lock**：回写只能把 `test`
+   改回 1.31.1，而下一轮 dependabot 仍会提 1.32.0 → **死循环**（PR 永远
+   被重开、永远红）。
+2. **在 dependabot PR 上放宽 `--enforce-lockfile`**：恰好把这条守卫要抓的
+   另一类缺陷（改了 `pubspec.yaml` 但忘了提交 lock）也一并放行——那才是它
+   存在的原因（issue #35）。
+
+#### 做法
+
+1. `dependabot.yml` 加 `ignore`：`test` / `test_api` / `test_core`。它们的版本
+   由 `FLUTTER_VERSION` 决定，**随 Flutter 升级自然前进**（`pub upgrade`
+   重新解析），不会永久停滞。
+2. `ci.yml` 的 `Resolve dependencies` 在失败后再跑一次非 enforce 的
+   `pub get`，打印 `pubspec.lock` 的实际差异 + 两条处置指引（自己改依赖 /
+   dependabot 的 PR）。**判定不变**，只把裸 `exit 65` 换成可操作的结论。
+
+#### 取舍
+
+- **不把 `FLUTTER_VERSION` 追到最新稳定版**去迁就 dependabot：CI 的可复现性
+  （§6.30）比「自动依赖升级能落地」更重要，且追版本只是把同一个问题推到
+  下一个小版本。
+- **不 ignore 整条链路**（`matcher` / `meta` / `collection` 等也被 SDK 引）：
+  那些没有出现「dependabot 提了装不上」的实测样本，先按出错的三条收口；
+  出现新的再补。
+- **不新增守卫**：这条规则的「真源」是 Flutter SDK 的 `flutter_test/pubspec.yaml`
+  与 CI 的 `FLUTTER_VERSION`，两者都在仓库外/远端；本地写一个「ignore 列表
+  必须含 X」的静态断言只会把版本信息复制一份，反而更难维护。
+
+#### 验证
+
+- 复现：`git checkout` 任一条 dependabot PR 的 lock（`test 1.32.0`）→
+  `flutter pub get --enforce-lockfile` 必失败，且失败信息正是上面那三行降级；
+- 反证：把锁改回 `test 1.31.1` 后同一命令通过；
+- 修复后：改 `dependabot.yml` 触发一轮 update job，不再为这三个包开 PR。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
@@ -827,7 +901,12 @@ debug 构建沙箱较松可能不暴露，**只在正式包上现形**——与�
 
 无法像 macOS 那样 ad-hoc 凑合——需 $99/年账号 + 签名证书 + 描述文件。
 
-### CI 成本参考（私有仓库 Free 计划 2,000 Linux 分钟/月）
+### CI 成本参考（镜像仓是 **public** → 分钟数不计量）
+
+⚠️ 下表是 2026-10 按「私有仓库 Free 2,000 分钟/月」算的；**2026-11 起
+GitHub 镜像仓是 public**（`/repos/.../actions` 的分钟数对 public 仓库不计费），
+故实际成本只剩**墙钟**：5 个 job 并行，整轮 ≈ 最慢那个（实测约 5.5 min）。
+表留着是因为「配额倍数」那一列仍能看出谁贵。
 
 | 平台 | 配额倍数 | 单次构建 | 月 20 次 |
 |---|---|---|---|

@@ -108,8 +108,38 @@ jobs:
       # `--enforce-lockfile`：lockfile 与 pubspec.yaml 不一致时显式失败，而不是
       # 默默重解析。提交 `pubspec.lock` 只保证「有一份」，不保证「CI 用的是它」
       # ——少了这个标志，新增依赖却忘了更新 lockfile 时 CI 仍会绿（见 issue #35）。
+      #
+      # ## 失败时给「可操作的结论」，而不是裸 exit 65
+      #
+      # 这条 step 以前只打 pub 自己的两句 `Unable to satisfy ...` + 一串
+      # `< pkg x (was y)`，**不说是哪个方向的问题**：是「忘了提交 lock」还是
+      # 「别人给的 lock 在本仓 Flutter 版本下根本不可满足」。dependabot 的 PR
+      # 正是后一种（`flutter_test` 钉死 `test_api`，见 dependabot.yml 头注与
+      # §6.93），看上去却和「代码有问题」一模一样。
+      #
+      # 故失败后再跑一次非 enforce 的 `pub get`，把**差异**（正确的 lock 长
+      # 什么样）与两条处置指引打出来。注意：这里只是**改诊断**，判定仍由
+      # `--enforce-lockfile` 做——不要在 dependabot PR 上放宽它。
       - name: Resolve dependencies
-        run: flutter pub get --enforce-lockfile
+        run: |
+          set -uo pipefail
+          if flutter pub get --enforce-lockfile > /tmp/pubget.log 2>&1; then
+            cat /tmp/pubget.log
+            exit 0
+          fi
+          cat /tmp/pubget.log
+          echo '::group::诊断：本仓 Flutter 版本下的实际解析结果'
+          flutter pub get || true
+          git --no-pager diff --stat -- pubspec.lock || true
+          git --no-pager diff -U0 -- pubspec.lock \
+            | grep -E '^[+-][[:space:]]{2}[a-z0-9_]+:|^[+-][[:space:]]{4}version:' \
+            | head -60 || true
+          echo '::endgroup::'
+          echo '❌ 提交的 pubspec.lock 与本仓 Flutter 版本解析出的结果不一致。'
+          echo '   1) 自己改了依赖 → 本地跑 `flutter pub get`，把 pubspec.lock 一起提交。'
+          echo '   2) dependabot 的 PR → 它可能提出被 flutter_test 钉死、本仓 Flutter'
+          echo '      装不上的版本（见 .github/dependabot.yml 头注 / §6.93），关闭该 PR。'
+          exit 1
 
       - name: Format check
         run: bash tools/check_format.sh

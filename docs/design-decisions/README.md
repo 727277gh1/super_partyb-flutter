@@ -21,7 +21,7 @@
 | [桌面平台集成](platform.md) | `platform.md` | §6.35 §6.41 §6.45 §6.55 §6.63 §6.68 §6.69 §6.75 |
 | [界面与交互](ui.md) | `ui.md` | §6.16 §6.32 §6.38 §6.40 §6.44 §6.46 §6.51 §6.54 §6.62 §6.70 §6.76 §6.77 §6.78 §6.79 §6.80 §6.81 §6.82 §6.83 §6.88 §6.89 §6.91 |
 | [测试与仓库守卫](testing.md) | `testing.md` | §6.13 §6.17 §6.19 §6.21 §6.22 §6.24 §6.25 §6.26 §6.27 |
-| [构建、分发与发布](build-and-release.md) | `build-and-release.md` | §6.29 §6.30 §6.31 §6.33 §6.61 §6.87 §7 §8 |
+| [构建、分发与发布](build-and-release.md) | `build-and-release.md` | §6.29 §6.30 §6.31 §6.33 §6.61 §6.87 §6.93 §7 §8 |
 | [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 |
 | [性能与内存](performance.md) | `performance.md` | §6.47 §6.59 §6.60 |
 
@@ -119,3 +119,4 @@
 | §6.90 | 切换账号时失效身份与缓存归属（issue #103） | [`auth.md`](auth.md) |
 | §6.91 | 对话列表刷新与 SSE 异步一致性（issue #104） | [`ui.md`](ui.md) |
 | §6.92 | 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（2026-11） | [`chat.md`](chat.md) |
+| §6.93 | dependabot 的 pub PR 永远红：lock 被 `flutter_test` 的精确 pin 判死（2026-11） | [`build-and-release.md`](build-and-release.md) |
