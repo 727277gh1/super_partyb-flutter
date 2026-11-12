@@ -21,6 +21,7 @@ export 'src/miniprogram_login.dart';
 export 'src/oidc_callback.dart';
 export 'src/oidc_client.dart';
 export 'src/pending_auth_store.dart';
+export 'src/qr_login.dart';
 export 'src/sse_client.dart';
 export 'src/session_credential.dart';
 export 'src/token_store.dart';

@@ -197,6 +197,28 @@ SSE 反复重连失败，而客户端此前只能重启。故补一条运行中�
 浏览器协议栈，token 交换走 CDN 也通）、探测端口仍取自编译期 host（别名表只
 换 host，不能表达「不同端口」）。
 
+#### 5.1.2 App 扫码登录（浏览器出码 → 手机 App 确认）
+
+**这条链路是客户端直连 IdP，不走网关的 `/pba` / `/ufs`。**
+
+| 方法 | 路径 | 认证 |
+|---|---|---|
+| GET | `{issuer}/api/v1/qr-login/sessions/{scene}/preview` | `Authorization: Bearer <IdP 会话 token>` |
+| POST | `{issuer}/api/v1/qr-login/sessions/{scene}/confirm` | 同上 |
+| POST | `{issuer}/api/v1/qr-login/sessions/{scene}/deny` | 同上 |
+
+- 端点根由 **issuer 推导**（`QrLoginClient.endpointBase`），**不硬编码域名**：
+  dever / bcc 各环境 issuer 不同，写死会静默打到错误环境；
+- 深链两种形态都要认（`QrLoginUri`）：`partyb://qrlogin?scene=<scene>` 与
+  `https://<host>/idp/qr/<scene>`。前者是浏览器「在本机 App 中打开」，
+  后者是二维码内容本身（系统相机扫码 → App Links 接管）；
+- **App 不接收、不解析、不存储任何 token**：登录态由浏览器与 IdP 之间流转，
+  App 只回答「确认 / 不是本人」；
+- `poll_secret` 只属于发起轮询的那台浏览器，App 全程不接触它。
+
+安全要点与完整状态机见 id-provider 的 `go/docs/qr-login.md`；服务端实现在
+`id-provider/go/internal/qrlogin`。
+
 ### 5.2 路由前缀（易踩坑）
 
 Go API 有**四套**前缀，**不是** `/api/chat`：
