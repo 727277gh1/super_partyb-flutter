@@ -69,6 +69,18 @@ class SpbRoutes {
   /// 与 [login] 同一约定：守卫与路由表用同一个常量。
   static const lock = '/lock';
 
+  /// 扫码登录确认页（「在手机上确认另一台设备的登录」）。
+  ///
+  /// 通过深链 `partyb://qrlogin?scene=...` 或
+  /// `https://<host>/idp/qr/<scene>` 进入，scene 以查询参数携带。
+  /// 不用 path 参数：scene 是 base64url，虽然目前不含 `/`，但把「可能含 `/`
+  /// 的任意 token」放进 path 段是等着某天被转义规则咬一口。
+  static const qrLogin = '/qr-login';
+
+  /// 确认页的完整位置（带 scene）。
+  static String qrLoginFor(String scene) =>
+      '$qrLogin?scene=${Uri.encodeQueryComponent(scene)}';
+
   static String chat(String groupId, {String? turn}) {
     final anchor = normalizeTurnAnchor(turn);
     return anchor == null
@@ -148,6 +160,29 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
       // 已锁定（issue #94）时先过门禁：深链不该成为绕过锁屏的入口——从通知 /
       // 浏览器点进来的链接会绕过 App 的冷启动流程。
       if (auth != null && auth.isLocked) return _lockLocation(null);
+      // 扫码登录深链（`partyb://qrlogin?scene=...`）：直接落到确认页。
+      //
+      // WHY 不能走下面的「外部入口→首页」分支：那会把刚打开的确认页顶掉，
+      // 用户看到的是「点链接回到了对话列表」，而浏览器那边还在等确认。
+      // WHY 在这里换算而不用 null：null 表示「不重定向」，go_router 会拿
+      // 带 scheme 的 location 去匹配路由表 → 匹配失败 → 一屏错误页。
+      // 未登录时不在这里拦：落到确认页后由路径分支把它带去登录页并记住 from。
+      final qrScene = QrLoginUri.parseScene(state.uri);
+      if (qrScene != null) {
+        final target = SpbRoutes.qrLoginFor(qrScene);
+        if (auth != null && auth.isAuthenticated) return target;
+        // 未登录：直接去登录页，并把**完整的**确认页地址（含 scene）作为
+        // from 带过去。
+        //
+        // WHY 不 return target 让守卫再跑一遍：实测（go_router 16）从带 scheme
+        // 的 location 重定向到站内路径后，守卫**不会**再对该目标执行一次，
+        // 于是未登录用户会直接看到确认页、点确认时拿 401。这里一次跳到位，
+        // 也不依赖那个实现细节。
+        //
+        // WHY 用 target 而不是 matchedLocation：matchedLocation 会丢掉
+        // `scene`，登录回来就成了「不知道要确认哪一次登录」。
+        return '${SpbRoutes.login}?from=${Uri.encodeComponent(target)}';
+      }
       return auth != null && auth.isAuthenticated
           ? SpbRoutes.conversations
           : SpbRoutes.login;
@@ -266,6 +301,13 @@ List<RouteBase> buildMobileRoutes() {
       path: SpbRoutes.lock,
       builder: (context, state) => const _SessionLockPage(),
     ),
+    // 扫码登录确认页也在 shell 之外：它来自外部深链，是一次性的「插入」动作，
+    // 不属于任何标签的导航栈；完成后应当离开，而不是「返回」到某个 tab。
+    GoRoute(
+      path: SpbRoutes.qrLogin,
+      builder: (context, state) =>
+          _QrLoginPage(scene: state.uri.queryParameters['scene'] ?? ''),
+    ),
     StatefulShellRoute.indexedStack(
       builder: (context, state, navigationShell) =>
           _AppShell(navigationShell: navigationShell),
@@ -358,6 +400,33 @@ List<RouteBase> buildMobileRoutes() {
           _WorkDetailPage(workId: state.pathParameters['workId'] ?? ''),
     ),
   ];
+}
+
+/// 扫码登录确认页（接线到 `QrLoginClient`）。
+///
+/// 页面本身在 `spb_features`（不依赖 Riverpod / 插件，可独立 widget test），
+/// 这里只负责把三个动作接到真实 API 上。
+class _QrLoginPage extends ConsumerWidget {
+  const _QrLoginPage({required this.scene});
+
+  final String scene;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final client = ref.watch(qrLoginClientProvider);
+    return QrLoginConfirmPage(
+      scene: scene,
+      // scene 为空说明深链被截断：onLoad 会直接抛出可读文案（不发请求）。
+      onLoad: () => client.preview(scene),
+      onConfirm: () => client.confirm(scene),
+      onDeny: () => client.deny(scene),
+      // 完成（确认/拒绝）后离开确认页：它是从外部插入的一次性动作，
+      // 留在栈上会让用户按返回又看到「已确认」的空页面。
+      onDone: (_) {
+        if (context.mounted) Navigator.of(context).maybePop();
+      },
+    );
+  }
 }
 
 /// 登录页（接线到认证用例）。

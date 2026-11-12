@@ -157,6 +157,62 @@ void main() {
     });
   });
 
+  group('AndroidManifest：App 扫码登录深链', () {
+    late String xml;
+
+    setUp(() {
+      xml = manifest.readAsStringSync();
+    });
+
+    test('声明了 partyb://qrlogin（与 QrLoginUri 常量一致）', () {
+      // 这两处不一致的表现是「浏览器点了『在本机打开 App』毫无反应」——
+      // 浏览器侧无法回报错误，客户端也不崩，只能靠这条断言拦住。
+      expect(
+        xml,
+        contains('android:scheme="${QrLoginUri.scheme}"'),
+        reason: 'scheme 与 QrLoginUri.scheme 不一致',
+      );
+      expect(
+        xml,
+        contains('android:host="${QrLoginUri.host}"'),
+        reason: 'host 与 QrLoginUri.host 不一致（App 会收不到扫码链接）',
+      );
+    });
+
+    test('claimed HTTPS 形态声明了 {issuer 前缀}/qr/ 的 pathPrefix', () {
+      // 二维码的**内容**就是这个地址：系统相机扫码后由 App Links 接管，
+      // 未安装 App 时才落到 IdP 的说明页。漏这条 = 只能手动点浏览器按钮。
+      expect(QrLoginUri.httpsPathPrefix, '/idp/qr/');
+      expect(
+        xml,
+        contains('android:pathPrefix="${QrLoginUri.httpsPathPrefix}"'),
+        reason: 'pathPrefix 与 QrLoginUri.httpsPathPrefix 不一致',
+      );
+    });
+
+    test('每个跑过 OIDC 的 host 都有对应的 /idp/qr/ filter', () {
+      final qrFilters = _autoVerifyFilters(xml)
+          .where((f) => f.contains('android:pathPrefix="/idp/qr/"'))
+          .toList();
+      final hosts = qrFilters.expand(_hostsOf).toSet();
+      for (final host in ['tbcc.atjog.com', 'dever.atjog.com']) {
+        expect(
+          hosts,
+          contains(host),
+          reason: '缺少 $host 的扫码登录 filter：该域名下扫码不会唤起 App',
+        );
+      }
+    });
+
+    test('扫码登录的 https filter 也遵守「一条一 host」', () {
+      // 与 OIDC 回调同理：Android 11 及以下一条 filter 内任一 host 验证失败
+      // 会让整条失效。这里单独断言，避免将来新增 host 时踩这个坑。
+      for (final filter in _autoVerifyFilters(xml)) {
+        expect(_hostsOf(filter), hasLength(1), reason: filter);
+      }
+    });
+  });
+
   group('iOS Info.plist', () {
     test('声明了同一 scheme（iOS 无 claimed HTTPS 前的最低要求）', () {
       expect(plist.existsSync(), isTrue, reason: '找不到 ${plist.path}');

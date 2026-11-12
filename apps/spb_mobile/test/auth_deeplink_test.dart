@@ -340,6 +340,77 @@ void main() {
     });
   });
 
+  group('AuthDeepLinkReceiver：扫码登录深链', () {
+    test('partyb://qrlogin?scene=... 只投递 scene，不做 token 交换', () async {
+      final source = _FakeDeepLinkSource();
+      final rec = _Recorder();
+      final scenes = <String>[];
+      final store = await _newStore(pending: _pending());
+      final receiver = AuthDeepLinkReceiver(
+        source: source,
+        onCode: rec.onCode,
+        pendingState: store.consume,
+        onError: rec.onError,
+        onQrLoginScene: scenes.add,
+      );
+
+      await receiver.start();
+      source.controller.add(Uri.parse('partyb://qrlogin?scene=abc-123'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(scenes, ['abc-123']);
+      // 关键断言：scene 不是授权码，不能走进 OIDC 换 token 的分支。
+      expect(rec.handled, isEmpty);
+      expect(rec.errors, isEmpty);
+      await receiver.dispose();
+      await source.controller.close();
+    });
+
+    test('claimed HTTPS 形态（系统相机扫码）同样投递 scene', () async {
+      final source = _FakeDeepLinkSource(
+        initial: Uri.parse('https://tbcc.atjog.com/idp/qr/scene_https'),
+      );
+      final scenes = <String>[];
+      final store = await _newStore();
+      final receiver = AuthDeepLinkReceiver(
+        source: source,
+        onCode: (_, _) async => null,
+        pendingState: store.consume,
+        onQrLoginScene: scenes.add,
+      );
+
+      await receiver.start();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(scenes, ['scene_https']);
+      await receiver.dispose();
+    });
+
+    test('缺 scene 的扫码链接上报错误而不是静默忽略', () async {
+      final source = _FakeDeepLinkSource();
+      final rec = _Recorder();
+      final scenes = <String>[];
+      final store = await _newStore();
+      final receiver = AuthDeepLinkReceiver(
+        source: source,
+        onCode: rec.onCode,
+        pendingState: store.consume,
+        onError: rec.onError,
+        onQrLoginScene: scenes.add,
+      );
+
+      await receiver.start();
+      source.controller.add(Uri.parse('partyb://qrlogin'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(scenes, isEmpty);
+      expect(rec.errors, hasLength(1));
+      expect(rec.errors.single, contains('重新出码'));
+      await receiver.dispose();
+      await source.controller.close();
+    });
+  });
+
   group('mobileSignIn', () {
     OidcConfig config() => const OidcConfig(
       issuer: 'https://app.example.com/idp',

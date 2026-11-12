@@ -117,6 +117,50 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="dever.atjog.com" android:path="/idp/app/callback"/>
             </intent-filter>
+            <!--
+              App 扫码登录（自定义 scheme）。
+
+              ⚠️ 与 `packages/spb_api/lib/src/qr_login.dart` 的 QrLoginUri 常量一致：
+              scheme=partyb, host=qrlogin, query 参数 scene。
+
+              链路：浏览器登录页出码 → 用户点「在本机 App 中打开」→ 本连接唤起
+              App → App 用已登录身份 POST /confirm → 浏览器轮询到 confirmed 并登录。
+
+              ## 为什么二维码里不放 token
+
+              scene 是**授权句柄**，不是凭据：拿到它什么也换不到，必须有已登录的
+              账号主人在 App 里点头。这也意味着「任何人能把用户引到这个 App」都不
+              构成提权（最坏情况是弹一条「扫码请求不存在」）。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="partyb" android:host="qrlogin"/>
+            </intent-filter>
+            <!--
+              App 扫码登录（claimed HTTPS）：二维码的**内容本身**就是这条地址。
+
+              两个入口都指向同一个 scene：
+                - 同机：浏览器按钮直接跳 partyb://qrlogin（不上网）；
+                - 跨设备：另一台手机用系统相机扫码 → 打开本地址 → App Links 接管；
+                  App 未安装时才会落到 IdP 的说明页（`{issuer 前缀}/qr/{scene}`）。
+
+              与上面的 OIDC 回调同理，**一个 host 一条** filter（Android 11 及以下
+              一条 filter 内任一 host 失败则整条失效）。pathPrefix 用 `/idp/qr/`。
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="tbcc.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

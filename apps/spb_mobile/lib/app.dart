@@ -60,6 +60,13 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   @override
   void initState() {
     super.initState();
+    // 冷启动场景：把应用拉起的那个深链在 `main.dart` 里就被处理过
+    // （`receiver.start()` 是 await 的），所以 `ref.listen` 观察不到这次变化，
+    // 必须显式读一次初值。
+    final initialScene = ref.read(qrLoginSceneProvider);
+    if (initialScene != null && initialScene.isNotEmpty) {
+      _openQrLogin(initialScene);
+    }
     // 离线写队列（issue #30）：与桌面端同构的预热（见 `apps/spb_desktop/lib/app.dart`
     // 同一行的说明）。
     //
@@ -128,8 +135,36 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
     super.dispose();
   }
 
+  /// 打开扫码登录确认页。
+  ///
+  /// - 用 `go` 而不是 `push`：确认页来自外部、是一次性动作，`push` 会在用户
+  ///   原来的页面上再压一层，完成后按返回又回到确认页；
+  /// - 推迟到 post-frame：`initState` 期间路由栈尚未就绪，build 期间更不能改它；
+  /// - 导航后立刻 `consume()`：让同一条深链被点第二次时仍能再次触发。
+  void _openQrLogin(String scene) {
+    final target = SpbRoutes.qrLoginFor(scene);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _router.go(target);
+      ref.read(qrLoginSceneProvider.notifier).consume();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    // 扫码登录深链 → 导航到确认页。
+    //
+    // ## 为什么导航只在这一个地方
+    //
+    // 深链由 `AuthDeepLinkReceiver` 在 `main.dart` 收到（那时 `GoRouter` 还不
+    // 存在），它只把 scene 投进 `qrLoginSceneProvider`。这里既是冷启动的入口
+    // （`initState` 里读初值），也是运行中的入口（`ref.listen`），两条路径
+    // 走同一个 [_openQrLogin]。
+    ref.listen<String?>(qrLoginSceneProvider, (previous, next) {
+      if (next == null || next.isEmpty) return;
+      _openQrLogin(next);
+    });
+
     return MaterialApp.router(
       title: 'Super PartyB',
       debugShowCheckedModeBanner: false,

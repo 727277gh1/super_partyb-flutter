@@ -77,6 +77,7 @@ class AuthDeepLinkReceiver {
     required this.onCode,
     required this.pendingState,
     this.onError,
+    this.onQrLoginScene,
   });
 
   final DeepLinkSource source;
@@ -100,6 +101,22 @@ class AuthDeepLinkReceiver {
 
   /// 错误上报（用户可见文案）。
   final void Function(String message)? onError;
+
+  /// 收到「App 扫码登录」深链时回调（scene 已解析）。
+  ///
+  /// ## 为什么并入本接收器而不是另起一个
+  ///
+  /// `app_links` 的 `uriLinkStream` 是插件单例上的流；两处各自 `listen` 取决于
+  /// 实现是否为 broadcast，一旦不是就会抛「Stream has already been listened
+  /// to」——而这种崩溃只在新装应用第一次收到深链时发生。并进同一个 `_handle`
+  /// 就只有一个订阅者。
+  ///
+  /// ## 为什么不要求已登录
+  ///
+  /// 未登录时也要把 scene 交上去：路由守卫会先带用户去登录页（并把目标路径
+  /// 带在 `from` 里），登录完成后再回到确认页。在这里静默丢掉会让用户看到
+  /// 「点了链接毫无反应」，而去重/鉴权都是路由层的职责。
+  final void Function(String scene)? onQrLoginScene;
 
   StreamSubscription<Uri>? _sub;
 
@@ -127,6 +144,19 @@ class AuthDeepLinkReceiver {
   }
 
   Future<void> _handle(Uri uri) async {
+    // App 扫码登录深链：交给上层导航到确认页。它**不是** OIDC 回调，
+    // 不能走下面的 token 交换逻辑（scene 不是授权码）。
+    if (QrLoginUri.matches(uri)) {
+      final scene = QrLoginUri.parseScene(uri);
+      if (scene == null) {
+        // 链接形态对但缺 scene：多半是被截断的链接，不该静默吞掉。
+        onError?.call('扫码登录链接不完整，请在原页面重新出码');
+        return;
+      }
+      onQrLoginScene?.call(scene);
+      return;
+    }
+
     if (!OidcCallbackUri.matches(uri)) {
       // 不是本应用的 OIDC 回调：静默忽略。
       SpbLog.debug('忽略非 OIDC 深链', {'scheme': uri.scheme, 'host': uri.host});

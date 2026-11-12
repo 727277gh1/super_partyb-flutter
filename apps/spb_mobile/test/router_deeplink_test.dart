@@ -32,6 +32,12 @@ void main() {
           path: SpbRoutes.settings,
           builder: (_, _) => const Text('SETTINGS'),
         ),
+        // 扫码登录确认页：用 hint 文本渲染，便于断言「重定向到了确认页」。
+        GoRoute(
+          path: SpbRoutes.qrLogin,
+          builder: (_, state) =>
+              Text('QR:${state.uri.queryParameters['scene']}'),
+        ),
       ],
     );
     addTearDown(router.dispose);
@@ -45,6 +51,66 @@ void main() {
 
   /// go_router 的默认错误页标题（`MaterialErrorScreen`）。
   const errorPageTitle = 'Page Not Found';
+
+  group('扫码登录深链', () {
+    testWidgets('已登录 → 直接落到确认页（不能被「外部入口」分支送去首页）', (tester) async {
+      await pumpApp(
+        tester,
+        app(
+          auth: const AuthState(status: AuthStatus.authenticated),
+          initialLocation: 'partyb://qrlogin?scene=abc-123',
+        ),
+      );
+
+      // WHY 断言 scene 而不是只断言页面：丢了 scene 就等于「用户点了链接但
+      // 确认页不知道要确认哪一次登录」，界面上是一句话说不清的失败。
+      expect(find.text('QR:abc-123'), findsOneWidget);
+      expect(find.text('HOME'), findsNothing);
+      expect(find.text(errorPageTitle), findsNothing);
+    });
+
+    testWidgets('claimed HTTPS 形态同样落到确认页', (tester) async {
+      await pumpApp(
+        tester,
+        app(
+          auth: const AuthState(status: AuthStatus.authenticated),
+          initialLocation: 'https://tbcc.atjog.com/idp/qr/scene_https',
+        ),
+      );
+
+      expect(find.text('QR:scene_https'), findsOneWidget);
+    });
+
+    testWidgets('未登录 → 先去登录页，并记住确认页作为回跳目标', (tester) async {
+      await pumpApp(
+        tester,
+        app(
+          auth: const AuthState(status: AuthStatus.unauthenticated),
+          initialLocation: 'partyb://qrlogin?scene=abc-123',
+        ),
+      );
+
+      expect(find.text('LOGIN'), findsOneWidget);
+      // from 必须带上 scene：登录完成后才能回到同一个确认页（否则登录完
+      // 用户回到对话列表，浏览器的二维码已经过期）。
+      final location = GoRouter.of(tester.element(find.text('LOGIN'))).state.uri
+          .toString();
+      expect(location, contains('from='));
+      expect(Uri.decodeComponent(location), contains('scene=abc-123'));
+    });
+
+    testWidgets('已锁定 → 先过门禁（深链不能绕过锁屏）', (tester) async {
+      await pumpApp(
+        tester,
+        app(
+          auth: AuthState.locked,
+          initialLocation: 'partyb://qrlogin?scene=abc-123',
+        ),
+      );
+
+      expect(find.text('QR:abc-123'), findsNothing);
+    });
+  });
 
   group('OIDC 回调深链', () {
     testWidgets('冷启动（会话未判定）→ 登录页，不渲染 go_router 错误页', (tester) async {

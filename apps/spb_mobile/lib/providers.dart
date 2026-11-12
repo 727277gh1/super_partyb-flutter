@@ -463,6 +463,9 @@ final authDeepLinkReceiverProvider = Provider<AuthDeepLinkReceiver>((ref) {
       // 把失败原因显示在登录页（它 watch 的就是 authStateProvider）。
       ref.read(authStateProvider.notifier).markUnauthenticated(message);
     },
+    // App 扫码登录深链 → 投递 scene，由根组件的监听器导航到确认页。
+    onQrLoginScene: (scene) =>
+        ref.read(qrLoginSceneProvider.notifier).set(scene),
   );
   ref.onDispose(receiver.dispose);
   return receiver;
@@ -519,6 +522,46 @@ final deepLinkSourceProvider = Provider<DeepLinkSource>((ref) {
 final authStateProvider = NotifierProvider<AuthStateNotifier, AuthState>(
   AuthStateNotifier.new,
 );
+
+/// 扫码登录 API 客户端（直连 IdP，不走网关）。
+///
+/// 端点由 issuer 推导（`{issuer}/api/v1/qr-login/sessions`），不硬编码域名。
+/// tokenProvider 复用会话管理器：确认动作需要 IdP access token 作为 Bearer。
+final qrLoginClientProvider = Provider<QrLoginClient>((ref) {
+  final config = ref.watch(oidcConfigProvider);
+  final manager = ref.watch(sessionManagerProvider);
+  return QrLoginClient(
+    issuer: Uri.parse(config.issuer),
+    tokenProvider: manager.currentAccessToken,
+  );
+});
+
+/// 等待处理的扫码登录 scene（由深链接收器写入）。
+///
+/// ## 为什么经一个 provider 中转，而不是直接导航
+///
+/// 深链接收器在 `main.dart` 里、`GoRouter` 还没建——它拿不到 router。
+/// 把它写成「接收器只投递事实、根 build 负责导航」后：
+/// - 导航只在一个地方发生（`app.dart`），不会两处抢路由；
+/// - 冷启动与运行中两条路径走同一段代码（区别只在谁先触发 rebuild）。
+final qrLoginSceneProvider = NotifierProvider<QrLoginSceneNotifier, String?>(
+  QrLoginSceneNotifier.new,
+);
+
+class QrLoginSceneNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  /// 投递一个待处理的 scene。
+  ///
+  /// **不做同值去重**：消费方（`app.dart`）导航后立刻 `consume()`，所以同一
+  /// 条深链被点第二次时状态确实发生了变化，必须能再次触发导航。去重会让
+  /// 「用户先关掉确认页、再点一次链接」毫无反应。
+  void set(String scene) => state = scene;
+
+  /// 取走并清空（导航完成后调用，避免返回时又被弹回确认页）。
+  void consume() => state = null;
+}
 
 /// 生物识别门禁（issue #94）。
 ///
