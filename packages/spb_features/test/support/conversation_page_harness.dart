@@ -253,6 +253,10 @@ Future<void> pumpPage(
   Future<void> Function(String)? onSend,
   Future<void> Function(String text, String? agentId)? onRetryTurn,
   bool enableSearch = false,
+
+  /// 窄屏溢出菜单的调用方条目（issue #31）。页面自己还会追加「轮次列表」
+  /// （§6.94）与「在本对话中搜索」。
+  List<ConversationOverflowItem>? overflowItems,
   Future<void> Function(String)? onCancelTurn,
   Future<List<int>?> Function(AgentFileItem file)? onLoadThumbnailAgentFile,
   Future<void> Function(AgentFileItem file)? onDownloadAgentFile,
@@ -319,6 +323,7 @@ Future<void> pumpPage(
         onSend: onSend,
         onRetryTurn: onRetryTurn,
         enableSearch: enableSearch,
+        overflowItems: overflowItems,
         onCancelTurn: onCancelTurn,
         onLoadThumbnailAgentFile: onLoadThumbnailAgentFile,
         onDownloadAgentFile: onDownloadAgentFile,

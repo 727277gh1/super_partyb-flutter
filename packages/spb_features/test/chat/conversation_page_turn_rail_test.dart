@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -24,6 +25,9 @@ import '../support/conversation_page_harness.dart';
 ///
 /// ⚠️ 本机是无头 LXC：这些用例证明状态机与几何判据，**不**证明真机上 hover
 /// 与跳转的观感（见 `docs/development.md` 的验证边界）。
+/// 溢出菜单里那个无关条目的动作（只为了凑出「有调用方条目」的形态）。
+void _noop() {}
+
 void main() {
   setUpHarness();
   tearDownHarness();
@@ -142,17 +146,159 @@ void main() {
     // 起始态是「跟随最新」：视口在底部。
     expect(timelinePosition(tester).extentAfter, lessThan(2));
 
-    await tester.tap(find.byKey(const ValueKey('turn-rail-tick-$turnA')));
+    // 鼠标点（`kind: mouse`）：桌面语义是直跳。触屏点会打开列表（见下一条用例）
+    // ——`tester.tap` 默认是 touch，这里必须显式声明，否则断言的语义会随实现漂移。
+    await tester.tap(
+      find.byKey(const ValueKey('turn-rail-tick-$turnA')),
+      kind: PointerDeviceKind.mouse,
+    );
     await tester.pumpAndSettle();
 
     // 真的跳上去了（不是「点了没反应」）：贴顶落到该轮、下方仍有大量内容。
-    expect(tester.getTopLeft(find.text('第 0 轮')).dy, lessThan(120));
+    // 限定在时间线内找：鼠标点按会让指针停在刻度列上 → hover 面板里也有
+    // 一份「第 0 轮」文本，直接 `find.text` 会命中两个。
+    expect(
+      tester
+          .getTopLeft(
+            find.descendant(
+              of: find.byType(CustomScrollView),
+              matching: find.text('第 0 轮'),
+            ),
+          )
+          .dy,
+      lessThan(120),
+    );
     expect(timelinePosition(tester).extentAfter, greaterThan(500));
     // 该轮被高亮，且出现「回到最新」出口（复用锚点态，不是另造一套状态）。
     expect(
       find.byKey(ValueKey('turn-highlight-${ids.first[0]}')),
       findsOneWidget,
     );
+    expect(
+      find.byKey(const ValueKey('conversation-back-to-latest')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('窄屏：刻度条不出现，但「更多」里有轮次列表，选中即跳转', (tester) async {
+    tester.view.physicalSize = const Size(430, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+
+    final ids = <List<String>>[];
+    for (var i = 0; i < 6; i++) {
+      ids.add(
+        await pushTurn(
+          tester,
+          turnId: i == 0 ? turnA : hex(i),
+          input: '第 $i 轮',
+          seq: i * 10 + 1,
+        ),
+      );
+    }
+    // 窄屏没有 AppBar 图标的位置，页面靠调用方交来的 overflowItems 摆「更多」。
+    await pumpPage(
+      tester,
+      overflowItems: const [
+        ConversationOverflowItem(
+          key: ValueKey('menu-test-item'),
+          icon: Icons.settings,
+          label: '测试项',
+          onTap: _noop,
+        ),
+      ],
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('turn-rail-ticks')), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('conversation-overflow-menu')));
+    await tester.pumpAndSettle();
+    final menuEntry = find.byKey(const ValueKey('menu-conversation-turns'));
+    expect(menuEntry, findsOneWidget);
+
+    await tester.tap(menuEntry);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('turn-list-sheet')), findsOneWidget);
+
+    // 选中最早那一轮：弹层关闭并**真的落位**（复用锚点状态机）。
+    await tester.tap(find.byKey(const ValueKey('turn-list-row-$turnA')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('turn-list-sheet')), findsNothing);
+    expect(
+      find.byKey(ValueKey('turn-highlight-${ids.first[0]}')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('conversation-back-to-latest')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('只有一轮时「更多」里不摆轮次列表（点了也没变化）', (tester) async {
+    tester.view.physicalSize = const Size(430, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    await pushTurn(tester, turnId: turnA, input: '只此一轮', seq: 1);
+    await pumpPage(
+      tester,
+      overflowItems: const [
+        ConversationOverflowItem(
+          key: ValueKey('menu-test-item'),
+          icon: Icons.settings,
+          label: '测试项',
+          onTap: _noop,
+        ),
+      ],
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('conversation-overflow-menu')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('menu-conversation-turns')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('menu-conversation-search')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('宽屏触屏（平板 / 折叠屏展开）点刻度：打开列表而不是盲跳', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    for (var i = 0; i < 6; i++) {
+      await pushTurn(
+        tester,
+        turnId: i == 0 ? turnA : hex(i),
+        input: '第 $i 轮',
+        seq: i * 10 + 1,
+      );
+    }
+    await pumpPage(tester);
+    await tester.pumpAndSettle();
+
+    // 刻度条在（宽度够），但没有 hover 面板可看；手指点刻度 → 打开列表。
+    expect(find.byKey(const ValueKey('turn-rail-ticks')), findsOneWidget);
+    await tester.tap(
+      find.byKey(ValueKey('turn-rail-tick-${hex(3)}')),
+      kind: PointerDeviceKind.touch,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('turn-list-sheet')), findsOneWidget);
+    // 弹层里点选才跳（两段式，不是第一下就跳）。
+    await tester.tap(find.byKey(ValueKey('turn-list-row-${hex(3)}')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('turn-list-sheet')), findsNothing);
     expect(
       find.byKey(const ValueKey('conversation-back-to-latest')),
       findsOneWidget,
@@ -178,15 +324,21 @@ void main() {
     await pumpPage(tester);
     await tester.pumpAndSettle();
 
-    // 先跳到首轮（进入锚点态），再点最后一格。
-    await tester.tap(find.byKey(const ValueKey('turn-rail-tick-$turnA')));
+    // 先跳到首轮（进入锚点态），再点最后一格。两处都是鼠标语义。
+    await tester.tap(
+      find.byKey(const ValueKey('turn-rail-tick-$turnA')),
+      kind: PointerDeviceKind.mouse,
+    );
     await tester.pumpAndSettle();
     expect(
       find.byKey(const ValueKey('conversation-back-to-latest')),
       findsOneWidget,
     );
 
-    await tester.tap(find.byKey(ValueKey('turn-rail-tick-${hex(9)}')));
+    await tester.tap(
+      find.byKey(ValueKey('turn-rail-tick-${hex(9)}')),
+      kind: PointerDeviceKind.mouse,
+    );
     await tester.pumpAndSettle();
 
     // 回到最新 = 退出锚点态：出口消失、视口回到底部。

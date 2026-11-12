@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
 import 'package:spb_design/spb_design.dart';
@@ -71,17 +72,24 @@ const double kTurnRailPanelRowHeight = 26;
 /// 一类操作，而这个面板出现得越「干脆」越像滚动条而非内容。附带好处是
 /// `MediaQuery.disableAnimations` 无需特判。
 ///
-/// ## 触屏端
+/// ## 触屏端（平板 / 折叠屏展开 / 横屏手机，宽度 ≥ 720）
 ///
-/// 没有 hover 就没有面板，但**点横杠仍然可用**（跳转不依赖面板）。窄屏是否
-/// 显示由调用方按宽度决定（见 `ConversationPage` 的 `SpbBreakpoints.compact`）：
-/// 390dp 的手机上这条 16px 的列会挤压正文，不值得。
+/// 没有 hover 就没有面板，而**点横杠仍然可用**（跳转不依赖面板）。但「只能盲点」
+/// 不是合格的导航：用户看不到各轮摘要，也数不出共有几轮。故调用方可以传
+/// [onOpenList]：**触摸**点刻度 → 打开整屏列表（[showTurnListSheet]，48dp 行高），
+/// 鼠标点刻度 → 维持直跳。判据用 `TapDownDetails.kind`（输入设备自带），不做
+/// 平台嗅探——同一台设备接上鼠标时行为会自动切回桌面语义。
+///
+/// 窄屏（< 720）由调用方决定不显示（见 `ConversationPage`）：390dp 的手机上这条
+/// 16px 的列会挤压正文，且与系统边缘返回手势抢；那里的入口是「更多」菜单里的
+/// 轮次列表。
 class TurnRail extends StatefulWidget {
   const TurnRail({
     super.key,
     required this.entries,
     required this.activeTurnId,
     required this.onJump,
+    this.onOpenList,
   });
 
   /// 轮次列表（**旧 → 新**，见 [buildTurnRailEntries]）。
@@ -92,6 +100,9 @@ class TurnRail extends StatefulWidget {
 
   /// 点了某一格（传归一化后的 turn id）。
   final void Function(String turnId) onJump;
+
+  /// 触屏点刻度时改为打开列表（见类文档「触屏端」）。null = 触摸也直跳。
+  final VoidCallback? onOpenList;
 
   @override
   State<TurnRail> createState() => _TurnRailState();
@@ -110,6 +121,12 @@ class _TurnRailState extends State<TurnRail> {
   /// 触发 `onExit` → `setState` → 面板移除 → 指针落在正文上 → 再也回不来）。
   bool _overTicks = false;
   bool _overPanel = false;
+
+  /// 最近一次按下的设备类型（见 [TurnRail.onOpenList]）。
+  ///
+  /// 只用于**这一次**点按的语义判定，不缓存成「本机是触屏」之类的长期结论：
+  /// 判定依据应当是当前这次输入，而不是设备能力（后者没有可靠的跨平台 API）。
+  PointerDeviceKind? _lastTapKind;
 
   bool get _expanded => _overTicks || _overPanel;
 
@@ -184,6 +201,23 @@ class _TurnRailState extends State<TurnRail> {
     controller.jumpTo(target);
   }
 
+  /// 刻度被点：触摸改为打开列表，鼠标直跳（见 [TurnRail.onOpenList]）。
+  void _handleTickTap(TurnRailEntry entry) {
+    final onOpenList = widget.onOpenList;
+    // null（还没点过任何一格）按非触摸处理：鼠标用户点第一下就该直跳。
+    final isTouch = switch (_lastTapKind) {
+      PointerDeviceKind.touch ||
+      PointerDeviceKind.stylus ||
+      PointerDeviceKind.invertedStylus => true,
+      _ => false,
+    };
+    if (isTouch && onOpenList != null) {
+      onOpenList();
+      return;
+    }
+    widget.onJump(entry.turnId);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.entries.isEmpty) return const SizedBox.shrink();
@@ -235,7 +269,10 @@ class _TurnRailState extends State<TurnRail> {
           return GestureDetector(
             key: ValueKey('turn-rail-tick-${entry.turnId}'),
             behavior: HitTestBehavior.opaque,
-            onTap: () => widget.onJump(entry.turnId),
+            // `onTapDown` 自带输入设备类型：这是判「该直跳还是该开列表」的
+            // 唯一可靠依据（见 [_handleTickTap]）。
+            onTapDown: (details) => _lastTapKind = details.kind,
+            onTap: () => _handleTickTap(entry),
             child: Align(
               alignment: Alignment.centerRight,
               // 横杠：激活的那根更长更亮。长度差而非只换颜色，是因为色差在

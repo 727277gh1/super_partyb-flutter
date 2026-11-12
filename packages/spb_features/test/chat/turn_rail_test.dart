@@ -188,6 +188,49 @@ void main() {
     expect(panel.controller!.position.pixels, greaterThan(0));
   });
 
+  testWidgets('触屏点刻度：改为打开列表（没有 hover 也要能看摘要）', (tester) async {
+    final entries = entriesOf(3);
+    String? jumped;
+    var openedList = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              height: 400,
+              child: TurnRail(
+                entries: entries,
+                activeTurnId: turnA,
+                onJump: (turnId) => jumped = turnId,
+                onOpenList: () => openedList++,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // 触摸（`kind: touch`）→ 开列表，**不**直跳：手指看不到 hover 面板，
+    // 盲跳等于让用户凭猜测点格子。
+    await tester.tap(
+      find.byKey(ValueKey('turn-rail-tick-${entries[1].turnId}')),
+      kind: PointerDeviceKind.touch,
+    );
+    await tester.pump();
+    expect(openedList, 1);
+    expect(jumped, isNull);
+
+    // 同一根横杠用鼠标点 → 直跳（接上鼠标的平板自动回到桌面语义）。
+    await tester.tap(
+      find.byKey(ValueKey('turn-rail-tick-${entries[1].turnId}')),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump();
+    expect(jumped, entries[1].turnId);
+    expect(openedList, 1);
+  });
+
   testWidgets('没有轮次时不占位（空对话不该出现一条空刻度列）', (tester) async {
     await pumpRail(tester, entries: const []);
 

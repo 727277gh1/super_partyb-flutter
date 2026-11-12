@@ -37,6 +37,7 @@ import 'thumbnail_memo.dart';
 import 'timeline_extent_cache.dart';
 import 'tool_call_batch_card.dart';
 import 'tool_call_tile.dart';
+import 'turn_list_sheet.dart';
 import 'turn_rail.dart';
 import 'turn_status.dart';
 import 'user_message_bubble.dart';
@@ -2099,7 +2100,30 @@ class _ConversationPageState extends State<ConversationPage>
     return null;
   }
 
-  /// 跳到某一轮（刻度条 / 面板点击）。
+  /// 打开轮次列表弹层（触屏 / 窄屏的刻度条等价物，§6.94）。
+  ///
+  /// ## 为什么弹层只「返回选中值」而不自己跳
+  ///
+  /// 跳转要接的是页面这套状态机（[_anchoredTurnId] + [_following] +
+  /// [_scrollToTurn]），弹层在 `showModalBottomSheet` 的另一个 context 里，拿不
+  /// 到它。让弹层只回传 `turnId`，页面在这里 await 后调 [_jumpToTurn]，刻度条、
+  /// hover 面板、列表三处就共用同一条落位路径（不可能出现「列表跳的与刻度条跳的
+  /// 不一样」）。
+  Future<void> _openTurnList() async {
+    final entries = _railEntries();
+    if (entries.isEmpty) return;
+    final turnId = await showTurnListSheet(
+      context,
+      entries: entries,
+      // 没结论时退回锚点：两者语义都是「我现在在哪一轮」。
+      activeTurnId: _activeTurnId ?? normalizeTurnAnchor(_anchoredTurnId),
+    );
+    // 弹层是异步等待：期间用户可能已离开本页（切换对话 / 退回列表）。
+    if (!mounted || turnId == null) return;
+    await _jumpToTurn(turnId);
+  }
+
+  /// 跳到某一轮（刻度条 / 面板 / 列表点击）。
   ///
   /// ## 与深链锚点的关系
   ///
@@ -2726,6 +2750,11 @@ class _ConversationPageState extends State<ConversationPage>
       phase: sameTurn ? progress.phase : null,
       isPreparing: awaitingTurnId.isNotEmpty,
     );
+    // 轮次列表入口（§6.94）：只有一轮时没有导航价值，与刻度条同一门槛，
+    // 免得「更多」菜单里冒出一个点了也毫无变化的条目。
+    final turnsEntry = _railEntries().length >= 2
+        ? () => unawaited(_openTurnList())
+        : null;
 
     return Scaffold(
       appBar: title == null
@@ -2768,10 +2797,13 @@ class _ConversationPageState extends State<ConversationPage>
                 // 图标（没地方），但功能不能因此消失。两项的 `key` 不同
                 // （`conversation-search-open` vs `menu-conversation-search`），
                 // 故测试能分别断言两种布局下的路径。
-                if (widget.overflowItems != null)
+                if (widget.overflowItems != null || turnsEntry != null)
                   _OverflowMenu(
-                    items: widget.overflowItems!,
+                    items: widget.overflowItems,
                     onSearch: _openSearch,
+                    // 轮次列表（§6.94）：窄屏没有刻度条，这是唯一的会话内
+                    // 跳轮入口。它不依赖 `_group`，门槛与刻度条一致（≥2 轮）。
+                    onTurns: turnsEntry,
                   ),
                 StreamBuilder<SseState>(
                   stream: widget.controller.connectionState,
@@ -2859,6 +2891,10 @@ class _ConversationPageState extends State<ConversationPage>
                           entries: railEntries,
                           activeTurnId: _activeTurnId,
                           onJump: (turnId) => unawaited(_jumpToTurn(turnId)),
+                          // 触屏（≥720dp 的平板 / 折叠屏展开 / 横屏手机）：没有
+                          // hover 就没有摘要面板，点刻度改成打开整屏列表。鼠标
+                          // 仍直跳（判据是 taps 自带的 `kind`，见 TurnRail）。
+                          onOpenList: () => unawaited(_openTurnList()),
                         ),
                       ),
                     // 浮动层：锚点态的两个出口共用同一位置——
@@ -4081,12 +4117,20 @@ class _BackToLatestButton extends StatelessWidget {
 /// 与 AppBar 图标同一取舍：入口消失会让用户以为「本端不支持」，置灰只说明
 /// 「现在还用不了」。
 class _OverflowMenu extends StatelessWidget {
-  const _OverflowMenu({required this.items, required this.onSearch});
+  const _OverflowMenu({
+    required this.items,
+    required this.onSearch,
+    this.onTurns,
+  });
 
-  final List<ConversationOverflowItem> items;
+  /// 调用方交来的低频入口；null = 没有（此时菜单里只有页面自己的两项）。
+  final List<ConversationOverflowItem>? items;
 
   /// 「在本对话中搜索」的动作（由页面提供，见 [ConversationPage.overflowItems]）。
   final VoidCallback onSearch;
+
+  /// 轮次列表（§6.94）；null = 轮次太少，不摆这一项。
+  final VoidCallback? onTurns;
 
   @override
   Widget build(BuildContext context) {
@@ -4098,13 +4142,23 @@ class _OverflowMenu extends StatelessWidget {
       // `onSelected`（`PopupMenuItem.enabled: false` 不可点）。
       onSelected: (action) => action(),
       itemBuilder: (context) => [
-        for (final item in items)
+        for (final item in items ?? const <ConversationOverflowItem>[])
           PopupMenuItem<VoidCallback>(
             key: item.key,
             value: item.onTap,
             enabled: item.onTap != null,
             child: _OverflowMenuRow(icon: item.icon, label: item.label),
           ),
+        // 轮次列表：窄屏没有刻度条，这是会话内跳轮的唯一入口。它不依赖
+        // `_group`（数据就是已加载时间线），故与搜索一样常可用。
+        if (onTurns != null) ...[
+          const PopupMenuDivider(),
+          PopupMenuItem<VoidCallback>(
+            key: const ValueKey('menu-conversation-turns'),
+            value: onTurns,
+            child: const _OverflowMenuRow(icon: Icons.list_alt, label: '轮次列表'),
+          ),
+        ],
         // 搜索始终可用（它不依赖 `_group`）：搜的是已加载的时间线。
         const PopupMenuDivider(),
         PopupMenuItem<VoidCallback>(
