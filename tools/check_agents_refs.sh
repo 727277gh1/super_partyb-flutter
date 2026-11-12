@@ -109,6 +109,10 @@ EXEMPT = {
     # 的证据（`fontSize: _isDenseLayout ? 13.0 : null`）——那是对 SDK 内部
     # 实现的引用，本仓库当然没有这个文件。
     'list_tile.dart': 'Flutter SDK 文件名，非本仓库符号（§6.76）',
+    # go_router 的路由匹配实现文件（pub-cache 里的 `lib/src/match.dart`）。
+    # §6.96 用它钉住「每个 location 一个 pageKey（`ValueKey(newMatchedPath)`）
+    # ⇒ 换对话就是换 page ⇒ 全窗过渡不是只在首次 push 时付」的证据。
+    'match.dart': 'go_router 插件源码文件，非本仓库符号（§6.96）',
 }
 
 with open(DOC, encoding='utf-8') as fh:

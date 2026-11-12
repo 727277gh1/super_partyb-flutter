@@ -697,3 +697,128 @@ Dart heap 分解（本模块拿不到这一维）。
 3576 帧=59.6 / 多帧光栅取均值 / 安装幂等 / post-frame 真回调计帧）；
 `memory_probe_test.dart` +4（接线后有 `fps` 与 `raster` / 窗口为 0 不写 /
 未接线保持原格式 / 无 timings 时不写 `raster=`）。
+
+---
+
+### 6.96 远端桌面（RDP）里「卡两下再跳」：桌面去全窗过渡 + 远端会话关动效 + 三项环境读数（2026-11）
+
+issue #110。用户的描述是「RDP 里切换界面明显卡顿：点侧边栏换对话/换页面时先顿一下，
+然后画面跳两下直接到新页面；同一台机器本地会话基本顺畅」。
+
+#### 三层成本，只有两层是仓库能改的
+
+| 层 | 机制 | 量级 | 归属 |
+|---|---|---|---|
+| ① 渲染后端 | RDP 会话无硬件 D3D（Server 2019 / Win11 起移除 RemoteFX vGPU）→ ANGLE 落 `D3D_DRIVER_TYPE_WARP`，每帧 CPU 光栅 + present 回读 | 单帧 raster 3ms → 20–40ms | 引擎，改不到 |
+| ② 帧提交 | Flutter Windows 每帧提交**整窗**（无部分失效），而切页走的正是全窗过渡 | 一帧 ≈ 2×1080p 像素重绘 + 整窗混合 | **本仓库** |
+| ③ 首帧税 | 新页面建视口 + Markdown 冷解析（实测 4 段/580 字符 68ms） | 首帧即超 16.7ms 预算 | 本仓库（已单独优化） |
+
+三层相乘 ⇒「先顿一下，然后卡两下跳过去」。
+
+#### ②的根因：Windows 默认过渡在**每一帧**都脏整窗
+
+`apps/spb_desktop/lib/router.dart` 全部是 `builder:` → go_router 生成
+`MaterialPage`；主题**没有** `pageTransitionsTheme`（全仓 grep 为空）→ 走 Flutter
+默认表的 `TargetPlatform.windows: ZoomPageTransitionsBuilder()`。它的成本结构：
+
+- `allowSnapshotting` 默认 true → 进入页与退出页**各做一次整页离屏光栅**
+  （这就是用户感知到的那一下「顿」）；
+- 之后每帧做两个全窗纹理的缩放（双线性）+ 整窗 scrim 的逐像素 alpha 混合；
+- go_router 每个 location 一个 `pageKey`（`match.dart` 的
+  `ValueKey(newMatchedPath)`）⇒ **每次点侧边栏换对话都是新 page**，这层不是
+  只在首次 push 时付；
+- 这条过渡在 Windows 上实际是 **450ms**（`ZoomPageTransitionsBuilder` 的时长，
+  实测值；不是 `MaterialPageRoute` 默认的 300ms）。
+
+#### 改法一：桌面端所有路由零时长（`NoTransitionPage`）
+
+`buildDesktopRoutes()` 全部改用 `pageBuilder: (c, s) => desktopPage(s, child)`，
+`desktopPage` 就是 `NoTransitionPage(key: state.pageKey, ...)`（`transitionDuration`
+与 `reverseTransitionDuration` 都是 `Duration.zero`，`buildTransitions` 原样返回
+child——**连那一次离屏快照都不做**）。
+
+三个取舍：
+
+1. **无条件去掉，而不是「只在 RDP 里去掉」**：桌面切页本来就不需要缩放过渡；
+   有 GPU 时那层也只是白付钱。按会话分支会让「同一台机器接上/断开 RDP」表现为
+   两种交互节奏，且依赖一个异步探测值。
+2. **`key` 必须用 `state.pageKey`**：它由 go_router 按 location 生成，决定
+   「换对话 = 换页面」；自己生成 key 会让切对话复用同一个 route，页面
+   `initState` 不再重跑（表现为「点了没反应」）。
+3. **移动端不跟着改**：左右滑入是 Android/iOS 的平台约定（用户靠它读层级），
+   且那边走真正的 GPU 合成。
+
+#### 改法二：远端会话下关掉常驻动画
+
+常驻动画（spinner、流式光标、进度指示、刻度条过渡）在 WARP 下不是免费的：
+**一直有帧** = 一直占住被 DWM 节流的帧预算（远程会话的 `DWMFRAMEINTERVAL`
+默认约 30fps 量级，引擎按 60Hz 请求 → 掉帧 + 排队 ⇒ 输入延迟累积）。
+
+判据只能来自宿主：Flutter 侧**没有**「这是不是远端会话」的信号
+（`MediaQuery.disableAnimations` 反映的是用户的「减少动效」偏好，RDP 不会替
+用户打开它）。故新增：
+
+- 原生 `apps/spb_desktop/windows/runner/flutter_window.cpp`：通道
+  `com.atjog.spb/display_env` 的方法 `remoteSession` → `GetSystemMetrics(SM_REMOTESESSION)`；
+- `packages/spb_platform/lib/src/display_env.dart`：启动探测一次，结果进进程级缓存
+  （诊断报告要同步读、首帧的动效策略也要它，故不能是「每次现问」）；
+- `apps/spb_desktop/lib/app.dart`：`MaterialApp.builder` 里用
+  `MediaQuery.copyWith(disableAnimations: true)` 覆写子树——读取该开关的组件
+  （`turn_status.dart` 的 spinner、`turn_rail.dart` 的过渡）**自动**归零，不必
+  逐处接线（这正是 issue #110 记的「全局没有接线」）。
+
+三条边界：
+
+1. **只做加法**：本地会话不覆盖系统值（不能把用户的「减少动效」开关改回 false）；
+2. **探测在 `runApp` 之前、与桌面能力/端点探测并发**：晚一步就会首帧按本地策略
+   渲染、随后再降级一次——那次降级本身就是一次整窗重绘；
+3. **只回答「进程从远端会话启动」**，不跟随会话切换（要 `WTSRegisterSessionNotification`，
+   且会话切换那一刻引擎正在重建交换链，此时再全局重建只会放大问题）。
+
+#### 改法三：三项环境读数（让下一次报障不必再猜）
+
+诊断报告的「运行环境」小节新增：
+
+| 键 | 取值 | 回答什么 |
+|---|---|---|
+| `remote_session` | `true` / `false` / `(未知)` | 这次运行到底在不在 RDP 里。缺了它，`raster=` 偏高时无法区分「RDP + WARP」与「本机驱动被禁 / 无独显」 |
+| `window` | `1920x1080`（**物理**像素） | 每帧要光栅多少像素 |
+| `dpr` | `1.25` / `1.5` / `2` | RDP 客户端常带 150% 缩放 → 像素数 ×2.25，WARP 成本线性上升 |
+
+`remote_session` 的三态是刻意的：`null` 写 `(未知)` 而**不是** `false`——后者会被
+读成「已确认为本地会话」，把排查引向相反方向。窗口尺寸取引擎
+（`PlatformDispatcher.implicitView`）而不是 `window_manager`：报告是同步拼的，
+且移动端不装该插件；代价是它反映「导出那一刻」（正处于悬浮窗时读数为 720 宽，
+与「当时画了多少像素」同义）。
+
+#### 验证
+
+- `apps/spb_desktop/test/router_transitions_test.dart` 5 条：
+  ① 结构性守卫——遍历路由树，**每一条**页面路由都必须有 `pageBuilder`、
+     `builder` 必须为 null（纯 redirect 路由例外）；
+  ② 真实推入的 `PageRoute.transitionDuration` 与 `reverseTransitionDuration`
+     都是 `Duration.zero`，覆盖首个页面 / `/settings` / 换对话三条路径；
+  ③④ `remoteSession` 为 true 时子树 `disableAnimations` 为 true、false 时保持 false；
+  ⑤ 系统已开「减少动效」时本地会话不会把它复位。
+- `packages/spb_platform/test/display_env_test.dart` 5 条：true/false 两态并写缓存、
+  **无实现时不写 warn**（Linux/macOS/移动端是预期路径）、调用失败保留旧值并留
+  warn、成功时写一条 info。
+- `packages/spb_platform/test/diagnostics_export_test.dart` +6 条：`remote_session`
+  三态（未探测 ≠ false）、`window`/`dpr` 的格式化（1.5 / 1.25 / 1.75 / 2 / 1.0→1）、
+  拿不到 view 时写 `(未知)` 而非空串。
+
+反证（逐条实测过，不是推定）：
+
+- 任意一条路由改回 `builder:` → ① 立刻红，报错直接说「`miniapp/works` 用了
+  `builder:`」；
+- `desktopPage` 换成 `MaterialPage` → ② 拿到 **450ms**（Windows 的缩放过渡）而红；
+- 去掉 `app.dart` 的 `MediaQuery` 覆写 → ③ 变红。
+
+#### 未验证
+
+- **RDP 真机**：本机无 Windows / 无 RDP（AGENTS.md §8、§9）。上述用例能证明
+  「路由确实是零时长的页面」「远端会话确实会把开关置位」，**不能**证明 RDP 里的
+  主观流畅度与单帧 raster 的真实降幅——那需要用户机器上的 `fps=` / `raster=`
+  读数对照（本地会话 vs RDP 会话各一次）。
+- **白屏（不是卡顿）**：用户在 RDP 里另有「白屏卡死」报障，那是 surface/设备丢失
+  一类的问题（引擎侧），与本节的三层成本不是同一件事；待单独确认症状形态后处理。

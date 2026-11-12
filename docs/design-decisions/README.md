@@ -23,7 +23,7 @@
 | [测试与仓库守卫](testing.md) | `testing.md` | §6.13 §6.17 §6.19 §6.21 §6.22 §6.24 §6.25 §6.26 §6.27 |
 | [构建、分发与发布](build-and-release.md) | `build-and-release.md` | §6.29 §6.30 §6.31 §6.33 §6.61 §6.87 §6.93 §7 §8 |
 | [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 |
-| [性能与内存](performance.md) | `performance.md` | §6.47 §6.59 §6.60 |
+| [性能与内存](performance.md) | `performance.md` | §6.47 §6.59 §6.60 §6.72 §6.73 §6.74 §6.96 |
 
 ## 全部小节
 
@@ -122,3 +122,4 @@
 | §6.93 | dependabot 的 pub PR 永远红：`flutter_test` 的精确 pin 把 analyzer 家族钉死（2026-11） | [`build-and-release.md`](build-and-release.md) |
 | §6.94 | 轮次导航刻度条：右侧竖置「齿轮」（2026-11） | [`chat.md`](chat.md) |
 | §6.95 | Android 签名：调试密钥入库，让 CI 与各开发机签出同一签名（2026-11） | [`build-and-release.md`](build-and-release.md) |
+| §6.96 | 远端桌面（RDP）里「卡两下再跳」：桌面去全窗过渡 + 远端会话关动效 + 三项环境读数（2026-11，issue #110） | [`performance.md`](performance.md) |
