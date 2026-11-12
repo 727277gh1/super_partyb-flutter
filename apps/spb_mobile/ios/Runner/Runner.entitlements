@@ -16,8 +16,13 @@
 	  ## 为什么是这两个域名
 
 	  与 Android manifest、`OidcCallbackUri` 的双栈保持一致：tbcc 走 CDN
-	  （IPv4/IPv6 均可），tbcc6 是源站别名。issuer 用哪个域名，回调就从哪个
-	  域名回来，两个都要能接管。
+	  （IPv4/IPv6 均可），tbcc6 是源站别名，dever 是内网 dever 环境
+	  （`SPB_OIDC_ISSUER=https://dever.atjog.com/idp`）。issuer 用哪个域名，
+	  回调就从哪个域名回来，三个都要能接管。
+
+	  ⚠️ 这份清单由 `test/ios_platform_config_test.dart` 与 Android manifest
+	  的 `android:host` 交叉校验：一边加域名、另一边没加会直接红灯（此前
+	  dever 就是漏的，表现为 iOS 上「扫码登录点了没反应」）。
 
 	  ## 生效前提（缺一即静默失败）
 
@@ -40,6 +45,7 @@
 	<array>
 		<string>applinks:tbcc.atjog.com</string>
 		<string>applinks:tbcc6.atjog.com</string>
+		<string>applinks:dever.atjog.com</string>
 	</array>
 </dict>
 </plist>
