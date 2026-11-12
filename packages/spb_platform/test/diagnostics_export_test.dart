@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show Size;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_core/spb_core.dart';
@@ -30,6 +31,9 @@ void main() {
   tearDown(() {
     SpbLog.clearRecentLogs();
     MemoryLedger.reset();
+    // `SpbDisplayEnv` 是进程级缓存（与 MemoryLedger 同一性质）：不复位会让
+    // 「远端会话」结论漏给后续用例。
+    SpbDisplayEnv.debugSetRemoteSession(null);
   });
 
   group('DiagnosticsExporter.save：四态', () {
@@ -173,6 +177,56 @@ void main() {
       expect(env['app'], isNotEmpty);
       expect(env['flutter'], isNotEmpty);
       expect(env['platform'], isNotEmpty);
+    });
+
+    group('渲染环境读数（issue #110）', () {
+      test('remote_session 未探测时写「(未知)」而不是 false', () {
+        // `false` 会让人读成「确认为本地会话」，而真实含义是「本平台没有这条
+        // 通道 / 启动探测还没跑」——两者会把排查引向完全不同的方向
+        // （本地驱动被禁 vs RDP + WARP）。
+        SpbDisplayEnv.debugSetRemoteSession(null);
+
+        expect(diagnosticsEnvironment()['remote_session'], '(未知)');
+      });
+
+      test('remote_session 探测到远端会话时为 true', () {
+        SpbDisplayEnv.debugSetRemoteSession(true);
+
+        expect(diagnosticsEnvironment()['remote_session'], 'true');
+      });
+
+      test('remote_session 探测到本地会话时为 false', () {
+        SpbDisplayEnv.debugSetRemoteSession(false);
+
+        expect(diagnosticsEnvironment()['remote_session'], 'false');
+      });
+
+      test('window 是物理像素尺寸、dpr 是设备像素比（ISSUE #110 的乘数）', () {
+        // RDP 常带 150% 缩放，而 Flutter 按 DPR 渲染逻辑分辨率 → 像素数 ×2.25，
+        // WARP 成本线性上升。同一台机器「本地 100%」与「RDP 150%」是两个
+        // 完全不同的问题，只看 `raster=` 分不出来。
+        //
+        // 直接断言格式化函数：widget 测试里 `tester.view` 是包装层，与引擎真实
+        // view（本函数取值的来源）**不共享数值**，用 `tester.view` 设值只会
+        // 得到一条永远错的预期（见 `formatWindowSize` 的说明）。
+        expect(formatWindowSize(const Size(1920, 1080)), '1920x1080');
+        // 1.500 → 1.5（去掉尾随零，但保留 1.25/1.75 这类真实小数）。
+        expect(formatDevicePixelRatio(1.5), '1.5');
+        expect(formatDevicePixelRatio(1.25), '1.25');
+        expect(formatDevicePixelRatio(1.75), '1.75');
+        expect(formatDevicePixelRatio(2), '2');
+      });
+
+      test('DPR 为整数时不留小数点（1.000 → 1）', () {
+        expect(formatDevicePixelRatio(1.0), '1');
+      });
+
+      test('拿不到 view 时 window / dpr 写「(未知)」，不写空串', () {
+        // 空串在报告里看起来像「这一行没生成出来」，而「(未知)」是明确的结论。
+        // （真实环境里这两种情况同时出现：移动端引擎没有隐式 view。）
+        expect(formatWindowSize(null), '(未知)');
+        expect(formatDevicePixelRatio(null), '(未知)');
+      });
     });
 
     test('环境信息含端点选择结论（endpoint_host / endpoint_probe）', () {

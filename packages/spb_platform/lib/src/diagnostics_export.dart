@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show PlatformDispatcher, Size;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +7,7 @@ import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 
 import 'desktop_capabilities.dart';
+import 'display_env.dart';
 import 'memory_probe.dart';
 
 /// 把诊断报告写入用户选定的文件（issue #40）。
@@ -129,6 +131,8 @@ class DiagnosticsExporter {
 /// | `endpoint_host` / `endpoint_probe` | 否 | 启动探测选中的**主机名**与状态短名（`upgraded`/`kept`/`skipped`）。主机名与同组的 `api`/`ufs` 同源（就是它们 host 部分的副本），不含路径/查询串/凭证 |
 /// | `oidc_client_id` | 否 | `env.dart` 明写「client_id 是公开值（会出现在授权 URL 里）」 |
 /// | `verbose_log` / `release` | 否 | 布尔开关 |
+/// | `remote_session` | 否 | Windows 会话是否为 RDP（`GetSystemMetrics(SM_REMOTESESSION)`）。布尔，不含机器名/地址 |
+/// | `window` / `dpr` | 否 | 窗口**物理**像素尺寸与设备像素比。回答「RDP 是不是带了 150% 缩放」——那是 WARP 光栅成本的乘数（issue #110）；不含窗口标题或内容 |
 ///
 /// **没有**任何 token / secret / 凭证进这个 Map——日志侧同理（见
 /// `spb_api` 的 `session_credential.dart`：「本函数绝不记录 token 值」）。
@@ -179,7 +183,59 @@ Map<String, String> diagnosticsEnvironment() {
         : SpbEnv.oidcClientId,
     'verbose_log': SpbEnv.verboseLogging.toString(),
     'release': SpbEnv.isRelease.toString(),
+    // ---- 渲染环境的两个判据（issue #110） ----
+    //
+    // ## 为什么要这三项
+    //
+    // 「远端桌面里很卡」只能靠读数分开两种成因，而报告此前**一项都没有**：
+    //
+    // - `remote_session` = 这次运行到底在不在 RDP 会话里。没有它，`raster=`
+    //   偏高时无法区分「RDP + WARP」与「本机驱动被禁 / 无独显」；
+    // - `window` / `dpr` = 每帧要光栅多少像素。RDP 客户端常带 150% 缩放，
+    //   而 Flutter 按 DPR 渲染逻辑分辨率 → 像素数 ×2.25，WARP 成本线性上升。
+    //   同一台机器「本地 1920x1080@100%」与「RDP 1920x1080@150%」是两个
+    //   完全不同的问题，只看 `raster=` 分不出来。
+    //
+    // ## 为什么窗口尺寸取自引擎而不是 window_manager
+    //
+    // `PlatformDispatcher.implicitView` 是引擎真正在渲染的那个 view（物理像素
+    // + DPR），绕开了 `window_manager` 的平台通道（本函数是同步的，且移动端
+    // 不装该插件）。代价是它反映「此刻」而非「启动时」——导出时若正处于
+    // 悬浮窗（720 宽），读数也是 720，这与「当时画了多少像素」同义。
+    'remote_session': switch (SpbDisplayEnv.remoteSession) {
+      true => 'true',
+      false => 'false',
+      // null = 未探测 / 本平台没有实现。**不等于 false**：写 `false` 会让人
+      // 以为「已确认为本地会话」，那会把排查引到错误方向。
+      null => '(未知)',
+    },
+    'window': formatWindowSize(
+      PlatformDispatcher.instance.implicitView?.physicalSize,
+    ),
+    'dpr': formatDevicePixelRatio(
+      PlatformDispatcher.instance.implicitView?.devicePixelRatio,
+    ),
   };
+}
+
+/// 窗口**物理**像素尺寸，`宽x高`；拿不到时返回 `(未知)`。
+///
+/// 物理像素（不是逻辑像素）是刻意的：WARP 的每帧成本 = 物理像素数 × 过度绘制，
+/// 而 `dpr` 单独一项就能反推逻辑尺寸。
+///
+/// 单独抽成函数是为了**可测**：`tester.view.physicalSize` 改的是测试用的
+/// `TestFlutterView` 包装层，而这里读的是引擎真实 view（`PlatformDispatcher`
+/// 的 `implicitView`），两者在 widget 测试里**并不共享数值**——把格式化与
+/// 取值分开，格式化才能被精确断言。
+String formatWindowSize(Size? size) {
+  if (size == null) return '(未知)';
+  return '${size.width.round()}x${size.height.round()}';
+}
+
+/// 设备像素比，最多三位小数（1.25 / 1.5 / 1.75 / 2 都能区分，且不写长尾）。
+String formatDevicePixelRatio(double? dpr) {
+  if (dpr == null) return '(未知)';
+  return dpr.toStringAsFixed(3).replaceFirst(RegExp(r'\.?0+$'), '');
 }
 
 /// 组装诊断报告并交给平台保存（**两端装配层的唯一入口**）。
