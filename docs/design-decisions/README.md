@@ -119,4 +119,4 @@
 | §6.90 | 切换账号时失效身份与缓存归属（issue #103） | [`auth.md`](auth.md) |
 | §6.91 | 对话列表刷新与 SSE 异步一致性（issue #104） | [`ui.md`](ui.md) |
 | §6.92 | 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（2026-11） | [`chat.md`](chat.md) |
-| §6.93 | dependabot 的 pub PR 永远红：lock 被 `flutter_test` 的精确 pin 判死（2026-11） | [`build-and-release.md`](build-and-release.md) |
+| §6.93 | dependabot 的 pub PR 永远红：`flutter_test` 的精确 pin 把 analyzer 家族钉死（2026-11） | [`build-and-release.md`](build-and-release.md) |

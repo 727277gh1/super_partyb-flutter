@@ -30,6 +30,9 @@
 # 依赖（workspace 根执行，所有包共享一份 lockfile；CI 用 --enforce-lockfile，
 # 改依赖要把根 pubspec.lock 一起提交——否则构建不可复现）
 flutter pub get
+# 升级依赖只能走这一条（Dependabot 不管 pub：它的 lock 被 flutter_test 的
+# 精确 pin 判死，见 §6.93）。先 `flutter upgrade` 到 FLUTTER_VERSION 再升级。
+flutter pub upgrade
 
 # 静态分析 / 格式化
 dart analyze .

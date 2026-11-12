@@ -656,13 +656,13 @@ Restart Manager 的关闭序列（MS「Restart Manager — Guidelines for Applic
 - **不把 `preventClose` 关掉**：那会让「关窗即隐藏」失效（§6.4 的既有行为），
   也解决不了问题——RM 的 `WM_QUERYENDSESSION` 仍无人应答。
 
-### 6.93 dependabot 的 pub PR 永远红：lock 被 `flutter_test` 的精确 pin 判死（2026-11-12）
+### 6.93 dependabot 的 pub PR 永远红：`flutter_test` 的精确 pin 把 analyzer 家族钉死（2026-11-12）
 
 #### 症状
 
 Dependabot 每周为 `pub` 生态开 PR（`increase-if-necessary`），diff **只有根
 `pubspec.lock`**、测试与构建全绿，唯独 `quality` job 的 `Resolve dependencies`
-失败：
+失败（PR #34 `test`、#35 `drift`、#36 `build_runner` 同一个形态）：
 
 ```
 < test 1.31.1 (was 1.32.0)
@@ -675,21 +675,35 @@ Unable to satisfy `pubspec.yaml` using `pubspec.lock`.
 `flutter pub get`，会**默默重解析**成一个我能装上的 lock。于是失败只集中在
 一条 step 上，看起来像「代码有问题」。
 
-#### 根因：本仓 Flutter 版本钉死了 `test` 的上限
+#### 根因：`flutter_test` 的精确 pin 把整条 analyzer 家族钉死
 
-| 包 | 版本 | 要求的 `test_api` / `test_core` |
+单个 PR 的降级列表只露出冰山一角（PR #34/#35 是 `test`，PR #36 是
+`build_runner`）。真相要看 pub 自己的求解器输出——在包目录里
+`flutter pub add --dev build_runner:2.17.1 --dry-run`，它把链条一条不落地
+写出来了：
+
+```
+Note: matcher is pinned to version 0.12.20 by flutter_test from the flutter SDK.
+Note: test_api is pinned to version 0.7.12 by flutter_test from the flutter SDK.
+...
+Because every version of flutter_test from sdk depends on both matcher 0.12.20
+  and test_api 0.7.12, if flutter_test from sdk and test >=1.24.3 then
+  analyzer >=8.0.0 <14.0.0.
+Because build_runner 2.17.1 depends on analyzer ^14.3.0, version solving failed.
+```
+
+四步链条，每一环都是硬约束：
+
+| # | 事实 | 后果 |
 |---|---|---|
-| `test` 1.31.1 | 本仓 lock（正确） | `test_api 0.7.12` / `test_core 0.6.18` |
-| `test` 1.32.0 | dependabot 提的 | `test_api 0.7.14` / `test_core 0.6.20` |
-| `flutter_test`（Flutter **3.47.5** 自带） | CI 的 `FLUTTER_VERSION` | **精确钉 `test_api: 0.7.12`** |
+| 1 | `flutter_test`（SDK 包，`FLUTTER_VERSION=3.47.5`）**精确钉** `test_api: 0.7.12` / `matcher: 0.12.20` | 没有商量余地 |
+| 2 | `test 1.32.0` 要 `test_api 0.7.14` | `test` 上限 **1.31.1** |
+| 3 | `test 1.31.1` 要 `analyzer >=8.0.0 <14.0.0` | **analyzer 家族上限 13.x** |
+| 4 | `build_runner 2.17.x` 要 `analyzer ^14.3.0`（`build` 5.x 的后续、`source_gen` 4.3.x 同理） | 这一档全部**装不上** |
 
-`flutter_test` 是 SDK 包、用 `test_api: <精确版本>` 声明——它排在依赖图上游，
-于是 `test` 永远越不过 1.31.1。Dependabot 的解析环境与 CI 的 `FLUTTER_VERSION`
-引脚不同（它看到的是更新的 Flutter 依赖图），所以它算出的 lock 在本仓
-**不可落地**。
-
-这不是「Dependabot 不支持 Pub Workspaces」——实测它**能**正确处理单一
-lockfile（diff 里一行 `pubspec.yaml` 都没改）。
+所以不是「Dependabot 偶尔算错」，而是**在 Flutter 版本固定的前提下**，
+它推的 tip 版本绝大多数结构性不可落地。它也不支持 Pub Workspaces 的说法不成立
+——实测它**能**只改根 `pubspec.lock`（diff 里一行 `pubspec.yaml` 都没动）。
 
 #### 为什么不能用「CI 自动回写 lock」修
 
@@ -702,33 +716,43 @@ lockfile（diff 里一行 `pubspec.yaml` 都没改）。
    另一类缺陷（改了 `pubspec.yaml` 但忘了提交 lock）也一并放行——那才是它
    存在的原因（issue #35）。
 
-#### 做法
+#### 做法：把 `pub` 从 Dependabot 手里拿回来
 
-1. `dependabot.yml` 加 `ignore`：`test` / `test_api` / `test_core`。它们的版本
-   由 `FLUTTER_VERSION` 决定，**随 Flutter 升级自然前进**（`pub upgrade`
-   重新解析），不会永久停滞。
-2. `ci.yml` 的 `Resolve dependencies` 在失败后再跑一次非 enforce 的
-   `pub get`，打印 `pubspec.lock` 的实际差异 + 两条处置指引（自己改依赖 /
-   dependabot 的 PR）。**判定不变**，只把裸 `exit 65` 换成可操作的结论。
+1. `dependabot.yml` **删掉整个 `pub` 生态**，只留 `github-actions`（那一段的
+   PR 不动 `pubspec.lock`，与本仓 Flutter 版本无关，因而**可落地**）。
+2. pub 升级改由人跑，且**用 CI 的同一个 Flutter 版本**：
+   `flutter pub upgrade`（只升现有约束内，不动 `pubspec.yaml` 的约束——
+   约束是刻意选的，见 dependabot.yml 旧注与 §6.30）。
+3. `ci.yml` 的 `Resolve dependencies` 在失败后再跑一次非 enforce 的
+   `pub get`，打印 `pubspec.lock` 的实际差异 + 两条处置指引。**判定不变**，
+   只把裸 `exit 65` 换成可操作的结论。
 
 #### 取舍
 
-- **不把 `FLUTTER_VERSION` 追到最新稳定版**去迁就 dependabot：CI 的可复现性
+- **不把 `FLUTTER_VERSION` 追到最新稳定版**去迁就 Dependabot：CI 的可复现性
   （§6.30）比「自动依赖升级能落地」更重要，且追版本只是把同一个问题推到
-  下一个小版本。
-- **不 ignore 整条链路**（`matcher` / `meta` / `collection` 等也被 SDK 引）：
-  那些没有出现「dependabot 提了装不上」的实测样本，先按出错的三条收口；
-  出现新的再补。
+  下一个小版本（新 SDK 会钉新的 `test_api`）。
+- **不写 `ignore` 名单代替删生态**：先按 `test`/`test_api`/`test_core` 收口时，
+  下一轮立刻又开了 `build_runner`（PR #36）——按包名枚举是打地鼠，而真正的
+  规则是「要 `analyzer >=14` 即不可落地」，这笔判断只有跑过求解器的人有。
+- **接受「pub 升级不再自动开 PR」**：换来「不会再有结构性红的 PR」与
+  「锁与 CI 的 SDK 永远一致」。安全告警仍可从 `flutter pub outdated` /
+  `dart pub outdated` 与 GitHub Advisory 手动核对。
+- **不在 Gitea 侧换成 Renovate**：同一类问题的根源是 SDK 引脚，换工具不换
+  结论；除非将来把 `FLUTTER_VERSION` 改成「跟随 stable」。
 - **不新增守卫**：这条规则的「真源」是 Flutter SDK 的 `flutter_test/pubspec.yaml`
-  与 CI 的 `FLUTTER_VERSION`，两者都在仓库外/远端；本地写一个「ignore 列表
-  必须含 X」的静态断言只会把版本信息复制一份，反而更难维护。
+  与 CI 的 `FLUTTER_VERSION`，两者都在仓库外/远端；本地写一个静态断言只会把
+  版本信息复制一份，反而更难维护。
 
 #### 验证
 
-- 复现：`git checkout` 任一条 dependabot PR 的 lock（`test 1.32.0`）→
-  `flutter pub get --enforce-lockfile` 必失败，且失败信息正是上面那三行降级；
-- 反证：把锁改回 `test 1.31.1` 后同一命令通过；
-- 修复后：改 `dependabot.yml` 触发一轮 update job，不再为这三个包开 PR。
+- 复现（本机，用同一个 SDK）：把任一 dependabot PR 的 lock 应用后
+  `flutter pub get --enforce-lockfile` 必失败，降级清单正是上面四步链条的产物；
+- 定位：在包目录 `flutter pub add --dev build_runner:2.17.1 --dry-run`
+  会直接打出 `version solving failed` 与上面那段 `Because ...` 链条；
+- 反证：锁回到本仓 HEAD 的 `test 1.31.1` 后同一命令通过；
+- 修复后：`dependabot.yml` 只剩 `github-actions` 一段，改它触发一轮 update
+  job，不再为 pub 包开任何 PR。
 
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
