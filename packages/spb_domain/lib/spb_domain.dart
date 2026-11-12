@@ -129,6 +129,7 @@ export 'src/turn_activity.dart';
 export 'src/turn_anchor.dart';
 export 'src/turn_detail.dart';
 export 'src/turn_group.dart';
+export 'src/turn_rail.dart';
 export 'src/sync_scope_config.dart';
 export 'src/sync_settings.dart';
 export 'src/sync_state.dart';

@@ -37,6 +37,7 @@ import 'thumbnail_memo.dart';
 import 'timeline_extent_cache.dart';
 import 'tool_call_batch_card.dart';
 import 'tool_call_tile.dart';
+import 'turn_rail.dart';
 import 'turn_status.dart';
 import 'user_message_bubble.dart';
 
@@ -1077,6 +1078,44 @@ class _ConversationPageState extends State<ConversationPage>
   /// 是否**真的**为当前锚点补过页（决定「找不到」的提示文案）。
   bool _anchorBackfillUsed = false;
 
+  // ---------- 轮次导航刻度条（§6.94）----------
+
+  /// 时间线区域（含刻度条那层 `Stack`）的定位键。
+  ///
+  /// 只用来回答「视口顶部在屏幕上的 y 是多少」：行位置由 [_rowKeys] 的
+  /// `GlobalKey` 给出，而两者必须在**同一个坐标系**里比较，故这里取的是
+  /// 「装着时间线的那个盒子」而不是 `CustomScrollView`（后者拿不到 `context`）。
+  final _timelineAreaKey = GlobalKey();
+
+  /// 视口顶部所在的那一轮（刻度条高亮用）。null = 还没结论（首帧未布局 / 空对话）。
+  ///
+  /// ## 为什么要单独一个状态，而不复用 [_anchoredTurnId]
+  ///
+  /// 锚点是「用户被显式送到某一轮」（只在深链 / 点击时存在），而高亮回答
+  /// 「此刻屏幕上最上面那一轮是哪一轮」——用户自己滚动时后者一直在变、前者不变。
+  /// 两者混用会让刻度条只在跳转过之后才亮，或者用户随手一滚就熄。
+  String? _activeTurnId;
+
+  /// 上次探测时的滚动位置（[_activeProbeDelta] 节流的基准）。
+  double? _activeProbeAt;
+
+  /// 探测「顶部是哪一轮」的像素阈值：滚动不足这么多就不重新扫。
+  ///
+  /// 扫描本身是 O(行数)，但只有**已构建**的行有 `RenderBox`（未构建的直接跳过），
+  /// 故真实成本远小于行数；真正的理由是不想为每 1px 的滚动位移付一次扫描 +
+  /// 一次 `localToGlobal`——流式输出期间滚动通知非常密。
+  static const double _activeProbeDelta = 48;
+
+  /// 刻度条条目缓存（与 [_railEntriesItems] 成对，`identical` 作判据）。
+  ///
+  /// 与 [_displayRows] 同取向：分组是 O(n) 全量扫描，`_items` 没变时不该重算
+  /// （每次 build 都算一遍，流式期间等于每帧扫一次全表）。
+  List<TurnRailEntry>? _railEntriesCache;
+  List<ConversationItem>? _railEntriesItems;
+
+  /// 已排过一次 post-frame 探测（去重）。
+  bool _activeProbeScheduled = false;
+
   @override
   void initState() {
     super.initState();
@@ -1123,6 +1162,8 @@ class _ConversationPageState extends State<ConversationPage>
     // 控制器可能**已经有**快照（从列表页进来就是这种）：只看 items 流会错过
     // 那一次推送，深链就永远不生效。
     _maybeResolveAnchor();
+    // 刻度条高亮同理：首帧就要给出结论，否则要等用户滚一下才亮。
+    _scheduleActiveProbe();
   }
 
   /// 订阅离线队列（仅在调用方注入 [ConversationPage.outboxEntries] 时）。
@@ -1387,6 +1428,8 @@ class _ConversationPageState extends State<ConversationPage>
       _timelineCenterId = null;
       _timelineOrigin = SpbSpacing.pagePadding.top;
       _rowExtents.clear();
+      _activeTurnId = null;
+      _activeProbeAt = null;
     }
     _evictThumbnailsOfDeletedFiles(items);
     setState(() => _items = items);
@@ -1394,6 +1437,9 @@ class _ConversationPageState extends State<ConversationPage>
     // 事件集合变了 → 再试一次锚点（首屏 / 缓存 / SSE 三条路径都走这里，
     // 不依赖某一条加载完成回调，避开「其中一条改完忘了接」）。
     _maybeResolveAnchor();
+
+    // 同理：范围变了要重新回答「顶部是哪一轮」（翻页会把更早的轮次插到上方）。
+    _scheduleActiveProbe();
 
     if (_following) {
       // 等一帧：新项尚未布局完成，此时 maxScrollExtent 还是旧值。
@@ -1941,6 +1987,160 @@ class _ConversationPageState extends State<ConversationPage>
     if (_following) {
       _scheduleFollowBottom();
     }
+
+    // 刻度条高亮跟着视口走（内部按像素阈值节流，见 [_activeProbeDelta]）。
+    _updateActiveTurn();
+  }
+
+  // ---------- 轮次导航刻度条（§6.94）----------
+
+  /// 刻度条要投影的轮次列表（**旧 → 新**，口径见 [buildTurnRailEntries]）。
+  List<TurnRailEntry> _railEntries() {
+    final cached = _railEntriesCache;
+    if (cached != null && identical(_items, _railEntriesItems)) return cached;
+    final entries = buildTurnRailEntries(_items);
+    _railEntriesCache = entries;
+    _railEntriesItems = _items;
+    return entries;
+  }
+
+  /// 排一次 post-frame 探测。
+  ///
+  /// 行位置只能在**布局之后**读（`RenderBox` 尺寸/坐标是布局产物）；items 刚推
+  /// 进来的那一帧还拿不到新行的几何。
+  void _scheduleActiveProbe() {
+    if (_activeProbeScheduled) return;
+    _activeProbeScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _activeProbeScheduled = false;
+      if (!mounted) return;
+      _updateActiveTurn(force: true);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// 刷新「视口顶部在哪一轮」并写入 [_activeTurnId]（必要时 `setState`）。
+  ///
+  /// 三条取值优先级：
+  ///
+  /// 1. 锚点态（跳转过之后）→ 就是那一轮。用户是被**显式送到**那里的，视口顶部
+  ///    出现的是上一轮的尾巴也不该把高亮挪走；
+  /// 2. 贴底（`_following` 且已到底）→ 最后一轮。「我在最新」比「顶部恰好是上一轮
+  ///    的最后几行」更符合直觉，也与 webapp 把「跟随中」映射到最新轮一致；
+  /// 3. 其余 → 视口顶部所在的那一行所属的轮次（[_topVisibleTurnId]）。
+  ///
+  /// 只在结论**变化**时 `setState`：滚动通知每秒几十次，每次都重建整页会拖慢
+  /// 流式输出（也就是 §6.74 那类「滚动时卡」的成因）。
+  void _updateActiveTurn({bool force = false}) {
+    if (!mounted) return;
+    final anchored = normalizeTurnAnchor(_anchoredTurnId);
+    String? target;
+    if (anchored != null) {
+      target = anchored;
+    } else {
+      final entries = _railEntries();
+      if (entries.isEmpty) {
+        target = null;
+      } else {
+        final position = _scrollController.hasClients
+            ? _scrollController.position
+            : null;
+        final atBottom =
+            _following &&
+            position != null &&
+            position.maxScrollExtent > position.minScrollExtent &&
+            position.pixels >= position.maxScrollExtent - 1;
+        if (atBottom) {
+          target = entries.last.turnId;
+        } else {
+          if (!force &&
+              position != null &&
+              _activeProbeAt != null &&
+              (position.pixels - _activeProbeAt!).abs() < _activeProbeDelta) {
+            return;
+          }
+          _activeProbeAt = position?.pixels;
+          target = _topVisibleTurnId();
+        }
+      }
+    }
+    if (target == _activeTurnId) return;
+    setState(() => _activeTurnId = target);
+  }
+
+  /// 视口顶部的那一轮（扫已构建的行）。
+  ///
+  /// ## 为什么用 `GlobalKey` 的 `RenderBox` 而不是「按行高累加」
+  ///
+  /// 时间线是**变高**列表（消息长度、文件卡、批量卡各不相同），且未构建行的高度
+  /// 只能估（`TimelineExtentCache` 对未测量的行按 120 兜底）——累加出来的位置在
+  /// 长对话里会偏出好几屏。`GlobalKey` 拿到的是**真实几何**，只有已构建的行才有，
+  /// 这正是我们要的范围。
+  ///
+  /// ## 为什么从旧往新扫
+  ///
+  /// 行按时间正序排列，第一个「底边越过视口顶」的行就是顶部那一行。未构建的行
+  /// `currentContext` 为 null，会被直接跳过（成本只是一次 map 查找）。
+  String? _topVisibleTurnId() {
+    final rows = _lastRows;
+    final area = _timelineAreaKey.currentContext?.findRenderObject();
+    if (rows == null || rows.isEmpty || area is! RenderBox || !area.hasSize) {
+      return null;
+    }
+    final viewportTop = area.localToGlobal(Offset.zero).dy;
+    for (final row in rows) {
+      final owner = locateIdsOf(row).first;
+      final box = _rowKeys[owner]?.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) continue;
+      final rowTop = box.localToGlobal(Offset.zero).dy;
+      if (rowTop + box.size.height <= viewportTop + 1) continue;
+      return turnIdOfRow(row);
+    }
+    return null;
+  }
+
+  /// 跳到某一轮（刻度条 / 面板点击）。
+  ///
+  /// ## 与深链锚点的关系
+  ///
+  /// 复用同一套状态（[_anchoredTurnId] + [_following] + [_scrollToTurn]），
+  /// 于是跳转后同样会出现「回到最新」出口、同样钉住视口不被流式新增拽走。
+  /// 差别只有两点：
+  ///
+  /// 1. **目标一定在已加载范围内**（刻度条就是它的投影），故不需要补页；
+  /// 2. 顺手把 [_anchorHandled] 记成它，避免地址栏里还挂着旧 `?turn=` 时，
+  ///    下一批 items 到达又把用户拽回深链那一轮。
+  Future<void> _jumpToTurn(String turnId) async {
+    final target = normalizeTurnAnchor(turnId);
+    if (target == null) return;
+    final itemId = turnAnchorItemId(_items, target);
+    if (itemId == null) {
+      _showMessage('该轮已不在已加载的消息范围内');
+      return;
+    }
+    _anchorHandled = target;
+
+    if (isLatestTurn(_items, target)) {
+      // 跳到最后一轮 ≡ 跟随最新：与深链同取舍（见 [isLatestTurn] 的说明）。
+      if (_anchoredTurnId != null) {
+        setState(() {
+          _anchoredTurnId = null;
+          _activeTurnId = target;
+        });
+      } else {
+        setState(() => _activeTurnId = target);
+      }
+      _resumeFollowing();
+      return;
+    }
+
+    // 先关跟随再落位：否则落位后的那一帧里新事件会把视口拽回底部。
+    _following = false;
+    setState(() {
+      _anchoredTurnId = target;
+      _activeTurnId = target;
+    });
+    await _scrollToTurn(itemId);
   }
 
   /// 到达顶部附近时加载更早的一页（带并发与终止保护）。
@@ -2629,37 +2829,64 @@ class _ConversationPageState extends State<ConversationPage>
           if (_ttsStatus != null && _ttsStatus!.hasStatus)
             _TtsStatusBar(status: _ttsStatus!),
           Expanded(
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: _items.isEmpty
-                      ? EmptyState(message: widget.emptyHint)
-                      : _buildTimeline(),
-                ),
-                // 浮动层：锚点态的两个出口共用同一位置——
-                // 1) 已定位到历史轮次 → 「回到最新」；
-                // 2) 解析失败（补页无果）→ 常驻提示卡（issue #87 回归修法）。
-                //
-                // ## 为什么失败态要常驻而不是只靠 SnackBar
-                //
-                // 提示会消失，锚点值不会：它仍挂在 widget 上，随后的每批
-                // items 都会重试定位，且跟随仍是关的（启动时被关掉）。
-                // 常驻卡片给了用户唯一的出口「返回最新」，点了才恢复跟随。
-                if (_anchoredTurnId != null || _anchorStickyNotice)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: SpbSpacing.sm,
-                    child: Center(
-                      child: _BackToLatestButton(
-                        onTap: _backToLatest,
-                        notice: _anchorStickyNotice
-                            ? '未找到该轮对话（可能已加载上限之外或已删除）'
-                            : null,
-                      ),
+            // 刻度条是否出现取决于**可用宽度**（不是平台）：390dp 的手机上这条
+            // 16px 的列会挤正文，而平权/桌面端有空间（§6.94）。
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final railEntries = _railEntries();
+                final showRail =
+                    railEntries.length >= 2 &&
+                    constraints.maxWidth >= SpbBreakpoints.compact;
+                return Stack(
+                  children: [
+                    Positioned.fill(
+                      key: _timelineAreaKey,
+                      child: _items.isEmpty
+                          ? EmptyState(message: widget.emptyHint)
+                          : _buildTimeline(),
                     ),
-                  ),
-              ],
+                    // 轮次导航刻度条：叠在时间线右侧内边距里，**不参与布局**。
+                    //
+                    // 为什么用叠层而不是 `Row(时间线, 刻度条)`：后者会让时间线
+                    // 变窄 → 每一行重新折行 → 整个 Markdown 重排（hover / 宽度
+                    // 变化都会触发），在软件光栅下就是一次整窗重绘（§6.74）。
+                    if (showRail)
+                      Positioned(
+                        top: 0,
+                        bottom: 0,
+                        right: 0,
+                        child: TurnRail(
+                          entries: railEntries,
+                          activeTurnId: _activeTurnId,
+                          onJump: (turnId) => unawaited(_jumpToTurn(turnId)),
+                        ),
+                      ),
+                    // 浮动层：锚点态的两个出口共用同一位置——
+                    // 1) 已定位到历史轮次 → 「回到最新」；
+                    // 2) 解析失败（补页无果）→ 常驻提示卡（issue #87 回归修法）。
+                    //
+                    // ## 为什么失败态要常驻而不是只靠 SnackBar
+                    //
+                    // 提示会消失，锚点值不会：它仍挂在 widget 上，随后的每批
+                    // items 都会重试定位，且跟随仍是关的（启动时被关掉）。
+                    // 常驻卡片给了用户唯一的出口「返回最新」，点了才恢复跟随。
+                    if (_anchoredTurnId != null || _anchorStickyNotice)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: SpbSpacing.sm,
+                        child: Center(
+                          child: _BackToLatestButton(
+                            onTap: _backToLatest,
+                            notice: _anchorStickyNotice
+                                ? '未找到该轮对话（可能已加载上限之外或已删除）'
+                                : null,
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
             ),
           ),
           // 同一轮只有一条主状态；消息和工具卡保留内容与静态状态。
@@ -3060,12 +3287,7 @@ class _ConversationPageState extends State<ConversationPage>
   ) {
     final anchored = normalizeTurnAnchor(_anchoredTurnId);
     if (anchored == null) return child;
-    final rowTurnId = switch (row) {
-      SingleItemRow(:final item) => item.turnId,
-      AgentFileBatchRow(:final files) => files.first.turnId,
-      ToolCallBatchRow(:final calls) => calls.first.turnId,
-    };
-    final turn = normalizeTurnAnchor(rowTurnId);
+    final turn = turnIdOfRow(row);
     if (turn == null || turn != anchored) return child;
 
     final scheme = Theme.of(context).colorScheme;

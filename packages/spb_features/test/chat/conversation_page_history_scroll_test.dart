@@ -6,9 +6,15 @@ import 'package:spb_models/spb_models.dart';
 
 import '../support/conversation_page_harness.dart';
 
-final _timeline = find.byWidgetPredicate(
-  (widget) => widget is ScrollView && widget.controller != null,
-);
+/// 时间线本体。
+///
+/// ## 为什么按 `CustomScrollView` 精确定位，而不是「任意带 controller 的
+/// `ScrollView`」
+///
+/// 后者会把页面上**别的**可滚动区域也匹配进来（轮次刻度条的刻度列 / hover
+/// 面板都是 `ListView`，§6.94 之后尤其明显），`tester.widget` 随即抛
+/// `Too many elements`——而报错点在 `_position` 里，看起来像滚动位置算错了。
+final _timeline = find.byType(CustomScrollView);
 
 ScrollPosition _position(WidgetTester tester) =>
     tester.widget<ScrollView>(_timeline).controller!.position;

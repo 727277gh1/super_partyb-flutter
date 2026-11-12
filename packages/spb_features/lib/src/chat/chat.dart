@@ -76,5 +76,6 @@ export 'thumbnail_memo.dart';
 export 'tool_call_batch_card.dart';
 export 'tool_call_tile.dart';
 export 'turn_detail_panel.dart';
+export 'turn_rail.dart';
 export 'turn_status.dart';
 export 'user_message_bubble.dart';
