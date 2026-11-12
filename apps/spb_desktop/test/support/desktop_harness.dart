@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -304,6 +305,22 @@ Future<TestHarness> pumpApp(
   /// 监听本地端口，测试里跑不了——于是那段接线长期零覆盖。
   /// 注入后可以喂一份真实形态的 token 响应并断言落盘结果。
   LoopbackSignIn? loopbackSignIn,
+
+  /// 本次运行是否为远端桌面（RDP）会话（issue #110）。默认 `false`（本地会话）。
+  ///
+  /// ## 为什么必须可注入
+  ///
+  /// 真实值来自平台通道（`SpbDisplayEnv.detectRemoteSession()`，只有 Windows
+  /// 原生侧实现），`flutter test` 里拿不到；若用例直接改 `SpbDisplayEnv` 的
+  /// 进程级静态字段，同一文件里的其它用例会串行继承它（静默变成「全部在
+  /// RDP 里」），故统一从容器注入。
+  bool remoteSession = false,
+
+  /// 路由观察者（可注入）。默认无。
+  ///
+  /// 用于断言「推入的是零时长路由」（issue #110 / §6.96）：`PageRoute` 的
+  /// `transitionDuration` 只能从路由对象上读，而路由对象由 Navigator 持有。
+  NavigatorObserver? observer,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -473,6 +490,8 @@ Future<TestHarness> pumpApp(
       windowFocusedProvider.overrideWith(
         () => FixedWindowFocused(windowFocused),
       ),
+      // 远端会话（RDP）标记（issue #110）：见 `remoteSession` 参数的说明。
+      remoteSessionProvider.overrideWithValue(remoteSession),
       // 初始目录：写进内存库的绑定表，让 syncLocalRootProvider 读得到。
       if (syncLocalRoot != null)
         syncLocalRootProvider.overrideWith((ref) async => syncLocalRoot),
@@ -499,6 +518,7 @@ Future<TestHarness> pumpApp(
     routes: buildDesktopRoutes(),
     redirect: buildAuthRedirect(),
     refreshListenable: container.read(authRefreshListenableProvider),
+    observers: [?observer],
   );
   addTearDown(router.dispose);
 

@@ -60,10 +60,14 @@ library;
 ///                               —— 宿主「会话即将结束」接线（Windows
 ///                                  Restart Manager 升级安装要求客户端退出，
 ///                                  见 §6.87）
+///   SpbDisplayEnv / detectRemoteSession
+///                               —— 远端桌面（RDP）会话探测：诊断读数 +
+///                                  远端会话下关闭动效的依据（issue #110，§6.96）
 export 'src/biometric_gate.dart';
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
+export 'src/display_env.dart';
 export 'src/drag_drop.dart';
 export 'src/file_sink.dart';
 export 'src/frame_activity.dart';

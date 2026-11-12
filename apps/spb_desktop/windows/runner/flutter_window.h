@@ -46,6 +46,17 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       host_lifecycle_channel_;
 
+  // 显示环境通道（`com.atjog.spb/display_env`，Dart → 原生）。
+  //
+  // 只有一个入站方法 `remoteSession`：回答「本进程所在的 Windows 会话是不是
+  // 远程桌面（RDP）」。Dart 侧用它（1）把读数写进诊断报告、（2）在远端会话
+  // 下关掉动效（issue #110，见 `spb_platform/lib/src/display_env.dart`）。
+  //
+  // Dart 侧拿不到这个事实：`MediaQuery` 只有系统的「减少动效」开关，RDP
+  // 不会替用户打开它。
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      display_env_channel_;
+
   // 是否已收到「会话确实要结束」（WM_ENDSESSION 且 lParam 含
   // ENDSESSION_CLOSEAPP）。只有它为真时才放行 WM_CLOSE——否则用户点关闭的
   // 既有行为（隐藏到托盘）会被破坏。

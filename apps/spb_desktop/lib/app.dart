@@ -302,6 +302,37 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
       // 用户选择的主题模式（跟随系统 / 浅色 / 深色），持久化在
       // `ui.theme_mode`。默认 system = 跟随系统，与改动前行为一致。
       themeMode: ref.watch(themeModeProvider),
+      // 远端桌面会话（RDP）下强制关闭动效（issue #110 / §6.96）。
+      //
+      // ## 为什么改在 `builder` 里覆写 `MediaQuery`
+      //
+      // `MaterialApp.builder` 位于 `MediaQuery` **之下**（引擎已注入真实的
+      // `disableAnimations`：Windows 的「减少动效」开关、Android 的
+      // “Remove animations”、iOS 的“减弱动态效果”），故这里覆写只影响本 App
+      // 的子树，不污染宿主，也不需要每个页面各写一遍。
+      //
+      // 用 `copyWith(disableAnimations: true)` 而不是自己算时长：读取该开关的
+      // 组件（`turn_status.dart` 的 spinner、`turn_rail.dart` 的过渡、框架自身
+      // 的隐式动画）会**自动**归零，不必逐处接线——这也正是「全局没有接线」
+      // 那条记在 issue #110 里的缺口。
+      //
+      // ## 为什么不是「有远端会话才降级」（即只在 RDP 里生效）
+      //
+      // 路由过渡本身已经在 `router.dart` 里**无条件**改成零时长（见那里的
+      // 说明）：桌面端的切页不需要缩放过渡，本地有 GPU 时那层也只是白付钱。
+      // 这里只处理「常驻动画」（连续帧），它们是 RDP 特有的成本。
+      builder: (context, child) {
+        // `builder` 的 child 在 MaterialApp 内部可能为 null（它要等路由
+        // 构建完）；返回空盒子而**不是** null——否则框架会插一个红屏。
+        if (child == null) return const SizedBox.shrink();
+        if (!ref.watch(remoteSessionProvider)) return child;
+        final media = MediaQuery.maybeOf(context);
+        if (media == null || media.disableAnimations) return child;
+        return MediaQuery(
+          data: media.copyWith(disableAnimations: true),
+          child: child,
+        );
+      },
       routerConfig: _router,
     );
   }

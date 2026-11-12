@@ -245,57 +245,92 @@ AuthState? _authStateFromContext(BuildContext context) {
 ///
 /// 独立导出供测试构造自己的 `GoRouter`（测试需要指定 `initialLocation`
 /// 并在 pumpWidget 前拿到实例以主动导航）。
+///
+/// ## 为什么全部用 `pageBuilder` + [desktopPage]（**无过渡**）
+///
+/// issue #110 / §6.96：Windows 默认的 `ZoomPageTransitionsBuilder`
+/// 在**每一帧**都脏整个窗口——进入页与退出页各做一次整页离屏快照
+/// （`allowSnapshotting` 默认 true，即那次「点下去先顿一下」），之后每帧做
+/// 两个全窗纹理的缩放 + 整窗 scrim 的逐像素 alpha 混合。有独立 GPU 时这层
+/// 几乎免费；而在远程桌面（只能 WARP 软件光栅）里单帧 20–40ms，450ms 的
+/// 过渡只出得来十来帧、实际观感是「卡两下直接跳过去」。
+///
+/// 而 go_router 每个 location 一个 `pageKey`（`match.dart` 的
+/// `ValueKey(newMatchedPath)`），于是**每次点侧边栏换对话都是新页面**——这层
+/// 成本不是只在首次 push 时付。
+///
+/// 去掉后：切页零帧过渡（内容直接换），本地会话同样受益（少一层白付的全窗
+/// 合成）。反证见 `test/router_transitions_test.dart`：只要有一条路由回退到
+/// `builder:`，那条用例就会拿到 450ms 的 `transitionDuration`（Windows 缩放过渡
+/// 的实际时长，实测值）而变红。
+///
+/// ## 为什么移动端不跟着改
+///
+/// 移动端的左右滑入是**平台约定**（Android/iOS 用户靠它判断层级关系），且它
+/// 走的是真正的 GPU 合成。这边只改桌面端。
 List<RouteBase> buildDesktopRoutes() {
   return [
     GoRoute(
       path: SpbRoutes.login,
-      builder: (context, state) => const _LoginPage(),
+      pageBuilder: (context, state) => desktopPage(state, const _LoginPage()),
     ),
     GoRoute(
       path: SpbRoutes.home,
-      builder: (context, state) {
+      pageBuilder: (context, state) {
         final delegate = GoRouter.of(context).routerDelegate;
         // 子路由和移动端 tab 会保留列表实例；用当前落点识别真正返回列表。
-        return ListenableBuilder(
-          listenable: delegate,
-          builder: (context, _) =>
-              _HomePage(isActive: delegate.state.uri.path == SpbRoutes.home),
+        return desktopPage(
+          state,
+          ListenableBuilder(
+            listenable: delegate,
+            builder: (context, _) =>
+                _HomePage(isActive: delegate.state.uri.path == SpbRoutes.home),
+          ),
         );
       },
       routes: [
         GoRoute(
           path: 'chat/:groupId',
-          builder: (context, state) {
+          pageBuilder: (context, state) {
             final groupId = state.pathParameters['groupId'] ?? '';
-            return _ChatPage(
-              groupId: groupId,
-              // 深链锚点：只认合法值（非法值当没传，不能把任意串拼进键比较）。
-              anchorTurnId: normalizeTurnAnchor(
-                state.uri.queryParameters[kTurnAnchorParam],
+            return desktopPage(
+              state,
+              _ChatPage(
+                groupId: groupId,
+                // 深链锚点：只认合法值（非法值当没传，不能把任意串拼进键比较）。
+                anchorTurnId: normalizeTurnAnchor(
+                  state.uri.queryParameters[kTurnAnchorParam],
+                ),
               ),
             );
           },
         ),
         GoRoute(
           path: 'search',
-          builder: (context, state) => const _SearchPage(),
+          pageBuilder: (context, state) =>
+              desktopPage(state, const _SearchPage()),
         ),
         GoRoute(
           path: 'confirmations',
-          builder: (context, state) => const _PendingConfirmationsPage(),
+          pageBuilder: (context, state) =>
+              desktopPage(state, const _PendingConfirmationsPage()),
         ),
         GoRoute(
           path: 'my-turns',
-          builder: (context, state) => const _MyTurnsPage(),
+          pageBuilder: (context, state) =>
+              desktopPage(state, const _MyTurnsPage()),
         ),
         GoRoute(
           path: 'habits',
-          builder: (context, state) => const _HabitsPage(),
+          pageBuilder: (context, state) =>
+              desktopPage(state, const _HabitsPage()),
         ),
         GoRoute(
           path: 'settings',
-          builder: (context, state) =>
-              _SettingsPage(initialTab: _settingsTabFromQuery(state)),
+          pageBuilder: (context, state) => desktopPage(
+            state,
+            _SettingsPage(initialTab: _settingsTabFromQuery(state)),
+          ),
           routes: [
             // 旧「交付物同步页」的兼容重定向：跑同步的区块已并入设置页的
             // 「交付物同步」标签（历史与理由见 [SettingsTab] 文档）。
@@ -307,24 +342,40 @@ List<RouteBase> buildDesktopRoutes() {
         ),
         GoRoute(
           path: 'overlay',
-          builder: (context, state) => const _OverlayQuickCapturePage(),
+          pageBuilder: (context, state) =>
+              desktopPage(state, const _OverlayQuickCapturePage()),
         ),
         // 小程序工作台：与移动端同路径。两条路由**不会互相抢匹配**
         // （`/miniapp/works` 是 2 段，`/miniapp/works/:workId` 是 3 段，
         // 段数不同），故不依赖声明顺序——移动端有回归用例守着同一结论。
         GoRoute(
           path: 'miniapp/works',
-          builder: (context, state) => const _WorksPage(),
+          pageBuilder: (context, state) =>
+              desktopPage(state, const _WorksPage()),
         ),
         GoRoute(
           path: 'miniapp/works/:workId',
-          builder: (context, state) =>
-              _WorkDetailPage(workId: state.pathParameters['workId'] ?? ''),
+          pageBuilder: (context, state) => desktopPage(
+            state,
+            _WorkDetailPage(workId: state.pathParameters['workId'] ?? ''),
+          ),
         ),
       ],
     ),
   ];
 }
+
+/// 桌面端的**零时长**页面（无过渡）：路由表的唯一载体，见 [buildDesktopRoutes]。
+///
+/// `NoTransitionPage` 的 `transitionDuration` / `reverseTransitionDuration` 都是
+/// `Duration.zero`（go_router 16.3.0 `lib/src/pages/custom_transition_page.dart`），
+/// 且 `buildTransitions` 原样返回 child——连那一帧的离屏快照都不做。
+///
+/// `key` 必须用 `state.pageKey`：它由 go_router 按 location 生成，决定了
+/// 「换个对话 = 换页面」；自己生成 key 会让切对话时复用同一个 route，页面的
+/// `initState` 不再重跑（表现为「点了没反应」）。
+Page<void> desktopPage(GoRouterState state, Widget child) =>
+    NoTransitionPage<void>(key: state.pageKey, child: child);
 
 /// 登录页（接线到认证用例）。
 class _LoginPage extends ConsumerWidget {

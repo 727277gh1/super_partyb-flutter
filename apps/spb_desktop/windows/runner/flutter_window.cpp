@@ -16,6 +16,14 @@
 
 namespace {
 
+// 显示环境通道名。
+//
+// ⚠️ 必须与 Dart 侧逐字一致：`packages/spb_platform/lib/src/display_env.dart`
+// 的 `kDisplayEnvChannelName`。写错不会报错，只会表现为 Dart 侧拿到
+// `MissingPluginException` → 读数「未知」→ 远端会话下的动效降级整条不生效，
+// 而应用照旧可用（因此没有任何报障信号）。
+constexpr char kDisplayEnvChannelName[] = "com.atjog.spb/display_env";
+
 // 剪贴板文件读取通道名。
 //
 // ⚠️ 必须与 Dart 侧逐字一致：packages/spb_platform/lib/src/overlay_files.dart
@@ -212,6 +220,33 @@ void ClipboardMethodCallHandler(
   result->Success(flutter::EncodableValue(entries));
 }
 
+void DisplayEnvMethodCallHandler(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  if (call.method_name() != "remoteSession") {
+    result->NotImplemented();
+    return;
+  }
+
+  // ## 为什么是 SM_REMOTESESSION 而不是别的信号
+  //
+  // 它是**唯一**从宿主直接回答「当前会话是不是远程桌面」的 API：
+  // RDP 会话里恒为 TRUE，本地控制台会话为 FALSE。Dart 侧完全没有等价物
+  // （`MediaQuery.disableAnimations` 反映的是用户的「减少动效」偏好，RDP
+  // 不会替用户打开它）。
+  //
+  // ## 语义边界：它描述**会话**，不是「此刻有没有连着 RDP 客户端」
+  //
+  // 用户断开 RDP（会话被断开但未注销）后它仍为 TRUE。这对本用途是**对的**：
+  // 重连回来仍是同一个 WARP 光栅的会话。
+  //
+  // ## 为什么恒返回 Success 而不区分错误
+  //
+  // 这个调用不会失败（无参数、无权限要求），Dart 侧只需要 true/false。
+  const bool remote_session = ::GetSystemMetrics(SM_REMOTESESSION) != 0;
+  result->Success(flutter::EncodableValue(remote_session));
+}
+
 }  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -261,6 +296,18 @@ bool FlutterWindow::OnCreate() {
           kHostLifecycleChannelName,
           &flutter::StandardMethodCodec::GetInstance());
 
+  // 显示环境通道（Dart → 原生）：远端桌面会话探测。
+  //
+  // 与剪贴板通道同一时机与同一理由（`SetMethodCallHandler` 必须在引擎
+  // messenger 就绪之后；本通道在**启动早期**就会被调，晚于首帧注册会让第一次
+  // 探测落到 `MissingPluginException`——而那条路径被 Dart 侧当作「本平台没有
+  // 实现」静默处理，于是远端会话永远不会被识别）。
+  display_env_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kDisplayEnvChannelName,
+          &flutter::StandardMethodCodec::GetInstance());
+  display_env_channel_->SetMethodCallHandler(DisplayEnvMethodCallHandler);
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -277,6 +324,7 @@ void FlutterWindow::OnDestroy() {
   // 先释放通道再释放 controller：通道持有 engine 的 messenger 指针，
   // 顺序反了会留下一个指向已析构 engine 的悬垂指针。
   host_lifecycle_channel_.reset();
+  display_env_channel_.reset();
   clipboard_channel_.reset();
 
   if (flutter_controller_) {

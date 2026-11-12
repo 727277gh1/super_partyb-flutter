@@ -107,9 +107,16 @@ void main() {
     //
     // 端点探测与它**并发**：两者互不依赖，串行会把探测的耗时（无 IPv6 时
     // ~10ms，黑洞场景最多 1.5s）叠加到启动延迟上。
+    //
+    // 远端会话探测（issue #110）也在这里并发：结果写进 `SpbDisplayEnv` 的
+    // 进程级缓存（诊断报告要同步读它，而首帧的动效策略也要它），且它是
+    // 一次平台通道往返（微秒级）。**必须**在 `runApp` 之前完成，否则首帧会
+    // 按「本地会话」的策略渲染，随后再降级一次——那次降级本身就是一次
+    // 整窗重绘，恰好是这条改动要避免的事情。
     final results = await Future.wait<Object?>([
       bootstrapDesktop(binding),
       resolveEndpointsAtStartup(),
+      SpbDisplayEnv.detectRemoteSession(),
     ]);
     final capabilities = results[0] as DesktopCapabilities;
     final endpoints = results[1] as SpbEndpoints;

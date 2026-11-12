@@ -79,6 +79,28 @@ final windowFocusedProvider = NotifierProvider<WindowFocusedNotifier, bool>(
   WindowFocusedNotifier.new,
 );
 
+/// 本次运行是否为远端桌面（RDP）会话（issue #110）。
+///
+/// ## 它决定什么
+///
+/// `true` 时应用根节点把 `MediaQuery.disableAnimations` 强制置位
+/// （见 `app.dart` 的 `MaterialApp.builder`），于是**会读这个开关的**动画
+/// （spinner、流式光标、刻度条过渡…）全部停在稳态：WARP 软件光栅下每帧
+/// 都要 CPU 填像素 + 跨设备回读，常驻动画就是「一直有帧要传」。
+///
+/// ## 为什么取 `?? false` 而不是三态
+///
+/// 探测值本身是三态的（`SpbDisplayEnv.remoteSession`，null = 未探测 /
+/// 本平台没实现），诊断报告必须保留 null 与 false 的区别；但**行为**上
+/// 「不知道」只能保守地理为「不乱关用户的动画」。两者口径不同是有意的：
+/// 报告回答「当时是什么」，这里回答「要不要降级」。
+///
+/// 默认值在生产由 `main()` 的启动探测写入（`SpbDisplayEnv.detectRemoteSession`）；
+/// 测试不必走平台通道，override 本 provider 即可。
+final remoteSessionProvider = Provider<bool>((ref) {
+  return SpbDisplayEnv.remoteSession ?? false;
+});
+
 /// 确认卡到达时发 OS 通知（issue #21）。
 ///
 /// 判定逻辑（判重 / 前台不打扰 / 权限幂等）在 `spb_domain` 的
