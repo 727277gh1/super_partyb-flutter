@@ -69,8 +69,17 @@ apps/*/macos/Flutter/ephemeral/
 apps/*/windows/flutter/ephemeral/
 
 # ---- 签名与密钥（绝不提交）----
+#
+# 这里针对的是**发布密钥**（能上架、能覆盖正式包的私钥）。
+#
+# ⚠️ 唯一的例外在下面：`apps/spb_mobile/android/debug.keystore` 是**调试密钥**，
+# 刻意入库（§6.95）。它的口令是 Android 公开约定（storepass/keypass = android，
+# alias = androiddebugkey），不含任何机密；入库的目的正是让 CI 与各台开发机
+# **签出同一个签名**——否则每次 CI 都在干净环境里重新生成 `~/.android/debug.keystore`
+# （随机密钥），产出的 APK 装不上上一版（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
 *.jks
 *.keystore
+!apps/spb_mobile/android/debug.keystore
 key.properties
 *.p12
 *.mobileprovision

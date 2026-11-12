@@ -121,3 +121,4 @@
 | §6.92 | 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（2026-11） | [`chat.md`](chat.md) |
 | §6.93 | dependabot 的 pub PR 永远红：`flutter_test` 的精确 pin 把 analyzer 家族钉死（2026-11） | [`build-and-release.md`](build-and-release.md) |
 | §6.94 | 轮次导航刻度条：右侧竖置「齿轮」（2026-11） | [`chat.md`](chat.md) |
+| §6.95 | Android 签名：调试密钥入库，让 CI 与各开发机签出同一签名（2026-11） | [`build-and-release.md`](build-and-release.md) |

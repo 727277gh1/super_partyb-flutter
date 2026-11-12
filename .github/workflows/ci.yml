@@ -464,6 +464,12 @@ jobs:
 
       - run: flutter pub get
 
+      # 签名接线是「静默失败」型：签错照样构建成功，只在用户**安装**时暴露
+      # （INSTALL_FAILED_UPDATE_INCOMPATIBLE / 各家 ROM 的「签名不一致」）。
+      # 故构建前后各查一次：静态接线 + 产物实际证书（§6.95）。
+      - name: Verify Android debug signing wiring
+        run: bash tools/check_android_signing.sh
+
       - name: Build APK (release)
         env:
           DEF_API: ${{ needs.config.outputs.api }}
@@ -503,6 +509,13 @@ jobs:
             fi
             echo "✅ $(basename "$(dirname "$snap")")/libapp.so 未残留默认地址"
           done
+
+      # 产物必须真的由仓库内那把 debug key 签出来：只查 Gradle 接线不够，
+      # 回退路径（`~/.android/debug.keystore`）也能让接线检查通过。
+      - name: Verify APK signing certificate
+        run: |
+          bash tools/check_android_signing.sh \
+            apps/spb_mobile/build/app/outputs/flutter-apk/app-release.apk
 
       - uses: actions/upload-artifact@v6
         with:

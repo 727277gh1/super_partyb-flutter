@@ -30,6 +30,35 @@ plugins {
 //     安装。这种「看起来成功」的失败必须变成硬错误。
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// debug 签名：固定用**仓库内**的 debug.keystore（§6.95）
+//
+// ## 为什么必须入库一把 debug key
+//
+// 默认的 `signingConfigs.debug` 指向 `~/.android/debug.keystore`，这个文件是
+// **AGP 按需用 keytool 现场生成**的——口令固定（`android`），但**密钥对是随机的**。
+// 于是：
+//   - 每台开发机各一把；
+//   - CI 每次都在干净 runner 上重新生成，**每次一把新的**。
+//
+// 后果不是「不正式」，而是**装不上**：Android 拒绝覆盖签名不同的同包名应用
+// （`INSTALL_FAILED_UPDATE_INCOMPATIBLE` / 各家 ROM 文案「签名不一致」）。实测
+// 两次相邻 CI 产物的签名证书分别是
+//   23:E0:80:BE:… 与 C2:25:66:4D:…（都是 CN=Android Debug）
+// 即每次下载新 APK 都要先卸载旧版。
+//
+// 因此把一把**调试**密钥入库：它不含机密（口令是 Android 公开约定），换来
+// 「同一份代码 → 同一签名」。发布签名仍走 `key.properties` + CI secrets，
+// **两者不要混用**。
+// ---------------------------------------------------------------------------
+
+/** 仓库内的调试密钥（相对 `apps/spb_mobile/android/`，与 `key.properties` 同目录）。 */
+val repoDebugKeystoreFile = rootProject.file("debug.keystore")
+
+/** 调试密钥的固定口令。Android 生态的公开约定，不是机密。 */
+val repoDebugKeystorePassword = "android"
+val repoDebugKeystoreAlias = "androiddebugkey"
+
 /** 签名配置文件名（相对 `apps/spb_mobile/android/`）。 */
 val keystorePropertiesFileName = "key.properties"
 
@@ -119,6 +148,24 @@ android {
     }
 
     signingConfigs {
+        // 覆盖 AGP 默认的 debug 配置，改用仓库内的固定密钥（见文件上方说明）。
+        // 文件缺失时（例如有人把这个文件从工作区删了）不报错：退回 AGP 默认行为，
+        // 只打印警告——构建仍然可用，只是那次产物的签名会与别人不同。
+        if (repoDebugKeystoreFile.exists()) {
+            getByName("debug") {
+                storeFile = repoDebugKeystoreFile
+                storePassword = repoDebugKeystorePassword
+                keyAlias = repoDebugKeystoreAlias
+                keyPassword = repoDebugKeystorePassword
+            }
+        } else {
+            logger.warn(
+                "警告：未找到 ${repoDebugKeystoreFile.absolutePath}，" +
+                    "debug 签名将回退到 ~/.android/debug.keystore（每次生成随机密钥，" +
+                    "产出的包无法覆盖安装上一版）。见 §6.95。",
+            )
+        }
+
         // 只在配置完整时创建。缺失时整个 release signingConfig 不存在，
         // buildTypes.release 会显式落到 debug（见下），而不是拿到一个半成品。
         if (canSignRelease) {

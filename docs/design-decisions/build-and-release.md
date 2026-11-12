@@ -771,6 +771,99 @@ Because build_runner 2.17.1 depends on analyzer ^14.3.0, version solving failed.
 - 修复后：`dependabot.yml` 只剩 `github-actions` 一段，改它触发一轮 update
   job，不再为 pub 包开任何 PR。
 
+### 6.95 Android 签名：调试密钥入库，让 CI 与各开发机签出同一签名（2026-11）
+
+#### 症状
+
+每次装新下载的 APK 都提示**签名不一致**（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`，
+各家 ROM 文案不同：小米「已存在签名不同的应用」、华为「应用签名不一致」、
+`adb install` 报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`），必须先卸载旧版才装得上。
+本地自建包与 CI 包之间同样互相覆盖不了。
+
+#### 根因：debug 签名指向一个**现场生成、密钥随机**的文件
+
+`apps/spb_mobile/android/app/build.gradle.kts` 在 `key.properties` 缺失时回退到
+`signingConfigs.debug`（这个回退是**有意**的：否则只想验证编译的人也要先有密钥）。
+AGP 的 debug 配置指向 `~/.android/debug.keystore`，而该文件是 **AGP 第一次构建时
+用 `keytool` 现场生成**的：口令固定（`android`）、别名固定（`androiddebugkey`），
+但**密钥对随机**。
+
+于是三处各一把钥匙：
+
+| 来源 | 证书 SHA-256（`CN=Android Debug`） |
+|---|---|
+| CI run A（`43209314418`） | `23:E0:80:BE:0F:A5:8E:87:…` |
+| CI run B（`43205019870`） | `C2:25:66:4D:CA:D7:ED:DF:…` |
+| 本机 `~/.android/debug.keystore` | `D2:C1:2C:B7:77:93:78:A5:0C:…` |
+
+GitHub 的 runner 每次都是干净 VM → `~/.android` 为空 → **每轮 CI 一把新钥匙**。
+所以「每次安装都签名不一致」不是偶发，而是必然。
+
+> 顺带解释一个常见误解：这**不是**「用了 debug 签名所以不正式」。debug 签名
+> 完全可以覆盖安装，前提是**每次用同一把**。问题在于「同一把」这件事没有保证。
+
+#### 修法：把一把**调试**密钥入库
+
+`apps/spb_mobile/android/debug.keystore`（RSA 2048、别名 `androiddebugkey`、
+口令 `android`、`CN=Android Debug, O=Android, C=US`、有效期到 2054）**提交进仓库**，
+`build.gradle.kts` 显式覆盖 debug 配置指向它：
+
+```kotlin
+val repoDebugKeystoreFile = rootProject.file("debug.keystore")   // android/ 下
+// ...
+if (repoDebugKeystoreFile.exists()) {
+    getByName("debug") {
+        storeFile = repoDebugKeystoreFile
+        storePassword = "android"; keyAlias = "androiddebugkey"; keyPassword = "android"
+    }
+} else { logger.warn(...) }   // 文件被删也不阻塞构建，只警告
+```
+
+它为什么可以入库：
+
+- **不含机密**：口令与别名是 Android 生态的公开约定（`debug.keystore` + `android`）；
+  能上架、能覆盖正式包的是**发布**密钥，那个仍只在本地 `key.properties` 与 CI
+  secrets（`ANDROID_KEYSTORE_BASE64` 等）里，`.gitignore` 对 `*.jks` / `*.keystore`
+  的规则**保持有效**，只对这一个路径开了 `!` 例外（两处 `.gitignore` 都要开：
+  根目录与 `apps/spb_mobile/android/.gitignore`，后者还有一条 `**/*.keystore`
+  会盖掉前者）；
+- **换来确定性**：「同一份代码 → 同一签名」，与本机/CI/哪位同事无关。
+
+#### 守卫 `tools/check_android_signing.sh`
+
+四道检查，缺一条都会让「签名换了一把」静默溜过去：
+
+| 检查 | 防的失败 |
+|---|---|
+| 文件存在**且被 git 跟踪**（再断言没被 `.gitignore` 命中） | 只在本机存在 = 没修，CI 依旧换钥匙 |
+| Gradle 里确实 `getByName("debug")` + `storeFile = repoDebugKeystoreFile` | 文件在但没人用（回退仍是默认行为） |
+| 证书指纹 == 脚本里钉住的常量 | 有人 `rm` 后重新生成：文件还在、接线也在，但签名换了 |
+| （可选）传入 APK 时用 `apksigner` 比对产物实际证书 | Gradle 接线对、产物却由别的 key 签（走了回退） |
+
+`ci.yml` 的 android job 在**构建前**跑静态检查、**构建后**再比对产物证书；
+`release.yml` 只跑静态检查——那里若配了 secrets，产物本就该由**发布**密钥签名。
+
+#### 代价与边界
+
+- **一次性卸载**：已经装过旧 CI 包（随机 debug 密钥签的）的人，需要卸载一次，
+  之后就能一直覆盖升级。
+- **换这把密钥 = 全员卸载一次**。故守卫把指纹钉成常量：真要换，得同时改守卫与
+  本节，而这两步在 review 里看得见。
+- **不改成强制发布签名**：CI 的 APK 定位是「冒烟包」（`SPB_ENV=prod` 的配置 +
+  可安装性），不是上架产物。要求所有贡献者配密钥会把可构建性变成门槛。
+- **不动包名 / versionCode**：与签名无关的另一个坑
+  （`versionCode` 只降不升时也会拒装，但错误是 `INSTALL_FAILED_VERSION_DOWNGRADE`，
+  别与本节混为一谈）。
+
+#### 验证
+
+- 本机 `flutter build apk --release` 后
+  `bash tools/check_android_signing.sh <apk>` → `✅ 产物签名与仓库内调试密钥一致`
+  （指纹 `1089ac1f…`，与上面三把旧钥匙都不同）；
+- 反证：另生成一把密钥替换 `debug.keystore` 后守卫立刻红
+  （`实际 db21cad3… ≠ 期望 1089ac1f…`），还原后恢复绿；
+- CI：android job 的两条 `Verify Android …` 步骤全绿，artifact 可覆盖安装上一轮。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 

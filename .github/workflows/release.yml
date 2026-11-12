@@ -392,6 +392,11 @@ jobs:
           chmod 600 key.properties upload-keystore.jks
           echo "已写入签名配置（值不打印）"
 
+      # 静态接线检查（不比对产物）：这个 job 里配了 secrets 时产物由**发布**
+      # 密钥签名，与仓库内的调试密钥本就不同，故不传 APK 路径（§6.95）。
+      - name: Verify Android debug signing wiring
+        run: bash tools/check_android_signing.sh
+
       - name: Build APK (release)
         env:
           DEF_API: ${{ needs.config.outputs.api }}

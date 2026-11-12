@@ -22,6 +22,7 @@
 | `tools/check_agents_refs.sh` | 文档标识符引用与本清单的 Shell 脚本覆盖 |
 | `tools/check_agents_numbers.sh` | 文档数字漂移 |
 | `tools/check_agents_size.sh` | AGENTS.md 体积与设计决策索引完整性 |
+| `tools/check_android_signing.sh` | Android 调试签名接线：仓库内密钥在位、Gradle 覆盖 debug、指纹未变、产物实际证书一致 |
 
 ```bash
 for f in tools/check_*.sh; do bash "$f" || break; done
