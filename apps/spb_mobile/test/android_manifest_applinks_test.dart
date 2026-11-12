@@ -83,8 +83,14 @@ void main() {
       );
     });
 
-    test('双栈两个 host 都已声明', () {
-      for (final host in ['tbcc.atjog.com', 'tbcc6.atjog.com']) {
+    test('各环境 issuer host 都已声明', () {
+      // 断言的是「每个跑过 OIDC 的 issuer 域名都在」，不是固定条数：
+      // 漏一条不报错、只是那个环境「回调打开浏览器落地页」，要多点一次「打开应用」。
+      for (final host in [
+        'tbcc.atjog.com', // 生产
+        'tbcc6.atjog.com', // 生产双栈别名
+        'dever.atjog.com', // 内网 dever 环境
+      ]) {
         expect(
           xml,
           contains('android:host="$host"'),
@@ -93,23 +99,47 @@ void main() {
       }
     });
 
-    test('每个 host 独占一条 autoVerify filter（不能合并）', () {
+    test('每条 autoVerify filter 只声明一个 host（不能合并）', () {
       // WHY: Android 11 及以下，一条 filter 里**任一** host 验证失败会导致整条
       // filter 失效。tbcc6 目前没有 HTTPS 监听（TLS 只在 EdgeOne 上且只前置
       // tbcc），若与 tbcc 合并在一条 filter 里，会让旧设备上 tbcc 也收不到回调。
-      final filters = RegExp(
-        r'<intent-filter[^>]*android:autoVerify="true"[^>]*>[\s\S]*?</intent-filter>',
-      ).allMatches(xml).map((m) => m.group(0)!).toList();
-
-      expect(filters, hasLength(2), reason: '应为两个域名各一条 autoVerify filter');
+      // 这里不写死 filter 条数：manifest 里还有其它用途的 autoVerify 组
+      // （例如其它深链），断言只应关心「一条一 host」这条不变量。
+      final filters = _autoVerifyFilters(xml);
+      expect(filters, isNotEmpty, reason: '找不到 autoVerify filter');
 
       for (final filter in filters) {
-        final hosts = RegExp(r'android:host="([^"]+)"')
-            .allMatches(filter)
-            .map((m) => m.group(1))
-            .toList();
-        expect(hosts, hasLength(1), reason: '一条 filter 只能有一个 host，实际 = $hosts');
+        final hosts = _hostsOf(filter);
+        expect(
+          hosts,
+          hasLength(1),
+          reason: '一条 filter 只能有一个 host，实际 = $hosts\n$filter',
+        );
       }
+    });
+
+    test('每个 issuer host 各有一条 /idp/app/callback 的 filter', () {
+      final callbackFilters = _autoVerifyFilters(xml)
+          .where((f) => f.contains('android:path="/idp/app/callback"'))
+          .toList();
+      final hosts = callbackFilters.expand(_hostsOf).toSet();
+
+      for (final host in [
+        'tbcc.atjog.com',
+        'tbcc6.atjog.com',
+        'dever.atjog.com',
+      ]) {
+        expect(
+          hosts,
+          contains(host),
+          reason: '缺少 $host 的回调 filter：该域名下点击回调只会在浏览器落地页停下',
+        );
+      }
+      expect(
+        hosts.length,
+        callbackFilters.length,
+        reason: '回调 filter 有 host 重复：$hosts vs ${callbackFilters.length} 条',
+      );
     });
 
     test('自定义 scheme 的 intent-filter 没有被 autoVerify 误伤', () {
@@ -140,3 +170,15 @@ void main() {
     });
   });
 }
+
+/// 取出 manifest 里所有 `autoVerify="true"` 的 intent-filter 文本块。
+List<String> _autoVerifyFilters(String xml) => RegExp(
+  r'<intent-filter[^>]*android:autoVerify="true"[^>]*>[\s\S]*?</intent-filter>',
+).allMatches(xml).map((m) => m.group(0)!).toList();
+
+/// 取出一个 filter 块里的全部 host。
+List<String> _hostsOf(String filter) =>
+    RegExp(r'android:host="([^"]+)"')
+        .allMatches(filter)
+        .map((m) => m.group(1)!)
+        .toList();
