@@ -369,10 +369,10 @@ class _LoginPage extends ConsumerWidget {
     return LoginPage(
       state: ref.watch(authStateProvider),
       onSignIn: () => ref.read(authControllerProvider).signIn(),
-      // 粘贴导入会话：IdP 未注册移动端 public client 时的唯一登录入口
-      //（深链闭环依赖 `partyb://oidc/callback` 注册，见 docs/mobile-oidc-deeplink.md）。
-      onImportSession: (raw) =>
-          ref.read(authControllerProvider).importSession(raw),
+      // 粘贴导入会话**不注入**：那是桌面端的补丁（Linux 读不到浏览器 Cookie）。
+      // 移动端已有深链回调把授权结果送回进程，再摆一个「手抄 id_token」的入口
+      // 只会多出两类风险：剪贴板（token 会被前台 App 读到）与钓鱼（照客服指示
+      // 粘一个 token 就是登进攻击者账号）。另四条登录路径已覆盖各类环境。
       // 微信一键登录：手机上唯一能「一步到位」的路径（同机无法扫码）。
       // 回调把短码回退交回给登录页展示（唤起不可用时的兜底）。
       onWeChatSignIn: (onShortCode) =>

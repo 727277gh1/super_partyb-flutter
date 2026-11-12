@@ -533,9 +533,13 @@ void main() {
       );
     });
 
-    testWidgets('登录页展示导入入口与输入框', (tester) async {
-      // 移动端此前只注入 onSignIn，LoginPage 的导入区不渲染。
-      // 这条用例守住「移动端也有这条路」——它是当前唯一可登录路径。
+    testWidgets('登录页**不**展示粘贴导入入口（移动端不需要手工搬运凭证）', (tester) async {
+      // 导入会话是桌面端的补丁：Linux 读不到浏览器 Cookie，所以要让用户把
+      // 浏览器里的 id_token 抄过来。移动端有深链回调直接把授权结果送回进程，
+      // 再摆一个「手抄 token」的入口只会多出两类风险：
+      //   1. 剪贴板：token 会被前台 App 读到（Android 可静默读、iOS 弹提示）；
+      //   2. 钓鱼：照「客服」指示粘一个 token 就是登进攻击者账号。
+      // 另有微信一键/短码、邮箱、反向码、深链四条路径，覆盖各类环境。
       await pumpApp(
         tester,
         tokenStore: InMemoryTokenStore(),
@@ -544,29 +548,21 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.ensureVisible(
-        find.byKey(const ValueKey('login-other-methods')),
-      );
-      await tester.tap(find.byKey(const ValueKey('login-other-methods')));
-      await tester.pumpAndSettle();
-
-      // 导入区默认收起（它是备选路径，展开着会让登录页看起来有两条对等入口）
-      // ——必须先展开才能断言输入框存在。
-      //
-      // 登录页条目随功能增加而变长（微信登录码 / 邮箱 / 反向登录码…），
-      // 导入入口在默认窗口里已在折叠线以下：先滚到可见处再点。
-      await tester.ensureVisible(
-        find.byKey(const ValueKey('login-import-session')),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('login-import-session')));
-      await tester.pumpAndSettle();
+      final otherMethods = find.byKey(const ValueKey('login-other-methods'));
+      if (otherMethods.evaluate().isNotEmpty) {
+        await tester.ensureVisible(otherMethods);
+        await tester.tap(otherMethods);
+        await tester.pumpAndSettle();
+      }
 
       expect(
-        find.byKey(const ValueKey('login-import-field')),
-        findsOneWidget,
-        reason: '移动端必须展示粘贴导入入口（深链闭环依赖 IdP 注册）',
+        find.byKey(const ValueKey('login-import-session')),
+        findsNothing,
+        reason: '移动端不得暴露「粘贴 id_token」入口（剪贴板泄露 + 钓鱼面）',
       );
+      // 不注入导入回调时，整块折叠区只剩邮箱/反向码——它们仍在，证明折叠区本身没被
+      // 删掉（防止「顺手把其他入口一起删了」这种过度修复）。
+      expect(find.byKey(const ValueKey('login-handoff-field')), findsOneWidget);
     });
 
     testWidgets('待验证登录请求持久化：进程重启后仍可消费（回调能完成换 token）', (tester) async {
