@@ -30,6 +30,8 @@ void main() {
     Future<String?> Function(String email, void Function() onSent)?
     onEmailSignIn,
     Future<String?> Function(String code)? onHandoffSignIn,
+    Future<({String? accountName, String? error})> Function(String code)?
+    onHandoffPreview,
     Size? size,
     bool expandAlternatives = true,
   }) async {
@@ -50,6 +52,7 @@ void main() {
           onWeChatSignIn: onWeChatSignIn,
           onEmailSignIn: onEmailSignIn,
           onHandoffSignIn: onHandoffSignIn,
+          onHandoffPreview: onHandoffPreview,
         ),
       ),
     );
@@ -679,6 +682,129 @@ void main() {
       // 码是持有即授权的凭据：不写清楚，用户会截图发微信求助，拿到截图的人
       // 就能登录他的账号。
       expect(find.text('登录码 2 分钟内有效、只能用一次。请勿把码发给任何人。'), findsOneWidget);
+    });
+
+    // 兑换不可逆（码单次消费），而这条路径能被社工利用（码 = 凭据）：攻击者
+    // 出码诱骗受害者输码，受害者就会登进攻击者账号。所以兑换前必须把账号名
+    // 摆给用户看——这是他能看到的**唯一**异常信号。
+    group('兑换前回显账号（对抗被诱导输码）', () {
+      testWidgets('先预览，确认后才兑换', (tester) async {
+        final calls = <String>[];
+        await pumpLogin(
+          tester,
+          onSignIn: () async => null,
+          onHandoffPreview: (code) async {
+            calls.add('preview:$code');
+            return (accountName: '张三', error: null);
+          },
+          onHandoffSignIn: (code) async {
+            calls.add('signin:$code');
+            return null;
+          },
+        );
+
+        await tester.enterText(
+          find.byKey(const ValueKey('login-handoff-field')),
+          'AB2C-3D4E',
+        );
+        await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+        await tester.pumpAndSettle();
+
+        // 确认框先出现，且此时**还没有**兑换（不可逆动作必须发生在确认之后）。
+        expect(
+          find.byKey(const ValueKey('login-handoff-confirm-dialog')),
+          findsOneWidget,
+        );
+        expect(find.text('将登录为：张三'), findsOneWidget);
+        expect(calls, ['preview:AB2C-3D4E']);
+
+        await tester.tap(
+          find.byKey(const ValueKey('login-handoff-confirm-ok')),
+        );
+        await tester.pumpAndSettle();
+        expect(calls, ['preview:AB2C-3D4E', 'signin:AB2C-3D4E']);
+      });
+
+      testWidgets('用户取消则不兑换（码不被消费）', (tester) async {
+        var signIns = 0;
+        await pumpLogin(
+          tester,
+          onSignIn: () async => null,
+          onHandoffPreview: (_) async => (accountName: '张三', error: null),
+          onHandoffSignIn: (_) async {
+            signIns++;
+            return null;
+          },
+        );
+
+        await tester.enterText(
+          find.byKey(const ValueKey('login-handoff-field')),
+          'AB2C-3D4E',
+        );
+        await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('login-handoff-confirm-cancel')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(signIns, 0);
+        expect(
+          find.byKey(const ValueKey('login-handoff-confirm-dialog')),
+          findsNothing,
+        );
+      });
+
+      testWidgets('预览失败直接报错，不弹确认框也不兑换', (tester) async {
+        var signIns = 0;
+        await pumpLogin(
+          tester,
+          onSignIn: () async => null,
+          onHandoffPreview: (_) async =>
+              (accountName: null, error: '登录码无效或已被使用，请核对后重新输入'),
+          onHandoffSignIn: (_) async {
+            signIns++;
+            return null;
+          },
+        );
+
+        await tester.enterText(
+          find.byKey(const ValueKey('login-handoff-field')),
+          'AB2C-3D4E',
+        );
+        await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('login-handoff-confirm-dialog')),
+          findsNothing,
+          reason: '码本身不成立时弹「将登录为」只会让人以为码是对的',
+        );
+        expect(find.text('登录码无效或已被使用，请核对后重新输入'), findsOneWidget);
+        expect(signIns, 0);
+      });
+
+      testWidgets('未注入 onHandoffPreview 时保持旧行为（不拦，直接兑换）', (tester) async {
+        // 兼容��宿主（或旧 IdP 没有 /handoff/preview）不能因为缺预览就无法登录。
+        var signIns = 0;
+        await pumpLogin(
+          tester,
+          onSignIn: () async => null,
+          onHandoffSignIn: (_) async {
+            signIns++;
+            return null;
+          },
+        );
+
+        await tester.enterText(
+          find.byKey(const ValueKey('login-handoff-field')),
+          'AB2C-3D4E',
+        );
+        await tester.tap(find.byKey(const ValueKey('login-handoff-button')));
+        await tester.pumpAndSettle();
+
+        expect(signIns, 1);
+      });
     });
   });
 

@@ -1021,6 +1021,34 @@ final handoffSignInActionProvider =
       );
     });
 
+/// 反向登录码的**兑换前预览**：这个码属于哪个账号（」不消费码）。
+///
+/// 兑换不可逆（码单次消费），而这条路径能被社工利用（码=凭据），所以登录页
+/// 必须先拿到账号名弹「将登录为 …」。不在这里直接弹框：弹框需要 BuildContext，
+/// 由页面负责（见 `LoginPage.onHandoffPreview`）。
+///
+/// 返回 `error` 非空表示预览本身失败（码不存在/过期/限流）——此时不该继续兑换。
+final handoffPreviewProvider =
+    Provider<
+      Future<({String? accountName, String? error})> Function(String code)
+    >((ref) {
+      final client = ref.read(miniProgramLoginClientProvider);
+      return (code) async {
+        try {
+          final preview = await client.previewHandoffCode(code: code);
+          // null = 服务端还没这个端点（旧 IdP）：返回「无预览」，让登录页跳过
+          // 确认框继续兑换，而不是把用户挡在门外。
+          if (preview == null) return (accountName: null, error: null);
+          return (accountName: preview.accountName, error: null);
+        } on AuthError catch (e) {
+          return (accountName: null, error: e.message);
+        } catch (e) {
+          SpbLog.warn('反向登录码预览失败', {'error': e.toString()});
+          return (accountName: null, error: '登录码预览失败，请重试');
+        }
+      };
+    });
+
 /// 邮箱 magic link 客户端。
 ///
 /// 端点由 issuer 推导（`{issuer}/api/v1/auth/magic-link`），不硬编码域名。

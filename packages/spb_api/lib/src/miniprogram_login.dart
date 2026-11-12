@@ -126,6 +126,34 @@ enum MiniProgramPollState {
   expired,
 }
 
+/// 反向登录码的兑换前预览：这个码属于**哪个账号**、还剩多久。
+///
+/// ## 为什么要有它（安全，不是体验）
+///
+/// 反向码是「持有即授权」：输码即登入出码人的账号。于是一条社工链成立——
+/// 攻击者出码发给受害者（「输入这个码把数据搬过去」），受害者输码后自己就登进了
+/// 攻击者的账号，之后写的笔记/上传的文件/对话全归攻击者，而受害者毫无察觉。
+///
+/// 兑换是**不可逆**的（码单次消费），所以唯一能打断它的时机就是「兑换前」：
+/// 把账号名摊给用户看，他看到不是自己就会停下来。
+///
+/// 服务端对应 `POST /handoff/preview`（不消费码，见 id-provider 的 PreviewHandoff）。
+class HandoffPreview {
+  const HandoffPreview({required this.accountName, this.expiresInSeconds});
+
+  /// 将登录进的账号展示名。
+  ///
+  /// 服务端查不到名字时会回一个中性占位（「该账号」）——它不是空串，客户端
+  /// 可以无条件拿它拼文案，不要自己再判空。
+  final String accountName;
+
+  /// 剩余有效秒数（未知时为 null）。
+  final int? expiresInSeconds;
+
+  @override
+  String toString() => 'HandoffPreview($accountName)';
+}
+
 /// 小程序扫码登录的 API 客户端。
 class MiniProgramLoginClient {
   MiniProgramLoginClient({
@@ -283,20 +311,23 @@ class MiniProgramLoginClient {
     return code;
   }
 
-  /// 用**反向登录码**（小程序出码、本设备输码）兑换 OIDC 授权码。
+  /// 用**反向登录码**（小程序出码、本设备输码）换 OIDC 授权码。
   ///
   /// ## 与 [exchange] 的区别
   ///
   /// - [exchange] 消费的是「小程序已确认的 scene」（正向：App 出码 → 小程序确认）；
   /// - 本方法消费的是「小程序已登录后自己发出的 8 位码」（反向），
   ///   谁拿到码谁就能兑换，所以服务端做了 8 位长度、2 分钟 TTL、单次消费、
-  ///   同码错 5 次作废、按来源限流。
+  ///   按来源限流。
   ///
   /// 两条路径**端点与存储都隔离**：反向码进 `/exchange` 会 404，正向 scene 进
   /// `/handoff/redeem` 会 400（格式），所以这里不会误消费别的会话。
   ///
   /// 返回的 code 交给 `OidcClient.exchangeCode`（同一个 [pkce]）换 token，
   /// 与浏览器/正向登录完全一致。
+  ///
+  /// ⚠️ **兑换不可逆**：调用它就意味着用户接受了「登录进这个账号」。界面必须先
+  /// 调 [previewHandoffCode] 把账号名给用户看，否则就是一条无提示的账号接管通道。
   Future<String> redeemHandoffCode({
     required String code,
     required PkcePair pkce,
@@ -326,6 +357,50 @@ class MiniProgramLoginClient {
       throw const AuthError('登录码兑换失败（响应缺少 code）');
     }
     return authCode;
+  }
+
+  /// 反向码**兑换前**的只读预览：这个码属于哪个账号。
+  ///
+  /// 不消费码——「看了一眼发现不是我的账号」应该能直接放弃，而不是把码吃掉、
+  /// 逼用户回小程序重新出码。服务端对应 `POST /handoff/preview`。
+  ///
+  /// 返回 `null` 表示**服务端还没这个端点**（旧 IdP，见下面 404 分支），调用方
+  /// 应退回「无预览」并继续兑换。这个分支让上线顺序变成「先上客户端也行」：
+  /// 否则新版客户端 + 旧 IdP 会让反向码登录整条断掉（用户看到一条莫名的失败）。
+  Future<HandoffPreview?> previewHandoffCode({required String code}) async {
+    final uri = endpointBase.replace(
+      path: '${endpointBase.path}/handoff/preview',
+    );
+    final Response<dynamic> res;
+    try {
+      res = await _dio.post<dynamic>(
+        uri.toString(),
+        // 码不进 URL：查询串会被各级访问日志/代理计下来，而这是一个凭据。
+        data: {'code': code},
+      );
+    } on DioException catch (e) {
+      final data = e.response?.data;
+      final structured = data is Map && _str(data['error']) != null;
+      final status = e.response?.statusCode;
+      if (!structured && (status == 404 || status == 405)) {
+        // 路由不存在（旧 IdP）：不是「码无效」，而是「服务端不理解这个请求」。
+        return null;
+      }
+      throw AuthError(_messageFor(e, handoff: true));
+    }
+    final account = _asMap(_asMap(res.data)['account']);
+    final name = _str(account['name']);
+    if (name == null) {
+      // 服务端未回账号名（响应结构变了）：不编一个名字，也不阻断预览。
+      return HandoffPreview(
+        accountName: '该账号',
+        expiresInSeconds: _int(_asMap(res.data)['expiresInSeconds']),
+      );
+    }
+    return HandoffPreview(
+      accountName: name,
+      expiresInSeconds: _int(_asMap(res.data)['expiresInSeconds']),
+    );
   }
 
   /// 统一错误映射：把服务端的 `error` 码翻成用户能读懂的原因。
@@ -363,7 +438,9 @@ class MiniProgramLoginClient {
         // 可能碰到，统一提示重新发起。
         return '登录码已失效，请重新发起';
       case 'too_many_attempts':
-        // 同一个码错够次数就被作废：不能再让用户继续试，只能重新出码。
+        // 服务端已不再返回这个码（反向码没有「同码尝试次数」这种可归属的计数，
+        // 见 id-provider 的 handoff.go 文件头）。保留映射只是为了旧版 IdP 上线
+        // 期间的兼容：用户能看懂「已作废，需重新出码」。
         return '这个登录码尝试次数过多已作废，请在小程序里重新生成';
       case 'poll_secret_required':
       case 'poll_secret_invalid':

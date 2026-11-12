@@ -47,6 +47,7 @@ class LoginPage extends StatefulWidget {
     this.onWeChatSignIn,
     this.onEmailSignIn,
     this.onHandoffSignIn,
+    this.onHandoffPreview,
     this.title = '登录 Super PartyB',
     this.subtitle = '使用统一身份认证中心（SSO）登录',
     this.miniProgramName = '成蹊',
@@ -118,6 +119,21 @@ class LoginPage extends StatefulWidget {
   ///
   /// 为 null 时不展示。
   final Future<String?> Function(String code)? onHandoffSignIn;
+
+  /// 反向登录码的**兑换前预览**：这个码属于哪个账号。
+  ///
+  /// ## 为什么它是安全必需项，不是体验优化
+  ///
+  /// 反向码是「持有即授权」：输码即登入出码人的账号。于是有一条社工链——
+  /// 攻击者出码发给受害者（「输入这个码把数据搬过来」），受害者输码后自己就登进了
+  /// 攻击者的账号，之后写的一切都归攻击者。兑换是**不可逆**的（码单次消费），
+  /// 所以唯一能打断它的时机就在兑换前：把账号名摊给用户看。
+  ///
+  /// 返回值：`accountName` 非空且 `error` 为空时弹确认框；`error` 非空则直接展示
+  /// 错误（不弹框，因为连码都不成立）。为 null 时**不弹确认框**（保持旧行为：
+  /// 无预览能力的宿主，或尚未接入该端点的旧 IdP）。
+  final Future<({String? accountName, String? error})> Function(String code)?
+  onHandoffPreview;
 
   /// 邮箱 magic link 登录：输邮箱 → 收信 → 点链接确认 → 自动登录。
   ///
@@ -388,6 +404,9 @@ class _LoginPageState extends State<LoginPage> {
   ///
   /// 与邮箱入口一样**当场**就能出结果（成功直接进应用，失败给可操作文案），
   /// 所以不需要「等待中」的中间态。
+  ///
+  /// 提交前先走 [onHandoffPreview] 把「将登录为 <账号>」摊给用户确认：兑换是
+  /// 不可逆的，而这条路径能被社工利用（码=凭据）。见字段文档。
   Future<void> _handleHandoffSignIn() async {
     final handler = widget.onHandoffSignIn;
     if (handler == null || _handoffBusy) return;
@@ -399,6 +418,39 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
 
+    // 1) 兑换前预览：先弄清「这个码属于谁」。失败就不往下走（不弹确认框）。
+    final preview = widget.onHandoffPreview;
+    if (preview != null) {
+      setState(() {
+        _handoffBusy = true;
+        _localError = null;
+      });
+      ({String? accountName, String? error}) outcome;
+      try {
+        outcome = await preview(code);
+      } catch (e) {
+        SpbLog.warn('反向登录码预览异常', {'error': e.toString()});
+        outcome = (accountName: null, error: '登录码预览失败，请重试');
+      }
+      if (!mounted) return;
+      setState(() => _handoffBusy = false);
+      if (outcome.error != null) {
+        setState(() => _localError = outcome.error);
+        return;
+      }
+      final name = outcome.accountName;
+      if (name == null) {
+        // 服务端没给账号名（旧 IdP）：不拦，但也不假装确认过。
+        setState(() {
+          _localError = null;
+        });
+      } else {
+        final proceed = await _confirmHandoffAccount(name);
+        if (!proceed || !mounted) return;
+      }
+    }
+
+    // 2) 兑换（不可逆：码被消费，会话落盘）。
     setState(() {
       _handoffBusy = true;
       _localError = null;
@@ -419,6 +471,46 @@ class _LoginPageState extends State<LoginPage> {
       // 成功后清空输入框：码就是凭据，留在控制器里没有任何用处。
       if (error == null) _handoffController.clear();
     });
+  }
+
+  /// 「将登录为 <账号>」的确认框。返回 false 表示用户取消（不兑换）。
+  ///
+  /// 文案刻意把账号名放在最前，并把「不是你自己的账号」写成明确的停止信号：
+  /// 被诱导输码的人只有在这一秒才发现自己要登进去的不是自己的号。
+  Future<bool> _confirmHandoffAccount(String accountName) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        key: const ValueKey('login-handoff-confirm-dialog'),
+        title: const Text('确认登录码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('将登录为：$accountName'),
+            const SizedBox(height: SpbSpacing.sm),
+            Text(
+              '如果这不是你自己的账号，请点「取消」。\n'
+              '登录码就是登录凭据，不要把它交给别人。',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            key: const ValueKey('login-handoff-confirm-cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('login-handoff-confirm-ok'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('继续登录'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
   }
 
   /// 粘贴导入会话。

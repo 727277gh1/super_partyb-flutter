@@ -357,6 +357,10 @@ class _LoginPage extends ConsumerWidget {
       // 桌面端最缺的就是这一条：loopback 需要 IdP 注册 public client（#6 未闭环），
       // 邮件通道需要运维配 mailer。而用户手机上通常已经登录着小程序，出一个码
       // 就能把会话搬过来，全程不需要任何服务端配置。
+      //
+      // 先预览再兑换：码是持有即授权的凭据，必须让用户看到「将登录为 <账号>」
+      // 再决定（否则被社工时受害者会无提示地登进别人的账号）。
+      onHandoffPreview: (code) => ref.read(handoffPreviewProvider)(code),
       onHandoffSignIn: (code) =>
           ref.read(authControllerProvider).handoffSignIn(code),
     );

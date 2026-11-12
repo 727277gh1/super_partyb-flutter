@@ -387,6 +387,83 @@ void main() {
     }
   });
 
+  // 兑换前预览：反向码是「持有即授权」，而兑换不可逆（单次消费）。所以界面必须
+  // 先拿到「这个码属于哪个账号」，否则被社工的用户会无提示地登进别人的号。
+  group('previewHandoffCode（兑换前预览）', () {
+    test('请求 /handoff/preview，码不进 URL，取出账号名与剩余秒数', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/handoff/preview',
+        (server) => server.reply(200, {
+          'success': true,
+          'account': {'name': '张三'},
+          'expiresInSeconds': 95,
+        }),
+        // 码是凭据：只能放请求体，不能进查询串（会被各级访问日志记下来）。
+        data: {'code': 'AB2C-3D4E'},
+      );
+
+      final preview = await client.previewHandoffCode(code: 'AB2C-3D4E');
+      expect(preview?.accountName, '张三');
+      expect(preview?.expiresInSeconds, 95);
+    });
+
+    test('服务端没给账号名时不编名字、也不抛错（旧 IdP 兼容）', () async {
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/handoff/preview',
+        (server) => server.reply(200, {'success': true}),
+        data: {'code': 'AB2C-3D4E'},
+      );
+
+      final preview = await client.previewHandoffCode(code: 'AB2C-3D4E');
+      expect(preview?.accountName, '该账号');
+      expect(preview?.expiresInSeconds, isNull);
+    });
+
+    test('旧 IdP 没有该端点（404 且无结构化 error）→ 返回 null，不阻断登录', () async {
+      // 上线顺序保护：新版客户端 + 未升级的 IdP 不该让反向码登录整条断掉。
+      // 判定依据是「404 且响应体里没有 error 字段」——路由不存在时 chi 返回的是
+      // 纯文本 404，而真实业务错误一定带 `{"error":"..."}`。
+      adapter.onPost(
+        '$issuer/api/v1/bindings/mini-program/handoff/preview',
+        (server) => server.reply(404, '404 page not found'),
+        data: {'code': 'AB2C-3D4E'},
+      );
+
+      expect(
+        await client.previewHandoffCode(code: 'AB2C-3D4E'),
+        isNull,
+        reason: 'null = 服务端不理解这个请求，调用方应跳过确认直接兑换',
+      );
+    });
+
+    // 预览失败的语义必须与兑换一致（同一套服务端错误码），否则用户会在
+    // 「码过期了」时看到正经的兑换错误、却在预览看到一包英文。
+    for (final c in const [
+      ('not_found', '核对'),
+      ('expired', '重新生成'),
+      ('rate_limited', '稍后再试'),
+    ]) {
+      test('服务端 ${c.$1} → 可读原因（含「${c.$2}」）', () async {
+        adapter.onPost(
+          '$issuer/api/v1/bindings/mini-program/handoff/preview',
+          (server) => server.reply(400, {'success': false, 'error': c.$1}),
+          data: {'code': 'AB2C-3D4E'},
+        );
+
+        await expectLater(
+          client.previewHandoffCode(code: 'AB2C-3D4E'),
+          throwsA(
+            isA<AuthError>().having(
+              (e) => e.message,
+              'message',
+              contains(c.$2),
+            ),
+          ),
+        );
+      });
+    }
+  });
+
   // 轮询密钥（pollSecret）是「6 位短码不能当凭据用」的关键：
   // 服务端在创建时下发，轮询要放请求头、兑换要放进请求体。任何一处漏传，
   // 服务端都会 403，用户看到的是「登录失败」而不是「实现漏了字段」。

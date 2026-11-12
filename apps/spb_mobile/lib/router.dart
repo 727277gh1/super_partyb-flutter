@@ -383,6 +383,8 @@ class _LoginPage extends ConsumerWidget {
       // 反向登录码（#21）：另一台设备上的小程序出码 → 本机输码。
       // 手机端少见（同机时「微信一键」更直接），但换手机/重装/微信不在本机时
       // 它是唯一能把会话搬过来的路径。
+      // 先预览再兑换：码是持有即授权的凭据，必须让用户看到「将登录为 <账号>」。
+      onHandoffPreview: (code) => ref.read(handoffPreviewProvider)(code),
       onHandoffSignIn: (code) =>
           ref.read(authControllerProvider).handoffSignIn(code),
     );
