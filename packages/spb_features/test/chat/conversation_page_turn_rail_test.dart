@@ -22,6 +22,9 @@ import '../support/conversation_page_harness.dart';
 ///    「点了没反应」；
 /// 3. **跳过去之后高亮跟着走**——刻度条的激活格来自「视口顶部那一轮」，
 ///    而这是页面的几何计算，纯组件测试根本触碰不到。
+/// 4. **自己滚动时高亮也跟得上**——见文件末尾三条「激活格跟随」的用例：这条
+///    曾经全线失灵（`_onScroll` 的两条 early return 把刷新跳过了、锚点态又把
+///    高亮钉死），而刻度条自己「画得对、回调传得对」，组件测试一条都不会红。
 ///
 /// ⚠️ 本机是无头 LXC：这些用例证明状态机与几何判据，**不**证明真机上 hover
 /// 与跳转的观感（见 `docs/development.md` 的验证边界）。
@@ -82,6 +85,16 @@ void main() {
       .widget<CustomScrollView>(find.byType(CustomScrollView).first)
       .controller!
       .position;
+
+  /// 刻度条当前高亮的轮次（读页面传给 [TurnRail] 的那个值）。
+  String? activeTurn(WidgetTester tester) =>
+      tester.widget<TurnRail>(find.byType(TurnRail)).activeTurnId;
+
+  /// 拖时间线（正数 = 往回看更早内容，负数 = 往新内容方向）。
+  Future<void> scrollTimeline(WidgetTester tester, double dy) async {
+    await tester.drag(find.byType(CustomScrollView).first, Offset(0, dy));
+    await tester.pumpAndSettle();
+  }
 
   testWidgets('宽屏且有两轮以上：刻度条出现；一轮都没有时不出现', (tester) async {
     tester.view.physicalSize = const Size(900, 700);
@@ -347,5 +360,110 @@ void main() {
       findsNothing,
     );
     expect(timelinePosition(tester).extentAfter, lessThan(2));
+  });
+
+  // ---------- 激活格跟随滚动（2026-11 回归）----------
+  //
+  // 这一组防的是「刻度条画得对、也点得动，但**从不跟着滚动换格**」——用户看到
+  // 的现象是「齿轮不会随滚动条切换」。两处独立的成因，都要钉住：
+  //
+  //   1. 刷新被 `_onScroll` 的 early return 跳过：用户朝上滚（`forward`）为了
+  //      「零容差脱离跟随」直接 return；自动滚动（跟随动画 / 跳转）也 `return`。
+  //      而这两条恰好覆盖了「看到更早的轮次」与「程序把我送到某处」两个主场景；
+  //   2. 锚点态把高亮钉死：点过刻度跳转之后，无论再怎么滚都停在被跳的那一轮。
+  //
+  // 两者都**不会**让任何组件测试变红，所以只能在页面层用真几何验证。
+
+  testWidgets('跟随最新时激活格是最后一轮（自动滚动后也要刷新）', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    for (var i = 0; i < 10; i++) {
+      await pushTurn(
+        tester,
+        turnId: i == 0 ? turnA : hex(i),
+        input: '第 $i 轮',
+        seq: i * 10 + 1,
+      );
+    }
+    await pumpPage(tester);
+    await tester.pumpAndSettle();
+
+    // 首帧后的定位是**自动滚动**（`isAutomatic`）——正是曾经被 early return
+    // 跳过的那条路径，所以这条断言同时覆盖成因 1 的另一半。
+    expect(timelinePosition(tester).extentAfter, lessThan(2));
+    expect(activeTurn(tester), hex(9));
+  });
+
+  testWidgets('用户向上滚动：激活格切到视口顶部那一轮', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    for (var i = 0; i < 10; i++) {
+      await pushTurn(
+        tester,
+        turnId: i == 0 ? turnA : hex(i),
+        input: '第 $i 轮',
+        seq: i * 10 + 1,
+      );
+    }
+    await pumpPage(tester);
+    await tester.pumpAndSettle();
+    expect(activeTurn(tester), hex(9));
+
+    // 一轮有 12 段正文，拖 4 次才真正离开最后一轮——拖一次就断言会「碰巧过」。
+    for (var i = 0; i < 4; i++) {
+      await scrollTimeline(tester, 600);
+    }
+
+    final now = activeTurn(tester);
+    expect(now, isNotNull);
+    expect(now, isNot(hex(9)), reason: '上滚之后高亮必须离开最后一轮');
+    // 高亮必须落在**视口顶部可见**的那一轮上，而不是随便一个更早的轮次。
+    final rail = tester.widget<TurnRail>(find.byType(TurnRail));
+    final index = rail.entries.indexWhere((e) => e.turnId == now);
+    final lastIndex = rail.entries.length - 1;
+    expect(index, greaterThanOrEqualTo(0));
+    expect(index, lessThan(lastIndex));
+  });
+
+  testWidgets('点刻度跳转后再自己滚动：激活格不再钉在被跳的那一轮', (tester) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    mockTimeline();
+    await startController(tester);
+    for (var i = 0; i < 10; i++) {
+      await pushTurn(
+        tester,
+        turnId: i == 0 ? turnA : hex(i),
+        input: '第 $i 轮',
+        seq: i * 10 + 1,
+      );
+    }
+    await pumpPage(tester);
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(const ValueKey('turn-rail-tick-$turnA')),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(activeTurn(tester), turnA);
+
+    // 往下滚回更晚的轮次：高亮必须跟着走（曾经会永远停在 turnA）。
+    for (var i = 0; i < 3; i++) {
+      await scrollTimeline(tester, -600);
+    }
+    final now = activeTurn(tester);
+    expect(now, isNotNull);
+    expect(now, isNot(turnA), reason: '锚点态不该把高亮钉死在跳转目标上');
   });
 }

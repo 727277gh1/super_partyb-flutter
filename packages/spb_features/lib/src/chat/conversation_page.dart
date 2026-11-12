@@ -1932,6 +1932,25 @@ class _ConversationPageState extends State<ConversationPage>
   /// 估算修正的路径，容差正是为它存在的。
   void _onScroll() {
     if (!_scrollController.hasClients) return;
+    try {
+      _onScrollBody();
+    } finally {
+      // 刻度条高亮**只关心「滚动位置变了」**，与下面的跟随 / 翻页 / 定位分支无关，
+      // 故放在 `finally` 里：本方法有几条 early return，而它们恰好覆盖了最该让
+      // 刻度条动的两种情形——
+      //   1. 用户朝上滚（`forward`）→ 那条路径为了「零容差脱离跟随」直接 return；
+      //   2. 自动滚动（跟随动画 / 跳转 / 搜索定位）→ `isAutomatic` 直接 return。
+      // 曾经把 `_updateActiveTurn()` 写在方法末尾，于是这两种情况下刻度条永远
+      // 停在首帧算出来的那一轮（实测：10 轮对话里稳定停在第一轮）。
+      _updateActiveTurn();
+    }
+  }
+
+  /// [_onScroll] 的实体（真正处理跟随 / 翻页 / 定位的部分）。
+  ///
+  /// 单独拆出来只为一件事：让 `_onScroll` 能用 `try/finally` 保证刻度条刷新，
+  /// 而不必在每条 `return` 前各补一行（漏一条就是本文档描述的那个缺陷）。
+  void _onScrollBody() {
     final position = _scrollController.position;
     // 外部 jumpTo/搜索会先取消滚动 activity，但动画 Future 下一微任务
     // 才结束；不能把这段时间内的用户定位误认成自动滚动。
@@ -1988,9 +2007,6 @@ class _ConversationPageState extends State<ConversationPage>
     if (_following) {
       _scheduleFollowBottom();
     }
-
-    // 刻度条高亮跟着视口走（内部按像素阈值节流，见 [_activeProbeDelta]）。
-    _updateActiveTurn();
   }
 
   // ---------- 轮次导航刻度条（§6.94）----------
@@ -2022,48 +2038,57 @@ class _ConversationPageState extends State<ConversationPage>
 
   /// 刷新「视口顶部在哪一轮」并写入 [_activeTurnId]（必要时 `setState`）。
   ///
-  /// 三条取值优先级：
+  /// 两条取值优先级：
   ///
-  /// 1. 锚点态（跳转过之后）→ 就是那一轮。用户是被**显式送到**那里的，视口顶部
-  ///    出现的是上一轮的尾巴也不该把高亮挪走；
-  /// 2. 贴底（`_following` 且已到底）→ 最后一轮。「我在最新」比「顶部恰好是上一轮
+  /// 1. 贴底（`_following` 且已到底）→ 最后一轮。「我在最新」比「顶部恰好是上一轮
   ///    的最后几行」更符合直觉，也与 webapp 把「跟随中」映射到最新轮一致；
-  /// 3. 其余 → 视口顶部所在的那一行所属的轮次（[_topVisibleTurnId]）。
+  /// 2. 其余 → 视口顶部所在的那一行所属的轮次（[_topVisibleTurnId]）。
+  ///
+  /// ## 为什么**不**让锚点态（[_anchoredTurnId]）参与
+  ///
+  /// 曾经的第一优先级是「锚点态 → 就是那一轮」，理由是「用户是被显式送到那里
+  /// 的」。实测那是错的，而且错得很显眼：点一下刻度跳到第 3 轮之后，用户再自己
+  /// 滚到别处，高亮仍然钉在第 3 轮上——**刻度条从此不再响应滚动**，也就失去了
+  /// 「我在哪」这个唯一用途。用户能看见自己滚到了哪里，需要刻度条回答的是
+  /// 「这是第几轮」，而不是「你刚被送到第几轮」。
+  ///
+  /// 锚点该管的事（挡住「自动滚到底」、给出「回到最新」出口）与高亮无关：
+  /// 跳转时 [_scrollToTurn] 把目标轮**贴顶落位**，落位后「视口顶部那一轮」就是
+  /// 目标轮，高亮自然对得上；而对不上的那些帧恰好是用户正在滚动、本来就该跟着
+  /// 变的帧。要在落位动画开始前就给出即时反馈，[_jumpToTurn] 会先把
+  /// [_activeTurnId] 设成目标值。
   ///
   /// 只在结论**变化**时 `setState`：滚动通知每秒几十次，每次都重建整页会拖慢
   /// 流式输出（也就是 §6.74 那类「滚动时卡」的成因）。
   void _updateActiveTurn({bool force = false}) {
     if (!mounted) return;
-    final anchored = normalizeTurnAnchor(_anchoredTurnId);
+    final entries = _railEntries();
+    if (entries.isEmpty) {
+      if (_activeTurnId != null) setState(() => _activeTurnId = null);
+      return;
+    }
+    final position = _scrollController.hasClients
+        ? _scrollController.position
+        : null;
+    final atBottom =
+        _following &&
+        position != null &&
+        position.maxScrollExtent > position.minScrollExtent &&
+        position.pixels >= position.maxScrollExtent - 1;
     String? target;
-    if (anchored != null) {
-      target = anchored;
+    if (atBottom) {
+      target = entries.last.turnId;
     } else {
-      final entries = _railEntries();
-      if (entries.isEmpty) {
-        target = null;
-      } else {
-        final position = _scrollController.hasClients
-            ? _scrollController.position
-            : null;
-        final atBottom =
-            _following &&
-            position != null &&
-            position.maxScrollExtent > position.minScrollExtent &&
-            position.pixels >= position.maxScrollExtent - 1;
-        if (atBottom) {
-          target = entries.last.turnId;
-        } else {
-          if (!force &&
-              position != null &&
-              _activeProbeAt != null &&
-              (position.pixels - _activeProbeAt!).abs() < _activeProbeDelta) {
-            return;
-          }
-          _activeProbeAt = position?.pixels;
-          target = _topVisibleTurnId();
-        }
+      if (!force &&
+          position != null &&
+          _activeProbeAt != null &&
+          (position.pixels - _activeProbeAt!).abs() < _activeProbeDelta) {
+        return;
       }
+      _activeProbeAt = position?.pixels;
+      target = _topVisibleTurnId();
+      // 几何暂时读不到（刚改布局 / 行还没构建）时保持上一个结论，别把高亮闪没。
+      if (target == null) return;
     }
     if (target == _activeTurnId) return;
     setState(() => _activeTurnId = target);
