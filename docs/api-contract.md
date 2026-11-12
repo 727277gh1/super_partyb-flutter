@@ -138,6 +138,12 @@ HTTP），才需要逐请求 failover + 断路器 + 环形日志（见
 `super_partyb/docs/miniapp-dualstack-failover-design.md`）。故**不要**把
 小程序那套搬过来——那是另一层需求，不是这里的缺失。
 
+**本机制不覆盖 `SPB_OIDC_ISSUER`（登录端点）**：别名表只重写 `SpbEndpoints`
+里 API / UFS 两个基地址（`SpbEndpoints` 根本没有 issuer 字段）。issuer 是 OIDC
+的身份命名空间（写进 token 的 `iss`、发现文档、回调白名单），**只能有一个**；
+若它指向的域名在当前网络不通，登录直接失败，不会退回 API 的 host。因此部署时
+要把 issuer 放在一个**本身就双栈**的域名上（A+AAAA），而不是靠客户端探测兜底。
+
 **实现位置**（改之前先读）：
 
 | 层 | 内容 |
