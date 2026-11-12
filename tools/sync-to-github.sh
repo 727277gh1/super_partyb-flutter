@@ -44,6 +44,21 @@
 #   3. 校验：任一真实值仍残留则中止（不推送）
 #   4. `git init` + 单条提交 + force-push 到 `$SPB_GITHUB_REMOTE`
 #
+# ## 为什么推送之后要回写 `refs/remotes/github/*`
+#
+# 推送发生在 `mktemp -d` 出来的**临时仓库**里（孤立历史只能在干净目录里造），
+# 那个仓库的 `git push -u` 只对它自己生效，脚本退出时就被 `trap` 删掉了。
+# 于是本仓库的 `refs/remotes/github/<branch>` **不会**被这次推送更新——它会一直
+# 停在上一次手工 `git fetch github` 的位置。
+#
+# 这不是「看起来不整洁」的问题，它会**误导诊断**：镜像每次 force-push 都是一棵
+# 新树，若本地 ref 停在几个提交之前，`git diff <gitea> github/main` 会把「那时还
+# 没写的新文件」显示成**删除**（实测就把 600+ 行 `turn_rail.dart` 报成了删除，
+# 差点误判同步漏文件）。
+#
+# 故脚本末尾显式 fetch 回写这条 ref（`+` 强制，因为对方是 force-push），
+# 让 `git log github/main` / `git diff gitea/main github/main` 立刻可信。
+#
 # ## 跳过二进制是有意的
 #
 # 本仓库有 44 个 golden 基线 PNG，是**逐字节比对**的。用 `perl -i` 之类的
@@ -276,7 +291,24 @@ echo "  文件：$(git ls-files | wc -l)"
 
 git remote add github "$REMOTE"
 echo "▶ 推送（force，历史每次整体替换）→ $REMOTE"
-git push -f -u github "$BRANCH" 2>&1 | tail -4
+# 不用 `-u`：这个仓库是临时的（见文件头），设了 upstream 也没有下次。
+git push -f github "$BRANCH" 2>&1 | tail -4
+
+# ── 回写本仓库的跟踪 ref ──────────────────────────────────────────────
+# 见文件头「为什么推送之后要回写」：不做这一步，`refs/remotes/github/<branch>`
+# 会停在上一次手工 fetch 的位置，`git diff` 会把新文件报成删除。
+mirror_ref="refs/remotes/github/$BRANCH"
+if git -C "$REPO_ROOT" remote | grep -qx github; then
+  # 失败不致命：推送已经成功，只是本仓库的这条 ref 仍旧、仍会误导诊断。
+  if git -C "$REPO_ROOT" fetch --no-tags --quiet "$REMOTE" \
+      "+refs/heads/$BRANCH:$mirror_ref"; then
+    echo "  本仓库 $mirror_ref → $(git -C "$REPO_ROOT" rev-parse --short "$mirror_ref")"
+  else
+    echo "  ⚠️ 回写 $mirror_ref 失败（推送本身已成功）；下次核对前先手工 git fetch github" >&2
+  fi
+else
+  echo "  本仓库没有名为 github 的 remote，跳过回写 $mirror_ref" >&2
+fi
 
 echo
 echo "✅ 已同步。注意：这是**孤立历史**，绝不要把它与 Gitea 合并。"

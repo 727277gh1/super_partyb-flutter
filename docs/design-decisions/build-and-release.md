@@ -35,6 +35,23 @@ bash tools/sync-to-github.sh --help      # 打印脚本头部的说明
 里还有没有真实值」），后者查的是**导出的临时树**（回答「这次推送会带出什么」）。
 未清理干净时 `--verify` 报残留而 `--dry-run` 也报——但只有后者会真的中止推送。
 
+#### 镜像的 tip 由脚本回写，别信旧的 `github/main`
+
+推送发生在 `mktemp -d` 的**临时仓库**里（孤立历史只能在干净目录造），那里的
+`git push -u` 只对那个用完即删的仓库生效。所以本仓库的
+`refs/remotes/github/main` **不会**被推送更新，除非脚本最后把它 fetch 回来——
+脚本现在会做这一步（并打印新的短哈希）。
+
+这条不是洁癖：镜像每次 force-push 都是**新树**，本地 ref 停几天前时，
+`git diff gitea/main github/main` 会把「那时还没写的新文件」显示成**删除**。
+2026-11 就发生过一次：600+ 行 `turn_rail.dart` 被报成「镜像缺失」，实际是本地
+ref 停在旧快照上。核对镜像用下面两条，不要用 `git log github/main`：
+
+```bash
+git ls-remote github main        # 远端真实 tip（不依赖本地 ref）
+git fetch github main && git cat-file -e FETCH_HEAD:<path>   # 确认某文件在
+```
+
 #### 可选环境变量（文档曾漏记，实测补齐）
 
 | 变量 | 默认值 | 用途 |
