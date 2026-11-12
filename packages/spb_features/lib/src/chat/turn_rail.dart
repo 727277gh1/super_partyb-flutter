@@ -49,25 +49,45 @@ const double kTurnRailTickWidthActive = 13;
 /// 不靠说明文字。
 const double kTurnRailTickWidthHover = 11;
 
-/// 面板淡入 + 横杠伸缩的时长。
+/// 面板**入场**的时长。
 ///
-/// ## 为什么是 150ms（`SpbDuration.fast`）而不是 250~300ms
+/// ## 参数出处（不是拍脑袋定的）
 ///
-/// 这个面板会被频繁召唤（每次划过右侧就出现），时长一长就变成「拖沓」；
-/// 而它又不是纯装饰，慢一点没有信息收益。150ms 与 Material 的 hover 类反馈
-/// 同档，读起来是「跟手」而不是「播动画」。
+/// | 依据 | 值 |
+/// |---|---|
+/// | Material 3 duration token `md.sys.motion.duration.short3` | 150ms（「小而实用的过渡」） |
+/// | Atlassian Design / motion | 下拉/浮层入场 150ms |
+/// | Carmen Ansio 动效令牌量表 | `--duration-fast` 150ms = hover / click / **tooltip** |
 ///
-/// 附带的好处是**帧数少**：在远程桌面的软件光栅下（§6.74 / issue #110），
-/// 每帧都要整窗 present，150ms ≈ 9 帧；300ms 就要 18 帧。同样的观感，
-/// 一半的代价。
+/// 150ms 正好是 M3 `short3`，也等于本项目 `SpbDuration.fast`（Flutter SDK 里就是
+/// `Durations.short3`）。面板每次划过右侧都会出现（高频），M3 与 Atlassian 都明确
+/// 「一天触发几十次的动效压在 150ms 以内」。
+///
+/// 附带的好处是**帧数少**：远程桌面的软件光栅下（§6.74 / issue #110）每帧都要
+/// 整窗 present，150ms ≈ 9 帧；300ms 就要 18 帧。
 const Duration kTurnRailMotion = SpbDuration.fast;
 
 /// 面板**收起**的时长。
 ///
-/// 比展开更快（`SpbDuration.instant`）：离场应当「立刻腾出视野」，且此时用户
-/// 的注意力已经移走了。进出不对称是这类浮层的常规做法（Material 的
-/// tooltip/menu 也是出场快、入场慢）。
+/// ## 为什么是入场的 53%
+///
+/// Material 3：「退出过渡应比进入更快」，且退出用 `accelerate`（加速离开），进入用
+/// `decelerate`（减速停稳）。常见做法是把退出压到入场的 **50~60%** ——
+/// `SpbDuration.instant`（80ms）÷ 150ms = 53%，落在区间正中；换成 M3 的
+/// `short2`(100ms) 是 67%，会显得「关得比开得还慢」。
+///
+/// 这也解释了两个时长为什么共用 `SpbDuration` 的两档而不是各写一个魔数。
 const Duration kTurnRailFadeOut = SpbDuration.instant;
+
+/// 横杠伸缩（悬停变宽 / 当前轮换格）的时长。
+///
+/// ## 为什么比面板更快（80ms）
+///
+/// 它是**悬停态反馈**，不是「元素进入屏幕」：Atlassian 的规范把 hover / press 归为
+/// 50–150ms 的「interactions」，示例里列表行 hover 是 50ms；M3 的对应档位是
+/// `short1`(50) / `short2`(100)。横杠变宽只有 3px 的位移量，若与面板同为 150ms，
+/// 会读成「两件事在同时慢慢做」；80ms 让它先到位，面板随后浮出，因果顺序更清楚。
+const Duration kTurnRailTickMotion = SpbDuration.instant;
 
 /// 时间线右侧的轮次导航刻度条（竖置「齿轮」）。
 ///
@@ -104,11 +124,11 @@ const Duration kTurnRailFadeOut = SpbDuration.instant;
 /// 但**事件驱动、≤150ms、局部脏矩形**的微过渡代价可以忽略——它们每帧只重绘
 /// 264×300 的面板或 16×7 的格子，而不是整窗 Markdown。故：
 ///
-/// | 动效 | 触发 | 手段 | 时长 |
-/// |---|---|---|---|
-/// | 面板淡入 + 从右滑出 10px | 指针进入刻度列 | `FadeTransition` + `SlideTransition`（纯合成，控制器见 [_TurnRailState._panelAnim]） | [kTurnRailMotion] |
-/// | 面板淡出 | 指针离开 | 同上（出场更快，见 [kTurnRailFadeOut]） | [kTurnRailFadeOut] |
-/// | 横杠伸缩 / 当前轮换格 | 悬停、激活轮变化 | `AnimatedContainer`（只重排 16×7 的格子） | [kTurnRailMotion] |
+/// | 动效 | 触发 | 手段 | 时长 | 曲线 |
+/// |---|---|---|---|---|
+/// | 面板淡入 + 从右滑出 12px | 指针进入刻度列 | `FadeTransition` + `SlideTransition`（纯合成） | [kTurnRailMotion]（150ms = M3 `short3`） | `Easing.standardDecelerate` |
+/// | 面板淡出（反向收回） | 指针离开 | 同一 controller 反向 | [kTurnRailFadeOut]（80ms = 入场的 53%） | `Easing.standardAccelerate` |
+/// | 横杠伸缩 / 当前轮换格 | 悬停、激活轮变化 | `AnimatedContainer`（只重排 16×7 的格子） | [kTurnRailTickMotion]（80ms，hover 态要比入场更快） | `Easing.standardDecelerate` |
 ///
 /// 三条约束：
 ///
@@ -205,15 +225,22 @@ class _TurnRailState extends State<TurnRail>
       duration: kTurnRailMotion,
       reverseDuration: kTurnRailFadeOut,
     )..addStatusListener(_handlePanelStatus);
+    // 进入用 `decelerate`（减速停稳），退出用 `accelerate`（加速离开）——这是
+    // M3 的 easing 令牌 `Easing.standardDecelerate` / `Easing.standardAccelerate`
+    // （Flutter SDK 里就在 `Easing` 类里，值即 specs 的 Cubic(0,0,0,1) /
+    // Cubic(0.3,0,1,1)）。不用 `Curves.easeOutCubic` 是因为它不是 M3 令牌，
+    // 停在 0.355 而非 1.0，尾段会留一点「没走完」的迟疑感。
     final curved = CurvedAnimation(
       parent: _panelAnim,
-      curve: Curves.easeOutCubic,
+      curve: Easing.standardDecelerate,
+      reverseCurve: Easing.standardAccelerate,
     );
     _panelOpacity = curved;
     _panelSlide = Tween<Offset>(
-      // 从刻度列那一侧滑出 10px（0.04 × 264）：位移比缩放更像浮层，且不改变
-      // 命中区域大小（缩放会）。
-      begin: const Offset(0.04, 0),
+      // 从刻度列那一侧滑出 `SpbSpacing.sm`（12px）：位移比缩放更像浮层，且不改变
+      // 命中区域大小（缩放会）。12px 也够小——M3 说「在屏幕内出现的容器」用
+      // 淡入 + 从 95% 轻微放大，我们把「轻微」折算成 ≈ 一个间距令牌的位移。
+      begin: const Offset(SpbSpacing.sm / kTurnRailPanelWidth, 0),
       end: Offset.zero,
     ).animate(curved);
     // 首帧就把激活格滚进视野：长对话的激活轮通常是最新那几轮，不滚的话刻度列
@@ -373,7 +400,7 @@ class _TurnRailState extends State<TurnRail>
   Widget _buildTicks(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final activeIndex = _activeIndex;
-    final motion = _motion(context, kTurnRailMotion);
+    final motion = _motion(context, kTurnRailTickMotion);
     // 指针在刻度条上（刻度列或面板）时整列「填满」一点：不说话的「可点」提示。
     final boost = _expanded;
     return MouseRegion(
@@ -406,7 +433,7 @@ class _TurnRailState extends State<TurnRail>
               // 尺寸变化只波及这个 16×7 的格子（`itemExtent` 固定，列表不重排）。
               child: AnimatedContainer(
                 duration: motion,
-                curve: Curves.easeOutCubic,
+                curve: Easing.standardDecelerate,
                 margin: const EdgeInsets.only(right: SpbSpacing.xxs),
                 width: isActive
                     ? kTurnRailTickWidthActive
@@ -530,7 +557,7 @@ class _TurnRailState extends State<TurnRail>
       hoverColor: scheme.primary.withValues(alpha: 0.07),
       child: AnimatedContainer(
         duration: duration,
-        curve: Curves.easeOutCubic,
+        curve: Easing.standardDecelerate,
         // 当前轮：底色 + 左侧 3px 主色标记。两层都要，因为底色在浅色主题里
         // 与 hover 色接近，而竖标记是「我在这一行」的确定性信号。
         color: isActive ? scheme.primaryContainer : null,
@@ -538,7 +565,7 @@ class _TurnRailState extends State<TurnRail>
           children: [
             AnimatedContainer(
               duration: duration,
-              curve: Curves.easeOutCubic,
+              curve: Easing.standardDecelerate,
               width: 3,
               height: kTurnRailPanelRowHeight,
               color: isActive

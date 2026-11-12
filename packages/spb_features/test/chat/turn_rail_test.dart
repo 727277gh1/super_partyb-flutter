@@ -237,6 +237,31 @@ void main() {
     expect(openedList, 1);
   });
 
+  // ---------- 动效参数（§6.94「参数出处」）----------
+
+  /// 参数守卫：这四个数不是随手写的，改它就必须解释。
+  ///
+  /// 没有这条用例时的失败方式是**静默的**：下一个人把入场调成 300ms（「更顺滑」），
+  /// 测试全绿，用户却觉得浮层拖沓——而且远程桌面下帧数翻倍。把依据写进断言，
+  /// 改动就会撞上这条，从而被要求给出新依据（与 `tools/` 的守卫同一思路）。
+  test('动效参数落在 M3 / Atlassian 的令牌区间', () {
+    // M3 `md.sys.motion.duration.short3` = 150ms（Flutter SDK 同名常量）。
+    expect(kTurnRailMotion, Durations.short3);
+    // hover 态的反馈比「元素进入屏幕」更快：50~150ms 区间，且严格小于入场。
+    expect(kTurnRailTickMotion, lessThan(kTurnRailMotion));
+    expect(
+      kTurnRailTickMotion.inMilliseconds,
+      inInclusiveRange(
+        Durations.short1.inMilliseconds,
+        kTurnRailMotion.inMilliseconds,
+      ),
+    );
+    // M3：退出比进入快，常见做法压到入场的 50%~60%。
+    final exitRatio =
+        kTurnRailFadeOut.inMilliseconds / kTurnRailMotion.inMilliseconds;
+    expect(exitRatio, inInclusiveRange(0.5, 0.6));
+  });
+
   // ---------- 动效（§6.94「动效」）----------
 
   /// 面板当前的肉眼不透明度（`AnimatedOpacity` → `FadeTransition` 的实时值）。

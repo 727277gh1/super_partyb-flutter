@@ -1834,11 +1834,30 @@ v1 只定位已加载区间，越界就给一句「不在已加载范围内，�
 初版是**零动画**，理由是软件光栅 + 整窗 present 下 alpha 混合太贵（§6.74 /
 issue #110）。这个结论现在收窄——它成立的是「连续/整窗」动效，不是所有动效：
 
-| 动效 | 触发 | 手段 | 时长 |
-|---|---|---|---|
-| 面板淡入 + 从右滑出 10px | 指针进入刻度列 | `FadeTransition` + `SlideTransition`（纯合成，不重排） | `kTurnRailMotion` = `SpbDuration.fast`（150ms） |
-| 面板淡出 | 指针离开 | 同一个 controller 反向 | `kTurnRailFadeOut` = `SpbDuration.instant`（80ms） |
-| 横杠伸缩（8 → 11，激活 13 恒定） | 悬停；激活轮变化时换格 | `AnimatedContainer`（只重排 16×7 的格子） | `kTurnRailMotion` |
+| 动效 | 触发 | 手段 | 时长 | 曲线 |
+|---|---|---|---|---|
+| 面板淡入 + 从右滑出 12px | 指针进入刻度列 | `FadeTransition` + `SlideTransition`（纯合成，不重排） | 150ms（`SpbDuration.fast`） | `Easing.standardDecelerate` |
+| 面板淡出（反向收回） | 指针离开 | 同一个 controller 反向 | 80ms（`SpbDuration.instant`） | `Easing.standardAccelerate` |
+| 横杠伸缩（8 → 11，激活 13 恒定） | 悬停；激活轮变化时换格 | `AnimatedContainer`（只重排 16×7 的格子） | 80ms | `Easing.standardDecelerate` |
+
+##### 参数出处（这一节的意义：别再拍脑袋调数）
+
+| 参数 | 取值 | 依据 |
+|---|---|---|
+| 入场 150ms | = `md.sys.motion.duration.short3` | [M3 easing & duration tokens](https://m3.material.io/styles/motion/easing-and-duration/tokens-specs)：short1/2/3/4 = 50/100/150/200ms，「小而实用的过渡」；Flutter SDK 里就是 `Durations.short3` |
+| 入场曲线 `decelerate` | `Cubic(0.0, 0.0, 0.0, 1.0)` | M3 easing token `Easing.standardDecelerate`（同一页的 easing 表；Flutter 有现成常量，别手写） |
+| 退出 80ms | = 入场 × 0.53 | M3：「退出过渡应比**进入**更快」，且退出用 `accelerate`；常见做法把退出压到入场的 50%~60%（80/150 = 53%） |
+| 退出曲线 `accelerate` | `Cubic(0.3, 0.0, 1.0, 1.0)` | M3 easing token `Easing.standardAccelerate` |
+| hover 反馈 80ms（比入场快） | < 150ms | [Atlassian motion](https://atlassian.design/foundations/motion)：hover/press 属 50–150ms 的 interactions（示例里列表行 hover 50ms），并明确「一天触发几十次的动效压在 150ms 内」 |
+| 滑出 12px | = `SpbSpacing.sm` | M3：屏幕内出现的容器用「淡入 + 从 95% 轻微放大」；锚定在右侧浮层用「从关联组件的方向滑出」更自然，幅度折算成 ≈ 一个间距令牌 |
+
+> 为什么入场不用 `Curves.easeOutCubic`（第一版就是它）：它不是 M3 令牌，控制点是
+> `(0.215, 0.61, 0.355, 1.0)`，尾段停在 0.355 而不是 1.0 一侧，看起来像「没走完
+> 就停了」的迟疑。换成令牌曲线后，观感与「同一套 M3 界面」一致。
+
+这四个常量由 `turn_rail_test.dart` 的一条**参数守卫**用例钉住：入场必须等于
+`Durations.short3`、hover 反馈必须快于入场、退出必须落在入场的 50%~60%。改数就得
+改测试，改测试就得解释——与 `tools/` 的守卫同一思路。
 
 代价为什么可忽略：这些帧的脏矩形是 264×300 的面板或 16×7 的格子，不是整窗
 Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms。同时三条约束
@@ -1858,8 +1877,9 @@ Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms
   才挂上」的（收起时不在树上，否则它会占着那 264px 命中区），于是 `AnimatedOpacity`
   的入场永远是**闪现**——看起来像没做动效。显式 controller 从 0 `forward()`
   才有中间帧；用例 `面板是渐变淡入，不是闪现` 就是钉这一点的。
-- **进出不对称**（150ms 进 / 80ms 出）：离场越快越好，此时用户注意力已经移走；
-  这也是 Material tooltip / menu 的常规节奏。
+- **进出不对称**（150ms 进 / 80ms 出 + decelerate/accelerate 两种曲线）：离场越快
+  越好，此时用户注意力已经移走；M3 对退出还额外要求「用加速曲线」，所以两条路径
+  用的不是同一条 `Curve`（`CurvedAnimation(curve:, reverseCurve:)`）。
 
 另外两处「静态」的展示优化，与动效无关但同属「让它读得出自己在哪」：面板顶部的
 `第 3 / 12 轮` 标题（264px 里挤一行，换掉「数行数定位自己」），以及当前行左侧
@@ -1887,7 +1907,8 @@ Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms
 - `packages/spb_features/test/chat/conversation_page_turn_rail_test.dart`（4 条）：
   宽度门槛（两轮以上 + ≥720 才出现）、窄屏不出现、点刻度**真的贴顶落位**并给出
   「回到最新」、点最后一格回到跟随最新；
-- `turn_rail_test.dart` 另有 5 条动效/展示用例：第一帧未完成（真的在渐变）、
+- `turn_rail_test.dart` 另有 1 条**参数守卫**（入场 = `Durations.short3`、hover 反馈
+  快于入场、退出落在入场的 50%~60%）与 5 条动效/展示用例：第一帧未完成（真的在渐变）、
   离开后先淡出再从树上移除且收起期间不拦点击、悬停时非激活横杠变宽而激活格不变、
   面板标题给出「第几 / 共几轮」、`disableAnimations` 下单帧到位并立即移除；
 - `packages/spb_features/test/chat/turn_list_sheet_test.dart`（4 条）：行高 = 48dp、
