@@ -1,0 +1,39 @@
+{
+  "profile": "partyb.readonly",
+  "schema_version": 1,
+  "title": "月度销售",
+  "summary": "金额单位为元；二月数据缺失，保留空值。",
+  "spec": {
+    "root": "sales",
+    "elements": {
+      "sales": {
+        "type": "Chart",
+        "props": {
+          "chartType": "bar",
+          "xKey": "month",
+          "series": [
+            {
+              "dataKey": "amount",
+              "name": "销售额"
+            }
+          ],
+          "data": {
+            "$state": "/sales"
+          }
+        }
+      }
+    },
+    "state": {
+      "sales": [
+        {
+          "month": "一月",
+          "amount": 120
+        },
+        {
+          "month": "二月",
+          "amount": null
+        }
+      ]
+    }
+  }
+}

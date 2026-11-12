@@ -1,0 +1,28 @@
+name: spb_ui
+description: 通用组件库（无业务语义，仅依赖设计令牌）
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  spb_design:
+
+# 品牌标志随本包分发（见 lib/src/spb_logo.dart）。
+#
+# 放在 spb_ui 而不是各端 assets/：两端各存一份必然漂移，而标志是
+# 「一眼看出是哪个产品」的东西——两份颜色略有差异比没有还糟。
+flutter:
+  assets:
+    - assets/brand/logo.png
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

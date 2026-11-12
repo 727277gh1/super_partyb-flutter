@@ -1,0 +1,24 @@
+name: spb_workspace
+description: Super PartyB 多端客户端（Flutter）——桌面端 + 移动端统一工作区
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+# Dart Pub Workspaces：单一 lockfile、单一 .dart_tool，跨包共享解析结果。
+# 所有成员必须在自己的 pubspec.yaml 里声明 `resolution: workspace`。
+workspace:
+  - apps/spb_desktop
+  - apps/spb_mobile
+  - packages/spb_core
+  - packages/spb_models
+  - packages/spb_api
+  - packages/spb_domain
+  - packages/spb_data
+  - packages/spb_design
+  - packages/spb_ui
+  - packages/spb_platform
+  - packages/spb_features
+
+dev_dependencies:
+  melos: ^7.0.0

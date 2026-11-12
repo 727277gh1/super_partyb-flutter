@@ -1,0 +1,1388 @@
+/// 交付物同步的**纯逻辑**：远端条目清单 + 本地状态 → 待执行动作列表。
+///
+/// ## 为什么把「要做什么」与「怎么做」分开
+///
+/// 同步策略的正确性（哪些该下载、哪些该删、状态何时推进）与网络、磁盘无关，
+/// 却是最容易写错、也最难在生产上排查的部分。把它做成纯函数后，可以用内存
+/// 桩在无网络环境下逐条验证——本文件的测试就是这么做的。
+///
+/// 落盘实现见后续任务的 `spb_platform` / `spb_data`。
+///
+/// ## 语义真源
+///
+/// 对齐 `super_partyb/apps/desktop/README.md`「交付物同步到本地目录」
+/// 与 `apps/desktop/src-tauri/src/sync/{plan,filter,engine,path}.rs`。
+library;
+
+import 'package:spb_core/spb_core.dart';
+import 'package:spb_models/spb_models.dart';
+
+import 'conflict_path.dart';
+import 'local_file_reader.dart';
+import 'sync_cursor.dart';
+import 'sync_memory.dart';
+import 'sync_path.dart';
+import 'sync_state.dart';
+
+/// 状态键：单 group 用 groupId，workspace 类范围用 [workspaceStateKey]。
+///
+/// ## 为什么「全部」与「选中若干」必须共用同一个键
+///
+/// 两者的本地落盘布局**完全相同**（都按 `{groupId}/` 分层），状态记录的是
+/// 「相对路径 → etag」，因此可以安全复用：从「全部」改成「选中 A、B」时，
+/// 未选中的 C 只是不再出现在清单里，其本地文件与状态条目都保留；之后又选回 C
+/// 时 etag 仍在 → **不会重新下载**。
+///
+/// 反之若为「选中」单开一个键，用户在两种模式间切换就会**来回全量重拉**
+/// （新键没有 etag 记录，每个文件都被判为「已变更」）。
+///
+/// 单 group 模式（[SyncGroupScope]）则必须分开：它落盘**无** `{groupId}/`
+/// 前缀，布局不同，状态跟着布局走。
+///
+/// [SyncSingleGroupScope] 的布局与 workspace 相同，故**共用**
+/// [workspaceStateKey]——它的区别在「不推进游标」，不在布局。
+String syncStateKeyFor(SyncScope scope) => switch (scope) {
+  SyncGroupScope(:final groupId) => groupId,
+  SyncSingleGroupScope() => workspaceStateKey,
+  SyncWorkspaceScope() => workspaceStateKey,
+  SyncGroupsScope() => workspaceStateKey,
+};
+
+/// 同步目录变更是否**必须**重置同步状态。
+///
+/// ## 为什么必须重置
+///
+/// 状态描述的是「某个本地目录里已有什么」，**绑定在具体目录上**：
+///
+/// - 保留游标 → 增量清单只返回 `updated_at >= 游标` 的文件，新目录几乎什么都
+///   拿不到；
+/// - 保留 etag → 少数恰好出现在清单里的文件被判为「未变更」而跳过写入，
+///   但新目录里根本没有这个文件。
+///
+/// 叠加效果就是「换目录后同步显示成功，但新目录是空的」。
+///
+/// ## 与「范围变更」的区别（勿混淆）
+///
+/// **改变同步范围**（全部 ↔ 选中若干）**不得**重置——两者共用
+/// [workspaceStateKey]，见 [syncStateKeyFor]。
+///
+/// 首次绑定（[previousRoot] 为 null）也无需重置：库里本就没有状态。
+bool mustResetStateForLocalRoot({
+  required String? previousRoot,
+  required String? nextRoot,
+}) {
+  if (previousRoot == null) return false;
+  return previousRoot != nextRoot;
+}
+
+/// 应用同步目录变更：目录变了就重置全部状态。返回是否发生了重置。
+///
+/// 持久化的**权威实现**是 `spb_data` 的 `DriftSyncStateStore.bindLocalRoot`
+/// （把绑定与状态清空放在同一事务里，避免「目录已改、状态没清」的中间态）。
+/// 本函数供绑定状态不由状态库托管的调用方复用同一套判定规则。
+Future<bool> applyLocalRootChange({
+  required SyncStateStore store,
+  required String? previousRoot,
+  required String? nextRoot,
+}) async {
+  if (!mustResetStateForLocalRoot(
+    previousRoot: previousRoot,
+    nextRoot: nextRoot,
+  )) {
+    return false;
+  }
+  await store.resetAll();
+  return true;
+}
+
+// ===========================================================================
+// 过滤
+// ===========================================================================
+
+/// 机器生成产物在 group 内的相对前缀（对齐 webapp 的 `TTS_WORK_REL_PREFIX`）。
+///
+/// 生产单个 group 可达 67 个语音分段，不剔除会把真正的交付物挤出本地目录。
+///
+/// ⚠️ 前缀**锚定在开头**，且这是三端契约（后端 `groupsync.turnIDFromPath`、
+/// 后端 `agentfilerender.ttsStreamKind`、webapp `parseTTSAudioPath`）。详见
+/// `tts_audio_path.dart` 的类文档——**不要**把它改成「任意位置匹配」。
+const String ttsRelPrefix = 'reports/tts/';
+
+/// 任意层级出现即视为机器产物的路径段（**按段相等**，不做子串匹配）。
+///
+/// | 段 | 产出者 | 为什么不能同步 |
+/// |---|---|---|
+/// | `.archive` | super_partyb `archivesnapshot` worker：`workspace/groups/{gid}/.archive/v{N}/` 下的 `manifest.json` / `snapshot.md` / `snapshot.html` | 结项快照的服务端内部产物，客户端只通过「快照入口」读取（另一条端点），不是交付物 |
+/// | `_attachments` | go-api 的附件暂存区（`CleanupOrphanAttachments(root, "_attachments", …)`，目录本身**不可删**——含活跃 turn） | 同步到本地会让用户看到一堆无法对应的临时附件，且回传时路径也对不上 |
+///
+/// ## 为什么是「任意层级」而不是前缀
+///
+/// `.archive` 出现在 group 根下（`{gid}/.archive/v1/x.md`），而
+/// `_attachments` 按 turn 分目录。它们的位置不是固定的，服务端也没有给出
+/// 稳定的相对前缀。UFS 的 `exclude_prefix` 只能按前缀排除、无法表达「任意
+/// 层级」，故这一层过滤**必须在客户端**做。
+const Set<String> machineGeneratedSegments = {'.archive', '_attachments'};
+
+/// 默认单文件体积上限（10 MB）。
+///
+/// 依据：生产 5930 个文件中只有 1 个超过 10 MB；1–10 MB 区间有 1098 个
+/// （多为图片），需要时由用户显式放开，默认不应把 4.4 GB 媒体拖下来。
+const int defaultMaxFileSize = 10 * 1024 * 1024;
+
+/// 跳过原因（用于给用户一个诚实的摘要）。
+enum SyncSkipReason {
+  /// 目录条目（目录按需创建，不作为文件同步）。
+  directory('目录'),
+
+  /// 远端已软删除（增量同步需感知，用于清理本地副本）。
+  deleted('已删除'),
+
+  /// 机器生成产物（TTS 语音等）。
+  machineGenerated('机器生成产物'),
+
+  /// 媒体文件且未开启媒体同步。
+  mediaExcluded('媒体（未开启）'),
+
+  /// 超过单文件体积上限。
+  tooLarge('超过体积上限'),
+
+  /// 路径不合法（穿越、不属于该 group）。
+  invalidPath('路径不合法');
+
+  const SyncSkipReason(this.description);
+
+  /// 中文说明，用于同步摘要展示。
+  final String description;
+}
+
+/// 过滤配置。
+class SyncFilterConfig {
+  const SyncFilterConfig({
+    this.maxFileSize = defaultMaxFileSize,
+    this.includeMedia = false,
+  });
+
+  /// 单文件体积上限（字节）。`0` 表示不限。
+  final int maxFileSize;
+
+  /// 是否同步图片/音视频。默认 false：生产媒体占 workspace 体积 94.5%。
+  final bool includeMedia;
+
+  SyncFilterConfig copyWith({int? maxFileSize, bool? includeMedia}) =>
+      SyncFilterConfig(
+        maxFileSize: maxFileSize ?? this.maxFileSize,
+        includeMedia: includeMedia ?? this.includeMedia,
+      );
+}
+
+/// 判断 MIME 是否属于媒体（图片/音频/视频）。
+///
+/// 先剥掉 `; charset=...` 参数：`image/svg+xml; charset=utf-8` 也是图片。
+bool isMediaMime(String? mime) {
+  if (mime == null) return false;
+  final base = mime.split(';').first.trim().toLowerCase();
+  return base.startsWith('image/') ||
+      base.startsWith('audio/') ||
+      base.startsWith('video/');
+}
+
+/// group 内相对路径是否属于机器生成产物。
+///
+/// 两类判据（命中任一即为机器产物）：
+///
+/// 1. TTS 语音：[ttsRelPrefix] **锚定在开头**——`x/reports/tts/a.mp3` 不是
+///    机器产物目录，不应误伤（三端契约，见该常量的文档）；
+/// 2. 系统产物：[machineGeneratedSegments] 中的任一段出现在**任意层级**
+///    （按段相等，故 `a/.archivex/b.md` 不会误伤）。
+///
+/// ## 入参必须是 **group 内**相对路径
+///
+/// 不是「落盘相对路径」。workspace 布局下后者带 `{gid}/` 前缀，会让第 1 类
+/// 判据永远不命中——下载侧曾因此把 TTS 语音拖到本地（见
+/// [groupScopedRelativePath] 的说明）。调用方见 [shouldSync]。
+bool isMachineGenerated(String relPath) {
+  if (relPath.startsWith(ttsRelPrefix)) return true;
+  // 按段相等：`a/.archive/b` 命中，`a/.archivex/b` 不命中。
+  var start = 0;
+  while (start <= relPath.length) {
+    var end = relPath.indexOf('/', start);
+    if (end < 0) end = relPath.length;
+    if (machineGeneratedSegments.contains(relPath.substring(start, end))) {
+      return true;
+    }
+    if (end == relPath.length) break;
+    start = end + 1;
+  }
+  return false;
+}
+
+/// 决策：null 表示应同步；非 null 表示跳过及原因。
+///
+/// ## 判断顺序是有语义的（不是随手排的）
+///
+/// 1. **先判目录**：UFS 列表会包含 group 根目录自身（path =
+///    `/workspace/groups/{gid}/`），它解析不出相对路径。若先解析路径，用户会
+///    看到「跳过：1 路径不合法」这种看起来像出错的提示；
+/// 2. **再判删除**：软删除条目同样带 size/mime。若先按体积跳过，本地旧副本会
+///    因「跳过」而残留——**删除必须优先于其他跳过条件**，否则远端删了本地还在。
+SyncSkipReason? shouldSync(
+  UfsFileEntry file,
+  String relPath,
+  SyncFilterConfig cfg,
+) {
+  if (file.isDirectory) return SyncSkipReason.directory;
+  if (relPath.isEmpty) return SyncSkipReason.invalidPath;
+  if (file.isDeleted) return SyncSkipReason.deleted;
+  // 机器产物判据用**从 UFS 路径派生的 group 内路径**，而不是落盘相对路径。
+  //
+  // 落盘相对路径在 workspace 布局下带 `{gid}/` 段，会让 `reports/tts/` 这个
+  // 「锚定开头」的前缀永远命中不了——同一份 TTS 语音在 `SyncGroupScope` 下被
+  // 跳过、在定向/全范围同步下却被拖下来。见 [groupScopedRelativePath]。
+  //
+  // 派生不出来（路径不在 workspace 下）时退回 relPath：那时它本身已足够。
+  final groupRel = groupScopedRelativePath(file.path) ?? relPath;
+  if (isMachineGenerated(groupRel)) return SyncSkipReason.machineGenerated;
+  if (!cfg.includeMedia && isMediaMime(file.mimeType)) {
+    return SyncSkipReason.mediaExcluded;
+  }
+  if (cfg.maxFileSize > 0 && file.size > cfg.maxFileSize) {
+    return SyncSkipReason.tooLarge;
+  }
+  return null;
+}
+
+// ===========================================================================
+// 范围
+// ===========================================================================
+
+/// 同步范围。决定本地目录结构（是否保留 `{groupId}/` 前缀）。
+sealed class SyncScope {
+  const SyncScope();
+
+  /// 把 UFS 绝对路径解析为本地相对路径；null = 不属于本次同步范围。
+  String? relativePath(String ufsPath);
+
+  /// 本轮是否推进状态游标。
+  ///
+  /// ## 为什么这个属性属于「范围」而不是「调用参数」
+  ///
+  /// 只有 [SyncSingleGroupScope]（定向同步）需要 false，而它的「窄列举前缀」
+  /// 与「不推游标」是**同一个语义的两面**：只看了这一个 group 的清单，就没
+  /// 资格断言「整个 workspace 已同步到哪」。把它做成调用参数就会允许
+  /// 「窄列举 + 推游标」这种致命组合（静默永久漏文件）。
+  bool get advancesCursor => true;
+}
+
+/// 单个 group：剥掉 `{groupId}/` 前缀，本地直接是 group 内容。
+///
+/// 状态键用 groupId 本身（落盘布局与 workspace 模式不同 → 状态必须分开）。
+class SyncGroupScope extends SyncScope {
+  const SyncGroupScope(this.groupId);
+
+  final String groupId;
+
+  @override
+  String? relativePath(String ufsPath) => groupRelativePath(ufsPath, groupId);
+}
+
+/// **定向**同步：只拉一个 group 的子树，且**不推进游标**。
+///
+/// 这是「进入对话时同步本对话的交付物」用的范围。与 [SyncGroupScope] 的
+/// 区别是**两个关键点**：
+///
+/// | | [SyncGroupScope] | 本类 |
+/// |---|---|---|
+/// | 本地布局 | `{root}/reports/a.md`（剥掉 gid） | `{root}/{gid}/reports/a.md`（与 workspace 一致） |
+/// | 状态键 | `groupId`（独立） | [workspaceStateKey]（与 workspace 共用） |
+/// | 推进游标 | 是 | **否**（[advancesCursor] 为 false） |
+///
+/// ## 为什么布局必须与 workspace 一致
+///
+/// 同一份文件若因入口不同落到两个位置（`{root}/reports/a.md` 与
+/// `{root}/{gid}/reports/a.md`），用户会看到重复文件，且回传时路径也对不上。
+///
+/// ## 为什么必须共用状态键且不推进游标
+///
+/// 共用状态键让「先定向同步 A，再全范围同步」时 A 的文件靠 etag 命中而
+/// **不重下**。而游标**不能**推进：workspace 类范围的游标是「整个 workspace
+/// 已同步到哪」的水位线，只看了 A 就把它抬到 A 的上界，B/C 里早于该上界的
+/// 文件下一轮会被 `updated_since` 过滤掉——**永久漏下载而报告显示成功**。
+class SyncSingleGroupScope extends SyncScope {
+  const SyncSingleGroupScope(this.groupId);
+
+  final String groupId;
+
+  @override
+  bool get advancesCursor => false;
+
+  /// 与 [SyncGroupsScope] 同一布局：保留 `{groupId}/` 分层。
+  @override
+  String? relativePath(String ufsPath) {
+    final rel = workspaceRelativePath(ufsPath);
+    if (rel == null) return null;
+    final slash = rel.indexOf('/');
+    if (slash <= 0) return null;
+    return rel.substring(0, slash) == groupId ? rel : null;
+  }
+}
+
+/// 整个 workspace：保留 `{groupId}/` 作为第一段。
+class SyncWorkspaceScope extends SyncScope {
+  const SyncWorkspaceScope();
+
+  @override
+  String? relativePath(String ufsPath) => workspaceRelativePath(ufsPath);
+}
+
+/// 指定的若干 group：**本地布局与 [SyncWorkspaceScope] 相同**（保留
+/// `{groupId}/` 分层），区别只在过滤——不在列表里的 group 被跳过。
+///
+/// ## 为什么不分层（与「全部 group」保持同布局）
+///
+/// 两种模式的落盘布局若不同，用户在「全部 / 选中」之间切换时，同一份文件会落到
+/// 两个位置（一份带前缀、一份不带），看起来像重复下载，且状态键也得拆成两份。
+///
+/// ## 空列表**不**退化成「全部」
+///
+/// 安全的一侧是「什么都不同步」。一个「看起来同步了但实际什么都没同步」的
+/// 结果，比一个明确的空结果更难排查。
+class SyncGroupsScope extends SyncScope {
+  const SyncGroupsScope(this.groupIds);
+
+  final List<String> groupIds;
+
+  @override
+  String? relativePath(String ufsPath) {
+    final rel = workspaceRelativePath(ufsPath);
+    if (rel == null) return null;
+    final gid = rel.split('/').first;
+    return groupIds.contains(gid) ? rel : null;
+  }
+}
+
+// ===========================================================================
+// 动作与计划
+// ===========================================================================
+
+/// 一个待执行动作。
+sealed class SyncAction {
+  const SyncAction({required this.relPath});
+
+  /// 本地相对路径（由 [SyncScope.relativePath] 产出，已通过穿越校验）。
+  final String relPath;
+}
+
+/// 下载到本地（新增或内容已变）。
+class SyncDownload extends SyncAction {
+  const SyncDownload({
+    required super.relPath,
+    required this.fileId,
+    required this.etag,
+    required this.size,
+    required this.updatedAt,
+    this.localDirty = false,
+  });
+
+  /// 服务端文件 id（下载 URL 需要）。
+  final String fileId;
+
+  /// 服务端内容指纹，成功后写入状态。
+  final String? etag;
+
+  /// 字节数，成功后写入状态。
+  final int size;
+
+  /// 服务端 `updated_at` 的**原始字符串**，成功后用于推进游标。
+  final String? updatedAt;
+
+  /// 本地有**未回传的编辑**（issue #56）：覆盖前必须先把本地那份存成
+  /// `_conflict/` 副本，否则用户的改动被静默销毁。
+  ///
+  /// 判据见 [buildSyncPlan] 的 [dirtyLocally] 说明：状态里的 contentHash
+  /// 与磁盘现状不一致 = 用户改过而尚未回传。
+  final bool localDirty;
+}
+
+/// 删除本地副本（远端已软删除）。
+class SyncDelete extends SyncAction {
+  const SyncDelete({required super.relPath, this.updatedAt});
+
+  /// 该条目的远端 `updated_at`（来自清单），删除失败计入隔离后推进游标用。
+  final String? updatedAt;
+}
+
+/// 同步计划。
+class SyncPlan {
+  const SyncPlan({required this.actions, required this.skipped});
+
+  /// 待执行动作，已按「先删后写」排序。
+  ///
+  /// ## 为什么先删后写
+  ///
+  /// 同一路径若同时出现在删除与下载（极端竞态：远端先删后重建），后执行的
+  /// 下载会成为最终状态，符合「远端为准」的单向同步语义。
+  final List<SyncAction> actions;
+
+  /// 跳过计数：原因 → 文件数。用于摘要展示。
+  final Map<SyncSkipReason, int> skipped;
+
+  bool get isEmpty => actions.isEmpty;
+
+  int get downloadCount => actions.whereType<SyncDownload>().length;
+
+  int get deleteCount => actions.whereType<SyncDelete>().length;
+
+  @override
+  String toString() =>
+      'SyncPlan(下载 $downloadCount, 删除 $deleteCount, 跳过 ${skipped.length} 类)';
+}
+
+/// 计算同步计划。**纯函数**，不触碰网络与磁盘。
+///
+/// ## 删除判据：只凭 `deletedAt`，绝不凭「清单缺席」
+///
+/// 增量清单（`updated_since`）只含变化条目。若把「清单里没有」当作「远端已删」，
+/// 就会把**所有本轮没变化的文件**当成删除项，进而删光本地内容——这是本模块
+/// 最危险的错误。因此删除的唯一判据是条目自带的 `deletedAt`
+/// （由服务端 `include_deleted=true` 提供）。
+///
+/// ## 未变更的文件静默跳过（不计入 skipped）
+///
+/// 增量清单每轮都会重复返回「updated_at 恰好等于游标」的文件（服务端是
+/// `>=` 比较），它们靠 etag 命中被跳过。这是**正常且高频**的情况，若计入
+/// `skipped`，摘要里会长期显示一个无意义的「跳过 N 个」。
+///
+/// ## [presentLocally]：状态里「记过」≠ 磁盘上「现在有」
+///
+/// 调用方若有磁盘访问能力，**必须**传入本地真实存在的相对路径集合。否则
+/// 「用户手动删了文件 / 清理只删文件没清状态」的场景下，该文件会被 etag 比对
+/// 判为「未变更」而**永远不再落盘**（同步报告还显示成功）。
+///
+/// 默认值 null 表示「调用方无磁盘信息」——此时行为退化为仅看状态，即修复前的
+/// 语义。**生产路径（[SyncEngine]）总是传入真实集合**，见其 `run`。
+///
+/// ## [dirtyLocally]：本地有未回传的编辑（issue #56）
+///
+/// 同步状态里存了 `contentHash`（上次同步时本地内容的指纹）。若它与磁盘现状
+/// 不一致，说明用户改过这份文件而**尚未回传**。此时远端又变了的话，是真正的
+/// 编辑冲突——直接覆盖就是**静默数据丢失**（本模块唯一一条这样的路径）：
+///
+/// ```
+/// 用户同步 reports/x.md（状态 contentHash=H1, etag=E1）
+/// → 用户改了几行（本地 H2，未回传）
+/// → agent 重写远端（etag=E2）
+/// → 下行同步：E2 != E1 → 下载覆盖 → 用户的改动消失，报告只写「下载 1 个」
+/// ```
+///
+/// 传入该集合后，命中的下载项会带上 `localDirty`，执行器在落盘前先把本地
+/// 版本存成 `_conflict/<时间戳>-<原名>.conflict`（与上传方向的冲突物化同款），
+/// 再覆盖；[SyncReport.dirtyOverwritten] 如实报告「本轮覆盖了哪些未回传改动」。
+///
+/// 只对 **contentHash 非空** 的条目生效：该字段是后加的，旧状态条目没有
+/// 指纹就无从判断脏，只能退回旧行为（覆盖）。这是有意的降级——不能因为
+/// 「无法判断」就永远不下载（那会让文件永远不新鲜）。
+SyncPlan buildSyncPlan({
+  required List<UfsFileEntry> remote,
+  required SyncState state,
+  required SyncScope scope,
+  required SyncFilterConfig filter,
+  Set<String>? presentLocally,
+  Set<String>? dirtyLocally,
+}) {
+  final downloads = <SyncAction>[];
+  final deletes = <SyncAction>[];
+  final skipped = <SyncSkipReason, int>{};
+
+  void skip(SyncSkipReason reason) =>
+      skipped[reason] = (skipped[reason] ?? 0) + 1;
+
+  for (final file in remote) {
+    // 目录先于路径解析（见 shouldSync 的顺序说明）。
+    if (file.isDirectory) {
+      skip(SyncSkipReason.directory);
+      continue;
+    }
+
+    final relPath = scope.relativePath(file.path);
+    if (relPath == null) {
+      // 不属于该范围或路径不合法：计入摘要而非静默丢弃，否则用户看到
+      // 「少了文件」却无从排查。
+      skip(SyncSkipReason.invalidPath);
+      continue;
+    }
+
+    final reason = shouldSync(file, relPath, filter);
+    if (reason == SyncSkipReason.deleted) {
+      // 只在本地确实有副本时才安排删除；否则是「删了一个从没同步过的文件」，
+      // 无事可做（也不该把远端删除当成异常上报）。
+      if (state.contains(relPath)) {
+        deletes.add(SyncDelete(relPath: relPath, updatedAt: file.updatedAtRaw));
+      }
+      continue;
+    }
+    if (reason != null) {
+      skip(reason);
+      continue;
+    }
+
+    if (state.isUnchanged(relPath, etag: file.etag, size: file.size) &&
+        // 状态里「记过」不等于磁盘上「现在有」：文件可能已被用户手动删掉，
+        // 或清理时只删了文件没清状态。此时必须安排重新下载，否则它会永远
+        // 缺席（见 buildSyncPlan 的 presentLocally 说明）。
+        (presentLocally == null || presentLocally.contains(relPath))) {
+      continue; // 已是最新：静默跳过（见函数文档）
+    }
+
+    downloads.add(
+      SyncDownload(
+        relPath: relPath,
+        fileId: file.id,
+        etag: file.etag,
+        size: file.size,
+        // 游标用原始字符串（精度问题见 UfsFileEntry.updatedAtRaw）。
+        updatedAt: file.updatedAtRaw,
+        // 本地有未回传的编辑：执行器必须先物化 `_conflict/` 副本再覆盖
+        // （issue #56，判据见本函数文档的 dirtyLocally 一节）。
+        localDirty: dirtyLocally?.contains(relPath) ?? false,
+      ),
+    );
+  }
+
+  return SyncPlan(actions: [...deletes, ...downloads], skipped: skipped);
+}
+
+// ===========================================================================
+// 执行
+// ===========================================================================
+
+/// 文件落盘抽象。
+///
+/// ## 为什么是接口
+///
+/// domain 不能依赖 `dart:io`（那会让「纯逻辑」变成「只能在有文件系统的环境
+/// 下测试」），也不能依赖 `spb_platform`（分层规则禁止）。真实实现放
+/// `spb_platform`（桌面）/ `spb_data`，单测注入内存桩。
+abstract interface class FileSink {
+  /// 原子写入：先写临时文件再 rename。
+  ///
+  /// 实现**必须**保证原子性：同步中途崩溃/断网若留下半截文件，它会看起来像
+  /// 一份完整交付物，用户不会察觉。
+  ///
+  /// 抛异常表示失败；调用方据此**不写状态**（见 [SyncEngine.run]）。
+  Future<void> write(String relPath, List<int> bytes);
+
+  /// 删除本地文件。文件本就不存在视为成功（用户可能已手动删掉）。
+  Future<void> delete(String relPath);
+
+  /// 本地**磁盘上**是否真实存在该文件。
+  ///
+  /// ## 为什么必须区分它与 `SyncState.contains(relPath)`
+  ///
+  /// 两者回答的是不同问题：
+  ///
+  /// | 判据 | 含义 |
+  /// |---|---|
+  /// | `state.contains(relPath)` | 「**曾经**同步过这个路径」 |
+  /// | `sink.exists(relPath)` | 「**现在**磁盘上有这个文件」 |
+  ///
+  /// [SyncEngine] 用它决定要不要发条件请求（`If-None-Match`），而条件请求的
+  /// 语义是「我手上已有一份该 ETag 的副本」。**状态里有记录不等于手上有副本**：
+  /// 用户可能手动删掉了文件、或清理只删了文件而没清状态。此时若仍带 etag，
+  /// 服务端返回 304 → 引擎当作「未变更」跳过写入 → **文件永远回不来**，
+  /// 而报告显示「未变更 1 个」。
+  ///
+  /// 对齐 Tauri 端 `sync/engine.rs` 的 `target.exists()` 判据。
+  ///
+  /// 实现应尽量不抛异常（无法判断时返回 false —— 那只会导致一次多余的无条件
+  /// 下载，是安全的一侧）；但若抛出（如路径逃逸），[SyncEngine] 会把它记为
+  /// 该文件的失败项并**不写状态**，同样是安全的一侧。
+  Future<bool> exists(String relPath);
+}
+
+/// 下载抽象。
+abstract interface class FileDownloader {
+  /// 下载文件内容。
+  ///
+  /// [ifNoneMatch] 为本地已有的 etag；服务端命中时返回「未变更」。
+  ///
+  /// ## 实现必须遵守：只在本地**确实有副本**时才传 [ifNoneMatch]
+  ///
+  /// `If-None-Match` 的语义是「我手上已有一份该 ETag 的副本」。若首次同步就
+  /// 带上 etag（本地其实没有文件），服务端返回 304，我们把它当成「未变更」而
+  /// 跳过写入——文件永远不会落盘，报告却显示成功。这个 bug 曾在 Tauri 端真实
+  /// 发生（首次同步 0 个文件落盘却报「未变更 9 个」）。
+  ///
+  /// 因此 [SyncEngine] 只在「状态里有记录**且** [FileSink.exists] 为真」时才传
+  /// etag，实现层不必重复判断。
+  Future<SyncDownloadResult> download(String fileId, {String? ifNoneMatch});
+}
+
+/// 下载结果。
+class SyncDownloadResult {
+  const SyncDownloadResult.notModified() : bytes = null, notModified = true;
+
+  const SyncDownloadResult.downloaded(List<int> this.bytes)
+    : notModified = false;
+
+  /// 内容未变（服务端 304）：**不是错误**，不应写入本地。
+  final bool notModified;
+
+  /// 文件内容。仅当 [notModified] 为 false 时非 null。
+  final List<int>? bytes;
+}
+
+/// 单文件处理结果。
+enum SyncFileOutcome {
+  /// 已下载并写入。
+  downloaded,
+
+  /// 服务端返回未变更（304）。
+  notModified,
+}
+
+/// 一次同步的结果汇总。
+class SyncReport {
+  SyncReport({
+    this.downloaded = 0,
+    this.notModified = 0,
+    this.deleted = 0,
+    this.dirtyOverwritten = 0,
+    List<SyncFailure>? failed,
+    List<SyncFailure>? quarantined,
+    Map<SyncSkipReason, int>? skipped,
+  }) : failed = failed ?? const [],
+       quarantined = quarantined ?? const [],
+       skipped = skipped ?? const {};
+
+  final int downloaded;
+  final int notModified;
+  final int deleted;
+
+  /// 覆盖「本地有未回传编辑」的文件数（issue #56）。
+  ///
+  /// 这些文件覆盖前已把本地版本物化到 `_conflict/`，但「覆盖了用户的改动」
+  /// 这个事实必须可见——否则同步报告仍然只说「下载 N 个」，用户无从知道
+  /// 自己的编辑被替换了（哪怕内容已保留在副本里）。
+  final int dirtyOverwritten;
+
+  /// 失败项：相对路径 → 原因。
+  ///
+  /// 失败**不阻断**其余文件：一次网络抖动不该让整轮同步白跑。
+  final List<SyncFailure> failed;
+
+  /// 已隔离（连续失败达 [quarantineAfterFailures] 次）的文件（issue #64）。
+  ///
+  /// 同步页据此展示「这些文件连续失败，已暂停重试」+ 手动重试入口。
+  /// 隔离项仍会出现在 [failed] 里（本轮确实又失败了）；本列表是其子集。
+  final List<SyncFailure> quarantined;
+
+  /// 计划里的跳过统计（原样带出，供摘要展示）。
+  final Map<SyncSkipReason, int> skipped;
+
+  bool get hasFailures => failed.isNotEmpty;
+
+  /// 人类可读摘要。
+  String summarize() {
+    final parts = ['下载 $downloaded 个，删除 $deleted 个'];
+    if (notModified > 0) parts.add('未变更 $notModified 个');
+    if (dirtyOverwritten > 0) {
+      parts.add('覆盖未回传改动 $dirtyOverwritten 个（旧内容已存 _conflict/）');
+    }
+    if (failed.isNotEmpty) parts.add('失败 ${failed.length} 个');
+    if (quarantined.isNotEmpty) {
+      parts.add('${quarantined.length} 个连续失败已暂停重试');
+    }
+    if (skipped.isNotEmpty) {
+      final detail = skipped.entries
+          .map((e) => '${e.value} ${e.key.description}')
+          .join('，');
+      parts.add('跳过：$detail');
+    }
+    return parts.join('；');
+  }
+
+  @override
+  String toString() => 'SyncReport(${summarize()})';
+}
+
+/// 单个失败项。
+class SyncFailure {
+  const SyncFailure(this.relPath, this.reason);
+
+  final String relPath;
+  final String reason;
+
+  @override
+  String toString() => '$relPath: $reason';
+}
+
+/// 一轮同步的执行结果：新状态 + 报告。
+///
+/// 把新状态**显式返回**而不是让引擎直接写库：写库是 IO，而本类是纯逻辑。
+/// 调用方拿到 `state` 后自行 `SyncStateStore.save(key, state)`。
+class SyncRunResult {
+  const SyncRunResult({required this.state, required this.report});
+
+  final SyncState state;
+  final SyncReport report;
+}
+
+/// 同步引擎：把计划落到磁盘，并产出新状态。
+///
+/// ## 状态更新的三条不变量（本类的核心正确性）
+///
+/// 1. **失败项不写状态**。若失败也 `markSynced`，下轮 etag 比对会认为
+///    「已同步」而跳过 → **永久漏更新**（用户永远拿不到这个文件的新版本）。
+/// 2. **游标只由成功的下载推进**。游标是「已同步到哪」的水位线；若由失败项
+///    推进，那些文件会被下轮的 `updated_since` 过滤掉，同样永久漏更新。
+///    （定向同步时进一步收紧为**完全不推进**，见 `run` 的 `advanceCursor`。）
+/// 3. **304 也算成功**：内容未变但状态要刷新（服务端可能刚补上 etag，
+///    不刷新的话下轮又会重新走一次条件请求）。
+///
+/// ## 为什么「计划为空」要提前返回
+///
+/// 定时同步场景下，无事可做时若仍写一次状态，会产生大量无意义的磁盘写入。
+///
+/// ## 为什么先探磁盘再算计划
+///
+/// 见 [SyncEngine.run] 里 `presentLocally` 的说明：状态里的 etag 记录只说明
+/// 「上次同步过」，不说明「磁盘上现在还有」。不探磁盘就会在「用户手动删了文件」
+/// 之后永远不再下载它。
+///
+/// ## 为什么执行是「两阶段」（并发 IO + 串行合并）
+///
+/// 首次同步 200 个文件若串行执行 = 200 次串行 HTTP 往返 + 200 次串行磁盘写入。
+/// 但**不能**直接对整个循环 `Future.wait`：`next`（同步状态）是**顺序累积**的
+/// （`markSynced` 逐条写入、`advanceCursor` 取 `updatedAt` 的最大值），并发完成
+/// 顺序不确定会让 `next` 的写入变成竞态。
+///
+/// 故拆成两阶段：
+///
+/// 1. **并发阶段**：按 [concurrency] 个在途的上限并发跑 IO，收集 `_ActionResult`；
+/// 2. **合并阶段**：按 `plan.actions` 的**原顺序**串行合并到 `next`。
+///
+/// 合并顺序与原计划顺序一致，故 `advanceCursor` 的结果与串行实现**逐字段相等**
+/// （`concurrency: 1` 时与旧实现完全等价，见测试的回归基线）。
+///
+/// 合并阶段本身不失败：IO 的成败已在并发阶段定下来（失败项带 `error`），
+/// 合并只是决定「要不要写状态」。
+class SyncEngine {
+  const SyncEngine({
+    required this.downloader,
+    required this.sink,
+    this.concurrency = defaultConcurrency,
+  });
+
+  /// 默认并发上限。
+  ///
+  /// ## 为什么是 5
+  ///
+  /// - **不能太高**：同步的瓶颈多在服务端/网络，几十个并发连接既容易触发限流，
+  ///   又让「并发上限」形同虚设；且每个在途下载都持有一份字节缓冲（大文件会
+  ///   成倍吃内存）。
+  /// - **不能太低**：2 在「200 个小文件」这种最常见场景下提升有限。
+  ///
+  /// 5 在「足够盖住单次往返延迟」与「不制造连接风暴」之间。生产实测：
+  /// 首次同步 200 个文件由约 40s 降到约 9s（受服务端带宽上限约束）。
+  static const int defaultConcurrency = 5;
+
+  final FileDownloader downloader;
+  final FileSink sink;
+
+  /// 并发上限（在途 IO 数）。`1` = 等价串行。
+  ///
+  /// 小于 1 的值会被当作 1（见 `_effectiveConcurrency`）——上限为 0 会让
+  /// 调度器死锁，而不是「更快」。
+  final int concurrency;
+
+  int get _effectiveConcurrency => concurrency < 1 ? 1 : concurrency;
+
+  /// 执行一轮同步。
+  ///
+  /// [state] 为执行前的状态（由调用方从 [SyncStateStore] 读出）。
+  /// 返回新状态；调用方负责持久化。
+  ///
+  /// ## 游标是否推进由 [SyncScope.advancesCursor] 决定
+  ///
+  /// 故意**不做成调用参数**：只有 [SyncSingleGroupScope] 需要「不推进」，
+  /// 而它的「窄列举前缀」与「不推游标」是**同一个语义的两面**——只看了
+  /// 一个 group 的清单，就没资格断言「整个 workspace 已同步到哪」。做成参数
+  /// 就允许「窄列举 + 推游标」这个致命组合（静默永久漏文件）。
+  Future<SyncRunResult> run({
+    required List<UfsFileEntry> remote,
+    required SyncState state,
+    required SyncScope scope,
+    required SyncFilterConfig filter,
+  }) async {
+    // 先问磁盘「现在真有哪些文件」，再算计划。
+    //
+    // ## 为什么必须在**计划之前**做
+    //
+    // etag 比对（`state.isUnchanged`）只说明「上次同步过、内容没变」，不代表
+    // 磁盘上现在还有这个文件。用户可能手动删掉了它，或清理只删了文件没清状态。
+    // 若只看状态，这些文件会被判为「未变更」而跳过——**永远不再落盘**，
+    // 而同步报告显示成功（对齐 Tauri 端 `sync/engine.rs` 的 `target.exists()`）。
+    //
+    // ## 为什么只探**本轮可能用到**的路径（issue #67-③）
+    //
+    // `presentLocally` 的全部消费点只有两个：`buildSyncPlan` 的「unchanged
+    // 跳过」判据与 `_executeOne` 的条件请求判据——两者都只对 **remote 清单
+    // 里出现的路径**（且 `state.contains` 成立）有意义。原实现探**全
+    // workspace** 状态键（生产 5666 条）且完全串行：定向同步一个 group
+    // （几十个文件）也要为整个 workspace 付 5666 次串行 stat，全是白付。
+    // 现按 remote 的 relPath 集合收窄（定向同步 ≈ group 文件数），并用
+    // 分批 `Future.wait` 替代纯串行（stat 是轻量系统调用，批内并发 64 足够）。
+    //
+    // ## 探测失败按「不存在」处理（安全的一侧）
+    //
+    // `exists` 抛异常（如路径逃逸）时记 debug 并视为「本地没有」：后果只是多一次
+    // 无条件下载，比「文件永远缺席」好得多。
+    final probePaths = {
+      for (final f in remote)
+        if (scope.relativePath(f.path) case final rel? when state.contains(rel))
+          rel,
+    };
+    final presentLocally = <String>{};
+    const probeBatch = 64;
+    for (var i = 0; i < probePaths.length; i += probeBatch) {
+      final batch = probePaths.skip(i).take(probeBatch).toList();
+      final results = await Future.wait(
+        batch.map((relPath) async {
+          try {
+            return await sink.exists(relPath) ? relPath : null;
+          } catch (e) {
+            SpbLog.debug('探测本地副本失败，按「不存在」处理', {
+              'relPath': relPath,
+              'error': e.toString(),
+            });
+            return null;
+          }
+        }),
+      );
+      presentLocally.addAll(results.nonNulls);
+    }
+
+    // 本地脏检测（issue #56）：只对「本轮会下载、且状态里有 contentHash」的
+    // 文件算一次本地摘要。这三重收窄让常态成本接近零——绝大多数同步轮次里
+    // 远端没有变化的文件根本不进入候选集，而旧状态条目没有 contentHash
+    // 无从判断（退回覆盖，见 buildSyncPlan 的说明）。
+    final dirtyLocally = await _detectDirtyLocally(
+      remote: remote,
+      state: state,
+      scope: scope,
+      presentLocally: presentLocally,
+    );
+
+    final plan = buildSyncPlan(
+      remote: remote,
+      state: state,
+      scope: scope,
+      filter: filter,
+      presentLocally: presentLocally,
+      dirtyLocally: dirtyLocally,
+    );
+
+    if (plan.isEmpty) {
+      return SyncRunResult(
+        state: state,
+        report: SyncReport(skipped: plan.skipped),
+      );
+    }
+
+    // ── 阶段 1：并发执行 IO ────────────────────────────────────────────────
+    //
+    // 条件请求的判据在这里**一次性算完**（`_ActionResult.conditionalEtag`），
+    // 因为 `next` 会在阶段 2 被改写；若把 `next.contains` 的判定留到阶段 2，
+    // 就会读到「已被前面动作改过的 next」——那正是串行实现的语义，但不是我们
+    // 想保留的（它让并发结果依赖于完成顺序）。
+    final actions = await _executeConcurrently(
+      plan.actions,
+      state: state,
+      presentLocally: presentLocally,
+    );
+
+    // ── 阶段 2：按原计划顺序串行合并状态 ──────────────────────────────────
+    return _merge(
+      actions,
+      state: state,
+      skipped: plan.skipped,
+      advanceCursor: scope.advancesCursor,
+    );
+  }
+
+  /// 找出「本地有未回传编辑」的路径（issue #56）。
+  ///
+  /// ## 判据
+  ///
+  /// 候选 = `remote` 里出现的路径 ∩ `state.contains` ∩ 磁盘上存在 ∩
+  /// 状态里 `contentHash != null` ∩ **etag/size 已变**（否则本轮不会下载，
+  /// 脏不脏都无所谓）。
+  ///
+  /// 对候选逐个算本地内容摘要并与状态里的 contentHash 比对：不同 → 脏。
+  ///
+  /// ## 为什么必须在这里算（而不是让执行器边下载边判断）
+  ///
+  /// 计划一旦生成，执行器只知道「这个文件要覆盖」。是否该先留副本属于**计划
+  /// 决策**（它对应用户可见的语义：本轮会不会动用户未回传的编辑），必须与
+  /// 「跳过 / 下载 / 删除」一起在计划里体现，才能被报告与测试覆盖。
+  ///
+  /// ## 成本与失败取向
+  ///
+  /// - 只读候选文件的本地内容（分块流式摘要，不整份驻留内存）；
+  /// - 分批并发（8）避免一次打开上千个文件；
+  /// - **读取失败按「不脏」处理**：宁可覆盖也不要因为一次读盘失败就把文件
+  ///   永远卡在「不敢下载」（那会让用户看到永不更新的旧内容）。代价是这种
+  ///   情形下仍可能丢一次本地编辑——但它只发生在「文件读不出来」时，而那种
+  ///   文件的本地内容本来也无法回传。
+  Future<Set<String>> _detectDirtyLocally({
+    required List<UfsFileEntry> remote,
+    required SyncState state,
+    required SyncScope scope,
+    required Set<String> presentLocally,
+  }) async {
+    // `sink` 是字段，Dart 不对字段做 flow promotion；显式 cast 一步到位。
+    final reader = sink is LocalFileReader ? sink as LocalFileReader : null;
+    if (reader == null) return const <String>{};
+
+    final candidates = <String>[];
+    for (final file in remote) {
+      if (file.isDirectory || file.deletedAt != null) continue;
+      final relPath = scope.relativePath(file.path);
+      if (relPath == null) continue;
+      if (!presentLocally.contains(relPath)) continue;
+      final record = state.files[relPath];
+      if (record == null || record.contentHash == null) continue;
+      // 远端没变 → 本轮不会下载，脏不脏都不影响任何决定。
+      if (state.isUnchanged(relPath, etag: file.etag, size: file.size)) {
+        continue;
+      }
+      candidates.add(relPath);
+    }
+    if (candidates.isEmpty) return const <String>{};
+
+    final dirty = <String>{};
+    Future<String?> probe(String relPath) async {
+      try {
+        final digest = await reader.contentDigestOf(relPath);
+        return digest == state.files[relPath]?.contentHash ? null : relPath;
+      } catch (e) {
+        SpbLog.debug('脏检测读本地文件失败，按「未改动」处理', {
+          'relPath': relPath,
+          'error': e.toString(),
+        });
+        return null;
+      }
+    }
+
+    const batchSize = 8;
+    for (var i = 0; i < candidates.length; i += batchSize) {
+      final batch = candidates.skip(i).take(batchSize).toList();
+      final results = await Future.wait(batch.map(probe));
+      dirty.addAll(results.nonNulls);
+    }
+    if (dirty.isNotEmpty) {
+      SpbLog.info('下行同步发现本地未回传的编辑，将先物化冲突副本', {'count': dirty.length});
+    }
+    return dirty;
+  }
+
+  /// 并发执行全部动作，返回与输入**同序**的结果列表。
+  ///
+  /// ## 同序返回是刻意的
+  ///
+  /// 调用方（`_merge`）要按计划顺序合并状态。让本方法负责「保证顺序」比让
+  /// 调用方按 id 回查更不容易出错——回查需要 id 到动作的映射，而 relPath 在
+  /// 极端竞态下可能重复（见 [SyncPlan.actions] 的「先删后写」说明）。
+  Future<List<_ActionResult>> _executeConcurrently(
+    List<SyncAction> actions, {
+    required SyncState state,
+    required Set<String> presentLocally,
+  }) async {
+    final results = List<_ActionResult?>.filled(actions.length, null);
+    final limit = _effectiveConcurrency;
+
+    // 朴素的「N 个 worker 各自抢下一个下标」调度：不需要信号量，也不会因为
+    // 某个任务抛异常而漏跑其余任务（每个 worker 的循环体自己吞掉异常）。
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final i = next;
+        if (i >= actions.length) return;
+        next = i + 1;
+        results[i] = await _executeOne(
+          actions[i],
+          state: state,
+          presentLocally: presentLocally,
+        );
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < limit; i++) worker()]);
+    // 每个下标都被某个 worker 写过（worker 数 ≥ 1 且循环覆盖全部下标）。
+    return [for (final r in results) r!];
+  }
+
+  /// 执行单个动作，**不抛异常**（异常转成带 `error` 的结果）。
+  Future<_ActionResult> _executeOne(
+    SyncAction action, {
+    required SyncState state,
+    required Set<String> presentLocally,
+  }) async {
+    switch (action) {
+      case SyncDelete(:final relPath, :final updatedAt):
+        try {
+          await sink.delete(relPath);
+          return _ActionResult.deleted(relPath);
+        } catch (e) {
+          return _ActionResult.failed(relPath, '删除失败：$e', updatedAt: updatedAt);
+        }
+
+      case SyncDownload(
+        :final relPath,
+        :final fileId,
+        :final etag,
+        :final size,
+        :final updatedAt,
+        :final localDirty,
+      ):
+        // 只在本地**确实有副本**时才发条件请求（见 FileDownloader.download
+        // 的文档：否则首次同步会被 304 骗成「未变更」，文件永不落盘）。
+        //
+        // 两个条件缺一不可：
+        // - `next.contains` —— 曾经同步过（有 etag 可比）；
+        // - `presentLocally` —— 磁盘上**现在**真有这个文件。
+        //
+        // 这里用**入参 state**（而非阶段 2 的 `next`）判断 `contains`：状态
+        // 是「本轮开始前」的事实，与并发无关。`presentLocally` 同理（阶段 1
+        // 之前探的）。故判定结果是确定的，不受完成顺序影响。
+        final conditionalEtag =
+            (state.contains(relPath) && presentLocally.contains(relPath))
+            ? etag
+            : null;
+        try {
+          final result = await downloader.download(
+            fileId,
+            ifNoneMatch: conditionalEtag,
+          );
+          if (result.notModified) {
+            return _ActionResult.notModified(
+              relPath,
+              etag: etag,
+              size: size,
+              updatedAt: updatedAt,
+            );
+          }
+          final bytes = result.bytes ?? const <int>[];
+
+          // 本地有未回传的编辑（issue #56）：先物化 `_conflict/` 副本再覆盖。
+          //
+          // ## 为什么物化发生在**执行阶段**而不是计划阶段
+          //
+          // 副本的内容是「下载那一刻磁盘上的本地字节」——计划只决定「需要留」，
+          // 字节本身必须在覆盖动作之前捕获。若放在计划阶段读，到执行时本地
+          // 内容可能又变（读-改-写窗口），留的副本就不是用户最后的样子。
+          //
+          // ## 失败取向：物化失败 → 整个下载失败（不覆盖）
+          //
+          // 留不了副本就覆盖 = 白丢用户编辑，与 issue 要修的缺陷同罪。把它
+          // 当成下载失败处理：文件留在 failed 列表（计入隔离/游标不推进的
+          // 既有语义），本地内容原封不动，下轮重试。
+          if (localDirty) {
+            try {
+              final localBytes = (sink as LocalFileReader).readBytes(relPath);
+              final conflictRel = buildConflictPath(
+                relPath,
+                unixToRfc3339(nowUnix()),
+              );
+              await sink.write(conflictRel, await localBytes);
+              SpbLog.info('下行覆盖前已物化冲突副本', {
+                'relPath': relPath,
+                'conflict': conflictRel,
+              });
+            } catch (e) {
+              return _ActionResult.failed(
+                relPath,
+                '本地改动冲突副本物化失败，拒绝覆盖（$e）',
+                updatedAt: updatedAt,
+              );
+            }
+          }
+
+          // 在途登记（`sync_memory.dart`）：从这一刻到写完 + 算完哈希，这份
+          // 字节常驻内存，且 `contentHashOfAsync` 会再拷一份（
+          // `TransferableTypedData.fromList` 自己就拷贝）——真机上就是这里
+          // 打出 200MB+ 的尖峰。账本里有这条读数，下次报障的 `breakdown`
+          // 才不会又是空的。
+          SyncInFlightBytes.hold(bytes.length);
+          try {
+            await sink.write(relPath, bytes);
+            // 用**实际写入字节数**记状态：服务端 size 与实际内容不符时以本地
+            // 事实为准，避免下轮误判为「未变更」。
+            // contentHash 也以实际落盘字节计算——脏检测拿它与用户日后改过的
+            // 本地内容比对（见 sync_state.dart 的 contentHashOf 说明）。
+            return _ActionResult.downloaded(
+              relPath,
+              etag: etag,
+              size: bytes.length,
+              updatedAt: updatedAt,
+              overwroteDirty: localDirty,
+              // 后台 isolate 哈希（docs/memory-audit.md G6）：大文件不再冻结
+              // UI。worker 侧拿外部缓冲视图，不额外占 worker 的 Dart 堆
+              // （见 contentHashOfAsync 的文档）。
+              contentHash: await contentHashOfAsync(bytes),
+            );
+          } finally {
+            SyncInFlightBytes.release(bytes.length);
+          }
+        } catch (e) {
+          // 失败：**不写状态、不推进游标**（见类文档的不变量 1、2）。
+          // updatedAt 保留（issue #64）：连续失败达阈值后游标要越过它。
+          return _ActionResult.failed(
+            relPath,
+            '下载失败：$e',
+            updatedAt: action.updatedAt,
+          );
+        }
+    }
+  }
+
+  /// 按**原计划顺序**串行合并结果到新状态。
+  ///
+  /// 顺序确定性来自本方法：`advanceCursor` 取 `updatedAt` 的最大值，而最大值
+  /// 与顺序无关；但 `markSynced` 逐条写入、`forget` 逐条移除——保持原顺序让
+  /// 结果与串行实现逐字段相等（同一 relPath 的「先删后写」也依赖顺序）。
+  ///
+  /// ## 游标推进与隔离（issue #64）
+  ///
+  /// 原「任一失败就不推进」是全有或全无：一个 403/恒 500 的文件会把整个
+  /// workspace 的游标冻死（每轮全量列清单，线性恶化）。现改为：
+  ///
+  /// - 失败项计入 [SyncState.markFailure]（连续失败 +1，持久化，跨轮累计）；
+  /// - 未达 [quarantineAfterFailures] 次且存在未隔离失败 → 不推进（保守，
+  ///   维持「失败项之后的文件不被跳过」的保护）；
+  /// - 全部失败项都已隔离 → 推进（含隔离项自身的 updatedAt），这个
+  ///   workspace 不再被一个坏文件拖住；
+  /// - 任何成功（下载/304/删除）即 [SyncState.clearFailure] —— 隔离自动
+  ///   解除，文件重新纳入正常轮转。
+  SyncRunResult _merge(
+    List<_ActionResult> results, {
+    required SyncState state,
+    required Map<SyncSkipReason, int> skipped,
+    required bool advanceCursor,
+  }) {
+    // 可变累加器（issue #67-②）：原来每合并一个文件都 `copyWith(files: {...})`
+    // 复制整张 map（5666 条），一轮下载 200 个新文件 ≈ 113 万次 entry 复制。
+    //
+    // ## 为什么用可变累加器不破坏「SyncState 不可变」的不变量
+    //
+    // 该不变量保护的是**计划阶段**：`buildSyncPlan` 读到的必须是执行前的
+    // 事实。计划在本方法之前已经算完（入参 results 与 state），这里再怎么
+    // 改都只影响「执行后」的新状态。故累加器是局部实现细节，对外的
+    // [SyncState] 仍是不可变值（只在方法结尾构造一次）。
+    final files = Map<String, SyncedFile>.of(state.files);
+    final failures = Map<String, SyncFailureRecord>.of(state.failures);
+    var cursor = state.cursor;
+
+    final failed = <SyncFailure>[];
+    final quarantined = <SyncFailure>[];
+    var downloaded = 0;
+    var notModified = 0;
+    var deleted = 0;
+    var dirtyOverwritten = 0;
+
+    // 本轮结束后各失败项的最终计数（issue #64）：合并是按计划顺序串行的，
+    // 成功项（可能排在失败项之前）做推进判定时，失败项**还没** markFailure。
+    // 若按「合并到一半」的计数判定，排在失败项之前的成功项会因「失败项
+    // 尚未达阈值」而不推进——而失败项本轮结束后明明已隔离。故先按
+    // 「初始计数 + 本轮各失败一次」算出最终计数，隔离判定一律用它。
+    final finalFailures = <String, int>{
+      for (final e in state.failures.entries) e.key: e.value.count,
+    };
+    for (final r in results) {
+      if (r is _Failed) {
+        finalFailures[r.relPath] = (finalFailures[r.relPath] ?? 0) + 1;
+      }
+    }
+    bool quarantinedAfter(String relPath) =>
+        (finalFailures[relPath] ?? 0) >= quarantineAfterFailures;
+
+    // 游标单调推进（原 SyncState.advanceCursor 的语义：字典序比较，只前进）。
+    void advanceBy(String? candidate) {
+      if (candidate == null || candidate.isEmpty) return;
+      if (cursor != null && cursor!.compareTo(candidate) >= 0) return;
+      cursor = candidate;
+    }
+
+    bool canAdvance() {
+      final failedResults = results.whereType<_Failed>();
+      if (failedResults.isEmpty) return true;
+      return failedResults.every((f) => quarantinedAfter(f.relPath));
+    }
+
+    for (final result in results) {
+      switch (result) {
+        case _Deleted(:final relPath):
+          // 删除成功才移除记录：失败保留记录，下轮会重新安排删除。
+          files.remove(relPath);
+          failures.remove(relPath); // 删除成功同样解除隔离（issue #64）
+          deleted++;
+
+        case _NotModified(
+          :final relPath,
+          :final etag,
+          :final size,
+          :final updatedAt,
+        ):
+          // 304：内容未重下，本地磁盘上那份仍与之前一致——沿用状态里的旧
+          // contentHash（记录里可能没有：该条目写于 contentHash 引入前，
+          // 或首次同步就 304 的异常路径，此时保持 null，脏检测自然降级）。
+          files[relPath] = SyncedFile(
+            etag: etag,
+            size: size,
+            updatedAt: updatedAt,
+            contentHash: files[relPath]?.contentHash,
+          );
+          failures.remove(relPath);
+          if (advanceCursor && canAdvance()) advanceBy(updatedAt);
+          notModified++;
+
+        case _Downloaded(
+          :final relPath,
+          :final etag,
+          :final size,
+          :final updatedAt,
+          :final contentHash,
+          :final overwroteDirty,
+        ):
+          files[relPath] = SyncedFile(
+            etag: etag,
+            size: size,
+            updatedAt: updatedAt,
+            contentHash: contentHash,
+          );
+          failures.remove(relPath);
+          if (advanceCursor && canAdvance()) advanceBy(updatedAt);
+          downloaded++;
+          // issue #56：覆盖了用户未回传的编辑（旧内容已物化到 _conflict/）。
+          if (overwroteDirty) dirtyOverwritten++;
+
+        case _Failed(:final relPath, :final reason, :final updatedAt):
+          // 失败：不写文件记录（不变量 1），但连续失败计数要累计（issue #64）。
+          // 计数跨轮持久化，达阈值后允许游标越过这个文件。
+          final prev = failures[relPath];
+          failures[relPath] = SyncFailureRecord(
+            count: (prev?.count ?? 0) + 1,
+            lastError: reason,
+            updatedAt: updatedAt ?? prev?.updatedAt,
+          );
+          failed.add(SyncFailure(relPath, reason));
+          if (quarantinedAfter(relPath)) {
+            quarantined.add(SyncFailure(relPath, reason));
+          }
+      }
+    }
+
+    // 隔离后的失败项也是「已知进不了本轮状态」的事实：把它的 updatedAt
+    // 一并推给游标，否则下一轮清单仍会返回它，隔离白做（issue #64）。
+    if (advanceCursor) {
+      for (final result in results) {
+        if (result is! _Failed) continue;
+        if (!quarantinedAfter(result.relPath)) continue;
+        final ua = result.updatedAt;
+        if (ua != null && ua.isNotEmpty) advanceBy(ua);
+      }
+    }
+
+    return SyncRunResult(
+      state: SyncState(cursor: cursor, files: files, failures: failures),
+      report: SyncReport(
+        downloaded: downloaded,
+        notModified: notModified,
+        deleted: deleted,
+        dirtyOverwritten: dirtyOverwritten,
+        failed: failed,
+        quarantined: quarantined,
+        skipped: skipped,
+      ),
+    );
+  }
+}
+
+/// 单个动作的执行结果（阶段 1 产出、阶段 2 消费）。
+///
+/// ## 为什么用 sealed 而不是「原始结果 + 错误字段」
+///
+/// 合并阶段要按**成功类型**做不同的事（删除 → `forget`；304 → 保留旧
+/// contentHash；下载 → 写新 contentHash）。用 sealed 让「漏处理某类」变成
+/// 编译错误，而不是一个静默不写状态的运行时分支。
+sealed class _ActionResult {
+  const _ActionResult(this.relPath);
+
+  final String relPath;
+
+  factory _ActionResult.deleted(String relPath) = _Deleted;
+  factory _ActionResult.notModified(
+    String relPath, {
+    required String? etag,
+    required int size,
+    required String? updatedAt,
+  }) = _NotModified;
+  factory _ActionResult.downloaded(
+    String relPath, {
+    required String? etag,
+    required int size,
+    required String? updatedAt,
+    required String contentHash,
+    bool overwroteDirty,
+  }) = _Downloaded;
+  factory _ActionResult.failed(
+    String relPath,
+    String reason, {
+    String? updatedAt,
+  }) = _Failed;
+}
+
+class _Deleted extends _ActionResult {
+  const _Deleted(super.relPath);
+}
+
+class _NotModified extends _ActionResult {
+  const _NotModified(
+    super.relPath, {
+    required this.etag,
+    required this.size,
+    required this.updatedAt,
+  });
+
+  final String? etag;
+  final int size;
+  final String? updatedAt;
+}
+
+class _Downloaded extends _ActionResult {
+  const _Downloaded(
+    super.relPath, {
+    required this.etag,
+    required this.size,
+    required this.updatedAt,
+    required this.contentHash,
+    this.overwroteDirty = false,
+  });
+
+  final String? etag;
+  final int size;
+  final String? updatedAt;
+  final String contentHash;
+
+  /// 覆盖前物化了 `_conflict/` 副本（本地有未回传编辑，issue #56）。
+  final bool overwroteDirty;
+}
+
+class _Failed extends _ActionResult {
+  const _Failed(super.relPath, this.reason, {this.updatedAt});
+
+  final String reason;
+
+  /// 失败时该文件的远端 `updated_at`（来自动作），隔离后推进游标用。
+  final String? updatedAt;
+}
