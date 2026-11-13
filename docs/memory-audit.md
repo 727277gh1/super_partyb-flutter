@@ -144,11 +144,11 @@
 | # | 项 | 证据（file:line） | 为什么这轮不动 | 已登记 issue |
 |---|---|---|---|
 | J1 | 结束时切换父链导致 Markdown remount | `assistant_message_bubble.dart` | 已修：稳定 SelectionArea/SelectionContainer 父链，流式禁选；解析 State 和已定型段落复用、选择/恢复流式回归通过，见 performance.md §6.47（#72，Windows 待复核） |
-| J2 | `FileLogSink` 每条日志**同步写盘**（`writeAsBytesSync`，§6.57 有意如此） | `packages/spb_core/lib/src/log_file_sink.dart` | 这是 §6.57 明确记录的取舍：异步缓冲会在崩溃时丢最后一段，而「崩溃后仍能读到」正是该 sink 存在的唯一理由。真要优化应先降日志量，而不是改写法治 #73 |
+| J2 | `FileLogSink` 每条日志**同步写盘**（`writeAsBytesSync`，§6.57 有意如此） | `packages/spb_core/lib/src/log_file_sink.dart` | 这是 §6.57 明确记录的取舍：异步缓冲会在崩溃时丢最后一段，而「崩溃后仍能读到」正是该 sink 存在的唯一理由。真要优化应先降日志量，而不是改写法治 #73。**复核结论（2026-11-13，`spbf#73` 已关）：维持同步写**——翻案前置条件是先有「某热路径在刷日志」的读数（`PerfProbe` / 账本），而不是先改 sink |
 | J3 | 流式 fade 逐字动画（`charactersPerSecond: 600`） | `assistant_message_bubble.dart`（`GptMarkdown(animation: fade, ...)`） | 逐字揭示是**产品表达**而非性能缺陷；关掉会让长回复「一坨文字突然出现」。若要控成本，方向是「大回复降级为一次性显示」，须产品决定 #74 |
 | J4 | 追底动画被自己的像素通知和新事件反复重启 | `conversation_page.dart` | 已修：动画期间合并目标，完成后追最新高度；用户上滚停止、窗口缩放继续跟随，见 performance.md §6.47（#75，Windows 待复核） |
 > G8/G10 已修；J1/J4 于 2026-11-10 完成本地修复和结构回归，设备表现仍待复核。
-> J2/J3 保留既有取舍。完整根因与判据见 [性能设计](design-decisions/performance.md) §6.47。
+> J2/J3 保留既有取舍（J2 已二次复核并关单，#73 结论：维持同步写）。完整根因与判据见 [性能设计](design-decisions/performance.md) §6.47。
 
 ### 6.3 与 §三（有意保留）的边界
 
