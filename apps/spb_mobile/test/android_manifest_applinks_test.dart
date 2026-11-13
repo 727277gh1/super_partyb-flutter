@@ -4,6 +4,21 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_api/spb_api.dart';
 
+/// 客户端应声明（并可接管回调）的全部 issuer 域名。
+///
+/// **一处定义**：三处断言都引用它，避免「加域名忘了改某条断言」时出现
+/// 「manifest 对了、测试还在考旧域名」的假绿。
+///
+/// dever 是 123 生产环境的主域名族（`dever` / `dever-preview` 及其 IPv6
+/// 源站别名 `dever6*`）；`dever6*` 目前源站无 HTTPS 监听，验证会失败但不
+/// 影响其它域名（一个 host 一条 filter）。
+const _issuerHosts = <String>[
+  'dever.atjog.com',
+  'dever6.atjog.com',
+  'dever-preview.atjog.com',
+  'dever6-preview.atjog.com',
+];
+
 /// 平台配置文件与 Dart 常量的一致性守卫。
 ///
 /// ## 为什么需要这组断言
@@ -67,7 +82,7 @@ void main() {
     test('声明了 https scheme 与 Dart 侧一致的 path', () {
       // path 由 issuer 推导：issuer 的 basePath + /app/callback。
       final expectedPath = OidcCallbackUri.claimedHttpsRedirectUri(
-        issuer: Uri.parse('https://tbcc.atjog.com/idp'),
+        issuer: Uri.parse('https://dever.atjog.com/idp'),
       )!.path;
 
       expect(expectedPath, '/idp/app/callback');
@@ -86,11 +101,7 @@ void main() {
     test('各环境 issuer host 都已声明', () {
       // 断言的是「每个跑过 OIDC 的 issuer 域名都在」，不是固定条数：
       // 漏一条不报错、只是那个环境「回调打开浏览器落地页」，要多点一次「打开应用」。
-      for (final host in [
-        'tbcc.atjog.com', // 生产
-        'tbcc6.atjog.com', // 生产双栈别名
-        'dever.atjog.com', // 内网 dever 环境
-      ]) {
+      for (final host in _issuerHosts) {
         expect(
           xml,
           contains('android:host="$host"'),
@@ -101,8 +112,8 @@ void main() {
 
     test('每条 autoVerify filter 只声明一个 host（不能合并）', () {
       // WHY: Android 11 及以下，一条 filter 里**任一** host 验证失败会导致整条
-      // filter 失效。tbcc6 目前没有 HTTPS 监听（TLS 只在 EdgeOne 上且只前置
-      // tbcc），若与 tbcc 合并在一条 filter 里，会让旧设备上 tbcc 也收不到回调。
+      // filter 失效。dever6 目前没有 HTTPS 监听（TLS 只在 EdgeOne 上），
+      // 若与 dever 合并在一条 filter 里，会让旧设备上 dever 也收不到回调。
       // 这里不写死 filter 条数：manifest 里还有其它用途的 autoVerify 组
       // （例如其它深链），断言只应关心「一条一 host」这条不变量。
       final filters = _autoVerifyFilters(xml);
@@ -124,11 +135,7 @@ void main() {
           .toList();
       final hosts = callbackFilters.expand(_hostsOf).toSet();
 
-      for (final host in [
-        'tbcc.atjog.com',
-        'tbcc6.atjog.com',
-        'dever.atjog.com',
-      ]) {
+      for (final host in _issuerHosts) {
         expect(
           hosts,
           contains(host),
@@ -195,7 +202,7 @@ void main() {
           .where((f) => f.contains('android:pathPrefix="/idp/qr/"'))
           .toList();
       final hosts = qrFilters.expand(_hostsOf).toSet();
-      for (final host in ['tbcc.atjog.com', 'dever.atjog.com']) {
+      for (final host in _issuerHosts) {
         expect(
           hosts,
           contains(host),

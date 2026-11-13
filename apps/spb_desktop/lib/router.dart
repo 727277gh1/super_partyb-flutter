@@ -3176,7 +3176,7 @@ class _WorkDetailPage extends ConsumerWidget {
 /// `archive_snapshot_dto.go`）。直接交给浏览器会得到 `file:///_staging/...`。
 ///
 /// 补全基准用 [SpbEndpoints.current.ufsBaseUrl] 的 **origin**（scheme+host）：
-/// 站点挂在网关域名下，与 UFS 基地址同源（生产都是 `tbcc.atjog.com`）。
+/// 站点挂在网关域名下，与 UFS 基地址同源（生产都是 `dever.atjog.com`）。
 /// 不用 API 基地址（带 `/pba` 前缀，拼出来是 `https://host/pba/_staging/...`）。
 ///
 /// ## 为什么是顶层函数而不是 State 方法

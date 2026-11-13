@@ -74,7 +74,7 @@ void main() {
         tester,
         app(
           auth: const AuthState(status: AuthStatus.authenticated),
-          initialLocation: 'https://tbcc.atjog.com/idp/qr/scene_https',
+          initialLocation: 'https://dever.atjog.com/idp/qr/scene_https',
         ),
       );
 

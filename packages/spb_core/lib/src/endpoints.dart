@@ -29,7 +29,7 @@ typedef EndpointProbe = Future<bool> Function(
 
 /// 一次端点解析的结论（「是否做了探测、结果如何」）。
 ///
-/// 诊断报告用它回答「为什么用户连的是 tbcc 而不是 tbcc6」——
+/// 诊断报告用它回答「为什么用户连的是 dever 而不是 dever6」——
 /// `skipped` 说明根本没配置别名表，`kept` 说明探测了但源站不可达。
 enum EndpointProbeOutcome {
   /// 未配置别名表（或表为空），未做探测，基地址维持编译期值。

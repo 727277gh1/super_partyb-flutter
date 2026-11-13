@@ -84,18 +84,36 @@
               本应用 minSdk=24（Android 7.0），旧设备仍占相当比例，故一个 host 一条：
               一个域名没配好，不会连带另一个域名也收不到回调。
 
-              ## 为什么要写三个 host
+              ## 为什么要写四个 host
 
-              OIDC issuer 用哪个域名，回调就从哪个域名回来，都要能接管：
+              OIDC issuer 用哪个域名，回调就从哪个域名回来，都要能接管。
+              当前域名族是 **dever**（123 生产环境；bcc 的 `tbcc*` 已随环境降级移除）：
 
-              - `tbcc.atjog.com`：生产（EdgeOne，IPv4/IPv6 均可）；
-              - `tbcc6.atjog.com`：生产双栈别名。⚠️ 目前**没有 HTTPS 监听**
-                （TLS 只在 EdgeOne 上且只前置 tbcc），验证会失败——一条一 host
-                的写法让它只影响自己，等 tbcc6 也上 CDN/证书后无需改 APK 即可生效；
-              - `dever.atjog.com`：内网 dever 环境（192.168.1.123）。调试构建常用
-                `SPB_OIDC_ISSUER=https://dever.atjog.com/idp`，**漏这条的表现**是
-                「回调打开浏览器落地页，要多点一次『打开应用』」——不报错、不崩，
-                极易被判成「App Links 没配好」而反复排查。
+              - `dever.atjog.com`：生产主域名，经腾讯 EdgeOne 终止 TLS（双栈，
+                IPv4/IPv6 均可连）；
+              - `dever6.atjog.com`：上面那个的**源站别名**——只有一条家宽 IPv6、
+                无 A 记录，绕开 EdgeOne 直连 192.168.1.123。⚠️ 源站**没有 HTTPS
+                监听**（TLS 只在 EdgeOne 上），验证会失败——一条一 host 的写法
+                让它只影响自己，等源站上 443/证书后无需改 APK 即可生效；
+              - `dever-preview.atjog.com`：预览域名（同一个 EdgeOne 入口，网关按
+                host 路由到 UFS 预览服务）；
+              - `dever6-preview.atjog.com`：预览域名的源站别名，同 ⚠️。
+
+              **漏一条的表现**是「回调打开浏览器落地页，要多点一次『打开应用』」
+              ——不报错、不崩，极易被判成「App Links 没配好」而反复排查。
+              issuer 侧（`oauth_clients.redirectUris`）已注册同名的四个回调。
+
+              实测状态（2026-11-13）：
+
+              | host | `/.well-known/assetlinks.json` | `/idp/…` |
+              |---|---|---|
+              | `dever.atjog.com` | 200（含本包名 + 签名指纹） | 200 |
+              | `dever-preview.atjog.com` | 404（网关把该 host 路由到 UFS 预览服务） | 404 |
+              | `dever6*` | 本机无 IPv6 出口，未验证 | — |
+
+              即现在**只有 dever.atjog.com 能真正验证通过**；其余三条是**预置**
+              （服务端补齐 `/.well-known` 后无需再改 APK 即可生效，反之只影响
+              自己那一条 filter）。
 
               path 与 Dart 侧 OidcCallbackUri.claimedHttpsPath 保持一致（/idp 前缀 + /app/callback）。
             -->
@@ -103,19 +121,25 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https" android:host="tbcc.atjog.com" android:path="/idp/app/callback"/>
-            </intent-filter>
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https" android:host="tbcc6.atjog.com" android:path="/idp/app/callback"/>
-            </intent-filter>
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="dever.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever-preview.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6-preview.atjog.com" android:path="/idp/app/callback"/>
             </intent-filter>
             <!--
               App 扫码登录（自定义 scheme）。
@@ -153,13 +177,25 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https" android:host="tbcc.atjog.com" android:pathPrefix="/idp/qr/"/>
+                <data android:scheme="https" android:host="dever.atjog.com" android:pathPrefix="/idp/qr/"/>
             </intent-filter>
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https" android:host="dever.atjog.com" android:pathPrefix="/idp/qr/"/>
+                <data android:scheme="https" android:host="dever6.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever-preview.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6-preview.atjog.com" android:pathPrefix="/idp/qr/"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

@@ -19,7 +19,7 @@ import 'package:spb_desktop/providers.dart';
 class _FakeMiniProgramClient extends MiniProgramLoginClient {
   _FakeMiniProgramClient({this.createShortCodeError})
     : super(
-        issuer: Uri.parse('https://tbcc.atjog.com/idp'),
+        issuer: Uri.parse('https://dever.atjog.com/idp'),
         clientId: 'client_desktop',
         redirectUri: 'http://127.0.0.1/callback',
       );

@@ -12,7 +12,7 @@ import 'package:spb_core/spb_core.dart';
 /// 所以这里把「认什么 / 不认什么」逐条钉死。
 void main() {
   const expectedState = 'st-123';
-  final issuer = Uri.parse('https://tbcc.atjog.com/idp');
+  final issuer = Uri.parse('https://dever.atjog.com/idp');
 
   group('自定义 scheme 形态', () {
     test('标准地址命中', () {
@@ -59,7 +59,7 @@ void main() {
       expect(
         OidcCallbackUri.matches(
           Uri.parse(
-            'https://tbcc.atjog.com/idp/app/callback?code=c1&state=st-123',
+            'https://dever.atjog.com/idp/app/callback?code=c1&state=st-123',
           ),
           issuer: issuer,
         ),
@@ -70,7 +70,7 @@ void main() {
     test('结尾斜杠容错', () {
       expect(
         OidcCallbackUri.matches(
-          Uri.parse('https://tbcc.atjog.com/idp/app/callback/'),
+          Uri.parse('https://dever.atjog.com/idp/app/callback/'),
           issuer: issuer,
         ),
         isTrue,
@@ -80,8 +80,8 @@ void main() {
     test('issuer 带结尾斜杠时也一致', () {
       expect(
         OidcCallbackUri.matches(
-          Uri.parse('https://tbcc.atjog.com/idp/app/callback'),
-          issuer: Uri.parse('https://tbcc.atjog.com/idp/'),
+          Uri.parse('https://dever.atjog.com/idp/app/callback'),
+          issuer: Uri.parse('https://dever.atjog.com/idp/'),
         ),
         isTrue,
       );
@@ -90,15 +90,15 @@ void main() {
     test('换域名（双栈/staging）跟着 issuer 走，不硬编码', () {
       expect(
         OidcCallbackUri.matches(
-          Uri.parse('https://tbcc6.atjog.com/idp/app/callback'),
-          issuer: Uri.parse('https://tbcc6.atjog.com/idp'),
+          Uri.parse('https://dever6.atjog.com/idp/app/callback'),
+          issuer: Uri.parse('https://dever6.atjog.com/idp'),
         ),
         isTrue,
       );
-      // 但 issuer 是 tbcc 时，tbcc6 不算命中——回调只会从 issuer 那个域名回来。
+      // 但 issuer 是 dever 时，dever6 不算命中——回调只会从 issuer 那个域名回来。
       expect(
         OidcCallbackUri.matches(
-          Uri.parse('https://tbcc6.atjog.com/idp/app/callback'),
+          Uri.parse('https://dever6.atjog.com/idp/app/callback'),
           issuer: issuer,
         ),
         isFalse,
@@ -108,10 +108,10 @@ void main() {
     test('域名不符 / 路径不符 / scheme 不符一律拒绝', () {
       for (final raw in [
         'https://evil.example/idp/app/callback', // 域名不符
-        'https://tbcc.atjog.com/idp/other', // 路径不符
-        'https://tbcc.atjog.com/app/callback', // 少了 basePath
-        'http://tbcc.atjog.com/idp/app/callback', // scheme 不符
-        'https://tbcc.atjog.com/idp/app/callbackx',
+        'https://dever.atjog.com/idp/other', // 路径不符
+        'https://dever.atjog.com/app/callback', // 少了 basePath
+        'http://dever.atjog.com/idp/app/callback', // scheme 不符
+        'https://dever.atjog.com/idp/app/callbackx',
       ]) {
         expect(
           OidcCallbackUri.matches(Uri.parse(raw), issuer: issuer),
@@ -135,7 +135,7 @@ void main() {
     test('claimed HTTPS', () {
       final r = OidcCallbackUri.parse(
         Uri.parse(
-          'https://tbcc.atjog.com/idp/app/callback?code=abc&state=$expectedState',
+          'https://dever.atjog.com/idp/app/callback?code=abc&state=$expectedState',
         ),
         expectedState: expectedState,
         issuer: issuer,
@@ -148,7 +148,7 @@ void main() {
       expect(
         () => OidcCallbackUri.parse(
           Uri.parse(
-            'https://tbcc.atjog.com/idp/app/callback?code=abc&state=other',
+            'https://dever.atjog.com/idp/app/callback?code=abc&state=other',
           ),
           expectedState: expectedState,
           issuer: issuer,
@@ -177,7 +177,7 @@ void main() {
   test('claimedHttpsRedirectUri 由 issuer 推导', () {
     expect(
       OidcCallbackUri.claimedHttpsRedirectUri(issuer: issuer).toString(),
-      'https://tbcc.atjog.com/idp/app/callback',
+      'https://dever.atjog.com/idp/app/callback',
     );
     // 编译期缺省值同样可推导（默认 issuer 是本地 IdP）。
     expect(
@@ -192,7 +192,7 @@ void main() {
     test('https issuer → claimed HTTPS', () {
       expect(
         OidcCallbackUri.preferredRedirectUri(issuer: issuer),
-        'https://tbcc.atjog.com/idp/app/callback',
+        'https://dever.atjog.com/idp/app/callback',
       );
     });
 

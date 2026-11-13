@@ -24,7 +24,7 @@ class _FakeClient extends MiniProgramLoginClient {
     this.exchangeCode = 'ory_ac_test',
     this.exchangeError,
   }) : super(
-         issuer: Uri.parse('https://tbcc.atjog.com/idp'),
+         issuer: Uri.parse('https://dever.atjog.com/idp'),
          clientId: 'client_test',
          redirectUri: 'partyb://oidc/callback',
        );

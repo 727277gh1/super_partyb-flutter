@@ -368,7 +368,7 @@ void main() {
 
     test('claimed HTTPS 形态（系统相机扫码）同样投递 scene', () async {
       final source = _FakeDeepLinkSource(
-        initial: Uri.parse('https://tbcc.atjog.com/idp/qr/scene_https'),
+        initial: Uri.parse('https://dever.atjog.com/idp/qr/scene_https'),
       );
       final scenes = <String>[];
       final store = await _newStore();

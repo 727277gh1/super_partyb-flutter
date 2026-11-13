@@ -16,7 +16,7 @@ import 'package:test/test.dart';
 ///
 /// 所以断言的是**发出的请求长什么样**与**错误怎么翻译**，而不只是能跑通。
 void main() {
-  const issuer = 'https://tbcc.atjog.com/idp';
+  const issuer = 'https://dever.atjog.com/idp';
   const base = '$issuer/api/v1/auth/magic-link';
   const redirectUri = 'partyb://oidc/callback';
   const clientId = 'client_45f10bfb-0170-4815-b';
@@ -43,7 +43,7 @@ void main() {
 
     test('issuer 结尾带斜杠时不产生双斜杠', () {
       final c = MagicLinkClient(
-        issuer: Uri.parse('https://tbcc.atjog.com/idp/'),
+        issuer: Uri.parse('https://dever.atjog.com/idp/'),
         clientId: clientId,
         redirectUri: redirectUri,
       );

@@ -398,7 +398,7 @@ void main() {
           'site_id': 'site_1',
           'site_status': 'ready',
           'environment': 'production',
-          'access_url': 'https://tbcc.atjog.com/ufs_sites/g-grp_1/',
+          'access_url': 'https://dever.atjog.com/ufs_sites/g-grp_1/',
         }),
         data: null,
       );

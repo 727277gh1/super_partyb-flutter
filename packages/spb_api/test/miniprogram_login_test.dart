@@ -16,7 +16,7 @@ import 'package:test/test.dart';
 ///
 /// 所以这里断言的是**发出的请求长什么样**与**错误怎么翻译**，而不只是能跑通。
 void main() {
-  const issuer = 'https://tbcc.atjog.com/idp';
+  const issuer = 'https://dever.atjog.com/idp';
   const redirectUri = 'partyb://oidc/callback';
   const clientId = 'client_45f10bfb-0170-4815-b';
 
@@ -39,19 +39,19 @@ void main() {
     test('从 issuer 推导，保留 basePath（/idp 前缀不能丢）', () {
       expect(
         client.endpointBase.toString(),
-        'https://tbcc.atjog.com/idp/api/v1/bindings/mini-program',
+        'https://dever.atjog.com/idp/api/v1/bindings/mini-program',
       );
     });
 
     test('issuer 结尾带斜杠时不产生双斜杠', () {
       final c = MiniProgramLoginClient(
-        issuer: Uri.parse('https://tbcc.atjog.com/idp/'),
+        issuer: Uri.parse('https://dever.atjog.com/idp/'),
         clientId: clientId,
         redirectUri: redirectUri,
       );
       expect(
         c.endpointBase.toString(),
-        'https://tbcc.atjog.com/idp/api/v1/bindings/mini-program',
+        'https://dever.atjog.com/idp/api/v1/bindings/mini-program',
       );
     });
 

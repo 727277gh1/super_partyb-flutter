@@ -62,7 +62,7 @@ class _FakeSdk implements WeChatOpenSdk {
 const _okConfig = WeChatMiniProgramLaunchConfig(
   openAppId: 'wx1234567890abcdef',
   userName: 'gh_abcdef123456',
-  universalLink: 'https://tbcc.atjog.com/app/',
+  universalLink: 'https://dever.atjog.com/app/',
 );
 
 void main() {
@@ -138,7 +138,7 @@ void main() {
       expect(sdk.lastUserName, 'gh_abcdef123456');
       expect(sdk.lastPath, 'pages/index/index?scene=scene-1');
       expect(sdk.lastAppId, 'wx1234567890abcdef');
-      expect(sdk.lastUniversalLink, 'https://tbcc.atjog.com/app/');
+      expect(sdk.lastUniversalLink, 'https://dever.atjog.com/app/');
     });
 
     test('注册是幂等的（重复登录不重复 registerApi）', () async {

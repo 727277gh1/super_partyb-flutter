@@ -163,7 +163,7 @@ class MiniProgramLoginClient {
     Dio? dio,
   }) : _dio = dio ?? Dio(BaseOptions(responseType: ResponseType.json));
 
-  /// IdP issuer（含 basePath，例如 `https://tbcc.atjog.com/idp`）。
+  /// IdP issuer（含 basePath，例如 `https://dever.atjog.com/idp`）。
   final Uri issuer;
 
   /// OIDC public client id（兑换出的授权码绑定它）。
@@ -177,7 +177,7 @@ class MiniProgramLoginClient {
 
   /// 小程序登录端点根路径：`{issuer}/api/v1/bindings/mini-program`。
   ///
-  /// 从 issuer 推导而非写死域名：staging / 双栈（tbcc / tbcc6）下 issuer 变了
+  /// 从 issuer 推导而非写死域名：staging / 双栈（dever / dever6）下 issuer 变了
   /// 端点就该跟着变，写死会让某个构建静默打到错误的环境。
   Uri get endpointBase {
     final basePath = issuer.path.replaceAll(RegExp(r'/+$'), '');
