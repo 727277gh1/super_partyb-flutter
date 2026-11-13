@@ -688,3 +688,42 @@ attempts 分支，`ErrHandoffTooManyAttempts` 是不可达分支。真相是：�
 
 **验收可做性**：验收项「桌面 + 移动各注册一枚」是人工真机项，此前卡在无真机；2026-11-13
 起 Windows 与 Android 真机均可用（`spbf#4` 因此关闭），该条不再阻塞。
+
+### 6.98 微信开放平台 App 授权登录：不做，小程序短码已覆盖（issue #83 收口，2026-11）
+
+**结论**：不做微信开放平台 App 授权登录（OpenSDK / `wechat_open` provider）。目标本身
+（"App 里零输入地走微信身份"）已由**三条零资质路径**交付，B 方案（开放平台）买来的
+只剩"少一次切 App"，代价是资质 + 审核 + 两套 provider + App Store 4.8 连带。
+
+已交付的零资质路径（都在本仓有对应实现）：
+
+| 路径 | 确认者 | 服务端 | 客户端 |
+|---|---|---|---|
+| 小程序会话换码（`#80`） | 微信 openid | `id-provider#10`（`internal/miniprogramqrcode` 的 `MiniProgramLogin`） | `spb_api/lib/src/miniprogram_login.dart` |
+| **短码确认**（复用同一 scene 机制） | 微信 openid | `id-provider#18`（`CreateShortCodeSession` / `...Opts`） | `spb_features/lib/src/auth/login_page.dart` 的短码回退（倒计时、失效、流程结束清屏）+ `super_partyb#103` 的「输入登录码」页 |
+| 浏览器出码 → 已登录 App 确认（§6.91） | 本家 IdP 会话 | `internal/qrlogin` | `spb_api/lib/src/qr_login.dart` + `qr_login_page.dart` |
+
+即：**"复用小程序短码"不是 B 的临时替代，而是 B 的目标达成方式**。短码路径不依赖任何
+资质（无 300 元/年认证、无包名/签名 MD5 登记、无 Universal Links 前置（后者卡 `#111`））。
+
+**成本对照（B 方案为何不划算）**：
+
+- 开放平台开发者资质认证 **300 元/年**（每次申请都收费，与是否通过无关）；
+- 在线申请 + 缴费后 **15 个工作日**展开认证，通过后还要在「接口信息」里单独申请「微信登录」权限；
+- 移动应用登记要包名 + 签名 MD5（Android）与 Bundle ID + Universal Links（iOS）；
+- 服务端要新增 `wechat_open` provider 并做 **unionid 合并**（`id-provider#13`）——否则同一个人在小程序与 App 会是两个 IdP 账号；现有扫码路径还会自动建号，等于放大开放注册面。
+
+**连带项也消失**：短码路径的账号仍由本家 IdP 建立（密码 / 邮箱 magic link / 短码 /
+passkey），没有"第三方/社交登录建立主账号"，所以 **App Store 4.8 不触发**，
+`#84`（Sign in with Apple）不需要。
+
+**现状的 unionid 合并不必做**：只有小程序一条微信身份，不存在"同一人两个微信身份"的
+数据问题；`wechat_open` 上线才需要它。
+
+**重新评估触发条件**（与 `#85` 第 7 条同源）：
+
+1. 小程序侧方案因体验或资质被否决（例如小程序主体认证失效、短码转化被证明不可用）；
+2. 需要面向微信生态外的自然流量做拉新（对外投放、非内部用户）。
+
+⚠️ 触发条件一出现，必须**与 `#84`（Sign in with Apple）同一批**上线——4.8 是硬约束，
+不能分批。
