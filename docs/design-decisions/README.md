@@ -22,7 +22,7 @@
 | [界面与交互](ui.md) | `ui.md` | §6.16 §6.32 §6.38 §6.40 §6.44 §6.46 §6.51 §6.54 §6.62 §6.70 §6.76 §6.77 §6.78 §6.79 §6.80 §6.81 §6.82 §6.83 §6.88 §6.89 §6.91 |
 | [测试与仓库守卫](testing.md) | `testing.md` | §6.13 §6.17 §6.19 §6.21 §6.22 §6.24 §6.25 §6.26 §6.27 |
 | [构建、分发与发布](build-and-release.md) | `build-and-release.md` | §6.29 §6.30 §6.31 §6.33 §6.61 §6.87 §6.93 §7 §8 |
-| [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 |
+| [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 §6.99 |
 | [性能与内存](performance.md) | `performance.md` | §6.47 §6.59 §6.60 §6.72 §6.73 §6.74 §6.96 |
 
 ## 全部小节
@@ -87,6 +87,7 @@
 | §6.55 | Windows 托盘：图标不显示 + 右键菜单卡死（2026-11） | [`platform.md`](platform.md) |
 | §6.56 | group 用量（token 消耗）展示：REST 权威 + SSE 增量 + 重连对账（2026-11，对齐 Go `4a05176c` / `20874489`） | [`chat.md`](chat.md) |
 | §6.57 | 桌面端可诊断性：本地文件日志 + 会话标记 + 悬浮窗失败回滚（2026-11） | [`runtime-and-ops.md`](runtime-and-ops.md) |
+| §6.99 | 通知事件范围：只覆盖确认卡及其撤销，回复完成/失败/同步/后台任务一律不发；`unreadCount` 恒 0（2026-11，issue #89） | [`runtime-and-ops.md`](runtime-and-ops.md) |
 | §6.58 | 归属提示重构：`routing_selected` 合并进气泡，无聊原因零空间（2026-11） | [`chat.md`](chat.md) |
 | §6.59 | 内存审计与处置（2026-11）：无界集合加界 / 图片解码降采样 / batch 写入 | [`performance.md`](performance.md) |
 | §6.60 | 第二轮内存/峰值优化：哈希下放 isolate / 交付物树懒构建 / 内存压力接线（2026-11） | [`performance.md`](performance.md) |

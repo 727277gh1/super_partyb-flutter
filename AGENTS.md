@@ -220,6 +220,7 @@ spb_design / spb_models / spb_core → 无包内依赖
 | **不删** `sqlite3_flutter_libs`（零 Dart import） | 原生插件，drift 移动端运行时需要；已在 `tools/check_unused_deps.sh` 豁免 |
 | **不接**四项检索面板（语义 / 图谱 / 两个「演化」） | 数据面为空 / 数据源在 Go 时代已停写，前置是服务端先恢复写入（§6.9.6） |
 | **不上提**两端 `providers.dart` 的百个同名 provider | 独立重构；装配留各 app，一致性由 §6.17 守卫 |
+| **不扩大**通知事件范围：除确认卡（及其撤销）外一律不发（回复完成 / 轮次失败 / 同步失败 / 后台任务），托盘 `unreadCount` 恒 0 | 混渠道会把用户训练成忽略所有通知；移动端后台无推送（`#88`）、前台已不打扰。判据与重评估触发见 [§6.99](docs/design-decisions/runtime-and-ops.md) |
 
 ## 12. 提交约定
 
