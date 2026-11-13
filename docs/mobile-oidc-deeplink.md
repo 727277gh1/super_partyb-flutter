@@ -82,7 +82,7 @@ T6 曾建议移动端「内嵌 webview 读 cookie」。本任务未采用，理�
 |---|---|
 | `android/app/src/main/AndroidManifest.xml` | 自定义 scheme：`<intent-filter>` + `<data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>`；claimed HTTPS：`<intent-filter android:autoVerify="true">` + `https` + `path="/idp/app/callback"`（见 §2.3） |
 | `ios/Runner/Info.plist` | `CFBundleURLTypes` → `CFBundleURLSchemes` = `["partyb"]` |
-| `ios/Runner/Runner.entitlements` | `com.apple.developer.associated-domains` = `applinks:tbcc.atjog.com` / `applinks:tbcc6.atjog.com`（claimed HTTPS 的 iOS 半边，与微信 Universal Link 共用） |
+| `ios/Runner/Runner.entitlements` | `com.apple.developer.associated-domains` = `applinks:dever.atjog.com` / `applinks:dever6.atjog.com` / `applinks:dever-preview.atjog.com` / `applinks:dever6-preview.atjog.com`（claimed HTTPS 的 iOS 半边，与微信 Universal Link 共用） |
 | `packages/spb_api/lib/src/oidc_callback.dart` | `OidcCallbackUri`（`scheme`/`host`/`path`/`redirectUri`/`claimedHttpsRedirectUri`/`matches`/`parse`） |
 
 > iOS 的 plist 没有 host/path 的等价声明（只能声明 scheme），
@@ -143,7 +143,7 @@ claimed HTTPS 由操作系统校验域名归属（RFC 8252 §7.2 首选），因
 
 | 项 | 位置 | 内容 |
 |---|---|---|
-| Android 过滤器 | `AndroidManifest.xml` | `<intent-filter android:autoVerify="true">`，`https` + `tbcc.atjog.com` / `tbcc6.atjog.com` + `path="/idp/app/callback"` |
+| Android 过滤器 | `AndroidManifest.xml` | `<intent-filter android:autoVerify="true">`，`https` + `dever.atjog.com` / `dever6.atjog.com` / `dever-preview.atjog.com` / `dever6-preview.atjog.com` + `path="/idp/app/callback"`（一个 host 一条 filter） |
 | Dart 常量 | `OidcCallbackUri.claimedHttpsPath` | `/app/callback`（拼在 issuer 的 basePath 之后） |
 | Dart 判定 | `OidcCallbackUri.matches()` | 自定义 scheme **与** issuer 推导的 https 形态都认 |
 | 漂移守卫 | `apps/spb_mobile/test/android_manifest_applinks_test.dart` | 直接读 manifest/plist 断言与 Dart 常量一致 |
@@ -177,6 +177,18 @@ issuer 已由 `SPB_OIDC_ISSUER` 注入。硬编码域名会让 staging / 双栈�
 2. IdP 注册 claimed HTTPS 回调 —— id-provider#8，代码已就绪，**未部署**；
 3. 指纹必须对应**实际分发的那份 APK**：换签名密钥后不同步更新，已安装
    用户的 App Links 会静默失效。
+
+**2026-11-13 实测状态**（客户端已声明 dever 四个域名，服务端还差一项）：
+
+| host | `assetlinks.json`（Android） | `apple-app-site-association`（iOS） | `/idp/…` |
+|---|---|---|---|
+| `dever.atjog.com` | **200**（包名 + 指纹已对） | **404（待办）** | 200 |
+| `dever-preview.atjog.com` | 404（该 host 被路由到 UFS 预览服务） | 404 | 404 |
+| `dever6.atjog.com` / `dever6-preview.atjog.com` | 未验证（本机无 IPv6 出口） | 未验证 | — |
+
+结论：**Android App Links 在 `dever` 上已具备验证条件；iOS 还缺 AASA**（
+网关补上 `/.well-known/apple-app-site-association` 后即生效，与客户端发版无关）。
+预览域名与 `dever6*` 的三条声明是**预置**，验证不过只影响它们自己。
 
 **验证（需真机，当前被 issue #4 阻塞）**：
 

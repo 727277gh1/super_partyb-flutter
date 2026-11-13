@@ -179,7 +179,7 @@ if (!state.isAuthenticated) {
 客户端 `AuthInterceptor` 收到 401 → 刷新也失败 → `onSessionExpired` → 路由守卫
 把用户送回登录页（§6.34 那条链路，本身是对的）。
 
-**与 `tbcc6.atjog.com` 无关**：登录走编译期 issuer（`SpbEndpoints` 没有 issuer
+**与 `dever6.atjog.com` 无关**：登录走编译期 issuer（`SpbEndpoints` 没有 issuer
 字段，端点升级只改 API/UFS 的 host），出问题的是登录**之后**的每个请求。
 
 #### 修法：取值规则收敛到一处，不再让四个调用点各写一遍

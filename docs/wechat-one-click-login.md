@@ -79,7 +79,7 @@ App                      IdP (id-provider)                微信
 ## 5. 几个必须记住的约束
 
 1. **端点从 issuer 推导**（`{issuer}/api/v1/bindings/mini-program`），不硬编码域名：
-   staging / 双栈（`tbcc` / `tbcc6`）下 issuer 变了端点要跟着变。
+   staging / 双栈（`dever` / `dever6`）下 issuer 变了端点要跟着变。
 2. **`state` 至少 8 字符**：fosite 对 `state` 有最小熵要求，短了直接 400。
 3. **PKCE 必填**：`flutter-client` 是 public client，服务端强制 PKCE。
 4. **轮询必须有总超时**：用户唤起微信后可能直接退出。没有超时，登录页会永远
@@ -119,7 +119,7 @@ URL Scheme 一次都没被尝试过。修复后：
 
 ```bash
 curl -s -X POST -H 'Content-Type: application/json' \
-  'https://tbcc.atjog.com/idp/api/v1/bindings/mini-program/qrcode-session?scheme=1'
+  'https://dever.atjog.com/idp/api/v1/bindings/mini-program/qrcode-session?scheme=1'
 # {"success":true,"scene":"cf25...","expiresAt":"...",
 #  "schemeError":"当前小程序未开通「URL Scheme 唤起」权限，无法直接打开微信，请改用 SSO 登录"}
 ```
@@ -268,7 +268,7 @@ fluwx ≥4 自带 `WXEntryActivity`，无需手写。
 
 | 位置 | 内容 | 作用 |
 |---|---|---|
-| `ios/Runner/Runner.entitlements` | `applinks:tbcc.atjog.com`、`applinks:tbcc6.atjog.com` | 微信 Universal Link + OIDC claimed HTTPS 回调（issue #77 的 iOS 半边） |
+| `ios/Runner/Runner.entitlements` | `applinks:dever.atjog.com`、`applinks:dever6.atjog.com`、`applinks:dever-preview.atjog.com`、`applinks:dever6-preview.atjog.com` | 微信 Universal Link + OIDC claimed HTTPS 回调（issue #77 的 iOS 半边） |
 | `ios/Runner.xcodeproj/project.pbxproj` | 三个构建配置均 `CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements` | 只挂 Debug 是最常见的漏法：本地正常、Release 包上线后静默失效 |
 | `ios/Runner/Info.plist` | `LSApplicationQueriesSchemes` = `weixin` / `weixinULAPI` / `weixinURLParamsAPI` / `wechat` | 缺 `weixin` → `isWeChatInstalled` 恒 false；缺 `weixinULAPI` → 「唤起成功但回不来」 |
 
@@ -283,7 +283,7 @@ fluwx ≥4 自带 `WXEntryActivity`，无需手写。
    AppID 后人工补进 `CFBundleURLTypes`（plist 里有注释写明补法）。漏了它的
    后果是「小程序确认后不会被拉回前台」——轮询仍在跑，登录最终仍会完成，
    只是体验降级。
-2. **AASA 文件**：`https://tbcc.atjog.com/.well-known/apple-app-site-association`
+2. **AASA 文件**：`https://dever.atjog.com/.well-known/apple-app-site-association`（四个 dever 域名各一份才算齐）
    （无 `.json` 后缀、`Content-Type: application/json`），`appID` 形如
    `<TeamID>.com.atjog.spb.spbMobile`。由 api-gateway 提供，见 api-gateway#12 /
    id-provider#8。**未签名/模拟器不校验**，所以本机无法验证这一项。
@@ -351,7 +351,7 @@ adb logcat -s flutter | grep -E "已唤起微信|scene="
 
 # 3. 确认后回到 App，应直接进入会话列表（不出现登录页）
 # 4. 若卡在「请在微信中确认…」，先看服务端：
-curl -s "https://tbcc.atjog.com/idp/api/v1/bindings/mini-program/check/<scene>"
+curl -s "https://dever.atjog.com/idp/api/v1/bindings/mini-program/check/<scene>"
 
 # 5. 确认 token 里拿到了 refresh_token（否则一小时后会被踢）
 ```

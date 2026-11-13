@@ -318,7 +318,15 @@ bad=$(find lib -name '*.so*' -exec sh -c \
 [ -n "$bad" ] && { echo "❌ $bad"; exit 1; }
 ```
 
-#### 四、`tbcc6.atjog.com` **应该**配进 `SPB_PREFERRED_HOSTS`（含一次错误判断的纠正）
+#### 四、`dever6.atjog.com`（原记录为 `tbcc6`）**应该**配进 `SPB_PREFERRED_HOSTS`（含一次错误判断的纠正）
+
+> **2026-11 迁移说明**：部署目标从 bcc 换到 123，域名族随之从 `tbcc` / `tbcc6`
+> 换成 **`dever` / `dever6`**（外加上预览的 `dever-preview` / `dever6-preview`）。
+> 本节下文的 `tbcc*` 是**当时的实测记录**，不篡改历史数据；而 `tbcc6` 与
+> `dever6` **就是同一个源站**（同一条家宽 IPv6，只是 CNAME 的域名换了），
+> 所以下面关于「地址会变 / 证书未必匹配 / 连不上就降级」的推理与失败模式表
+> **原样适用**，只需把名字读作 `dever6`。当前生效值见本节五，历史索引里的
+> 标题（`tbcc6 判定`）保留不改。
 
 **本节最初写的是「不应配置」，结论错了。** 记录纠正过程，因为错误的推理方式
 比错误本身更值得防。
@@ -358,33 +366,50 @@ bad=$(find lib -name '*.so*' -exec sh -c \
 （`240d:c010::/32`），流量仍过 CDN；`tbcc6` 是**绕过 CDN 直连源站**，两者目的
 完全不同，IPv6 只是顺带的。把两件事混为一谈，就得出了「不需要配」的错误结论。
 
-**实际配置**：
+**实际配置**（当前：123 / dever 域名族）：
 
 ```
-SPB_PREFERRED_HOSTS = tbcc.atjog.com=tbcc6.atjog.com
+SPB_PREFERRED_HOSTS = dever.atjog.com=dever6.atjog.com;dever-preview.atjog.com=dever6-preview.atjog.com
 ```
 
-一条规则即可：`api` 与 `ufs` 的 host 都是 `tbcc.atjog.com`，`resolveEndpoints`
-在循环里对两者各调一次 `_rewriteHost`。**issuer 不受影响**（`SpbEndpoints`
-无 issuer 字段），且桌面端 loopback 回调打 `127.0.0.1`，与 tbcc6 完全正交。
+两条规则写在一张表里：`resolveEndpoints` 的循环**只处理出现在
+`api`/`ufs` 基地址里的 host**（`endpoints.dart` 的
+`if (api.host != compiledHost && ufs.host != compiledHost) continue;`），
+所以一派生两条不会互相干扰——编译期注入 `dever.atjog.com` 时，
+`dever-preview` 那条**直接被跳过**（不探测、不耗时）；换构建注入
+`https://dever-preview.atjog.com/…` 时则自动生效。`api` 与 `ufs` 的 host
+同为 `dever.atjog.com` 时，后者一次循环里被 `_rewriteHost` 调两次。
+**issuer 不受影响**（`SpbEndpoints` 无 issuer 字段），且桌面端 loopback 回调
+打 `127.0.0.1`，与 `dever6` 完全正交。
 
-> ⚠️ **本机与 bcc 都无 IPv6 出口**，无法直接验证 tbcc6 可达性（check-host.net
-> 的节点也只解析 A 记录，连 `ipv6.google.com` 都报 `Unknown host`）。证书由部署
-> 方确认覆盖该域名。若将来 tbcc6 下线，**改/删这个 Variable 即可**，无需发版。
+> ⚠️ **本机与 bcc 都无 IPv6 出口**，无法直接验证 dever6 可达性（check-host.net
+> 的节点也只解析 A 记录，连 `ipv6.google.com` 都报 `Unknown host`）。DNS 实测：
+> `dever6.atjog.com` / `dever6-preview.atjog.com` → `qpoweiurty.atjog.com` →
+> `2409:8a55:a22:7330:be24:11ff:fee3:581a`（只AAAA、无 A 记录）；而
+> `dever.atjog.com` 的 AAAA 是 EdgeOne 边缘（`240d:c010::/32`）——两者不可混为一谈。
+> 证书由部署方确认覆盖该域名。若将来 `dever6*` 下线，**改/删这个 Variable 即可**，
+> 无需发版。
 
 #### 五、GitHub Variables（公开仓库，值全部会进二进制）
 
 | Variable | 值 |
 |---|---|
-| `SPB_API_BASE_URL` | `https://tbcc.atjog.com/pba` |
-| `SPB_UFS_BASE_URL` | `https://tbcc.atjog.com/ufs` |
-| `SPB_OIDC_ISSUER` | `https://tbcc.atjog.com/idp` |
+| `SPB_API_BASE_URL` | `https://dever.atjog.com/pba` |
+| `SPB_UFS_BASE_URL` | `https://dever.atjog.com/ufs` |
+| `SPB_OIDC_ISSUER` | `https://dever.atjog.com/idp` |
 | `SPB_OIDC_CLIENT_ID` | public client 的 `clientId`（**公开值**，会出现在授权 URL） |
-| `SPB_PREFERRED_HOSTS` | `tbcc.atjog.com=tbcc6.atjog.com`（见上节四） |
+| `SPB_PREFERRED_HOSTS` | `dever.atjog.com=dever6.atjog.com;dever-preview.atjog.com=dever6-preview.atjog.com`（见上节四） |
+
+> **已执行（2026-11-13）**：上表就是当前仓库 Variables 的取值，`tbcc*` 已全部换掉。
+> 历史遗留的 `https://tbcc.atjog.com/…` 不再使用。仓库里的 `.github/workflows/*`
+> 只**读**这些 Variables，所以改域名时**代码里什么都不用改**，但必须同步改
+> Settings → Variables，否则下次出包仍会连 bcc（`tools/check_build_defines.sh`
+> 只看「有没有传」，**不比较域名**，拦不住这类漂移）。
 
 `--dart-define` 的值**必然编译进二进制**（在 `lib/libapp.so` 的 Dart AOT 常量区，
 `strings` 可提取），故配进公开 Variables 不构成新泄露。验证方式：下载产物后
-`strings -a lib/libapp.so | grep tbcc`——同时应确认旧默认值 `127.0.0.1:8000` 已消失。
+`strings -a lib/libapp.so | grep dever`——同时应确认旧默认值 `127.0.0.1:8000` 已消失。
+迁移后还应确认 `grep tbcc` **无命中**（旧域名不该再被编进二进制）。
 
 `release.yml` 四个平台均接入了全部 5 个 define（windows `:174`、linux `:274`、
 android `:388`、macos `:475`），config job 会逐项打印 `set` / `unset`。
