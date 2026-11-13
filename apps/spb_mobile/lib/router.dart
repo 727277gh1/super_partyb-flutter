@@ -456,6 +456,14 @@ class _LoginPage extends ConsumerWidget {
       onHandoffPreview: (code) => ref.read(handoffPreviewProvider)(code),
       onHandoffSignIn: (code) =>
           ref.read(authControllerProvider).handoffSignIn(code),
+      // 短码卡片上的「打开微信」：裸 `weixin://` 只把微信**宿主**带到前台，
+      // 不涉及小程序深链（那是主体资质，见 idp#17）。未装微信时 `canLaunchUrl`
+      // 为 false → 按钮不渲染（死链按钮比缺按钮更费用户）。
+      canOpenWeChatHost: () => canLaunchUrl(Uri.parse('weixin://')),
+      openWeChatHost: () => launchUrl(
+        Uri.parse('weixin://'),
+        mode: LaunchMode.externalApplication,
+      ),
     );
   }
 }

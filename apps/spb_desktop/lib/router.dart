@@ -414,6 +414,9 @@ class _LoginPage extends ConsumerWidget {
       onHandoffPreview: (code) => ref.read(handoffPreviewProvider)(code),
       onHandoffSignIn: (code) =>
           ref.read(authControllerProvider).handoffSignIn(code),
+      // 「打开微信」按钮**不接**（issue #98）：这条短码的下一跳是「手机上的
+      // 微信小程序」，桌面版微信（若有）里没有它；把用户从登录窗口扔进另一个
+      // 桌面窗口只会丢掉「本机显示的码」。故桌面端不传，按钮不渲染。
     );
   }
 }

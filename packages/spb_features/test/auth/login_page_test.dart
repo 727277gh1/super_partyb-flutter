@@ -32,6 +32,8 @@ void main() {
     Future<String?> Function(String code)? onHandoffSignIn,
     Future<({String? accountName, String? error})> Function(String code)?
     onHandoffPreview,
+    Future<bool> Function()? canOpenWeChatHost,
+    Future<bool> Function()? openWeChatHost,
     Size? size,
     bool expandAlternatives = true,
   }) async {
@@ -53,6 +55,8 @@ void main() {
           onEmailSignIn: onEmailSignIn,
           onHandoffSignIn: onHandoffSignIn,
           onHandoffPreview: onHandoffPreview,
+          canOpenWeChatHost: canOpenWeChatHost,
+          openWeChatHost: openWeChatHost,
         ),
       ),
     );
@@ -345,6 +349,176 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('login-short-code')), findsNothing);
+    });
+  });
+
+  group('登录页：短码卡上的「打开微信」（issue #98）', () {
+    /// 走一次微信登录并停在短码卡（用 Completer 挂住编排层）。
+    Future<Completer<String?>> showShortCode(
+      WidgetTester tester, {
+      Future<bool> Function()? canOpenWeChatHost,
+      Future<bool> Function()? openWeChatHost,
+      int expiresInSeconds = 300,
+    }) async {
+      final gate = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        canOpenWeChatHost: canOpenWeChatHost,
+        openWeChatHost: openWeChatHost,
+        onWeChatSignIn: ([onShortCode]) {
+          onShortCode?.call(
+            MiniProgramShortCode(
+              scene: 'A3F9K2',
+              displayCode: 'A3F-9K2',
+              expiresInSeconds: expiresInSeconds,
+            ),
+          );
+          return gate.future;
+        },
+      );
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pump();
+      // 探针是异步的：让它落地。
+      await tester.pump();
+      return gate;
+    }
+
+    testWidgets('装了微信 → 出现按钮，点一下调用一次唤起', (tester) async {
+      var opens = 0;
+      final gate = await showShortCode(
+        tester,
+        canOpenWeChatHost: () async => true,
+        openWeChatHost: () async {
+          opens++;
+          return true;
+        },
+      );
+
+      expect(find.byKey(const ValueKey('login-open-wechat')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('login-open-wechat')));
+      await tester.pump();
+      expect(opens, 1);
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('没装微信（canLaunch=false）→ 按钮不渲染（死链比缺按钮更费用户）', (tester) async {
+      var opens = 0;
+      final gate = await showShortCode(
+        tester,
+        canOpenWeChatHost: () async => false,
+        openWeChatHost: () async {
+          opens++;
+          return true;
+        },
+      );
+
+      expect(find.byKey(const ValueKey('login-open-wechat')), findsNothing);
+      expect(opens, 0);
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('未注入能力（桌面端）→ 按钮不渲染', (tester) async {
+      final gate = await showShortCode(tester);
+      expect(find.byKey(const ValueKey('login-open-wechat')), findsNothing);
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('唤起失败不静默：错误条写清「手动去微信搜哪个小程序」', (tester) async {
+      final gate = await showShortCode(
+        tester,
+        canOpenWeChatHost: () async => true,
+        openWeChatHost: () async => false,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-open-wechat')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.textContaining('没能打开微信'), findsOneWidget);
+      expect(find.textContaining('成蹊'), findsWidgets);
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('码过期后不再显示「打开微信」（拉微信已无意义）', (tester) async {
+      final gate = await showShortCode(
+        tester,
+        canOpenWeChatHost: () async => true,
+        openWeChatHost: () async => true,
+        expiresInSeconds: 2,
+      );
+
+      expect(find.byKey(const ValueKey('login-open-wechat')), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('已过期，请重新发起'), findsOneWidget);
+      expect(find.byKey(const ValueKey('login-open-wechat')), findsNothing);
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
+    });
+  });
+
+  group('登录页：短码进行中收起其余入口（issue #98）', () {
+    testWidgets('码在手上时 SSO 与「其他登录方式」都收起，留一条退回路径', (tester) async {
+      final gate = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onEmailSignIn: (email, _) async => null,
+        onWeChatSignIn: ([onShortCode]) {
+          onShortCode?.call(
+            const MiniProgramShortCode(
+              scene: 'A3F9K2',
+              displayCode: 'A3F-9K2',
+              expiresInSeconds: 300,
+            ),
+          );
+          return gate.future;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-wechat-button')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('login-short-code')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('login-sso-button')),
+        findsNothing,
+        reason: '唯一任务是去微信输码，SSO 入口此时是噪音',
+      );
+      expect(
+        find.byKey(const ValueKey('login-other-methods')),
+        findsNothing,
+        reason: '邮箱 / 反向码 / 导入会话同样收起',
+      );
+      expect(
+        find.byKey(const ValueKey('login-wechat-button')),
+        findsNothing,
+        reason: '「微信一键登录」已经走到短码，按钮重复',
+      );
+      // 必须留退路：码过期后卡会停在「已过期」，否则用户被锁在同一页。
+      expect(
+        find.byKey(const ValueKey('login-short-code-switch')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-short-code-switch')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('login-short-code')), findsNothing);
+      expect(find.byKey(const ValueKey('login-sso-button')), findsOneWidget);
+      expect(find.byKey(const ValueKey('login-other-methods')), findsOneWidget);
+
+      gate.complete(null);
+      await tester.pumpAndSettle();
     });
   });
 

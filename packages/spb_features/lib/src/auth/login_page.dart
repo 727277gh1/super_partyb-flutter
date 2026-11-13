@@ -48,6 +48,8 @@ class LoginPage extends StatefulWidget {
     this.onEmailSignIn,
     this.onHandoffSignIn,
     this.onHandoffPreview,
+    this.openWeChatHost,
+    this.canOpenWeChatHost,
     this.title = '登录 Super PartyB',
     this.subtitle = '使用统一身份认证中心（SSO）登录',
     this.miniProgramName = '成蹊',
@@ -161,6 +163,26 @@ class LoginPage extends StatefulWidget {
   /// 当前认证状态（错误消息从这里读）。
   final AuthState state;
 
+  /// 把微信**宿主**带到前台（裸 `weixin://`，不涉及小程序资质）。
+  ///
+  /// 返回 true 表示已交给系统（微信被拉到前台）；false 表示没打开。
+  ///
+  /// ## 为什么只拉到微信、不深链进小程序
+  ///
+  /// 深链进小程序（加密 scheme / URL Link / `WXLaunchMiniProgram`）都受主体
+  /// 资质约束（个人主体拿不到，`85407`），那是 `idp#17` 的事。本入口只做
+  /// 用户当前**必须**自己完成的那一步：把微信带到前台。剩下的「搜索小程序 →
+  /// 输入上面的码」用户看得见、也有明确文案引导。
+  ///
+  /// 为 null 时不展示该按钮（桌面端没有微信宿主；未安装微信时由
+  /// [canOpenWeChatHost] 判否而不展示——不能让按钮变成死链）。
+  final Future<bool> Function()? openWeChatHost;
+
+  /// 检测本设备能否用 `weixin://` 打开微信（`canLaunch` 语义）。
+  ///
+  /// null = 与 [openWeChatHost] 同：本平台不提供这条通道。
+  final Future<bool> Function()? canOpenWeChatHost;
+
   /// 微信小程序的名称（短码文案里要写出来）。
   ///
   /// 必须写出名字：短码这条路上 App **唤不起**小程序，用户得自己去微信里找它。
@@ -211,6 +233,12 @@ class _LoginPageState extends State<LoginPage> {
   /// 短码倒计时的秒表（只在展示短码时跑，归零或流程结束时立刻停）。
   Timer? _shortCodeTicker;
 
+  /// `weixin://` 能否拉起一个「打开微信」按钮（探针结果，默认 false）。
+  ///
+  /// 在 [initState] 里探测一次：未安装微信时按钮**不渲染**，而不是点了没反应
+  /// 或弹一个「无法打开」错误——死链按钮比缺按钮更费用户。
+  bool _canOpenWeChatHost = false;
+
   /// 是否正在等待邮件确认（已发信 → 轮询期间）。
   bool _emailBusy = false;
 
@@ -225,6 +253,46 @@ class _LoginPageState extends State<LoginPage> {
 
   /// 是否正在兑换反向登录码（防重复提交）。
   bool _handoffBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _probeWeChatHost();
+  }
+
+  /// 探测一次能否打开微信壮主（null / 抛错都当不提供）。
+  Future<void> _probeWeChatHost() async {
+    final probe = widget.canOpenWeChatHost;
+    if (probe == null) return;
+    bool available;
+    try {
+      available = await probe();
+    } on Object catch (e) {
+      // 探针失败不影响登录（其它路径都还在）：留一条 debug 痕迹即可。
+      SpbLog.debug('探测 weixin:// 失败', {'error': '$e'});
+      available = false;
+    }
+    if (!mounted || available == _canOpenWeChatHost) return;
+    setState(() => _canOpenWeChatHost = available);
+  }
+
+  /// 把微信拉到前台（短码卡片上的按钮）。
+  Future<void> _openWeChat() async {
+    final open = widget.openWeChatHost;
+    if (open == null) return;
+    bool ok;
+    try {
+      ok = await open();
+    } on Object catch (e) {
+      SpbLog.warn('打开微信壮主时异常', {'error': '$e'});
+      ok = false;
+    }
+    if (!mounted || ok) return;
+    // 唤不起时不要让它变成「点了没反应」：改回手动动线并说清楚去哪找。
+    setState(
+      () => _localError = '没能打开微信，请手动切到微信并搜索「${widget.miniProgramName}」输入上面的码',
+    );
+  }
 
   @override
   void dispose() {
@@ -621,23 +689,83 @@ class _LoginPageState extends State<LoginPage> {
                           code: _shortCode!,
                           remaining: _shortCodeRemaining(),
                           miniProgramName: widget.miniProgramName,
+                          // 未安装微信时不传播（不渲染死链按钮）。
+                          onOpenWeChat: _canOpenWeChatHost ? _openWeChat : null,
+                        ),
+                        const SizedBox(height: SpbSpacing.md),
+                        // 码在手上时唯一任务是「去微信输码」，其余入口全部收起。
+                        // 但必须留一条逆路：码过期后卡片会停在「已过期」，没装微信
+                        // /不想等的用户否则会被锁在同一页直到重开 App。
+                        // 注意：这里只还原 UI——编排层的轮询无法取消（Future 由
+                        // app 层持有），码本身仍会被服务端 TTL 吃掉。
+                        TextButton(
+                          key: const ValueKey('login-short-code-switch'),
+                          onPressed: _clearShortCode,
+                          child: const Text('改用其他登录方式（这段登录码作废）'),
+                        ),
+                      ],
+                      // 微信一键登录按钮：手上有码时它已没意义（用户要去的是微信），
+                      // 留着只会与卡片争主视线。
+                      if (_shortCode == null) ...[
+                        FilledButton.icon(
+                          key: const ValueKey('login-wechat-button'),
+                          style: desktop
+                              ? FilledButton.styleFrom(
+                                  backgroundColor: scheme.secondaryContainer,
+                                  foregroundColor: scheme.onSecondaryContainer,
+                                )
+                              : null,
+                          // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
+                          // 登录流程（state/PKCE 会互相覆盖）。
+                          onPressed: _busy || _wechatBusy || _emailBusy
+                              ? null
+                              : _handleWeChatSignIn,
+                          icon: _wechatBusy
+                              ? const SizedBox(
+                                  width: SpbSpacing.lg,
+                                  height: SpbSpacing.lg,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.chat_bubble_outline),
+                          label: Text(
+                            _wechatBusy
+                                ? '请在微信中确认…'
+                                : desktop
+                                ? '用微信小程序登录'
+                                : '微信一键登录',
+                          ),
+                        ),
+                        const SizedBox(height: SpbSpacing.sm),
+                        Text(
+                          desktop
+                              ? '在手机微信小程序中输入本机显示的登录码。'
+                              : '将打开微信小程序，确认后自动返回本应用。',
+                          textAlign: TextAlign.center,
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
                         ),
                         const SizedBox(height: SpbSpacing.lg),
                       ],
+                    ],
+                    // 短码进行中时其余入口全部收起（issue #98）：此时用户的
+                    // 唯一任务是「去微信输码」，SSO/邮箱/反向码都是噪音。
+                    if (_shortCode == null) ...[
                       FilledButton.icon(
-                        key: const ValueKey('login-wechat-button'),
-                        style: desktop
+                        key: const ValueKey('login-sso-button'),
+                        style: !desktop && widget.onWeChatSignIn != null
                             ? FilledButton.styleFrom(
                                 backgroundColor: scheme.secondaryContainer,
                                 foregroundColor: scheme.onSecondaryContainer,
                               )
                             : null,
-                        // 两个入口互斥：任一进行中就都禁用，避免并发发起两套
-                        // 登录流程（state/PKCE 会互相覆盖）。
+                        // 加载中禁用，避免重复发起授权（会产生多个 state）。
                         onPressed: _busy || _wechatBusy || _emailBusy
                             ? null
-                            : _handleWeChatSignIn,
-                        icon: _wechatBusy
+                            : _handleSignIn,
+                        icon: _busy
                             ? const SizedBox(
                                 width: SpbSpacing.lg,
                                 height: SpbSpacing.lg,
@@ -645,87 +773,47 @@ class _LoginPageState extends State<LoginPage> {
                                   strokeWidth: 2,
                                 ),
                               )
-                            : const Icon(Icons.chat_bubble_outline),
-                        label: Text(
-                          _wechatBusy
-                              ? '请在微信中确认…'
-                              : desktop
-                              ? '用微信小程序登录'
-                              : '微信一键登录',
-                        ),
+                            : const Icon(Icons.login),
+                        label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
                       ),
-                      const SizedBox(height: SpbSpacing.sm),
+                      const SizedBox(height: SpbSpacing.md),
                       Text(
-                        _shortCode == null
-                            ? desktop
-                                  ? '在手机微信小程序中输入本机显示的登录码。'
-                                  : '将打开微信小程序，确认后自动返回本应用。'
-                            : '打开微信 → 搜索或「发现 → 小程序」进入「${widget.miniProgramName}」→「我的 → 输入登录码」，填入上面的码。',
+                        // 提一句浏览器页里的免密入口：那是用户真正打开的那一页，
+                        // 只在 App 里写「用邮件登录」的话，从这里进 SSO 的人不会知道
+                        // 浏览器页上还有这条路。
+                        '登录将在系统浏览器中完成，完成后自动返回本应用。'
+                        '浏览器页也可选「用邮件登录」免密进入。',
                         textAlign: TextAlign.center,
                         style: textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
                       ),
-                      const SizedBox(height: SpbSpacing.lg),
-                    ],
-                    FilledButton.icon(
-                      key: const ValueKey('login-sso-button'),
-                      style: !desktop && widget.onWeChatSignIn != null
-                          ? FilledButton.styleFrom(
-                              backgroundColor: scheme.secondaryContainer,
-                              foregroundColor: scheme.onSecondaryContainer,
-                            )
-                          : null,
-                      // 加载中禁用，避免重复发起授权（会产生多个 state）。
-                      onPressed: _busy || _wechatBusy || _emailBusy
-                          ? null
-                          : _handleSignIn,
-                      icon: _busy
-                          ? const SizedBox(
-                              width: SpbSpacing.lg,
-                              height: SpbSpacing.lg,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.login),
-                      label: Text(_busy ? '正在登录…' : '使用 SSO 登录'),
-                    ),
-                    const SizedBox(height: SpbSpacing.md),
-                    Text(
-                      // 提一句浏览器页里的免密入口：那是用户真正打开的那一页，
-                      // 只在 App 里写「用邮件登录」的话，从这里进 SSO 的人不会知道
-                      // 浏览器页上还有这条路。
-                      '登录将在系统浏览器中完成，完成后自动返回本应用。'
-                      '浏览器页也可选「用邮件登录」免密进入。',
-                      textAlign: TextAlign.center,
-                      style: textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                    if (widget.onEmailSignIn != null ||
-                        widget.onHandoffSignIn != null ||
-                        widget.onImportSession != null) ...[
-                      const SizedBox(height: SpbSpacing.lg),
-                      ExpansionTile(
-                        key: const ValueKey('login-other-methods'),
-                        title: const Text('其他登录方式'),
-                        subtitle: Text(
-                          [
-                            if (widget.onEmailSignIn != null) '邮箱',
-                            if (widget.onHandoffSignIn != null) '登录码',
-                            if (widget.onImportSession != null) '导入会话',
-                          ].join(' · '),
+                      if (widget.onEmailSignIn != null ||
+                          widget.onHandoffSignIn != null ||
+                          widget.onImportSession != null) ...[
+                        const SizedBox(height: SpbSpacing.lg),
+                        ExpansionTile(
+                          key: const ValueKey('login-other-methods'),
+                          title: const Text('其他登录方式'),
+                          subtitle: Text(
+                            [
+                              if (widget.onEmailSignIn != null) '邮箱',
+                              if (widget.onHandoffSignIn != null) '登录码',
+                              if (widget.onImportSession != null) '导入会话',
+                            ].join(' · '),
+                          ),
+                          // 收起时保留已填写的内容和错误，再展开可继续原流程。
+                          maintainState: true,
+                          children: [
+                            if (widget.onEmailSignIn != null)
+                              _buildEmailSection(context),
+                            if (widget.onHandoffSignIn != null)
+                              _buildHandoffSection(context),
+                            if (widget.onImportSession != null)
+                              _buildImportSection(context),
+                          ],
                         ),
-                        // 收起时保留已填写的内容和错误，再展开可继续原流程。
-                        maintainState: true,
-                        children: [
-                          if (widget.onEmailSignIn != null)
-                            _buildEmailSection(context),
-                          if (widget.onHandoffSignIn != null)
-                            _buildHandoffSection(context),
-                          if (widget.onImportSession != null)
-                            _buildImportSection(context),
-                        ],
-                      ),
+                      ],
                     ],
                   ],
                 ),
@@ -958,6 +1046,7 @@ class _ShortCodeCard extends StatelessWidget {
     required this.code,
     required this.remaining,
     required this.miniProgramName,
+    this.onOpenWeChat,
   });
 
   final MiniProgramShortCode code;
@@ -967,6 +1056,9 @@ class _ShortCodeCard extends StatelessWidget {
 
   /// 小程序名称（见 [LoginPage.miniProgramName]）。
   final String miniProgramName;
+
+  /// 「打开微信」按钮的动作；null = 不渲染（未安装微信 / 平台无此通道）。
+  final Future<void> Function()? onOpenWeChat;
 
   @override
   Widget build(BuildContext context) {
@@ -1015,6 +1107,36 @@ class _ShortCodeCard extends StatelessWidget {
             key: const ValueKey('login-short-code-ttl'),
             style: textTheme.bodySmall?.copyWith(
               color: expired ? scheme.error : scheme.onSurfaceVariant,
+            ),
+          ),
+          // 只在「能打开微信 + 码未过期」时出现：过期后拉微信没意义，
+          // 装不了微信时也不该摆一个点了没反应的按钮。
+          if (onOpenWeChat != null && !expired) ...[
+            const SizedBox(height: SpbSpacing.md),
+            OutlinedButton.icon(
+              key: const ValueKey('login-open-wechat'),
+              onPressed: onOpenWeChat,
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('打开微信'),
+            ),
+            const SizedBox(height: SpbSpacing.xs),
+            Text(
+              '只把微信带到前台；进小程序与输码仍由你完成',
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          const SizedBox(height: SpbSpacing.sm),
+          // 详细动线写进卡片里（issue #98）：短码进行中其余入口已收起，
+          // 这段「去哪找小程序」的文案若还挂在微信按钮下面，用户就看不到它了。
+          Text(
+            '打开微信 → 搜索或「发现 → 小程序」进入「$miniProgramName」→'
+            '「我的 → 输入登录码」，填入上面的码。',
+            key: const ValueKey('login-short-code-path'),
+            textAlign: TextAlign.center,
+            style: textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
             ),
           ),
         ],
