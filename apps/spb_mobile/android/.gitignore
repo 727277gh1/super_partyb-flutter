@@ -1,0 +1,20 @@
+gradle-wrapper.jar
+/.gradle
+/captures/
+/gradlew
+/gradlew.bat
+/local.properties
+GeneratedPluginRegistrant.java
+.cxx/
+
+# Remember to never publicly share your keystore.
+# See https://flutter.dev/to/reference-keystore
+#
+# 这里指的是**发布密钥**。唯一的例外是 `/debug.keystore`——Android 公开约定的
+# 调试密钥（storepass/keypass = android，alias = androiddebugkey），刻意入库
+# 以便 CI 与各开发机签出同一签名，避免「每次 CI 的 APK 都装不上上一版」
+# （§6.95 / `tools/check_android_signing.sh`）。
+key.properties
+**/*.keystore
+!/debug.keystore
+**/*.jks

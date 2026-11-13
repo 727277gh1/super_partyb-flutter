@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      品牌主色（super_partyb 的 logo 底色 #1a5cd7）。
+
+      ⚠️ 与 `packages/spb_ui/lib/src/spb_logo.dart` 的 `SpbLogo.brandBlue`
+      必须一致：自适应图标的背景层（本文件）与前景区（ic_launcher_foreground）
+      在启动器里合成一张图，前景的镂空对勾是**靠背景透出来**的——两处颜色
+      不一致时对勾会变成另一种蓝。
+    -->
+    <color name="ic_launcher_background">#1a5cd7</color>
+</resources>

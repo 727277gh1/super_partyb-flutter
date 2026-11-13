@@ -1,0 +1,7 @@
+include:
+  - package:lints/recommended.yaml
+  - ../../analysis_options.yaml
+
+linter:
+  rules:
+    use_null_aware_elements: false

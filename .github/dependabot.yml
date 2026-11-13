@@ -1,0 +1,79 @@
+# 依赖自动更新配置（issue #47）。
+#
+# ## 为什么需要它
+#
+# `pubspec.lock` 有 189 个包，`tools/check_unused_deps.sh` 与 CI 的
+# `--enforce-lockfile` 只保证「锁得住」，**不保证会升级**——安全补丁只能靠人
+# 想起来。本文件让 **GitHub Actions 生态**的升级自动开 PR。
+#
+# ## ⚠️ 前提：本文件只在 GitHub 上生效
+#
+# 本仓库的**权威远端是 Gitea**（`git@<gitea-host>:dever/super_partyb-flutter`），
+# 而 `.github/workflows/*.yml` 是为 GitHub Actions 写的（`release.yml` 的
+# macOS job 需要 GitHub 的 macOS runner）。若 CI 实际跑在 Gitea Actions 上，
+# **Dependabot 不生效**——Gitea 用 Renovate 或 `renovate.json`。
+#
+# ## ❌ `pub` 生态**有意不交给 Dependabot**（2026-11-12 实测，§6.93）
+#
+# 它认 Pub Workspaces（能只改根 `pubspec.lock`、不碰任何 `pubspec.yaml`），
+# 但它**解出的 lock 在本仓 CI 的 Flutter 版本下不可满足**，于是每周制造
+# 永远红的 PR（PR #34/#35/#36）。pub 自己把根因说得最清楚：
+#
+# ```
+# Note: matcher is pinned to version 0.12.20 by flutter_test from the flutter SDK.
+# Note: test_api is pinned to version 0.7.12 by flutter_test from the flutter SDK.
+# ...
+# And because every version of flutter_test from sdk depends on both
+#   matcher 0.12.20 and test_api 0.7.12,
+# if flutter_test from sdk and test >=1.24.3 then analyzer >=8.0.0 <14.0.0.
+# And because build_runner 2.17.1 depends on analyzer ^14.3.0,
+#   version solving failed.
+# ```
+#
+# 链条只有一条、但覆盖面很宽：
+#
+# 1. `flutter_test`（SDK 包，CI 用 `FLUTTER_VERSION=3.47.5`）**精确钉**
+#    `test_api 0.7.12` 与 `matcher 0.12.20`；
+# 2. → `test` 被钉在 1.31.1（`test 1.32.0` 要 `test_api 0.7.14`）；
+# 3. → `test 1.31.1` 要 `analyzer >=8.0.0 <14.0.0`，于是 **analyzer 家族上限 13.x**；
+# 4. → 任何要 `analyzer >=14` 的包（`build_runner` 2.17.x、`build` 5.x 的
+#    后续、`source_gen` 4.3.x、`drift_dev` 的下一档……）**全都装不上**。
+#
+# 也就是说：这不是「dependabot 偶尔算错」，而是**在 Flutter 版本固定的前提下**，
+# 它推的 tip 版本绝大多数结构性地不可落地。而让它「自动回写 lock」也没用——
+# 回写只能写回 1.31.1，下一轮它照样提 1.32.0（死循环）。
+#
+# 那就得换分工：**pub 升级由人用 CI 的同一个 Flutter 版本跑**
+# （`flutter pub upgrade`，见 AGENTS.md §2 的「依赖」段），Dependabot 只负责
+# GitHub Actions 的 action 版本。代价是 pub 升级不再自动开 PR——换来的是
+# 「不会再有结构性红的 PR」与「锁与 CI 的 SDK 永远一致」。
+#
+# 完整复盘（含两条「看似更聪明但走不通」的替代方案）见
+# `docs/design-decisions/build-and-release.md` §6.93。
+version: 2
+updates:
+  # ── GitHub Actions ─────────────────────────────────────────────────
+  #
+  # ⚠️ 与 issue #47 第三节相关：第三方 action（`subosito/flutter-action`、
+  # `android-actions/setup-android`）已 **pin 到 commit SHA**（tag 可被移动，
+  # 是供应链风险）；官方 `actions/*` 保留 `@v5`（GitHub 维护）。
+  #
+  # Dependabot **认** `uses: x@<sha> # v2.23.0` 这种写法：它会开 PR 把 SHA
+  # 与后面的注释一并升级（官方文档："Dependabot will also update the comment"）。
+  # 故 pin SHA 不会让 action 变成永久不升级的死区。
+  #
+  # 这里先用 monthly：action 的 major 升级常带 breaking（如 `checkout@v4`
+  # → `v5` 改了默认 `fetch-depth`），需要人工读 changelog。
+  #
+  # 这一段的 PR 是**可落地**的：它不动 `pubspec.lock`，与本仓 Flutter 版本无关。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: 'chore'
+      include: scope

@@ -1,0 +1,227 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      联网权限。
+
+      ⚠️ 必须声明在 **main** 源集，不能只依赖 debug/profile 源集：
+      `src/debug/AndroidManifest.xml` 与 `src/profile/AndroidManifest.xml` 里
+      各有一份 INTERNET，但那只用于 Flutter 工具的热重载/断点通信，**release
+      构建不会合并它们**。
+
+      也不能指望插件贡献：已逐个核对全部依赖的 `android/src/main/
+      AndroidManifest.xml`，贡献 INTERNET 的插件数为 **0**（flutter_secure_
+      storage / app_links / file_selector_android / sqlite3_flutter_libs 等
+      都没有）。
+
+      缺失时的表现是「debug 能跑、release 包一联网就失败」——而且不是崩
+      溃，是 API 调用抛 SocketException / 登录无响应，排查成本高。
+    -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application
+        android:label="spb_mobile"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!--
+              OIDC 授权回调（自定义 scheme）。
+
+              ⚠️ 与 `packages/spb_api/lib/src/oidc_callback.dart` 的 OidcCallbackUri
+              常量必须一致：scheme=partyb, host=oidc, pathPrefix=/callback。
+              两处（此处、Dart 常量）不一致会表现为「登录后应用毫无反应」而不是报错。
+
+              已由 IdP 注册（oauth_clients.redirectUris 含 partyb://oidc/callback），
+              实测 authorize 可正常 302 回跳，见 docs/mobile-oidc-deeplink.md。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="partyb" android:host="oidc" android:pathPrefix="/callback"/>
+            </intent-filter>
+            <!--
+              OIDC 授权回调（claimed HTTPS / Android App Links）。
+
+              ## 为什么需要这一条
+
+              自定义 scheme 没有归属校验：任何声明了 partyb scheme 的应用都能抢走回调。
+              autoVerify 让系统去取 `https://<host>/.well-known/assetlinks.json`，
+              校验通过后**只有本应用**能接管该域名的这个路径（RFC 8252 §7.2 首选）。
+
+              ## 三个必须同时成立的条件
+
+              1. 服务端返回 assetlinks.json（api-gateway 的 verification_files，
+                 package_name + 签名指纹 + application/json）；
+              2. 本 intent-filter 的 scheme/host/path 与之完全一致；
+              3. 安装的是**指纹匹配**的那个 APK（换签名密钥后须同步更新服务端）。
+
+              任一不成立都是**静默**失败：链接照常打开浏览器，无任何报错。
+              排查：adb shell pm get-app-links com.atjog.spb.spb_mobile
+
+              ## 为什么一个 host 一个 intent-filter（不能合并）
+
+              Android 12+ 按 host 分别判定：任一 host 验证通过，该 host 的链接就归本应用；
+              但 **Android 11 及以下是一条 filter 内任一 host 失败则整条 filter 失效**。
+              本应用 minSdk=24（Android 7.0），旧设备仍占相当比例，故一个 host 一条：
+              一个域名没配好，不会连带另一个域名也收不到回调。
+
+              ## 为什么要写四个 host
+
+              OIDC issuer 用哪个域名，回调就从哪个域名回来，都要能接管。
+              当前域名族是 **dever**（123 生产环境；bcc 的 `tbcc*` 已随环境降级移除）：
+
+              - `dever.atjog.com`：生产主域名，经腾讯 EdgeOne 终止 TLS（双栈，
+                IPv4/IPv6 均可连）；
+              - `dever6.atjog.com`：上面那个的**源站别名**——只有一条家宽 IPv6、
+                无 A 记录，绕开 EdgeOne 直连 192.168.1.123。⚠️ 源站**没有 HTTPS
+                监听**（TLS 只在 EdgeOne 上），验证会失败——一条一 host 的写法
+                让它只影响自己，等源站上 443/证书后无需改 APK 即可生效；
+              - `dever-preview.atjog.com`：预览域名（同一个 EdgeOne 入口，网关按
+                host 路由到 UFS 预览服务）；
+              - `dever6-preview.atjog.com`：预览域名的源站别名，同 ⚠️。
+
+              **漏一条的表现**是「回调打开浏览器落地页，要多点一次『打开应用』」
+              ——不报错、不崩，极易被判成「App Links 没配好」而反复排查。
+              issuer 侧（`oauth_clients.redirectUris`）已注册同名的四个回调。
+
+              实测状态（2026-11-13）：
+
+              1. `dever.atjog.com`：assetlinks 200（含本包名 + 签名指纹），`/idp/…` 200；
+              2. `dever-preview.atjog.com`：assetlinks 404（网关把该 host 路由到 UFS
+                 预览服务），`/idp/…` 404；
+              3. `dever6*`：本机无 IPv6 出口，未验证。
+
+              （这里**不能写 Markdown 表格**：XML 注释里不允许出现两个连续的连字符，
+              而表格的分隔行恰好就是它们；实测会让整个 AndroidManifest.xml
+              解析失败（`processReleaseMainManifest` 报 not well-formed），
+              而 Dart 侧的静态检查完全看不出问题。故一律改用有序列表。）
+
+              即现在**只有 dever.atjog.com 能真正验证通过**；其余三条是**预置**
+              （服务端补齐 `/.well-known` 后无需再改 APK 即可生效，反之只影响
+              自己那一条 filter）。
+
+              path 与 Dart 侧 OidcCallbackUri.claimedHttpsPath 保持一致（/idp 前缀 + /app/callback）。
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever-preview.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6-preview.atjog.com" android:path="/idp/app/callback"/>
+            </intent-filter>
+            <!--
+              App 扫码登录（自定义 scheme）。
+
+              ⚠️ 与 `packages/spb_api/lib/src/qr_login.dart` 的 QrLoginUri 常量一致：
+              scheme=partyb, host=qrlogin, query 参数 scene。
+
+              链路：浏览器登录页出码 → 用户点「在本机 App 中打开」→ 本连接唤起
+              App → App 用已登录身份 POST /confirm → 浏览器轮询到 confirmed 并登录。
+
+              ## 为什么二维码里不放 token
+
+              scene 是**授权句柄**，不是凭据：拿到它什么也换不到，必须有已登录的
+              账号主人在 App 里点头。这也意味着「任何人能把用户引到这个 App」都不
+              构成提权（最坏情况是弹一条「扫码请求不存在」）。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="partyb" android:host="qrlogin"/>
+            </intent-filter>
+            <!--
+              App 扫码登录（claimed HTTPS）：二维码的**内容本身**就是这条地址。
+
+              两个入口都指向同一个 scene：
+                - 同机：浏览器按钮直接跳 partyb://qrlogin（不上网）；
+                - 跨设备：另一台手机用系统相机扫码 → 打开本地址 → App Links 接管；
+                  App 未安装时才会落到 IdP 的说明页（`{issuer 前缀}/qr/{scene}`）。
+
+              与上面的 OIDC 回调同理，**一个 host 一条** filter（Android 11 及以下
+              一条 filter 内任一 host 失败则整条失效）。pathPrefix 用 `/idp/qr/`。
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever-preview.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="dever6-preview.atjog.com" android:pathPrefix="/idp/qr/"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+
+        <!-- 微信 OpenSDK：Android 11+ 的包可见性限制下，不声明就查不到微信，
+             `isWeChatInstalled` 恒为 false → 「微信一键登录」永远提示未安装。
+             这也是微信官方 SDK 接入文档要求的声明（issue #92）。 -->
+        <package android:name="com.tencent.mm"/>
+    </queries>
+</manifest>
