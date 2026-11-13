@@ -75,6 +75,21 @@ freezed / json_serializable / build_runner / json_annotation / freezed_annotatio
 4. Flutter 官方多窗口（`flutter config --enable-windowing`）在 3.47.5 仍是
    `(Not set) (Unavailable)`。
 
+> **2026-11-13 复核：前提变了，「不做」的结论没变。** 0.6.0 起 `window_manager`
+> 改由 nativeapi 驱动，其 changelog 明写 "Several windows at once, content bounds,
+> title bar colours, visual effects and focusability come with it"——上面那条
+> 「0.5.2 的公开 API 里根本没有创建窗口的方法」**对 0.6.x 已不成立**。
+>
+> 不换的理由从「做不到」收窄为「不划算」：悬浮窗真正缺的需求是**同屏**，而第二个
+> 窗口要付的代价是**独立 engine / 独立 isolate**（Riverpod 容器、认证凭证、`Dio`
+> 都得在第二窗口重建，见下）。nativeapi 的多窗口是否同样需要每窗独立视图/engine
+> **未核实**；若同样需要，换上它并不比 `desktop_multi_window` 省事。
+>
+> 触发条件：真出现「悬浮窗与主窗同屏」需求时，先核实 nativeapi 多窗口的装配成本，
+> 再在「`window_manager` 0.6+」与「`desktop_multi_window`」之间选（版本升级的触发
+> 条件另见 issue #101）。`flutter config --enable-windowing` 在 3.47.5 仍是
+> `Unavailable`；3.50 未核实。
+
 #### ✅ 真多窗口存在（但本仓库当前不用）
 
 `desktop_multi_window` **有真实的 Linux 实现**：`linux/multi_window_manager.cc:102`
