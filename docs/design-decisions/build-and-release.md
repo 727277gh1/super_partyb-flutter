@@ -897,6 +897,34 @@ if (repoDebugKeystoreFile.exists()) {
   （`实际 db21cad3… ≠ 期望 1089ac1f…`），还原后恢复绿；
 - CI：android job 的两条 `Verify Android …` 步骤全绿，artifact 可覆盖安装上一轮。
 
+### 6.101 依赖锁定与升级触发条件：`window_manager` 0.5.2 / `flutter_local_notifications` 22.3.1（2026-11）
+
+两处 cases 的共同点：**它们不是欠债，是「无收益不改」的判定结果**。Dependabot 曾为两者各开
+major PR，CI 都红，PR 已关闭并 `@dependabot ignore this major version`；2026-11-13 复核后把
+推理从 issue 搬到这里（issue #101 / #102 随之关闭——该仓没有 `status/not-doing` 标签，
+**关闭即表示维持现状**，与 §6.98 同一约定）。
+
+| 包 | 锁在 | 为什么锁 | 升级触发条件 |
+|---|---|---|---|
+| `window_manager`（桌面端唯一 import：`apps/spb_desktop/lib/bootstrap.dart`） | 0.5.2（`^0.5.0`） | 0.6.0 把默认导出换成 nativeapi（`Window`/`WindowManager`/事件流/`EventRequest`），0.5.x API 整体搬进 `package:window_manager/legacy.dart` 且全部 `@Deprecated` → `analyze --fatal-infos` 直接红；0.7.0 更进一步要求 Flutter 3.50 / Dart 3.14 且 widgets 改 `package:material_ui` | ① 0.5.x 出现用户可感知的窗口缺陷（尺寸/置顶/全屏/关闭拦截/多显示器）且定位在插件侧；② 要「悬浮窗与主窗同屏」（先核 nativeapi 多窗口是否也需独立 engine，见 [§6.5](architecture.md)）；③ Flutter 升 3.50 时连带迁（0.7.0）；④ 需要 nativeapi 独有能力（系统 caption / Win11 snap layouts / 内容边界 / 视觉特效） |
+| `flutter_local_notifications`（`packages/spb_platform/lib/src/local_notification_sink.dart`） | 22.3.1（`^22.3.1`） | 23.x 的 Android 侧要 `compileSdk 37` + AGP 9.1.1，而 Flutter 3.47.5 **与 3.50.0** 的默认 `compileSdkVersion` 都是 **36**（拉 3.50.0 tag 核过 `FlutterExtension.kt`）；同时 23.x 的实质修复（排程通知 null icon 的 NPE、重复通知 DST）全落在我们**没用**的 API 上 | ① 我们要用排程/重复通知（`zonedSchedule` / `periodicallyShow`）；② Flutter 模板抬到 37（省掉「显式 37 + AGP 升级」的试探）；③ Play 政策或别的依赖逼到 37；④ 需要 Android live update 通知 |
+
+#### 判定纪律（三条，下次别再重新推理一遍）
+
+1. **无收益不改**：同 major 的 patch 若只修我们用不到的路径，也不升（`22.3.3` 即属此类）。
+   判据是「修复是否落在我们实际调用的 API 上」，不是「新版本是否更好」。
+2. **pub 升级只由人跑，且用 CI 同一个 Flutter 版本**：`flutter pub upgrade`（§6.93）。锁文件
+   与 SDK 必须同时移动，否则下一轮 CI 就是 §6.93 那种结构性红。
+3. **Dependabot 只碰 `uses:`（actions）**：pub 的 major PR 一律关 + ignore，拒绝依据指向本节，
+   不指向某张 issue——issue 会关，本节不会。
+
+#### 反向验证（这两条锁确实还在生效）
+
+- `flutter pub upgrade --dry-run` 里 `window_manager` 显示 `0.5.2 (0.7.0 available)`、
+  `flutter_local_notifications` 停在 22.x：说明约束确实拦住了 major。
+- `apps/spb_mobile/android/app/build.gradle.kts` 仍是 `compileSdk = flutter.compileSdkVersion`（36），
+  没有为 23.x 私自改成 37——那次试探若做，必须连同 AGP 版本与 CI 的 `android-37` 平台一起验。
+
 ## 7. Linux 桌面端系统依赖（**分发必读**）
 
 
