@@ -291,10 +291,21 @@ Future<DiagnosticsExportOutcome> exportDiagnosticsReport(
     // 但「探针没装、账本也空」（移动端未接线 / 单测）仍然整节省略——那才是
     // 「什么都没采集」，写一行占位只会让人以为采集挂了。
     final probeLines = probe?.reportLines() ?? const <String>[];
-    final ledgerLines = MemoryLedger.reportLines();
+    final currentLedger = MemoryLedger.snapshot();
+    final ledgerLines = currentLedger.map((e) => e.reportLine).toList();
     final lines = <String>[...probeLines, ...ledgerLines];
     if (lines.isNotEmpty && ledgerLines.isEmpty) {
       lines.add('（内存账本无登记项：当前页面不持有可再生态缓存）');
+    }
+    // 「上次账本」：用户通常在**设置页**导出，而持有方（对话页时间线/交付面板）
+    // 已经随页面卸载注销了——只打当前账本等于把「花在谁身上」这条线索掐断。
+    // 采样时顺带记下的非空快照补上这一段（issue #99 缺口 2）。
+    final lastLedger = probe?.lastLedgerSnapshot;
+    if (lastLedger != null && !_sameLedger(currentLedger, lastLedger.entries)) {
+      lines.add(
+        '上次账本（${hhmmss(lastLedger.at)}）：'
+        '${lastLedger.entries.map((e) => e.warnToken).join(' | ')}',
+      );
     }
     memoryLines = lines.isEmpty ? null : lines;
   }
@@ -308,6 +319,19 @@ Future<DiagnosticsExportOutcome> exportDiagnosticsReport(
     text,
     suggestedName: 'spb-diagnostics-${_fileNameStamp(at)}.txt',
   );
+}
+
+/// 账本快照相同（name/count/bytes 全等）时不必重复打「上次账本」。
+bool _sameLedger(List<MemoryLedgerEntry> a, List<MemoryLedgerEntry> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].name != b[i].name ||
+        a[i].count != b[i].count ||
+        a[i].bytes != b[i].bytes) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /// 文件名时间戳：`20261012-203045`。

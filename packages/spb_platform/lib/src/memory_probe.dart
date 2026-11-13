@@ -67,6 +67,8 @@ class MemorySample {
     required this.imageCacheEntries,
     required this.liveImages,
     this.activity,
+    this.peakAt,
+    this.ledger,
   });
 
   /// 采样时刻（报告里显示到秒）。
@@ -77,6 +79,18 @@ class MemorySample {
 
   /// 进程启动以来的 RSS 高水位（OS 计数，见 [ProcessInfo.maxRss]）。
   final int peakRssBytes;
+
+  /// 本采样**首次观察到**当前 [peakRssBytes] 的时刻；null = 峰值没变（沿用上一条）。
+  ///
+  /// ## 为什么需要它（issue #99 缺口 1）
+  ///
+  /// [ProcessInfo.maxRss] 只给数字、**不带时间戳**：2026-11 真机报告里
+  /// `peak=541.0MB` 从 14:12 起一直不变，而 `peak − 常驻 ≈ 190MB` 的解释恰恰
+  /// 取决于「峰值是否与某次操作同一时刻」（Dart 堆外已释放 vs 工作集裁剪后
+  /// 重新换入）。记下“峰值变大那次采样”的时刻，就能把峰值钉进某个操作窗口。
+  ///
+  /// 精度只到采样间隔（≤ 60s），但那是唯一不需要改平台调用的办法。
+  final DateTime? peakAt;
 
   /// 全局 `imageCache` 当前占用的解码位图字节数。
   final int imageCacheBytes;
@@ -94,17 +108,28 @@ class MemorySample {
   /// （见 `frame_activity.dart` 文件头）。
   final FrameActivity? activity;
 
+  /// 采样时刻的账本快照（**非空才记**；null = 那一刻没有任何持有方登记）。
+  ///
+  /// ## 为什么快照要跟着采样走（issue #99 缺口 2）
+  ///
+  /// 账本只在**当前挂载**的持有方登记（`register`/`unregister` 成对，这个取向
+  /// 本身是对的）。但用户通常在**设置页**点导出，此时对话页已卸载、登记项跟着
+  /// 注销——于是「350MB 花在谁身上」正好查不到。把「当时的非空快照」留在采样
+  /// 里，导出时就能打出「上次账本（时刻）：…」，不需要让页面常驻。
+  final List<MemoryLedgerEntry>? ledger;
+
   /// 报告里的一行。
   ///
   /// 形如 `14:03:11 rss=182.4MB peak=240.9MB imageCache=12.1MB(4 张) live=1`，
-  /// 接线了帧计数时尾部再加 ` fps=59.6 raster=7.3ms`。
+  /// 首次观察到峰值的那一行再带 `@14:12:35`；接线了帧计数时尾部再加
+  /// ` fps=59.6 max_build=312.0ms raster=7.3ms`。
   /// 只写时刻（不写日期）：同一份报告里的采样都在同一次运行内，日期是噪音。
   String toReportLine() {
-    final hh = at.hour.toString().padLeft(2, '0');
-    final mm = at.minute.toString().padLeft(2, '0');
-    final ss = at.second.toString().padLeft(2, '0');
+    final peakAt = this.peakAt;
+    final peakSuffix = peakAt == null ? '' : '@${hhmmss(peakAt)}';
     final base =
-        '$hh:$mm:$ss rss=${_mb(rssBytes)}MB peak=${_mb(peakRssBytes)}MB '
+        '${hhmmss(at)} rss=${_mb(rssBytes)}MB '
+        'peak=${_mb(peakRssBytes)}MB$peakSuffix '
         'imageCache=${_mb(imageCacheBytes)}MB($imageCacheEntries 张) '
         'live=$liveImages';
     final activity = this.activity;
@@ -138,12 +163,14 @@ class MemoryProbe {
     int Function()? readImageCacheBytes,
     int Function()? readImageCacheEntries,
     int Function()? readLiveImages,
+    List<MemoryLedgerEntry> Function()? readLedger,
     this.takeFrameActivity,
   }) : _readRss = readRss ?? _processRss,
        _readPeakRss = readPeakRss ?? _processPeakRss,
        _readImageCacheBytes = readImageCacheBytes ?? _imageCacheBytes,
        _readImageCacheEntries = readImageCacheEntries ?? _imageCacheEntries,
-       _readLiveImages = readLiveImages ?? _imageCacheLiveImages;
+       _readLiveImages = readLiveImages ?? _imageCacheLiveImages,
+       _readLedger = readLedger ?? MemoryLedger.snapshot;
 
   /// 环形缓冲容量（硬上限）。
   final int capacity;
@@ -161,11 +188,15 @@ class MemoryProbe {
   final int Function() _readImageCacheEntries;
   final int Function() _readLiveImages;
 
+  /// 取账本快照（默认读进程级 [MemoryLedger]）；注入只为测试。
+  final List<MemoryLedgerEntry> Function() _readLedger;
+
   /// 取本窗口渲染活动；null = 未接线（报告行里就没有 `fps=`）。
   final FrameActivity Function()? takeFrameActivity;
 
   final Queue<MemorySample> _samples = Queue<MemorySample>();
   int _peakRssBytes = 0;
+  DateTime? _peakObservedAt;
   DateTime? _lastSampleAt;
 
   /// **首条**采样（启动基线）。
@@ -183,6 +214,27 @@ class MemoryProbe {
 
   /// 观测到的 RSS 峰值（取「OS 高水位」与「已采样最大值」的较大者）。
   int get peakRssBytes => _peakRssBytes;
+
+  /// 峰值**首次被观察到**的时刻；null = 还没采过。
+  ///
+  /// 单独保留（而不是只靠采样行里的 `peakAt`）：环形缓冲会滚掉那次采样，
+  /// 而「峰值是什么时候的」不能跟着一起被冲掉（同 [_baseline] 的理由）。
+  DateTime? get peakObservedAt => _peakObservedAt;
+
+  /// 环形缓冲里**最近一份非空账本快照**（含它的时刻）；null = 窗口内没有。
+  ///
+  /// 用途：导出时若没有持有方登记，就打这一份出来（issue #99 缺口 2）。
+  ({DateTime at, List<MemoryLedgerEntry> entries})? get lastLedgerSnapshot {
+    // `Queue` 没有 `reversed`（不是 List），且这里的元素最多 capacity 个，
+    // 转一次 List 比 `elementAt` 逐个回抛更直白。
+    for (final s in _samples.toList().reversed) {
+      final ledger = s.ledger;
+      if (ledger != null && ledger.isNotEmpty) {
+        return (at: s.at, entries: ledger);
+      }
+    }
+    return null;
+  }
 
   /// 启动基线（首条采样）；null = 还没采过。
   MemorySample? get baseline => _baseline;
@@ -223,7 +275,11 @@ class MemoryProbe {
     }
 
     final peak = rss > osPeak ? rss : osPeak;
-    if (peak > _peakRssBytes) _peakRssBytes = peak;
+    final peakChanged = peak > _peakRssBytes;
+    if (peakChanged) {
+      _peakRssBytes = peak;
+      _peakObservedAt = now;
+    }
 
     final sample = MemorySample(
       at: now,
@@ -233,6 +289,9 @@ class MemoryProbe {
       imageCacheEntries: cacheEntries,
       liveImages: live,
       activity: takeFrameActivity?.call(),
+      // 只有“这一次把峰值推高了”才带时刻：之后每行都写会让人以为峰值一直在变。
+      peakAt: peakChanged ? now : null,
+      ledger: _ledgerSnapshot(),
     );
     _samples.addLast(sample);
     _baseline ??= sample;
@@ -256,10 +315,35 @@ class MemoryProbe {
         (_samples.isEmpty || !identical(_samples.first, baseline))) {
       lines.add('${baseline.toReportLine()} ← 启动基线（已滚出采样窗口）');
     }
+    // 峰值第一次被观察到的那次采样若已滚出窗口（或被基线取代），补一行：
+    // 否则读者又回到「peak=541.0MB 是什么时候的」这个老问题（issue #99 缺口 1）。
+    final peakAt = _peakObservedAt;
+    if (peakAt != null && !_samples.any((s) => s.peakAt == peakAt)) {
+      lines.add('峰值 ${_mb(_peakRssBytes)}MB 首次观察于 ${hhmmss(peakAt)}');
+    }
     lines.addAll(_samples.map((s) => s.toReportLine()));
     return List<String>.unmodifiable(lines);
   }
+
+  /// 读一次账本快照（非空才返回；读数失败降级为 null，不打断采样）。
+  List<MemoryLedgerEntry>? _ledgerSnapshot() {
+    try {
+      final snapshot = _readLedger();
+      return snapshot.isEmpty
+          ? null
+          : List<MemoryLedgerEntry>.unmodifiable(snapshot);
+    } on Object catch (e) {
+      SpbLog.debug('内存账本快照失败', {'error': '$e'});
+      return null;
+    }
+  }
 }
+
+/// `hh:mm:ss`（报告里的时刻都以它为准，避免各处各写一遍补零逻辑）。
+String hhmmss(DateTime at) =>
+    '${at.hour.toString().padLeft(2, '0')}:'
+    '${at.minute.toString().padLeft(2, '0')}:'
+    '${at.second.toString().padLeft(2, '0')}';
 
 int _processRss() => ProcessInfo.currentRss;
 

@@ -41,6 +41,8 @@ class FrameActivity {
     required this.frames,
     required this.window,
     this.avgRasterUs,
+    this.worstBuildUs,
+    this.worstRasterUs,
   });
 
   /// 窗口内引擎实际出的帧数（`addPostFrameCallback` 计数）。
@@ -52,6 +54,18 @@ class FrameActivity {
   /// 窗口内平均光栅耗时；null = 引擎没回传 timings（**不是 0ms**）。
   final int? avgRasterUs;
 
+  /// 窗口内**最差**一帧的 build 耗时；null = 引擎没回传 timings。
+  ///
+  /// ## 为什么不只是均值（issue #99 缺口 3）
+  ///
+  /// `fps=10.2 + raster=1.9ms` 说明成本在 UI 线程，但分不清「每帧 ~100ms 持续
+  /// 掉帧」与「卡了一次 500ms、其余时间空闲」——前者是逐帧重建/布局，后者是单次
+  /// 大解析或同步 IO，修法完全不同。补上最差值这一维，两种形状就能分开。
+  final int? worstBuildUs;
+
+  /// 窗口内**最差**一帧的 raster 耗时；null = 引擎没回传 timings。
+  final int? worstRasterUs;
+
   /// 每秒帧数（窗口时长未知时按 0 处理，避免出现 (int)/0）。
   double get fps {
     final us = window.inMicroseconds;
@@ -59,21 +73,29 @@ class FrameActivity {
     return frames * 1000000 / us;
   }
 
-  /// 报告里的片段：`fps=59.6 raster=7.3ms`。
+  /// 报告里的片段：`fps=59.6 max_build=312.0ms raster=7.3ms`。
   ///
   /// 帧数保留一位小数：1 分钟窗口里 3576 帧 = 59.6fps，四舍五入成整数会把
   /// 「60 帧满速」与「50 帧掉帧」显示成同一个值。
+  /// 最差 build 排在均值 raster 之前：它是判断「持续掉帧 / 单次卡顿」的主判据。
   String toReportFragment() {
+    final base = StringBuffer('fps=${fps.toStringAsFixed(1)}');
+    final build = worstBuildUs;
+    if (build != null) {
+      base.write(' max_build=${(build / 1000).toStringAsFixed(1)}ms');
+    }
     final raster = avgRasterUs;
-    final base = 'fps=${fps.toStringAsFixed(1)}';
-    if (raster == null) return base;
-    return '$base raster=${(raster / 1000).toStringAsFixed(1)}ms';
+    if (raster != null) {
+      base.write(' raster=${(raster / 1000).toStringAsFixed(1)}ms');
+    }
+    return base.toString();
   }
 
   @override
   String toString() =>
       'FrameActivity(frames: $frames, window: ${window.inMilliseconds}ms, '
-      'avgRaster: ${avgRasterUs == null ? 'n/a' : '${avgRasterUs! ~/ 1000}ms'})';
+      'avgRaster: ${avgRasterUs == null ? 'n/a' : '${avgRasterUs! ~/ 1000}ms'}, '
+      'worstBuild: ${worstBuildUs == null ? 'n/a' : '${worstBuildUs! ~/ 1000}ms'})';
 }
 
 /// 帧活动计数器（累积 + 取窗口快照）。
@@ -90,6 +112,8 @@ class FrameActivityCounter {
   int _frames = 0;
   int _rasterSumUs = 0;
   int _rasterFrames = 0;
+  int? _worstBuildUs;
+  int? _worstRasterUs;
   DateTime? _windowStart;
 
   /// 引擎出了一帧（`addPostFrameCallback` 回调里调）。
@@ -100,11 +124,20 @@ class FrameActivityCounter {
 
   /// 引擎回传一批帧耗时（`addTimingsCallback` 回调里调）。
   ///
-  /// 只累加光栅耗时：build 耗时已在 `FrameTimingReporter` 那条通道上，
-  /// 这里要回答的是「光栅是否在 CPU 上」。
+  /// 累加光栅耗时算均值，同时记 build/raster 的**最大值**：
+  /// 「这一分钟平均还行」与「其中有两帧卡了半秒」在帧数上完全分辨不出来
+  /// （issue #99 缺口 3）。
   void noteTimings(List<FrameTiming> timings) {
     for (final t in timings) {
       _rasterSumUs += t.rasterDuration.inMicroseconds;
+      final buildUs = t.buildDuration.inMicroseconds;
+      final rasterUs = t.rasterDuration.inMicroseconds;
+      final worstBuild = _worstBuildUs;
+      if (worstBuild == null || buildUs > worstBuild) _worstBuildUs = buildUs;
+      final worstRaster = _worstRasterUs;
+      if (worstRaster == null || rasterUs > worstRaster) {
+        _worstRasterUs = rasterUs;
+      }
     }
     _rasterFrames += timings.length;
   }
@@ -118,11 +151,15 @@ class FrameActivityCounter {
       window: now.difference(start),
       // 一帧 timings 都没收到 → 这一项不可用，而不是「0ms」。
       avgRasterUs: _rasterFrames == 0 ? null : _rasterSumUs ~/ _rasterFrames,
+      worstBuildUs: _worstBuildUs,
+      worstRasterUs: _worstRasterUs,
     );
     _windowStart = now;
     _frames = 0;
     _rasterSumUs = 0;
     _rasterFrames = 0;
+    _worstBuildUs = null;
+    _worstRasterUs = null;
     return activity;
   }
 }

@@ -458,6 +458,92 @@ void main() {
 
         expect(captured, contains('交付物面板清单: 5666 项 / 0B'));
       });
+
+      test('当前账本为空但窗口里有过非空快照 → 打「上次账本」+ 时刻（#99 缺口 2）', () async {
+        // 场景：用户先看过对话（持有方登记过），再切到设置页导出——会话页已
+        // 卸载、登记项注销，只打当前账本就是「花在谁身上」查不到。
+        var current = const [
+          MemoryLedgerEntry(
+            name: 'conversation.timeline',
+            label: '对话页时间线',
+            count: 19,
+            bytes: 3 * 1024,
+          ),
+        ];
+        final probe = MemoryProbe(
+          readRss: () => 200 * 1024 * 1024,
+          readPeakRss: () => 400 * 1024 * 1024,
+          readImageCacheBytes: () => 0,
+          readImageCacheEntries: () => 0,
+          readLiveImages: () => 0,
+          readLedger: () => current,
+        );
+        installMemoryProbe(probe: probe, interval: const Duration(hours: 1));
+        // 第一份采样带非空账本，时刻固定。
+        probe.sample(force: true, at: DateTime(2026, 11, 9, 14, 19, 6));
+
+        // 页面卸载：账本转空；导出会 force 采一次（当前账本为空）。
+        current = const [];
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, contains('## 内存采样'));
+        expect(
+          captured,
+          contains('上次账本（14:19:06）：对话页时间线=19/3.0KB'),
+          reason: '当前账本为空时，最近一份非空快照是唯一能回答「花在谁身上」的读数',
+        );
+        expect(captured, contains('（内存账本无登记项：当前页面不持有可再生态缓存）'));
+      });
+
+      test('没有非空快照时不打「上次账本」（不编造一行空的）', () async {
+        installMemoryProbe(
+          probe: MemoryProbe(
+            readRss: () => 200 * 1024 * 1024,
+            readPeakRss: () => 200 * 1024 * 1024,
+            readImageCacheBytes: () => 0,
+            readImageCacheEntries: () => 0,
+            readLiveImages: () => 0,
+            readLedger: () => const [],
+          ),
+          interval: const Duration(hours: 1),
+        );
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        expect(captured, isNot(contains('上次账本')));
+        expect(captured, contains('（内存账本无登记项：当前页面不持有可再生态缓存）'));
+      });
+
+      test('采样行带峰值时刻（#99 缺口 1）', () async {
+        installMemoryProbe(
+          probe: MemoryProbe(
+            readRss: () => 253 * 1024 * 1024,
+            readPeakRss: () => 541 * 1024 * 1024,
+            readImageCacheBytes: () => 0,
+            readImageCacheEntries: () => 0,
+            readLiveImages: () => 0,
+          ),
+          interval: const Duration(hours: 1),
+        );
+
+        String? captured;
+        final caps = _RecordingCapabilities(
+          onSave: (text, suggestedName) => captured = text,
+        );
+        await exportDiagnosticsReport(caps);
+
+        // 首条采样就把峰值推高 → 报告里有 `peak=541.0MB@<时刻>`。
+        expect(captured, contains('peak=541.0MB@'));
+      });
     });
   });
 }

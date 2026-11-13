@@ -98,9 +98,23 @@
 | `RowLocateRegistry.length` / `bufferedEventCount` / `notifiedCount` | `row_locate_registry.dart:72`、`chat_stream_controller.dart:310` 附近、`confirmation_notifier.dart:87` 附近 | 测试钩子：断言回收/清理生效 |
 | `SPB_FRAME_TIMING=true` 编译期开关 | `packages/spb_core/lib/src/env.dart:120` | 真机慢帧统计进诊断报告（本机不可用） |
 | 「导出诊断日志」链路（环形缓冲 + `redactSecrets`） | `packages/spb_core/lib/src/logger.dart:251` 附近、`:344` 附近 | 用户侧取证 |
-| **`MemoryProbe` 内存采样**（RSS / OS 高水位 / imageCache 字节与张数与 live） | `packages/spb_platform/lib/src/memory_probe.dart`；两端 `main.dart` 接线；报告小节见 `buildDiagnosticsReport(memory:)` | **真实用户机器上的绝对内存曲线**：每 60s 一条进 12 槽环形缓冲，导出报告时带出（release 可用，不依赖 DevTools / VM service） |
+| **`MemoryProbe` 内存采样**（RSS / OS 高水位**及峰值时刻** / imageCache 字节与张数与 live / **当时的账本快照** / 帧读数含**最差帧**） | `packages/spb_platform/lib/src/memory_probe.dart`；两端 `main.dart` 接线；报告小节见 `buildDiagnosticsReport(memory:)` | **真实用户机器上的绝对内存曲线**：每 60s 一条进 12 槽环形缓冲，导出报告时带出（release 可用，不依赖 DevTools / VM service） |
 | **`MemoryLedger` 内存账本**（具名读数：时间线 / 缩略图 / 气泡缓存 / 交付物清单） | `packages/spb_core/lib/src/memory_ledger.dart`；持有方（`conversation_page.dart` / `group_deliverables_panel.dart`）在 `initState` 登记、`dispose` 注销 | **回答「花在谁身上」**：曲线只能说「占了多少」，分解行才能区分引擎基线 / 图片 / 时间线 / 清单。登记必须成对，否则观测本身成了泄漏（页面测试钉住注销） |
 | **`MemoryWatchdog` 高水位日志**（边沿触发 + 30 分钟冷却，带账本分解） | `packages/spb_platform/lib/src/memory_watchdog.dart`；两端 `main.dart` 接线 | **用户不导出报告时也有证据**：imageCache ≥ 24MB / RSS 增量 ≥ 256MB / 任一账本项越线时写一条 `warn`，带 `breakdown` 与 `!` 越线标记 |
+
+### 观测补强三处（issue #99，2026-11-13）
+
+2026-11-09 那份真机报告卡住的三点，都是"报告里没有这一维"，不是"内存本身查不出"。
+三处补强都只加读数、不改任何持有方：
+
+| 缺口 | 现状（补齐前） | 补强后 | 代码 |
+|---|---|---|---|
+| 峰值无时刻 | `peak=541.0MB` 从 14:12 起一直不变，但无法判断它是否与某次操作同一时刻（`peak − 常驻 ≈ 190MB` 的解释取决于这个） | 记录"峰值变大那次采样"的时刻，该行写成 `peak=541.0MB@14:12:35`；那次采样被环形缓冲滚掉时，小节里另补一行 `峰值 541.0MB 首次观察于 14:12:35` | `memory_probe.dart` 的 `MemorySample.peakAt` / `MemoryProbe.peakObservedAt` |
+| 设置页导出时账本为空 | 账本只在**当前挂载**的持有方登记，用户在设置页导出时会话页已卸载 →「350MB 花在谁身上」查不到 | 采样时顺带留存**非空**账本快照；导出时若当前账本为空/已变，打一行 `上次账本（14:19:06）：对话页时间线=19/3.0KB \| …` | `MemoryProbe.lastLedgerSnapshot` + `diagnostics_export.dart` |
+| `fps=` 只有均值 | `fps=10.2 raster=1.9ms` 分不清「每帧 ~100ms 持续掉帧」与「卡了一次 500ms」——两者修法完全不同 | 采样行补 `max_build=312.0ms`（窗口内最差一帧）；无 timings 时仍不写（缺席 ≠ 0ms） | `frame_activity.dart` 的 `FrameActivity.worstBuildUs/worstRasterUs` |
+
+读数口径不变：`peak` 是 OS 高水位（`ProcessInfo.maxRss`）、`rss` 是工作集
+（`ProcessInfo.currentRss`）——峰值时刻只回答"何时"，不改变"是哪个口径"。
 
 ### 绝对内存曲线：从 openQuestion 降级为「只能远程采集」
 

@@ -136,6 +136,112 @@ void main() {
     });
   });
 
+  group('峰值时刻（issue #99 缺口 1）', () {
+    test('峰值变大时记录该次采样的时刻，报告行带 @hh:mm:ss', () {
+      final p = probeWith(initialPeak: 100 * 1024 * 1024);
+      p.setPeak(541 * 1024 * 1024);
+      final at = DateTime(2026, 11, 9, 14, 12, 35);
+
+      final sample = p.probe.sample(force: true, at: at);
+      expect(sample?.peakAt, at);
+      expect(p.probe.peakObservedAt, at);
+      expect(sample?.toReportLine(), contains('peak=541.0MB@14:12:35'));
+    });
+
+    test('峰值不变时保持原时刻（不重复打 @，也不被后续采样覆盖）', () {
+      final p = probeWith(initialPeak: 100 * 1024 * 1024);
+      p.setPeak(541 * 1024 * 1024);
+      final first = DateTime(2026, 11, 9, 14, 12, 35);
+      p.probe.sample(force: true, at: first);
+
+      final second = p.probe.sample(
+        force: true,
+        at: DateTime(2026, 11, 9, 14, 13, 35),
+      );
+      expect(second?.peakAt, isNull, reason: '峰值没变，这一行不带 @');
+      expect(p.probe.peakObservedAt, first, reason: '首次观察时刻不被覆盖');
+      expect(second?.toReportLine(), isNot(contains('@')));
+    });
+
+    test('峰值观察时刻滚出窗口后仍能给出（reportLines 补一行）', () {
+      final p = probeWith(capacity: 2, initialPeak: 100 * 1024 * 1024);
+      p.setPeak(541 * 1024 * 1024);
+      p.probe.sample(force: true, at: DateTime(2026, 11, 9, 14, 12, 35));
+      for (var i = 0; i < 3; i++) {
+        p.probe.sample(force: true, at: DateTime(2026, 11, 9, 14, 20 + i, 0));
+      }
+
+      final lines = p.probe.reportLines();
+      expect(
+        lines.any((l) => l.contains('峰值 541.0MB 首次观察于 14:12:35')),
+        isTrue,
+        reason: '窗口里已没有带 @ 的行，必须单独补一行，否则峰值时刻又读不出',
+      );
+    });
+  });
+
+  group('账本快照（issue #99 缺口 2）', () {
+    MemoryProbe ledgerProbe({List<MemoryLedgerEntry> Function()? readLedger}) =>
+        MemoryProbe(
+          readRss: () => 100 * 1024 * 1024,
+          readPeakRss: () => 100 * 1024 * 1024,
+          readImageCacheBytes: () => 0,
+          readImageCacheEntries: () => 0,
+          readLiveImages: () => 0,
+          readLedger: readLedger,
+        );
+
+    test('账本非空时快照随采样留存，lastLedgerSnapshot 给出最近一份', () {
+      const entry = MemoryLedgerEntry(
+        name: 'conversation.timeline',
+        label: '对话页时间线',
+        count: 19,
+        bytes: 3 * 1024,
+      );
+      final probe = ledgerProbe(readLedger: () => const [entry]);
+      final at = DateTime(2026, 11, 9, 14, 19, 6);
+      probe.sample(force: true, at: at);
+
+      final snap = probe.lastLedgerSnapshot;
+      expect(snap?.at, at);
+      expect(snap?.entries.single.name, 'conversation.timeline');
+    });
+
+    test('账本为空时不记快照（null = 那一刻没有持有方登记）', () {
+      final probe = ledgerProbe(readLedger: () => const []);
+      probe.sample(force: true);
+      expect(probe.lastLedgerSnapshot, isNull);
+      expect(probe.samples.single.ledger, isNull);
+    });
+
+    test('读数抛异常时降级为 null，不打断采样', () {
+      final probe = ledgerProbe(readLedger: () => throw StateError('boom'));
+      final sample = probe.sample(force: true);
+      expect(sample, isNotNull, reason: '账本是诊断，不是采样失败的理由');
+      expect(sample?.ledger, isNull);
+      expect(probe.lastLedgerSnapshot, isNull);
+    });
+
+    test('页面卸载后（账本转空）最近一份非空快照仍在窗口里可取', () {
+      var current = const [
+        MemoryLedgerEntry(
+          name: 'conversation.timeline',
+          label: '对话页时间线',
+          count: 19,
+          bytes: 3 * 1024,
+        ),
+      ];
+      final probe = ledgerProbe(readLedger: () => current);
+      probe.sample(force: true, at: DateTime(2026, 11, 9, 14, 19, 6));
+
+      current = const [];
+      probe.sample(force: true, at: DateTime(2026, 11, 9, 14, 26, 40));
+
+      expect(probe.samples.last.ledger, isNull, reason: '卸载后当次采样确实没有登记项');
+      expect(probe.lastLedgerSnapshot?.at, DateTime(2026, 11, 9, 14, 19, 6));
+    });
+  });
+
   group('读数失败降级', () {
     test('读数抛异常时返回 null、不入缓冲、不抛给调用方', () {
       final probe = MemoryProbe(
@@ -164,7 +270,9 @@ void main() {
       p.probe.sample(force: true, at: DateTime(2026, 11, 5, 14, 3, 11));
 
       expect(p.probe.reportLines(), [
-        '14:03:11 rss=182.4MB peak=240.0MB imageCache=12.0MB(4 张) live=1',
+        // 首条采样把峰值从 0 推到 240MB，故它带 `@`（峰值首次观察时刻）。
+        '14:03:11 rss=182.4MB peak=240.0MB@14:03:11 '
+            'imageCache=12.0MB(4 张) live=1',
       ]);
     });
 
@@ -204,9 +312,15 @@ void main() {
       }
 
       final lines = p.probe.reportLines();
-      expect(lines, hasLength(3), reason: '1 条基线 + 2 条窗口内采样');
+      // 1 条基线 + 1 条「峰值首次观察」（那次采样已被滚出窗口）+ 2 条采样。
+      expect(lines, hasLength(4), reason: '基线 + 峰值时刻补行 + 2 条窗口内采样');
       expect(lines.first, startsWith('23:13:19 rss='));
       expect(lines.first, contains('启动基线'));
+      expect(
+        lines[1],
+        contains('峰值 250.0MB 首次观察于'),
+        reason: '滚出窗口的那次采样才是峰值首次被观察到的一刻',
+      );
       expect(p.probe.baseline?.rssBytes, 100 * 1024 * 1024);
       expect(p.probe.samples.first.rssBytes, 250 * 1024 * 1024);
     });
