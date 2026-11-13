@@ -441,9 +441,9 @@ Android `<intent-filter>` 与 iOS `CFBundleURLTypes` **已注册**（
 
 | 项 | 状态 | 参考 |
 |---|---|---|
-| Android 模拟器不可用（`/dev/kvm` 未透传） | 待决策 | `super_partyb#30` |
+| Android 模拟器不可用（`/dev/kvm` 未透传） | **已决：不改宿主**，回归验证走 CI 无头构建 + 真机手测 | `super_partyb#30` |
 | Windows / macOS 出包需原生主机 | 已知限制 | `AGENTS.md` §8 |
-| iOS 出包需 Apple Developer 账号（$99/年） | 待决策 | `super_partyb#31` |
+| iOS 出包需 Apple Developer 账号（$99/年） | **已决**：macOS 走 CI 出包，iOS 暂不出包 | `super_partyb#31` |
 
 ---
 

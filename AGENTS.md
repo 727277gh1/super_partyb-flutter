@@ -182,7 +182,7 @@ spb_design / spb_models / spb_core → 无包内依赖
 | 平台 | 本机可构建 | 在哪出包 | 备注 |
 |---|---|---|---|
 | Linux | ✅ | 本地 / CI | 需 GTK 开发库 + `bundle_linux_deps.sh` |
-| Android | ✅ | 本地 / CI | **模拟器不可用**（无 `/dev/kvm`；跟踪 `super_partyb` issue #30） |
+| Android | ✅ | 本地 / CI | **模拟器不可用**（无 `/dev/kvm`），回归与验签一律走 CI，见 `super_partyb#30`（已决） |
 | Windows | ❌ | GitHub `windows-2022` | 无代码签名（运行弹 SmartScreen） |
 | macOS | ❌ | GitHub `macos-14`（**仅 tag**，10× 计费） | 未公证（首开需绕过 Gatekeeper） |
 | iOS | ❌ | 未出包 | 需 Apple Developer 账号 |
