@@ -287,6 +287,15 @@ data: <json>
 | 流式增量（message/thought） | `true` | **追加**到当前段落 |
 | 权威帧（段级完整文本） | `false` | **替换**当前段落 |
 | 状态变更通知（goal_updated 等） | `true` | 真源在业务表，事件只提示「数据过期」 |
+| 分发阶段进度（`dispatch_stage`，**默认不发**） | `true` | 首 token前的等待分段（见下） |
+
+**`dispatch_stage`（issue #86）现在是「预留 + 默认关闭」的形态**：服务端按
+`SPB_DISPATCH_EVENTS=1` 才发，默认只在日志与 `routing_selected.stages` 落库。
+事件 `payload` 只有 `{name, start_ms, end_ms, status}`（相对本轮分发起点的偏移，
+无正文、无 group/turn）——它发生在建 turn、定 group **之前**。
+客户端可以完全忽略它（未知事件类型按「保留摘要、不渲染」处理）；将来做
+「首 token前进度提示」时才需要消费：`status ∈ ok|skip|deadline|error`，
+`skip` 表示该段因预算/开关没跑，不是 0ms 跑完。
 
 **「同一 turn 全部 `message` 事件拼接即完整回复」**（`final_message` 已废弃，迁移 0010 清空历史）。归约实现见 `packages/spb_domain/lib/src/event_reducer.dart`。
 
