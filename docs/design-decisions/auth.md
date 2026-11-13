@@ -656,3 +656,35 @@ attempts 分支，`ErrHandoffTooManyAttempts` 是不可达分支。真相是：�
 （回显账号名、重复预览、已兑换 404）、客户端（`previewHandoffCode` 成功/错误
 映射）、登录页（确认框先于兑换、取消不消费、预览失败不弹框、未注入时旧行为）、
 移动端路由（不渲染粘贴导入入口）。
+
+### 6.97 Passkeys 是 IdP + 浏览器侧能力，客户端零改动（issue #82 收口，2026-11）
+
+**结论**：WebAuthn 的 ceremony 只能跑在**浏览器上下文**（或系统 passkey provider）里，
+本仓（Flutter 客户端）在推荐档位下**没有代码要做**。`spbf#82` 因此并入实现单
+[`id-provider#12`](https://git.atjog.com/dever/id-provider/issues/12) 并关闭。
+
+判据不是"谁方便"，而是绑定机制：**assertion 的签名绑在 RP ID 上，而 RP ID 由浏览器
+按页面 origin 计算**（`https://dever.atjog.com` → `rpId=dever.atjog.com`）。客户端自己
+算不出这个绑定，只能靠关联域文件让操作系统代验——因此一旦按 §6.91 的「登录一律走
+外部用户代理」执行，ceremony 天然落在 IdP 登录页上。
+
+客户端真正要付的只有**已经付过的那一项**：能打开系统浏览器、并接回 claimed HTTPS
+回调（`#77` 已交付：`assetlinks.json` 为 `handle_all_urls`、`api-gateway#12` 补了
+`/.well-known` 路由）。
+
+| 档位 | 谁实现 | 对本仓意味着什么 |
+|---|---|---|
+| ② `ASWebAuthenticationSession` / Custom Tabs 打开 IdP 登录页（**默认选它**） | IdP（登录页 + 表 + 两个 ceremony 端点） | 零改动 |
+| ① 原生（`ASAuthorization` / Credential Manager 取 assertion） | 客户端 + IdP | 需 AASA `webcredentials` / assetlinks `get_login_creds` 关联域已验证；iOS 侧卡 [`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)（Apple 付费账号）→ **现阶段不选** |
+| ③ 内嵌 WebView | — | 禁止（§6.91） |
+
+**RP ID / origin 修正**：实现单里写的 `tbcc.atjog.com` + 双栈 `tbcc6` 已过期——生产目标
+域名是 `dever.atjog.com`（`*6` 域名全线不可用，见仓库根 `AGENTS.md`），origin 只注册
+`dever.atjog.com` 一个。WebAuthn 要求安全上下文，`http://localhost` 是唯一例外
+（RP ID 只能是 `localhost`，**不能**用 IP 或内网域名替代）。
+
+**与 #94 的边界**：`#94` 的本地生物识别门禁是**客户端**能力（给已有会话解锁，§6.71），
+与 passkey 无关；`id-provider#12` 也明确写了不要拿 passkey 去"给已有 token 加锁"。
+
+**验收可做性**：验收项「桌面 + 移动各注册一枚」是人工真机项，此前卡在无真机；2026-11-13
+起 Windows 与 Android 真机均可用（`spbf#4` 因此关闭），该条不再阻塞。
