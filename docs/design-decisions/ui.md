@@ -1897,6 +1897,39 @@ works 的文案来自服务端 `status_label`（客户端不翻译），而 grou
 离屏截图使用真实 CJK 字体人工检查；真机触控与屏幕阅读器仍待现场验证。
 
 
+#### 请求成本与上限（2026-11-13 复核，issue #106）
+
+卡片上的信息**没有逐卡请求**：三类数据都来自列表页已经加载的两份响应，请求量是
+O(1) 而不是 O(卡片数)。
+
+| 卡片信息 | 来源 | 额外请求 |
+|---|---|---|
+| 待确认计数 / 顶部角标 | 列表页**一次** `GET /chat/confirmations?status=pending&limit=50`，客户端按 `group_id` 聚合并去重 | **+1**（页面级，与卡片数无关） |
+| 任务失败/阻塞摘要、当前任务名称 | `GET /chat/groups` 响应里每个 group 自带的 `current_goal`；服务端 `chat.go` 用 `loadGroupGoalSnapshots` **固定 2 次 SQL** 批量装（注释原文：避免前端对每个 group 单独请求），客户端 `GoalSnapshot.fromJson` 派生 | **0** |
+| agent 名称 | `GET /api/agents` 一次（§6.89 早有，缓存后折成同步查表） | 0 |
+
+刷新时机只有三处：进入/重新进入列表（`autoDispose` 释放后重拉）、手动刷新、
+在确认页处理完返回（使 provider 失效）。`a0c1a7c` 初版还挂过 `goalUpdatesProvider` /
+`pendingConfirmationUpdatesProvider`（`goal_updated` 与确认事件驱动的重拉通道），
+`6f8aa07` 改成快照刷新时把两条都删了——**请求更少，代价是时效性退到「下次进入列表」**，
+这是明确接受的取舍。
+
+两个上限要一起读：
+
+- **50 条窗口**：Go `global_confirmations.go` 只认 `limit`，没有 offset / 总数。满页时
+  全局角标标 `50+`、卡片标「至少 N 项」；某个 group 恰好超出窗口时**该组计数会被低估**
+  且无法察觉（只能靠标「至少」提示可能不足）。
+- **失败不当 0**：查询失败走 `pendingConfirmationsUnavailable`（可重试），不把「查不到」
+  画成「没有待确认」。
+
+#### 为什么要一个符号而不是两处 `50`
+
+请求窗口与「满页 = 可能还有更多」的判定窗口**必须是同一个数**：前者在
+`ChatApi.kConfirmationsRequestLimit`（`listConfirmations` / `listConfirmationsTyped` 的
+默认值），后者由列表页把它传给 `PendingConfirmationSummary.fromItems`。原先请求用默认
+50、判定用字面量 50，改任一处都会让「至少 N 项」静默变成谎话且不报编译错误。守卫：
+`chat_api_contract_test.dart` 断言默认请求真的带 `limit=kConfirmationsRequestLimit`。
+
 ### 6.91 对话列表刷新与 SSE 异步一致性（issue #104）
 
 三个独立缺陷会让列表与服务端状态不一致：翻页在途时刷新清空列表却被

@@ -1275,7 +1275,10 @@ final pendingConfirmationsProvider =
       }
       return ref
           .watch(chatApiProvider)
-          .listConfirmationsTyped(status: 'pending');
+          .listConfirmationsTyped(
+            status: 'pending',
+            limit: ChatApi.kConfirmationsRequestLimit,
+          );
     });
 
 // ==================== 对话流 ====================

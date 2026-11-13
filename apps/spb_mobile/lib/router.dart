@@ -540,7 +540,10 @@ class _ConversationsTab extends ConsumerWidget {
     final pendingSummary =
         pending == null || pending.isLoading || pending.hasError
         ? null
-        : PendingConfirmationSummary.fromItems(pending.requireValue, limit: 50);
+        : PendingConfirmationSummary.fromItems(
+            pending.requireValue,
+            limit: ChatApi.kConfirmationsRequestLimit,
+          );
     // 本地交付物统计快照（与桌面端同构）：未加载完/失败时给 null（文件条
     // 不显示，不阻断列表）。加载完成后 provider 发新值，本 widget 重建。
     final fileSummaries = ref.watch(groupFileSummariesProvider).value;

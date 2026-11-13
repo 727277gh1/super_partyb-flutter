@@ -1176,10 +1176,21 @@ class ChatApi {
 
   // ==================== 确认卡 ====================
 
+  /// `GET /chat/confirmations` 的请求窗口上限。
+  ///
+  /// **请求用多少条，判定「满页 = 可能还有更多」就必须用多少条**：列表页把响应
+  /// 拿去 [PendingConfirmationSummary.fromItems] 时传的就是这个符号
+  /// （`apps/*/lib/router.dart`）。两处各写一个字面量 `50` 时，任何一处改动都会让
+  /// 「至少 N 项」与「50+」静默变成谎话，且不会触发编译错误。
+  ///
+  /// 服务端侧没有 offset/总数（Go `global_confirmations.go` 只认 limit），故满页
+  /// 只能证明「这些存在」，不能证明「没有更多」。
+  static const int kConfirmationsRequestLimit = 50;
+
   /// `GET /chat/confirmations` —— 跨 group 的待确认列表。
   Future<List<Map<String, dynamic>>> listConfirmations({
     String? status,
-    int limit = 50,
+    int limit = kConfirmationsRequestLimit,
   }) async {
     final res = await _get(
       '/chat/confirmations',
@@ -1195,7 +1206,7 @@ class ChatApi {
   // 静默拿到错误值，调用方也能拿到编译期字段访问。
   Future<List<ChatConfirmation>> listConfirmationsTyped({
     String? status,
-    int limit = 50,
+    int limit = kConfirmationsRequestLimit,
   }) async {
     final raw = await listConfirmations(status: status, limit: limit);
     return raw.map(ChatConfirmation.fromJson).toList(growable: false);

@@ -28,10 +28,14 @@ import 'package:test/test.dart';
 
 /// 记录请求路径与请求体的最小真实服务器。
 class Recorder {
-  Recorder(this.server, this.paths, this.bodies);
+  Recorder(this.server, this.paths, this.bodies, this.uris);
   final HttpServer server;
   final List<String> paths;
   final List<Map<String, dynamic>> bodies;
+
+  /// 完整 URI（含 query）。断言「请求窗口」这类参数时用：`paths` 只留 path，
+  /// 拿不到 `?limit=` 到底传了什么。
+  final List<Uri> uris;
   String get baseUrl => 'http://127.0.0.1:${server.port}';
   Future<void> close() => server.close(force: true);
 }
@@ -44,8 +48,10 @@ Future<Recorder> startRecorder(
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   final paths = <String>[];
   final bodies = <Map<String, dynamic>>[];
+  final uris = <Uri>[];
   server.listen((req) async {
     paths.add(req.uri.path);
+    uris.add(req.uri);
     final raw = await utf8.decoder.bind(req).join();
     bodies.add(
       raw.isEmpty
@@ -58,7 +64,7 @@ Future<Recorder> startRecorder(
       ..write(jsonEncode(respond(req.uri.path)));
     await req.response.close();
   });
-  return Recorder(server, paths, bodies);
+  return Recorder(server, paths, bodies, uris);
 }
 
 ChatApi apiFor(Recorder r) => ChatApi(createDio(baseUrl: r.baseUrl));
@@ -160,6 +166,21 @@ void main() {
       await apiFor(rec).listConfirmations(status: 'pending', limit: 30);
 
       expect(rec.paths, ['/chat/confirmations']);
+    });
+
+    test('默认 limit 来自 kConfirmationsRequestLimit（与摘要窗口同源）', () async {
+      // 两处各写一个字面量 50 时，「至少 N 项」可能在改完一边后静默变谎话。
+      // 这条钉住「请求窗口」与「判定满页窗口」是同一个符号。
+      final rec = await startRecorder((_) => {'items': <dynamic>[]});
+      addTearDown(rec.close);
+
+      await apiFor(rec).listConfirmationsTyped(status: 'pending');
+
+      expect(
+        rec.uris.single.queryParameters['limit'],
+        '${ChatApi.kConfirmationsRequestLimit}',
+      );
+      expect(rec.uris.single.queryParameters['status'], 'pending');
     });
 
     test('解析 {items: [...]} 且返回裸 map（字段由调用方解释）', () async {

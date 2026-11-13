@@ -447,7 +447,10 @@ class _HomePage extends ConsumerWidget {
     final pendingSummary =
         pending == null || pending.isLoading || pending.hasError
         ? null
-        : PendingConfirmationSummary.fromItems(pending.requireValue, limit: 50);
+        : PendingConfirmationSummary.fromItems(
+            pending.requireValue,
+            limit: ChatApi.kConfirmationsRequestLimit,
+          );
     // 本地交付物统计快照：未加载完/失败时给空 Map（文件条不显示，不阻断列表）。
     // 加载完成后 provider 发新值，本 widget 重建，文件条自然出现。
     // 用 `.value` 而非 `watch(future)`：本页不该因快照重算而整页重建（同
