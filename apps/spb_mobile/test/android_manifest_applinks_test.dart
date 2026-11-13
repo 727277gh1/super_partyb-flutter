@@ -220,6 +220,53 @@ void main() {
     });
   });
 
+  group('AndroidManifest：XML 合法性', () {
+    late String xml;
+
+    setUp(() {
+      xml = manifest.readAsStringSync();
+    });
+
+    test('注释里不得出现两个连续的连字符（XML 不允许，gradle 整份解析失败）', () {
+      // WHY：本文件绝大部分体积是「为什么这么写」的注释，而注释里写 Markdown
+      // 表格（分隔行 `|---|`）或画横线，就出现了连续两个连字符——这在 XML
+      // 里是**硬错误**，不只是不规范：
+      //
+      //   Execution failed for task ':app:processReleaseMainManifest'
+      //   > ManifestMerger2$MergeFailureException: Error parsing AndroidManifest.xml
+      //
+      // 代价很不对称：上面的文本匹配断言全绿、`dart analyze` 全绿、`flutter
+      // test` 全绿，只有 `flutter build apk` 才会红（实测踩过一次，2026-11-13）。
+      // 故这里用一条零依赖的纯文本规则把它提前到单测（XML 解析库不在依赖里，
+      // 而这条规则恰好是本文件唯一的真实失效模式）。
+      final comments = RegExp(r'<!--([\s\S]*?)-->').allMatches(xml);
+      for (final match in comments) {
+        final body = match.group(1)!;
+        // 失败信息指向**真正的违规位置**，不是注释块开头——本文件里的注释动辄
+        // 四五十行，报「第 61 行」等于让人自己数。
+        final bad = body.indexOf('--');
+        expect(
+          body,
+          isNot(contains('--')),
+          reason:
+              '注释块内含两个连续连字符（gradle 会解析失败）：'
+              '${_lineOf(xml, match.start + 4 + (bad < 0 ? 0 : bad))}',
+        );
+      }
+    });
+
+    test('注释块成对闭合（半截注释会把后面的元素吃掉）', () {
+      final opens = RegExp(r'<!--').allMatches(xml).length;
+      final closes = RegExp(r'-->').allMatches(xml).length;
+
+      expect(
+        opens,
+        closes,
+        reason: '`<!--` 出现 $opens 次、`-->` 出现 $closes 次：有个注释块没闭合',
+      );
+    });
+  });
+
   group('iOS Info.plist', () {
     test('声明了同一 scheme（iOS 无 claimed HTTPS 前的最低要求）', () {
       expect(plist.existsSync(), isTrue, reason: '找不到 ${plist.path}');
@@ -245,3 +292,12 @@ List<String> _hostsOf(String filter) =>
         .allMatches(filter)
         .map((m) => m.group(1)!)
         .toList();
+
+/// 把字符偏移换成「第 N 行：内容」，让失败信息直接指向要改的那一行。
+///
+/// 没有它，「注释块内含两个连续连字符：<!--…-->」这种信息得靠人再去数行号。
+String _lineOf(String text, int offset) {
+  final line = '\n'.allMatches(text.substring(0, offset)).length + 1;
+  final content = text.split('\n')[line - 1].trim();
+  return '第 $line 行：$content';
+}

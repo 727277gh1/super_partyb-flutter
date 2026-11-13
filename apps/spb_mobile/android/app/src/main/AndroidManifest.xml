@@ -105,11 +105,15 @@
 
               实测状态（2026-11-13）：
 
-              | host | `/.well-known/assetlinks.json` | `/idp/…` |
-              |---|---|---|
-              | `dever.atjog.com` | 200（含本包名 + 签名指纹） | 200 |
-              | `dever-preview.atjog.com` | 404（网关把该 host 路由到 UFS 预览服务） | 404 |
-              | `dever6*` | 本机无 IPv6 出口，未验证 | — |
+              1. `dever.atjog.com`：assetlinks 200（含本包名 + 签名指纹），`/idp/…` 200；
+              2. `dever-preview.atjog.com`：assetlinks 404（网关把该 host 路由到 UFS
+                 预览服务），`/idp/…` 404；
+              3. `dever6*`：本机无 IPv6 出口，未验证。
+
+              （这里**不能写 Markdown 表格**：XML 注释里不允许出现两个连续的连字符，
+              而表格的分隔行恰好就是它们；实测会让整个 AndroidManifest.xml
+              解析失败（`processReleaseMainManifest` 报 not well-formed），
+              而 Dart 侧的静态检查完全看不出问题。故一律改用有序列表。）
 
               即现在**只有 dever.atjog.com 能真正验证通过**；其余三条是**预置**
               （服务端补齐 `/.well-known` 后无需再改 APK 即可生效，反之只影响
