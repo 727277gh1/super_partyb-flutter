@@ -831,7 +831,7 @@ API（Android Credential Manager / iOS `ASAuthorizationPlatformPublicKeyCredenti
 > iOS 侧 `apple-app-site-association` 仍是 404，且无 Apple 账号签不出
 > associated domains，故原生路径在 iOS 上**从零开始**。
 
-前置清单与分期见 id-provider#12 的后续 issue。
+前置清单与分期见 [id-provider#40](https://git.atjog.com/dever/id-provider/issues/40)（`priority/p3`、不排期）。
 
 #### 2. 分工：页面只收集意图
 

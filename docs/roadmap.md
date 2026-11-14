@@ -23,6 +23,7 @@
 ### M1+：功能实现（**大部分已完成**）
 
 - [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
+- [x] 账号安全入口（Passkey / 双因素）：设置页跳系统浏览器打开 IdP `/dashboard/security`，客户端不做 WebAuthn ceremony（见 [§6.103](design-decisions/auth.md)；原生 passkey 评估见 id-provider#40）
 - [x] 两端切账号身份与离线缓存归属失效（[issue #103](https://git.atjog.com/dever/super_partyb-flutter/issues/103)，见 [§6.90](design-decisions/auth.md)；本地修复与自动化回归）
 - [x] 对话列表刷新竞态、SSE 删除后复活及归档快照丢失（[issue #104](https://git.atjog.com/dever/super_partyb-flutter/issues/104)，见 [§6.91](design-decisions/ui.md)；本地修复与自动化回归）
 - [x] 页面可用性修复（[issue #105](https://git.atjog.com/dever/super_partyb-flutter/issues/105)）：聊天顶部操作分行、同步设置草稿离开保护、首屏同步入口、桌面表单限宽、侧栏换行与触控/语义补齐；本地自动化及离屏截图验证通过，真机待复核。登录非主路径折叠为 #98 的部分完成。
