@@ -317,6 +317,19 @@ auto_turn_count, max_auto_turns}`（唯一产出点 `chatgate/goal_gate.go`）�
 （第 2/5 轮）」，`delay_seconds` 缺失时退化为「已排入下一轮自动继续」，
 **不编造秒数**。
 
+**#123 新增字段（2026-11-14）**：`schedule_created` payload 增加布尔
+`timeout_resume`（true = 本轮是「带断点进度的超时续跑」，输入已含上一轮进度摘要，
+不是从头重来）；`goal_gate_decision` payload 在超时轮增加
+`timeout_resume` / `task_timeout_streak` / `task_timeout_max`（`source` 取
+`task_timeout`）；`goal_gate_stopped`
+的 `reason` 可能取新值 `task_timeout`（任务级超时熔断）。全部是**加法**，旧客户端
+按未知键忽略即可。
+
+**任务重试端点（#123 解封入口）**：`POST /chat/goals/:goal_id/tasks/:task_id/retry`，
+body 可选 `{"error_reason": "..."}`（人工备注）。仅 `blocked` / `error_stopped`
+任务可调（其余 409 `task_not_blocked`）；成功返回 `{task, progress}`，效果 =
+任务回 `pending` + 清 goal_gate 超时连击 + 恢复因 `task_timeout` 暂停的 gate。
+
 ⚠️ **`executor_started` / `executor_completed` / `gate_evaluated` /
 `gate_completed` / `gate_error` 是 `Diagnostic: true` 事件，设计上不进时间线**
 （`chatbus.Event.Diagnostic`）。它们默认只落库不广播（由运行时配置
