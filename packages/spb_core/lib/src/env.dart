@@ -76,6 +76,43 @@ class SpbEnv {
     defaultValue: 'http://127.0.0.1:3000/idp',
   );
 
+  /// IdP 的「账号安全」页（Passkey / 双因素认证），见 issue #12。
+  ///
+  /// ## 为什么由客户端拼这个 URL
+  ///
+  /// issuer 已是编译期常量，路径 `/dashboard/security` 是 IdP 的 Web 路由。
+  /// 为一次跳转在 discovery 文档里加一个字段，等于凭空多一个要维护的契约面；
+  /// 而两端**共用**本 getter 就不会各自硬编码路径后漂移（移动端当初把
+  /// `/api/chat` 拼错就是这么来的）。
+  ///
+  /// ## 为什么不在 App 内直接做 passkey
+  ///
+  /// 原生 ceremony 要求域名归属证明（Android `assetlinks.json` 里的签名证书
+  /// 指纹 / iOS associated domains + Apple 团队 ID），且客户端 data 的 origin
+  /// 会变成 `android:apk-key-hash:…` 这类 opaque 值、需要服务端显式放行。
+  /// 那些前提齐备之前，把用户交给浏览器是唯一能真正完成注册的路径。
+  ///
+  /// ## 尾斜杠
+  ///
+  /// [oidcIssuer] 自带 basePath（生产 `https://…/idp`）。这里容忍结尾多余的
+  /// `/`，但**不要**在调用处再补一个——`https://host/idp//dashboard` 虽然
+  /// 多数服务端能兜住，但会在浏览器地址栏留下一个丑陋的 URL。
+  ///
+  /// 返回 null = issuer 为空（把 `SPB_OIDC_ISSUER` 显式置空的自定义构建），
+  /// 调用方据此不展示入口。
+  static Uri? accountSecurityUrlFrom(String issuer) {
+    final base = issuer.trim().replaceAll(RegExp(r'/+$'), '');
+    if (base.isEmpty) return null;
+    final parsed = Uri.tryParse('$base/dashboard/security');
+    // 只接受绝对地址：相对地址会被 launchUrl/url_launcher 拒绝，拼出半截
+    // 路径的失败形态比「入口不展示」更难排查。
+    if (parsed == null || !parsed.hasScheme || parsed.host.isEmpty) return null;
+    return parsed;
+  }
+
+  /// [accountSecurityUrlFrom] 取编译期 [oidcIssuer] 的便捷入口。
+  static Uri? get accountSecurityUrl => accountSecurityUrlFrom(oidcIssuer);
+
   /// OIDC client_id。
   ///
   /// 默认空串表示「未配置」——没有普适的本地默认值，必须由构建方显式注入

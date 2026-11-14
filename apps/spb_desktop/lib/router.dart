@@ -2964,6 +2964,11 @@ class _SettingsPage extends ConsumerWidget {
       preferenceFallbackDisplayName:
           ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
+      // 账号安全（Passkey / 双因素）：交给系统浏览器，理由见
+      // `openAccountSecurityPage` 与 `SpbEnv.accountSecurityUrl` 的文档。
+      // 与 OIDC 登录共用 `openInBrowser`（三平台分派在 `spawnSystemOpen`），
+      // 不为此再引 `url_launcher`。
+      onOpenAccountSecurity: openAccountSecurityPage,
       // 诊断报告导出（issue #40）。
       //
       // ## 为什么不经过 provider

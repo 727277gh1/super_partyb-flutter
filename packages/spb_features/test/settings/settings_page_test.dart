@@ -31,6 +31,7 @@ void main() {
   _themeModeTests();
   _userPreferencesTests();
   _biometricLockTests();
+  _accountSecurityTests();
 
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
@@ -49,6 +50,7 @@ void main() {
     Future<ThemeMode> Function()? loadThemeMode,
     Future<void> Function(ThemeMode)? saveThemeMode,
     Future<DiagnosticsExportOutcome> Function()? onExportDiagnostics,
+    Future<bool> Function()? onOpenAccountSecurity,
     bool showAutoSync = false,
     bool localRootIsDefault = false,
     SettingsTab tab = SettingsTab.general,
@@ -90,6 +92,7 @@ void main() {
           loadThemeMode: loadThemeMode,
           saveThemeMode: saveThemeMode,
           onExportDiagnostics: onExportDiagnostics,
+          onOpenAccountSecurity: onOpenAccountSecurity,
           showAutoSync: showAutoSync,
           localRootIsDefault: localRootIsDefault,
           initialTab: tab,
@@ -1916,6 +1919,108 @@ void _biometricLockTests() {
         isFalse,
         reason: '落盘失败还显示「已开启」，等于骗用户手机在保护他',
       );
+    });
+  });
+}
+
+/// 「账号安全（Passkey）」入口。
+///
+/// ## 这个测试防的是什么
+///
+/// 该入口的失败全部无形：未注入却渲染 → 点了没反应；注入了却静默失败 →
+/// 用户以为浏览器坏了。passkey 是本项目唯一的无密码登录路径，找不到入口
+/// 等于功能不可用（issue #12 的客户端侧）。
+///
+/// ## 为什么不测「真的打开了浏览器」
+///
+/// 打开浏览器是平台能力（`xdg-open` / `url_launcher`），widget 测试里没有
+/// 真实浏览器。这里只验证页面契约：**只在注入时渲染、点击必定回调、失败
+/// 必定给用户可见提示**。URL 拼接由 `spb_core` 的
+/// `account_security_url_test.dart` 覆盖，两端装配由 `dart analyze` 兜住。
+void _accountSecurityTests() {
+  Future<void> pumpEntry(
+    WidgetTester tester, {
+    Future<bool> Function()? onOpen,
+  }) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          desktopInfo: DesktopIntegrationInfo.hidden,
+          onOpenAccountSecurity: onOpen,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  group('设置页：账号安全入口（Passkey）', () {
+    testWidgets('未注入时不展示（未配置 issuer 的构建）', (tester) async {
+      await pumpEntry(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-account-security')),
+        findsNothing,
+      );
+      expect(find.text('账号安全（Passkey）'), findsNothing);
+    });
+
+    testWidgets('注入后展示，并说明是跳去浏览器', (tester) async {
+      await pumpEntry(tester, onOpen: () async => true);
+
+      expect(
+        find.byKey(const ValueKey('settings-account-security')),
+        findsOneWidget,
+      );
+      expect(find.text('账号安全（Passkey）'), findsOneWidget);
+      // 文案必须提到浏览器：否则用户点完看到浏览器弹出来会以为 App 崩了。
+      expect(find.text('在浏览器中管理 Passkey 与双因素认证'), findsOneWidget);
+    });
+
+    testWidgets('点击触发回调一次', (tester) async {
+      var calls = 0;
+      await pumpEntry(
+        tester,
+        onOpen: () async {
+          calls++;
+          return true;
+        },
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-account-security')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+    });
+
+    testWidgets('打开失败时给可见提示（不静默）', (tester) async {
+      await pumpEntry(tester, onOpen: () async => false);
+
+      await tester.tap(find.byKey(const ValueKey('settings-account-security')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('无法打开浏览器，请在浏览器中手动访问账号安全页'), findsOneWidget);
+    });
+
+    testWidgets('回调抛异常也提示（不让它冒泡成红屏）', (tester) async {
+      await pumpEntry(tester, onOpen: () async => throw StateError('boom'));
+
+      await tester.tap(find.byKey(const ValueKey('settings-account-security')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('无法打开浏览器，请在浏览器中手动访问账号安全页'), findsOneWidget);
     });
   });
 }

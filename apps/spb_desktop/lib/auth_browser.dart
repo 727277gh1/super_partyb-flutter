@@ -97,3 +97,32 @@ Future<void> openInBrowser(String url) async {
     throw const PlatformError('无法在当前平台打开链接（已尝试系统默认程序）');
   }
 }
+
+/// 在系统浏览器中打开 IdP 的「账号安全」页（Passkey / 双因素认证）。
+///
+/// ## 为什么是浏览器而不是 App 内的 passkey 注册
+///
+/// passkey 的信任根是 **RP 域名**（生产 `dever.atjog.com`）。浏览器里 origin
+/// 天然就是它，ceremony 直接成立；App 内直连平台原生 API 还要求域名归属证明
+/// （Android `assetlinks.json` 的签名证书指纹、iOS associated domains + Apple
+/// 团队 ID），且 clientData 的 origin 变成 `android:apk-key-hash:…` 这类
+/// opaque 值、需要服务端逐条放行。前置齐备前这条路走不通，硬做只会得到一个
+/// 「点了没反应」的入口。追踪 issue 见 id-provider#12 的后续。
+///
+/// 失败返回 false（由设置页弹提示），不抛：本入口的失败不该冒泡成错误页。
+Future<bool> openAccountSecurityPage() async {
+  final url = SpbEnv.accountSecurityUrl;
+  if (url == null) {
+    // issuer 未配置的自定义构建：入口本不该展示，走到这里是装配层漏检。
+    SpbLog.warn('账号安全页不可用：SPB_OIDC_ISSUER 未配置');
+    return false;
+  }
+  try {
+    await openInBrowser(url.toString());
+    SpbLog.info('已在系统浏览器中打开账号安全页', {'host': url.host});
+    return true;
+  } on Object catch (e) {
+    SpbLog.warn('打开账号安全页失败', {'error': '$e'});
+    return false;
+  }
+}

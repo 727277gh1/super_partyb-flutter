@@ -226,6 +226,7 @@ class SettingsPage extends StatefulWidget {
     this.preferenceAgentOptions = const [],
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
+    this.onOpenAccountSecurity,
     this.showAutoSync = false,
     this.localRootIsDefault = false,
     this.title = '设置',
@@ -248,6 +249,28 @@ class SettingsPage extends StatefulWidget {
   /// 对话列表 AppBar 已有 4 个图标（新建/待确认/搜索/工作台），再加会拥挤。
   /// 本项是低频的「回顾」动作，放设置页更合适。
   final VoidCallback? onOpenMyTurns;
+
+  /// 在系统浏览器中打开 IdP 的「账号安全」页（Passkey / 双因素认证）。
+  ///
+  /// ## 为什么是「打开浏览器」而不是在 App 内做 passkey
+  ///
+  /// passkey 的注册必须在**凭据 RP = IdP 域名**的信任根下完成：浏览器路径下
+  /// 这件事天然成立（origin 就是 `https://dever.atjog.com`），而 App 内直连
+  /// 平台原生 API 还要求域名归属证明（Android `assetlinks.json` 的签名证书
+  /// 指纹、iOS associated domains + Apple 团队 ID）+ 服务端接受
+  /// `android:apk-key-hash:` 这类 opaque origin。那套前提的完成度见
+  /// `docs/design-decisions/` 与 id-provider#12 的后续 issue；在此之前，
+  /// 把用户交给浏览器是**唯一不会骗人**的入口。
+  ///
+  /// ## 为什么 URL 与跳转都不在本页
+  ///
+  /// 与 [onOpenMyTurns] 同一分工：页面只收集「用户想管理账号安全」这个意图。
+  /// 桌面端走 `openInBrowser`（`spawnSystemOpen`），移动端走 `url_launcher`，
+  /// 两端实现不同；URL 由 issuer 拼出，也属于装配层知识。
+  ///
+  /// 返回 false = 打开失败（页面会给出「请手动访问」提示）。
+  /// 为 null 时不展示该入口（未配置 OIDC issuer 的构建）。
+  final Future<bool> Function()? onOpenAccountSecurity;
 
   /// 桌面集成区块的展示信息（决定是否展示托盘/快捷键项）。
   ///
@@ -475,6 +498,9 @@ class _SettingsPageState extends State<SettingsPage>
   /// 保存对话框是**模态**的，用户点了之后界面不会立即回来；不置 busy 会让
   /// 用户以为没反应而再点一下，弹出第二个对话框。
   bool _exportingDiagnostics = false;
+
+  /// 正在打开账号安全页（防连点开出多个标签页）。
+  bool _openingAccountSecurity = false;
 
   String? _error;
 
@@ -740,6 +766,34 @@ class _SettingsPageState extends State<SettingsPage>
     if (message != null) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  /// 打开 IdP 账号安全页（Passkey / 双因素）。
+  ///
+  /// 失败时**必须**给用户可见的提示：这里唯一的动作就是「跳出去」，静默失败
+  /// 会让用户以为按钮坏了（浏览器没起来 / xdg-open 缺失都可能失败）。
+  Future<void> _openAccountSecurity() async {
+    final open = widget.onOpenAccountSecurity;
+    if (open == null || _openingAccountSecurity) return;
+
+    setState(() => _openingAccountSecurity = true);
+    bool ok;
+    try {
+      ok = await open();
+    } on Object catch (e) {
+      // 装配层已把失败映射成 false；能抛到这里的只有实现缺陷（如 Uri 解析
+      // 崩），页面兜底成「打开失败」，不让它冒泡成红屏。
+      SpbLog.warn('打开账号安全页失败', {'error': '$e'});
+      ok = false;
+    }
+    if (!mounted) return;
+    setState(() => _openingAccountSecurity = false);
+
+    if (!ok) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('无法打开浏览器，请在浏览器中手动访问账号安全页')));
     }
   }
 
@@ -1691,6 +1745,31 @@ class _SettingsPageState extends State<SettingsPage>
                     subtitle: const Text('清除本机登录凭证'),
                     enabled: !_signingOut,
                     onTap: _signingOut ? null : _signOut,
+                  ),
+                ),
+              ],
+              if (widget.onOpenAccountSecurity != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-account-security'),
+                    leading: const Icon(Icons.security_outlined),
+                    title: const Text('账号安全（Passkey）'),
+                    // 说明「会跳出去」：用户点完看到浏览器弹出来才不会被吓到，
+                    // 也知道回来的路（本站登录页仍在）。
+                    subtitle: const Text('在浏览器中管理 Passkey 与双因素认证'),
+                    trailing: _openingAccountSecurity
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.open_in_new, size: 18),
+                    enabled: !_openingAccountSecurity,
+                    onTap: _openingAccountSecurity
+                        ? null
+                        : _openAccountSecurity,
                   ),
                 ),
               ],

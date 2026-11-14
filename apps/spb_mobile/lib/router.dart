@@ -899,6 +899,9 @@ class _SettingsTab extends ConsumerWidget {
       preferenceFallbackDisplayName:
           ref.watch(currentUserProvider).value?.displayNameFallback ?? '',
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
+      // 账号安全（Passkey / 双因素）：交给系统浏览器，理由见
+      // `_openAccountSecurityPage` 与 `SpbEnv.accountSecurityUrl` 的文档。
+      onOpenAccountSecurity: _openAccountSecurityPage,
       // 退出登录：清凭证 → 回登录页。
       //
       // 显式跳转是「双保险」：`signOut()` 置为未登录后，路由守卫本身就会重定向
@@ -2886,6 +2889,35 @@ Future<bool> _openSnapshotSite(ArchiveSnapshot snapshot) async {
     return await launchUrl(url, mode: LaunchMode.externalApplication);
   } on Object catch (e) {
     SpbLog.warn('打开结项站点失败', {'error': '$e'});
+    return false;
+  }
+}
+
+/// 在系统浏览器中打开 IdP 的「账号安全」页（Passkey / 双因素认证）。
+///
+/// ## 为什么是浏览器而不是 App 内的 passkey 注册
+///
+/// passkey 的信任根是 **RP 域名**（生产 `dever.atjog.com`）。浏览器里 origin
+/// 天然就是它；App 内直连平台原生 API（Android Credential Manager /
+/// iOS ASAuthorization）还要求域名归属证明（`assetlinks.json` 里的签名证书
+/// 指纹、associated domains + Apple 团队 ID），且 clientData 的 origin 会变成
+/// `android:apk-key-hash:…` 这类 opaque 值、需要服务端逐条放行。前置齐备前
+/// 硬做只会得到一个「点了没反应」的入口。追踪见 id-provider#12 的后续 issue。
+///
+/// 用 `LaunchMode.externalApplication`（系统浏览器）而**不是**应用内 WebView：
+/// WebView 里没有平台认证器，passkey 的 ceremony 根本无法完成——这正是本入口
+/// 必须跳出去的原因（与 `_openSnapshotSite` 同一模式）。
+Future<bool> _openAccountSecurityPage() async {
+  final url = SpbEnv.accountSecurityUrl;
+  if (url == null) {
+    // issuer 未配置的自定义构建：入口本不该展示，走到这里是装配层漏检。
+    SpbLog.warn('账号安全页不可用：SPB_OIDC_ISSUER 未配置');
+    return false;
+  }
+  try {
+    return await launchUrl(url, mode: LaunchMode.externalApplication);
+  } on Object catch (e) {
+    SpbLog.warn('打开账号安全页失败', {'error': '$e'});
     return false;
   }
 }

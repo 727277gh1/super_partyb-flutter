@@ -798,3 +798,61 @@ Future 在 app 层持有、这里取消不了，码本身仍由服务端 TTL 吃
 - 既有「编排层回调短码」用例仍断言卡片里能读到「输入登录码」与小程序名。
 
 `spb_features` 1614 项、桌面端 266 项、移动端 191 项、`dart analyze .` 全绿。
+
+### 6.103 账号安全入口跳浏览器：客户端不做 passkey 注册（id-provider#12 客户端侧，2026-11）
+
+**结论**：设置页「账号」区新增「账号安全（Passkey）」入口，点击**用系统浏览器**
+打开 IdP 的 `/dashboard/security`；**客户端不实现** WebAuthn ceremony，也不请求
+passkey 管理 API。
+
+#### 1. 为什么是浏览器
+
+passkey 的信任根是 **RP 域名**（生产 `dever.atjog.com`）。浏览器里 `origin` 天然
+就是它，`navigator.credentials` 一次调用就能完成注册/断言。App 内直连平台原生
+API（Android Credential Manager / iOS `ASAuthorizationPlatformPublicKeyCredentialProvider`）
+则额外要求：
+
+| 前提 | Android | iOS |
+|---|---|---|
+| 域名归属证明 | `https://dever.atjog.com/.well-known/assetlinks.json`，含**签名证书 SHA-256** | `apple-app-site-association` + associated domains entitlement + **Apple 团队 ID** |
+| 客户端 data 的 origin | 变成 `android:apk-key-hash:<证书哈希>`（opaque origin），服务端必须显式放行 | 仍是 `https://dever.atjog.com`（无需改动） |
+| 其他 | 签名 key 轮换要同步 DAL 与服务端白名单 | 无 Apple 账号 → 连 entitlement 都签不出来（§8：iOS 未出包） |
+
+也就是说：原生路径的成本不在客户端代码，而在**域名归属 + 服务端 origin 白名单 +
+签名证书三方同步**，且 iOS 侧当前完全阻塞。在这些前提齐备前，硬做一个入口只会
+得到「点了没反应」。
+
+> 实测（2026-11）：`https://dever.atjog.com/.well-known/assetlinks.json` **已经存在**
+> ——那是 Android App Links（`handle_all_urls`，同一份签名证书指纹）留下的。
+> 所以 Android 侧真正缺的只有两件事：① 该文件补一条
+> `delegate_permission/common.get_web_credentials` 关系；② IdP 的 origin 白名单
+> 放行 `android:apk-key-hash:k0lD6oiYUOruZg_3KG7lUZdh5R6uCjNkKq2KwLpWeWQ`
+> （由现有指纹的 32 字节直接 base64url 得来，不需要新证书）。
+> iOS 侧 `apple-app-site-association` 仍是 404，且无 Apple 账号签不出
+> associated domains，故原生路径在 iOS 上**从零开始**。
+
+前置清单与分期见 id-provider#12 的后续 issue。
+
+#### 2. 分工：页面只收集意图
+
+`SettingsPage.onOpenAccountSecurity` 是 `Future<bool> Function()?`——页面不拼 URL、
+不碰平台能力（与 `onOpenMyTurns` 同一分工）。URL 由
+`SpbEnv.accountSecurityUrlFrom(issuer)`（`spb_core`，纯 Dart 可单测）拼出，两端
+装配层负责真正的跳转：
+
+| 端 | 实现 | 为什么 |
+|---|---|---|
+| 桌面 | `openAccountSecurityPage`（`auth_browser.dart`）→ `openInBrowser` | 与 OIDC 登录、Markdown 链接共用 `spawnSystemOpen` 三平台分派，不引 `url_launcher` |
+| 移动 | `_openAccountSecurityPage`（`router.dart`）→ `launchUrl(externalApplication)` | 移动端本就用 `url_launcher`；**必须**是外部浏览器，WebView 里没有平台认证器 |
+
+失败一律给可见提示（「无法打开浏览器，请在浏览器中手动访问账号安全页」）：这个
+入口的唯一动作就是「跳出去」，静默失败等于用户以为按钮坏了。
+
+#### 3. 验证
+
+- `packages/spb_core/test/account_security_url_test.dart`：basePath 保留、结尾斜杠
+  吃掉（不拼出 `//dashboard`）、端口、空 issuer → null、相对地址 → null；
+- `packages/spb_features/test/settings/settings_page_test.dart`：未注入不渲染 /
+  注入后展示且文案写明「在浏览器中」/ 点击触发一次 / 返回 false 与抛异常都提示；
+- `dart analyze .`、全部 `tools/check_*.sh`、`spb_features` 1619 项、桌面端 266 项、
+  移动端 193 项、四个纯 Dart 包全绿。
