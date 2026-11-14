@@ -71,7 +71,22 @@ class FakeSseClient extends SseClient {
   Stream<SseState> get states => statesController.stream;
 
   @override
-  SseState get state => SseState.connected;
+  SseState get state => currentState;
+
+  /// 当前连接状态（`recoverIfStalled` 的分支依据）。
+  ///
+  /// 真实 `SseClient` 由重连逻辑维护它；这里让用例自己拨。默认 `connected`
+  /// 保持旧行为：既有用例大都不关心这个维度。
+  SseState currentState = SseState.connected;
+
+  /// `isSilentFor` 的返回值（模拟「有/无心跳」）。
+  ///
+  /// 真实实现按「最近一次收到字节」算；这里直接给结果，让用例专注于
+  /// `recoverIfStalled` 的判定矩阵而不是造时间。
+  bool silent = false;
+
+  @override
+  bool isSilentFor(Duration threshold, {DateTime? now}) => silent;
 
   /// 推一个连接状态（测「SSE 恢复 → 触发离线队列重试」）。
   void emitState(SseState s) => statesController.add(s);

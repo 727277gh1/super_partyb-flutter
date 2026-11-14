@@ -2527,6 +2527,53 @@ class ChatStreamController {
   /// 重连（用户手动点「重试」时调用）。
   Future<void> reconnect() => _sse.resume();
 
+  /// 「回到前台时判定连接已死」的静默阈值。
+  ///
+  /// 服务端每 3s 一条心跳（`chat_stream.go` 的 `: heartbeat`），取 10s ≈ 3 个
+  /// 心跳周期：偶发一跳丢失不误判，真死了也只需 10s 就能从 zombie 状态里
+  /// 脱身。
+  static const Duration resumeSilenceThreshold = Duration(seconds: 10);
+
+  /// 应用回到前台时调用：连接若不健康则重连一次，否则空操作。
+  ///
+  /// ## 它补的是哪个缺口（issue #88 方案 C 的客户端部分）
+  ///
+  /// 移动端被系统挂起/冻结后，进程恢复时没人告诉 SSE 客户端「你可能已经断了」：
+  ///
+  /// | 恢复前的 state | 会发生什么 | 本方法的动作 |
+  /// |---|---|---|
+  /// | `failed` | 自动重连早已耗尽 `maxRetries`，**永久停手** | 重连 |
+  /// | `idle` | 连接已关（如 `close()` 后） | 重连 |
+  /// | `connected` 但静默 > [resumeSilenceThreshold] | 半开僵尸连接：既无 error 也无 onDone | 重连 |
+  /// | `connected` 且有心跳 | 健康（空闲对话也有心跳） | 空操作 |
+  /// | `connecting` / `reconnecting` | 退避机制还活着 | 空操作（交给它） |
+  ///
+  /// ## 为什么不在这里重拉 timeline
+  ///
+  /// 重连带的 cursor 会触发服务端回放；回放被截断（>500 条）时已有缺口
+  /// 探测（[_probeReplayGap]）自动整段回填。再补一次回填就是第二套语义，
+  /// 两套并存必然漂移。
+  ///
+  /// 返回是否真的发起了重连（供装配层记日志 / 测试断言）。
+  Future<bool> recoverIfStalled({DateTime? now}) async {
+    if (_disposed) return false;
+    // 从未 start（没有连接、也没有 path）：没有可恢复的东西。`resume()` 本身
+    // 也会在 `_path == null` 时早退，这里显式返回 false 避免「假装重连了」。
+    if (!isConnected) return false;
+
+    final stalled = switch (_sse.state) {
+      // 退避机制还活着，交给它——抢话只会打乱退避节奏。
+      SseState.connecting || SseState.reconnecting => false,
+      // failed：重连次数耗尽后永久停手；idle：连接已关。两者只有外部能救。
+      SseState.failed || SseState.idle => true,
+      // connected：可能是挂起后被系统静默回收的僵尸连接，看心跳。
+      SseState.connected => _sse.isSilentFor(resumeSilenceThreshold, now: now),
+    };
+    if (!stalled) return false;
+    await reconnect();
+    return true;
+  }
+
   /// 释放本控制器自己的资源。
   ///
   /// ## 不释放 [SseClient]（重要）

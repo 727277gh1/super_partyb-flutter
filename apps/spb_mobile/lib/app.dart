@@ -124,8 +124,38 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
     _lifecycleObserver = _LifecycleFocusObserver(
       onChanged: (focused) =>
           ref.read(windowFocusedProvider.notifier).set(focused),
+      onResumed: _resyncOnResume,
     );
     WidgetsBinding.instance.addObserver(_lifecycleObserver);
+  }
+
+  /// 回到前台时对一次账（issue #88 方案 C 的客户端部分）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// 移动端切后台一阵后，系统会冻结甚至杀掉进程：SSE 断掉、`ConfirmationNotifier`
+  /// 收不到那批 `confirmation_required` 事件。回到前台时若什么都不做，用户会
+  /// 看到一份**陈旧**的待确认列表，直到自己去点刷新——而确认卡恰恰是有
+  /// 时效的（服务端 10 分钟 TTL 就把它清成 expired）。
+  ///
+  /// ## 两件事，两种代价
+  ///
+  /// 1. **待确认收件箱重拉**：provider 是 `autoDispose`，无人监听时
+  ///  invalidate 只丢快照、不发请求；列表页正在看时立刻重拉。
+  /// 2. **SSE 连接自救**：只在控制器**本来就活着**时才动它。凭空 `ref.read`
+  ///  会新建一个随即被 autoDispose 丢弃的实例，白开一条连接再断掉。
+  ///
+  /// 没有做「重拉当前对话的 timeline」：重连带的 cursor 会触发服务端回放，
+  /// 回放被截断时已有缺口探测兜底（见 `ChatStreamController.recoverIfStalled`）
+  /// ——两套回填语义并存必然漂移。
+  void _resyncOnResume() {
+    ref.invalidate(pendingConfirmationsProvider);
+
+    final userId = ref.read(currentUserIdProvider).value;
+    if (userId == null || userId.isEmpty) return;
+    final controllerProvider = chatStreamControllerProvider(userId);
+    if (!ref.exists(controllerProvider)) return;
+    unawaited(ref.read(controllerProvider).recoverIfStalled());
   }
 
   @override
@@ -191,13 +221,53 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
 /// 一次多余提示），故选择「只认 resumed」= 保守地多发。
 ///
 /// 桌面端同理（`window_manager` 的 blur 也包含「被其他窗口遮挡」）。
+///
+/// ## 第二个职责：「真的从后台回来」
+///
+/// 同一份生命周期事件还是「进程被冻结过」的唯一本地信号。移动端挂起会让
+/// SSE 变僵尸、待确认列表变陈旧（issue #88 方案 C）。故「见过 `paused`/`hidden`
+/// 之后又回到 `resumed`」额外触发一次对账（[onResumed]）；`inactive → resumed`
+/// 不触发——那是没离开过应用的往返。
 class _LifecycleFocusObserver with WidgetsBindingObserver {
-  _LifecycleFocusObserver({required this.onChanged});
+  _LifecycleFocusObserver({required this.onChanged, this.onResumed});
 
   final void Function(bool focused) onChanged;
+
+  /// 从后台**真正回到前台**时调用一次（见 [didChangeAppLifecycleState]）。
+  final VoidCallback? onResumed;
+
+  /// 本次可见期内是否**真的离开过**（见过 `paused`/`hidden`/`detached`）。
+  ///
+  /// ## 为什么不能只看「上一跳是不是 paused」
+  ///
+  /// 回前台不是 `paused → resumed` 一跳，而是
+  /// `paused → hidden → inactive → resumed`——进入 [didChangeAppLifecycleState]
+  /// 时 [resumed] 的**上一层永远是 `inactive`**。用「上一层」做判据会让真机
+  /// 永远不触发（测试用完整序列才看得出来）。故记「离开过」这个事实。
+  bool _leftForeground = false;
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     onChanged(state == AppLifecycleState.resumed);
+
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _leftForeground = true;
+      case AppLifecycleState.resumed:
+        // 只有「离开过」才是对账时机。`inactive → resumed` 是没离开过应用的
+        // 往返（下拉通知中心、划一下控制中心、切到应用切换器又回来）：进程
+        // 没被冻结、连接没断过，重拉一次是纯浪费（还可能在弱网下把列表刷成
+        // 加载态）。
+        //
+        // 冷启动时 `_leftForeground` 为 false，不触发——冷启动本就有自己的
+        // 回填与建连路径。
+        if (!_leftForeground) return;
+        _leftForeground = false;
+        onResumed?.call();
+      case AppLifecycleState.inactive:
+        break;
+    }
   }
 }

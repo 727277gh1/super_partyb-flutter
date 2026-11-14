@@ -55,7 +55,11 @@ class FakeSseClient extends SseClient {
   Stream<SseState> get states => statesController.stream;
 
   @override
-  SseState get state => SseState.connected;
+  SseState get state => currentState;
+
+  /// 当前连接状态。默认 `connected` 保持既有用例行为；
+  /// 需要验证「回到前台自救」的用例把它拨到 `failed` 之类。
+  SseState currentState = SseState.connected;
 
   /// `connect` 收到的全部 path（按调用顺序）。
   final connectedPaths = <String>[];

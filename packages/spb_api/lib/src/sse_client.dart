@@ -155,6 +155,39 @@ class SseClient {
 
   SseState get state => _state;
 
+  /// 最近一次**收到字节**的时刻（含心跳注释行），null = 本次连接尚未收到任何字节。
+  ///
+  /// ## 为什么需要它：僵尸连接
+  ///
+  /// 移动端进程被系统挂起后，socket 常被平台回收而**本地收不到 error、也收不到
+  /// onDone**——[state] 会一直停在 [SseState.connected]。回到前台时若只信
+  /// `state`，这条已死的连接会被当成健康连接继续用，用户看到的是一条永远
+  /// 不更新的时间线（issue #88）。
+  ///
+  /// 服务端每 3s 发一条 `: heartbeat` 注释行（见 [_onText] 的注释行分支），
+  /// 故「超过若干个心跳周期没有收到**任何字节**」就是连接已死的可靠证据。
+  ///
+  /// ## 为什么不能只看「最近一帧」
+  ///
+  /// 心跳不是帧（`event == null`）。只看帧的话，一条**空闲但健康**的连接会
+  /// 被误判为静默——那会把「没人说话」误读成「连接断了」。
+  DateTime? _lastByteAt;
+
+  /// 最近一次收到字节的时刻（见 [_lastByteAt]）。
+  DateTime? get lastByteAt => _lastByteAt;
+
+  /// 连接是否已静默超过 [threshold]。
+  ///
+  /// 从未收到字节（刚连上 / 刚重建）时返回 `false`：此时「静默」没有判据，
+  /// 而把「还没收到任何字节」当死会让每次重连都立刻再重连一次。
+  ///
+  /// [now] 仅供测试注入，生产用 [DateTime.now]。
+  bool isSilentFor(Duration threshold, {DateTime? now}) {
+    final at = _lastByteAt;
+    if (at == null) return false;
+    return (now ?? DateTime.now()).difference(at) > threshold;
+  }
+
   /// 最后收到的事件 ID，用于断线重连的 cursor。
   String? get lastEventId => _lastEventId;
 
@@ -293,7 +326,12 @@ class SseClient {
           .startChunkedConversion(sink);
 
       _byteSub = body.stream.listen(
-        (bytes) => utf8Sink.add(bytes),
+        (bytes) {
+          // 收到任何字节（含心跳注释行）都刷新活跃时刻——它是判断连接是否
+          // 已成半开僵尸的唯一本地证据，见 [_lastByteAt]。
+          _lastByteAt = DateTime.now();
+          utf8Sink.add(bytes);
+        },
         onError: (Object e, StackTrace st) {
           SpbLog.warn('SSE 流错误', {'error': e.toString()});
           _markStreamDead();
@@ -541,6 +579,9 @@ class SseClient {
       _cancelToken!.cancel('SSE 连接重建');
     }
     _cancelToken = null;
+    // 新连接的活跃时刻从零算起：上一个连接的「刚收到字节」不能为本次连接
+    // 作证（否则重建后立刻会被判成「不静默」，僵尸连接永远判不出来）。
+    _lastByteAt = null;
     // 新连接不得携带上一个连接的不完整行（否则两段无关字节会被拼成一行）。
     _lineBuf = '';
     _pendingData.clear();

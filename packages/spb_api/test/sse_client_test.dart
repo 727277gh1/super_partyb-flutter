@@ -653,6 +653,74 @@ void main() {
     });
   });
 
+  group('活跃时刻（僵尸连接判定，issue #88）', () {
+    test('刚连接时没有判据：isSilentFor 恒 false', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(stream);
+
+      await client.connect(path: '/s');
+      await _drain();
+
+      expect(client.lastByteAt, isNull, reason: '尚未收到任何字节');
+      expect(
+        client.isSilentFor(
+          const Duration(seconds: 10),
+          now: DateTime.now().add(const Duration(hours: 1)),
+        ),
+        isFalse,
+        reason: '「还没收到字节」不是「静默」——否则每次重连都要立刻再重连',
+      );
+      await client.dispose();
+    });
+
+    test(': heartbeat 也算活跃（空闲对话的心跳是活着的唯一证据）', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(stream);
+
+      await client.connect(path: '/s');
+      await _drain();
+      stream.push(utf8.encode(': heartbeat\n\n'));
+      await _drain();
+
+      final at = client.lastByteAt;
+      expect(at, isNotNull, reason: '注释行同样刷新活跃时刻（它不走 _pushFrame）');
+      expect(
+        client.isSilentFor(
+          const Duration(seconds: 10),
+          now: at!.add(const Duration(seconds: 9)),
+        ),
+        isFalse,
+      );
+      expect(
+        client.isSilentFor(
+          const Duration(seconds: 10),
+          now: at.add(const Duration(seconds: 11)),
+        ),
+        isTrue,
+        reason: '超过阈值 = 半开僵尸连接（无 error 也无 onDone）',
+      );
+      await client.dispose();
+    });
+
+    test('重建连接后活跃时刻清零（上一跳不能为本次连接作证）', () async {
+      final stream = _ControllableAdapter();
+      final client = _client(stream);
+
+      await client.connect(path: '/s');
+      await _drain();
+      stream.push(utf8.encode('data: {}\n\n'));
+      await _drain();
+      expect(client.lastByteAt, isNotNull);
+
+      // resume 走 _teardown + _openStream：新连接从零算起，否则残留的
+      // 「刚收到字节」会让僵尸连接永远被判成「不静默」。
+      await client.resume();
+      await _drain();
+      expect(client.lastByteAt, isNull);
+      await client.dispose();
+    });
+  });
+
   group('退避与重连上限', () {
     test('退避序列为 1s, 2s, 4s, ... 且封顶 maxBackoff', () async {
       // 用极短的 maxBackoff 与 initialBackoff 使测试快速跑完，
