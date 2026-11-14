@@ -857,6 +857,13 @@ Android 需要 FCM 或厂商通道（小米/vivo 等要求应用市场上架）�
 **不需要** Apple 开发者账号，前提是 PWA 加到主屏）或厂商通道聚合，均属
 `super_partyb` / `mq-server` 侧，本仓库只提供订阅与回调的本地面。
 
+> **2026-11-15 进展**：服务端 WebPush 已落地（`super_partyb` `239e30ce`：
+> `internal/webpush` + `/api/push/*` + webapp 的 `manifest.json`/`sw.js`/设置面板，
+> 部署与 iOS 两条硬约束见该项目 `docs/push-notifications.md`）。
+> 它让 **webapp/PWA** 在后台能收到确认卡通知，但**不覆盖本仓库的 Flutter 客户端**
+> ——「App 被杀」这条仍要等 FCM/APNs（被 #83/#84 的 Apple 账号阻塞）。
+> 本节「客户端加代码突破不了」的结论不变。
+
 **可观测判据**：
 
 1. 挂起 ≥ 1 分钟后回前台 → 待确认列表发**一次** `GET /chat/confirmations`；
