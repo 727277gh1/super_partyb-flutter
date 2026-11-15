@@ -1092,9 +1092,25 @@ debug 构建沙箱较松可能不暴露，**只在正式包上现形**——与�
 
 改动这两份文件后请顺手核对本段，避免再次出现「代码已修、文档说没修」的漂移。
 
-### iOS：必须 Apple Developer 账号
+### iOS：必须 Apple Developer 账号 —— **决策 no-doing（不采购）**
 
 无法像 macOS 那样 ad-hoc 凑合——需 $99/年账号 + 签名证书 + 描述文件。
+
+**2026-11-15 定案：不采购该账号，iOS 相关能力一律 no-doing**（[`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)）。
+不是「暂缓」也不是「等哪天」：采购与否是预算决策，本仓没有它，因此下列项**不是待办**，
+不要再逐条重新论证一遍：
+
+| 被同一前提否决的项 | 兜底 |
+|---|---|
+| iOS 出包 / TestFlight / App Store 分发 | iOS 用户走 webapp（浏览器 / PWA 加主屏） |
+| Universal Links、`apple-app-site-association`、Associated Domains entitlement（#111 本体） | iOS OIDC 回调走 `partyb://oidc/callback` + IdP 落地页「打开应用」按钮 |
+| App-bound Passkeys on iOS（`webcredentials` 关联域） | passkey 只在 webapp 与 Android 提供（见 `auth.md`） |
+| Flutter 客户端远程推送（APNs） | 推送走服务端 Web Push（iOS 16.4+ 需加主屏，**不需要**账号，见 `super_partyb/docs/push-notifications.md`） |
+| Sign in with Apple（`spbf#84`） | 不引入第三方/社交登录 → App Store 4.8 不触发 |
+
+**重新评估触发条件**（出现任一才重开，届时直接以 [`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)
+的清单为实施计划）：① 需要 iOS 对外分发（TestFlight / 商店）；② 需要 AASA 关联域
+（App-bound Passkey、Universal Links 深链）；③ iOS 侧成为主要流量来源。
 
 ### CI 成本参考（镜像仓是 **public** → 分钟数不计量）
 

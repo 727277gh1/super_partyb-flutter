@@ -675,7 +675,7 @@ attempts 分支，`ErrHandoffTooManyAttempts` 是不可达分支。真相是：�
 | 档位 | 谁实现 | 对本仓意味着什么 |
 |---|---|---|
 | ② `ASWebAuthenticationSession` / Custom Tabs 打开 IdP 登录页（**默认选它**） | IdP（登录页 + 表 + 两个 ceremony 端点） | 零改动 |
-| ① 原生（`ASAuthorization` / Credential Manager 取 assertion） | 客户端 + IdP | 需 AASA `webcredentials` / assetlinks `get_login_creds` 关联域已验证；iOS 侧卡 [`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)（Apple 付费账号）→ **现阶段不选** |
+| ① 原生（`ASAuthorization` / Credential Manager 取 assertion） | 客户端 + IdP | 需 AASA `webcredentials` / assetlinks `get_login_creds` 关联域已验证；iOS 侧卡 [`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)（Apple 付费账号，已定 **no-doing**）→ **现阶段不选** |
 | ③ 内嵌 WebView | — | 禁止（§6.91） |
 
 **RP ID / origin 修正**：实现单里写的 `tbcc.atjog.com` + 双栈 `tbcc6` 已过期——生产目标
@@ -816,7 +816,7 @@ API（Android Credential Manager / iOS `ASAuthorizationPlatformPublicKeyCredenti
 |---|---|---|
 | 域名归属证明 | `https://dever.atjog.com/.well-known/assetlinks.json`，含**签名证书 SHA-256** | `apple-app-site-association` + associated domains entitlement + **Apple 团队 ID** |
 | 客户端 data 的 origin | 变成 `android:apk-key-hash:<证书哈希>`（opaque origin），服务端必须显式放行 | 仍是 `https://dever.atjog.com`（无需改动） |
-| 其他 | 签名 key 轮换要同步 DAL 与服务端白名单 | 无 Apple 账号 → 连 entitlement 都签不出来（§8：iOS 未出包） |
+| 其他 | 签名 key 轮换要同步 DAL 与服务端白名单 | 无 Apple 账号 → 连 entitlement 都签不出来（§8：iOS 未出包，已定 **no-doing**） |
 
 也就是说：原生路径的成本不在客户端代码，而在**域名归属 + 服务端 origin 白名单 +
 签名证书三方同步**，且 iOS 侧当前完全阻塞。在这些前提齐备前，硬做一个入口只会
