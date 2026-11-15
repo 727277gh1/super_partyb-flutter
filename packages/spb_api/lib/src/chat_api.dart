@@ -1665,7 +1665,23 @@ class CreateTurnResult {
 /// `POST /users/:user_id/chat/messages` 的响应（Go 侧 `SendMessageResponse`）。
 ///
 /// 服务端可能返回**新建 turn** 或**命中已有 turn**（同 request_id 幂等命中），
-/// 后者通过 [deduped] 标识。
+/// 后者通过 [deduped] 标识；还可能**什么都没建**（[deferred]，见下）。
+///
+/// ## 第三种终态：`deferred`（super_partyb#168 / 本仓库 #113）
+///
+/// 群正忙时服务端不建 turn，把输入缓冲进 `chat_inbox_messages(pending)`，
+/// 返回 **HTTP 202**：
+///
+/// ```json
+/// {"turn_id":"","group_id":"…","status":"deferred","deferred":true,
+///  "inbox_message_id":"…","agent_id":"…"}
+/// ```
+///
+/// `turn_id` 是空串**且这是确定语义**（没有 turn 可等），不是超时或降级。
+/// 续跑时服务端会为这条输入新建一轮，那个 turn 的 `user_message` 事件 payload
+/// 里带**同一个** `inbox_message_id`——这是客户端把「排队中的气泡」与「真正
+/// 开跑的那一轮」对上号的唯一可靠凭据（见 `ChatStreamController` 的
+/// `_absorbDeferredEcho`）。
 class SendMessageResult {
   const SendMessageResult({
     required this.turnId,
@@ -1673,6 +1689,8 @@ class SendMessageResult {
     required this.status,
     this.requestId,
     this.deduped = false,
+    this.deferred = false,
+    this.inboxMessageId,
     this.raw = const {},
   });
 
@@ -1688,6 +1706,19 @@ class SendMessageResult {
   /// 是否命中了已有 turn（幂等去重）。
   final bool deduped;
 
+  /// 输入被缓冲进 inbox，**没有建 turn**（群正忙，见类文档）。
+  ///
+  /// 判据是服务端显式的 `deferred: true` 或 `status == "deferred"`——不看
+  /// 「`turn_id` 是否为空」：`feedback_recorded` 同样是空 turnId 但语义完全
+  /// 不同（那是控制指令已被消费，不会有后续轮次）。
+  final bool deferred;
+
+  /// 被缓冲的那条 inbox 消息 ID（仅 [deferred] 时有值）。
+  ///
+  /// 续跑出的 `user_message` 事件 payload 里带同一个值，用于把乐观回显
+  /// 「吸收」进真正的那一轮，而不是在时间线上再冒一个气泡。
+  final String? inboxMessageId;
+
   final Map<String, dynamic> raw;
 
   factory SendMessageResult.fromJson(Map<String, dynamic> json) {
@@ -1702,6 +1733,12 @@ class SendMessageResult {
       status: (turn['status'] ?? json['status'] ?? 'queued').toString(),
       requestId: (json['request_id'] ?? turn['request_id']) as String?,
       deduped: json['deduped'] == true || json['deduplicated'] == true,
+      deferred:
+          json['deferred'] == true ||
+          (turn['status'] ?? json['status']) == 'deferred',
+      inboxMessageId: _nonEmptyStr(
+        json['inbox_message_id'] ?? json['inboxMessageId'],
+      ),
       raw: json,
     );
   }

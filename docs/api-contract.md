@@ -253,6 +253,33 @@ Go API 返回**裸 JSON**（如 `{items: [...]}`），**不是** Python 时代�
 各自照抄服务端，映射在 `spb_models` 里做。**新增端点一律 snake_case**（服务端 tag 与全仓 REST 约定）；
 `sessions/*` 两套都收是历史兼容，不是新约定——不要据此推理其他端点也收 camelCase。
 
+#### 5.3.1 `POST /users/:uid/chat/messages` 的三种终态
+
+同一个端点，服务端可能**建 turn**、**命中已有 turn**，或**什么都不建**。三者都可能是 2xx，
+客户端必须按 `status` / 布尔字段区分，不能只看「有没有 `turn_id`」：
+
+| 终态 | HTTP | 关键字段 | 客户端该做什么 |
+|---|---|---|---|
+| 新建 turn | 201 | `turn_id`、`status: "queued"` | 乐观回显转正（落 `turn_id`） |
+| 幂等命中 | 201 | 同上 + `deduped: true` | 同上（服务端已按 `(user_id, request_id)` 去重） |
+| 归属反馈回执 | 200 | `turn_id: ""`、`status: "feedback_recorded"` | 不建 turn、**不会**有后续轮次：回显保留原文但关掉「发送中」 |
+| **群忙缓冲** | **202** | `turn_id: ""`、`status: "deferred"`、`deferred: true`、`inbox_message_id` | 回显**保持「发送中」**，等续跑那一轮吸收（见下） |
+
+群忙缓冲（super_partyb#168 的服务端行为）：群正忙时输入进 `chat_inbox_messages(pending)`，
+当前 turn 终态后由服务端**逐条续跑**建轮——**缓冲 ≠ 合并**，顺序保持。
+
+续跑出来的那一轮，其 `user_message` 事件 payload 里带**同一个** `inbox_message_id`
+（真源 `chat/inbox.go` 的 `UserMessageExtra`）。客户端据此：
+
+- 把排队中的乐观回显**原位吸收**进该轮（先改成本地事件的 `turn_id`，归约再按 `turnId`
+  与权威帧合并）——否则时间线上会出现两条（去重是按 `turnId` 的，而排队中的回显没有）；
+- **不要按文本相似度对齐**：用户连发两条一样的「继续」是常态；
+- 超时（默认 10 分钟）只关「发送中」，**不删气泡、不放弃吸收**（服务端把 group 归档后
+  会把缓冲标 `superseded`，那一轮永远不会来）。
+
+实现：`spb_api` 的 `SendMessageResult.deferred` / `inboxMessageId`，
+`ChatStreamController` 的 `_trackDeferredEcho` / `_absorbDeferredEcho`。
+
 ### 5.4 SSE 事件契约
 
 **真源**：`super_partyb/apps/go-api/internal/chatbus/broker.go` 的 `Event*` 常量。

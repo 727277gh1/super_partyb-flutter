@@ -248,6 +248,31 @@ class ChatStreamController {
   /// 乐观回显 eventId 的单调计数（见 [injectLocalUserMessage] 里的碰撞说明）。
   int _echoSeq = 0;
 
+  /// 被服务端缓冲（`202 deferred`）的乐观回显，key 是 `inbox_message_id`。
+  ///
+  /// ## 为什么需要登记（issue #113）
+  ///
+  /// 群正忙时服务端**不建 turn**，把输入塞进 inbox（super_partyb#168），返回
+  /// `{"status":"deferred","turn_id":"","inbox_message_id":"…"}`。此时如果把
+  /// 回显当成普通成功转正，用户会看到「已发送」然后安静几分钟；若一直停在
+  /// 「发送中」，遇到 group 被归档（服务端标 `superseded`）就永久转圈。
+  ///
+  /// 续跑时服务端新建的那一轮，其 `user_message` 事件 payload 里带**同一个**
+  /// `inbox_message_id`——据此可以把回显「吸收」进真正的那一轮（原位替换），
+  /// 而不是在时间线上再冒一个重复气泡（去重是按 turnId 的，而回显此刻没有
+  /// turnId，不吸收必然重复）。
+  final Map<String, _DeferredEcho> _deferredEchoes = {};
+
+  /// 缓冲中的回显多久后不再显示「发送中」（issue #113）。
+  ///
+  /// 到期只改**显示状态**（pending → false），登记仍然保留：续跑帧晚到时依旧
+  /// 能吸收，不会因为等久了就变成两条气泡。
+  Duration deferredSettleTimeout = const Duration(minutes: 10);
+
+  /// 登记保留多久（超过即丢弃）。默认 6h：覆盖「一轮跑很久」的极端情况，
+  /// 又不至于让 map 无限增长。
+  Duration deferredAbsorbWindow = const Duration(hours: 6);
+
   /// 本会话最近一次**本地投递成功**的 turnId；空串 = 还没发过。
   ///
   /// 用途：对话页的兵底细条只对该 turn 显示「正在准备响应」（见
@@ -742,6 +767,10 @@ class ChatStreamController {
       t.cancel();
     }
     _staleTimers.clear();
+    for (final e in _deferredEchoes.values) {
+      e.cancel();
+    }
+    _deferredEchoes.clear();
     // 挂起的「本轮触及的 turn」随之失效：切 group / 重启后它们是旧时间线的
     // turn，若让随后的 flush 拿它们去重排计时器，会武装出无对应项的计时器。
     _pendingTouchedTurnIds = null;
@@ -2138,6 +2167,13 @@ class ChatStreamController {
       _applyUsageIncrement(event);
     }
 
+    // 缓冲消息续跑：把排队中的回显吸收进这一轮（issue #113）。
+    // 必须早于 [_appendEvent]：吸收会把回显的 turnId 换成服务端的，随后归约
+    // 按 turnId 原位合并，时间线上仍然只有一条用户消息。
+    if (event.eventType == EventTypes.userMessage) {
+      _absorbDeferredEcho(event);
+    }
+
     _appendEvent(event);
     _trimBuffer();
 
@@ -2367,6 +2403,19 @@ class ChatStreamController {
         routingMode: routingMode,
         requestId: rid,
       );
+      if (result.deferred) {
+        // 群正忙：服务端把输入缓冲进 inbox，**没有建 turn**（issue #113）。
+        // 回显保持「发送中」由 [_trackDeferredEcho] 兜住超时，等续跑那一轮的
+        // `user_message`（带同一个 inbox_message_id）来吸收。
+        _trackDeferredEcho(
+          echoId: echoId,
+          inboxMessageId: result.inboxMessageId,
+          groupId: result.groupId,
+          input: input,
+          agentId: agentId,
+        );
+        return result;
+      }
       _settleLocalEcho(echoId, result.groupId, result.turnId, input, agentId);
       return result;
     } on SpbError catch (e) {
@@ -2465,6 +2514,75 @@ class ChatStreamController {
     if (turnId.isNotEmpty) _lastSentTurnId = turnId;
     _trimBuffer();
     _emit();
+  }
+
+  /// 登记一条被服务端缓冲的乐观回显（issue #113）。
+  ///
+  /// `inboxMessageId` 缺失时**不登记**：没有关联凭据就无法把续跑帧与这条回显
+  /// 对上号，登记只会让它在窗口期内白白占着「发送中」。这种情况下按普通响应
+  /// 落地处理——先把 pending 关掉，用户至少看到一条正常气泡。
+  void _trackDeferredEcho({
+    required String echoId,
+    required String? inboxMessageId,
+    required String groupId,
+    required String input,
+    String? agentId,
+  }) {
+    if (inboxMessageId == null || inboxMessageId.isEmpty) {
+      SpbLog.warn('deferred 响应缺少 inbox_message_id，按普通响应落地', {'group': groupId});
+      _settleLocalEcho(echoId, groupId, '', input, agentId);
+      return;
+    }
+    // 同一 id 重复登记（客户端重试拿到同一 inbox 行）时先清掉旧的计时器。
+    _deferredEchoes.remove(inboxMessageId)?.cancel();
+
+    final echo = _DeferredEcho(
+      echoId: echoId,
+      groupId: groupId,
+      input: input,
+      agentId: agentId,
+    );
+    // 到期只关「发送中」：一轮跑十几分钟很正常，不能把气泡永久钉在转圈上。
+    echo.settleTimer = Timer(deferredSettleTimeout, () {
+      _settleLocalEcho(echo.echoId, echo.groupId, '', echo.input, echo.agentId);
+    });
+    echo.expireTimer = Timer(deferredAbsorbWindow, () {
+      _deferredEchoes.remove(inboxMessageId)?.cancel();
+    });
+    _deferredEchoes[inboxMessageId] = echo;
+
+    SpbLog.debug('输入已被服务端缓冲（群忙），等续跑吸收回显', {
+      'group': groupId,
+      'inbox_message_id': inboxMessageId,
+      'settle_timeout_s': deferredSettleTimeout.inSeconds,
+    });
+  }
+
+  /// 续跑的 `user_message` 到达时，把对应的排队回显吸收进这一轮（issue #113）。
+  ///
+  /// 判据是 payload 里的 `inbox_message_id`（服务端 `chat/inbox.go` 的
+  /// `UserMessageExtra` 写入），**不是文本相似度**：用户完全可以连发两条一样的
+  /// 「继续」，按文本匹配会把第二条接到第一条的气泡上。
+  void _absorbDeferredEcho(ChatEvent event) {
+    if (_deferredEchoes.isEmpty) return;
+    final inboxId = event.payload?['inbox_message_id'];
+    if (inboxId is! String || inboxId.isEmpty) return;
+    final echo = _deferredEchoes.remove(inboxId);
+    if (echo == null) return;
+    echo.cancel();
+    // 原位替换成带服务端 turnId 的版本：随后归约按 turnId 找到它并合并成一条。
+    _settleLocalEcho(
+      echo.echoId,
+      event.groupId.isEmpty ? echo.groupId : event.groupId,
+      event.turnId,
+      echo.input,
+      echo.agentId,
+    );
+    SpbLog.debug('缓冲的输入已开跑，回显被吸收进该轮', {
+      'group': event.groupId,
+      'turn': event.turnId,
+      'inbox_message_id': inboxId,
+    });
   }
 
   /// 发送失败时把乐观回显移除（避免永久停留的幽灵消息）。
@@ -2641,5 +2759,36 @@ class ChatStreamController {
     if (decoded is Map<String, dynamic>) return decoded;
     if (decoded is Map) return Map<String, dynamic>.from(decoded);
     return null;
+  }
+}
+
+/// 一条被服务端缓冲（`202 deferred`）的乐观回显（issue #113）。
+///
+/// 生命周期：`send` 收到 deferred 响应时登记 → 续跑那一轮的 `user_message`
+/// 带同一个 `inbox_message_id` 到达时吸收（原位替换成带 turnId 的版本）→
+/// 登记移除。若续跑一直不来，[settleTimer] 到点只关掉「发送中」，登记继续
+/// 保留到 [expireTimer]——晚到的续跑帧仍然能吸收，不会变成两条气泡。
+class _DeferredEcho {
+  _DeferredEcho({
+    required this.echoId,
+    required this.groupId,
+    required this.input,
+    required this.agentId,
+  });
+
+  /// 缓冲里那条乐观回显事件的 eventId。
+  final String echoId;
+  final String groupId;
+  final String input;
+  final String? agentId;
+
+  Timer? settleTimer;
+  Timer? expireTimer;
+
+  void cancel() {
+    settleTimer?.cancel();
+    settleTimer = null;
+    expireTimer?.cancel();
+    expireTimer = null;
   }
 }

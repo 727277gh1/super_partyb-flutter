@@ -652,6 +652,63 @@ void main() {
       expect(r.status, 'feedback_recorded');
     });
 
+    // 群正忙时服务端**不建 turn**，回 HTTP 202 + `deferred: true`（super_partyb#168）。
+    // 真源：`chat_stream.go` 的 `result.Deferred` 分支。
+    //
+    // 这条容易被误判成「普通成功但 turn_id 为空」：`feedback_recorded` 也是空
+    // turnId，但那是控制指令已被消费（不会有后续轮次），而 deferred 是「稍后
+    // 会开跑」。客户端必须能区分——否则前者会去等一个永不到来的 turn，后者会
+    // 把气泡提前转正成「已发送」。
+    test('deferred（群忙缓冲，202）→ deferred 为真且有 inbox_message_id', () async {
+      final rec = await startRecorder(
+        (_) => {
+          'turn_id': '',
+          'group_id': 'grp_1',
+          'status': 'deferred',
+          'deferred': true,
+          'inbox_message_id': 'inbox_7',
+          'agent_id': 'agt_1',
+        },
+        statusCode: 202,
+      );
+      addTearDown(rec.close);
+
+      final r = await apiFor(rec).sendMessage('usr_1', input: '补一句');
+
+      expect(r.deferred, isTrue);
+      expect(r.inboxMessageId, 'inbox_7', reason: '续跑帧靠它把回显对上号');
+      expect(r.turnId, isEmpty, reason: '这一刻确实没有 turn 可等');
+      expect(r.status, 'deferred');
+      expect(r.groupId, 'grp_1');
+    });
+
+    test('只有 status=deferred 而没有 deferred 布尔 → 仍判定为 buffered', () async {
+      // 容错：网关/老服务端只回 status 时不能退化成「普通成功」。
+      final rec = await startRecorder(
+        (_) => {'turn_id': '', 'group_id': 'grp_1', 'status': 'deferred'},
+        statusCode: 202,
+      );
+      addTearDown(rec.close);
+
+      final r = await apiFor(rec).sendMessage('usr_1', input: 'x');
+      expect(r.deferred, isTrue);
+      expect(r.inboxMessageId, isNull);
+    });
+
+    test('feedback_recorded 不算 deferred（同为空 turnId，语义完全不同）', () async {
+      final rec = await startRecorder(
+        (_) => {
+          'turn_id': '',
+          'group_id': 'grp_1',
+          'status': 'feedback_recorded',
+        },
+      );
+      addTearDown(rec.close);
+
+      final r = await apiFor(rec).sendMessage('usr_1', input: 'x');
+      expect(r.deferred, isFalse);
+    });
+
     test('deduped 命中已有 turn（幂等去重）', () async {
       final rec = await startRecorder(
         (_) => {
