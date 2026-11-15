@@ -295,6 +295,28 @@ class QrLoginUri {
     }
     return null;
   }
+
+  /// 相机扫到的**任意文本** → scene（认不出时返回 null）。
+  ///
+  /// ## 为什么不直接复用 [parseScene]
+  ///
+  /// 相机扫出的东西不受控：可能是本应用的登录深链，也可能是超市的付款码、
+  /// 别人的小程序码，甚至一段随手贴的文字。`Uri.parse` 对这类文本不一定
+  /// 报错（Dart 对空格、`%` 很宽容，会自己转义），但对非法端口（
+  /// `https://x:idp/qr/a`）、含空格的主机段等确实会抛 `FormatException`——
+  /// 那条异常会从相机页面一路冒到登录页的错误横幅，把「扫错了码」说成
+  /// 「程序出错」。故这里先 `Uri.tryParse` 再判断：**解析失败就是「不是我们的
+  /// 码」，不算错误**。
+  ///
+  /// 返回 null 的调用方应当给一句可操作的话（如「这不是 PartyB 的登录码」），
+  /// 而不是静默关掉相机页——用户会以为自己扫成功了。
+  static String? parseScannedText(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null) return null;
+    return parseScene(uri);
+  }
 }
 
 // ---- JSON 小工具（本文件私有；与 miniprogram_login.dart 的同名函数同语义） ----

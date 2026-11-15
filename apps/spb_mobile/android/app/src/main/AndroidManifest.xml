@@ -16,6 +16,21 @@
       溃，是 API 调用抛 SocketException / 登录无响应，排查成本高。
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!--
+      相机权限（登录页「扫一扫」）。
+
+      权限本身由 `mobile_scanner` 自己的 manifest 贡献（插件声明了 CAMERA +
+      `uses-feature required=false`），合并后的 APK 里本来就有。这里**显式再写
+      一遍**是为了让权限清单在「本应用的 manifest」里可见：这个文件是排查
+      「为什么 release 包点了没反应」时第一眼看的地方，而跨插件贡献的权限在
+      这里看不到（此前 INTERNET 就踩过同型的坑，见上方注释）。
+
+      `required=false`：没有相机的设备（部分平板/模拟器）仍应能安装并使用
+      其余功能（微信一键 / 登录码都是替代路径）；写成 required 会让 Play 与
+      部分安装器直接拒装。
+    -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <application
         android:label="spb_mobile"
         android:name="${applicationName}"

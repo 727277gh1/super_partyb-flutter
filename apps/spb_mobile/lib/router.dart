@@ -464,6 +464,17 @@ class _LoginPage extends ConsumerWidget {
         Uri.parse('weixin://'),
         mode: LaunchMode.externalApplication,
       ),
+      // 扫一扫（相机）：浏览器登录页的「App 扫码」码是
+      // `https://<host>/idp/qr/<scene>`，扫到之后与**深链**完全同路：投进
+      // `qrLoginSceneProvider`，由 `app.dart` 统一跳确认页。
+      //
+      // 同机场景用户该用上面的「微信一键」（手机扫不了自己的屏幕）；这条是
+      // 「另一台设备上的浏览器要登录本机账号」：PC 出码 → 手机扫 → 手机确认。
+      onScanQr: ref.read(qrScannerProvider).isSupported
+          ? () => ref.read(qrScannerProvider).scan(context)
+          : null,
+      onQrScanned: (scene) =>
+          ref.read(qrLoginSceneProvider.notifier).set(scene),
     );
   }
 }

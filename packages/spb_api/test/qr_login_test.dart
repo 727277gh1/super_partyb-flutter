@@ -210,4 +210,46 @@ void main() {
       expect(QrLoginUri.parseScene(Uri.parse(link)), 'a-b_c.d~e');
     });
   });
+
+  /// 相机扫到的是**任意文本**：它可能是我们的码，也可能是别的东西。
+  /// 这一组钉住「认不出 = null，不抛异常」——抛异常的代价是登录页把
+  /// 「扫错了码」显示成「程序出错」，用户据此以为产品坏了。
+  group('扫码文本解析（相机入口）', () {
+    test('两种登录深链都能从原始文本取到 scene（含前后空白）', () {
+      expect(
+        QrLoginUri.parseScannedText(
+          '  https://dever.atjog.com/idp/qr/abc123\n',
+        ),
+        'abc123',
+      );
+      expect(
+        QrLoginUri.parseScannedText('partyb://qrlogin?scene=abc123'),
+        'abc123',
+      );
+    });
+
+    test('空文本 / 纯空白 → null', () {
+      expect(QrLoginUri.parseScannedText(''), isNull);
+      expect(QrLoginUri.parseScannedText('   \n'), isNull);
+    });
+
+    test('别的产品的二维码 → null（常见形态：URL / 纯数字 / 文本）', () {
+      expect(QrLoginUri.parseScannedText('https://example.com/'), isNull);
+      expect(QrLoginUri.parseScannedText('1234567890'), isNull);
+      expect(QrLoginUri.parseScannedText('这不是一个链接'), isNull);
+      // 微信小程序码的文本形态：没有 scheme、也没有 /idp/qr/ 前缀。
+      expect(
+        QrLoginUri.parseScannedText('weixin://dl/business/?t=abc'),
+        isNull,
+      );
+    });
+
+    test('根本不成立 URI 的文本 → null（Uri.tryParse 返回 null 的形态）', () {
+      // 非法端口 / 含空格的主机段：`Uri.parse` 会抛 FormatException，
+      // `tryParse` 返回 null。相机扫到这种文本时不能让它变成异常。
+      expect(QrLoginUri.parseScannedText('https://x:idp/qr/abc'), isNull);
+      expect(QrLoginUri.parseScannedText('ht tp://a'), isNull);
+      expect(QrLoginUri.parseScannedText('::'), isNull);
+    });
+  });
 }

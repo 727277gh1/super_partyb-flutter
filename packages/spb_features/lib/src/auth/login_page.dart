@@ -48,6 +48,8 @@ class LoginPage extends StatefulWidget {
     this.onEmailSignIn,
     this.onHandoffSignIn,
     this.onHandoffPreview,
+    this.onScanQr,
+    this.onQrScanned,
     this.openWeChatHost,
     this.canOpenWeChatHost,
     this.title = '登录 Super PartyB',
@@ -160,6 +162,32 @@ class LoginPage extends StatefulWidget {
   final Future<String?> Function(String email, void Function() onSent)?
   onEmailSignIn;
 
+  /// 相机扫码登录：打开相机扫另一台设备 / 浏览器出的登录码。
+  ///
+  /// 返回扫到的**原始文本**（null = 用户取消或相机不可用）。
+  ///
+  /// ## 为什么相机要由宿主注入
+  ///
+  /// 相机是平台插件能力（`mobile_scanner` 只在 Android/iOS/macOS 有实现），而本
+  /// 页刻意**不依赖任何平台插件**（见类doc：登录动作全部由宿主注入，本页才能在
+  /// 无插件的 widget test 里完整验证）。故这里只要一个「叫开相机、返回文本」的
+  /// 回调，插件与相机界面都在 `apps/spb_mobile`（`QrScanner` / `QrScannerPage`）。
+  ///
+  /// 为 null 时不展示入口——**桌面端传 null**（`NoopQrScanner.isSupported`
+  /// 为 false）：桌面端扫自己的屏幕没有意义，它走的是短码/反向码那条路。
+  final Future<String?> Function()? onScanQr;
+
+  /// 扫到的文本被判为扫码登录后，把它交给宿主去导航（`{issuer}/qr/<scene>`）。
+  ///
+  /// ## 为什么本页不做导航
+  ///
+  /// 与「登录成功后的去向」同一条纪律（见类doc）：导航是路由层的知识，页面
+  /// 自己 `go` 会与路由守卫抢栈。宿主拿 scene 后投进 `qrLoginSceneProvider`，
+  /// 由 `app.dart` 统一跳确认页（与深链收到的 scene 完全同一段代码）。
+  ///
+  /// 为 null 时不展示扫码入口（二者必须同时提供，否则扫到了无处可去）。
+  final void Function(String scene)? onQrScanned;
+
   /// 当前认证状态（错误消息从这里读）。
   final AuthState state;
 
@@ -247,6 +275,9 @@ class _LoginPageState extends State<LoginPage> {
 
   /// 邮箱输入控制器。
   final TextEditingController _emailController = TextEditingController();
+
+  /// 是否正在打开相机（防重复点击 + 避免两次 push 出两个相机页）。
+  bool _scanBusy = false;
 
   /// 反向登录码输入控制器。
   final TextEditingController _handoffController = TextEditingController();
@@ -762,7 +793,8 @@ class _LoginPageState extends State<LoginPage> {
                               )
                             : null,
                         // 加载中禁用，避免重复发起授权（会产生多个 state）。
-                        onPressed: _busy || _wechatBusy || _emailBusy
+                        onPressed:
+                            _busy || _wechatBusy || _emailBusy || _scanBusy
                             ? null
                             : _handleSignIn,
                         icon: _busy
@@ -788,7 +820,8 @@ class _LoginPageState extends State<LoginPage> {
                           color: scheme.onSurfaceVariant,
                         ),
                       ),
-                      if (widget.onEmailSignIn != null ||
+                      if (widget.onScanQr != null ||
+                          widget.onEmailSignIn != null ||
                           widget.onHandoffSignIn != null ||
                           widget.onImportSession != null) ...[
                         const SizedBox(height: SpbSpacing.lg),
@@ -797,6 +830,7 @@ class _LoginPageState extends State<LoginPage> {
                           title: const Text('其他登录方式'),
                           subtitle: Text(
                             [
+                              if (widget.onScanQr != null) '扫一扫',
                               if (widget.onEmailSignIn != null) '邮箱',
                               if (widget.onHandoffSignIn != null) '登录码',
                               if (widget.onImportSession != null) '导入会话',
@@ -805,6 +839,8 @@ class _LoginPageState extends State<LoginPage> {
                           // 收起时保留已填写的内容和错误，再展开可继续原流程。
                           maintainState: true,
                           children: [
+                            if (widget.onScanQr != null)
+                              _buildScanSection(context),
                             if (widget.onEmailSignIn != null)
                               _buildEmailSection(context),
                             if (widget.onHandoffSignIn != null)
@@ -825,6 +861,92 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
+  /// 扫一扫区域（相机扫另一台设备 / 浏览器出的登录码）。
+  ///
+  /// ## 为什么它只出现在移动端
+  ///
+  /// 相机是手机的能力；桌面端扫自己的屏幕没有意义（那一路走短码/反向码）。
+  /// 宿主不传 [LoginPage.onScanQr] 时整块不渲染（含 ExpansionTile 里的
+  /// 「扫一扫」标签），而不是渲染一个点不动的按钮。
+  Widget _buildScanSection(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final locked = _busy || _wechatBusy || _emailBusy || _scanBusy;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        FilledButton.tonal(
+          key: const ValueKey('login-scan-button'),
+          onPressed: locked ? null : _handleScanQr,
+          child: _scanBusy
+              ? const SizedBox(
+                  width: SpbSpacing.lg,
+                  height: SpbSpacing.lg,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('扫一扫登录'),
+        ),
+        const SizedBox(height: SpbSpacing.sm),
+        Text(
+          // 扫的是**另一台设备**上的码：浏览器登录页（PC 出码、手机确认）或
+          // 另一部手机。同机场景用户该用上面的「微信一键」。
+          '用相机扫浏览器登录页上的二维码，确认后浏览器即完成登录。',
+          textAlign: TextAlign.center,
+          style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: SpbSpacing.md),
+      ],
+    );
+  }
+
+  /// 打开相机扫码，并把扫到的文本解释成登录意图。
+  ///
+  /// ## 为什么解释放在这里，而不是相机实现里
+  ///
+  /// 相机只知道「文本」，不知道什么是登录码（那是认证域的知识，住在
+  /// `spb_api` 的 `QrLoginUri`）。放在这里的好处是：相机实现只依赖插件，
+  /// 这段判断可以在无插件的 widget test 里用假回调完整驱动。
+  Future<void> _handleScanQr() async {
+    final open = widget.onScanQr;
+    final nav = widget.onQrScanned;
+    if (open == null || nav == null || _scanBusy) return;
+
+    setState(() {
+      _scanBusy = true;
+      _localError = null;
+      _errorField = null;
+    });
+
+    String? text;
+    try {
+      text = await open();
+    } catch (e) {
+      // 相机打不开（权限被拒/硬件异常）是预期内结果，但用户需要一句能行动的话。
+      SpbLog.warn('打开相机扫码时异常', {'error': e.toString()});
+      text = null;
+      if (mounted) {
+        setState(() {
+          _scanBusy = false;
+          _localError = '没能打开相机，请检查系统里的相机权限后重试';
+        });
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() => _scanBusy = false);
+    // null = 用户取消 / 相机不可用：安静回登录页，不弹错误（取消不是错误）。
+    if (text == null) return;
+
+    final scene = QrLoginUri.parseScannedText(text);
+    if (scene == null) {
+      setState(() => _localError = '这不是 PartyB 的登录码（扫到的是别的二维码）');
+      return;
+    }
+    nav(scene);
+  }
+
   /// 反向登录码区域（手机小程序出码 → 本设备输码）。
   ///
   /// 与邮箱区域一样**始终可见**：它是一条对等的登录路径，不是补救措施。
@@ -832,7 +954,8 @@ class _LoginPageState extends State<LoginPage> {
   Widget _buildHandoffSection(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final locked = _busy || _wechatBusy || _emailBusy || _handoffBusy;
+    final locked =
+        _busy || _wechatBusy || _emailBusy || _handoffBusy || _scanBusy;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -912,7 +1035,7 @@ class _LoginPageState extends State<LoginPage> {
   Widget _buildEmailSection(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final locked = _busy || _wechatBusy || _emailBusy;
+    final locked = _busy || _wechatBusy || _emailBusy || _scanBusy;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

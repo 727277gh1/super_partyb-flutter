@@ -856,3 +856,64 @@ API（Android Credential Manager / iOS `ASAuthorizationPlatformPublicKeyCredenti
   注入后展示且文案写明「在浏览器中」/ 点击触发一次 / 返回 false 与抛异常都提示；
 - `dart analyze .`、全部 `tools/check_*.sh`、`spb_features` 1619 项、桌面端 266 项、
   移动端 193 项、四个纯 Dart 包全绿。
+
+### 6.104 App 内相机扫码：「扫一扫」只扫别人的码（2026-11）
+
+**结论**：移动端登录页新增「扫一扫」入口（`login-scan-button`），相机扫到
+`{issuer}/qr/<scene>`（或 `partyb://qrlogin?scene=`）后**与深链完全同路**：投进
+`qrLoginSceneProvider`，由 `app.dart` 统一跳 `/qr-login` 确认页。桌面端不注入
+（`NoopQrScanner.isSupported == false` → 入口不渲染）。
+
+#### 1. 为什么相机是 `spb_platform` 的契约，而不是登录页里的插件调用
+
+`mobile_scanner` 只有 Android/iOS/macOS 实现，而登录页在 `spb_features` 里、
+两端共用。直接 import 插件会重演 §6.4 的老问题（分层被破坏后编译仍通过，
+「纯 Dart 可无头单测」的能力静默丢失）。故：
+
+| 层 | 放什么 |
+|---|---|
+| `spb_platform` | `QrScanner`（`isSupported` / `problem` / `scan(context)`）+ `NoopQrScanner`，**零插件** |
+| `apps/spb_mobile` | `createQrScanner()` + `MobileQrScanner` + `QrScannerPage`（整屏相机页） |
+| `apps/spb_desktop` | 不注入，默认 null（入口不出现） |
+| `spb_features` | 只调回调：`onScanQr()` 拿文本 → `QrLoginUri.parseScannedText` 判语义 → `onQrScanned(scene)` 交给路由 |
+
+`scan()` 收 `BuildContext`：相机预览必须是整屏页面，而「打开页面」只能由持有
+调用点上下文的调用方发起——实现里自己找 Navigator 就得引入全局 `navigatorKey`
+（本仓库没有，也不为这一处引）。
+
+#### 2. 为什么「解释」放在登录页，而不是相机实现里
+
+相机只产文本，不知道什么是登录码（那是认证域知识，住在 `spb_api`）。把它留在
+页面侧的好处是：**相机实现只依赖插件**，而这段判断能用假回调在无插件的 widget
+test 里完整驱动（`login_page_test.dart` 的「扫一扫」组：命中 / 自定义 scheme /
+取消 / 扫到别的码 / 抛异常 / 加载态各一条）。
+
+`parseScannedText` 用 `Uri.tryParse` 而不是 `Uri.parse`：相机扫出的东西不受控
+（付款码、别人的小程序码、随手贴的文字），`parse` 遇到非法端口会抛
+`FormatException`，那条异常冒到登录页会把「扫错了码」显示成「程序出错」。
+
+#### 3. 权限与平台
+
+- Android：`CAMERA` + `uses-feature android.hardware.camera required=false`。
+  插件自身的 manifest 已贡献同样的两行，App 的 manifest 显式再写一遍是**为了
+  `required=false` 与可见性**：没有相机的设备仍要能装（微信一键/登录码是替代
+  路径），而 release 包「点了没反应」时排查第一眼看的就是这个文件。
+- iOS：`NSCameraUsageDescription` 必须自己加——缺它相机**起不来**且没有系统
+  弹窗；用户拒绝一次后只能去系统设置里放开（`mobile_scanner` 不会二次弹）。
+- Android 侧解码用 bundled ML Kit 模型（APK 因此变大）；改成
+  `dev.steenbakker.mobile_scanner.useUnbundled=true` 可依赖 Play Services 动态
+ 下载模型，代价是没 Play Services 的设备扫不了。
+
+#### 4. 为什么扫的是「别人的码」
+
+同机场景用户扫不了自己的屏幕（那是「微信一键」的职责）。「扫一扫」的正当用途
+是**跨设备**：PC 浏览器上 `/idp/login` 的「App 扫码」tab 出码（
+`POST {issuer}/api/v1/qr-login/sessions` → `openUrl` / `deepLink` / `qrImage`），
+手机扫 → 手机（已登录）确认 → 浏览器轮询拿到 cookie。
+
+> ⚠️ 若改用**系统相机**扫同一个码，链路先经 App Links：`https://<host>/idp/qr/<scene>`
+> 要求 `/.well-known/assetlinks.json` 里的签名指纹与**实际安装的那份 APK**一致。
+> 生产该文件里是 2026-10-20 release APK 的指纹（`93:49:43:…`），而 CI 与本地出的是
+> 仓库 `debug.keystore` 签名（`10:89:AC:…`）——不匹配时落地页会先打开浏览器，
+> 再靠 `partyb://qrlogin?scene=` 兜一跳。**App 内扫码不走 App Links**，因此不受
+> 该指纹约束。

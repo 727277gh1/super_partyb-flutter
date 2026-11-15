@@ -21,6 +21,7 @@ import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
 import 'biometric_gate.dart';
+import 'qr_scanner.dart';
 import 'wechat_open_sdk.dart';
 
 /// 移动端没有桌面能力，恒为空实现。
@@ -1032,6 +1033,13 @@ final miniProgramLoginClientProvider = Provider<MiniProgramLoginClient>((ref) {
 final wechatMiniProgramLauncherProvider = Provider<WeChatMiniProgramLauncher>(
   (ref) => createWeChatMiniProgramLauncher(),
 );
+
+/// 相机扫码能力（登录页的「扫一扫」）。
+///
+/// 移动端拿到 `mobile_scanner` 的实现，桌面端是空实现（登录页据此不渲染
+/// 入口，见 `QrScanner.isSupported`）。测试里可覆盖成假实现，登录页的
+/// `onScanQr` 因此不必真的去碰相机。
+final qrScannerProvider = Provider<QrScanner>((ref) => createQrScanner());
 
 /// 「微信一键登录」动作。
 ///

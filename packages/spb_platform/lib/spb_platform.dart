@@ -28,6 +28,9 @@ library;
 ///   WeChatMiniProgramLauncher / OpenSdkMiniProgramLauncher
 ///                               —— 微信 OpenSDK 唤起小程序（issue #92，服务端
 ///                                  scheme 对个人主体不可用时的唯一通道）
+///   QrScanner / NoopQrScanner   —— 相机扫二维码（登录页「扫一扫」）。**只有
+///                                  契约**，`mobile_scanner` 的桥接与相机页面在
+///                                  `apps/spb_mobile`；桌面端注入空实现。
 ///   HostPlatform / ProcessRunner / spawnSystemOpen / spawnSystemReveal
 ///                               —— 系统「打开 / 定位」命令的三平台分派（可注入以便测试）
 ///   normalizeWindowsPath        —— explorer 只认原生分隔符：混合分隔符路径
@@ -81,6 +84,7 @@ export 'src/memory_probe.dart';
 export 'src/memory_watchdog.dart';
 export 'src/overlay_files.dart';
 export 'src/overlay_window_state.dart';
+export 'src/qr_scanner.dart';
 export 'src/session_end.dart';
 export 'src/system_open.dart';
 export 'src/tray.dart';

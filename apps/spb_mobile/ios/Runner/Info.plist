@@ -103,6 +103,14 @@
 	-->
 	<key>NSFaceIDUsageDescription</key>
 	<string>用 Face ID 解锁已登录的会话，避免重复登录。生物特征不会被上传或存储。</string>
+	<!--
+	  相机权限（登录页「扫一扫」）：`mobile_scanner` 用 AVFoundation 取景。
+	  缺这个键时 iOS 不会弹权限框，相机**直接起不来**（表现为黑屏/报错），
+	  且拒绝一次后只能去系统设置里手动放开——所以文案要说清用途：
+	  扫的是登录二维码，画面不上传、不保存。
+	-->
+	<key>NSCameraUsageDescription</key>
+	<string>扫描登录二维码，把本次登录授权给发起登录的设备。相机画面只在本机解码，不会上传或保存。</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

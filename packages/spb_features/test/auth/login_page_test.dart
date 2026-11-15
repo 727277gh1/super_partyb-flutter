@@ -32,6 +32,8 @@ void main() {
     Future<String?> Function(String code)? onHandoffSignIn,
     Future<({String? accountName, String? error})> Function(String code)?
     onHandoffPreview,
+    Future<String?> Function()? onScanQr,
+    void Function(String scene)? onQrScanned,
     Future<bool> Function()? canOpenWeChatHost,
     Future<bool> Function()? openWeChatHost,
     Size? size,
@@ -55,6 +57,8 @@ void main() {
           onEmailSignIn: onEmailSignIn,
           onHandoffSignIn: onHandoffSignIn,
           onHandoffPreview: onHandoffPreview,
+          onScanQr: onScanQr,
+          onQrScanned: onQrScanned,
           canOpenWeChatHost: canOpenWeChatHost,
           openWeChatHost: openWeChatHost,
         ),
@@ -979,6 +983,122 @@ void main() {
 
         expect(signIns, 1);
       });
+    });
+  });
+
+  group('登录页：扫一扫（相机入口）', () {
+    testWidgets('未注入 onScanQr 时不展示入口（桌面端走登录码那条路）', (tester) async {
+      await pumpLogin(tester, onSignIn: () async => null);
+
+      expect(find.byKey(const ValueKey('login-scan-button')), findsNothing);
+    });
+
+    testWidgets('扫到登录链接 → 交给路由层去确认（本页不导航）', (tester) async {
+      var scans = 0;
+      final scenes = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onScanQr: () async {
+          scans++;
+          // 相机扫出来的就是这一串字符（claimed HTTPS 形态）。
+          return 'https://dever.atjog.com/idp/qr/abc123';
+        },
+        onQrScanned: scenes.add,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-scan-button')));
+      await tester.pumpAndSettle();
+
+      expect(scans, 1);
+      expect(scenes, ['abc123']);
+      // 扫对了码不应该同时弹错误横幅。
+      expect(find.byKey(const ValueKey('login-error')), findsNothing);
+    });
+
+    testWidgets('自定义 scheme 形态也认（旧客户端兜底链接）', (tester) async {
+      final scenes = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onScanQr: () async => 'partyb://qrlogin?scene=abc123',
+        onQrScanned: scenes.add,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-scan-button')));
+      await tester.pumpAndSettle();
+
+      expect(scenes, ['abc123']);
+    });
+
+    testWidgets('用户取消（相机返回 null）→ 安静回登录页，不弹错误', (tester) async {
+      final scenes = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onScanQr: () async => null,
+        onQrScanned: scenes.add,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-scan-button')));
+      await tester.pumpAndSettle();
+
+      // 取消不是错误：这里出现横幅才是缺陷（用户会以为扫失败了）。
+      expect(find.byKey(const ValueKey('login-error')), findsNothing);
+      expect(scenes, isEmpty);
+    });
+
+    testWidgets('扫到别的二维码 → 给出可操作的文案，而不是静默关闭', (tester) async {
+      final scenes = <String>[];
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onScanQr: () async => 'https://example.com/product/42',
+        onQrScanned: scenes.add,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-scan-button')));
+      await tester.pumpAndSettle();
+
+      expect(scenes, isEmpty);
+      expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
+      expect(find.textContaining('不是 PartyB 的登录码'), findsOneWidget);
+    });
+
+    testWidgets('相机打不开（抛异常）→ 提示检查权限', (tester) async {
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onScanQr: () async => throw StateError('camera unavailable'),
+        onQrScanned: (_) {},
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-scan-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('没能打开相机'), findsOneWidget);
+    });
+
+    testWidgets('相机开着时按钮进加载态且禁用（防重复打开两个相机页）', (tester) async {
+      final gate = Completer<String?>();
+      await pumpLogin(
+        tester,
+        onSignIn: () async => null,
+        onScanQr: () => gate.future,
+        onQrScanned: (_) {},
+      );
+
+      await tester.tap(find.byKey(const ValueKey('login-scan-button')));
+      await tester.pump();
+
+      final button = tester.widget<ButtonStyleButton>(
+        find.byKey(const ValueKey('login-scan-button')),
+      );
+      expect(button.onPressed, isNull);
+
+      // 收尾：取消掉挂起的 future，避免测试结束时留下未完成的异步。
+      gate.complete(null);
+      await tester.pumpAndSettle();
     });
   });
 

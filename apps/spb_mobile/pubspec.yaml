@@ -69,6 +69,7 @@ dependencies:
   # 平台侧两个必需配置：Android `MainActivity` 继承 `FlutterFragmentActivity`；
   # iOS Info.plist 声明 `NSFaceIDUsageDescription`。
   local_auth: ^3.0.2
+  mobile_scanner: ^7.5.0
 
 dev_dependencies:
   flutter_test:
