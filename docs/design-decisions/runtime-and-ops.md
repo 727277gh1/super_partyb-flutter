@@ -823,9 +823,7 @@ Go API 无 `/chat/unread`、无 `unread` 字段），可用数据只有按 group
 本仓库里 OS 通知的触发源是 `ConfirmationNotifier`，它由对话页 SSE 事件驱动
 （§6.99）——进程不在就没有 SSE，也就没有通知。这条边界**客户端无法靠加代码突破**：
 Android 需要 FCM 或厂商通道（小米/vivo 等要求应用市场上架）、iOS 需要 APNs
-（被 Apple 付费账号阻塞 —— 该前提已定 **no-doing**，见 `build-and-release.md` §iOS 与
-[`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)；
-`#83`/`#84` 是**第三方登录**的决策记录，与推送无关）。
+（当前被 Apple 开发者账号阻塞，#83/#84）。
 
 **已实现（issue #88 方案 C 的客户端半边）**：切后台再回来时对一次账，解决
 "回到前台看到陈旧列表"这个可观测症状：
@@ -863,8 +861,7 @@ Android 需要 FCM 或厂商通道（小米/vivo 等要求应用市场上架）�
 > `internal/webpush` + `/api/push/*` + webapp 的 `manifest.json`/`sw.js`/设置面板，
 > 部署与 iOS 两条硬约束见该项目 `docs/push-notifications.md`）。
 > 它让 **webapp/PWA** 在后台能收到确认卡通知，但**不覆盖本仓库的 Flutter 客户端**
-> ——Flutter 端的「App 被杀」在 iOS 上**已定 no-doing**（APNs 需 Apple 付费账号，
-> 见 `build-and-release.md` §iOS），Android 需 FCM/厂商通道且未排期。
+> ——「App 被杀」这条仍要等 FCM/APNs（被 #83/#84 的 Apple 账号阻塞）。
 > 本节「客户端加代码突破不了」的结论不变。
 
 **可观测判据**：
