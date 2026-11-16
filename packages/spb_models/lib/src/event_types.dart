@@ -50,6 +50,44 @@ class EventTypes {
   /// 两者都需把 UI 上的确认卡置为不可交互，否则用户会对着一张早已失效的卡点下去。
   static const confirmationExpired = 'confirmation_expired';
 
+  // ---- 分发阶段进度（首 token 之前）----
+
+  /// 「建 turn 之前」的分发阶段进度（`chatbus/broker.go` 的 `EventDispatchStage`）。
+  ///
+  /// 填补的正是客户端唯一的黑屏窗口：用户按下发送 → 收到该 turn 首个事件
+  /// 之间（实测中位 3~28ms，长尾可达 3.7s）。分类 / 向量编码 / 入队都发生在
+  /// **建 turn、定 group 之前**，所以这条事件**没有 turn、没有 group**，
+  /// 也不能落库（`chat_events.turn_id` NOT NULL）。
+  ///
+  /// ## 归因只能靠 `request_id`
+  ///
+  /// 它是 **Transient** + user 级广播：同一用户的其他设备、小程序 BFF、
+  /// quick capture 的分发帧都会到达同一条 SSE 连接。区分「是不是本端这条消息」
+  /// 的唯一依据是 payload 里的 `request_id`（= 客户端 `send()` 生成的幂等键，
+  /// 与服务端 `req.RequestID`、`DispatchStageTracker` 的键一致）。
+  ///
+  /// ## 不是时间线正文
+  ///
+  /// 与 [turnActivity] 同族：**不进 [timelineVisible]**，走侧通道，供 composer
+  /// 上方的进度条。它不落库、断线不回放，故**不能当权威状态**（重连后必须
+  /// 按本地计时降级，等 timeline 纠正）。
+  ///
+  /// ## 契约（`phase` 区分开始与收尾，见 super_partyb#181）
+  ///
+  /// - 段开始：`{phase:"start", request_id, name, start_ms, budget_ms}`
+  /// - 段结束：`{phase:"end", …, end_ms, status, reason}`
+  /// - root 帧（`name="dispatch"`）：开始带预算，收尾带
+  ///   `{elapsed_ms, unattributed_ms, critical, dropped}`
+  ///
+  /// 段名闭集真源 Go `chatpipeline/pipeline_stages.go`（含父子路径
+  /// `parent/child`，如 `router.query_encode/embedding.encode`）；**未知段名
+  /// 必须兜底渲染**，服务端新增段不能让 UI 空转。
+  ///
+  /// 服务端**默认不发**（`SPB_DISPATCH_EVENTS` 默认 false），未开启时本类型
+  /// 只用于让 [ChatEvent.isKnown] 不误判（否则每帧都落一条「未知事件类型」
+  /// debug 日志）。
+  static const dispatchStage = 'dispatch_stage';
+
   // ---- Turn 生命周期与 gate 诊断 ----
   static const executorStarted = 'executor_started';
   static const executorCompleted = 'executor_completed';
@@ -245,6 +283,7 @@ class EventTypes {
     ttsFailed,
     retryScheduled,
     followUpSuggested,
+    dispatchStage,
     queueState,
     routingFeedback,
     routingFeedbackRequest,

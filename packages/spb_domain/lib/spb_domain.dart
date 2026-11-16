@@ -55,6 +55,8 @@ library;
 //   GateDecision / GateDecisionKind / GateSourceKind —— Gate 决策（adaptive_decision / goal_gate_decision 归约输出，独立于时间线）
 //   collectGateDecisions / gateDecisionFrom —— 事件流 → Gate 决策列表（纯函数）
 //   TurnActivitySnapshot          —— 执行中活动快照（turn_activity 归约输出，空窗期进度指示）
+//   DispatchStageTracker / DispatchStageProgress —— 分发阶段进度（dispatch_stage 归约输出，
+//                                    「按下发送 → 首 token」的等待期进度；按 request_id 归因）
 //   ContextUsage / ContextCost    —— 上下文用量与费用（context_update 归约输出，诊断区展示）
 //   ExecutionStatus / Kind        —— 执行等待/重试状态（queue_state / retry_scheduled 归约输出）
 //   TtsStatus / TtsPhase          —— 语音播报状态（tts_started / tts_completed / tts_failed 归约输出）
@@ -126,6 +128,7 @@ export 'src/tool_call_batch.dart';
 export 'src/tts_audio_path.dart';
 export 'src/tts_status.dart';
 export 'src/turn_activity.dart';
+export 'src/dispatch_stage.dart';
 export 'src/turn_anchor.dart';
 export 'src/turn_detail.dart';
 export 'src/turn_group.dart';

@@ -493,6 +493,99 @@ class ChatEvent {
       ? _intField('since_last_event_ms')
       : null;
 
+  // ---------- dispatch_stage 访问器（首 token 之前的分发进度） ----------
+  //
+  // 真源 Go `cmd/server/main.go` 的 `StageFunc` / `SummaryFunc` 闭包（见
+  // super_partyb#181）。payload 两种形态（同一事件类型，用 `phase` 区分）：
+  //
+  // - 段：`{phase, request_id, name, start_ms, budget_ms[, end_ms, status, reason]}`
+  // - root（`name="dispatch"`）收尾：另带
+  //   `{elapsed_ms, unattributed_ms, critical, dropped}`
+  //
+  // ⚠️ **全部按 eventType 门禁**（同 turn_activity 的理由，见上一节）：`name`
+  // / `status` / `reason` / `request_id` 都是极通用的键名，不加门禁时任何
+  // 恰好带同名键的事件都会被误读成分发进度（例如 `tool_result` 的 `status`
+  // 会被读成「本段已结束」）。
+  //
+  // ⚠️ 本类型是 **Transient**（不落库、无 globalSeq、断线不回放），故这些
+  // 访问器只服务「实时进度」。**不要**拿它们去判定服务端是否卡死或补历史。
+
+  /// 阶段（`dispatch_stage`）：`start` / `end`。
+  ///
+  /// 缺失或未知值返回 null，**不猜**：服务端新增 phase 时宁可少显示一条进度，
+  /// 也不要把它错配成 start/end（错了会把「未开始的段」当成「已结束」）。
+  String? get dispatchPhase =>
+      eventType == EventTypes.dispatchStage ? _str('phase') : null;
+
+  /// 客户端幂等键（`request_id`）——**归因的唯一依据**。
+  ///
+  /// 事件不带 group、不带 turn（分发发生在建 turn、定 group **之前**），而
+  /// SSE 是 user 级广播：同一用户的其他设备 / 小程序 BFF / quick capture / habit
+  /// 的分发帧都会到同一条连接。只有把它与本端 `send()` 生成的那个 rid 比对，
+  /// 才能回答「这一帧是不是我刚发的那条消息」。
+  String? get dispatchRequestId =>
+      eventType == EventTypes.dispatchStage ? _str('request_id') : null;
+
+  /// 段名（`name`）。闭集真源 Go `chatpipeline/pipeline_stages.go`，含父子
+  /// 路径 `parent/child`（如 `router.query_encode/embedding.encode`）。
+  /// **未知段名必须兜底渲染**（服务端新增段不能让 UI 空转）。
+  String? get dispatchStageName =>
+      eventType == EventTypes.dispatchStage ? _str('name') : null;
+
+  /// 相对本次分发起点的开始偏移（毫秒）。
+  ///
+  /// 只用于**同一请求内的相对排序**（谁先谁后、并发段是否重叠），
+  /// **不要**拿它算「已等待多久」——那是本地计时器的职责（服务端偏移
+  /// 与客户端时钟不同源，重连/时钟漂移时两者必然不一致）。
+  int? get dispatchStartMs =>
+      eventType == EventTypes.dispatchStage ? _intField('start_ms') : null;
+
+  /// 段结束偏移（毫秒）；`phase=start` 帧没有该键 → null。
+  int? get dispatchEndMs =>
+      eventType == EventTypes.dispatchStage ? _intField('end_ms') : null;
+
+  /// 本段**实际生效**的预算（毫秒）。
+  ///
+  /// 是生效值不是声明值：Go `dispatch.effectiveBudgetMS` 把「开始时父段剩余」
+  /// 折算进去了，故可直接用于「已用 / 预算」展示，无需客户端再推算。
+  int? get dispatchBudgetMs =>
+      eventType == EventTypes.dispatchStage ? _intField('budget_ms') : null;
+
+  /// 段终态：`ok` / `skip` / `deadline` / `error`。`phase=start` 帧为 null。
+  ///
+  /// **原样返回 String 而不归一成枚举**：它是展示字段（并且未知值要 fail-open）。
+  /// 需要 `switch` 的消费方用领域层的 `DispatchStageStatus.fromWire`。
+  String? get dispatchStatus =>
+      eventType == EventTypes.dispatchStage ? _str('status') : null;
+
+  /// 终态原因（`skip` 的 `cache_hit` / `budget_low` / `encoder_unavailable` 等）。
+  ///
+  /// null ≠ ok：Go 侧是 `omitempty`，`ok` 段通常没有这个键。
+  String? get dispatchReason =>
+      eventType == EventTypes.dispatchStage ? _str('reason') : null;
+
+  /// root 收尾帧的总耗时（`elapsed_ms`，仅 `phase=end & name=dispatch`）。
+  ///
+  /// 这是「整次分发花了多久」的唯一实时来源（日志里也有一条，但客户端够不到）。
+  int? get dispatchElapsedMs =>
+      eventType == EventTypes.dispatchStage ? _intField('elapsed_ms') : null;
+
+  /// root 收尾帧的**未归因时长**（`unattributed_ms`：父墙钟 − 直属子段并集）。
+  ///
+  /// >0 表示「有等待没被任何段记账」——issue #86 那个 30s 盲窗的形态。
+  /// 实测生产值可达 3147ms，是「用户明明等了 3 秒却看不出在干什么」的证据。
+  int? get dispatchUnattributedMs => eventType == EventTypes.dispatchStage
+      ? _intField('unattributed_ms')
+      : null;
+
+  /// root 收尾帧的关键路径段名（`critical`：结束得最晚的直属子段）。
+  String? get dispatchCriticalStage =>
+      eventType == EventTypes.dispatchStage ? _str('critical') : null;
+
+  /// root 收尾帧被丢弃的子段条数（`dropped`：超出 `MaxRecords=128` 的部分）。
+  int? get dispatchDropped =>
+      eventType == EventTypes.dispatchStage ? _intField('dropped') : null;
+
   // ---------- context_update 访问器 ----------
   //
   // ⚠️ 只做「按类型门禁 + 原样给出 payload」，**不在本层解析**成领域对象：
