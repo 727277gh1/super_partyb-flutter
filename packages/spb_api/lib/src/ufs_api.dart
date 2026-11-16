@@ -84,6 +84,119 @@ class UfsApi {
     return UfsFileEntry.fromJson(_asMap(res));
   }
 
+  /// `POST /api/files/{file_id}/preview-sessions`
+  ///
+  /// 签发一次性预览 ticket，返回**浏览器可直接打开、无需登录**的入口地址。
+  ///
+  /// ## 为什么必须走这条而不是拼 `preview.html?file_id=`
+  ///
+  /// 旧预览页（`/ufs/preview.html?file_id=…`）在网关认证之后，而系统浏览器
+  /// 里是**另一套会话**（host-only `idp_access_token` cookie，见
+  /// `docs/api-contract.md` §5.2）：App 里已登录 ≠ 浏览器里已登录，用户点一次
+  /// 预览就被要求再登一次。ticket 用 App 自己的凭证换取匿名入口，浏览器只
+  /// 需兑换一次（壳页 → `POST /preview/redeem` → host-only session cookie，
+  /// `Path=/preview/s/{id}/`）。
+  ///
+  /// ## 只有 HTML/XHTML/SVG 会签发（415 = 正常业务结果）
+  ///
+  /// 服务端 `isPreviewableHTMLMime` 只放行这三类主动内容（`internal/service/
+  /// preview_session.go:535`），其余一律 **415 + 「仅支持 HTML/SVG 文件预览」**。
+  /// 图片/文本在客户端内联渲染，不需要 ticket；PDF 等仍走旧预览页，故 415
+  /// **不是错误**，调用方应回落而不是给用户报失败。
+  ///
+  /// 入口地址来自响应 `url`（服务端按 `PREVIEW_PUBLIC_BASE_URL` 拼装），
+  /// 客户端**不得**自行拼接：预览域的 host 是部署知识。
+  ///
+  /// ## ticket 只有 2 分钟（默认 `PREVIEW_TICKET_TTL=2m`）
+  ///
+  /// 必须在**点击瞬间**创建并立即打开；不要缓存 `url`，也不要持久化
+  /// [UfsPreviewSession]——过期后浏览器打开只会看到「预览链接无效或已失效」。
+  Future<UfsPreviewSession> createPreviewSession(String fileId) async {
+    try {
+      final res = await _dio.post<dynamic>(
+        '/api/files/$fileId/preview-sessions',
+      );
+      final body = _asMap(_unwrap(res));
+      final url = body['url'];
+      final expiresAt = body['expires_at'];
+      if (url is! String || url.isEmpty || expiresAt is! String) {
+        throw ParseError(
+          '预览会话响应结构不符（缺 url / expires_at）',
+          raw: _bodyPreview(body),
+        );
+      }
+      final parsed = DateTime.tryParse(expiresAt);
+      if (parsed == null) {
+        throw ParseError('预览会话 expires_at 不是 RFC3339 时间', raw: expiresAt);
+      }
+      return UfsPreviewSession(url: url, expiresAt: parsed.toUtc());
+    } on DioException catch (e) {
+      throw _toSpbError(e);
+    }
+  }
+
+  /// `POST /api/files/{file_id}/media-access`
+  ///
+  /// 铸「免认证的短期媒体 URL」，供**浏览器 / 系统播放器**直接读取（它们带不了
+  /// `Authorization`，这正是本端点存在的理由——与 [createPreviewSession] 同一类
+  /// 「换一份能带走、会过期、不能长期复用」的能力）。
+  ///
+  /// ## 只覆盖图片 / 音视频 / PDF
+  ///
+  /// 服务端 `isMediaMime` 放行 png/jpeg/gif/webp/bmp、`video/*`、`audio/*` 与
+  /// `application/pdf`；其余（Office / 压缩包）返回 **415**「该文件类型不支持
+  /// 媒体访问」。判据在领域层 [resolveExternalPreviewChannel]，调用方应先按它
+  /// 分派，别把 Office 文档送到这里。
+  ///
+  /// ## 需要「交互式会话」（service/agent 上下文会被 403）
+  ///
+  /// UFS 只给真人在操作的会话铸免认证 URL（`middleware.IsInteractiveContext`，
+  /// super_partyb#162）：网关注入的 `X-Auth-Context: interactive` 由用户的
+  /// OIDC 令牌决定，API Key / agent / 服务间调用一律 `service` → **403**
+  /// 「创建媒体签名链接需要交互式会话」。客户端是用户令牌，天然 interactive。
+  ///
+  /// ## 有效期来自服务端（`UFS_MEDIA_TTL`，123 上是 30m）
+  ///
+  /// 同 [createPreviewSession]：**不要缓存** [UfsMediaAccess]；过期后浏览器拿到
+  /// 的是 404「媒体资源不存在或已失效」。
+  Future<UfsMediaAccess> createMediaAccess(
+    String fileId, {
+    String variant = 'original',
+    int? size,
+  }) async {
+    try {
+      final res = await _dio.post<dynamic>(
+        '/api/files/$fileId/media-access',
+        data: {'variant': variant, if (size != null) 'size': size},
+      );
+      final body = _asMap(_unwrap(res));
+      final url = body['url'];
+      final expiresAt = body['expires_at'];
+      if (url is! String || url.isEmpty || expiresAt is! String) {
+        throw ParseError(
+          '媒体签名响应结构不符（缺 url / expires_at）',
+          raw: _bodyPreview(body),
+        );
+      }
+      final parsed = DateTime.tryParse(expiresAt);
+      if (parsed == null) {
+        throw ParseError('媒体签名 expires_at 不是 RFC3339 时间', raw: expiresAt);
+      }
+      return UfsMediaAccess(
+        url: url,
+        expiresAt: parsed.toUtc(),
+        variant: body['variant'] is String
+            ? body['variant'] as String
+            : variant,
+        contentType: body['content_type'] is String
+            ? body['content_type'] as String
+            : null,
+      );
+    } on DioException catch (e) {
+      throw _toSpbError(e);
+    }
+  }
+
   /// `GET /api/files/{file_id}/download`
   ///
   /// ## 用 [ifNoneMatch] 做条件下载
@@ -255,6 +368,57 @@ class UfsApi {
     if (v is Map) return Map<String, dynamic>.from(v);
     return const {};
   }
+}
+
+/// 短期媒体签名 URL（[UfsApi.createMediaAccess] 的返回）。
+///
+/// 服务端形状是 `MediaAccessRoute`（`internal/service/media_access.go`）：
+/// `{url, expires_at, variant, size?, content_type?}`。
+///
+/// 同样**不缓存**：URL 里是短期 HMAC bearer，过期即 404。
+class UfsMediaAccess {
+  const UfsMediaAccess({
+    required this.url,
+    required this.expiresAt,
+    required this.variant,
+    this.contentType,
+  });
+
+  /// 浏览器 / 系统播放器可直接打开的 URL（`<base>/ufs/media/s/<token>`）。
+  final String url;
+
+  /// 签名过期时刻（UTC）。
+  final DateTime expiresAt;
+
+  /// `original` / `thumbnail`（服务端原样回显）。
+  final String variant;
+
+  /// 响应里的 content_type（可能为空，由浏览器按响应头自行判断）。
+  final String? contentType;
+
+  @override
+  String toString() =>
+      'UfsMediaAccess(variant=$variant, expires_at=$expiresAt)';
+}
+
+/// 一次性预览会话（[UfsApi.createPreviewSession] 的返回）。
+///
+/// ## 为什么不缓存 / 不持久化
+///
+/// [url] 里的 ticket 是一次性的（服务端 `ConsumeByTicketHash` 消费后即失效，
+/// 默认 2 分钟过期）。把它写进本地库或内存缓存，除了让用户在过期后看到
+/// 「预览链接无效或已失效」之外没有任何收益——每次点击都该新建一个。
+class UfsPreviewSession {
+  const UfsPreviewSession({required this.url, required this.expiresAt});
+
+  /// 浏览器入口地址（服务端拼装，形如 `<预览域>/preview/entry?t=ufs_preview_…`）。
+  final String url;
+
+  /// ticket 过期时刻（UTC）。用于日志/诊断，**不要**据此推迟打开。
+  final DateTime expiresAt;
+
+  @override
+  String toString() => 'UfsPreviewSession(expires_at=$expiresAt)';
 }
 
 /// 下载结果（[UfsApi.download] 的返回）。

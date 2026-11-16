@@ -2809,20 +2809,27 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     }
   }
 
-  /// 在系统浏览器中打开 UFS 预览页（external 类）。
+  /// 在系统浏览器中打开 UFS 预览面（external 类）。
   ///
-  /// 与桌面端的差异：移动端用 `url_launcher` 而非 `openInBrowser`
-  /// （后者在 `spb_platform` 里只实现桌面三平台）。这与 `onOpenLink` 的
-  /// 做法一致。
+  /// 与桌面端的差异只有「用哪个打开器」：移动端用 `url_launcher` 而非
+  /// `openInBrowser`（后者在 `spb_platform` 里只实现桌面三平台）。这与
+  /// `onOpenLink` 的做法一致。
   ///
-  /// URL 拼接同样留在装配层（页面不掌握 UFS 基地址与预览页路由）。
+  /// 三条物理通道与判据**与桌面端完全相同**（判型在领域层的
+  /// [resolveExternalPreviewChannel]，镜像小程序 `previewMode()`）：
+  /// - html/xhtml/svg → 一次性预览会话（浏览器免登录）；
+  /// - 图片/音视频/PDF → 媒体签名 URL（原生播放器带不了 `Authorization`）；
+  /// - Office/压缩包/未知 → 旧预览页（需浏览器侧网关登录会话）。
+  ///
+  /// 各通道凭证都短期（ticket 2m / 媒体签名 30m），故每次点击现取、不缓存。
+  ///
+  /// URL 拼接同样留在装配层（页面不掌握 UFS 基地址与预览页路由）；ticket 与
+  /// 媒体 URL 由服务端按 `PREVIEW_PUBLIC_BASE_URL` / `UFS_MEDIA_PUBLIC_BASE_URL`
+  /// 生成，不在此拼。
   Future<bool> _openAgentFileExternal(AgentFileItem file) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return false;
-    final url = Uri.parse(
-      '${SpbEndpoints.current.ufsBaseUrl}/preview.html'
-      '?file_id=${Uri.encodeQueryComponent(fileId)}',
-    );
+    final url = Uri.parse(await _agentFilePreviewUrl(file, fileId));
     try {
       return await launchUrl(url, mode: LaunchMode.externalApplication);
     } on Object catch (e) {
@@ -2830,6 +2837,37 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       return false;
     }
   }
+
+  /// 解析预览入口地址：按通道建，失败回落旧预览页。
+  Future<String> _agentFilePreviewUrl(AgentFileItem file, String fileId) async {
+    final channel = resolveExternalPreviewChannel(
+      mimeType: file.mimeType,
+      fileName: file.relativePath.isEmpty ? file.fileName : file.relativePath,
+    );
+    try {
+      switch (channel) {
+        case ExternalPreviewChannel.htmlSession:
+          return (await ref.read(ufsApiProvider).createPreviewSession(fileId))
+              .url;
+        case ExternalPreviewChannel.mediaAccess:
+          return (await ref.read(ufsApiProvider).createMediaAccess(fileId)).url;
+        case ExternalPreviewChannel.legacyPreviewPage:
+          return _legacyAgentFilePreviewUrl(fileId);
+      }
+    } on Object catch (e) {
+      SpbLog.info('预览通道不可用，回落到旧预览页', {
+        'file_id': fileId,
+        'channel': channel.name,
+        'error': '$e',
+      });
+      return _legacyAgentFilePreviewUrl(fileId);
+    }
+  }
+
+  /// 旧预览页：需要浏览器侧的网关登录会话（见 `docs/api-contract.md` §5.2）。
+  String _legacyAgentFilePreviewUrl(String fileId) =>
+      '${SpbEndpoints.current.ufsBaseUrl}/preview.html'
+      '?file_id=${Uri.encodeQueryComponent(fileId)}';
 
   static String _optionToAction(String option) => switch (option) {
     '继续' => 'approve',

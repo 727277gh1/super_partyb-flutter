@@ -454,4 +454,218 @@ void main() {
       );
     });
   });
+
+  group('UFS preview-session', () {
+    // 服务端：`internal/handler/preview_session.go` 的 `Create` → 201 + `PreviewSessionRoute`
+    // `{"url": "<PREVIEW_PUBLIC_BASE_URL>/preview/entry?t=ufs_preview_…", "expires_at": RFC3339}`
+    const entryUrl =
+        'https://dever-preview.atjog.com/preview/entry'
+        '?t=ufs_preview_ab12cd';
+
+    test('201：解析 url 与 expires_at（URL 原样取自服务端，不重拼）', () async {
+      adapter.onPost(
+        '/api/files/file_1/preview-sessions',
+        (server) => server.reply(201, {
+          'url': entryUrl,
+          'expires_at': '2026-11-17T08:02:00Z',
+        }),
+      );
+
+      final session = await api.createPreviewSession('file_1');
+
+      // 预览域的 host 是部署知识：客户端只用响应里的 url，任何拼接都会
+      // 在换部署（tbcc ↔ dever）时静默指错域名。
+      expect(session.url, entryUrl);
+      expect(session.expiresAt.isUtc, isTrue);
+      expect(session.expiresAt.year, 2026);
+    });
+
+    test('415（非 HTML/SVG）：抛 HttpError(415)，由调用方回落旧预览页', () async {
+      // 415 是正常业务结果而不是错误：服务端 `isPreviewableHTMLMime` 只放行
+      // text/html、application/xhtml+xml、image/svg+xml。若把它当成失败，
+      // PDF 预览会被一句泛化错误挡住（而它本可以走旧预览页）。
+      adapter.onPost(
+        '/api/files/file_1/preview-sessions',
+        (server) => server.reply(415, {'error': '仅支持 HTML/SVG 文件预览'}),
+      );
+
+      await expectLater(
+        api.createPreviewSession('file_1'),
+        throwsA(
+          isA<HttpError>()
+              .having((e) => e.statusCode, 'statusCode', 415)
+              .having((e) => e.isServerError, 'isServerError', isFalse),
+        ),
+      );
+    });
+
+    test('403（无权限）：归一为 AuthError(403)（不重试，由调用方回落）', () async {
+      // `mapDioError` 把 401/403 统一成 AuthError（重试无用，语义是「你不是
+      // 有权用户」），所以这里断言 AuthError 而不是 HttpError——写成 HttpError
+      // 会在将来有人改回映射时立即红，反向也成立。
+      adapter.onPost(
+        '/api/files/file_1/preview-sessions',
+        (server) => server.reply(403, {'error': '权限不足'}),
+      );
+
+      await expectLater(
+        api.createPreviewSession('file_1'),
+        throwsA(
+          isA<AuthError>().having((e) => e.statusCode, 'statusCode', 403),
+        ),
+      );
+    });
+
+    test('响应缺 url：抛 ParseError（契约漂移不能当成空 URL 打开）', () async {
+      adapter.onPost(
+        '/api/files/file_1/preview-sessions',
+        (server) => server.reply(201, {'expires_at': '2026-11-17T08:02:00Z'}),
+      );
+
+      await expectLater(
+        api.createPreviewSession('file_1'),
+        throwsA(isA<ParseError>()),
+      );
+    });
+
+    test('expires_at 不是 RFC3339：抛 ParseError', () async {
+      adapter.onPost(
+        '/api/files/file_1/preview-sessions',
+        (server) => server.reply(201, {'url': entryUrl, 'expires_at': '2m'}),
+      );
+
+      await expectLater(
+        api.createPreviewSession('file_1'),
+        throwsA(isA<ParseError>()),
+      );
+    });
+
+    test('POST 方法（服务端只注册了 POST，用 GET 会 405）', () async {
+      adapter.onPost(
+        '/api/files/file_1/preview-sessions',
+        (server) => server.reply(201, {
+          'url': entryUrl,
+          'expires_at': '2026-11-17T08:02:00Z',
+        }),
+      );
+
+      await api.createPreviewSession('file_1');
+
+      expect(recorder.last.method, 'POST');
+      expect(recorder.last.path, '/api/files/file_1/preview-sessions');
+    });
+  });
+
+  group('UFS media-access', () {
+    // 服务端：`internal/handler/media_access.go` 的 `Create` → 201 +
+    // `MediaAccessRoute` `{"url": "<base>/media/s/<token>", "expires_at": RFC3339,
+    //   "variant": "original", "content_type": "application/pdf"}`
+    const mediaUrl = 'https://dever.atjog.com/ufs/media/s/ufs_media_ab12cd';
+
+    test('201：解析 url / expires_at / variant / content_type', () async {
+      adapter.onPost(
+        '/api/files/file_1/media-access',
+        data: {'variant': 'original'},
+        (server) => server.reply(201, {
+          'url': mediaUrl,
+          'expires_at': '2026-11-17T08:32:00Z',
+          'variant': 'original',
+          'content_type': 'application/pdf',
+        }),
+      );
+
+      final access = await api.createMediaAccess('file_1');
+
+      // URL 由服务端按 `UFS_MEDIA_PUBLIC_BASE_URL` 生成——客户端不重拼
+      // （`/ufs/*` 前缀是网关部署知识）。
+      expect(access.url, mediaUrl);
+      expect(access.expiresAt.isUtc, isTrue);
+      expect(access.variant, 'original');
+      expect(access.contentType, 'application/pdf');
+    });
+
+    test('415（Office 等非媒体类型）：HttpError(415)，调用方回落旧预览页', () async {
+      // `isMediaMime` 只放行图像/音视频/PDF。docx 走这条会 415——它属于
+      // 「这条链不适用」，不是失败。
+      adapter.onPost(
+        '/api/files/file_1/media-access',
+        data: {'variant': 'original'},
+        (server) => server.reply(415, {'error': '该文件类型不支持媒体访问'}),
+      );
+
+      await expectLater(
+        api.createMediaAccess('file_1'),
+        throwsA(
+          isA<HttpError>()
+              .having((e) => e.statusCode, 'statusCode', 415)
+              .having((e) => e.isServerError, 'isServerError', isFalse),
+        ),
+      );
+    });
+
+    test('403（service 上下文 / 无权限）：归一为 AuthError(403)', () async {
+      // UFS 只给「交互式会话」铸免认证 URL（super_partyb#162）：API Key / agent
+      // 上下文一律 403。客户端是用户令牌，不该命中这条，但映射必须正确——
+      // 否则回落逻辑会误判成服务端故障。
+      adapter.onPost(
+        '/api/files/file_1/media-access',
+        data: {'variant': 'original'},
+        (server) => server.reply(403, {'error': '创建媒体签名链接需要交互式会话'}),
+      );
+
+      await expectLater(
+        api.createMediaAccess('file_1'),
+        throwsA(
+          isA<AuthError>().having((e) => e.statusCode, 'statusCode', 403),
+        ),
+      );
+    });
+
+    test('响应缺 url：抛 ParseError（不能拿空 URL 去 open）', () async {
+      adapter.onPost(
+        '/api/files/file_1/media-access',
+        data: {'variant': 'original'},
+        (server) => server.reply(201, {
+          'expires_at': '2026-11-17T08:32:00Z',
+          'variant': 'original',
+        }),
+      );
+
+      await expectLater(
+        api.createMediaAccess('file_1'),
+        throwsA(isA<ParseError>()),
+      );
+    });
+
+    test('expires_at 不是 RFC3339：抛 ParseError', () async {
+      adapter.onPost(
+        '/api/files/file_1/media-access',
+        data: {'variant': 'original'},
+        (server) => server.reply(201, {'url': mediaUrl, 'expires_at': '30m'}),
+      );
+
+      await expectLater(
+        api.createMediaAccess('file_1'),
+        throwsA(isA<ParseError>()),
+      );
+    });
+
+    test('POST + body 带 variant（缩略图变体走同一端点）', () async {
+      adapter.onPost(
+        '/api/files/file_1/media-access',
+        data: {'variant': 'thumbnail'},
+        (server) => server.reply(201, {
+          'url': mediaUrl,
+          'expires_at': '2026-11-17T08:32:00Z',
+          'variant': 'thumbnail',
+        }),
+      );
+
+      await api.createMediaAccess('file_1', variant: 'thumbnail');
+
+      expect(recorder.last.method, 'POST');
+      expect(recorder.last.path, '/api/files/file_1/media-access');
+      expect(recorder.last.data, containsPair('variant', 'thumbnail'));
+    });
+  });
 }

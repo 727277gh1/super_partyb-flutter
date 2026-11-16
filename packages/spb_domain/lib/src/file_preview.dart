@@ -56,10 +56,17 @@ enum FilePreviewKind {
 /// 与原始长度，UI **必须**据此给出明确提示（见 `showAgentFilePreview`）。
 const int kTextPreviewMaxChars = 200 * 1024;
 
-/// 图片扩展名（对齐 webapp `IMAGE_FILE_EXTENSIONS`）。
+/// 图片扩展名（对齐 webapp `IMAGE_FILE_EXTENSIONS`，**但明确不含 `.svg`**）。
 ///
-/// 含 `.svg`：`image/svg+xml` 的 mime 已命中 `image/` 前缀，但有些服务端把
-/// svg 报成 `text/plain` 或空 mime，故按扩展名兜一层。
+/// ## 为什么 `.svg` 不在此处（2026-11，参考小程序实现）
+///
+/// Flutter 的 `Image.memory` **不**解码 SVG（没有内置 svg 解码器），判成
+/// `image` 只会让预览对话框拿一句「图片加载失败」当结果。小程序对同一件事
+/// 的处置更彻底（`apps/miniapp/src/pages/work-detail/media/preview.ts`）：
+/// SVG 是**可携带脚本的主动内容**且 `<image>`/`previewImage` 不支持
+/// `image/svg+xml`，故一律送 UFS 独立预览域（`isPreviewableHTMLMime` 含
+/// `image/svg+xml`，走一次性 ticket）。本仓库同一取——见
+/// [resolveExternalPreviewChannel] 的 `htmlSession` 分支。
 const Set<String> _imageExtensions = {
   '.apng',
   '.avif',
@@ -69,7 +76,6 @@ const Set<String> _imageExtensions = {
   '.jpg',
   '.jpeg',
   '.png',
-  '.svg',
   '.webp',
 };
 
@@ -180,8 +186,13 @@ List<String> fileExtensionsOf(String value) {
 }
 
 /// 是否为图片（mime 前缀 `image/`，或扩展名命中 [._imageExtensions]）。
+///
+/// `image/svg+xml` **例外**：Flutter 解不了 SVG，且它是可携带脚本的主动内容，
+/// 应走 UFS 预览域（见 [_imageExtensions] 的说明）。
 bool isImagePreviewable({String? mimeType, required String fileName}) {
-  if (normalizeMimeType(mimeType).startsWith('image/')) return true;
+  final mime = normalizeMimeType(mimeType);
+  if (mime == 'image/svg+xml') return false;
+  if (mime.startsWith('image/')) return true;
   final name = fileName.toLowerCase();
   return fileExtensionsOf(name).any(_imageExtensions.contains);
 }
@@ -197,8 +208,8 @@ bool isInlineTextPreviewable({String? mimeType, required String fileName}) {
   final mime = normalizeMimeType(mimeType);
 
   if (mime.startsWith('text/')) {
-    // markup / 样式不内联（与 webapp 同判据）。`image/svg+xml` 不在此分支，
-    // 它由 [isImagePreviewable] 归为 image。
+    // markup / 样式不内联（与 webapp 同判据）。`image/svg+xml` 也不在此分支
+    // （它不是 `text/`）：由 [resolveExternalPreviewChannel] 归入 `htmlSession`。
     if (mime == 'text/html' || mime == 'text/css') return false;
     return true;
   }
@@ -269,10 +280,120 @@ FilePreviewKind resolvePreviewKind({
   if (isImagePreviewable(mimeType: mimeType, fileName: pathForExt)) {
     return FilePreviewKind.image;
   }
+  // 主动内容按**扩展名**兜一层：服务端常把 `.html` / `.svg` 报成 `text/plain`
+  // （上传未探测 mime），按 mime 会落到下面的 text 分支——用户看到的是源码，
+  // 而不是页面/SVG 图。
+  if (_looksLikeActiveContent(pathForExt)) {
+    return FilePreviewKind.external;
+  }
   if (isInlineTextPreviewable(mimeType: mimeType, fileName: pathForExt)) {
     return FilePreviewKind.text;
   }
   return FilePreviewKind.external;
+}
+
+/// 扩展名是否属于「主动内容」（HTML / SVG）。
+///
+/// 只用于 [resolvePreviewKind] 的**兜底**判定：mime 已明确时由 mime 决定
+/// （`text/html` / `application/xhtml+xml` / `image/svg+xml` 本就不会进 text 分支）。
+bool _looksLikeActiveContent(String fileName) =>
+    fileExtensionsOf(fileName.toLowerCase())
+        .any(_activeContentExtensions.contains);
+
+/// 主动内容扩展名（与 [resolveExternalPreviewChannel] 的 htmlSession 分支同一集合）。
+const Set<String> _activeContentExtensions = {
+  '.html',
+  '.htm',
+  '.xhtml',
+  '.svg',
+  '.svgz',
+};
+
+/// `external` 类文件该走哪条**物理通道**打开。
+///
+/// ## 为什么与 [FilePreviewKind] 分开
+///
+/// [FilePreviewKind] 答「能不能内联看」（三分支、UI 直接消费）；本枚举答
+/// 「不能内联时把用户送到哪个面」，只被装配层用它决定「建哪种会话/拼哪种
+/// URL」。两者同维度不同粒度，混成一个会让预览对话框的穷尽 switch 里多出
+/// 两个它根本不渲染的取值。
+///
+/// ## 判据来源：小程序的 `preview_mode`
+///
+/// 小程序的判型在服务端（`super_partyb/apps/go-api/internal/server/
+/// miniapp_artifacts.go` 的 `previewMode()`），客户端只做分发：
+/// `webview` → 预览会话；`image`/`audio`/`video` → 媒体签名 URL（原生组件带不了
+/// Authorization）；`document`/`download` → 下载后再用系统查看器。时间线的
+/// `AgentFileItem` **没有** `preview_mode` 字段，故这份判据镜像到本仓库；
+/// 新增分支前先核对小程序同名函数，两边判型不一致会出现「小程序能看、客户端
+/// 打不开」这种最难排查的差异。
+enum ExternalPreviewChannel {
+  /// HTML / XHTML / SVG → UFS **一次性预览会话**（`POST /api/files/{id}/
+  /// preview-sessions` → 免登录入场）。
+  ///
+  /// 含 SVG：`isPreviewableHTMLMime` 放行 `image/svg+xml`，而 Flutter 既解不了
+  /// SVG、也不该让主动内容跑在自己的源上。
+  htmlSession,
+
+  /// 图片 / 音视频 / PDF → UFS **媒体签名 URL**（`POST /api/files/{id}/
+  /// media-access`）。短期 HMAC bearer，UFS 自验签，浏览器或系统播放器免
+  /// Authorization 即可流式读取。
+  ///
+  /// 服务端 `isMediaMime` 只放行 png/jpeg/gif/webp/bmp、`video/*`、`audio/*`
+  /// 与 `application/pdf`——**Office 文档不在内**（会 415）。
+  mediaAccess,
+
+  /// 其余（Office / 压缩包 / 未知二进制）→ UFS **旧预览页**
+  /// （`/ufs/preview.html?file_id=…`，需浏览器侧的网关登录会话）。
+  legacyPreviewPage,
+}
+
+/// 判定 `external` 文件该走哪条通道（规则见 [ExternalPreviewChannel]）。
+ExternalPreviewChannel resolveExternalPreviewChannel({
+  String? mimeType,
+  required String fileName,
+}) {
+  final mime = normalizeMimeType(mimeType);
+  final exts = fileExtensionsOf(fileName.toLowerCase());
+
+  // 1) 主动内容 → 预览会话（含 SVG，理由见 htmlSession 分支）。
+  if (mime == 'text/html' ||
+      mime == 'application/xhtml+xml' ||
+      mime == 'image/svg+xml') {
+    return ExternalPreviewChannel.htmlSession;
+  }
+  if (exts.any(const {'.html', '.htm', '.xhtml', '.svg', '.svgz'}.contains)) {
+    return ExternalPreviewChannel.htmlSession;
+  }
+
+  // 2) 媒体签名 URL：图片 / 音视频 / PDF。
+  if (isImagePreviewable(mimeType: mimeType, fileName: fileName)) {
+    return ExternalPreviewChannel.mediaAccess;
+  }
+  if (mime.startsWith('audio/') ||
+      mime.startsWith('video/') ||
+      mime == 'application/pdf') {
+    return ExternalPreviewChannel.mediaAccess;
+  }
+  const mediaExts = {
+    '.mp3',
+    '.wav',
+    '.ogg',
+    '.m4a',
+    '.aac',
+    '.flac',
+    '.mp4',
+    '.m4v',
+    '.mov',
+    '.webm',
+    '.mkv',
+    '.avi',
+    '.pdf',
+  };
+  if (exts.any(mediaExts.contains)) return ExternalPreviewChannel.mediaAccess;
+
+  // 3) 其余 → 旧预览页（小程序里对应 document/download：下载后用系统查看器）。
+  return ExternalPreviewChannel.legacyPreviewPage;
 }
 
 /// 文本内容层判定的结果：原文，或识别出的 spec 文档。

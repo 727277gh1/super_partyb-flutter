@@ -2139,3 +2139,133 @@ super_partyb#181 因此补了 `router.auto_agent` 段）。
 - **类别维度只到闭集，没有 per-type 映射**：#117 的「18 → ≤7 渲染器合并」被数据否掉
   （服务端 62 条里 50 条都是 `event` 类别、本仓 17 个渲染项里 11 个落 `event`），
   故按类型的渲染分派**保持不变**；类别目前只用于对拍与未来的分流统计。
+
+### 6.108 交付物预览：先换一次性 ticket，再交给浏览器（2026-11）
+
+#### 问题：App 已登录 ≠ 浏览器已登录
+
+`external` 类交付物原本直接拼 UFS 的 `/ufs/preview.html?file_id=…` 打开。该路径在
+网关认证之后，而认证靠**浏览器侧**的 host-only `idp_access_token` cookie
+（`docs/api-contract.md` §5.2 已写明「系统浏览器需要独立的网关登录会话」）——客户端
+用的是 Bearer/header。于是用户明明在 App 里已登录，点一次预览仍要在浏览器里再登一次。
+`/_staging/ufs_sites/{slug}/`（PartyB 的 staging `access_url`）在网关上也是
+`skip_auth: false, auth_mode: browser`，症状相同。
+
+#### 决策：用 UFS 的一次性预览会话换匿名入口
+
+`POST /api/files/{file_id}/preview-sessions`（**要认证**，走 App 凭证）→
+`{url: <PREVIEW_PUBLIC_BASE_URL>/preview/entry?t=ufs_preview_…, expires_at}`；
+浏览器打开壳页 → 兑换 → host-only `ufs_preview_session` cookie（`Path=/preview/s/{id}/`、
+`SameSite=Strict`）→ 后续资源同源带上。客户端只做「建会话 → 打开」，**不拼预览域 URL**
+（host 是部署知识）。
+
+- **只有 HTML/XHTML/SVG 会签发**（`isPreviewableHTMLMime`，否则 **415**）。图片/文本在
+  客户端内联渲染，不需要 ticket；其余类型按通道走媒体签名 URL 或旧预览页（见下节
+  「external 不是一条通道」）→ **415 与 403/5xx/网络一样回落旧预览页**，回落是「这条链
+  不适用」而不是失败。旧预览页会给出服务端原始结论，比客户端一句泛化错误更好诊断。
+- **ticket 默认 2 分钟**（`PREVIEW_TICKET_TTL`），必须点击瞬间现取、**绝不缓存**；
+  会话 15 分钟、**空闲 5 分钟**（`PREVIEW_IDLE_TTL`，空闲超时后刷新得 410）。
+- 资源闭包 = **入口父目录整棵子树**（`buildResourceClosure`），故同目录/子目录相对引用的
+  多文件 HTML 应用可直接预览，客户端不需要起本地 server。
+
+#### 客户端渲染边界（谁渲染哪一类）
+
+| kind | 谁渲染 | 实现 |
+|---|---|---|
+| `text` | **客户端**（spec 卡 / map 卡 / markdown / 纯文本） | `resolveTextPreview` + `AgentFileTextBody` |
+| `image` | **客户端** `Image.memory`（解码上限 1024dp×DPR，§6.74） | `_ImagePayload` |
+| `external` · `htmlSession`（HTML / XHTML / **SVG**） | **浏览器**（ticket → 系统浏览器） | 两端 `_openAgentFileExternal` |
+| `external` · `mediaAccess`（图片 / **音视频** / **PDF**） | **浏览器或系统播放器**（媒体签名 URL） | 同上 |
+| `external` · `legacyPreviewPage`（Office / 压缩包 / 未知） | **浏览器**（旧预览页，需浏览器侧登录） | 同上 |
+
+`external` 为什么分三档见下节。
+
+「客户端不做渲染」只适用于 `external` 这一类，而且不是取舍而是渲染器成本：Flutter 没有
+HTML/CSS/JS 引擎，内嵌要 CEF 类运行时（Linux 桌面无官方实现：`webview_flutter` 无 Linux、
+`flutter_inappwebview` 明确不支持 Linux），自写子集渲染器等于写浏览器——CSS 覆盖不足时
+用户看到的是「排版坏掉的应用」，比开一个浏览器窗口更差。
+
+#### external 不是一条通道，而是三条（对齐小程序 `preview_mode`，2026-11）
+
+小程序把预览判型放在**服务端**（`super_partyb/apps/go-api/internal/server/miniapp_artifacts.go`
+的 `previewMode()`），客户端只做分发：`webview` → 预览会话；`image`/`audio`/`video` →
+短时效签名 URL（原生组件带不了 `Authorization`）；`document`/`download` → 下载后用系统
+查看器。时间线的 `AgentFileItem` **没有** `preview_mode` 字段，故判据镜像到本仓库的
+`resolveExternalPreviewChannel`（`packages/spb_domain/lib/src/file_preview.dart`），两端
+装配层按它分派：
+
+| 通道 | 覆盖 | 用什么 URL | 为什么 |
+|---|---|---|---|
+| `htmlSession` | HTML / XHTML / SVG | `POST /api/files/{id}/preview-sessions` → ticket | 主动内容必须隔离源；且 Flutter 没有 HTML 引擎 |
+| `mediaAccess` | 图片 / 音视频 / PDF | `POST /api/files/{id}/media-access` → `/ufs/media/s/<token>` | 浏览器与系统播放器带不了 `Authorization`；UFS 只给**交互式会话**铸这种 URL（`X-Auth-Context`，service/agent 403，super_partyb#162） |
+| `legacyPreviewPage` | Office / 压缩包 / 未知 | `/ufs/preview.html?file_id=…` | UFS `isMediaMime` **不放行** Office（会 415），只能回旧预览页 |
+
+**顺手修掉的一个真 bug：SVG 曾被判成 `image`。** `_imageExtensions` 里有 `.svg`，于是
+`Image.memory` 去解码 SVG——它没有解码器，用户得到的是「图片加载失败」。小程序的处置
+更彻底（`preview.ts` 的 `isSvgFile` 分支）：SVG 是可携带脚本的主动内容，`<image>` /
+`previewImage` 也不支持 `image/svg+xml`，故一律送独立预览域。这里同取：SVG 归
+`external · htmlSession`（UFS 的 `isPreviewableHTMLMime` 本就含 `image/svg+xml`）。
+另加一条扩展名兜底——服务端常把 `.html`/`.svg` 报成 `text/plain`，若按 mime 走 `text`
+分支，用户看到的是源码而不是页面。
+
+**仍然做不到的**（不属本方案，别当缺口）：紧邻「下载」的系统应用打开路径（`document` →
+下载后 `openDocument`）在桌面端**已有**（`_openAgentFile` → `_ensureAgentFileLocal`），
+移动端没有（Android/iOS 未实现 `getSaveLocation`，也没有「用系统查看器打开本地文件」的
+插件），故移动端 Office 文档只能留在旧预览页（浏览器可能要求登录一次）。
+
+#### 明确不做（同样是决策）
+
+- **不在客户端起本地预览 server**：`file://` 是 opaque origin（ES modules 被 CORS 拦、
+  相对 `fetch`/`localStorage`/Service Worker 全不可用），本地跑必须 HTTP，而那会把**不可信
+  的生产代码**放到能访问本机全部 loopback 端口的 origin 上（PartyB `AUTH_MODE=header` 只信
+  `X-User-ID`）。离线是另一条独立需求，另立项。
+- **不放宽 `/ufs/*` 认证**：把 `preview.html` 加进 `skip_auth` 等于 `file_id` 可枚举即
+  匿名可读。
+- **整站（UFS Sites）点票**：`CreateSession(user, fileID)` 没有 site 维度，staging 站点点票
+  不存在；要做是给 UFS 扩展现有 ticket 机制（跨仓库、单独立项）。
+
+#### 部署前提（缺一条 ticket 链就是死的）
+
+1. `UFS_PREVIEW_ENABLED=true`、`UFS_PREVIEW_PUBLIC_BASE_URL` 指向**公网可达**的预览域；
+2. AGW 有该预览域的 host 路由 → 预览服务端口，且 `skip_auth: true`（预览服务自己按
+   ticket/session 鉴权，「不能经过网关 OIDC 认证」）；
+3. `UFS_PREVIEW_ALLOWED_HOSTS` 含该域（否则预览服务直接 404「预览资源不存在」）。
+   `EntryAutoRedeem` 默认 false → 壳页会多一个「打开预览」按钮，要免点就
+   `UFS_PREVIEW_ENTRY_AUTO_REDEEM=true`。
+
+实测口径（2026-11-17，123）：预览服务 `127.0.0.1:8083`、`PUBLIC_BASE_URL=https://dever-preview.atjog.com`、
+`ALLOWED_HOSTS` 含该域，但 123 的 `gateway.yaml` 当时**只有 `tbcc-preview` / `tbcc6-preview`
+的 host 路由**，`dever-preview` 落进带认证的默认路由 → 直接 `401`。仓库 `configs/gateway.yaml`
+与 123 的配置都补了 `ufs_html_preview_dever` 后该域名才回 200 壳页。
+
+#### 已知限制（CSP 由 UFS 定，客户端只承受）
+
+- `connect-src` **不含 `'self'`**（`SessionHeaders`）：生成的 app 里 `fetch`/XHR 同源 JSON
+  会被拦，只放行 `cdn.jsdelivr.net`；
+- `img-src 'self' data:`、`font-src 'self' data: + jsdelivr/gstatic`；
+- `frame-src 'none'` + `frame-ancestors 'none'`：不能 iframe 内嵌进 App；
+- 无 SPA fallback、无目录索引（`GetResource` 精确匹配相对路径），绝对路径 `/x.js` 也 404。
+
+#### 反向验证
+
+- `packages/spb_api/test/ufs_api_test.dart` 的 `UFS preview-session` 组：把 URL 改成客户端
+  拼装 → 「解析 url 与 expires_at（URL 原样取自服务端）」红；把 415 分支改成抛错 →
+  「415：抛 HttpError(415)」红。
+- 删掉两端的回落分支 → 415/403 场景会直接给用户报失败（`_agentFilePreviewUrl` 的
+  `catch` 是唯一退回旧预览页的位置）。
+- 网关漏 host 路由 → 壳页 401（见上，`curl -I` 可直接复现）。
+
+#### 反向验证（通道分派）
+
+- `packages/spb_domain/test/file_preview_test.dart` 的 `resolveExternalPreviewChannel` 组：
+  Office 文档被改成 `mediaAccess` → 「Office 文档不能走 mediaAccess」红（UFS 会 415）；
+  `.svg` 被改回 `image` → 「image/svg+xml 归 external」红。
+- `packages/spb_api/test/ufs_api_test.dart` 的 `UFS media-access` 组：把 415 当失败抛错 →
+  对应用例红；body 不带 `variant` → 「POST + body 带 variant」红（服务端还要按变体取流）。
+- 两端 `_agentFilePreviewUrl` 的 `catch` 是唯一退回旧预览页的位置，删掉即 415/403 变用户可见失败。
+
+#### 未验证
+
+- 真机观感（本机无 `DISPLAY`）：壳页多一步「打开预览」是否被用户当成故障。
+- 媒体签名 URL 在移动端的外部打开器里是否都能连贯播放（`UFS_MEDIA_TTL=30m`，刷新即 404）。
+- PDF 内联渲染仍不做（需 pdfium 类插件，Linux 支持与体积另评）——现在走浏览器，已不需登录。

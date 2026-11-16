@@ -2869,13 +2869,35 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     return res.bytes;
   }
 
-  /// 在系统浏览器中打开该文件的 UFS 预览页（external 类的唯一出路）。
+  /// 在系统浏览器中打开该文件的预览面（external 类的唯一出路）。
+  ///
+  /// ## 三条物理通道（与小程序 `preview_mode` 同判据）
+  ///
+  /// `external` 不是一个面：判型在领域层（[resolveExternalPreviewChannel]，
+  /// 镜像 `super_partyb/apps/go-api/internal/server/miniapp_artifacts.go` 的
+  /// `previewMode()`），本方法只负责「按通道建 URL 再 open」：
+  ///
+  /// - **htmlSession**（html/xhtml/svg）→ `POST /api/files/{id}/preview-sessions`
+  ///   换一次性 ticket：浏览器壳页兑换一次即得 host-only session cookie
+  ///   （`Path=/preview/s/{id}/`），不再要求浏览器里的网关登录。
+  /// - **mediaAccess**（图片/音视频/PDF）→ `POST /api/files/{id}/media-access`
+  ///   铸短期 HMAC URL（`/ufs/media/s/…`，UFS 自验签、网关已放行）——浏览器与
+  ///   系统播放器带不了 `Authorization`，这条是它们唯一的匿名入口。
+  /// - **legacyPreviewPage**（Office/压缩包/未知）→ 旧预览页，需要浏览器侧的
+  ///   网关登录会话（见 `docs/api-contract.md` §5.2）。
+  ///
+  /// ## 为什么失败就回落而不是报错
+  ///
+  /// 每条通道都可能「本部署没开 / 这把文件不适用」：预览会话对非 HTML 回
+  /// **415**，媒体签名对 Office 回 **415**、对 service 上下文回 **403**。
+  /// 这些是「这条链不适用」而不是失败，回落旧预览页会给出服务端的原始结论。
   //
   // ## URL 拼接为什么在这里而不在页面
   //
   // 页面只收集意图（「预览这个文件」），它不掌握 UFS 基地址，也不该知道
   // 预览页的路由形状（`/preview.html?file_id=…`）。把拼接留在装配层，
-  // 将来换部署/换路由只改这一处。
+  // 将来换部署/换路由只改这一处。ticket / media URL **不在此拼接**——由服务端
+  // 按 `PREVIEW_PUBLIC_BASE_URL` / `UFS_MEDIA_PUBLIC_BASE_URL` 生成。
   //
   // ## 为什么用 `SpbEndpoints.current.ufsBaseUrl` 而不是某个 provider
   //
@@ -2885,9 +2907,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   Future<bool> _openAgentFileExternal(AgentFileItem file) async {
     final fileId = file.ufsFileId;
     if (fileId == null || fileId.isEmpty || file.isDeleted) return false;
-    final url =
-        '${SpbEndpoints.current.ufsBaseUrl}/preview.html'
-        '?file_id=${Uri.encodeQueryComponent(fileId)}';
+    final url = await _agentFilePreviewUrl(file, fileId);
     try {
       await openInBrowser(url);
       return true;
@@ -2896,6 +2916,41 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       return false;
     }
   }
+
+  /// 解析预览入口地址：按通道建，失败回落旧预览页。
+  ///
+  /// 各通道的凭证都**短期**（ticket 2m / 媒体签名 30m），故每次点击现取，
+  /// 绝不缓存——缓存只会把「过期」变成用户可见的失败。
+  Future<String> _agentFilePreviewUrl(AgentFileItem file, String fileId) async {
+    final channel = resolveExternalPreviewChannel(
+      mimeType: file.mimeType,
+      fileName: file.relativePath.isEmpty ? file.fileName : file.relativePath,
+    );
+    try {
+      switch (channel) {
+        case ExternalPreviewChannel.htmlSession:
+          return (await ref.read(ufsApiProvider).createPreviewSession(fileId))
+              .url;
+        case ExternalPreviewChannel.mediaAccess:
+          return (await ref.read(ufsApiProvider).createMediaAccess(fileId)).url;
+        case ExternalPreviewChannel.legacyPreviewPage:
+          return _legacyAgentFilePreviewUrl(fileId);
+      }
+    } on Object catch (e) {
+      // 415（本通道不适用于该类型）/403/5xx/网络都走这里：回落一次旧预览页。
+      SpbLog.info('预览通道不可用，回落到旧预览页', {
+        'file_id': fileId,
+        'channel': channel.name,
+        'error': '$e',
+      });
+      return _legacyAgentFilePreviewUrl(fileId);
+    }
+  }
+
+  /// 旧预览页：需要浏览器侧的网关登录会话（见 `docs/api-contract.md` §5.2）。
+  String _legacyAgentFilePreviewUrl(String fileId) =>
+      '${SpbEndpoints.current.ufsBaseUrl}/preview.html'
+      '?file_id=${Uri.encodeQueryComponent(fileId)}';
 
   /// 在系统浏览器中打开高德地图的 marker 链接（map spec 地点行）。
   ///

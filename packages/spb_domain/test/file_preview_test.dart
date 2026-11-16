@@ -57,7 +57,9 @@ void main() {
       // ---- image ----
       ('png 按 mime', 'image/png', 'a.png', 'out/a.png', FilePreviewKind.image),
       ('jpeg 按 mime', 'image/jpeg', 'a.jpg', null, FilePreviewKind.image),
-      ('svg 按 mime', 'image/svg+xml', 'a.svg', null, FilePreviewKind.image),
+      // svg **不是** image（2026-11，参考小程序）：Flutter 无 svg 解码器，
+      // 且它是主动内容，走预览会话。详见下方「判定顺序」组的说明。
+      ('svg 按 mime', 'image/svg+xml', 'a.svg', null, FilePreviewKind.external),
       ('mime 缺失但扩展名是图片', null, 'a.png', null, FilePreviewKind.image),
       (
         'mime 是 octet-stream 但扩展名是图片',
@@ -235,22 +237,143 @@ void main() {
   });
 
   group('判定顺序：image 优先于 text', () {
-    test('image/svg+xml 归 image（而非 external）', () {
-      // svg 是 markup，但 webapp 的 isImageFile 先命中 `image/` 前缀，
-      // 故它归 image 而不是被 markup 那条规则推去 external。
+    test('image/svg+xml 归 external（Flutter 解不了 SVG，走预览会话）', () {
+      // 2026-11 改动（参考小程序）：SVG 不再是 image。
+      // 理由两条：Flutter 的 Image.memory 没有 svg 解码器（判成 image 只会拿到
+      // 「图片加载失败」）；SVG 是可携带脚本的主动内容，小程序也把它送 UFS
+      // 独立预览域（preview.ts 的 isSvgFile 分支）。
       expect(
         resolvePreviewKind(mimeType: 'image/svg+xml', fileName: 'a.svg'),
-        FilePreviewKind.image,
+        FilePreviewKind.external,
+      );
+      expect(
+        resolveExternalPreviewChannel(
+          mimeType: 'image/svg+xml',
+          fileName: 'a.svg',
+        ),
+        ExternalPreviewChannel.htmlSession,
       );
     });
 
-    test('扩展名是图片但 mime 是 text/plain → 仍归 image', () {
-      // 服务端偶尔把 svg 报成 text/plain；不按扩展名兜底会让它走 text，
-      // 用户看到的是一坨 XML 而不是图。
+    test('扩展名是 svg 但 mime 是 text/plain → external + htmlSession', () {
+      // 服务端偶尔把 svg 报成 text/plain；无论按 mime 还是扩展名，都不能
+      // 落到 text（用户看到的是一坨 XML）也不能落到 mediaAccess（401/403）。
       expect(
         resolvePreviewKind(mimeType: 'text/plain', fileName: 'icon.svg'),
-        FilePreviewKind.image,
+        FilePreviewKind.external,
       );
+      expect(
+        resolveExternalPreviewChannel(
+          mimeType: 'text/plain',
+          fileName: 'icon.svg',
+        ),
+        ExternalPreviewChannel.htmlSession,
+      );
+    });
+  });
+
+  group('resolveExternalPreviewChannel：external 的三条物理通道', () {
+    // 判据镜像小程序 `previewMode()`（super_partyb apps/go-api miniapp_artifacts.go）。
+    final cases = <(String, String?, String, ExternalPreviewChannel)>[
+      // 主动内容 → 一次性预览会话
+      (
+        'html mime',
+        'text/html',
+        'index.html',
+        ExternalPreviewChannel.htmlSession,
+      ),
+      (
+        'xhtml mime',
+        'application/xhtml+xml',
+        'a.xhtml',
+        ExternalPreviewChannel.htmlSession,
+      ),
+      (
+        'html 扩展名 + 错 mime',
+        'application/octet-stream',
+        'page.html',
+        ExternalPreviewChannel.htmlSession,
+      ),
+      (
+        'svg mime',
+        'image/svg+xml',
+        'a.svg',
+        ExternalPreviewChannel.htmlSession,
+      ),
+      ('svgz 扩展名', null, 'a.svgz', ExternalPreviewChannel.htmlSession),
+      // 媒体签名 URL
+      (
+        'pdf mime',
+        'application/pdf',
+        'report',
+        ExternalPreviewChannel.mediaAccess,
+      ),
+      (
+        'pdf 扩展名',
+        'application/octet-stream',
+        '报告.pdf',
+        ExternalPreviewChannel.mediaAccess,
+      ),
+      ('视频 mime', 'video/mp4', 'demo', ExternalPreviewChannel.mediaAccess),
+      (
+        '音频扩展名',
+        'application/octet-stream',
+        'voice.mp3',
+        ExternalPreviewChannel.mediaAccess,
+      ),
+      (
+        '图片扩展名 + 错 mime',
+        'text/plain',
+        'shot.png',
+        ExternalPreviewChannel.mediaAccess,
+      ),
+      // 其余 → 旧预览页
+      (
+        'docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'a.docx',
+        ExternalPreviewChannel.legacyPreviewPage,
+      ),
+      (
+        'zip',
+        'application/zip',
+        'a.zip',
+        ExternalPreviewChannel.legacyPreviewPage,
+      ),
+      (
+        '未知二进制',
+        'application/octet-stream',
+        'blob',
+        ExternalPreviewChannel.legacyPreviewPage,
+      ),
+      (
+        'css（非主动内容但也不内联）',
+        'text/css',
+        'a.css',
+        ExternalPreviewChannel.legacyPreviewPage,
+      ),
+    ];
+    for (final (desc, mime, name, expected) in cases) {
+      test(desc, () {
+        expect(
+          resolveExternalPreviewChannel(mimeType: mime, fileName: name),
+          expected,
+        );
+      });
+    }
+
+    test('Office 文档不能走 mediaAccess（UFS isMediaMime 只放行 pdf/图像/音视频）', () {
+      // 走 mediaAccess 会拿到 415「该文件类型不支持媒体访问」——那是把
+      // 「本可以打开的文件」变成一句错误。故 docx/xlsx/pptx 归旧预览页。
+      for (final name in ['a.docx', 'a.xlsx', 'a.pptx']) {
+        expect(
+          resolveExternalPreviewChannel(
+            mimeType: 'application/octet-stream',
+            fileName: name,
+          ),
+          ExternalPreviewChannel.legacyPreviewPage,
+        );
+      }
     });
   });
 
