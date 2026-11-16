@@ -1014,6 +1014,10 @@ void main() {
       expect(scenes, ['abc123']);
       // 扫对了码不应该同时弹错误横幅。
       expect(find.byKey(const ValueKey('login-error')), findsNothing);
+      // 未登录时扫到码不会立刻进确认页（守卫会先把人送到登录），
+      // 所以必须有一句「已读到、登录后自动回去」的可见反馈。
+      expect(find.byKey(const ValueKey('login-scan-hint')), findsOneWidget);
+      expect(find.text('已读到登录码，登录后会自动回到确认页'), findsOneWidget);
     });
 
     testWidgets('自定义 scheme 形态也认（旧客户端兜底链接）', (tester) async {
@@ -1063,6 +1067,8 @@ void main() {
       expect(scenes, isEmpty);
       expect(find.byKey(const ValueKey('login-error')), findsOneWidget);
       expect(find.textContaining('不是 PartyB 的登录码'), findsOneWidget);
+      // 扫错码时不能同时给出「已读到登录码」——两条提示互相矛盾。
+      expect(find.byKey(const ValueKey('login-scan-hint')), findsNothing);
     });
 
     testWidgets('相机打不开（抛异常）→ 提示检查权限', (tester) async {

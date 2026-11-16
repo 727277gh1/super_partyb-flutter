@@ -6,10 +6,12 @@ void main() {
   String? resolve({
     required bool authenticated,
     String matched = '/settings',
+    String? target,
     String? from,
   }) => resolveAuthRedirect(
     authenticated: authenticated,
     matchedLocation: matched,
+    targetLocation: target,
     fromRaw: from,
     loginRoute: SpbRoutes.login,
     fallbackRoute: SpbRoutes.conversations,
@@ -134,6 +136,40 @@ void main() {
           path,
         );
       }
+    });
+  });
+
+  group('认证守卫：from 必须带上 query（回归）', () {
+    test('扫码确认页的 scene 不能在登录往返中丢失', () {
+      // 历史缺陷：`from` 用 `matchedLocation`（path-only）拼，于是
+      // `/qr-login?scene=abc` → 登录 → 回到 `/qr-login`（scene 空）→
+      // 确认页报「链接不完整」，浏览器那边一直等到二维码过期。
+      expect(
+        resolve(
+          authenticated: false,
+          matched: SpbRoutes.qrLogin,
+          target: '${SpbRoutes.qrLogin}?scene=abc',
+        ),
+        '${SpbRoutes.login}?from=%2Fqr-login%3Fscene%3Dabc',
+      );
+    });
+
+    test('带标签的页面同样保住查询参数', () {
+      expect(
+        resolve(
+          authenticated: false,
+          matched: SpbRoutes.settings,
+          target: '${SpbRoutes.settings}?tab=sync',
+        ),
+        '${SpbRoutes.login}?from=%2Fsettings%3Ftab%3Dsync',
+      );
+    });
+
+    test('未传 target 时退回 path（保持旧行为）', () {
+      expect(
+        resolve(authenticated: false, matched: '/chat/grp_x'),
+        '${SpbRoutes.login}?from=%2Fchat%2Fgrp_x',
+      );
     });
   });
 }

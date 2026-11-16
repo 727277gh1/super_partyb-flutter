@@ -146,12 +146,22 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
     return resolveAuthRedirect(
       authenticated: auth.isAuthenticated,
       matchedLocation: state.matchedLocation,
+      // `from` 带 query：只回写 path 会让登录后落到丢掉查询参数的页面
+      // （`/settings?tab=sync` 会变回「通用」标签）。理由与移动端同名注释一致。
+      targetLocation: _targetLocation(state.uri),
       fromRaw: state.uri.queryParameters['from'],
       loginRoute: SpbRoutes.login,
       fallbackRoute: SpbRoutes.home,
     );
   };
 }
+
+/// 把 [uri] 折成「站内 location」：path 带上 query（有的话）。
+///
+/// 供认证守卫作为 `from` 的完整目标；不包含 scheme/host，因为 `from` 只接受
+/// 站内路径（否则它就是开放重定向入口）。
+String _targetLocation(Uri uri) =>
+    uri.hasQuery ? '${uri.path}?${uri.query}' : uri.path;
 
 /// 认证守卫的**纯决策函数**（不碰 `BuildContext` / Riverpod）。
 ///
@@ -200,13 +210,17 @@ String? resolveAuthRedirect({
   required String? fromRaw,
   required String loginRoute,
   required String fallbackRoute,
+  String? targetLocation,
 }) {
   final goingToLogin = matchedLocation == loginRoute;
 
   if (!authenticated) {
     if (goingToLogin) return null;
     // 记住原本要去的页面，登录成功后回跳（go_router 的 `from` 约定）。
-    return '$loginRoute?from=${Uri.encodeComponent(matchedLocation)}';
+    // [targetLocation] 带着 query（`matchedLocation` 只有 path），缺它会在
+    // 回跳后丢掉查询参数（移动端扫码确认页的 scene 就是靠它）。
+    final target = targetLocation ?? matchedLocation;
+    return '$loginRoute?from=${Uri.encodeComponent(target)}';
   }
 
   if (goingToLogin) return _safeFrom(fromRaw, loginRoute) ?? fallbackRoute;

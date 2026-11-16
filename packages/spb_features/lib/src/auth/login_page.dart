@@ -280,6 +280,16 @@ class _LoginPageState extends State<LoginPage> {
   /// 是否正在打开相机（防重复点击 + 避免两次 push 出两个相机页）。
   bool _scanBusy = false;
 
+  /// 扫到合法登录码后的提示（未登录时不能立即确认，得先登录）。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// 确认端点要 Bearer，所以未登录状态下扫到码**不会**立刻进确认页：路由守卫
+  /// 会把 `/qr-login?scene=…` 改写成 `/login?from=<确认页>`，登录成功后再回去。
+  /// 但这一改写对用户是隐形的——页面看起来没变，用户会以为扫失败了又去扫一次。
+  /// 这行提示就是「刚才那一下生效了」的唯一回馈。
+  String? _scanHint;
+
   /// 反向登录码输入控制器。
   final TextEditingController _handoffController = TextEditingController();
 
@@ -896,6 +906,38 @@ class _LoginPageState extends State<LoginPage> {
           textAlign: TextAlign.center,
           style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
         ),
+        // 扫到码之后没法立即确认（本页就是「未登录」状态），所以必须告诉
+        // 用户「先去登录、之后自动回去」，否则刚才那一下是隐形的。
+        if (_scanHint != null) ...[
+          const SizedBox(height: SpbSpacing.sm),
+          Container(
+            key: const ValueKey('login-scan-hint'),
+            padding: SpbSpacing.cardPadding,
+            decoration: BoxDecoration(
+              color: scheme.tertiaryContainer,
+              borderRadius: SpbRadius.cardAll,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.qr_code_2,
+                  size: SpbSpacing.lg,
+                  color: scheme.onTertiaryContainer,
+                ),
+                const SizedBox(width: SpbSpacing.sm),
+                Expanded(
+                  child: Text(
+                    _scanHint!,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onTertiaryContainer,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: SpbSpacing.md),
       ],
     );
@@ -913,6 +955,7 @@ class _LoginPageState extends State<LoginPage> {
       _scanBusy = true;
       _localError = null;
       _errorField = null;
+      _scanHint = null;
     });
 
     final outcome = await scanQrLoginCode(widget.onScanQr);
@@ -926,6 +969,7 @@ class _LoginPageState extends State<LoginPage> {
       case QrScanCameraFailed() || QrScanForeignCode():
         setState(() => _localError = qrScanOutcomeMessage(outcome));
       case QrScanScene(:final scene):
+        setState(() => _scanHint = '已读到登录码，登录后会自动回到确认页');
         nav(scene);
     }
   }

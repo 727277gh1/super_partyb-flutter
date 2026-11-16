@@ -933,6 +933,23 @@ test 里完整驱动（`login_page_test.dart` 的「扫一扫」组：命中 / �
 原始文本，解释成 scene、判定「是不是本应用的码」只做一次，文案也只有一份
 （`qrScanOutcomeMessage`）——否则会演变成「设置页能扫、登录页说不是登录码」。
 
+**登录页那条是「先登录、再自动回确认页」**，不是死路：未登录时把
+`/qr-login?scene=…` 交给守卫，守卫改写成 `/login?from=<确认页>`，登录成功后再
+回跳。两个坑都是靠这条链路才能走通，因此写在这里：
+
+1. **`from` 必须带 query**。守卫原先用 `matchedLocation`（path-only）拼 `from`，
+   于是 `scene` 在登录往返中丢失 → 落到 `/qr-login`（空 scene）→ 确认页报
+   「扫码登录链接不完整」，而浏览器那边一直等到二维码过期。现在两端守卫都取
+   完整 location（`targetLocation` 参数，`_targetLocation(Uri)`），顺带修好了
+   `/settings?tab=sync` 这类带查询参数页面的回跳；
+2. **扫完必须有可见反馈**（`login-scan-hint`，文案「已读到登录码，登录后会自动
+   回到确认页」）。守卫把地址改写成登录页时页面看起来没变，用户会以为扫失败
+   又去扫一次——这一点在真机上尤其明显（相机页已经关掉了，屏幕上什么都没动）。
+
+回归测试：`apps/spb_mobile/test/router_qr_scan_test.dart`（真实登录页 + mini
+router：停在登录页 / 提示可见 / `from` 含 scene / 登录后到达确认页），
+两端 `router_redirect_test.dart` 的「from 必须带上 query」组。
+
 设置页的回调形态与 `onOpenAccountSecurity` 一致（`Future<String?> Function()?`
 + `void Function(String)?`，不注入即不渲染），因此**桌面端不出现这一行**：
 `mobile_scanner` 在 Linux 没有实现，桌面端自己的登录走浏览器 loopback，

@@ -208,12 +208,24 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
     return resolveAuthRedirect(
       authenticated: auth.isAuthenticated,
       matchedLocation: state.matchedLocation,
+      // `from` 必须带 **query**：确认页的 scene 就在 query 里
+      // （`/qr-login?scene=…`）。只回写 `matchedLocation`（path-only）会让
+      // 登录回来落到 `/qr-login`、scene 为空 → 确认页报「链接不完整」。
+      // 同类问题也影响 `/settings?tab=sync` 这类带查询参数的页面。
+      targetLocation: _targetLocation(state.uri),
       fromRaw: state.uri.queryParameters['from'],
       loginRoute: SpbRoutes.login,
       fallbackRoute: SpbRoutes.conversations,
     );
   };
 }
+
+/// 把 [uri] 折成「站内 location」：path 带上 query（有的话）。
+///
+/// 供认证守卫作为 `from` 的完整目标。**不包含** scheme/host：
+/// `from` 只接受站内路径（否则它是开放重定向入口，见 `_safeFrom`）。
+String _targetLocation(Uri uri) =>
+    uri.hasQuery ? '${uri.path}?${uri.query}' : uri.path;
 
 /// 认证守卫的**纯决策函数**（不碰 `BuildContext` / Riverpod）。
 ///
@@ -233,12 +245,17 @@ String? resolveAuthRedirect({
   required String? fromRaw,
   required String loginRoute,
   required String fallbackRoute,
+  String? targetLocation,
 }) {
   final goingToLogin = matchedLocation == loginRoute;
 
   if (!authenticated) {
     if (goingToLogin) return null;
-    return '$loginRoute?from=${Uri.encodeComponent(matchedLocation)}';
+    // [targetLocation] 优先：它带着 query，而 `matchedLocation` 只有 path。
+    // 回跳目标丢掉 query 是一类难查的缺陷（扫码确认页的 scene、
+    // `/settings?tab=sync` 都靠 query），故默认值也只做「没传就退回 path」。
+    final target = targetLocation ?? matchedLocation;
+    return '$loginRoute?from=${Uri.encodeComponent(target)}';
   }
 
   if (goingToLogin) return _safeFrom(fromRaw, loginRoute) ?? fallbackRoute;
