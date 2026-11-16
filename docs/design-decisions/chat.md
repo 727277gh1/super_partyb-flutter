@@ -1979,8 +1979,12 @@ Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms
    「按了也没用」；徽标猜错类别（把限流说成内存不足）会让人去调小任务，比不给类别更糟。
    历史事件（#182 之前只有 `content`）与未来服务端先发的新 code 都走这一格。
 4. **`retryable` 镜像服务端 `chatbus.Retryable`**，不自己判断：限流 / 上游错误 / 两档超时 /
-   挂死 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩；
+   挂死 / 重启中断 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩；
    兜底码提示找管理员）。`ErrorItem.isRecoverable` 由此派生（此前恒 true，归约层无从判断）。
+5. **闭集随后端演进**：2026-11-16 生产实测出现 `turn_interrupted`（重启回填，3 例），
+   而客户端闭集还停在 7 个 → 那些事件走 fail-open（通用图标、无徽标）。同步一次 fixture 才发现，
+   说明「vendored 夹具」只能保证**同步那一刻**一致，**同步频率**才是真约束：每次服务端改
+   `chatbus/error_payload.go` 的闭集，这里必须跑一次 `tools/sync_error_codes.sh` 并补 traits。
 
 **`detail` 的位置**：它是执行器原样给的诊断（`transport: upstream 429`、含工作区路径的命令串）。
 对话页红卡里**默认折叠**在「技术详情」里（可选中复制），详情面板直接展开——那本来就是排障面。

@@ -117,6 +117,17 @@ abstract final class ErrorCodes {
   /// 挂死清理（running 超过 TTL 被标记失败）。
   static const turnStalled = 'turn_stalled';
 
+  /// 进程退出把在跑的 turn 一起带走（部署重启 / 崩溃 / 被强杀），启动时回填。
+  ///
+  /// 服务端在**重启后**为遗留的 `running` turn 补一条 `error`（`backfilled: true`）
+  /// 再补 `done`，所以它是今天唯一能覆盖「turn 变 failed 却没有任何终态事件」的
+  /// code（super_partyb#184 的停机路径）。生产实测出现过 3 次（2026-11-16）。
+  ///
+  /// 可重试是服务端 `chatbus.Retryable` 的取值（`retryable: true`）——这与
+  /// `turn_stalled` 的取向一致：**环境性中断**再发一次有意义，而 OOM 不会因
+  /// 重发而好转。
+  static const turnInterrupted = 'turn_interrupted';
+
   /// 兜底码（服务端保证「无 code 可填时落它」）。
   static const internalError = 'internal_error';
 
@@ -131,6 +142,7 @@ abstract final class ErrorCodes {
     timeoutInactivity,
     timeoutHard,
     turnStalled,
+    turnInterrupted,
     internalError,
   ];
 
@@ -165,6 +177,11 @@ abstract final class ErrorCodes {
       retryable: true,
       icon: ErrorCodeIcon.interrupted,
       label: '执行中断',
+    ),
+    turnInterrupted: ErrorCodeTraits(
+      retryable: true,
+      icon: ErrorCodeIcon.interrupted,
+      label: '本轮被中断',
     ),
     internalError: ErrorCodeTraits(
       retryable: false,

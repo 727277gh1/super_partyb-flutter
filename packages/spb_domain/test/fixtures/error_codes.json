@@ -30,6 +30,11 @@
     "retryable": true
   },
   {
+    "code": "turn_interrupted",
+    "default_message": "本轮被意外中断（服务重启或进程退出），可重试",
+    "retryable": true
+  },
+  {
     "code": "internal_error",
     "default_message": "执行异常，请联系管理员",
     "retryable": false

@@ -22,6 +22,22 @@ void main() {
       }
     });
 
+    test('重启回填的 turn_interrupted 有徽标，且不与挂死混为一谈', () {
+      // 2026-11-16 生产实测载荷（`backfilled:true`）。两者都是「执行被打断」，
+      // 但用户该做的事不同：挂死是任务卡住了，重启中断是部署刚重启过。
+      expect(errorCodeLabel(ErrorCodes.turnInterrupted), '本轮被中断');
+      expect(
+        errorCodeIcon(ErrorCodes.turnInterrupted),
+        errorCodeIcon(ErrorCodes.turnStalled),
+        reason: '同一枚「执行中断」图标：给不同图标会让人以为图标 = 错误名',
+      );
+      expect(
+        errorCodeLabel(ErrorCodes.turnInterrupted),
+        isNot(errorCodeLabel(ErrorCodes.turnStalled)),
+        reason: '徽标必须区分——一个是挂死，一个是部署重启',
+      );
+    });
+
     test('未知 / 缺失 code 走通用兜底图标', () {
       for (final code in [null, '', 'brand_new_code']) {
         expect(errorCodeIcon(code), Icons.error_outline, reason: '$code');

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:test/test.dart';
 
 /// 错误码闭集（[ErrorCodes]）与服务端 vendored 清单的对拍。
@@ -100,6 +101,48 @@ void main() {
           reason: 'label 应是短徽标（如「内存不足」），不是一句完整话术',
         );
       }
+    });
+  });
+
+  group('生产实测载荷（2026-11-16，重启回填）', () {
+    // 现场原文（`chat_events.payload_json`，`turn_interrupted`）：
+    //   {"code":"turn_interrupted","content":"本轮被意外中断（服务重启或进程退出），
+    //    已标记失败。可重新发送消息重试。","backfilled":true,"turn_status":"failed"}
+    //
+    // 两个要点：① 该轮**没有 `message`**，只有过渡期的 `content` → 正文必须靠
+    // content 兜底（否则用户看到空正文的红卡）；② 它是 `Retryable` 的 true，
+    // 「重发」该给（这正是服务端文案在建议的动作）。
+    const payload = {
+      'code': 'turn_interrupted',
+      'content': '本轮被意外中断（服务重启或进程退出），已标记失败。可重新发送消息重试。',
+      'backfilled': true,
+      'turn_status': 'failed',
+    };
+
+    test('turn_interrupted 在闭集内且可重发', () {
+      expect(ErrorCodes.isKnown(ErrorCodes.turnInterrupted), isTrue);
+      final traits = ErrorCodes.traits(ErrorCodes.turnInterrupted);
+      expect(traits.retryable, isTrue, reason: '与 chatbus.Retryable 一致');
+      expect(traits.label, '本轮被中断');
+      expect(traits.icon, ErrorCodeIcon.interrupted);
+    });
+
+    test('只有 content 的老形状也能出正文（不依赖 message）', () {
+      // `errorMessage` 的兜底顺序：message → content → error → detail。
+      final event = ChatEvent(
+        eventId: 'e1',
+        userId: 'usr_1',
+        groupId: 'grp_1',
+        turnId: 'turn_1',
+        eventType: EventTypes.error,
+        seq: 1,
+        source: 'agent',
+        createdAt: DateTime.utc(2026, 11, 16, 14, 21, 4),
+        payload: payload,
+      );
+      expect(event.errorCode, 'turn_interrupted');
+      expect(event.errorMessage, payload['content']);
+      expect(event.errorDetail, isNull, reason: '回填事件没有 detail');
     });
   });
 

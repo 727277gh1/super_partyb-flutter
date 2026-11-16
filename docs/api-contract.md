@@ -413,12 +413,18 @@ fixture 在 `packages/spb_domain/test/fixtures/error_codes.json`
 | `content` | 过渡期兼容键，**逐字等于 `message`** | 旧消费者；三端迁到 `message` 后服务端删除 |
 | `detail` | 原始诊断串（`transport: upstream 429` / `responses invoke: …`） | **不进正文**：含英文诊断、路径、命令 → 只在「技术详情」展开/详情页展示 |
 
-闭集（7 个，顺序即清单顺序）：`oom_kill` / `upstream_rate_limited` /
+闭集（8 个，顺序即清单顺序）：`oom_kill` / `upstream_rate_limited` /
 `upstream_error` / `timeout_inactivity` / `timeout_hard` / `turn_stalled` /
-`internal_error`。
+`turn_interrupted` / `internal_error`。
+
+`turn_interrupted` 是**重启回填**专用：服务端进程退出（部署重启 / 崩溃 / 被强杀）
+会把在跑的 turn 一起带走，启动后为遗留的 `running` turn 补发一条
+`{"code":"turn_interrupted","message":"…","backfilled":true,"turn_status":"failed"}`，
+紧接一条 `done`。它是今天唯一覆盖「turn 变 `failed` 却没有任何终态事件」这条
+路径的 code（super_partyb#184），生产已实测出现（2026-11-16，3 例）。
 
 `retryable` 的真源是服务端 `chatbus.Retryable(code)`：限流 / 上游错误 / 两档超时 /
-挂死 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩、
+挂死 / 重启中断 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩、
 兜底码提示找管理员）。客户端镜像它，**未知 code 走 fail-open**
 （`ErrorCodeTraits.failOpen`：可重发、无徽标、通用图标）——历史事件
 （#182 之前只写 `content`）与未来服务端先发的新 code 都走这一格，绝不因客户端
