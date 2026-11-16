@@ -917,3 +917,46 @@ test 里完整驱动（`login_page_test.dart` 的「扫一扫」组：命中 / �
 > 仓库 `debug.keystore` 签名（`10:89:AC:…`）——不匹配时落地页会先打开浏览器，
 > 再靠 `partyb://qrlogin?scene=` 兜一跳。**App 内扫码不走 App Links**，因此不受
 > 该指纹约束。
+
+#### 5. 已登录用户从哪里扫：同一个能力，两个入口
+
+「手机已登好、要把另一台设备也登进去」是**已登录**状态下的需求，而登录页只在
+**未登录**时出现——只把入口放在登录页，这个场景永远进不去（用户会把「找不到
+扫一扫」理解成「这 App 不支持」）。故两个入口共用同一份相机能力与同一份解释：
+
+| 入口 | 何时可见 | 扫到码之后 |
+|---|---|---|
+| 登录页「其他登录方式 → 扫一扫登录」（`login-scan-button`） | 未登录 | `onQrScanned` → 深链同一落点 `/qr-login?scene=` |
+| 设置页「账号 → 扫一扫登录其他设备」（`settings-scan-qr-login`） | 已登录 | `context.push('/qr-login?scene=…')`：一次性插入，确认后 `maybePop()` 回设置页 |
+
+两处都调 `scanQrLoginCode`（`spb_features/lib/src/auth/qr_scan.dart`）：相机只产
+原始文本，解释成 scene、判定「是不是本应用的码」只做一次，文案也只有一份
+（`qrScanOutcomeMessage`）——否则会演变成「设置页能扫、登录页说不是登录码」。
+
+设置页的回调形态与 `onOpenAccountSecurity` 一致（`Future<String?> Function()?`
++ `void Function(String)?`，不注入即不渲染），因此**桌面端不出现这一行**：
+`mobile_scanner` 在 Linux 没有实现，桌面端自己的登录走浏览器 loopback，
+不需要（也没有）「扫另一台设备的码」这条路。
+
+#### 6. 「其他端」到底能登成什么
+
+扫码只解决**浏览器侧**的登录态（`idp_access_token` cookie，`Path=/`）。这条
+cookie 是 IdP 的会话凭证，`/oauth2/authorize` 认它（
+`id-provider/go/internal/oidc/provider.go` 的 `authenticatedUserID`：
+Bearer > cookie > 拒绝 `X-User-ID`）。因此「其他端」的实际覆盖是：
+
+| 其他端 | 扫码之后发生什么 |
+|---|---|
+| 浏览器（webapp `/pbw/*`、IdP 后台 `/idp/dashboard`） | 轮询命中 `confirmed` → 种 cookie → 页面跳回 `redirect_uri`；AGW 保护的路由再走一遍 OIDC 时**免密**（AGW 自己那套 `access_token`/`id_token` cookie 由 `/auth/oidc/callback` 下发） |
+| 桌面端 App（SPBF，RFC 8252 loopback） | 浏览器里的 `authorize` 请求带上刚种下的 cookie → 直接发授权码 → 回环拿到 code → 桌面端登录。**无需密码**，这是扫码真正省下的那一步 |
+| 移动端 App（另一台手机） | 扫码那一侧就是 App 自己；另一台手机装的是同一个 App，同样走登录页 / 设置页入口 |
+
+要注意的边界：
+
+- **扫码不会把身份给 App**：App 只做「确认」，token 始终在浏览器与 IdP 之间
+  流转（见 `spb_api` 的 `QrLoginClient` 文档）；
+- **App 必须已登录才能确认**（`requireUser` 只认 Bearer / cookie / 可信网关
+  头）。所以「先扫码再登录」是不可用的顺序：设置页入口只在有会话时可用，
+  登录页入口扫完会进确认页，而确认页在无会话时只会得到 401 提示；
+- **身份换不掉**：确认用的是当前账号，用户若想「用 A 账号登 B 浏览器」必须先
+  在本机切换账号。

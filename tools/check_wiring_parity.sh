@@ -132,11 +132,17 @@ TARGETS = [
             # 门禁」的语义（系统锁屏 + 窗口在前台），`local_auth` 在 Linux
             # 也没有实现；接上只会得到一个永远失败的开关。移动端注入真实
             # 实现，桌面端传 null → 不展示该区块。
+            # 相机扫码（auth.md §6.104）：`mobile_scanner` 在 Linux 桌面没有
+            # 实现，桌面端也没有「扫另一台设备的码」的场景（它自己的登录走
+            # 浏览器 loopback）。移动端接上后设置页出现「扫一扫登录其他设备」，
+            # 桌面端传 null → 不展示入口。
             'mobile': {
                 'loadNotifications',
                 'saveNotifications',
                 'loadBiometricLock',
                 'saveBiometricLock',
+                'onScanQr',
+                'onQrScanned',
             },
         },
     },

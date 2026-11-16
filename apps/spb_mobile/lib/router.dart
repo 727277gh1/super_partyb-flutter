@@ -913,6 +913,16 @@ class _SettingsTab extends ConsumerWidget {
       // 账号安全（Passkey / 双因素）：交给系统浏览器，理由见
       // `_openAccountSecurityPage` 与 `SpbEnv.accountSecurityUrl` 的文档。
       onOpenAccountSecurity: _openAccountSecurityPage,
+      // 扫一扫登录**其他设备**（issue：已登录状态下的扫码入口）。
+      //
+      // 登录页那条只在未登录时出现，而「手机已登好、要把电脑也登进去」正好是
+      // 已登录状态的需求——所以同一份相机能力在本页再开一个入口。确认页用
+      // `push` 而非 `go`：它是从设置页插入的一次性动作，确认/拒绝后
+      // `maybePop()` 应该回到设置页，而不是把设置页从栈里换掉。
+      onScanQr: ref.read(qrScannerProvider).isSupported
+          ? () => ref.read(qrScannerProvider).scan(context)
+          : null,
+      onQrScanned: (scene) => context.push(SpbRoutes.qrLoginFor(scene)),
       // 退出登录：清凭证 → 回登录页。
       //
       // 显式跳转是「双保险」：`signOut()` 置为未登录后，路由守卫本身就会重定向

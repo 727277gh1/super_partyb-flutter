@@ -32,6 +32,7 @@ void main() {
   _userPreferencesTests();
   _biometricLockTests();
   _accountSecurityTests();
+  _scanQrLoginTests();
 
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
@@ -2021,6 +2022,149 @@ void _accountSecurityTests() {
       await tester.pumpAndSettle();
 
       expect(find.text('无法打开浏览器，请在浏览器中手动访问账号安全页'), findsOneWidget);
+    });
+  });
+}
+
+/// 设置页的「扫一扫登录其他设备」（auth.md §6.104）。
+///
+/// ## 这组测试防的是什么
+///
+/// 这条入口存在的前提是**用户已经登录**（登录页只在未登录时出现），所以
+/// 它的失败模式都是「已登录用户以为功能坏了」：
+/// - 宿主不注入 → 入口不渲染（桌面端无相机），而不是渲染一个点不动的行；
+/// - 点了没有任何反应（回调没接上 / busy 卡死）；
+/// - 扫到别的码却静默吞掉（用户不知道刚才那一下做了什么）；
+/// - 取消却弹错误（用户会以为扫码失败、再去重试）。
+void _scanQrLoginTests() {
+  Future<void> pumpEntry(
+    WidgetTester tester, {
+    Future<String?> Function()? onScan,
+    void Function(String scene)? onScanned,
+  }) async {
+    // 与账号安全入口同口径：窗口调高，避免 ListView 惰性构建让条目不在树上。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          onScanQr: onScan,
+          onQrScanned: onScanned,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  group('设置页：扫一扫登录其他设备', () {
+    testWidgets('未注入相机时不展示（桌面端）', (tester) async {
+      await pumpEntry(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-scan-qr-login')),
+        findsNothing,
+      );
+      expect(find.text('扫一扫登录其他设备'), findsNothing);
+    });
+
+    testWidgets('有相机回调才展示，并说清是「扫另一台设备」', (tester) async {
+      await pumpEntry(tester, onScan: () async => null, onScanned: (_) {});
+
+      expect(
+        find.byKey(const ValueKey('settings-scan-qr-login')),
+        findsOneWidget,
+      );
+      // 文案必须点明方向：用户会在同一个 App 里看到「登录页扫码」与
+      // 「设置页扫码」，两处方向不同（这里扫的是别人的码）。
+      expect(find.text('用相机扫电脑上登录页的二维码，确认后那台设备即登录'), findsOneWidget);
+    });
+
+    testWidgets('扫到登录码 → 交给宿主去确认（本页不导航）', (tester) async {
+      var scans = 0;
+      final scenes = <String>[];
+      await pumpEntry(
+        tester,
+        onScan: () async {
+          scans++;
+          return 'https://dever.atjog.com/idp/qr/abc123';
+        },
+        onScanned: scenes.add,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-scan-qr-login')));
+      await tester.pumpAndSettle();
+
+      expect(scans, 1);
+      expect(scenes, ['abc123']);
+      // 扫对了不该同时弹提示（SnackBar 会挡住确认页）。
+      expect(find.byType(SnackBar), findsNothing);
+    });
+
+    testWidgets('用户取消 → 不弹任何提示', (tester) async {
+      final scenes = <String>[];
+      await pumpEntry(tester, onScan: () async => null, onScanned: scenes.add);
+
+      await tester.tap(find.byKey(const ValueKey('settings-scan-qr-login')));
+      await tester.pumpAndSettle();
+
+      expect(scenes, isEmpty);
+      expect(find.byType(SnackBar), findsNothing);
+    });
+
+    testWidgets('扫到别的二维码 → 给出可操作文案（不静默）', (tester) async {
+      final scenes = <String>[];
+      await pumpEntry(
+        tester,
+        onScan: () async => 'https://example.com/product/42',
+        onScanned: scenes.add,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-scan-qr-login')));
+      await tester.pumpAndSettle();
+
+      expect(scenes, isEmpty);
+      expect(find.text('这不是 PartyB 的登录码（扫到的是别的二维码）'), findsOneWidget);
+    });
+
+    testWidgets('相机打不开（抛异常）→ 提示检查相机权限', (tester) async {
+      await pumpEntry(
+        tester,
+        onScan: () async => throw StateError('camera unavailable'),
+        onScanned: (_) {},
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-scan-qr-login')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('没能打开相机，请检查系统里的相机权限后重试'), findsOneWidget);
+    });
+
+    testWidgets('相机开着时条目禁用（防重复打开两个相机页）', (tester) async {
+      final gate = Completer<String?>();
+      await pumpEntry(tester, onScan: () => gate.future, onScanned: (_) {});
+
+      await tester.tap(find.byKey(const ValueKey('settings-scan-qr-login')));
+      await tester.pump();
+
+      final tile = tester.widget<ListTile>(
+        find.byKey(const ValueKey('settings-scan-qr-login')),
+      );
+      expect(tile.onTap, isNull);
+
+      // 收尾：取消挂起的 future，避免测试结束时留下未完成的异步。
+      gate.complete(null);
+      await tester.pumpAndSettle();
     });
   });
 }

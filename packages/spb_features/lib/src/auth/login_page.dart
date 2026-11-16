@@ -7,6 +7,7 @@ import 'package:spb_design/spb_design.dart';
 import 'package:spb_ui/spb_ui.dart';
 
 import 'auth_state.dart';
+import 'qr_scan.dart';
 
 enum _LoginField { email, handoff, session }
 
@@ -900,17 +901,13 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  /// 打开相机扫码，并把扫到的文本解释成登录意图。
+  /// 打开相机扫码，并把扫到的结果交给路由层。
   ///
-  /// ## 为什么解释放在这里，而不是相机实现里
-  ///
-  /// 相机只知道「文本」，不知道什么是登录码（那是认证域的知识，住在
-  /// `spb_api` 的 `QrLoginUri`）。放在这里的好处是：相机实现只依赖插件，
-  /// 这段判断可以在无插件的 widget test 里用假回调完整驱动。
+  /// 解释与文案都在 [scanQrLoginCode] 里（与设置页共用同一份）：相机页只产
+  /// 文本，「这是不是登录码」是认证域的知识，不该在相机实现里。
   Future<void> _handleScanQr() async {
-    final open = widget.onScanQr;
     final nav = widget.onQrScanned;
-    if (open == null || nav == null || _scanBusy) return;
+    if (nav == null || _scanBusy) return;
 
     setState(() {
       _scanBusy = true;
@@ -918,33 +915,19 @@ class _LoginPageState extends State<LoginPage> {
       _errorField = null;
     });
 
-    String? text;
-    try {
-      text = await open();
-    } catch (e) {
-      // 相机打不开（权限被拒/硬件异常）是预期内结果，但用户需要一句能行动的话。
-      SpbLog.warn('打开相机扫码时异常', {'error': e.toString()});
-      text = null;
-      if (mounted) {
-        setState(() {
-          _scanBusy = false;
-          _localError = '没能打开相机，请检查系统里的相机权限后重试';
-        });
-      }
-      return;
-    }
-
+    final outcome = await scanQrLoginCode(widget.onScanQr);
     if (!mounted) return;
     setState(() => _scanBusy = false);
-    // null = 用户取消 / 相机不可用：安静回登录页，不弹错误（取消不是错误）。
-    if (text == null) return;
 
-    final scene = QrLoginUri.parseScannedText(text);
-    if (scene == null) {
-      setState(() => _localError = '这不是 PartyB 的登录码（扫到的是别的二维码）');
-      return;
+    switch (outcome) {
+      // 用户取消不是错误：安静回登录页，不弹错误。
+      case QrScanCancelled():
+        return;
+      case QrScanCameraFailed() || QrScanForeignCode():
+        setState(() => _localError = qrScanOutcomeMessage(outcome));
+      case QrScanScene(:final scene):
+        nav(scene);
     }
-    nav(scene);
   }
 
   /// 反向登录码区域（手机小程序出码 → 本设备输码）。

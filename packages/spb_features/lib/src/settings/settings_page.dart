@@ -10,6 +10,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 import 'package:spb_ui/spb_ui.dart';
 
+import '../auth/qr_scan.dart';
 import '../sync/sync_run_section.dart';
 import 'notification_subscriptions_card.dart';
 import 'user_preferences_card.dart';
@@ -227,6 +228,8 @@ class SettingsPage extends StatefulWidget {
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
     this.onOpenAccountSecurity,
+    this.onScanQr,
+    this.onQrScanned,
     this.showAutoSync = false,
     this.localRootIsDefault = false,
     this.title = '设置',
@@ -271,6 +274,23 @@ class SettingsPage extends StatefulWidget {
   /// 返回 false = 打开失败（页面会给出「请手动访问」提示）。
   /// 为 null 时不展示该入口（未配置 OIDC issuer 的构建）。
   final Future<bool> Function()? onOpenAccountSecurity;
+
+  /// 打开相机扫登录码（扫的是**另一台设备**上的码）。
+  ///
+  /// 入口理由：本页是**已登录**用户能找到「用手机给其他设备授权登录」的地方。
+  /// 登录页只在未登录时出现，而「手机已经登好、要把电脑也登进去」正是已登录
+  /// 状态下的需求——入口放登录页会永远进不去（见 `docs/design-decisions/auth.md`
+  /// §6.104）。
+  ///
+  /// 返回相机扫到的**原始文本**（null = 取消/相机不可用），解释成 scene 与
+  /// 判定「是不是本应用的码」都由本页完成（[scanQrLoginCode]）；
+  /// 为 null 时不展示入口（桌面端无相机）。
+  final Future<String?> Function()? onScanQr;
+
+  /// 扫到合法登录码后交回宿主（由装配层导航到确认页）。
+  ///
+  /// 与 [SettingsPage.onOpenMyTurns] 同一分工：页面不导航。
+  final void Function(String scene)? onQrScanned;
 
   /// 桌面集成区块的展示信息（决定是否展示托盘/快捷键项）。
   ///
@@ -501,6 +521,9 @@ class _SettingsPageState extends State<SettingsPage>
 
   /// 正在打开账号安全页（防连点开出多个标签页）。
   bool _openingAccountSecurity = false;
+
+  /// 相机开着时置 true（防连点开出第二个相机页）。
+  bool _scanQrBusy = false;
 
   String? _error;
 
@@ -794,6 +817,31 @@ class _SettingsPageState extends State<SettingsPage>
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('无法打开浏览器，请在浏览器中手动访问账号安全页')));
+    }
+  }
+
+  /// 扫一扫登录其他设备（相机）。
+  ///
+  /// 三种结果用 SnackBar 区分：取消**不弹**（取消不是错误）、相机起不来与
+  /// 扫错码各给一句可操作的话（文案与登录页同源，见 [qrScanOutcomeMessage]）。
+  Future<void> _scanQr() async {
+    final nav = widget.onQrScanned;
+    if (nav == null || _scanQrBusy) return;
+
+    setState(() => _scanQrBusy = true);
+    final outcome = await scanQrLoginCode(widget.onScanQr);
+    if (!mounted) return;
+    setState(() => _scanQrBusy = false);
+
+    switch (outcome) {
+      case QrScanCancelled():
+        return;
+      case QrScanCameraFailed() || QrScanForeignCode():
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(qrScanOutcomeMessage(outcome))));
+      case QrScanScene(:final scene):
+        nav(scene);
     }
   }
 
@@ -1729,10 +1777,43 @@ class _SettingsPageState extends State<SettingsPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // 危险操作区放最后：与上面的普通设置项拉开距离，避免误触。
-              if (widget.onSignOut != null) ...[
+              // 账号区标题只出现一次：扫一扫（若可接）与退出登录同属「账号」，
+              // 分开各写一个 SectionTitle 会让这一小节出现两个同名标题。
+              if (widget.onScanQr != null || widget.onSignOut != null) ...[
                 const SizedBox(height: SpbSpacing.lg),
                 const SectionTitle('账号', highlight: true),
+              ],
+              // 扫一扫：给**另一台设备**授权登录（本页是已登录状态下的入口，
+              // 登录页那条只在未登录时出现）。
+              if (widget.onScanQr != null && widget.onQrScanned != null)
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-scan-qr-login'),
+                    leading: const Icon(Icons.qr_code_scanner),
+                    title: const Text('扫一扫登录其他设备'),
+                    // 说清方向：**另一台**设备出码、本机扫。反过来的「本机出码」
+                    // 是登录页与 IdP 网页登录页的事，这里不该误导用户。
+                    subtitle: const Text('用相机扫电脑上登录页的二维码，确认后那台设备即登录'),
+                    trailing: _scanQrBusy
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.qr_code_scanner, size: 18),
+                    enabled: !_scanQrBusy,
+                    onTap: _scanQrBusy ? null : _scanQr,
+                  ),
+                ),
+              // 危险操作区放最后：与上面的普通设置项拉开距离，避免误触。
+              if (widget.onSignOut != null) ...[
+                // 与上一条（若存在）拉开间距，不再重复节标题。
+                SizedBox(
+                  height: widget.onScanQr == null
+                      ? SpbSpacing.lg
+                      : SpbSpacing.md,
+                ),
                 Card(
                   margin: EdgeInsets.zero,
                   child: ListTile(
