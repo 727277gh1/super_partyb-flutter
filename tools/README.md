@@ -38,4 +38,5 @@ for f in tools/check_*.sh; do bash "$f" || break; done
 | `tools/build_windows_installer.ps1` | Inno Setup 安装包构建 |
 | `tools/reverse_verify_issue50.sh` | 双栈降级变异验证 |
 | `tools/sync-to-github.sh` | 导出干净仓库并推送 GitHub |
+| `tools/sync_error_codes.sh` | 刷新 vendored 的 `error` code 闭集（服务端 `docs/error-codes.json`）|
 | `tools/scrub-history.sh` | 开源前清理历史中的真实标识；只重写历史，用法见脚本头 |

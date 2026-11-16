@@ -172,9 +172,14 @@ final class ToolCallItem extends ConversationItem {
 /// `terminalTurnIds`）：服务端执行失败后本轮不会再产出任何内容。用户唯一的
 /// 出路是把这段输入再投一次。
 ///
-/// 但并非所有错误都值得重发——参数非法 / 权限不足 / 额度耗尽重发也是同样结果。
-/// 归约层无法区分（`error` 的 payload 只有 `message`/`error`），故默认 true，
-/// 由**调用方**按需置 false。
+/// 「值不值得重发」现在由服务端的 `code` 决定（`ErrorCodes.traits(code).retryable`，
+/// 真源是服务端 `chatbus.Retryable`）：OOM 与 `internal_error` 重发必然再撞一次
+/// 同样的墙，限流 / 超时 / 挂死则值得再试。历史事件（#182 之前只写了 `content`）
+/// 与未来服务端先发的新 code 都**没有** code 可依，归约层按 fail-open 置 true
+/// （≈ 今天的行为），不删按钮。
+///
+/// 构造参数仍保留默认 true：`ErrorItem` 也被非归约路径构造（测试 / 手工拼装的
+/// 时间线项），那些地方无从得知 code。
 final class ErrorItem extends ConversationItem {
   const ErrorItem({
     required super.id,
@@ -182,10 +187,24 @@ final class ErrorItem extends ConversationItem {
     required this.message,
     super.turnId,
     this.isRecoverable = true,
+    this.code,
+    this.detail,
   });
 
+  /// 面向用户的文案（服务端 `message`，空时回落 `content` 等兼容键）。
   final String message;
+
+  /// 是否展示「重发」入口（见类文档）。
   final bool isRecoverable;
+
+  /// 服务端 `code`（闭集见 [ErrorCodes]）。`null` = 事件没带 code。
+  final String? code;
+
+  /// 原始诊断串（服务端 `detail`）。
+  ///
+  /// **不进正文**：含英文诊断、路径与命令（`transport: upstream 429` /
+  /// `responses invoke: …`）。只在详情面板的「技术详情」展开处出现。
+  final String? detail;
 }
 
 /// 会话绑定失效诊断（`pigo_session_missing`）。

@@ -38,6 +38,7 @@
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 [§6.22](design-decisions/testing.md)）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 [§6.14](design-decisions/chat.md)）
+- [x] `error` 事件按服务端 `code` 出表现（[issue #115](https://git.atjog.com/dever/super_partyb-flutter/issues/115)，服务端 P0 见 super_partyb#182）：`code` 闭集镜像 + vendored 对拍（`tools/sync_error_codes.sh`）、正文只取 `message`、`detail` 折叠进「技术详情」、`retryable` 决定「重发」，见 [§6.105](design-decisions/chat.md)；本地自动化回归通过（含 `error_banner` golden 未变），123 真实 OOM / 限流事件待复现复核
 - [x] 发送的乐观回显（请求在飞时「发送中」，issue #52，见 [§6.50](design-decisions/chat.md)）
 - [x] 对话内搜索（搜已加载时间线，见 [§6.15](design-decisions/chat.md)）+ 窄屏 AppBar 溢出修复（issue #31，见 [§6.16](design-decisions/ui.md)）
 - [x] 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（搜索命中 / 待确认收件箱 / 习惯执行历史 / 我的轮次四处入口都带上锚点，落位 + 高亮 + 「回到最新」，见 [§6.92](design-decisions/chat.md)）：本地自动化回归通过，真机跳变观感待复核；越界自动补页（[#108](https://git.atjog.com/dever/super_partyb-flutter/issues/108)）与 OS 层深链（[#109](https://git.atjog.com/dever/super_partyb-flutter/issues/109)）未做

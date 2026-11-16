@@ -154,6 +154,25 @@ class ChatEvent {
   /// 体、gate 决策载荷都可能带同名键），不门禁就会把别的事件的 code 读成本轮错误码。
   String? get errorCode => eventType == EventTypes.error ? _str('code') : null;
 
+  /// 原始诊断串（`error` 的 `detail` 键），**不是面向用户的文案**。
+  ///
+  /// 服务端收敛后（super_partyb#182，`chatbus.ErrorPayload`）三个键分工是：
+  ///
+  /// | 键 | 内容 | 谁看 |
+  /// |---|---|---|
+  /// | `code` | 闭集错误码 | 客户端分派表现（图标 / 是否给「重发」） |
+  /// | `message` | **一句话人话**（空则用该 code 的兜底文案） | 用户 |
+  /// | `detail` | 原始上游诊断（`transport: upstream 429` / `responses invoke: …`） | 排障面 |
+  ///
+  /// 执行器**故意**不把原文塞进 `message`（`chatexec/pigo_core.go` 的 `flushError`）：
+  /// 那是英文诊断串、无法本地化，且 `message` 会直接进正文。`detail` 含路径/
+  /// 命令，故同样不得进正文——只有详情面板的「技术详情」展开处能看。
+  ///
+  /// 按 `eventType` 门禁的理由同 [errorCode]：`detail` 也是通用键名
+  /// （工具结果、gate 载荷都带）。
+  String? get errorDetail =>
+      eventType == EventTypes.error ? _str('detail') : null;
+
   /// 归属判定的解释（`routing_selected`）。
   String? get routingReason =>
       _str('group_decision_reason') ?? _str('reason') ?? _str('mode');

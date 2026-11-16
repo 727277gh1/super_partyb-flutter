@@ -1026,7 +1026,7 @@ void main() {
     });
   });
 
-  group('error 访问器（errorMessage / errorCode）', () {
+  group('error 访问器（errorMessage / errorCode / errorDetail）', () {
     /// 构造一条 error 事件（两种序列化形状都走同一个 payload）。
     ChatEvent errorEvent(Map<String, dynamic> payload, {bool snake = false}) =>
         snake
@@ -1091,6 +1091,35 @@ void main() {
       );
 
       expect(ev.errorCode, isNull);
+    });
+
+    test('errorDetail 读 detail（不是 message），两者不互串', () {
+      // 服务端 #182 收敛后的分工：message = 一句话人话，detail = 原始诊断串。
+      final ev = errorEvent({
+        'code': 'upstream_rate_limited',
+        'message': '模型服务限流，稍后重试',
+        'detail': 'transport: upstream 429',
+        'content': '模型服务限流，稍后重试',
+      });
+
+      // 正文只拿人话：若这两个键混用，用户会在正文里看到英文诊断串。
+      expect(ev.errorMessage, '模型服务限流，稍后重试');
+      expect(ev.errorDetail, 'transport: upstream 429');
+    });
+
+    test('没有 detail 时 errorDetail 为 null（不把 message 当诊断串）', () {
+      expect(errorEvent({'message': '只有人话'}).errorDetail, isNull);
+    });
+
+    test('errorDetail 按类型门禁同 errorCode', () {
+      // `detail` 也是通用键名（工具结果 / gate 载荷都带）。
+      final ev = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.toolResult
+          ..['payload'] = {'detail': 'stderr: permission denied'},
+      );
+
+      expect(ev.errorDetail, isNull);
     });
   });
 }

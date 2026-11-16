@@ -21,6 +21,7 @@ import 'agent_file_preview.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'conversation_search_sheet.dart';
+import 'error_code_display.dart';
 import 'feedback_request_card.dart';
 import 'flush_strategy_dialog.dart';
 import 'follow_up_chips.dart';
@@ -3511,18 +3512,31 @@ class _ConversationPageState extends State<ConversationPage>
     GoalGateStoppedItem() => _GoalGateStoppedNotice(item: item),
     ScheduleCreatedItem() => _ScheduleCreatedNotice(item: item),
     DiagnosticNoticeItem() => _DiagnosticNotice(item: item),
-    ErrorItem(:final message, :final isRecoverable) => ErrorBanner(
-      // 重发是「用原输入再跑一轮」，按钮文案用「重发」而不是「重试」——
-      // 后者容易被读成「重试这个请求」（不产生新 turn），而实际会产生新 turn。
-      message: message,
-      onRetry:
-          (widget.onRetryTurn != null &&
-              isRecoverable &&
-              item.turnId.isNotEmpty)
-          ? () => _handleRetryTurn(item)
-          : null,
-      retryLabel: _retryingTurnId == item.turnId ? '重发中…' : '重发',
-    ),
+    ErrorItem(
+      :final message,
+      :final isRecoverable,
+      :final code,
+      :final detail,
+    ) =>
+      ErrorBanner(
+        // 重发是「用原输入再跑一轮」，按钮文案用「重发」而不是「重试」——
+        // 后者容易被读成「重试这个请求」（不产生新 turn），而实际会产生新 turn。
+        message: message,
+        // 图标与徽标只由服务端 `code` 决定（#182 闭集）；未知 code 保持原图标、
+        // 不渲染徽标（fail-open，不猜语义）。正文文案永远是服务端的 `message`。
+        icon: errorCodeIcon(code),
+        category: errorCodeLabel(code),
+        // 原始诊断串默认折叠在「技术详情」里——它含英文诊断 / 路径 / 命令，
+        // 不能直接进正文（服务端宁可把 message 写成一句人话，把原文挪到 detail）。
+        detail: detail,
+        onRetry:
+            (widget.onRetryTurn != null &&
+                isRecoverable &&
+                item.turnId.isNotEmpty)
+            ? () => _handleRetryTurn(item)
+            : null,
+        retryLabel: _retryingTurnId == item.turnId ? '重发中…' : '重发',
+      ),
     FeedbackRequestItem() => FeedbackRequestCard(
       question: item.question,
       options: item.options,

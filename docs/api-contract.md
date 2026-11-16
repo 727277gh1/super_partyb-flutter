@@ -326,6 +326,54 @@ data: <json>
 
 **「同一 turn 全部 `message` 事件拼接即完整回复」**（`final_message` 已废弃，迁移 0010 清空历史）。归约实现见 `packages/spb_domain/lib/src/event_reducer.dart`。
 
+#### 5.4.1 `error` 事件的 payload（`code` 闭集 + `message`/`detail` 分工）
+
+**真源**：`super_partyb/apps/go-api/internal/chatbus/error_payload.go` 的
+`ErrorPayload`（唯一构造入口）与 `ErrorCodes()`；导出清单
+`apps/go-api/docs/error-codes.json`（`{code, default_message, retryable}`）。
+**镜像**：`packages/spb_domain/lib/src/error_code.dart` 的 `ErrorCodes`，
+fixture 在 `packages/spb_domain/test/fixtures/error_codes.json`
+（`bash tools/sync_error_codes.sh` 刷新，`test/error_code_test.dart` 对拍）。
+
+```json
+{
+  "code": "upstream_rate_limited",
+  "message": "模型服务限流，稍后重试",
+  "content": "模型服务限流，稍后重试",
+  "detail": "transport: upstream 429"
+}
+```
+
+| 键 | 语义 | 客户端怎么用 |
+|---|---|---|
+| `code` | 闭集错误码（服务端保证恒有；未知值归一 `internal_error`） | 分派**表现**（图标 / 分类徽标 / 是否给「重发」）；未知 code 一律 fail-open |
+| `message` | **一句话人话**（空则服务端回落该 code 的兜底句） | 正文，唯一文案来源。**客户端不抄文案表** |
+| `content` | 过渡期兼容键，**逐字等于 `message`** | 旧消费者；三端迁到 `message` 后服务端删除 |
+| `detail` | 原始诊断串（`transport: upstream 429` / `responses invoke: …`） | **不进正文**：含英文诊断、路径、命令 → 只在「技术详情」展开/详情页展示 |
+
+闭集（7 个，顺序即清单顺序）：`oom_kill` / `upstream_rate_limited` /
+`upstream_error` / `timeout_inactivity` / `timeout_hard` / `turn_stalled` /
+`internal_error`。
+
+`retryable` 的真源是服务端 `chatbus.Retryable(code)`：限流 / 上游错误 / 两档超时 /
+挂死 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩、
+兜底码提示找管理员）。客户端镜像它，**未知 code 走 fail-open**
+（`ErrorCodeTraits.failOpen`：可重发、无徽标、通用图标）——历史事件
+（#182 之前只写 `content`）与未来服务端先发的新 code 都走这一格，绝不因客户端
+没跟上而收掉「重发」。
+
+新增错误语义一律**复用 `error` + 新 code**，不新增事件类型：小程序的渲染层是
+fail-closed 白名单，新类型要等微信审核才可见（`super_partyb#183` 同一判据）。
+
+> 两个**不要**：① 不要把 `session_handoff_stage` / `session_handoff_bridge` 当错误
+> 渲染（前者是进度、后者 `failed` 是降级，用户照样拿到回复，红字会误导成
+> 「换 agent 失败」）；② 不要按 `error_type` / `friendly_message` 这类 Python 时代
+> 的遗留键分派（Go 从不写，读到的永远是死分支）。
+>
+> 归约输出：`ErrorItem` 带 `message` / `code` / `detail` / `isRecoverable`
+> （`isRecoverable` 由 `ErrorCodes.traits(code).retryable` 派生，见
+> `event_reducer.dart` 的 `EventTypes.error` 分支）。
+
 **cursor 只记录落库事件的 ID**——Transient 事件无有效 ID（`globalSeq` 为 0），用它作游标会跳过其后的权威帧。
 增量帧的 `eventId` 为空、`seq` 也为 0，**不能直接用作列表 Key**；归约层为正文与
 思考段落生成稳定的本地展示标识，不写回事件，也不用于 SSE 游标（见 §6.85）。

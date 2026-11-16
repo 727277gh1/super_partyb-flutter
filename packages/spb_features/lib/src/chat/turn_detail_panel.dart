@@ -7,6 +7,7 @@ import 'package:spb_models/spb_models.dart';
 import 'agent_file_card.dart';
 import 'agent_file_preview.dart';
 import 'assistant_message_bubble.dart';
+import 'error_code_display.dart';
 import 'thought_tile.dart';
 import 'tool_call_tile.dart';
 
@@ -381,6 +382,7 @@ class TurnDetailPanel extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final msg = e.errorMessage ?? e.text;
+    final detail = e.errorDetail;
     return Container(
       padding: SpbSpacing.cardPadding,
       decoration: BoxDecoration(
@@ -393,13 +395,15 @@ class TurnDetailPanel extends StatelessWidget {
           Row(
             children: [
               Icon(
-                Icons.error_outline,
+                errorCodeIcon(e.errorCode),
                 size: SpbSpacing.lg,
                 color: scheme.onErrorContainer,
               ),
               const SizedBox(width: SpbSpacing.xs),
               Text(
-                '错误',
+                // 分类徽标由服务端 `code` 决定（#182 闭集）；未知 / 旧事件不猜类别，
+                // 退回原来的「错误」标题。正文仍是服务端 `message`。
+                errorCodeLabel(e.errorCode) ?? '错误',
                 style: theme.textTheme.labelMedium?.copyWith(
                   color: scheme.onErrorContainer,
                 ),
@@ -413,6 +417,20 @@ class TurnDetailPanel extends StatelessWidget {
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onErrorContainer,
               ),
+            ),
+          ],
+          // 原始诊断串（`detail`）在详情页**直接展开**而不做折叠：
+          // 详情页本身就是排障面（`_plainCard` 的注释同理——它的职责是把服务端发的
+          // 都摊开）；而对话页的时间线红卡里默认收起来，避免把英文诊断 /
+          // 工作区路径当成用户要读的正文。
+          if (detail != null && detail.trim().isNotEmpty) ...[
+            const SizedBox(height: SpbSpacing.xs),
+            SelectableText(
+              detail,
+              style: SpbType.mono(
+                theme.textTheme,
+                base: theme.textTheme.bodySmall,
+              )?.copyWith(color: scheme.onErrorContainer),
             ),
           ],
           const SizedBox(height: SpbSpacing.xxs),

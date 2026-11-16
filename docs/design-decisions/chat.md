@@ -1950,3 +1950,70 @@ Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms
 - **真机 / 远程桌面**：本机无 `DISPLAY`（[§9](../development.md)）。hover 的观感、
   刻度列在触控板惯性滚动下的手感、以及「叠层不重排」在 60Hz 屏幕上的实际收益，
   都需要真机采样（`SPB_FRAME_TIMING=true` 看 >32ms 慢帧）。
+
+### 6.105 `error` 事件按服务端 `code` 出表现：闭集镜像 + fail-open，文案只在服务端（2026-11）
+
+**现象**：生产里唯一一条 `error` 事件的 payload 是 `{"content":"transport: upstream 429"}`，
+客户端读 `error ?? detail ?? message` → 全部落空 → 时间线渲染成「未知错误」。真实原因
+（上游限流）躺在 payload 里没人看见。
+
+**根因不是「客户端漏读一个键」**，是这条事件的 payload **从来没有契约**：文档与
+`chatbus/delivery.go` 的日志投影声明 `{code, message}`，而所有生产者只写 `content`，
+`grep '"code"'` 在 Go 侧零命中。于是「读空」是必然，不是意外（super_partyb#182）。
+
+**服务端修法**（`d5974fd4` + `f3ebb3f4`，不属本仓库）：`chatbus.ErrorPayload` 成为唯一
+构造入口，`code` 闭集 7 值、未知归一 `internal_error`、空 `message` 回落该 code 的兜底句、
+过渡期 `content` 逐字等于 `message`、原始诊断串挪进 `detail`；`docs/error-codes.json`
+（`{code, default_message, retryable}`）由测试生成并对拍。
+
+**客户端这边的四条判据**：
+
+1. **正文只用服务端的 `message`**。客户端不抄一份文案表——两份必然漂移，而且漂移的方向
+   永远是「服务端改了话术、客户端还在说旧的」。`code` 只决定**表现**（图标 / 分类徽标 /
+   是否给「重发」）。
+2. **`code` 是 String 镜像，不是 Dart enum**。移动端无法强制升级，服务端会先发新 code；
+   enum 会让新值落到兜底枚举值或抛异常。故 `ErrorCodes.traits(String?)` 对未知值返回
+   `ErrorCodeTraits.failOpen`。
+3. **fail-open 的取值必须等于「今天的行为」**：`retryable: true`、无徽标、通用图标。
+   把「重发」按钮收掉是**负向**行为变化（用户以为功能坏了），而多渲染一次的代价只是
+   「按了也没用」；徽标猜错类别（把限流说成内存不足）会让人去调小任务，比不给类别更糟。
+   历史事件（#182 之前只有 `content`）与未来服务端先发的新 code 都走这一格。
+4. **`retryable` 镜像服务端 `chatbus.Retryable`**，不自己判断：限流 / 上游错误 / 两档超时 /
+   挂死 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩；
+   兜底码提示找管理员）。`ErrorItem.isRecoverable` 由此派生（此前恒 true，归约层无从判断）。
+
+**`detail` 的位置**：它是执行器原样给的诊断（`transport: upstream 429`、含工作区路径的命令串）。
+对话页红卡里**默认折叠**在「技术详情」里（可选中复制），详情面板直接展开——那本来就是排障面。
+一旦默认展示，用户就会把它当成「界面上要读的正文」，而它是英文的、无法本地化。
+
+**闭集怎么不漂**：`docs/error-codes.json` 的副本 vendored 到
+`packages/spb_domain/test/fixtures/error_codes.json`（`tools/sync_error_codes.sh` 刷新，
+**不联网**——本仓库 CI 在 GitHub Actions，到不了 `git.atjog.com`），
+`test/error_code_test.dart` 断言「集合相等 + 顺序相等 + 逐条 `retryable` 相等」。
+顺序也断言，是因为顺序不同的 diff 无法审查（到底加了一个 code 还是全部重排）。
+
+#### 反向验证
+
+- `event_reducer_test.dart`：`code=oom_kill` → `isRecoverable == false`；
+  `code=upstream_rate_limited` → `true`；无 code / 未知 code → `true`（fail-open）。
+  把 `ErrorCodes.traits(...)` 换回 `isRecoverable: true` 后第一条立刻红。
+- `chat_event_test.dart`：`message` 与 `detail` 不互串（否则正文会出现英文诊断串）；
+  两个访问器都按 `eventType` 门禁（`code` / `detail` 是通用键名）。
+- `error_code_test.dart`：改 fixture 任一 `retryable` 或删/加一个 code，对拍立即红。
+- `error_code_display_test.dart`：闭集内每个 code 的图标都不得落进 `generic`
+  （否则新 code 与「未知 code」长得一样，且没有任何测试会红）。
+- `spb_ui_test.dart`：`detail` 默认不可见、点「技术详情」后可见；`category` 为 null 时不渲染徽标。
+- golden `error_banner_light/dark.png` **未变**：新增三个可选子项都用
+  `mainAxisSize: MainAxisSize.min` + 条件渲染，缺省时与原来逐像素一致
+  （第一版漏了 `mainAxisSize`，Column 默认撑满可用高度，golden 立刻红——这正是它该拦的）。
+
+#### 边界（有意不做）
+
+- **不新增事件类型**：新错误语义一律复用 `error` + 新 `code`。小程序的渲染层是 fail-closed
+  白名单（`normalize.ts` 的 `classifyRenderType` 默认 `skip`），新类型要等微信审核才可见。
+- **不把 `session_handoff_stage` / `session_handoff_bridge` 当错误渲染**：前者是进度
+  （性质同 `dispatch_stage`），后者 `failed` 是降级（用户照样拿到回复），红字会误导成
+  「换 agent 失败」。
+- **不按 `error_type` / `friendly_message` 分派**：Python 时代的遗留键，Go 从不写，
+  读到的永远是死分支（webapp 侧曾有一条 `session_expired` → restore 的重试分支因此
+  从未触发，已由服务端复核结论否掉补进闭集）。

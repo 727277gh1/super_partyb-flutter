@@ -113,6 +113,61 @@ void main() {
 
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('category 作为分类徽标渲染在正文之上，与正文分开', (tester) async {
+      // 徽标回答「哪一类失败」（来自服务端 code），正文永远是 message；
+      // 两者混在一起就会变成客户端在造句。
+      await tester.pumpWidget(
+        _host(
+          const ErrorBanner(
+            message: '执行被内存上限 1024 MB 打断（OOM），本轮未完成',
+            category: '内存不足',
+          ),
+        ),
+      );
+
+      expect(find.text('内存不足'), findsOneWidget);
+      expect(find.text('执行被内存上限 1024 MB 打断（OOM），本轮未完成'), findsOneWidget);
+    });
+
+    testWidgets('category 为 null 时不渲染徽标（历史事件 / 未知 code）', (tester) async {
+      await tester.pumpWidget(_host(const ErrorBanner(message: 'x')));
+
+      expect(find.text('执行失败'), findsNothing);
+      expect(find.byType(Text), findsOneWidget);
+    });
+
+    testWidgets('detail 默认折叠，点「技术详情」后展开（可选中复制）', (tester) async {
+      // `detail` 是执行器原样给的诊断串（含英文 / 路径），默认展示会把
+      // 它当成用户要读的正文；折叠后只在排障时展开。
+      await tester.pumpWidget(
+        _host(
+          const ErrorBanner(
+            message: '模型服务限流，稍后重试',
+            detail: 'transport: upstream 429',
+          ),
+        ),
+      );
+
+      expect(find.text('技术详情'), findsOneWidget);
+      expect(find.text('transport: upstream 429'), findsNothing);
+
+      await tester.tap(find.text('技术详情'));
+      await tester.pump();
+
+      expect(find.text('transport: upstream 429'), findsOneWidget);
+      expect(find.text('收起技术详情'), findsOneWidget);
+    });
+
+    testWidgets('detail 为 null / 空串时不渲染折叠入口', (tester) async {
+      for (final detail in [null, '', '   ']) {
+        await tester.pumpWidget(
+          _host(ErrorBanner(message: 'x', detail: detail)),
+        );
+
+        expect(find.text('技术详情'), findsNothing, reason: '$detail');
+      }
+    });
   });
 
   group('HintLine', () {

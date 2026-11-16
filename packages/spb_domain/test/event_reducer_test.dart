@@ -870,6 +870,58 @@ void main() {
       expect((r.items.single as ErrorItem).message, 'transport: upstream 429');
     });
 
+    test('error 事件带 code 时：OOM 不给重发，限流给重发（#182 / #115）', () {
+      // 服务端对「值不值得重发」给了真源（`chatbus.Retryable`）：OOM 重发必然再
+      // 撞同一面墙（同样输入 + 同样内存上限），限流则值得再试。归约层是唯一
+      // 能把它落成 `ErrorItem` 表现位的地方。
+      final oom =
+          EventReducer.reduce([
+                ev(
+                  EventTypes.error,
+                  payload: {
+                    'code': 'oom_kill',
+                    'message': '执行被内存上限 1024 MB 打断（OOM），本轮未完成',
+                    'detail': 'OOM killer',
+                  },
+                ),
+              ]).items.single
+              as ErrorItem;
+
+      expect(oom.isRecoverable, isFalse);
+      expect(oom.code, 'oom_kill');
+      expect(oom.detail, 'OOM killer');
+
+      final limited =
+          EventReducer.reduce([
+                ev(
+                  EventTypes.error,
+                  payload: {'code': 'upstream_rate_limited', 'message': '上游限流'},
+                ),
+              ]).items.single
+              as ErrorItem;
+
+      expect(limited.isRecoverable, isTrue);
+      expect(limited.code, 'upstream_rate_limited');
+      expect(limited.detail, isNull);
+    });
+
+    test('error 事件无 code / 未知 code 时保持可重发（fail-open）', () {
+      // 历史事件（#182 之前只写 content）与未来服务端先发的新 code 都不能
+      // 把「重发」入口收掉——那是用户可见的负向行为变化。
+      for (final payload in <Map<String, dynamic>>[
+        {'content': 'transport: upstream 429'},
+        {'code': 'brand_new_code', 'message': '新错误'},
+      ]) {
+        final item =
+            EventReducer.reduce([ev(EventTypes.error, payload: payload)])
+                    .items
+                    .single
+                as ErrorItem;
+
+        expect(item.isRecoverable, isTrue, reason: '$payload');
+      }
+    });
+
     test('follow_up_suggested 产出建议项；空建议不产出', () {
       final withItems = EventReducer.reduce([
         ev(

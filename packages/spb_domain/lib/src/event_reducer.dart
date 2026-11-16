@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:spb_models/spb_models.dart';
 
 import 'conversation_item.dart';
+import 'error_code.dart';
 import 'execution_status.dart';
 import 'gate_decision.dart';
 import 'routing_attribution.dart';
@@ -489,12 +490,19 @@ class EventReducer {
           // error 与 done 同属终态：服务端在超时/执行异常时会先发 error 再发 done，
           // 两者都意味着「本轮不会再产出」。对齐 webapp `terminalLifecycleFromEvent`。
           if (ev.turnId.isNotEmpty) terminalTurnIds.add(ev.turnId);
+          // 是否给「重发」由服务端 code 决定（super_partyb#182）：OOM 与
+          // internal_error 重发必然再撞同一面墙，限流/超时/挂死值得再试。
+          // 历史事件与未来新 code 都没有 code 可依 → fail-open 保 true。
+          // 详见 `ErrorCodeTraits.failOpen` 的两条理由。
           items.add(
             ErrorItem(
               id: ev.eventId,
               createdAt: ev.createdAt,
               message: ev.errorMessage ?? '未知错误',
               turnId: ev.turnId,
+              code: ev.errorCode,
+              detail: ev.errorDetail,
+              isRecoverable: ErrorCodes.traits(ev.errorCode).retryable,
             ),
           );
 
