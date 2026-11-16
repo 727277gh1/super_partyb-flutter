@@ -6,6 +6,7 @@ library;
 
 // 导出的契约类型（barrel 文件，便于检索与确认公共 API 面）：
 //   ChatEvent / EventTypes          —— 聊天事件与事件类型常量
+//   EventCategory                   —— 事件类别 7 值闭集（服务端目录的镜像）
 //   ContextUsage / ContextCost      —— 上下文用量与费用（context_update 归一）
 //   GroupUsageSummary / GroupUsageTotals / GroupUsageAgentItem
 //                                —— group 级 token 消耗合计（usage-summary，计费口径）
@@ -43,6 +44,7 @@ export 'src/context_usage.dart';
 export 'src/group_usage.dart';
 export 'src/turn_runtime.dart';
 export 'src/chat_turn_summary.dart';
+export 'src/event_category.dart';
 export 'src/event_types.dart';
 export 'src/goal.dart';
 export 'src/habit.dart';

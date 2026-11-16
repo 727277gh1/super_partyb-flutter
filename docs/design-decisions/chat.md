@@ -2076,3 +2076,62 @@ super_partyb#181 因此补了 `router.auto_agent` 段）。
   动效、500ms 门槛在真机上是否偏早/偏晚，都需要实机采样。
 - **服务端开关仍关**：123 的 `.env` 没有 `SPB_DISPATCH_EVENTS`，实测零帧。这条路径
   在打开开关前只在单测里跑过（打开即生效，无需再改客户端代码）。
+
+### 6.107 事件目录对拍（vendored fixture）与契约漂移的两条可见出口（2026-11）
+
+**问题不是「事件没统一」，而是「漂移两侧都看不见」**：本仓的事件分流是按类型
+`switch` + `default:` 兜底，于是「服务端新增时间线事件」的后果不是报错，而是静默
+丢帧；`EventTypes.timelineVisible` 这类集合是否与实现一致，也只有当有人手工写测试
+盯着。这套形状在本仓历史上已经吞过两次真事件（`agent.file.*` 2927 条、
+`goal_gate_stopped`）。
+
+**修法一：把服务端目录 vendored 进来，只让测试读。**
+
+- 真源 `super_partyb/apps/go-api/docs/event-catalog.json`（62 entries / 60 类型 / 7 类别 /
+  5 动作），副本在 `packages/spb_models/fixtures/`，由 `tools/sync_event_catalog.sh`
+  刷新（`cp`，不改写），流程与三条纪律写在 `fixtures/README.md`（issue #118 合入）。
+- **生产代码不 import 它**，也不做 codegen（§6.2 禁 `build_runner`）：类型常量与类别
+  仍是手写镜像，由 `test/event_catalog_test.dart` 对拍。
+- 为什么不用 `sha256` 锁死：CI 在 GitHub Actions 到不了 `git.atjog.com`（§8），
+  `sha256` 只能锁「上次同步的那份」，同步一次改一次常量，收益为零。断言改为**语义等价**：
+  类别闭集（集合 + 顺序）、`timeline:true` 全部可渲染、`timeline:false` 的类型要么本仓认识
+  要么登记在 `EventTypes.diagnosticOnly`。
+
+**这一步当场抓到第一个真 bug**：`habit_pattern_recalibrated` 服务端有产出点、webapp 已渲染
+（`chat-timeline.ts` 的 `formatHabitPatternRecalibrationSummary`）、目录写着
+`consumers: ["webapp","miniapp","flutter"]`，而本仓**没有 case**——事件落到 `default:`
+静默丢弃。顺带发现 `timelineVisible` 比实现少 6 个类型（集合说不可见、实现却有分支）。
+
+**修法二：未知类型的运行时出口（不是渲染一切）。**
+
+判据是三条件**合取**（`EventTypes.shouldSurfaceUnknown`）：不认识 ∧ 落库 ∧ 不像控制事件
+（没被服务端标 `diagnostic`，也不在 `diagnosticOnly` 的 12 个登记里）。
+
+为什么不能只判「不认识」：服务端**每次执行都会发** `executor_startup` / `retry_push_done` /
+`session_rotated` 这类控制事件，它们本仓没有渲染分支（也不该有）。只按 `isKnown` 判断会让
+每一次对话都多出几行「未知事件」——那比静默丢帧更糟，因为用户会以为客户端坏了。
+
+可见出口的形式：一行**弱化**文本「未知事件：`<type>`（×N）（客户端可能需要升级）」，
+按 `(turnId, eventType)` 合并计数（评价心跳类不会刷屏），**不透传 payload**
+（可能含工作区路径 / stderr / session id，见 §6.105 同一条取舍）。
+
+**日志侧**：`ChatStreamController` 把「未知事件类型」从逐事件 `debug` 改成
+**每个类型一次 `warn`**（上限 32 个类型）。逐事件的 debug 有两个毛病：量随事件数线性涨，
+且生产默认不输出等于「没说过」。改完之后服务端新增事件在 LC 里是**一条带类型名的信号**。
+
+#### 反向验证
+
+- 把 `shouldSurfaceUnknown` 的三个条件拆成「只看 `!all.contains`」→
+  `event_reducer_contract_drift_test.dart` 里「登记在 diagnosticOnly 的控制类不产出项」立刻红。
+- 删掉 `unknownSeenEventIds` 去重 → 「同一条事件被重放不虚增计数」立刻红。
+- 把 `habit_pattern_recalibrated` 的 case 删掉 → `event_catalog_test.dart` 的
+  「目录里每个 `timeline:true` 的类型都能进时间线渲染」立刻红（附类型名）。
+- 在 fixture 的 `categories` 里加一个类别而不改 `EventCategory.all` → 类别对拍红。
+
+#### 未验证 / 尚未做
+
+- **真机观感**：本机无 `DISPLAY`（`docs/development.md`）。这一行的视觉权重（是否该更弱、
+  是否该合并到诊断面板）需要实机采样。
+- **类别维度只到闭集，没有 per-type 映射**：#117 的「18 → ≤7 渲染器合并」被数据否掉
+  （服务端 62 条里 50 条都是 `event` 类别、本仓 17 个渲染项里 11 个落 `event`），
+  故按类型的渲染分派**保持不变**；类别目前只用于对拍与未来的分流统计。

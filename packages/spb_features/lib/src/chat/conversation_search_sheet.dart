@@ -292,5 +292,7 @@ class _HitTile extends StatelessWidget {
     HabitSuggestionItem() => ('习惯', Icons.repeat_outlined),
     HabitAutoRunItem() => ('习惯', Icons.repeat_outlined),
     RoutingNoticeItem() => ('归属', Icons.alt_route_outlined),
+    HabitRecalibrationItem() => ('习惯', Icons.tune),
+    UnknownEventItem() => ('未知', Icons.help_outline),
   };
 }

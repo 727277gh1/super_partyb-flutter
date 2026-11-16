@@ -339,6 +339,24 @@ class EventTypes {
     // 节点），且 webapp 的时间线同样渲染它——见 [habitAutoRunCompleted] 的
     // 说明：Go 侧暂无产出点，这里先按契约声明，补齐后即刻生效。
     habitAutoRunCompleted,
+
+    // ---- 以下 6 个由服务端目录（`event-catalog.json`）的 `timeline: true` 补齐 ----
+    //
+    // 它们此前**缺失于本集合**，而 `ChatEvent.isTimelineVisible` 的唯一消费者是
+    // 测试（生产归约器直接 switch 类型），于是「集合说不可见、实现却有 case」
+    // 无人发现。issue #116 引入目录对拍后当场全红——这正是「集合与实现两侧
+    // 都要对齐目录」的价值。
+    //
+    // 语义上不全是「新增一行」：`confirmation_expired` / `resolved` 这类是
+    // **状态变更**（把已存在的卡置为不可交互），仍属时间线事件（目录如此声明）。
+    confirmationExpired,
+    routingFeedbackRequest,
+    routingFeedback,
+    habitSuggestionCreated,
+    habitSuggestionResolved,
+    // 习惯规则校准：webapp 已渲染（`habit-timeline.mts`），本仓此前落到
+    // default 分支被静默丢弃（#116 抓到的第一个真 bug）。
+    habitPatternRecalibrated,
   };
 
   /// 流式增量事件：收到时应「追加」而非「替换」。
@@ -346,4 +364,67 @@ class EventTypes {
   /// 与权威帧的区分规则见 [ChatEvent.transient]：Transient 的 message/thought
   /// 是增量片段，非 Transient 的是完整快照。
   static const Set<String> streamIncremental = {message, thought};
+
+  /// 服务端会发、但**本仓有意不渲染**的事件类型（诊断/控制类）。
+  ///
+  /// ## 为什么需要这张表（它不属于 [all]）
+  ///
+  /// [all] 的语义是「本仓认识」。下面这 12 个类型本仓**确实不认识**（没有归约分支、
+  /// 没有渲染器），但服务端目录（`event-catalog.json`）明确写着 `timeline: false`
+  /// 且 `consumers: ["debug"]`——它们是**控制/诊断事件**，进时间线才是错的。
+  ///
+  /// 若只靠 [isKnown] 判「要不要渲染未知类型」，这 12 个会被当成「服务端新增的
+  /// 时间线事件」而渲染成 12 种「未知事件」行——每一次执行都会冒出
+  /// `executor_startup` / `retry_push_done` / `session_rotated` 之类的噪声。
+  /// 那比静默丢弃更糟：用户会以为客户端坏了。
+  ///
+  /// ## 判据从哪来
+  ///
+  /// `super_partyb/apps/go-api/docs/event-catalog.json`：`timeline: false` 且不在
+  /// [all] 里的类型，恰好就是这 12 个（vendored 副本在
+  /// `packages/spb_models/fixtures/`）。`test/event_catalog_test.dart` 断言
+  /// 「目录里每个 `timeline:false` 的类型，要么在 [all] 里、要么在这里」——
+  /// 服务端新增控制类事件时必须把它登记进来（或实现它），否则测试红。
+  ///
+  /// ## 与 `ChatEvent.diagnostic` 的区别
+  ///
+  /// `diagnostic` 是**服务端**逐事件打的标记（`chatbus/catalog.go` 的
+  /// `diagnostics_exempt`/投递规则）；本表是**客户端**的静态登记，用于「服务端没
+  /// 打标、本仓也没有分支」时区分「新增的控制事件」与「新增的时间线事件」。
+  /// 两者都要看，任一说「不渲染」就不渲染。
+  static const Set<String> diagnosticOnly = {
+    'executor_fallback',
+    'executor_startup',
+    'retry_push_done',
+    'schedule_enqueued',
+    'schedule_triggered',
+    'session_handoff',
+    'session_handoff_bridge',
+    'session_handoff_requested',
+    'session_handoff_stage',
+    'session_rotated',
+    'session_summary',
+    'turn_reminder_injected',
+  };
+
+  /// 是否应当把「本仓不认识的类型」渲染成一行「未知事件」。
+  ///
+  /// 三个条件全部满足才算「契约漂移」：
+  ///
+  /// 1. **不认识**（不在 [all]）；
+  /// 2. **落库**（`transient == false`）——增量/心跳类不该进时间线；
+  /// 3. **不像控制事件**：既没被服务端标 `diagnostic`，也不在 [diagnosticOnly] 里。
+  ///
+  /// 命中时由归约器产出一条 [UnknownEventItem]（同 turn 同类型合并计数），
+  /// 让「服务端新增了时间线事件、客户端版本落后」这件事**可见**而不是静默丢帧；
+  /// 未命中时照旧只记日志（由 [ChatStreamController] 每个类型记一次）。
+  static bool shouldSurfaceUnknown({
+    required String eventType,
+    required bool transient,
+    required bool diagnostic,
+  }) =>
+      !all.contains(eventType) &&
+      !transient &&
+      !diagnostic &&
+      !diagnosticOnly.contains(eventType);
 }

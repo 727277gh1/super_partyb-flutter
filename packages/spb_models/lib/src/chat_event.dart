@@ -777,6 +777,57 @@ class ChatEvent {
       ? _nonEmpty(_str('habit_pattern_id'))
       : null;
 
+  // ---------- habit_pattern_recalibrated 访问器 ----------
+  //
+  // 字段名取自服务端目录（`event-catalog.json` 的该条 `optional`）：
+  // `topic_key` / `previous_acceptance_level` / `next_acceptance_level` /
+  // `reason` / `blocking_ratio` / `acceptance_ratio` / `habit_pattern_id`。
+  //
+  // ⚠️ 本仓此前**没有消费它**（归约器无 case），事件被静默丢弃。文案对齐
+  // webapp `apps/webapp/src/lib/habit-timeline.mts` 的三分支（降级/升级/其他）。
+
+  /// 主题键（`topic_key`）。
+  String? get habitRecalibrationTopicKey =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _nonEmpty(_str('topic_key'))
+      : null;
+
+  /// 命中的规则 id（`habit_pattern_id`），供深链到习惯规则详情。
+  String? get habitRecalibrationPatternId =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _nonEmpty(_str('habit_pattern_id'))
+      : null;
+
+  /// 校准前的打扰级别（`previous_acceptance_level`）。
+  String? get habitRecalibrationPreviousLevel =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _nonEmpty(_str('previous_acceptance_level'))
+      : null;
+
+  /// 校准后的打扰级别（`next_acceptance_level`）。
+  String? get habitRecalibrationNextLevel =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _nonEmpty(_str('next_acceptance_level'))
+      : null;
+
+  /// 校准原因（`reason`）：`blocking_feedback` / `acceptance_feedback` / 其他。
+  String? get habitRecalibrationReason =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _nonEmpty(_str('reason'))
+      : null;
+
+  /// 降级依据：被阻塞的比例 0–1（`blocking_ratio`）。
+  double? get habitRecalibrationBlockingRatio =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _double(payload?['blocking_ratio'])
+      : null;
+
+  /// 升级依据：被接受的比例 0–1（`acceptance_ratio`）。
+  double? get habitRecalibrationAcceptanceRatio =>
+      eventType == EventTypes.habitPatternRecalibrated
+      ? _double(payload?['acceptance_ratio'])
+      : null;
+
   /// 去空白后为空的串归为 null。
   ///
   /// 服务端可能下发空串（而非缺键），空串当「有值」会让卡片显示空白标题。

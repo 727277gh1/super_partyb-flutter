@@ -1,0 +1,2446 @@
+{
+  "schema_version": 1,
+  "source": "internal/chatbus/catalog.go + delivery.go",
+  "categories": [
+    "user_input",
+    "thinking",
+    "assistant_text",
+    "agent_file",
+    "confirmation",
+    "follow_up",
+    "event"
+  ],
+  "envelope": {
+    "keys": [
+      "user_id",
+      "group_id",
+      "turn_id",
+      "request_id"
+    ],
+    "default": [
+      "group_id",
+      "turn_id",
+      "request_id"
+    ]
+  },
+  "actions": [
+    {
+      "action_id": "confirm.answer",
+      "events": [
+        "confirmation_required"
+      ],
+      "endpoint": "POST /chat/confirmations/:confirmation_id/{resolve,confirm,reject}",
+      "payload": [
+        "action",
+        "comment"
+      ],
+      "idempotent": "confirmation_id",
+      "ack_event": "confirmation_resolved"
+    },
+    {
+      "action_id": "feedback.answer",
+      "events": [
+        "routing_feedback_request"
+      ],
+      "endpoint": "POST /chat/feedback/:token/resolve",
+      "payload": [
+        "reply",
+        "index",
+        "group_id"
+      ],
+      "idempotent": "request_id",
+      "ack_event": "routing_feedback"
+    },
+    {
+      "action_id": "followup.pick",
+      "events": [
+        "follow_up_suggested"
+      ],
+      "endpoint": "POST /users/:user_id/chat/messages",
+      "payload": [],
+      "idempotent": "request_id",
+      "ack_event": "user_message"
+    },
+    {
+      "action_id": "habit.suggestion.answer",
+      "events": [
+        "habit_suggestion_created"
+      ],
+      "endpoint": "POST /api/chat/habit-suggestions/:suggestion_id/{resolve,unresolve}",
+      "payload": [
+        "action",
+        "snooze_until",
+        "comment",
+        "pattern_patch"
+      ],
+      "idempotent": "suggestion_id",
+      "ack_event": "habit_suggestion_resolved"
+    },
+    {
+      "action_id": "turn.stop",
+      "events": [
+        "start",
+        "queue_state"
+      ],
+      "endpoint": "POST /chat/turns/:turn_id/cancel",
+      "payload": [],
+      "idempotent": "turn_id",
+      "ack_event": "done"
+    }
+  ],
+  "entries": [
+    {
+      "type": "adaptive_decision",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "action",
+        "confidence",
+        "gate_source",
+        "reason"
+      ],
+      "producer": [
+        "internal/chatgate/*:decide"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "agent.file.created",
+      "form": "durable",
+      "category": "agent_file",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "ext",
+          "size",
+          "op"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "op"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "relative_path"
+      ],
+      "optional": [
+        "attribution_source",
+        "chat_turn_id",
+        "group_id",
+        "metadata",
+        "mime_type",
+        "mtime_ns",
+        "owner_id",
+        "owner_type",
+        "size_bytes",
+        "sync_status",
+        "target_path",
+        "ufs_file_id"
+      ],
+      "producer": [
+        "internal/workers/groupsync/groupsync.go:emit"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "agent.file.deleted",
+      "form": "durable",
+      "category": "agent_file",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "ext",
+          "size",
+          "op"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "op"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "relative_path"
+      ],
+      "optional": [
+        "attribution_source",
+        "chat_turn_id",
+        "deleted_from_ufs",
+        "group_id",
+        "mime_type",
+        "owner_id",
+        "owner_type",
+        "size_bytes",
+        "target_path",
+        "ufs_file_id"
+      ],
+      "producer": [
+        "internal/workers/groupsync/groupsync.go:emit"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "agent.file.modified",
+      "form": "durable",
+      "category": "agent_file",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "ext",
+          "size",
+          "op"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "op"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "relative_path"
+      ],
+      "optional": [
+        "attribution_source",
+        "chat_turn_id",
+        "group_id",
+        "metadata",
+        "mime_type",
+        "mtime_ns",
+        "owner_id",
+        "owner_type",
+        "size_bytes",
+        "sync_status",
+        "target_path",
+        "ufs_file_id"
+      ],
+      "producer": [
+        "internal/workers/groupsync/groupsync.go:emit"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "confirmation_expired",
+      "form": "durable",
+      "category": "confirmation",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "confirmation_id"
+      ],
+      "optional": [],
+      "producer": [
+        "internal/chat/confirmations.go:expireStaleInteractiveRequests"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "confirmation_required",
+      "form": "durable",
+      "category": "confirmation",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "confirmation_id"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "confirmation_id"
+      ],
+      "optional": [
+        "kind",
+        "spec_schema",
+        "options",
+        "expires_at",
+        "turn_id",
+        "group_id",
+        "recommendation"
+      ],
+      "producer": [
+        "internal/chatgate/*:EnsureConfirmationCard"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter",
+        "mq"
+      ],
+      "actions": [
+        "confirm.answer"
+      ]
+    },
+    {
+      "type": "confirmation_resolved",
+      "form": "durable",
+      "category": "confirmation",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "confirmation_id"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "confirmation_id"
+      ],
+      "optional": [
+        "action",
+        "resolution",
+        "resolved_by"
+      ],
+      "producer": [
+        "internal/chatgate/*:resolve"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "context_update",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "telemetry"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushContextUpdate"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "dispatch_stage",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "user_id",
+        "request_id",
+        "group_id",
+        "turn_id"
+      ],
+      "required": [
+        "phase",
+        "name",
+        "request_id"
+      ],
+      "optional": [
+        "start_ms",
+        "budget_ms",
+        "end_ms",
+        "status",
+        "reason",
+        "elapsed_ms",
+        "unattributed_ms",
+        "critical",
+        "dropped"
+      ],
+      "producer": [
+        "internal/dispatch/dispatch.go:emit"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "done",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "status",
+          "first_token_ms"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "status"
+      ],
+      "optional": [
+        "elapsed_ms",
+        "first_token_ms",
+        "finalizer"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:processTurn",
+        "internal/chat/turn_worker.go:finalizer"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "error",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "ERROR",
+        "fields": [
+          "code"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "code",
+        "content"
+      ],
+      "optional": [
+        "detail",
+        "finalizer",
+        "stream",
+        "memory_limit_mb",
+        "oom_evidence"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushError",
+        "internal/chatexec/responses_executor.go:errorEvent",
+        "internal/chat/turn_worker.go:processTurn",
+        "internal/chat/turn_worker.go:finalizer",
+        "internal/toolagent/executor.go:Execute"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter",
+        "mq"
+      ],
+      "actions": []
+    },
+    {
+      "type": "executor_completed",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "executor",
+          "status",
+          "duration_ms"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "executor",
+        "status"
+      ],
+      "optional": [
+        "assistant_length",
+        "duration_ms",
+        "exit_code",
+        "http_status",
+        "reason",
+        "stdout_length",
+        "executor_diagnostics",
+        "stall_dump"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:processTurn"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "executor_fallback",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "WARN",
+        "fields": [
+          "reason",
+          "primary",
+          "fallback",
+          "agent_id"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "fallback",
+        "reason"
+      ],
+      "optional": [
+        "agent_id",
+        "group_id",
+        "primary",
+        "turn_id"
+      ],
+      "producer": [
+        "internal/chatexec/multi_executor.go:Execute"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "executor_started",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": true,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "executor",
+          "agent_id",
+          "input_length"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "executor"
+      ],
+      "optional": [
+        "agent_id",
+        "input_length",
+        "session_id_present"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:processTurn"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "executor_startup",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "executor",
+          "startup_ms",
+          "prepare_ms",
+          "spawn_ms",
+          "sandboxed",
+          "sandbox",
+          "status"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "executor"
+      ],
+      "optional": [
+        "prepare_ms",
+        "sandbox",
+        "sandboxed",
+        "spawn_ms",
+        "startup_ms",
+        "status",
+        "reason"
+      ],
+      "producer": [
+        "internal/chatexec/*:emitStartup"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "follow_up_suggested",
+      "form": "durable",
+      "category": "follow_up",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "suggestion_id",
+        "suggestions"
+      ],
+      "optional": [
+        "expires_at",
+        "group_id",
+        "spec_format",
+        "spec_schema",
+        "turn_id"
+      ],
+      "producer": [
+        "internal/chat/follow_up_suggest.go:emit"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": [
+        "followup.pick"
+      ]
+    },
+    {
+      "type": "gate_completed",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "gate",
+          "duration_ms"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "gate"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "gate"
+      ],
+      "optional": [
+        "duration_ms"
+      ],
+      "producer": [
+        "internal/chatgate/*:Execute"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "gate_error",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "WARN",
+        "fields": [
+          "gate",
+          "phase",
+          "duration_ms"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "gate"
+      ],
+      "optional": [
+        "phase",
+        "duration_ms",
+        "error",
+        "reason",
+        "stack"
+      ],
+      "producer": [
+        "internal/chatgate/*:Execute"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "gate_evaluated",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "gate",
+          "matched",
+          "duration_ms"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "gate"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "gate"
+      ],
+      "optional": [
+        "duration_ms",
+        "matched"
+      ],
+      "producer": [
+        "internal/chatgate/*:Execute"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "goal_gate_decision",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "decision_reason",
+          "status"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "decision_reason"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "auto_turn_count",
+        "decision_reason",
+        "goal",
+        "goal_achieved",
+        "max_auto_turns",
+        "next_input_preview",
+        "source",
+        "spec_schema",
+        "status",
+        "tasks"
+      ],
+      "producer": [
+        "internal/chatgate/goal_gate.go:decide"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "goal_gate_stopped",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "reason"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "auto_turn_count",
+        "completed_at",
+        "reason"
+      ],
+      "producer": [
+        "internal/chatgate/goal_gate.go:stop"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "goal_updated",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "user_id",
+        "group_id"
+      ],
+      "required": [],
+      "optional": [
+        "op",
+        "goal",
+        "tasks",
+        "progress",
+        "goal_id",
+        "task_id",
+        "goal_gate",
+        "enabled_by",
+        "status"
+      ],
+      "producer": [
+        "internal/server/goal_api.go:emit",
+        "internal/server/open_goal_gate_api.go:setGoalGate"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "group_metadata_updated",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "metadata",
+        "reason"
+      ],
+      "producer": [
+        "internal/chat/group_events.go:emitMetadata"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "group_title_updated",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "new_title"
+      ],
+      "optional": [],
+      "producer": [
+        "internal/chatgate/title_gate.go:buildTitleUpdatedEvent"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "group_updated",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "user_id",
+        "group_id"
+      ],
+      "required": [],
+      "optional": [
+        "op",
+        "group",
+        "title",
+        "metadata",
+        "archived"
+      ],
+      "producer": [
+        "internal/chat/group_events.go:PublishGroupUpdated"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "habit_auto_run_completed",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "topic_key",
+          "status"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "habit_run_id",
+        "topic_key",
+        "status",
+        "summary"
+      ],
+      "producer": [
+        "internal/workers/habit/*:completeRun"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "habit_pattern_recalibrated",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "habit_pattern_id",
+        "topic_key",
+        "confidence",
+        "cadence"
+      ],
+      "producer": [
+        "(legacy python) internal/server/habit_insights.go 只读"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "habit_suggestion_created",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "suggestion_id",
+          "trigger_type"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "suggestion_id"
+      ],
+      "optional": [
+        "editable_fields",
+        "evidence",
+        "habit_pattern_id",
+        "recommendation",
+        "rule_draft",
+        "status",
+        "trigger_type"
+      ],
+      "producer": [
+        "internal/server/habit_insights.go:createSuggestion"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": [
+        "habit.suggestion.answer"
+      ]
+    },
+    {
+      "type": "habit_suggestion_resolved",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "suggestion_id",
+          "action"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "suggestion_id"
+      ],
+      "optional": [
+        "action",
+        "topic_key"
+      ],
+      "producer": [
+        "internal/server/habit_insights.go:resolveSuggestion"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "heartbeat",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "stage",
+        "elapsed_ms",
+        "step",
+        "tool_running"
+      ],
+      "producer": [
+        "internal/chatexec/*:emitHeartbeat"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "message",
+      "form": "delta",
+      "category": "assistant_text",
+      "timeline": true,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "bytes"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "content"
+      ],
+      "optional": [],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent",
+        "internal/chatexec/responses_executor.go"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "message",
+      "form": "durable",
+      "category": "assistant_text",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "bytes"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "content"
+      ],
+      "optional": [],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent",
+        "internal/chatexec/llm_executor.go"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "pigo_session_missing",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "WARN",
+        "fields": [
+          "reason"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "session_id",
+        "reason"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:resume"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "plan",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "steps",
+        "content"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "queue_state",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "state"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "state"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "state"
+      ],
+      "optional": [
+        "reason",
+        "priority",
+        "queue_class",
+        "queue_total",
+        "queue_user",
+        "retry_attempt",
+        "enqueued_at"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:emitQueueReason"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": [
+        "turn.stop"
+      ]
+    },
+    {
+      "type": "retry_push_done",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "channel"
+      ],
+      "producer": [
+        "internal/workers/retrypush/worker.go:push"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "retry_scheduled",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "WARN",
+        "fields": [
+          "attempt",
+          "delay_ms"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "attempt",
+        "delay_ms",
+        "exit_code",
+        "http_status",
+        "max_retries",
+        "reason"
+      ],
+      "producer": [
+        "internal/chatgate/retry_failure.go:scheduleRetry"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "routing_feedback",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "confirmation_id",
+        "verdict",
+        "correct",
+        "group_id",
+        "source"
+      ],
+      "producer": [
+        "internal/chatpipeline/classify_feedback_commit.go:commit"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "routing_feedback_request",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "confirmation_id"
+      ],
+      "optional": [
+        "group_id",
+        "candidates",
+        "expires_at"
+      ],
+      "producer": [
+        "internal/chatpipeline/classify_feedback.go:EnsureClassifyFeedbackRequest"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter",
+        "mq"
+      ],
+      "actions": [
+        "feedback.answer"
+      ]
+    },
+    {
+      "type": "routing_selected",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "current_group_id",
+        "focus_topic",
+        "group_decision_reason",
+        "initial_prompt",
+        "live_pending_count",
+        "live_running_count",
+        "live_same_group",
+        "live_turn_count",
+        "resolved_agent_id",
+        "route_reason",
+        "route_source",
+        "selected_group_id",
+        "auto_agent",
+        "stages"
+      ],
+      "producer": [
+        "internal/chatpipeline/pipeline.go:route"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "schedule_created",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "schedule_id"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "schedule_id"
+      ],
+      "optional": [
+        "auto_turn_count",
+        "delay_seconds",
+        "failure_streak",
+        "max_auto_turns",
+        "reason",
+        "source",
+        "status",
+        "timeout_resume"
+      ],
+      "producer": [
+        "internal/chatgate/schedule.go:create"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "schedule_enqueued",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "schedule_id"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "schedule_id"
+      ],
+      "optional": [
+        "run_count",
+        "schedule_mode",
+        "scheduled_turn_id",
+        "trigger_reason",
+        "trigger_status"
+      ],
+      "producer": [
+        "internal/workers/schedule/schedule.go:enqueue"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "schedule_triggered",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "schedule_id",
+          "trigger_reason"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "trigger_reason"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "schedule_id"
+      ],
+      "optional": [
+        "run_count",
+        "schedule_mode",
+        "trigger_reason",
+        "trigger_status"
+      ],
+      "producer": [
+        "internal/workers/schedule/schedule.go:fire"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "session_handoff",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "text",
+        "covered_seq"
+      ],
+      "optional": [
+        "requested_turn_id",
+        "author",
+        "source_event_id"
+      ],
+      "producer": [
+        "internal/server/open_handoff.go:ingest"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "session_handoff_bridge",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "status"
+      ],
+      "optional": [
+        "agent_id",
+        "chars",
+        "duration_ms",
+        "from_session",
+        "request_id",
+        "reason"
+      ],
+      "producer": [
+        "internal/chat/handoff_bridge.go:Bridge"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "session_handoff_requested",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "utilization",
+        "prior_covered_seq",
+        "gate"
+      ],
+      "producer": [
+        "internal/workers/sessionsummary/worker.go:Maintain"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "session_handoff_stage",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "stage",
+        "status",
+        "reason"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:handoff"
+      ],
+      "consumers": [
+        "webapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "session_rotated",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "reason"
+      ],
+      "optional": [
+        "old_session_id",
+        "covered_seq",
+        "utilization",
+        "summary_chars"
+      ],
+      "producer": [
+        "internal/workers/sessionsummary/worker.go:maybeRotate"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "session_summary",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "text",
+        "covered_seq"
+      ],
+      "optional": [
+        "covered_turns",
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "duration_ms",
+        "author",
+        "source_event_id"
+      ],
+      "producer": [
+        "internal/workers/sessionsummary/worker.go:summarize"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "start",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "queue_wait_ms"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "status",
+        "queue_wait_ms"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:processTurn"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": [
+        "turn.stop"
+      ]
+    },
+    {
+      "type": "thought",
+      "form": "delta",
+      "category": "thinking",
+      "timeline": true,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "bytes"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "content"
+      ],
+      "optional": [],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "thought",
+      "form": "durable",
+      "category": "thinking",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "bytes"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "content"
+      ],
+      "optional": [],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "token_usage",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "input_tokens",
+          "output_tokens",
+          "model"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "cached_tokens",
+        "calls",
+        "input_tokens",
+        "output_tokens",
+        "provider",
+        "model",
+        "reasoning_tokens",
+        "total_tokens"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:processTurn"
+      ],
+      "consumers": [
+        "debug",
+        "metrics"
+      ],
+      "actions": []
+    },
+    {
+      "type": "tool_call",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "name",
+          "id"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "name"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "name"
+      ],
+      "optional": [
+        "id",
+        "arguments",
+        "content",
+        "status"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "tool_result",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "name",
+          "status",
+          "bytes"
+        ],
+        "aggregation": "per_turn",
+        "distinct": "name"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "name"
+      ],
+      "optional": [
+        "id",
+        "status",
+        "error"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEvent"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "tts_completed",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "duration_ms",
+          "parts"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "audio_path",
+        "kind",
+        "seq",
+        "parts",
+        "bytes",
+        "duration_ms",
+        "mode"
+      ],
+      "producer": [
+        "internal/tts/service.go:emit"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "tts_failed",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "WARN",
+        "fields": [
+          "duration_ms",
+          "reason"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "error",
+        "kind",
+        "seq",
+        "reason",
+        "parts",
+        "duration_ms",
+        "failed_part",
+        "completed_parts",
+        "lost_chars",
+        "message"
+      ],
+      "producer": [
+        "internal/tts/service.go:emit"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "tts_started",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "mode",
+          "seq"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "audio_path",
+        "kind",
+        "seq",
+        "mode"
+      ],
+      "producer": [
+        "internal/tts/service.go:emit"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "turn_activity",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": {
+        "level": "INFO",
+        "fields": [],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "step",
+        "elapsed_ms",
+        "tool_running"
+      ],
+      "producer": [
+        "internal/chat/turn_worker.go:upgradeHeartbeatToActivity"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "turn_reminder_injected",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "injected_count",
+          "bytes"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "count",
+        "total_chars"
+      ],
+      "optional": [
+        "reminders"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_reminder_probe.go:emitReminderProbe"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "user_message",
+      "form": "durable",
+      "category": "user_input",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "bytes",
+          "attachments_count"
+        ],
+        "aggregation": "per_turn"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "input",
+        "status"
+      ],
+      "optional": [
+        "targets",
+        "attachments_count",
+        "inbox_message_id",
+        "inbox_drain_mode"
+      ],
+      "producer": [
+        "internal/chat/enqueue.go:insertUserMessageEvent"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    },
+    {
+      "type": "visualization.published",
+      "form": "durable",
+      "category": "event",
+      "timeline": true,
+      "persist": true,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "INFO",
+        "fields": [
+          "artifact_id"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [],
+      "optional": [
+        "artifact_id",
+        "artifact_key",
+        "revision",
+        "event_version",
+        "profile",
+        "schema_version",
+        "spec_schema",
+        "spec_format",
+        "title",
+        "summary"
+      ],
+      "producer": [
+        "internal/chatgate/visualization.go:publish"
+      ],
+      "consumers": [
+        "webapp",
+        "miniapp",
+        "flutter"
+      ],
+      "actions": []
+    }
+  ]
+}

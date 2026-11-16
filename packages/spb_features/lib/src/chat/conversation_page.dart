@@ -3690,7 +3690,84 @@ class _ConversationPageState extends State<ConversationPage>
       onPreview: widget.onPreviewAgentFile,
     ),
     HabitAutoRunItem() => HabitAutoRunCard(item: item),
+    HabitRecalibrationItem() => _HabitRecalibrationRow(item: item),
+    UnknownEventItem() => _UnknownEventRow(item: item),
   };
+}
+
+/// 习惯规则校准（`habit_pattern_recalibrated`）：一行弱化提示。
+///
+/// ## 为什么是「提示行」而不是卡片
+///
+/// 它没有可点的动作（不是确认、不是建议），信息量只有「谁、从什么级别到什么
+/// 级别、为什么」。做成卡片会与建议卡/自动执行卡抢视觉权重，而用户此刻要看的
+/// 是回复本身。样式与 [_DiagnosticNotice] 同一族：浅色窄条 + 图标，不用告警色
+/// （这不是错误，是服务端按反馈做出的**正常调整**）。
+class _HabitRecalibrationRow extends StatelessWidget {
+  const _HabitRecalibrationRow({required this.item});
+
+  final HabitRecalibrationItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      key: ValueKey('habit-recalibration-${item.id}'),
+      color: Colors.transparent,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: SpbSpacing.xs),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.tune,
+              size: SpbSpacing.lg,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: SpbSpacing.sm),
+            Expanded(
+              child: SelectableText(
+                item.summary,
+                style: SpbType.listMeta(Theme.of(context).textTheme)
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 未知事件类型（契约漂移的可见出口，见 [UnknownEventItem] 的类文档）。
+///
+/// ## 为什么必须渲染，哪怕它「不该出现」
+///
+/// 这一行的存在本身就是信号：客户端版本落后于服务端，某个时间线事件它不认识。
+/// 静默丢弃时用户只会觉得「回答缺了一块」，没有任何可归因线索；而这一行至少
+/// 给出类型名，排障者能直接对照服务端目录。
+///
+/// 样式刻意**弱化**（比诊断条更轻）：它不是服务端故障，而是本客户端的覆盖缺口，
+/// 不该在视觉上压过正文本体。
+class _UnknownEventRow extends StatelessWidget {
+  const _UnknownEventRow({required this.item});
+
+  final UnknownEventItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final times = item.count > 1 ? '（×${item.count}）' : '';
+    return Padding(
+      key: ValueKey('unknown-event-${item.id}'),
+      padding: const EdgeInsets.symmetric(vertical: SpbSpacing.xs),
+      child: Text(
+        '未知事件：${item.eventType}$times（客户端可能需要升级）',
+        style: SpbType.listMeta(Theme.of(context).textTheme)
+            ?.copyWith(fontStyle: FontStyle.italic, color: scheme.outline),
+      ),
+    );
+  }
 }
 
 /// 语音播报状态条：展示播报进行到哪一步 / 为什么失败。

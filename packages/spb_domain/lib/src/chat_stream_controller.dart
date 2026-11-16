@@ -140,6 +140,11 @@ class ChatStreamController {
   /// `DispatchStageFrame` 的类文档），而 rid 是本端生成的 UUID，天然唯一。
   final Set<String> _inFlightRequestIds = {};
 
+  /// 已经 warn 过的未知事件类型（每类型一次，上限 32）。
+  ///
+  /// 见 [ChatStreamController._onFrame] 里未知分支的长注释。
+  final Set<String> _unknownEventTypesLogged = {};
+
   /// 最近一次推给 UI 的分发进度（null = 无）。
   ///
   /// 与 [_dispatchProgressController] 并存是既有取向：快照给首屏/重建用，
@@ -2229,9 +2234,27 @@ class ChatStreamController {
       return;
     }
 
-    // 未知事件类型：记录一次以便发现契约漂移，但不影响渲染。
-    if (!event.isKnown) {
-      SpbLog.debug('收到未知事件类型（可能是服务端新增）', {'eventType': event.eventType});
+    // 未知事件类型：**每个类型只记一次**（warn 级，进 LC 采集）。
+    //
+    // ## 为什么不是逐事件 debug
+    //
+    // 逐事件记有两个毛病：日志量随未知类型的事件数线性涨（若它其实是新的心跳类，
+    // 一次执行几百条），且 debug 在生产默认不出，等于「没说过」。
+    //
+    // 改成「每个类型记一次 + warn」后，服务端新增事件在 LC 里是**一条**明确的
+    // 信号（带类型名），而不是一片噪声。可见性由归约器的
+    // [EventTypes.shouldSurfaceUnknown] 负责（控制类静默、真未知类型渲染一行）。
+    //
+    // 上限 32 个类型：防止服务端某天发来海量随机类型把集合撑爆（判据只需要
+    // 「有一个非空的类型名」，不需要无限登记）。
+    if (!event.isKnown && _unknownEventTypesLogged.length < 32) {
+      if (_unknownEventTypesLogged.add(event.eventType)) {
+        SpbLog.warn('收到未知事件类型（服务端可能新增，客户端版本落后）', {
+          'eventType': event.eventType,
+          'transient': event.transient,
+          'diagnostic': event.diagnostic,
+        });
+      }
     }
 
     // 该 turn 又活过来了：撤销超时判定。

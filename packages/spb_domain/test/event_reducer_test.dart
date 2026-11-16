@@ -976,12 +976,22 @@ void main() {
       expect(r.activities, isEmpty);
     });
 
-    test('未知事件类型被静默忽略（向前兼容）', () {
+    test('未知事件类型不再静默：产出一行可见的「未知事件」（#117）', () {
+      // ⚠️ 行为变更是**有意**的（issue #116 / #117）：这条用例此前断言
+      // 「静默忽略（向前兼容）」。但静默的代价是这个形状在历史上已经吞过两次
+      // 真事件（`agent.file.*` 2927 条、`goal_gate_stopped`）——用户的感受是
+      // 「回答缺了一块」，而测试全绿。
+      //
+      // 现在的契约是：不认识 + 落库 + 非诊断类 ⇒ 产 [UnknownEventItem]；
+      // 增量 / 服务端标诊断 / 登记在 `EventTypes.diagnosticOnly` 的控制类仍静默
+      // （逐条见 `event_reducer_contract_drift_test.dart`）。
       final r = EventReducer.reduce([
         ev('brand_new_event', payload: {'text': 'x'}),
       ]);
 
-      expect(r.items, isEmpty);
+      expect(r.items, hasLength(1));
+      expect(r.items.single, isA<UnknownEventItem>());
+      expect((r.items.single as UnknownEventItem).eventType, 'brand_new_event');
     });
 
     test('token_usage 不进时间线（观测数据不挤占对话事件）', () {

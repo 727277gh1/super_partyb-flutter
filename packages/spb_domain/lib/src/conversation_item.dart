@@ -912,6 +912,137 @@ final class HabitAutoRunItem extends ConversationItem {
   }
 }
 
+/// 服务端新增、本仓尚未实现的事件（契约漂移的唯一可见出口）。
+///
+/// ## 为什么必须有这一项（issue #116 / #117）
+///
+/// 本仓的事件分流是**按类型**的 `switch`，`default:` 兜住一切。于是「服务端新增了
+/// 一个时间线事件」的后果不是报错，而是**静默丢帧**：用户只看到回答少了点什么，
+/// 所有测试照常绿。这个形态在本仓历史上已发生过两次（`agent.file.*` 吞掉 2927 条、
+/// `goal_gate_stopped` 声明了却无 case）。
+///
+/// 现在 `EventTypes.shouldSurfaceUnknown` 会把「不认识 + 落库 + 非诊断」的事件
+/// 变成这一项，页面上渲染成一行「未知事件（`<type>`）×N」——**可见的降级**比
+/// 静默丢弃好：用户知道该升级客户端，排障者有了类型名。
+///
+/// ## 为什么不透传 payload
+///
+/// payload 可能含工作区路径、stderr、session id（见 #115 的「不做通用 payload 透传」）。
+/// 这一项只带**类型名与计数**，足够定位，不足以泄露。
+///
+/// ## 为什么按 (turnId, eventType) 合并并计数
+///
+/// 未知类型可能在一次执行里来几百条（若它其实是新的心跳类）。一条一行会刷屏；
+/// 合并成「(type) ×N」既保留信息又不淹没历史。身份键固定为
+/// `unknown:<turnId>:<eventType>`，列表 diff 与重放都不会跳。
+final class UnknownEventItem extends ConversationItem {
+  const UnknownEventItem({
+    required super.id,
+    required super.createdAt,
+    required this.eventType,
+    super.turnId,
+    this.count = 1,
+  });
+
+  /// 服务端声明的事件类型（原样，不做本地化猜测）。
+  final String eventType;
+
+  /// 本 turn 里该类型出现的次数（同 id 合并时递增）。
+  final int count;
+
+  /// 递增一次，保留首次到达的 `createdAt` 与 id（重放不漂移）。
+  UnknownEventItem bumped() => UnknownEventItem(
+    id: id,
+    createdAt: createdAt,
+    turnId: turnId,
+    eventType: eventType,
+    count: count + 1,
+  );
+}
+
+/// 习惯规则校准（`habit_pattern_recalibrated`）。
+///
+/// ## 为什么它单独一个项，而不并进 [HabitSuggestionItem] / [HabitAutoRunItem]
+///
+/// 三者是习惯回环的不同环节：建议是「要不要开始」，自动执行是「这一轮帮你跑了」，
+/// 校准是「根据反馈把打扰级别的规则改了」。最后一件直接改变**将来会被打扰多少**，
+/// 用户最容易困惑「为什么它突然不提醒我了 / 突然又提醒了」——必须有自己的解释行。
+///
+/// ## 为什么本仓此前会漏掉它
+///
+/// Go 侧有产出点、webapp 已经渲染（`chat-timeline.ts` 的
+/// `formatHabitPatternRecalibrationSummary`）、服务端目录也写着
+/// `consumers: ["webapp","miniapp","flutter"]`，但本仓归约器**没有 case**，
+/// 事件落到 `default:` 静默丢弃。这条正是 #116 的目录对拍测试抓出来的第一只真 bug。
+///
+/// 文案对齐 webapp（`apps/webapp/src/lib/habit-timeline.mts`），不另写一套口径。
+final class HabitRecalibrationItem extends ConversationItem {
+  const HabitRecalibrationItem({
+    required super.id,
+    required super.createdAt,
+    super.turnId,
+    this.topicKey = '',
+    this.previousLevel = '',
+    this.nextLevel = '',
+    this.reason = '',
+    this.blockingRatio,
+    this.acceptanceRatio,
+  });
+
+  final String topicKey;
+
+  /// 校准前的打扰级别（`previous_acceptance_level`），如 `auto_run`。
+  final String previousLevel;
+
+  /// 校准后的打扰级别（`next_acceptance_level`），如 `confirm_required`。
+  final String nextLevel;
+
+  /// `blocking_feedback`（降级）/ `acceptance_feedback`（升级）/ 其他。
+  final String reason;
+
+  /// 降级依据：本轮被阻塞的比例（0–1）。
+  final double? blockingRatio;
+
+  /// 升级依据：本轮被接受的比例（0–1）。
+  final double? acceptanceRatio;
+
+  /// 主题展示名：与 [HabitAutoRunItem.topicLabel] 同一取舍（机器键不原样示人）。
+  String get topicLabel {
+    if (topicKey.isEmpty) return '未命名习惯';
+    return topicKey.replaceAll(RegExp(r'[._-]+'), ' ');
+  }
+
+  /// 级别展示名：`confirm_required` → `confirm required`（下划线换空格）。
+  static String levelLabel(String raw) =>
+      raw.isEmpty ? '未知级别' : raw.replaceAll(RegExp(r'[._-]+'), ' ');
+
+  /// 时间线摘要，对齐 webapp 的三分支文案。
+  String get summary {
+    final from = levelLabel(previousLevel);
+    final to = levelLabel(nextLevel);
+    final rate = _rate();
+    switch (reason) {
+      case 'blocking_feedback':
+        return '习惯规则已降级 · $topicLabel · $from → $to$rate';
+      case 'acceptance_feedback':
+        return '习惯规则已升级 · $topicLabel · $from → $to$rate';
+      default:
+        return '习惯规则已重新校准 · $topicLabel · $from → $to';
+    }
+  }
+
+  String _rate() {
+    final ratio = reason == 'blocking_feedback'
+        ? blockingRatio
+        : reason == 'acceptance_feedback'
+        ? acceptanceRatio
+        : null;
+    if (ratio == null) return '';
+    final kind = reason == 'blocking_feedback' ? '阻塞' : '接受';
+    return '（$kind ${(ratio * 100).round()}%）';
+  }
+}
+
 /// Agent 产出的文件（`agent.file.*`）。
 ///
 /// ## 为什么 [id] 用归一化的相对路径，而非 eventId

@@ -365,6 +365,29 @@ payload 分三种形态，靠 `phase` 区分（同一个事件类型发多条帧
 
 **「同一 turn 全部 `message` 事件拼接即完整回复」**（`final_message` 已废弃，迁移 0010 清空历史）。归约实现见 `packages/spb_domain/lib/src/event_reducer.dart`。
 
+#### 5.4.1b 本客户端不认识的事件类型（契约漂移的出口）
+
+**真源**：服务端目录 `super_partyb/apps/go-api/docs/event-catalog.json`
+（vendored 在 `packages/spb_models/fixtures/`，刷新脚本 `tools/sync_event_catalog.sh`，
+流程见同目录 `README.md`）。
+
+分流是**按类型**的（17 个 `ConversationItem` 渲染器），类别（7 值闭集）只用于对拍与
+未来统计（服务端自己就把 62 条里的 50 条归为 `event`）。于是「服务端新增了时间线事件」
+在客户端只有两种结局：
+
+| 情形 | 出口 |
+|---|---|
+| 不认识 ∧ **落库** ∧ 不像控制事件 | 一行弱化文本「未知事件：`<type>`（×N）（客户端可能需要升级）」，按 `(turnId, eventType)` 合并计数、**不透传 payload** |
+| 增量帧 / 服务端标 `diagnostic` / 登记在 `EventTypes.diagnosticOnly`（12 个） | 静默（只记日志） |
+
+判据实现是 `EventTypes.shouldSurfaceUnknown`，理由见
+[§6.107](design-decisions/chat.md)（控制类若也渲染，每次执行都会多几行噪声——
+比静默丢帧更糟）。日志侧每个未知类型只 `warn` 一次（上限 32 个类型），故
+logs-collector 里它是**一条带类型名的信号**而不是一片噪声。
+
+**对服务端的期待**：新增时间线事件时把它写进目录的 `timeline: true`——本仓的
+`test/event_catalog_test.dart` 会在下次同步时红，带上类型名。
+
 #### 5.4.2 `error` 事件的 payload（`code` 闭集 + `message`/`detail` 分工）
 
 **真源**：`super_partyb/apps/go-api/internal/chatbus/error_payload.go` 的

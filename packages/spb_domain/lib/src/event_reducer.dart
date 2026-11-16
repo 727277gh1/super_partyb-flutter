@@ -179,6 +179,10 @@ class EventReducer {
     // `reduce` 的签名（只收事件）保持不变。
     final terminalTurnIds = <String>{};
 
+    // 未知事件已计入的 eventId（见 default 分支的去重理由）。只作用于本次归约，
+    // 不跨调用累积——归约是纯函数，跨调用状态会随分页/回填顺序不同而漂移。
+    final unknownSeenEventIds = <String>{};
+
     for (final ev in events) {
       if (!ev.transient && ev.eventId.isNotEmpty) {
         lastEventId = ev.eventId;
@@ -733,6 +737,32 @@ class EventReducer {
             ),
           );
 
+        case EventTypes.habitPatternRecalibrated:
+          // 习惯规则校准：根据反馈把「将来会多频繁地打扰你」改了。
+          //
+          // 这条是 #116 的目录对拍测试抓到的第一个真 bug：服务端有产出点
+          // （`chatpipeline` 的反馈提交路径）、webapp 已渲染、目录写着
+          // `consumers: ["webapp","miniapp","flutter"]`，而本仓**没有 case**，
+          // 落到 `default:` 静默丢弃。用户看到的现象就是「它突然不提醒我了 /
+          // 突然又开始提醒」，且没有任何解释。
+          //
+          // 无 topic_key 也照常产出（与 [HabitAutoRunItem] 同一取向）：本项不靠它
+          // 作身份键，空 topic 只会渲染成「未命名习惯」。
+          _appendIfAbsent(
+            items,
+            HabitRecalibrationItem(
+              id: ev.eventId,
+              createdAt: ev.createdAt,
+              turnId: ev.turnId,
+              topicKey: ev.habitRecalibrationTopicKey ?? '',
+              previousLevel: ev.habitRecalibrationPreviousLevel ?? '',
+              nextLevel: ev.habitRecalibrationNextLevel ?? '',
+              reason: ev.habitRecalibrationReason ?? '',
+              blockingRatio: ev.habitRecalibrationBlockingRatio,
+              acceptanceRatio: ev.habitRecalibrationAcceptanceRatio,
+            ),
+          );
+
         case EventTypes.goalGateStopped:
           // Goal Gate 终止（目标达成 / 达到自动轮次上限 / 任务受阻或出错）。
           //
@@ -801,6 +831,27 @@ class EventReducer {
           );
 
         default:
+          // 契约漂移出口（issue #116 / #117）：服务端新增了本仓**不认识**、
+          // 又会落库、又不是诊断类的事件类型时，产一行「未知事件（type）×N」。
+          //
+          // WHY 在 default 的最前面且立即 break：这类事件没有任何已知的归约
+          // 语义，能做的只有「让它可见」。判据与三条件的理由见
+          // [EventTypes.shouldSurfaceUnknown]（控制类在 [EventTypes.diagnosticOnly]
+          // 里登记，不会被误当成新的时间线事件刷屏）。
+          if (EventTypes.shouldSurfaceUnknown(
+            eventType: ev.eventType,
+            transient: ev.transient,
+            diagnostic: ev.diagnostic,
+          )) {
+            // 重放/回填交叠会让**同一条**事件在输入里出现两次（SSE cursor 与
+            // timeline 重叠窗口）。按 eventId 去重，避免计数虚高；无 eventId
+            // 的按到达顺序计（它们本来就无法判定重复）。
+            if (ev.eventId.isEmpty || unknownSeenEventIds.add(ev.eventId)) {
+              _appendUnknownEvent(items, ev);
+            }
+            break;
+          }
+
           // heartbeat / gate_evaluated / gate_completed / gate_error / tts_* 等
           // 控制事件不进入对话列表，也不进 gate 决策通道。
           //
@@ -876,6 +927,37 @@ class EventReducer {
   /// 与 [_upsertHabitSuggestion] 不同：本项是**终态通知**（无后续事件改写它），
   /// 故不保留旧字段，重复到达时以先到者为准（不重建、不刷 createdAt——
   /// 列表排序不应因重放而漂移）。
+  /// 仅在 id 不存在时追加（重放/回填交叠时同一事件会到达两次）。
+  static void _appendIfAbsent(
+    List<ConversationItem> items,
+    ConversationItem item,
+  ) {
+    for (final it in items) {
+      if (it.id == item.id && it.runtimeType == item.runtimeType) return;
+    }
+    items.add(item);
+  }
+
+  /// 未知事件按 `(turnId, eventType)` 合并计数（见 [UnknownEventItem] 的类文档）。
+  static void _appendUnknownEvent(List<ConversationItem> items, ChatEvent ev) {
+    final id = 'unknown:${ev.turnId}:${ev.eventType}';
+    for (var i = 0; i < items.length; i++) {
+      final it = items[i];
+      if (it is UnknownEventItem && it.id == id) {
+        items[i] = it.bumped();
+        return;
+      }
+    }
+    items.add(
+      UnknownEventItem(
+        id: id,
+        createdAt: ev.createdAt,
+        turnId: ev.turnId,
+        eventType: ev.eventType,
+      ),
+    );
+  }
+
   static void _upsertHabitAutoRun(
     List<ConversationItem> items,
     HabitAutoRunItem incoming,
