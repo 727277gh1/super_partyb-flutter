@@ -118,8 +118,41 @@ class ChatEvent {
   String? get status => _str('status');
 
   /// 错误信息（`error` / `gate_error`）。
+  ///
+  /// 键顺序：`message` → `content` → `error` → `detail`。
+  ///
+  /// ## `content` 为什么必须在里面（issue #115）
+  ///
+  /// Go 侧 error 事件的**所有**生产者写的都是 `content`：
+  /// - `chatexec/pigo_core.go` 的 `flushEvent`（pigo 流错误，统一 `{"content": …}`）
+  /// - `chat/turn_worker.go` 的超时 / 挂死清理 / 执行失败分支
+  ///
+  /// 生产库实测（123，2026-11）：`{"content":"transport: upstream 429"}`。
+  /// 少了这个键，归约会落到 `?? '未知错误'`（`event_reducer.dart` 的
+  /// `ErrorItem` 创建处），真实原因被静默吞掉——用户看到「未知错误」，
+  /// 而错误文本就躺在 payload 里。
+  ///
+  /// 而同类里的 [text] 是 `text ?? content ?? message`（早就有 `content`），
+  /// 两套键顺序不一致正是这个 bug 的成因，这里补上并保持后缀一致。
+  ///
+  /// ## `message` 为什么排最前
+  ///
+  /// 服务端正在把契约收敛到 `{code, message}`（super_partyb#182），过渡期
+  /// 两个键同时存在且等值；优先取规范键，`content` 只作兼容。
   String? get errorMessage =>
-      _str('error') ?? _str('detail') ?? _str('message');
+      _str('message') ?? _str('content') ?? _str('error') ?? _str('detail');
+
+  /// 错误码（`error`），真源 super_partyb#182 的闭集
+  /// （`oom_kill` / `upstream_rate_limited` / `upstream_error` /
+  /// `timeout_inactivity` / `timeout_hard` / `turn_stalled` / `internal_error`）。
+  ///
+  /// **原样返回 String，不归一成枚举**：它是展示分支的判据，未知值必须
+  /// fail-open（按 `message` 直出、不给重试按钮），不能因为服务端先发了一个
+  /// 新 code 就崩或误报。需要 `switch` 的消费方在 `spb_domain` 侧自己映射。
+  ///
+  /// 按 `eventType` 门禁的理由：`code` 是极通用的键名（工具结果、HTTP 错误
+  /// 体、gate 决策载荷都可能带同名键），不门禁就会把别的事件的 code 读成本轮错误码。
+  String? get errorCode => eventType == EventTypes.error ? _str('code') : null;
 
   /// 归属判定的解释（`routing_selected`）。
   String? get routingReason =>

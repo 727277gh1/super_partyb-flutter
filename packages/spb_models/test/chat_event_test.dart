@@ -1025,4 +1025,72 @@ void main() {
       expect(ev.habitAutoRunPatternId, isNull);
     });
   });
+
+  group('error 访问器（errorMessage / errorCode）', () {
+    /// 构造一条 error 事件（两种序列化形状都走同一个 payload）。
+    ChatEvent errorEvent(Map<String, dynamic> payload, {bool snake = false}) =>
+        snake
+        ? ChatEvent.fromJson(
+            eventToDictShape()
+              ..['event_type'] = EventTypes.error
+              ..['payload'] = payload,
+          )
+        : ChatEvent.fromJson(
+            sseShape()
+              ..['eventType'] = EventTypes.error
+              ..['payload'] = payload,
+          );
+
+    test('生产真实形状（只有 content）也能读出错误文本', () {
+      // 123 库里的实际 payload：{"content":"transport: upstream 429"}。
+      // 修复前这里会得到 null，归约后渲染成「未知错误」（#115 的 bug）。
+      final ev = errorEvent({'content': 'transport: upstream 429'});
+
+      expect(ev.errorMessage, 'transport: upstream 429');
+    });
+
+    test('camelCase 与 snake_case 形状取到同一句话', () {
+      final camel = errorEvent({'content': '执行被内存上限打断'});
+      final snake = errorEvent({'content': '执行被内存上限打断'}, snake: true);
+
+      expect(camel.errorMessage, '执行被内存上限打断');
+      expect(snake.errorMessage, '执行被内存上限打断');
+      expect(camel.isKnown, isTrue);
+      expect(snake.isKnown, isTrue);
+    });
+
+    test('四个兼容键单独出现时都能读（message 优先于 content）', () {
+      expect(errorEvent({'message': '来自 message'}).errorMessage, '来自 message');
+      expect(errorEvent({'error': '来自 error'}).errorMessage, '来自 error');
+      expect(errorEvent({'detail': '来自 detail'}).errorMessage, '来自 detail');
+      // 过渡期两键等值，仍按规范键优先（顺序固定 = 行为可预测）。
+      expect(
+        errorEvent({'message': '规范键', 'content': '兼容键'}).errorMessage,
+        '规范键',
+      );
+    });
+
+    test('errorCode 读 code（闭集外的值也原样返回，fail-open）', () {
+      expect(
+        errorEvent({'code': 'oom_kill', 'message': 'OOM'}).errorCode,
+        'oom_kill',
+      );
+      expect(
+        errorEvent({'code': 'brand_new_code'}).errorCode,
+        'brand_new_code',
+      );
+      expect(errorEvent({'content': '没有 code'}).errorCode, isNull);
+    });
+
+    test('errorCode 按类型门禁：别的类型带 code 键也不读', () {
+      // `code` 是通用键名（工具结果 / HTTP 错误体都带），不门禁就会误读。
+      final ev = ChatEvent.fromJson(
+        sseShape()
+          ..['eventType'] = EventTypes.toolResult
+          ..['payload'] = {'code': 'E_NOENT', 'output': 'ls 失败'},
+      );
+
+      expect(ev.errorCode, isNull);
+    });
+  });
 }

@@ -858,6 +858,18 @@ void main() {
       expect((r.items.single as ErrorItem).message, '执行失败');
     });
 
+    test('error 事件只带 content 时也能出真实文案（不是「未知错误」）', () {
+      // 服务端 error 事件的实际 payload 是 `{"content": …}`
+      // （chatexec 的 flushEvent / turn_worker 的超时与中断分支；生产库实测
+      // 为 `{"content":"transport: upstream 429"}`）。此处兼归约层和行为层
+      // 一起守：键读不到时用户会看到「未知错误」，真实原因静默丢失。
+      final r = EventReducer.reduce([
+        ev(EventTypes.error, payload: {'content': 'transport: upstream 429'}),
+      ]);
+
+      expect((r.items.single as ErrorItem).message, 'transport: upstream 429');
+    });
+
     test('follow_up_suggested 产出建议项；空建议不产出', () {
       final withItems = EventReducer.reduce([
         ev(
