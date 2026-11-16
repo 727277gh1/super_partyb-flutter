@@ -2017,3 +2017,62 @@ Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms
 - **不按 `error_type` / `friendly_message` 分派**：Python 时代的遗留键，Go 从不写，
   读到的永远是死分支（webapp 侧曾有一条 `session_expired` → restore 的重试分支因此
   从未触发，已由服务端复核结论否掉补进闭集）。
+
+### 6.106 首 token之前的空窗：`dispatch_stage` 进度条 + 500ms 门槛 + 只认本端 rid（2026-11）
+
+**现象**：点了发送，几百毫秒到几秒里界面只有一条「发送中」气泡。这段时间服务端在判
+归属、挑 Agent、入队——与「回答」无关，但用户看不出它是活着还是卡了。
+
+**量化**（123，7 天，39 次 pipeline root）：median **6ms**、p90 **27ms**、max
+**3711ms**；两次长尾的 `unattributed_ms` 是 **3147ms** / **1047ms**，而
+`routing_selected.auto_agent.elapsed_ms` 分别 3675 / 1589——残差全在 Agent 匹配的
+Jev 仲裁里（`chatrouter/router_agent_compare.go` 的 `CompareJevTop1`，零埋点；
+super_partyb#181 因此补了 `router.auto_agent` 段）。
+
+**四个判据**：
+
+1. **门槛 500ms，不是「有帧就出条」**。p90 只有 27ms——按帧出现，99% 的发送都会闪
+   一条 30ms 的进度条。那是噪声不是信息（同 §6.13「只给稳定的东西加视觉元素」）。
+   门槛判定抽成 `shouldShowDispatchProgress(progress, now:)` 纯函数（`now` 由调用方
+   注入），能在无引擎的 CI 里覆盖「刚发出 / 恰好 500ms / 已收尾」三种边界。
+2. **归因只认本端 rid**。SSE 是 user 级订阅，同一连接上会有别的设备、小程序 BFF、
+   habit/schedule 续跑的分发帧。服务端已用 `dispatch.Attributable` 滤掉「没有
+   `request_id`」的帧，但它**无法知道**哪个 rid 是本端发的——不按 rid 过滤的后果不是
+   「少一条进度」，而是「显示另一台设备正在做什么」。用 rid 而不是 group/turn：
+   分发帧产生时 group 还没定。
+3. **显式分流 + return，不进缓冲不推游标**。`dispatch_stage` 是 Transient（
+   `Event{Transient: true}`，无有效 eventId）且没有 turn/group：走通用路径会让归约
+   白算一遍（对它没有 case）并推进游标（断线回放以不存在的 eventId 定位）。
+4. **收起时机紧跟「等待换人」**：root 收尾帧（`phase=end & name=dispatch`）到达即推
+   null——那一刻 turn 已建，接下来由 `TurnStatusStrip`（队列/执行）负责；两条同时
+   显示会让用户以为有两次等待。`send()` 出口（成功 / 失败 / 群忙 202）同样撤销：
+   deferred 没有 turn，也就没有后续可展示。
+
+**组件行为**（`dispatch_progress.dart`）：自带计时器——门槛未到就一次性定时到门槛，
+过了门槛每秒刷新「已等待 N 秒」；进度为 null 时立刻取消（页面空转不占 timer）。
+文案取 `dispatchProgressText`：当前段中文名 → 没有当前段时退回 root 的「正在分发」。
+**不能**显示空串：只到达 root `start` 是最常见的形态（`hasProgress` 不含
+`rootStarted`，webapp 侧同样单独处理），显示 del「正在分发」是诚实的。
+
+**为什么客户端自己算时长**：分发帧发生在 turn 建立之前，服务端没有 `elapsed_ms` 可给
+（root 收尾帧才有，那时条已收起）。
+
+#### 反向验证
+
+- `chat_stream_controller_dispatch_test.dart`（10 条）：本端帧出快照、只有 root 时也有
+  快照、别的 rid 一律不展示、缺 `request_id` 丢弃、root 收尾即推 null、`send` 返回后
+  迟到帧不再复活、群忙 202 收起、切 group 清空、断线清空、**不产出对话项且游标零推进**。
+  把 `_inFlightRequestIds` 判断删掉，第三条立刻红；把 `return` 换成「继续走通用路径」，
+  最后一条立刻红。
+- `dispatch_stage_test.dart`：门槛三边界（499ms 不显示 / 恰好 500ms 显示 / 收尾不显示）；
+  服务端 `dispatch.KnownStages()` 的 9 个段名**逐个**必须有自己的文案（落进「正在处理」
+  就红）——`router.auto_agent` 当初正是漏登记的那一个。
+- `dispatch_progress_test.dart`（12 条）：未过门槛不占位、到门槛自动出现（不依赖父层
+  重建）、按秒刷新、未知段兜底、`null` 不占位、页面里条在输入框之上、流推送实时更新。
+
+#### 未验证
+
+- **真机观感**：本机无 `DISPLAY`（[§9](../development.md)）。条的淡入/消失是否需要
+  动效、500ms 门槛在真机上是否偏早/偏晚，都需要实机采样。
+- **服务端开关仍关**：123 的 `.env` 没有 `SPB_DISPATCH_EVENTS`，实测零帧。这条路径
+  在打开开关前只在单测里跑过（打开即生效，无需再改客户端代码）。

@@ -607,6 +607,11 @@ class DispatchStageLabels {
     'feedback.judge': '正在判定归属反馈',
     'enqueue': '正在入队',
     'reminder.prepare': '正在准备提醒',
+    // `router.auto_agent` 是 `router.query_encode` 的**父段**（super_partyb#181
+    // 补的：生产长尾 3711ms 里 3147ms 没被任何段记账，全在 Jev 仲裁里）。
+    // 两者给同一句文案：用户不需要区分「召回编码」与「Jev 仲裁」，只需要知道
+    // 「正在挑由谁回答」。
+    'router.auto_agent': '正在匹配 Agent',
     'router.query_encode': '正在匹配 Agent',
     'embedding.encode': '正在向量编码',
   };
@@ -639,3 +644,52 @@ class DispatchStageLabels {
   /// 已登记的全部段名（测试与文档用；父子路径的 `<n>` 子段不在此列）。
   static Iterable<String> get knownStages => _exact.keys;
 }
+
+/// 「首 token 之前的分发进度条」最短展示时长（毫秒）。
+///
+/// ## 为什么必须有这个门槛
+///
+/// 生产基线（123，7 天）：pipeline root 的 median 是 **6ms**、p90 **27ms**——
+/// 绝大多数发送在 30ms 内就走完分发。若按「有帧就出条」，用户每次发送都会看到
+/// 一条进度条闪一下：那是**噪声**，不是信息（同 §6.13 不给抖动的组件做 golden
+/// 的取向：只给稳定的东西加视觉元素）。
+///
+/// 500ms 是「人开始觉得卡了」的经验线，也是本仓库其它等待态的分界
+/// （见 `turn_status.dart` 的 `stalled` 判定用同一量级的时长）。
+const int dispatchProgressMinVisibleMs = 500;
+
+/// 是否该显示分发进度条。
+///
+/// ## 三条判据（缺一不可）
+///
+/// 1. [progress] 非 null——非 null 本身就意味着**至少到达过一帧**（会话只在
+///    `apply` 时创建），故不需要再判 `rootStarted` / `hasProgress`；
+/// 2. 尚未 `rootFinished`——分发结束意味着 turn 已建，接下来的等待由
+///    `TurnStatusStrip`（队列/执行）接管，两条同时显示会让用户以为有两次等待；
+/// 3. 距首帧已过 [dispatchProgressMinVisibleMs]——见该常量的理由。
+///
+/// ## 为什么不在这里读墙钟
+///
+/// [now] 由调用方传入（页面用一个 1s 计时器推进），这样判定本身是纯函数：
+/// 可以在无引擎的 CI 里覆盖「刚发出 / 过了门槛 / 已收尾」三种边界，而不必等真
+/// 时间。与 `TurnActivitySnapshot` 的「时长由服务端给」不同——分发帧发生在
+/// **turn 建立之前**，服务端没有 `elapsed_ms` 可给（root 收尾帧才有，那时条已
+/// 收起），所以这里的「已等待多久」只能由客户端按首帧到达时刻算。
+bool shouldShowDispatchProgress(
+  DispatchStageProgress? progress, {
+  required DateTime now,
+}) {
+  if (progress == null) return false;
+  if (progress.rootFinished) return false;
+  final elapsedMs = now.difference(progress.startedAt).inMilliseconds;
+  return elapsedMs >= dispatchProgressMinVisibleMs;
+}
+
+/// 进度条主文案：当前段的中文名；没有进行中段时退回 root 的「正在分发」。
+///
+/// 为什么要退回而不是显示空白：只到达 root `start` 帧是**最常见**的形态
+/// （root start → 分类 → …），此时 `currentStage` 为 null，但用户确实在等。
+/// 显示「正在分发」是诚实的（服务端确实在分发，只是还没细到某一段）。
+String dispatchProgressText(DispatchStageProgress progress) =>
+    progress.currentLabel ??
+    DispatchStageLabels.labelFor(dispatchRootStageName);

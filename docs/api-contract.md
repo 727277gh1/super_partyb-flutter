@@ -314,19 +314,58 @@ data: <json>
 | 流式增量（message/thought） | `true` | **追加**到当前段落 |
 | 权威帧（段级完整文本） | `false` | **替换**当前段落 |
 | 状态变更通知（goal_updated 等） | `true` | 真源在业务表，事件只提示「数据过期」 |
-| 分发阶段进度（`dispatch_stage`，**默认不发**） | `true` | 首 token前的等待分段（见下） |
+| 分发阶段进度（`dispatch_stage`，**默认不发**） | `true` | 首 token前的等待分段（见 §5.4.1） |
 
-**`dispatch_stage`（issue #86）现在是「预留 + 默认关闭」的形态**：服务端按
-`SPB_DISPATCH_EVENTS=1` 才发，默认只在日志与 `routing_selected.stages` 落库。
-事件 `payload` 只有 `{name, start_ms, end_ms, status}`（相对本轮分发起点的偏移，
-无正文、无 group/turn）——它发生在建 turn、定 group **之前**。
-客户端可以完全忽略它（未知事件类型按「保留摘要、不渲染」处理）；将来做
-「首 token前进度提示」时才需要消费：`status ∈ ok|skip|deadline|error`，
-`skip` 表示该段因预算/开关没跑，不是 0ms 跑完。
+#### 5.4.1 `dispatch_stage`：首 token之前的分发进度（issue #86 / #181 / #114）
+
+**真源**：`super_partyb/apps/go-api/internal/dispatch/{wire.go,stages.go}`。
+**镜像**：`packages/spb_domain/lib/src/dispatch_stage.dart`（`DispatchStageFrame` /
+`DispatchStageTracker` / `DispatchStageLabels`）。
+
+**服务端默认关闭**：按 `SPB_DISPATCH_EVENTS=1` 才发（无消费方时开着只是徒增扇出）。
+关闭时客户端**零行为变化**——这条流永远不会有值，进度条不出现，也没有额外请求。
+
+payload 分三种形态，靠 `phase` 区分（同一个事件类型发多条帧）：
+
+| 形态 | `phase` | 键 |
+|---|---|---|
+| 段开始 | `start` | `request_id` `name` `start_ms` [`budget_ms`] |
+| 段结束 | `end` | 上述 + `end_ms` `status` [`reason`] |
+| root 开始 | `start` + `name=dispatch` | 同上（root 刻意不带 `budget_ms`） |
+| root 收尾 | `end` + `name=dispatch` | 上述 + `elapsed_ms` [`unattributed_ms`] [`critical`] [`dropped`] |
+
+**全部 Transient**（不落库、不回放、无有效 eventId），`group_id` / `turn_id` 恒为空
+——它发生在建 turn、定 group **之前**。故：
+
+- **归因只认 `request_id`**：SSE 是 user 级订阅，别的设备 / 小程序 BFF / habit 续跑
+  的分发帧都会出现在同一条连接上。客户端只认自己 `send()` 生成的 rid（
+  `ChatStreamController._inFlightRequestIds`），其余一律丢。
+- **不进缓冲、不推游标**：`_onFrame` 显式分流 + `return`。放进缓冲会让归约白算
+  一遍（对它没有 case），推进游标会让断线回放以「不存在的 eventId」定位。
+- **`status ∈ ok|skip|deadline|error`**；`skip` 表示该段因预算/开关没跑（不是 0ms 跑完）。
+- **`start`/`end` 必须配对**才有意义（「现在在做什么」= 最后一条未收尾的 `start`）；
+  同名段可重复（编码重试），迟到/缺失 `start` 的 `end` 记 orphan 但不改当前段。
+
+**段名闭集**（`DispatchStageLabels` 与 `dispatch.KnownStages()` 对拍）：
+`classify.prepare` / `classify.gate` / `classify.llm` / `feedback.judge` / `enqueue` /
+`reminder.prepare(/<n>)` / `router.auto_agent` / `router.query_encode` /
+`embedding.encode`。**未知段名兜底「正在处理」**，服务端新增段不会让进度条变空白。
+
+**客户端的用法**：`ChatStreamController.dispatchProgress` → `DispatchProgressBar`
+（输入框之上的细条）。它只回答「现在在做什么 + 已等待多久」，
+**过了 500ms 才显示**（生产 root median 6ms / p90 27ms，按「有帧就出条」等于每次
+发送都闪一条）；`root` 收尾帧或请求返回即收起，等待交回
+`TurnStatusStrip`（队列/执行）。
+
+**它不是权威状态**：断线就没了，重连也不补齐（Transient 无回放语义）。故不参与任何
+终态判断——「这一轮结束没有」仍只看时间线。
+
+`routing_selected.stages` 是同一批段的**落库投影**（历史回看用），两者不可互相替代：
+帧是实时的、无 turn；投影是持久的、挂在 turn 上。
 
 **「同一 turn 全部 `message` 事件拼接即完整回复」**（`final_message` 已废弃，迁移 0010 清空历史）。归约实现见 `packages/spb_domain/lib/src/event_reducer.dart`。
 
-#### 5.4.1 `error` 事件的 payload（`code` 闭集 + `message`/`detail` 分工）
+#### 5.4.2 `error` 事件的 payload（`code` 闭集 + `message`/`detail` 分工）
 
 **真源**：`super_partyb/apps/go-api/internal/chatbus/error_payload.go` 的
 `ErrorPayload`（唯一构造入口）与 `ErrorCodes()`；导出清单

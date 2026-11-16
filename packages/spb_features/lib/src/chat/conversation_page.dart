@@ -21,6 +21,7 @@ import 'agent_file_preview.dart';
 import 'assistant_message_bubble.dart';
 import 'confirmation_card.dart';
 import 'conversation_search_sheet.dart';
+import 'dispatch_progress.dart';
 import 'error_code_display.dart';
 import 'feedback_request_card.dart';
 import 'flush_strategy_dialog.dart';
@@ -134,6 +135,8 @@ class ConversationPage extends StatefulWidget {
     this.usageSummarySnapshot,
     this.executionStatus,
     this.executionStatusSnapshot,
+    this.dispatchProgress,
+    this.dispatchProgressSnapshot,
     this.ttsStatus,
     this.ttsStatusSnapshot,
     this.staleTurnIds,
@@ -551,6 +554,27 @@ class ConversationPage extends StatefulWidget {
 
   /// 首帧等待状态（同步初值，同 [contextUsageSnapshot]）。
   final ExecutionStatus? executionStatusSnapshot;
+
+  /// 首 token 之前的分发进度流（`dispatch_stage`，Transient；issue #114）。
+  ///
+  /// ## 它补的是 [executionStatus] **之前**那一段
+  ///
+  /// [executionStatus] 说的是「服务端已建 turn、正在排队/重试」；而分类归属、
+  /// 匹配 Agent、入队发生在**建 turn 之前**，此前对用户完全不可见（生产长尾
+  /// 3711ms）。这条流带着「当前在哪一段」，由 [DispatchProgressBar] 渲染。
+  ///
+  /// ## 与 [executionStatus] 共用同一条槽位（时间线底部、输入框之上）
+  ///
+  /// 两者不重叠：分发结束（root 收尾帧）即收起进度条、把等待交回
+  /// [executionStatus]。同时显示只会在「旧轮还在跑、新消息正在分发」时出现，
+  /// 那时确实是两次等待，分别显示是对的。
+  ///
+  /// 为 null 时不展示（同 [activities] 的「注入才订阅」取向）；服务端
+  /// `SPB_DISPATCH_EVENTS` 关闭时永远不会有帧，故未接线的一端零行为变化。
+  final Stream<DispatchStageProgress?>? dispatchProgress;
+
+  /// 首帧分发进度快照（同步初值，同 [activitiesSnapshot]）。
+  final DispatchStageProgress? dispatchProgressSnapshot;
 
   /// 语音播报状态流（`tts_started` / `tts_completed` / `tts_failed` 归约输出）。
   ///
@@ -1005,6 +1029,14 @@ class _ConversationPageState extends State<ConversationPage>
   /// 与 [_executionStatus] 同取向：存 State + 订阅推送时 setState。
   StreamSubscription<TtsStatus?>? _ttsStatusSub;
 
+  /// `dispatch_stage` 订阅与最近一次分发进度（issue #114）。
+  ///
+  /// 与 [_executionStatus] 同取向：存 State + 订阅推送时 setState。
+  /// 「过了 500ms 才显示」的门槛不在这里判——它需要随时间推进，交给
+  /// [DispatchProgressBar] 自己的计时器（见该类文档）。
+  StreamSubscription<DispatchStageProgress?>? _dispatchProgressSub;
+  DispatchStageProgress? _dispatchProgress;
+
   /// 最近一次播报状态；null 仅表示「尚未收到任何快照」，与 idle 区分开
   /// （idle 是收到快照但无播报，null 是还没订阅到）。
   TtsStatus? _ttsStatus;
@@ -1157,6 +1189,7 @@ class _ConversationPageState extends State<ConversationPage>
     _subscribeContextUsage();
     _subscribeUsageSummary();
     _subscribeExecutionStatus();
+    _subscribeDispatchProgress();
     _subscribeTtsStatus();
     _subscribeStaleTurnIds();
     _subscribeTimelineCache();
@@ -1251,6 +1284,20 @@ class _ConversationPageState extends State<ConversationPage>
     _executionStatus = widget.executionStatusSnapshot;
   }
 
+  /// 订阅分发进度流（仅在调用方传了 [ConversationPage.dispatchProgress] 时）。
+  ///
+  /// 与 [_subscribeExecutionStatus] 同一取向：未注入时不白订阅一条无人消费的流
+  /// （服务端开关关着时这条流永远不会有值）。
+  void _subscribeDispatchProgress() {
+    final stream = widget.dispatchProgress;
+    if (stream == null) return;
+    _dispatchProgressSub = stream.listen((snapshot) {
+      if (!mounted) return;
+      setState(() => _dispatchProgress = snapshot);
+    });
+    _dispatchProgress = widget.dispatchProgressSnapshot;
+  }
+
   /// 订阅播报状态流（仅在调用方传了 [ConversationPage.ttsStatus] 时）。
   void _subscribeTtsStatus() {
     final stream = widget.ttsStatus;
@@ -1311,6 +1358,13 @@ class _ConversationPageState extends State<ConversationPage>
       _executionStatusSub = null;
       _executionStatus = null;
       _subscribeExecutionStatus();
+    }
+    // 分发进度流同理。
+    if (oldWidget.dispatchProgress != widget.dispatchProgress) {
+      unawaited(_dispatchProgressSub?.cancel());
+      _dispatchProgressSub = null;
+      _dispatchProgress = null;
+      _subscribeDispatchProgress();
     }
     // 播报状态流同理。
     if (oldWidget.ttsStatus != widget.ttsStatus) {
@@ -1415,6 +1469,7 @@ class _ConversationPageState extends State<ConversationPage>
     _contextUsageSub?.cancel();
     _usageSummarySub?.cancel();
     _executionStatusSub?.cancel();
+    _dispatchProgressSub?.cancel();
     _ttsStatusSub?.cancel();
     _staleTurnIdsSub?.cancel();
     _fromCacheSub?.cancel();
@@ -2951,6 +3006,14 @@ class _ConversationPageState extends State<ConversationPage>
               },
             ),
           ),
+          // 首 token 之前的分发进度（issue #114）：比轮次状态条更早的一段等待，
+          // 故放在它**上方**（离输入框更远 = 时间上更早，与 OutboxBar /
+          // PendingMessagesBar 同一取向）。
+          //
+          // 组件内部判「过了 500ms 才显示」：绝大多数发送 p90 只有 27ms，
+          // 按「有帧就出条」会让每次发送都闪一条（噪声，不是信息）。
+          if (_dispatchProgress != null)
+            DispatchProgressBar(progress: _dispatchProgress),
           // 同一轮只有一条主状态；消息和工具卡保留内容与静态状态。
           if (turnStatus != null)
             TurnStatusStrip(

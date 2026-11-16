@@ -1123,6 +1123,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
   /// 最近一次归约出的等待/重试状态；null 表示当前无等待。
   ExecutionStatus? _executionStatus;
 
+  /// controller.dispatchProgress 的订阅（`dispatch_stage`，issue #114）。
+  ///
+  /// 首 token **之前**的等待：分类归属 / 匹配 Agent / 入队。与
+  /// [ExecutionStatus]（建 turn 之后）不重叠，故两条流各自一份状态。
+  StreamSubscription<DispatchStageProgress?>? _dispatchProgressSub;
+
+  /// 最近一次分发进度；null 表示没有在飞的分发。
+  DispatchStageProgress? _dispatchProgress;
+
   /// controller.ttsStatus 的订阅（tts_started / tts_completed / tts_failed）。
   StreamSubscription<TtsStatus?>? _ttsStatusSub;
 
@@ -1238,6 +1247,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     _contextUsageSub?.cancel();
     _usageSummarySub?.cancel();
     _executionStatusSub?.cancel();
+    _dispatchProgressSub?.cancel();
     _ttsStatusSub?.cancel();
     _staleTurnIdsSub?.cancel();
     _goalUpdatesSub?.cancel();
@@ -2209,6 +2219,17 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       );
       _onExecutionStatusChanged(controller.executionStatusSnapshot);
     }
+    if (_dispatchProgressSub == null) {
+      // 首 token之前的分发进度走独立流（见 DispatchStageProgress 类文档）。
+      // 与 activities 同取向：先订阅再同步一次快照。
+      //
+      // 服务端 `SPB_DISPATCH_EVENTS` 关闭时这条流永远不会有值（连 null 都
+      // 不会推），页面拿到的 `_dispatchProgress` 恒为 null → 零行为变化。
+      _dispatchProgressSub = controller.dispatchProgress.listen(
+        _onDispatchProgressChanged,
+      );
+      _onDispatchProgressChanged(controller.dispatchProgressSnapshot);
+    }
     if (_ttsStatusSub == null) {
       // 语音播报状态走独立流（见 TtsStatus 类文档）。
       _ttsStatusSub = controller.ttsStatus.listen(_onTtsStatusChanged);
@@ -2330,6 +2351,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     if (!mounted) return;
     setState(() => _executionStatus = status);
     _bumpOpenSheets();
+  }
+
+  /// 监听 controller.dispatchProgress：驱动对话页的分发进度条。
+  void _onDispatchProgressChanged(DispatchStageProgress? progress) {
+    if (!mounted) return;
+    setState(() => _dispatchProgress = progress);
   }
 
   /// 监听 controller.ttsStatus：驱动对话页的播报状态条。
@@ -2505,6 +2532,10 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       executionStatus: controller.executionStatus,
       executionStatusSnapshot: _executionStatus,
+      // 首 token之前的分发进度（dispatch_stage）：与等待提示不同槽位（更早）。
+      // 与另一端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
+      dispatchProgress: controller.dispatchProgress,
+      dispatchProgressSnapshot: _dispatchProgress,
       // 语音播报状态（tts_*）：只做状态展示，不引入播放（AGENTS.md §11）。
       // 与桌面端同步接线（两端构造点必须一致，否则一端功能缺失而测试仍绿）。
       ttsStatus: controller.ttsStatus,

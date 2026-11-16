@@ -8,6 +8,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:uuid/uuid.dart';
 
 import 'conversation_item.dart';
+import 'dispatch_stage.dart';
 import 'visualization_recovery.dart';
 import 'event_reducer.dart';
 import 'execution_status.dart';
@@ -115,6 +116,35 @@ class ChatStreamController {
       StreamController<ExecutionStatus?>.broadcast();
   final _ttsStatusController = StreamController<TtsStatus?>.broadcast();
   final _groupUpdatesController = StreamController<GroupUpdate>.broadcast();
+
+  /// 首 token 之前的分发进度（`dispatch_stage`，Transient）。
+  ///
+  /// 与其它旁路流的差别：它**不走归约**——`dispatch_stage` 发生在建 turn、
+  /// 定 group **之前**（payload 里连 group/turn 都没有），归约的输入是「本轮
+  /// 事件序列」，把它塞进去只会得到一条无主条目。故用独立的累积器
+  /// [DispatchStageTracker] 按 `request_id` 配对 start/end。
+  final _dispatchProgressController =
+      StreamController<DispatchStageProgress?>.broadcast();
+  final _dispatchTracker = DispatchStageTracker();
+
+  /// 本端**在飞**的请求 id（= `send()` 生成的 rid）。
+  ///
+  /// ## 为什么必须有这道门
+  ///
+  /// SSE 是 user 级订阅：同一连接上会有别的设备、小程序 BFF、quick capture、
+  /// habit/schedule 续跑的分发帧。服务端已用 `dispatch.Attributable` 滤掉
+  /// 「没有 request_id」的帧，但它**无法知道**哪个 rid 是本端发的。不过这道门
+  /// 的后果就不是「少一条进度」，而是「进度条显示的是另一台设备正在做什么」。
+  ///
+  /// 用 rid 而不是 group/turn：分发帧产生时 group 还没定（见
+  /// `DispatchStageFrame` 的类文档），而 rid 是本端生成的 UUID，天然唯一。
+  final Set<String> _inFlightRequestIds = {};
+
+  /// 最近一次推给 UI 的分发进度（null = 无）。
+  ///
+  /// 与 [_dispatchProgressController] 并存是既有取向：快照给首屏/重建用，
+  /// 流给增量用（同 [activitiesSnapshot] / [activities]）。
+  DispatchStageProgress? _dispatchProgress;
 
   /// 目标变更通知流（`goal_updated`）。
   ///
@@ -403,6 +433,33 @@ class ChatStreamController {
   /// 推送单个快照或 null（null = 本群未开语音 / 尚无播报事件）。
   /// 与 [executionStatus] 同为「注入才订阅」。
   Stream<TtsStatus?> get ttsStatus => _ttsStatusController.stream;
+
+  /// 首 token 之前的分发进度流（`dispatch_stage`，**不是**归约产物）。
+  ///
+  /// ## 它回答什么
+  ///
+  /// 「点了发送，为什么还没动静」——在这条流之前，客户端唯一能说的是
+  /// 「正在准备响应」（[ExecutionStatus] / `TurnStatusStrip`），而那已经是
+  /// **服务端建完 turn 之后**的状态。真正的等待大头在更早：分类归属、
+  /// 匹配 Agent、入队。生产实测 p90 27ms、长尾 **3711ms**（其中 3147ms 在
+  /// Agent 匹配的 Jev 仲裁里）——那段时间此前对用户完全不可见。
+  ///
+  /// ## 推送形态与生命周期
+  ///
+  /// 推送单个快照或 null（null = 没有在飞的分发 / 分发已收尾）。**只对
+  /// 本端在飞的请求推送**（见 [_inFlightRequestIds]）；`root` 收尾帧到达或
+  /// [send] 返回时立刻推 null，把等待交回 [executionStatus] 那条链。
+  ///
+  /// ## 它不是权威状态
+  ///
+  /// 帧是 Transient（不落库、不回放），断线/切后台会丢；故 UI 只能把它当
+  /// 「现在大概在做什么」，不能当判据（判断 turn 是否结束仍看 [items]）。
+  /// 与 [executionStatus] 同为「注入才订阅」。
+  Stream<DispatchStageProgress?> get dispatchProgress =>
+      _dispatchProgressController.stream;
+
+  /// 首帧分发进度快照（同步初值，同 [activitiesSnapshot]）。
+  DispatchStageProgress? get dispatchProgressSnapshot => _dispatchProgress;
 
   /// group 变更通知流（逐条推送，**不累积**）。
   ///
@@ -1096,6 +1153,10 @@ class ChatStreamController {
     _setFromCache(false);
     _resetStaleWatch();
     _resetUsageSummary(groupId);
+    // 分发进度属于**上一个对话**的那次发送：新页面不该显示它。
+    // 同时在飞的 rid 一并作废（它属于旧上下文，晚到的帧不再归因到新页面）。
+    _inFlightRequestIds.clear();
+    _resetDispatchProgress();
     // 同 [start]：清屏立刻推给页面，别让上一个 group 的内容留到回填返回
     // （见 [_clearTimelineAndEmit]）。
     _clearTimelineAndEmit();
@@ -2130,6 +2191,39 @@ class ChatStreamController {
       return;
     }
 
+    // `dispatch_stage`：首 token 之前的分发进度（super_partyb#181 / issue #114）。
+    //
+    // ## 为什么必须在这里显式分流 + return（不能让它走通用路径）
+    //
+    // 1. 它**没有 turn / group**：帧在 `dispatch.Begin` 时就发出，那时 turn 还没
+    //    建、group 还没定（payload 只有 `request_id` / `name` / `phase` /
+    //    `*_ms`）。走通用路径会被 `_appendEvent` 收进 [_buffer]，而 [_buffer] 是
+    //    归约的输入——归约器对它没有 case，只会白白多出一次 O(n) 全量重算。
+    // 2. 它是 Transient（`broker.Publish(Event{Transient: true})`）：无有效
+    //    eventId、不落库、不回放。放进缓冲会让「缓冲内容 == 可回放内容」这条
+    //    不变式失真，裁剪时也会先挤掉真正的历史。
+    //
+    // ## 为什么放在 group 过滤**之前**
+    //
+    // 帧的 `group_id` 恒为空（服务端没有可填的值）。放在过滤之后虽然也能穿透
+    // （过滤条件是「非空且不等」），但那是**碰巧**成立——一旦服务端将来把
+    // group 填上，过滤就会把「别的对话的分发帧」放进来或挡掉。这里用 rid 归因，
+    // 与 group 无关，故显式放在前面并把这条依赖写下来。
+    //
+    // ## 归因只认 rid
+    //
+    // 见 [_inFlightRequestIds]：不是本端发的帧一律丢（别的设备 / 小程序 /
+    // habit 续跑的分发帧都会出现在同一条 user 级订阅上）。
+    if (event.eventType == EventTypes.dispatchStage) {
+      final rid = event.dispatchRequestId;
+      if (rid == null || rid.isEmpty) return;
+      if (!_inFlightRequestIds.contains(rid)) return;
+      if (_dispatchTracker.applyEvent(event)) {
+        _publishDispatchProgress(rid);
+      }
+      return;
+    }
+
     final gid = _groupId;
     if (gid != null && event.groupId.isNotEmpty && event.groupId != gid) {
       return;
@@ -2202,7 +2296,69 @@ class ChatStreamController {
         ? error
         : NetworkError(error.toString(), cause: error);
     SpbLog.warn('SSE 流错误', {'error': mapped.toString()});
+    // 分发帧是 Transient（不回放），断线后手里那份进度已经**不可续**：
+    // 停在「正在匹配 Agent」比不显示更糟（用户会以为卡在那一步）。
+    // 重连后若分发仍在进行，服务端会继续发后续帧，进度条自然重新出现。
+    _resetDispatchProgress();
     if (!_errorController.isClosed) _errorController.add(mapped);
+  }
+
+  /// 登记一个「本端已发出、服务端正在分发」的请求。
+  ///
+  /// 在 [send] 的入口调用、出口撤销：分发的整个生命周期都在那次 POST 的
+  /// 往返之内（`dispatch.Begin` 在 handler 里，`enqueue` 完成后才写响应），
+  /// 故这个窗口天然覆盖「已发送 → 拿到 turnId」这一段。
+  void _beginDispatchTracking(String requestId) {
+    _inFlightRequestIds.add(requestId);
+    // 同一 rid 重发（显式传 requestId 的重放/测试路径）：丢掉旧状态，
+    // 否则旧会话里未收尾的段会与新会话的帧混配成一条假进度。
+    _dispatchTracker.forget(requestId);
+  }
+
+  /// 撤销登记（请求已返回 / 已失败 / 已转 deferred）。
+  ///
+  /// ## 为什么失败也要撤销
+  ///
+  /// 请求失败（网络错误、4xx）时服务端可能已经发了几帧；若不撤销，那几帧
+  /// 留在累积器里，下一次同 rid 的帧（不可能有）或淘汰之前，进度条会一直显示
+  /// 一条早已结束的分发。故一律清掉——**没有 turn 就没有后续等待**。
+  void _endDispatchTracking(String requestId) {
+    _inFlightRequestIds.remove(requestId);
+    _dispatchTracker.forget(requestId);
+    if (_dispatchProgress?.requestId == requestId) {
+      _setDispatchProgress(null);
+    }
+  }
+
+  /// 用累积器当前快照刷新推送值。
+  ///
+  /// root 收尾（`phase=end & name=dispatch`）意味着分发结束、turn 已建：
+  /// 立刻收起进度条并把等待交回 [executionStatus]（队列/执行），而不是等
+  /// [send] 返回——root 收尾帧可能比 HTTP 响应更早到。
+  void _publishDispatchProgress(String requestId) {
+    final progress = _dispatchTracker.progressFor(requestId);
+    if (progress == null || progress.rootFinished) {
+      _dispatchTracker.forget(requestId);
+      _setDispatchProgress(null);
+      return;
+    }
+    _setDispatchProgress(progress);
+  }
+
+  void _setDispatchProgress(DispatchStageProgress? progress) {
+    _dispatchProgress = progress;
+    if (!_dispatchProgressController.isClosed) {
+      _dispatchProgressController.add(progress);
+    }
+  }
+
+  /// 丢弃全部分发进度（断线 / 切 group / 登出）。
+  ///
+  /// 只清累积器与推送值，**不动** [_inFlightRequestIds]：那个集合的生命周期
+  /// 绑定 [send] 的 finally，提前清掉会让在飞请求的后续帧被误判成「别人的」。
+  void _resetDispatchProgress() {
+    _dispatchTracker.clear();
+    if (_dispatchProgress != null) _setDispatchProgress(null);
   }
 
   /// 是否有挂起的归约（测试用，issue #44）。
@@ -2394,6 +2550,10 @@ class ChatStreamController {
       agentId: agentId,
       pending: true, // 请求在飞：UI 显示「发送中」，转正/权威帧都会落回 false
     );
+    // 从这一刻起，服务端为这个 rid 发的分发帧归本端（issue #114）。
+    // 放在 `injectLocalUserMessage` 之后、请求之前：分发帧可能比 HTTP 响应
+    // 更早到达，登记早于发请求才能不丢第一帧。
+    _beginDispatchTracking(rid);
     try {
       final result = await _api.sendMessage(
         userId,
@@ -2462,6 +2622,13 @@ class ChatStreamController {
         fields: {'request_id': rid},
       );
       rethrow;
+    } finally {
+      // 请求已返回（成功 / 失败 / 转 deferred 都算）：分发的窗口结束。
+      //
+      // 群忙 202（deferred）在这里同样生效——服务端把输入缓冲进 inbox，
+      // **没有建 turn**，也就没有后续的分发可展示（决策见 §6.105 的
+      // 「202 立刻收起进度条」）。
+      _endDispatchTracking(rid);
     }
   }
 
@@ -2744,6 +2911,7 @@ class ChatStreamController {
     await _errorController.close();
     await _stateController.close();
     await _usageSummaryController.close();
+    await _dispatchProgressController.close();
   }
 
   static Map<String, dynamic>? _decode(String data) {

@@ -284,6 +284,16 @@ Future<void> pumpPage(
   bool wireContextUsage = true,
   bool wireUsageSummary = true,
   bool wireExecutionStatus = true,
+  bool wireDispatchProgress = true,
+
+  /// 覆盖分发进度的首帧快照 / 流（默认取 controller 的）。
+  ///
+  /// 页面级用例要验「有进度 ⇒ 出条、条在状态条之上」，而 controller 的快照
+  /// 需要一次真在飞的 `send()`（rid 归因）才有值——那属于 controller 的用例
+  /// （`spb_domain` 的 `chat_stream_controller_dispatch_test.dart`）。这里直接
+  /// 注入值，只验页面的渲染与位置。
+  DispatchStageProgress? dispatchProgressSnapshotOverride,
+  Stream<DispatchStageProgress?>? dispatchProgressStreamOverride,
   bool wireTtsStatus = true,
   bool wireStaleTurnIds = true,
   Set<String> staleTurnIds = const {},
@@ -365,6 +375,15 @@ Future<void> pumpPage(
             : null,
         executionStatusSnapshot: wireExecutionStatus
             ? controller.executionStatusSnapshot
+            : null,
+        // 首 token 之前的分发进度同理（issue #114）：默认接上，「未注入」
+        // 分支由 wireDispatchProgress=false 验证。
+        dispatchProgress: wireDispatchProgress
+            ? (dispatchProgressStreamOverride ?? controller.dispatchProgress)
+            : null,
+        dispatchProgressSnapshot: wireDispatchProgress
+            ? (dispatchProgressSnapshotOverride ??
+                  controller.dispatchProgressSnapshot)
             : null,
         // 播报状态同理。
         ttsStatus: wireTtsStatus ? controller.ttsStatus : null,

@@ -464,5 +464,119 @@ void main() {
       expect(DispatchStageLabels.labelFor(null), '正在处理');
       expect(DispatchStageLabels.knownStages, isNotEmpty);
     });
+
+    test('服务端 dispatch.KnownStages() 的每个段名都有专属文案（跨仓库对拍）', () {
+      // 清单真源：`super_partyb/apps/go-api/internal/dispatch/stages.go` 的
+      // `KnownStages()`。这里是**手抄**的副本（本仓库 CI 在 GitHub Actions，
+      // 到不了 git.atjog.com），服务端新增段时它不会自动红——但一旦有人手工
+      // 补齐文案，这条用例就保证「补齐」不是补成 fallback。
+      //
+      // 落进 fallback 的后果不是崩溃：用户看到「正在处理」，而服务端明明知道
+      // 它在「正在匹配 Agent」。这正是 `router.auto_agent`（super_partyb#181
+      // 补的段）当初漏登记时的形态。
+      const serverKnownStages = {
+        'classify.prepare',
+        'classify.gate',
+        'classify.llm',
+        'feedback.judge',
+        'enqueue',
+        'reminder.prepare',
+        'router.auto_agent',
+        'router.query_encode',
+        'embedding.encode',
+      };
+
+      for (final name in serverKnownStages) {
+        expect(
+          DispatchStageLabels.labelFor(name),
+          isNot(DispatchStageLabels.fallback),
+          reason: '段名 $name 没有专属文案，会显示「正在处理」',
+        );
+      }
+      // 反向：客户端登记的名字不得多于服务端（多于说明在猜不存在的段）。
+      // 排除 root（`dispatch`）——它是信封不是段，不在 `KnownStages()` 里。
+      expect(
+        DispatchStageLabels.knownStages.toSet().difference({
+          dispatchRootStageName,
+        }),
+        serverKnownStages,
+        reason: '客户端登记了服务端不会发的段名（或漏登记）',
+      );
+    });
+  });
+
+  group('进度条门槛与文案（issue #114 阶段 2）', () {
+    DispatchStageProgress progress({
+      required DateTime startedAt,
+      String? current,
+      bool rootFinished = false,
+    }) => DispatchStageProgress(
+      requestId: 'rid_x',
+      startedAt: startedAt,
+      updatedAt: startedAt,
+      completed: const [],
+      currentStage: current,
+      rootStarted: true,
+      rootFinished: rootFinished,
+    );
+
+    test('null 不显示', () {
+      expect(
+        shouldShowDispatchProgress(null, now: DateTime.utc(2026, 1, 1)),
+        isFalse,
+      );
+    });
+
+    test('刚发出（p90 只有 27ms）不显示——否则每次发送都闪一条', () {
+      // 生产基线：root median 6ms / p90 27ms。若「有帧就出条」，99% 的发送
+      // 都会看到一条闪过 30ms 的进度条：那是噪声不是信息。
+      final t0 = DateTime.utc(2026, 1, 1);
+      expect(
+        shouldShowDispatchProgress(
+          progress(startedAt: t0, current: 'classify.llm'),
+          now: t0.add(const Duration(milliseconds: 499)),
+        ),
+        isFalse,
+      );
+    });
+
+    test('过了门槛就显示（边界取「恰好 500ms」）', () {
+      final t0 = DateTime.utc(2026, 1, 1);
+      expect(
+        shouldShowDispatchProgress(
+          progress(startedAt: t0, current: 'classify.llm'),
+          now: t0.add(
+            const Duration(milliseconds: dispatchProgressMinVisibleMs),
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('root 收尾后一律不显示（等待已交回轮次状态栏）', () {
+      // 两条同时显示会让用户以为有两次等待。
+      final t0 = DateTime.utc(2026, 1, 1);
+      expect(
+        shouldShowDispatchProgress(
+          progress(startedAt: t0, rootFinished: true),
+          now: t0.add(const Duration(seconds: 5)),
+        ),
+        isFalse,
+      );
+    });
+
+    test('只有 root start 时文案退回「正在分发」（不是空串）', () {
+      final t0 = DateTime.utc(2026, 1, 1);
+      final p = progress(startedAt: t0, current: null);
+      expect(dispatchProgressText(p), '正在分发');
+      // `hasProgress` 不含 rootStarted（webapp 已按此处理）——故文案必须自己兜住。
+      expect(p.hasProgress, isFalse);
+    });
+
+    test('有当前段时文案是段的中文名', () {
+      final t0 = DateTime.utc(2026, 1, 1);
+      final p = progress(startedAt: t0, current: 'router.auto_agent');
+      expect(dispatchProgressText(p), '正在匹配 Agent');
+    });
   });
 }
