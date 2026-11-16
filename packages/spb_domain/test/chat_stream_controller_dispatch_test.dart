@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:spb_api/spb_api.dart';
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_models/spb_models.dart';
 import 'package:test/test.dart';
@@ -511,6 +512,114 @@ void main() {
 
       hang.resolve({'turn_id': 'turn_9', 'group_id': 'grp_1'});
       await sending;
+      await c.dispose();
+    });
+  });
+
+  group('诊断日志（Transient 帧在服务端不可观测，只能靠客户端留痕）', () {
+    // `dispatch_stage` 不落库、服务端不打日志（§6.106），所以「进度条没出现」
+    // 在服务端查不到任何痕迹。这一格日志是唯一的观测手段，因此它的**级别**
+    // 与**去重**也必须钉住：级别低了（debug）在 release 里根本不落 = 等于没有；
+    // 不去重则别的设备的分发帧会把日志刷满。
+
+    test('首个可归因帧记一条 info（含 rid / 段名 / 相位）', () async {
+      SpbLog.clearRecentLogs();
+      final hang = _HangAdapter();
+      final c = _controllerWith(hang);
+      final sub = c.dispatchProgress.listen((_) {});
+
+      await c.start(groupId: 'grp_1');
+      final sending = c.send(input: '你好', groupId: 'grp_1', requestId: 'rid_x');
+      await hang.waitForRequest();
+
+      sse.push(
+        EventTypes.dispatchStage,
+        dispatchFrame(rid: 'rid_x', name: dispatchRootStageName),
+      );
+      sse.push(
+        EventTypes.dispatchStage,
+        dispatchFrame(rid: 'rid_x', name: 'classify.llm', phase: 'end'),
+      );
+      await settle();
+
+      final logs = SpbLog.recentLogs.where((r) => r.message == '分发进度：收到首个可归因帧');
+      expect(logs, hasLength(1), reason: '每 rid 只记一条，否则一次发送要记十几条');
+      expect(logs.single.level, LogLevel.info, reason: 'debug 在 release 里不落');
+      expect(logs.single.fields['request_id'], 'rid_x');
+      expect(logs.single.fields['name'], dispatchRootStageName);
+      expect(logs.single.fields['phase'], 'start');
+
+      hang.resolve({'turn_id': 'turn_9', 'group_id': 'grp_1'});
+      await sending;
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('rid 不属于本端的帧记一次 warn（同 rid 不重复）', () async {
+      SpbLog.clearRecentLogs();
+      final hang = _HangAdapter();
+      final c = _controllerWith(hang);
+      final sub = c.dispatchProgress.listen((_) {});
+
+      await c.start(groupId: 'grp_1');
+      final sending = c.send(input: '你好', groupId: 'grp_1', requestId: 'rid_x');
+      await hang.waitForRequest();
+
+      // 别的设备的分发帧：同一条 user 级订阅上**本来就会出现**，UI 必须丢；
+      // 但若本端帧也落进这一格（rid 生成时机不一致），这条 warn 就是唯一线索。
+      sse.push(
+        EventTypes.dispatchStage,
+        dispatchFrame(rid: 'rid_other_device', name: 'classify.prepare'),
+      );
+      sse.push(
+        EventTypes.dispatchStage,
+        dispatchFrame(
+          rid: 'rid_other_device',
+          name: 'classify.prepare',
+          phase: 'end',
+        ),
+      );
+      await settle();
+
+      final warns = SpbLog.recentLogs.where(
+        (r) => r.message == 'dispatch 帧的 request_id 不属于本端（已丢弃）',
+      );
+      expect(warns, hasLength(1), reason: '按 rid 去重，否则每帧一条');
+      expect(warns.single.level, LogLevel.warn);
+      expect(warns.single.fields['request_id'], 'rid_other_device');
+      expect(warns.single.fields['in_flight'], 1);
+      expect(c.dispatchProgressSnapshot, isNull, reason: '别的设备的帧不得进 UI');
+
+      hang.resolve({'turn_id': 'turn_9', 'group_id': 'grp_1'});
+      await sending;
+      await sub.cancel();
+      await c.dispose();
+    });
+
+    test('缺 request_id 的帧记一条 warn（契约破坏）', () async {
+      SpbLog.clearRecentLogs();
+      final hang = _HangAdapter();
+      final c = _controllerWith(hang);
+      final sub = c.dispatchProgress.listen((_) {});
+
+      await c.start(groupId: 'grp_1');
+      final sending = c.send(input: '你好', groupId: 'grp_1', requestId: 'rid_x');
+      await hang.waitForRequest();
+
+      final broken = dispatchFrame(rid: 'rid_x', name: 'classify.llm')
+        ..['payload'] = {'phase': 'start', 'name': 'classify.llm'};
+      sse.push(EventTypes.dispatchStage, broken);
+      await settle();
+
+      final warns = SpbLog.recentLogs.where(
+        (r) => r.message == 'dispatch 帧缺少 request_id（已丢弃）',
+      );
+      expect(warns, hasLength(1));
+      expect(warns.single.level, LogLevel.warn);
+
+      hang.resolve({'turn_id': 'turn_9', 'group_id': 'grp_1'});
+      await sending;
+      await sub.cancel();
       await c.dispose();
     });
   });

@@ -145,6 +145,19 @@ class ChatStreamController {
   /// 见 [ChatStreamController._onFrame] 里未知分支的长注释。
   final Set<String> _unknownEventTypesLogged = {};
 
+  /// 已经记过「首个可归因帧」的 rid（每 rid 一次，上限 32）。
+  final Set<String> _dispatchFrameLoggedRequestIds = {};
+
+  /// 异常帧（rid 不属于本端 / 缺 rid）已记的条数与上限。
+  ///
+  /// ## 为什么要限流
+  ///
+  /// 同一用户的其他设备 / 小程序 / habit 续跑的分发帧都会到本端连接上，正常情况
+  /// 下**本来就该有**这类帧。按帧记会把这些变成日志噪声；按 rid 记一次则既能
+  /// 回答「帧来了但没归因」，又不会淹没。
+  int _dispatchAnomalyLogCount = 0;
+  final Set<String> _dispatchAnomalyLoggedRids = {};
+
   /// 最近一次推给 UI 的分发进度（null = 无）。
   ///
   /// 与 [_dispatchProgressController] 并存是既有取向：快照给首屏/重建用，
@@ -2221,10 +2234,48 @@ class ChatStreamController {
     // habit 续跑的分发帧都会出现在同一条 user 级订阅上）。
     if (event.eventType == EventTypes.dispatchStage) {
       final rid = event.dispatchRequestId;
-      if (rid == null || rid.isEmpty) return;
-      if (!_inFlightRequestIds.contains(rid)) return;
-      if (_dispatchTracker.applyEvent(event)) {
+      if (rid == null || rid.isEmpty) {
+        // 帧的形状不对（契约破坏）：服务端 `wire.go` 的 StagePayload/RootPayload
+        // 恒带 `request_id`，缺它说明是别人拼的帧。限流记，否则「进度条不出」
+        // 与「帧没发」在日志里长得一样。
+        _logDispatchAnomaly('dispatch 帧缺少 request_id（已丢弃）', event);
+        return;
+      }
+      if (!_inFlightRequestIds.contains(rid)) {
+        // 帧到了，但不是本端发的那条：别的设备 / 小程序 BFF / habit 续跑的
+        // 分发帧都会共用同一条 user 级订阅。这种情况本应安静丢弃，但它也是
+        // 「我发了消息却没有进度条」的头号嫌疑（rid 生成时机 / 幂等键不一致
+        // 会让本端帧也落进这一格），故按 rid 限流记一次。
+        _logDispatchAnomaly('dispatch 帧的 request_id 不属于本端（已丢弃）', event);
+        return;
+      }
+      final applied = _dispatchTracker.applyEvent(event);
+      if (applied) {
+        // 首个可归因帧记 info（每 rid 一次，量级 = 每次发送 1 条）：
+        // 客户端日志默认只从 info 起，debug 在 release 里根本不落，
+        // 「帧到没到」必须能在默认级别看见。
+        if (_dispatchFrameLoggedRequestIds.length < 32 &&
+            _dispatchFrameLoggedRequestIds.add(rid)) {
+          SpbLog.info('分发进度：收到首个可归因帧', {
+            'request_id': rid,
+            'name': event.dispatchStageName,
+            'phase': event.dispatchStagePhase,
+          });
+        } else {
+          SpbLog.debug('分发帧已归约', {
+            'request_id': rid,
+            'name': event.dispatchStageName,
+            'phase': event.dispatchStagePhase,
+          });
+        }
         _publishDispatchProgress(rid);
+      } else {
+        // tracker 拒绝（phase 不在闭集 / 段名未知等）：只在 debug 里留痕。
+        SpbLog.debug('分发帧未被 tracker 接受', {
+          'request_id': rid,
+          'name': event.dispatchStageName,
+          'phase': event.dispatchStagePhase,
+        });
       }
       return;
     }
@@ -2331,6 +2382,28 @@ class ChatStreamController {
   /// 在 [send] 的入口调用、出口撤销：分发的整个生命周期都在那次 POST 的
   /// 往返之内（`dispatch.Begin` 在 handler 里，`enqueue` 完成后才写响应），
   /// 故这个窗口天然覆盖「已发送 → 拿到 turnId」这一段。
+  /// 记录一条 dispatch 帧的异常（按 rid 去重，总量上限见 [_dispatchAnomalyLogCount]）。
+  ///
+  /// ## 为什么这类日志不能省
+  ///
+  /// `dispatch_stage` 是 Transient：不落库、服务端不打日志（见 §6.106）。所以
+  /// 「进度条没出现」在服务端**查不到任何痕迹**——只能靠客户端这一格回答
+  /// 「帧到没到、到了为什么被丢」。缺了它，排查只能在两头猜。
+  void _logDispatchAnomaly(String message, ChatEvent event) {
+    if (_dispatchAnomalyLogCount >= 8) return;
+    final rid = event.dispatchRequestId ?? '';
+    // 空 rid 的异常用固定键去重（否则每次都会记一条）。
+    final key = rid.isEmpty ? '<empty>' : rid;
+    if (!_dispatchAnomalyLoggedRids.add(key)) return;
+    _dispatchAnomalyLogCount++;
+    SpbLog.warn(message, {
+      'request_id': rid,
+      'name': event.dispatchStageName,
+      'phase': event.dispatchStagePhase,
+      'in_flight': _inFlightRequestIds.length,
+    });
+  }
+
   void _beginDispatchTracking(String requestId) {
     _inFlightRequestIds.add(requestId);
     // 同一 rid 重发（显式传 requestId 的重放/测试路径）：丢掉旧状态，

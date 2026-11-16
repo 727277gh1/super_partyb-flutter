@@ -2081,6 +2081,31 @@ super_partyb#181 因此补了 `router.auto_agent` 段）。
 - **服务端开关仍关**：123 的 `.env` 没有 `SPB_DISPATCH_EVENTS`，实测零帧。这条路径
   在打开开关前只在单测里跑过（打开即生效，无需再改客户端代码）。
 
+
+#### 6.106.1 「进度条没出现」怎么查（客户端自留痕）
+
+`dispatch_stage` 是 **Transient**：不落库（`chat_events` 里永远没有）、服务端
+**不打日志**（`publish` 闭包只做 `broker.Publish`）、也不回放。所以从服务端侧
+**无法证明帧发没发**——2026-11-17 排查真实一轮（root 2669ms / `reminder.prepare`
+3816ms，远超 500ms 门槛却看不到条）时就撞在这面墙上：日志里只有
+`dispatch slow stage profile`，帧本身零痕迹。
+
+修法是在客户端留痕，三条、都限流（否则别的设备的分发帧会刷满日志）：
+
+| 位置 | 级别 | 频率 | 回答什么问题 |
+|---|---|---|---|
+| 首个可归因帧（rid ∈ 在飞集合） | **info** | 每 rid 一次（上限 32） | 「帧到客户端了吗、段名/相位对不对」 |
+| rid 不属于本端 | **warn** | 每 rid 一次（上限 8） | 「帧到了但没归因」——rid 生成时机 / 幂等键不一致会让本端帧也落进这一格 |
+| 缺 `request_id` | **warn** | 一次/空 rid | 「帧形状不对」（契约破坏） |
+
+级别必须 info/warn 而不是 debug：`SpbLog` 默认 `minLevel=info`，**release 里
+debug 根本不落**，用 debug 等于没写。字段只放 `request_id` / `name` / `phase` /
+`in_flight` —— 没有正文，可直接贴 issue（§6.20 安全红线）。
+
+判读口诀：**服务端有 `dispatch slow stage profile` 而客户端没有「收到首个可归因帧」
+→ 查客户端 build（是否包含本阶段代码）与 SSE 是否连着；有「不属于本端」→ 查 rid。**
+
+
 ### 6.107 事件目录对拍（vendored fixture）与契约漂移的两条可见出口（2026-11）
 
 **问题不是「事件没统一」，而是「漂移两侧都看不见」**：本仓的事件分流是按类型

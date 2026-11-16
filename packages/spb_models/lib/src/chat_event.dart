@@ -584,6 +584,13 @@ class ChatEvent {
   String? get dispatchStageName =>
       eventType == EventTypes.dispatchStage ? _str('name') : null;
 
+  /// 相位（`phase`）：`start` / `end`（真源 Go `dispatch.ParserPhase*`）。
+  ///
+  /// **诊断用**：日志里只有段名不够——同一段会发 start 与 end 两帧，分不清
+  /// 「只到了 start」还是「两帧都在」。UI 侧仍走 `DispatchStageTracker`。
+  String? get dispatchStagePhase =>
+      eventType == EventTypes.dispatchStage ? _str('phase') : null;
+
   /// 相对本次分发起点的开始偏移（毫秒）。
   ///
   /// 只用于**同一请求内的相对排序**（谁先谁后、并发段是否重叠），
