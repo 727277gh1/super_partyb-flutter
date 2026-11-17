@@ -123,7 +123,7 @@
 | §6.93 | dependabot 的 pub PR 永远红：`flutter_test` 的精确 pin 把 analyzer 家族钉死（2026-11） | [`build-and-release.md`](build-and-release.md) |
 | §6.94 | 轮次导航刻度条：右侧竖置「齿轮」（2026-11） | [`chat.md`](chat.md) |
 | §6.95 | Android 签名：调试密钥入库，让 CI 与各开发机签出同一签名（2026-11） | [`build-and-release.md`](build-and-release.md) |
-| §6.96 | 远端桌面（RDP）里「卡两下再跳」：桌面去全窗过渡 + 远端会话关动效 + 三项环境读数（2026-11，issue #110） | [`performance.md`](performance.md) |
+| §6.96 | 远端桌面（RDP）里「卡两下再跳」：桌面去全窗过渡 + 远端会话关动效 + 三项环境读数；**传输层（RDP 编码/带宽/RTT）未排除**，附分流判据表（2026-11，issue #110） | [`performance.md`](performance.md) |
 | §6.97 | Passkeys 是 IdP + 浏览器侧能力，客户端零改动；RP ID 改 `dever.atjog.com`（2026-11，issue #82） | [`auth.md`](auth.md) |
 | §6.98 | 微信开放平台 App 授权登录：不做，小程序短码已覆盖目标（2026-11，issue #83） | [`auth.md`](auth.md) |
 | §6.100 | 登录页收纳与「打开微信」按钮：裸 `weixin://` 只拉宿主、未装微信不渲染、桌面端不接；短码进行中其余入口收起并留退路（2026-11，issue #98） | [`auth.md`](auth.md) |
