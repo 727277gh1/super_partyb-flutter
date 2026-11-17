@@ -2856,8 +2856,15 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       final url = switch (channel) {
         ExternalPreviewChannel.htmlSession =>
           (await ref.read(ufsApiProvider).createPreviewSession(fileId)).url,
-        ExternalPreviewChannel.mediaAccess =>
-          (await ref.read(ufsApiProvider).createMediaAccess(fileId)).url,
+        ExternalPreviewChannel.mediaAccess => (await createPreviewMediaAccess(
+          ref.read(ufsApiProvider),
+          fileId: fileId,
+          mimeType: file.mimeType,
+          fileName: file.relativePath.isEmpty
+              ? file.fileName
+              : file.relativePath,
+          sizeBytes: file.sizeBytes,
+        )).url,
         ExternalPreviewChannel.legacyPreviewPage => _legacyAgentFilePreviewUrl(
           fileId,
         ),

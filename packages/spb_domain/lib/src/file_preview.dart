@@ -396,6 +396,55 @@ ExternalPreviewChannel resolveExternalPreviewChannel({
   return ExternalPreviewChannel.legacyPreviewPage;
 }
 
+/// 视频「值得要压缩版」的体积下限（16 MiB）。
+///
+/// 低于它的视频直接拉 `original`：UFS 的 `compact` 是「1568 长边 + H.264 CRF28」
+/// （见 UFS #16 / `internal/service/media_variant.go`），对几十秒的小片段收益
+/// 有限，而多一次变体判定与一次转码排队反而更慢。高于它的录屏（1080p 一分钟
+/// ≈ 30–60 MB）压缩比在 80% 上下，移动数据上差别是「能看」与「看不了」。
+///
+/// 必须与小程序 `apps/miniapp/src/pages/work-detail/media/preview.ts` 的
+/// `COMPACT_VIDEO_MIN_BYTES` 保持同值：两端判据不一致会出现「同一文件桌面端
+/// 走压缩、小程序走原片」，而现象只是「一边快一边慢」，排查时看不出原因。
+const int kCompactVideoMinBytes = 16 * 1024 * 1024;
+
+/// 预览该文件时是否优先向 UFS 要 `compact`（压缩版）媒体签名。
+///
+/// ## 只对视频生效
+///
+/// - 图片：内联预览走缩略图，点开要的是**原图**（压缩版会把图中细节压掉）；
+/// - 音频：UFS 侧**没有** compact 产物（`audio/*` 请求会 415，见 UFS #16）；
+/// - PDF / 其余：没有压缩收益。
+///
+/// ## 体积未知时返回 false
+///
+/// `agent.file.deleted` 事件不带 size（[AgentFileItem.sizeBytes] 为 null）。
+/// 「不知道多大」不构成要压缩版的理由——按原片处理，不为几 KB 的片段白跑
+/// 一次变体判定。
+bool shouldPreferCompactVideo({
+  String? mimeType,
+  required String fileName,
+  int? sizeBytes,
+}) {
+  if (sizeBytes == null || sizeBytes < kCompactVideoMinBytes) return false;
+  final mime = normalizeMimeType(mimeType);
+  if (mime.startsWith('video/')) return true;
+  // mime 缺失 / octet-stream 时按扩展名兜底（与 [resolveExternalPreviewChannel]
+  // 同策略）：workspace sync 上传可能丢 Content-Type，UFS 侧也按扩展名回退。
+  if (mime.isNotEmpty && mime != 'application/octet-stream') return false;
+  const videoExts = {
+    '.mp4',
+    '.m4v',
+    '.mov',
+    '.webm',
+    '.mkv',
+    '.avi',
+    '.mpeg',
+    '.mpg',
+  };
+  return fileExtensionsOf(fileName.toLowerCase()).any(videoExts.contains);
+}
+
 /// 文本内容层判定的结果：原文，或识别出的 spec 文档。
 ///
 /// ## 为什么不是给 [FilePreviewKind] 加一个 `spec` 值

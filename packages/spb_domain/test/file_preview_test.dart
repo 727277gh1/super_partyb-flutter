@@ -626,4 +626,89 @@ void main() {
       expect(p.truncated, isTrue);
     });
   });
+
+  group('compact 变体判据（shouldPreferCompactVideo）', () {
+    // 这些判据错了不会报错：只是「该压缩的没压缩（移动数据上多下几十 MB）」
+    // 或「不该压缩的压缩了（图片细节被压掉 / 音频白拿一次 415 再回落）」。
+    const big = kCompactVideoMinBytes;
+    const small = kCompactVideoMinBytes - 1;
+
+    test('视频且超过阈值 → 要压缩版', () {
+      expect(
+        shouldPreferCompactVideo(
+          mimeType: 'video/mp4',
+          fileName: 'recording.mp4',
+          sizeBytes: big,
+        ),
+        isTrue,
+        reason: '阈值本身算「够大」：边界取 >= 而不是 >',
+      );
+    });
+
+    test('视频但小于阈值 → 走原片（多一次变体判定反而更慢）', () {
+      expect(
+        shouldPreferCompactVideo(
+          mimeType: 'video/quicktime',
+          fileName: 'clip.mov',
+          sizeBytes: small,
+        ),
+        isFalse,
+      );
+    });
+
+    test('体积未知（删除事件）→ 走原片', () {
+      expect(
+        shouldPreferCompactVideo(
+          mimeType: 'video/mp4',
+          fileName: 'gone.mp4',
+          sizeBytes: null,
+        ),
+        isFalse,
+      );
+    });
+
+    test('音频再大也不压缩（UFS 没有 audio 的 compact 产物）', () {
+      expect(
+        shouldPreferCompactVideo(
+          mimeType: 'audio/mpeg',
+          fileName: 'long.mp3',
+          sizeBytes: 200 * 1024 * 1024,
+        ),
+        isFalse,
+      );
+    });
+
+    test('图片再大也不压缩（点开要的是原图）', () {
+      expect(
+        shouldPreferCompactVideo(
+          mimeType: 'image/png',
+          fileName: 'huge.png',
+          sizeBytes: 200 * 1024 * 1024,
+        ),
+        isFalse,
+      );
+    });
+
+    test('mime 缺失/octet-stream 时按扩展名兜底判定视频', () {
+      for (final mime in [null, '', 'application/octet-stream']) {
+        expect(
+          shouldPreferCompactVideo(
+            mimeType: mime,
+            fileName: 'workspace/clip.MKV',
+            sizeBytes: big,
+          ),
+          isTrue,
+          reason: 'workspace sync 上传可能丢 Content-Type（mime=$mime）',
+        );
+      }
+      expect(
+        shouldPreferCompactVideo(
+          mimeType: 'application/octet-stream',
+          fileName: 'notes.pdf',
+          sizeBytes: big,
+        ),
+        isFalse,
+      );
+    });
+  });
 }
