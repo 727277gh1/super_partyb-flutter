@@ -2357,6 +2357,30 @@ spec、`DataTable` 全在小窗里内滚）与 modal 遮罩（把聊天压暗，
 - 未注入能力时不 push（`hasAny` 假 → 找不到 `agent-file-preview-page`）：改成
   「先 push 再判空」会让「点了没反应」的框重新出现。
 
+#### 后续（2026-11）：图片两段式 + 预览域可达性预检
+
+页面本身只是容器，两处体验问题在容器之外：
+
+- **图片先出形、后出清晰**：`AgentFilePreviewCallbacks.loadThumbnail` 与原图**并行**
+  发起（`GET /api/files/{id}/thumbnails/256`），小图回来就把形状铺上、底部一条
+  `LinearProgressIndicator` 表示原图还在路上，原图到位后**整块替换**。小图失败
+  （未注入、非图片、服务端没开缩略图、请求出错）一律静默退化为原来的转圈——
+  占位是增强，不能让「本该能看原图」的文件变成一条报错。它也**不计入** `hasAny`：
+  只配了小图不能让预览入口出现（那样点开必然空白）。
+- **开页前探一次预览域**：ticket / 媒体签名 URL 的 host 是服务端下发的部署知识
+  （`UFS_PREVIEW_PUBLIC_BASE_URL` / `UFS_MEDIA_PUBLIC_BASE_URL`），客户端没有备用
+  域名，也没有「换一个」的余地。不探测的话，域名不可达时用户只会在浏览器里看到
+  一张死页面，而 `openInBrowser` 仍返回 true、客户端一无所知。故 `_agentFilePreviewUrl`
+  对 `htmlSession` / `mediaAccess` 两条通道用 `spb_core` 的 `probeUrl`
+  （与端点选择同一个 TCP 判据、同一个 1.5s 超时）探一次；不通就回落旧预览页
+  （它挂在已被启动探测选中的 `ufsBaseUrl` 上）。`legacyPreviewPage` 不探——它本来
+  就在那个 host 上。探测函数自身抛错**放行**（增强不是门禁）。
+
+反向验证：`packages/spb_core/test/probe_url_test.dart`（端口默认值 / false 透传 /
+非 http(s) 放行 / 抛错放行）；`agent_file_preview_test.dart` 的「图片两段式」两条
+（把占位当最终图 → 「原图没到不能把占位当最终图」红；小图失败不静默 → 「small
+取不到仍出原图」红）。
+
 #### 未验证
 
 - 真机观感（本机无 `DISPLAY`）：移动端 AppBar 返回箭头与系统返回手势（edge swipe）

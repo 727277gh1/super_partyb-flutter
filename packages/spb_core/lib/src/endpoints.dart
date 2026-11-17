@@ -103,6 +103,42 @@ Future<bool> defaultEndpointProbe(
   }
 }
 
+/// 探测一个**完整 URL** 是否可达（只建 TCP 连接，不发应用层数据）。
+///
+/// ## 为什么需要这层包装
+///
+/// 服务端下发的绝对 URL（UFS 预览域的 ticket、媒体签名链接）里带着**部署
+/// 知识**：客户端不拼 host，也就无从知道它在当前网络下是否可达。而这些 URL
+/// 是交给系统浏览器/外部播放器打开的——打不开时客户端**拿不到任何信号**，
+/// 用户只看到一张死页面。开页前探一次，就能把「死页面」换成一次有意义的回落。
+///
+/// 判据与 [resolveEndpoints] 一致（[defaultEndpointProbe] 的 TCP 连接），故同样
+/// 只回答「能不能连上」，不判断证书、路由或内容。
+///
+/// ## 判不了的情形一律返回 true（放行）
+///
+/// - 非 `http`/`https`（`mailto:`、`partyb://` 等）：不是网络端点；
+/// - 没有 host（`file:///…`）：无从探测，宁可放行；
+/// - 探测函数自身抛错：探测是**增强**，不是门禁——与「未配置别名表即透传」
+///   同一取向（见 [resolveEndpoints]）。
+Future<bool> probeUrl(
+  Uri url, {
+  EndpointProbe probe = defaultEndpointProbe,
+  Duration timeout = defaultProbeTimeout,
+}) async {
+  if (url.scheme != 'http' && url.scheme != 'https') return true;
+  final host = url.host;
+  if (host.isEmpty) return true;
+  // `Uri.port` 对 http/https 已经填了默认端口（443/80），未知 scheme 才是 0；
+  // 上面已把非 http(s) 排除，故这里不必再兜底。
+  final port = url.port;
+  try {
+    return await probe(host, port, timeout);
+  } on Object {
+    return true;
+  }
+}
+
 /// 解析别名表原始字符串为 `compiledHost → preferredHost` 映射。
 ///
 /// 支持两种语法（与小程序 `TARO_APP_HOST_FALLBACKS` 同构，便于运维两处共用

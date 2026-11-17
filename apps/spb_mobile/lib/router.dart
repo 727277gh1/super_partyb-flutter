@@ -2601,6 +2601,9 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 小、下载后更不方便找）。
       onPreviewAgentFile: AgentFilePreviewCallbacks(
         loadBytes: _loadAgentFileBytes,
+        // 图片先出 256px 缩略图占位、原图到位后替换（两段式）。
+        // 复用卡片内联那条缩略图链路，不额外发明尺寸。
+        loadThumbnail: (file) => _loadAgentFileThumbnail(file),
         openExternal: _openAgentFileExternal,
         // map spec 的地点行：跳高德。移动端本就是「跳出去打开」的语义，
         // 故这里与 `openExternal` 用同一个 `url_launcher` 入口。
@@ -2847,15 +2850,30 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       fileName: file.relativePath.isEmpty ? file.fileName : file.relativePath,
     );
     try {
-      switch (channel) {
-        case ExternalPreviewChannel.htmlSession:
-          return (await ref.read(ufsApiProvider).createPreviewSession(fileId))
-              .url;
-        case ExternalPreviewChannel.mediaAccess:
-          return (await ref.read(ufsApiProvider).createMediaAccess(fileId)).url;
-        case ExternalPreviewChannel.legacyPreviewPage:
-          return _legacyAgentFilePreviewUrl(fileId);
+      final url = switch (channel) {
+        ExternalPreviewChannel.htmlSession =>
+          (await ref.read(ufsApiProvider).createPreviewSession(fileId)).url,
+        ExternalPreviewChannel.mediaAccess =>
+          (await ref.read(ufsApiProvider).createMediaAccess(fileId)).url,
+        ExternalPreviewChannel.legacyPreviewPage => _legacyAgentFilePreviewUrl(
+          fileId,
+        ),
+      };
+      // 服务端下发的 host 是**部署知识**（`UFS_PREVIEW_PUBLIC_BASE_URL` /
+      // `UFS_MEDIA_PUBLIC_BASE_URL`），客户端不拼也不掌握备用域名。开页前探
+      // 一次 TCP：不通就回落旧预览页（它挂在已被启动探测选中的 `ufsBaseUrl`
+      // 上）。不探的话，用户只会在浏览器里看到一张死页面，而客户端拿到的
+      // `openInBrowser` 返回值仍是 true。
+      if (channel != ExternalPreviewChannel.legacyPreviewPage &&
+          !await probeUrl(Uri.parse(url))) {
+        SpbLog.info('预览域不可达，回落到旧预览页', {
+          'file_id': fileId,
+          'channel': channel.name,
+          'host': Uri.parse(url).host,
+        });
+        return _legacyAgentFilePreviewUrl(fileId);
       }
+      return url;
     } on Object catch (e) {
       SpbLog.info('预览通道不可用，回落到旧预览页', {
         'file_id': fileId,

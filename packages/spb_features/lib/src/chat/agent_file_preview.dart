@@ -73,12 +73,28 @@ typedef OpenMapMarker = Future<bool> Function(MapMarker marker);
 class AgentFilePreviewCallbacks {
   const AgentFilePreviewCallbacks({
     this.loadBytes,
+    this.loadThumbnail,
     this.openExternal,
     this.openMapMarker,
   });
 
   /// 取原始字节（text 解码 / image 渲染共用）。
   final LoadAgentFileBytes? loadBytes;
+
+  /// 取**小图**（256px 缩略图），只给图片分支做「先出形、后出清晰」的占位。
+  ///
+  /// ## 为什么是可选的
+  ///
+  /// 缩略图是**增强**：取不到（非图片、服务端未开缩略图、网络抖动）时页面
+  /// 退回「转圈直到原图到位」的旧行为，不报错、不影响 [loadBytes] 的结果。
+  /// 故它不计入 [hasAny]——只配了它不能让预览入口出现（那样点开必然空白）。
+  ///
+  /// ## 为什么不复用 `loadBytes`
+  ///
+  /// 原图可能几十 MB，用户点开的头一两秒**什么都看不到**；而 UFS 的
+  /// `thumbnails/{size}` 是服务端同步补生成的小图（`internal/service/thumbnail.go`），
+  /// 通常几百毫秒内就回来。两者是两次独立请求，不能合并。
+  final LoadAgentFileBytes? loadThumbnail;
 
   /// 打开 UFS 预览页（external 类）。
   final OpenAgentFileExternal? openExternal;
@@ -167,6 +183,12 @@ class _AgentFilePreviewPageState extends State<_AgentFilePreviewPage> {
   /// text / image 的取数结果；external 恒为 null（不需要取数）。
   Future<_PreviewPayload>? _loading;
 
+  /// 图片的**占位小图**（256px 缩略图，已解码前的原始字节）。null = 还没有。
+  ///
+  /// 与 [_loading] 并行发起：小图先回来就先把形状铺上，原图到位后由
+  /// [_imageBody] 整块替换（两段式，见 [_imagePlaceholder]）。
+  Uint8List? _thumbBytes;
+
   /// external 跳转进行中（防重复点）。
   bool _openingExternal = false;
 
@@ -189,6 +211,22 @@ class _AgentFilePreviewPageState extends State<_AgentFilePreviewPage> {
   void _startLoading() {
     final kind = _kind;
     if (kind == FilePreviewKind.external) return;
+
+    // 图片：小图与原图**并行**发起（串行只会把总耗时变成两者之和）。
+    // 取不到就退化为「转圈到原图到位」，见 [_imagePlaceholder]。
+    final thumbLoader = widget.onPreview.loadThumbnail;
+    if (kind == FilePreviewKind.image && thumbLoader != null) {
+      // 不 await：小图只是占位，绝不能让它的成败拖住或影响原图这条主链。
+      thumbLoader(f).then(
+        (bytes) {
+          if (!mounted || bytes == null || bytes.isEmpty) return;
+          setState(() => _thumbBytes = Uint8List.fromList(bytes));
+        },
+        onError: (Object e) {
+          SpbLog.debug('预览占位小图取不到', {'file': f.fileName, 'error': '$e'});
+        },
+      );
+    }
 
     final loader = widget.onPreview.loadBytes;
     if (loader == null) {
@@ -351,6 +389,10 @@ class _AgentFilePreviewPageState extends State<_AgentFilePreviewPage> {
       future: _loading,
       builder: (context, snap) {
         if (snap.connectionState != ConnectionState.done) {
+          // 图片有占位小图就先把形状铺上（用户点开的头一两秒不再是空白转圈），
+          // 原图到位后由下面的 `_ImagePayload` 分支整块替换。
+          final placeholder = _imagePlaceholder();
+          if (placeholder != null) return placeholder;
           return const Padding(
             padding: EdgeInsets.all(SpbSpacing.xxxl),
             child: Center(child: CircularProgressIndicator()),
@@ -519,6 +561,50 @@ class _AgentFilePreviewPageState extends State<_AgentFilePreviewPage> {
                 color: scheme.onTertiaryContainer,
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 图片占位：先渲染 256px 缩略图，底部一条进度条表示「原图还在路上」。
+  ///
+  /// ## 为什么值得多一条请求
+  ///
+  /// 原图动辄几十 MB（手机截图、录屏帧），点击后的头一两秒是纯空白转圈；
+  /// 缩略图由服务端同步补生成、通常几百毫秒内回来，用户立刻能看到「打开
+  /// 的是哪张图」，也让慢网络下的等待有参照物。
+  ///
+  /// ## 为什么失败一律静默
+  ///
+  /// 小图是**增强**：没注入能力、非图片、服务端未开缩略图、请求失败——都返回
+  /// null 让调用方退回转圈。把占位失败做成错误提示只会让「本该能看原图」的
+  /// 文件变成一条报错。
+  ///
+  /// 缩略图**不**设 `cacheWidth`：它本身就是 256px（服务端白名单 64/128/256/512），
+  /// 再限宽没有收益，还会在窄屏上糊掉。
+  Widget? _imagePlaceholder() {
+    final bytes = _thumbBytes;
+    if (bytes == null) return null;
+    return Padding(
+      padding: const EdgeInsets.all(SpbSpacing.lg),
+      child: Column(
+        children: [
+          Expanded(
+            child: Center(
+              child: Image.memory(
+                bytes,
+                key: const ValueKey('agent-file-preview-image-thumb'),
+                fit: BoxFit.contain,
+                gaplessPlayback: true,
+                // 小图解码失败就当作没有占位（别让一条坏缩略图顶掉原图）。
+                errorBuilder: (c, o, s) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+          const SizedBox(height: SpbSpacing.sm),
+          const LinearProgressIndicator(
+            key: ValueKey('agent-file-preview-image-loading'),
           ),
         ],
       ),

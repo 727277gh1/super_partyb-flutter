@@ -136,4 +136,4 @@
 | §6.107 | 事件目录 vendored 对拍（类别/时间线/控制类）；契约漂移的出口 = 一行「未知事件」+ 每类型一次 warn（2026-11，issue #116 / #117 / #118 / super_partyb#183） | [`chat.md`](chat.md) |
 | §6.108 | 交付物预览：`external` 按小程序 `preview_mode` 分三通道（HTML/SVG→一次性 ticket、图片/音视频/PDF→媒体签名 URL、Office/未知→旧预览页），415/403/5xx 回落；客户端只渲 text/image（2026-11） | [`chat.md`](chat.md) |
 | §6.109 | 通知验证压成三步：Linux 用进程内假 daemon 跑**真**插件（无 GUI 可测），Windows/macOS 靠 App 内「通知自检」；四步失败点分别记录（2026-11，issue #90） | [`runtime-and-ops.md`](runtime-and-ops.md) |
-| §6.110 | 交付物预览改用独立页面（root Navigator 压一层 MaterialPageRoute）：系统返回/AppBar 返回/✕ 三个出口同源，都只弹这一层、对话不出栈；正文限宽 980（2026-11） | [`chat.md`](chat.md) |
+| §6.110 | 交付物预览改用独立页面（root Navigator 压一层 MaterialPageRoute）：系统返回/AppBar 返回/✕ 三个出口同源，都只弹这一层、对话不出栈；正文限宽 980。图片两段式（先 256 缩略图占位、原图到位替换）与开页前预览域 TCP 预检（不通回落旧预览页）（2026-11） | [`chat.md`](chat.md) |

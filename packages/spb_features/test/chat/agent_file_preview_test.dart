@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -72,6 +73,36 @@ Future<void> _pumpPreview(
   );
   await t.tap(find.text('open'));
   await t.pumpAndSettle();
+}
+
+/// 挂宿主并点开预览，**不 settle**：用于「原图还没回来」的中间态。
+///
+/// `pumpAndSettle` 在这里会超时——两段式的中间态带 `LinearProgressIndicator`，
+/// 它永远在动，settle 永远等不到静止帧。故只推固定几帧（含 300ms 转场）。
+Future<void> _pumpPreviewNoSettle(
+  WidgetTester t, {
+  required AgentFileItem file,
+  required AgentFilePreviewCallbacks onPreview,
+}) async {
+  await t.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => ElevatedButton(
+            onPressed: () => showAgentFilePreview(
+              context: context,
+              file: file,
+              onPreview: onPreview,
+            ),
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    ),
+  );
+  await t.tap(find.text('open'));
+  await t.pump();
+  await t.pump(const Duration(milliseconds: 400));
 }
 
 void main() {
@@ -157,6 +188,107 @@ void main() {
         findsNothing,
       );
       expect(find.text('open'), findsOneWidget);
+    });
+  });
+
+  group('图片两段式：先小图占位，原图到位后替换（2026-11）', () {
+    // 大图点击后的头一两秒本来是纯空白转圈。缩略图（256px，服务端同步补生成）
+    // 先把形状铺上，让用户确认「打开的是哪张图」。这组防两种退化：「顺序反了，
+    // 原图先出/占位顶替原图」与「小图失败连累原图」。
+    //
+    // ⚠️ Completer **必须**在 testWidgets 体内创建：在 group 体外创建的话它属于
+    // 真实 zone，`complete()` 的续体要等测试结束才跑，pump 多少帧都看不到。
+    AgentFileItem imageFile() => _file(
+      mimeType: 'image/png',
+      fileName: 'shot.png',
+      displayName: 'shot.png',
+      relativePath: 'out/shot.png',
+    );
+
+    testWidgets('小图先回：铺占位 + 进度条，原图仍在路上', (t) async {
+      final full = Completer<List<int>?>();
+      final thumb = Completer<List<int>?>();
+      await _pumpPreviewNoSettle(
+        t,
+        file: imageFile(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) => full.future,
+          loadThumbnail: (_) => thumb.future,
+        ),
+      );
+
+      // 小图还没回 → 仍是转圈。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image-thumb')),
+        findsNothing,
+      );
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      thumb.complete(_pngBytes);
+      await t.pump(const Duration(milliseconds: 1));
+      await t.pump(const Duration(milliseconds: 1));
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image-thumb')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image-loading')),
+        findsOneWidget,
+      );
+      // 原图没到，不能把占位当成最终图。
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image')),
+        findsNothing,
+      );
+
+      full.complete(_pngBytes);
+      await t.pump(const Duration(milliseconds: 1));
+      await t.pump(const Duration(milliseconds: 1));
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image-thumb')),
+        findsNothing,
+        reason: '原图到位后占位必须整块替换，不能两张图叠着',
+      );
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image-loading')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('小图取不到：不报错，原图照常出（占位是增强不是依赖）', (t) async {
+      final full = Completer<List<int>?>();
+      final thumb = Completer<List<int>?>();
+      await _pumpPreviewNoSettle(
+        t,
+        file: imageFile(),
+        onPreview: AgentFilePreviewCallbacks(
+          loadBytes: (_) => full.future,
+          loadThumbnail: (_) => thumb.future,
+        ),
+      );
+
+      thumb.complete(null);
+      await t.pump(const Duration(milliseconds: 1));
+      await t.pump(const Duration(milliseconds: 1));
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image-thumb')),
+        findsNothing,
+      );
+
+      full.complete(_pngBytes);
+      await t.pump(const Duration(milliseconds: 1));
+      await t.pump(const Duration(milliseconds: 1));
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-image')),
+        findsOneWidget,
+      );
+      expect(t.takeException(), isNull);
     });
   });
 
