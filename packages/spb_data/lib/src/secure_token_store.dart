@@ -45,8 +45,11 @@ import 'package:spb_core/spb_core.dart';
 /// 读失败按「未登录」处理后**不写缓存**（null 缓存与未缓存同形，直接不缓存
 /// 更简单——下次 read 再试一次真实存储，平台故障可能是瞬时的）。
 class SecureTokenStore implements TokenStore {
-  SecureTokenStore({FlutterSecureStorage? storage})
+  SecureTokenStore({FlutterSecureStorage? storage, this.cacheEnabled = true})
     : _storage = storage ?? const FlutterSecureStorage();
+
+  /// 多个 Flutter engine 共用凭证时必须重读安全存储。
+  final bool cacheEnabled;
 
   final FlutterSecureStorage _storage;
 
@@ -60,7 +63,7 @@ class SecureTokenStore implements TokenStore {
 
   @override
   Future<StoredTokens?> read() async {
-    if (_cachePopulated) return _cache;
+    if (cacheEnabled && _cachePopulated) return _cache;
     String? raw;
     try {
       raw = await _storage.read(key: storageKey);

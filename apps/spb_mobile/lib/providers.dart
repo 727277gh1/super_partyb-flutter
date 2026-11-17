@@ -20,6 +20,7 @@ import 'package:spb_models/spb_models.dart';
 import 'package:spb_platform/spb_platform.dart';
 
 import 'auth_deeplink.dart';
+import 'background_notifications.dart';
 import 'biometric_gate.dart';
 import 'qr_scanner.dart';
 import 'wechat_open_sdk.dart';
@@ -80,10 +81,73 @@ final windowFocusedProvider = NotifierProvider<WindowFocusedNotifier, bool>(
 
 /// 确认卡到达时发 OS 通知（issue #21）。见桌面端同名 provider 的文档。
 final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
+  final inbox = ref.watch(confirmationNotificationInboxProvider);
   return ConfirmationNotifier(
     sink: ref.watch(notificationSinkProvider),
     isWindowFocused: () => ref.read(windowFocusedProvider),
+    handlePersistedItems: inbox == null
+        ? null
+        : (items, focused) async {
+            final state = ref.read(notificationStateStoreProvider);
+            return state.exclusive(() async {
+              if (await ref.read(tokenStoreProvider).read() == null) return [];
+              return inbox.handleItems(items, focused: focused);
+            });
+          },
   );
+});
+
+final notificationStateStoreProvider = Provider<NotificationStateStore>((ref) {
+  final store = openNotificationState();
+  ref.onDispose(store.close);
+  return store;
+});
+
+final confirmationNotificationInboxProvider =
+    Provider<ConfirmationNotificationInbox?>((ref) {
+      final sink = ref.watch(notificationSinkProvider);
+      if (!supportsBackgroundNotifications || sink is! LocalNotificationSink) {
+        return null;
+      }
+      return ConfirmationNotificationInbox(
+        store: ref.watch(notificationStateStoreProvider),
+        show: sink.showChecked,
+        cancel: sink.cancel,
+        canNotify: sink.hasPermission,
+      );
+    });
+
+/// 「上一次后台检查成功」的时刻（设置页展示用）。
+///
+/// 返回 null = 该端根本没有后台排程（桌面端 / iOS），设置页据此不展示那一行。
+final lastBackgroundCheckProvider = Provider<Future<DateTime?> Function()?>((
+  ref,
+) {
+  if (!supportsBackgroundNotifications) return null;
+  return ref.watch(notificationStateStoreProvider).lastCheckAt;
+});
+
+final notificationPollingSchedulerProvider =
+    Provider<NotificationPollingScheduler>(
+      (ref) => const NoopNotificationPollingScheduler(),
+    );
+
+/// 启动、登录和回前台时协调；keep 策略不会因重复调用推迟既有周期。
+final reconcileNotificationPollingProvider = Provider<Future<void> Function()>((
+  ref,
+) {
+  return () async {
+    final scheduler = ref.read(notificationPollingSchedulerProvider);
+    if (!scheduler.supported) return;
+    final tokens = await ref.read(tokenStoreProvider).read();
+    final sink = ref.read(notificationSinkProvider);
+    await scheduler.reconcile(
+      enabled:
+          tokens != null &&
+          sink is LocalNotificationSink &&
+          await sink.hasPermission(),
+    );
+  };
 });
 
 /// 生产装配的 Provider override 清单——**唯一**来源。
@@ -97,6 +161,9 @@ List<Override> buildProductionOverrides() {
     // 生物识别门禁（issue #94）。漏了这一行 = 设置页的开关打开后永远
     // 「设备不可用」，门禁静默失效（默认实现是 `UnsupportedBiometricGate`）。
     biometricGateProvider.overrideWithValue(LocalAuthBiometricGate()),
+    notificationPollingSchedulerProvider.overrideWithValue(
+      WorkmanagerNotificationScheduler(),
+    ),
   ];
 }
 
@@ -145,6 +212,12 @@ final sessionTokenProvider = Provider<Future<String?> Function()>((ref) {
 /// 非 autoDispose 且必须单例：它持有内存缓存（issue #68），写路径与读路径
 /// 必须命中同一实例，否则 `write` 暖的缓存对另一实例不可见（读到旧值）。
 final tokenStoreProvider = Provider<TokenStore>((ref) {
+  if (supportsBackgroundNotifications) {
+    return createNotificationTokenStore(
+      ref.watch(notificationStateStoreProvider),
+      LocalNotificationSink(),
+    );
+  }
   return SecureTokenStore();
 });
 
@@ -172,7 +245,15 @@ final oidcConfigProvider = Provider<OidcConfig>((ref) {
 
 /// OIDC 客户端（刷新凭证用）。
 final oidcClientProvider = Provider<OidcClient>((ref) {
-  return OidcClient(config: ref.watch(oidcConfigProvider));
+  final dio = Dio(
+    BaseOptions(
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 30),
+      sendTimeout: const Duration(seconds: 15),
+    ),
+  );
+  ref.onDispose(() => dio.close(force: true));
+  return OidcClient(config: ref.watch(oidcConfigProvider), dio: dio);
 });
 
 /// 会话管理器：负责「拿到可用 token」与「过期前刷新（并发去重）」。
@@ -1470,12 +1551,32 @@ final pendingConfirmationsProvider =
       )) {
         return const [];
       }
-      return ref
+      final inbox = ref.read(confirmationNotificationInboxProvider);
+      final state = inbox == null
+          ? null
+          : ref.read(notificationStateStoreProvider);
+      final generation = await state?.exclusive(state.generation);
+      if (!ref.mounted) return const [];
+      final cards = await ref
           .watch(chatApiProvider)
           .listConfirmationsTyped(
             status: 'pending',
             limit: ChatApi.kConfirmationsRequestLimit,
           );
+      if (inbox != null && state != null && ref.mounted) {
+        final userId = await ref.read(currentUserIdProvider.future);
+        await state.exclusive(() async {
+          if (!ref.mounted || generation != await state.generation()) return;
+          if (!ref.mounted) return;
+          await inbox.reconcile(
+            cards,
+            userId: userId,
+            focused: ref.read(windowFocusedProvider),
+            complete: cards.length < ChatApi.kConfirmationsRequestLimit,
+          );
+        });
+      }
+      return cards;
     });
 
 // ==================== 对话流 ====================

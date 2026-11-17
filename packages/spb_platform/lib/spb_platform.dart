@@ -67,6 +67,7 @@ library;
 ///                               —— 远端桌面（RDP）会话探测：诊断读数 +
 ///                                  远端会话下关闭动效的依据（issue #110，§6.96）
 export 'src/biometric_gate.dart';
+export 'src/background_notifications.dart';
 export 'src/desktop_capabilities.dart';
 export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';

@@ -91,6 +91,16 @@ void main() {
   });
 
   group('SecureTokenStore token round-trip', () {
+    test('多 engine 模式每次重读，能看到另一实例刷新和登出', () async {
+      final first = SecureTokenStore(cacheEnabled: false);
+      final second = SecureTokenStore(cacheEnabled: false);
+      await first.write(const StoredTokens(accessToken: 'old'));
+      expect((await second.read())!.accessToken, 'old');
+      await first.write(const StoredTokens(accessToken: 'new'));
+      expect((await second.read())!.accessToken, 'new');
+      await first.clear();
+      expect(await second.read(), isNull);
+    });
     test('未写入时读取返回 null（不是抛异常）', () async {
       expect(await store.read(), isNull);
     });

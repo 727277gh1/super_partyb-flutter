@@ -30,6 +30,7 @@ class LocalNotification {
     required this.title,
     required this.body,
     this.payload,
+    this.expiresAt,
   });
 
   /// 通知 id。
@@ -46,6 +47,9 @@ class LocalNotification {
 
   /// 点击通知时带回来的负载（路由路径）。
   final String? payload;
+
+  /// Android 可按剩余有效期自动移除通知，避免等待下一轮后台拉取。
+  final DateTime? expiresAt;
 
   @override
   String toString() => 'LocalNotification($id, $title)';

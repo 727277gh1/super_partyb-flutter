@@ -136,6 +136,9 @@ TARGETS = [
             # 实现，桌面端也没有「扫另一台设备的码」的场景（它自己的登录走
             # 浏览器 loopback）。移动端接上后设置页出现「扫一扫登录其他设备」，
             # 桌面端传 null → 不展示入口。
+            # 后台检查（§6.110）：`WorkManager` 只在 Android 装配（桌面端有常驻
+            # 进程，SSE 活着就能弹通知，排一个定时任务只会重复打扰）。移动端
+            # 注入真实读取，桌面端传 null → 不展示那一行。
             'mobile': {
                 'loadNotifications',
                 'saveNotifications',
@@ -143,6 +146,7 @@ TARGETS = [
                 'saveBiometricLock',
                 'onScanQr',
                 'onQrScanned',
+                'loadLastBackgroundCheck',
             },
         },
     },

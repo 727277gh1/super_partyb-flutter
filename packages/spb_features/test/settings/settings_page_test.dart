@@ -34,6 +34,7 @@ void main() {
   _accountSecurityTests();
   _scanQrLoginTests();
   _notificationSelfTestTests();
+  _backgroundCheckTests();
 
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
@@ -2312,6 +2313,87 @@ void _notificationSelfTestTests() {
       await tester.pumpAndSettle();
 
       expect(find.text('通知自检失败，请重试'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+}
+
+/// 「后台检查」行（§6.110）。
+///
+/// ## 这个测试防的是什么
+///
+/// `WorkManager` 是尽力而为的：没收到通知时，「压根没跑」与「跑了但没有卡」
+/// 处置完全不同。所以这一行必须区分三种状态：
+/// - 从未成功（还没跑 / 未登录 / 没授权）——不能写成「正常」；
+/// - 读过一次但读失败（存储故障）——不能与「从未跑过」混为一谈；
+/// - 有真实时刻——展示它，不写「保证送达」。
+void _backgroundCheckTests() {
+  Future<void> pumpRow(
+    WidgetTester tester, {
+    required Future<DateTime?> Function()? load,
+  }) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          desktopInfo: DesktopIntegrationInfo.hidden,
+          loadLastBackgroundCheck: load,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  group('设置页：后台检查读数', () {
+    testWidgets('未注入时不展示（桌面端 / iOS 没有后台排程）', (tester) async {
+      await pumpRow(tester, load: null);
+
+      expect(
+        find.byKey(const ValueKey('settings-background-check')),
+        findsNothing,
+      );
+      expect(find.text('后台检查'), findsNothing);
+    });
+
+    testWidgets('从未成功过时明说「尚未成功执行过」', (tester) async {
+      await pumpRow(tester, load: () async => null);
+
+      expect(
+        find.byKey(const ValueKey('settings-background-check')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('尚未成功执行过'), findsOneWidget);
+    });
+
+    testWidgets('有时刻时展示它（今天的用「今天 HH:mm」）', (tester) async {
+      final at = DateTime.now();
+      await pumpRow(tester, load: () async => at);
+
+      final local = at.toLocal();
+      final hh = local.hour.toString().padLeft(2, '0');
+      final mm = local.minute.toString().padLeft(2, '0');
+      expect(find.textContaining('上次成功：今天 $hh:$mm'), findsOneWidget);
+      // 只陈述事实：不给「一定送达」的承诺。
+      expect(find.textContaining('保证'), findsNothing);
+    });
+
+    testWidgets('读取失败与「从未跑过」区分开', (tester) async {
+      await pumpRow(tester, load: () async => throw StateError('db locked'));
+
+      expect(find.textContaining('读取失败'), findsOneWidget);
+      expect(find.textContaining('尚未成功执行过'), findsNothing);
       expect(tester.takeException(), isNull);
     });
   });

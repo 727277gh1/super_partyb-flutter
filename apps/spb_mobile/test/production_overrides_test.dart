@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_mobile/background_notifications.dart';
 import 'package:spb_mobile/providers.dart';
 import 'package:spb_platform/spb_platform.dart';
 
@@ -75,6 +76,23 @@ void main() {
         isNull,
         reason: 'Noop sink 下必须隐藏入口，而不是让用户点一个永远失败的自检',
       );
+    });
+
+    // 后台检查的排程器（§6.111）：装配层必须注入真实现，但**是否支持**由
+    // 平台决定（只有 Android）。测试跑在 Linux 上，所以这里断言的是
+    // 「装的是 WorkManager 实现」+「非 Android 不声称支持」——两条一起守，
+    // 漏挂 override 时第一条会红，把平台门禁写成恒 true 时第二条会红。
+    test('后台检查排程器：生产装配真实现，非 Android 不声称支持', () {
+      final container = buildProductionContainer();
+      final scheduler = container.read(notificationPollingSchedulerProvider);
+      expect(scheduler, isA<WorkmanagerNotificationScheduler>());
+      expect(
+        scheduler.supported,
+        isFalse,
+        reason: '只有 Android 有可靠的后台排程；其他平台不得注册定时任务',
+      );
+      // 没有排程就没有「上次成功」可读 → 设置页不展示那一行。
+      expect(container.read(lastBackgroundCheckProvider), isNull);
     });
   });
 

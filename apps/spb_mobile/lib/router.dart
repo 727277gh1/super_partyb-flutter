@@ -929,6 +929,9 @@ class _SettingsTab extends ConsumerWidget {
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 通知自检（issue #90）：与桌面端同名同构（provider 给 null 时不展示）。
       onRunNotificationSelfTest: ref.watch(notificationSelfTestProvider),
+      // 后台检查（仅 Android）：没有远程推送，这条链路是尽力而为的，
+      // 设置页据此展示「上次成功」时刻（§6.110）。桌面端不注入 → 不展示。
+      loadLastBackgroundCheck: ref.watch(lastBackgroundCheckProvider),
       // 账号安全（Passkey / 双因素）：交给系统浏览器，理由见
       // `_openAccountSecurityPage` 与 `SpbEnv.accountSecurityUrl` 的文档。
       onOpenAccountSecurity: _openAccountSecurityPage,

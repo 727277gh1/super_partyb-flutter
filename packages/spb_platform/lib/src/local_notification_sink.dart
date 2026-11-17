@@ -197,24 +197,33 @@ class LocalNotificationSink implements NotificationSink {
     await _showInternal(notification);
   }
 
+  /// 后台只查询已有授权，不能依赖 Activity 发起运行时权限请求。
+  Future<bool> hasPermission() async {
+    if (!await initialize()) return false;
+    if (!Platform.isAndroid) return false;
+    return await _plugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.areNotificationsEnabled() ??
+        false;
+  }
+
+  /// 持久化判重只能在平台接受通知后标记成功，失败时允许下轮重试。
+  Future<bool> showChecked(LocalNotification notification) =>
+      _showInternal(notification);
+
   /// [show] 的可判定版本：返回是否真的发出去（供自检区分「没弹」与「没点」）。
   Future<bool> _showInternal(LocalNotification notification) async {
     if (!await initialize()) return false;
+    if (notification.expiresAt?.isAfter(DateTime.now()) == false) return false;
     try {
       await _plugin.show(
-        // ## id 为什么取 hashCode 而不是自增序号
-        //
-        // 平台侧相同 id 的通知会**覆盖**前一条。确认卡 id 是字符串，而插件要
-        // int；用 `hashCode` 让「同一张卡」映射到同一个 int（重复发即覆盖，
-        // 不会堆叠）。自增序号会让每次重复发都堆一条新的。
-        //
-        // hashCode 碰撞（不同卡映射到同一 int）的后果只是「后一条覆盖前一条」，
-        // 而调用方（`ConfirmationNotifier`）已按字符串 id 判重，实际不会发两条
-        // 不同的卡到同一个 int——除非两张卡真的碰撞，概率极低且后果轻微。
-        id: notification.id.hashCode,
+        // 跨 engine 和重启保持一致，后台创建的通知才能被前台撤销。
+        id: stableNotificationId(notification.id),
         title: notification.title,
         body: notification.body,
-        notificationDetails: _details(),
+        notificationDetails: _details(expiresAt: notification.expiresAt),
         payload: notification.payload,
       );
       return true;
@@ -321,7 +330,7 @@ class LocalNotificationSink implements NotificationSink {
   @visibleForTesting
   NotificationDetails get debugNotificationDetails => _details();
 
-  NotificationDetails _details() {
+  NotificationDetails _details({DateTime? expiresAt}) {
     // ## 这里读字段而不是写字面量
     //
     // 三个 `androidChannel*` 字段一直是构造参数，但曾经在这里被写成字面量
@@ -340,6 +349,11 @@ class LocalNotificationSink implements NotificationSink {
         priority: Priority.high,
         // 确认卡需要用户行动，用默认提示音即可（不自定义，避免打包音频资源）。
         playSound: true,
+        onlyAlertOnce: true,
+        timeoutAfter: expiresAt
+            ?.difference(DateTime.now())
+            .inMilliseconds
+            .clamp(1, 2147483647),
       ),
       iOS: const DarwinNotificationDetails(),
       macOS: const DarwinNotificationDetails(),
@@ -354,12 +368,7 @@ class LocalNotificationSink implements NotificationSink {
   Future<void> cancel(String id) async {
     if (!await initialize()) return;
     try {
-      // 与 show 同一映射（id.hashCode），否则平台侧找不到对应通知。
-      //
-      // ⚠️ String.hashCode 不保证跨进程稳定（Dart 文档明确说明）：撤销只在
-      // 同进程内有效——确认卡解决的时刻与发通知的时刻在同一会话。若将来要
-      // 「冷启动清理上次残留」，必须换稳定哈希并落盘映射，见 issue #87。
-      await _plugin.cancel(id: id.hashCode);
+      await _plugin.cancel(id: stableNotificationId(id));
     } catch (e) {
       // 撤销失败的最坏后果只是通知多留一会儿，不影响业务。
       debugPrint('[notifications] 撤销通知失败（已忽略）：$e');
@@ -383,4 +392,13 @@ class LocalNotificationSink implements NotificationSink {
       return null;
     }
   }
+}
+
+/// FNV-1a 的正 31 位结果，避免 String.hashCode 的跨 isolate 不稳定性。
+int stableNotificationId(String id) {
+  var hash = 0x811c9dc5;
+  for (final unit in id.codeUnits) {
+    hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+  }
+  return hash & 0x7fffffff;
 }

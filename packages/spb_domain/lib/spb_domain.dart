@@ -5,6 +5,8 @@
 /// 反向依赖（api 依赖 domain）是禁止的。
 library;
 
+export 'src/confirmation_notification_inbox.dart';
+
 // 导出的领域类型（barrel 文件，便于检索与确认公共 API 面）：
 //   ChatStreamController          —— SSE 连接 + 事件缓冲 + 归约后的对话项流
 //   EventReducer                  —— 事件流 → List<ConversationItem> 归约器

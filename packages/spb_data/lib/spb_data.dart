@@ -5,6 +5,7 @@
 library;
 
 export 'src/database.dart';
+export 'src/notification_state_store.dart';
 export 'src/group_cache_store.dart';
 export 'src/outbox_store.dart';
 export 'src/preferences_store.dart';

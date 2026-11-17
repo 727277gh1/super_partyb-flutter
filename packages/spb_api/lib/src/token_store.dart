@@ -240,6 +240,11 @@ class TokenRefreshOutcome {
       '${error == null ? '' : ', error: $error'})';
 }
 
+/// 多 engine 共享凭证时，由存储层串行化完整的读、刷新、写入过程。
+abstract interface class ExclusiveTokenStore implements TokenStore {
+  Future<T> withExclusiveAccess<T>(Future<T> Function(TokenStore store) action);
+}
+
 /// 会话凭证管理器：负责「拿到可用 token」与「过期前刷新」。
 ///
 /// ## 职责边界
@@ -346,7 +351,25 @@ class SessionManager {
   }
 
   Future<TokenRefreshOutcome> _doRefresh() async {
-    final current = await store.read();
+    final observed = await store.read();
+    final target = store;
+    if (target is ExclusiveTokenStore) {
+      return target.withExclusiveAccess((locked) async {
+        final latest = await locked.read();
+        // 等锁期间另一 engine 可能已经轮换 token，或用户已经退出登录。
+        if (latest == null) return const TokenRefreshOutcome.rejected();
+        if (latest.accessToken != observed?.accessToken ||
+            latest.refreshToken != observed?.refreshToken) {
+          return TokenRefreshOutcome.refreshed(latest);
+        }
+        return _refreshStore(locked);
+      });
+    }
+    return _refreshStore(store);
+  }
+
+  Future<TokenRefreshOutcome> _refreshStore(TokenStore target) async {
+    final current = await target.read();
     // 本地就没有 refresh_token：这是**确定**的「无法续期」，不是网络问题。
     if (current == null || !current.canRefresh) {
       return const TokenRefreshOutcome.rejected();
@@ -371,7 +394,7 @@ class SessionManager {
     final merged = next.copyWith(
       refreshToken: next.refreshToken ?? current.refreshToken,
     );
-    await store.write(merged);
+    await target.write(merged);
     return TokenRefreshOutcome.refreshed(merged);
   }
 

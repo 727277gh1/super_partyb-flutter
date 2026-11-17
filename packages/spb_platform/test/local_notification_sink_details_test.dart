@@ -18,6 +18,14 @@ import 'package:spb_platform/spb_platform.dart';
 ///
 /// 本文件把这两条钉死：字段传得进去、`icon` 指向白剪影而不是启动图标。
 void main() {
+  test('通知 ID 使用固定算法，冷启动仍能找到原通知', () {
+    expect(stableNotificationId('hello'), 1335831723);
+    expect(stableNotificationId('conf_1'), stableNotificationId('conf_1'));
+    expect(
+      stableNotificationId('conf_1'),
+      isNot(stableNotificationId('conf_2')),
+    );
+  });
   group('LocalNotificationSink 的 Android 通知参数', () {
     test('默认：渠道、单色小图标、高重要性 + 声音（横幅的前提）', () {
       final android = LocalNotificationSink().debugNotificationDetails.android!;

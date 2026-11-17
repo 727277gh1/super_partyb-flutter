@@ -71,6 +71,7 @@ class ConfirmationNotifier {
     required NotificationSink sink,
     required bool Function() isWindowFocused,
     this.text = const ConfirmationNotificationText(),
+    this.handlePersistedItems,
   }) : _sink = sink,
        _isWindowFocused = isWindowFocused;
 
@@ -89,6 +90,13 @@ class ConfirmationNotifier {
   final bool Function() _isWindowFocused;
 
   final ConfirmationNotificationText text;
+
+  /// 移动端多 engine 共用持久化判重；桌面端继续使用会话内集合。
+  final Future<List<LocalNotification>> Function(
+    Iterable<ConversationItem> items,
+    bool focused,
+  )?
+  handlePersistedItems;
 
   /// 已处理过的确认卡 id（容量上限见 [notifiedIdsCapacity]）。
   ///
@@ -168,6 +176,8 @@ class ConfirmationNotifier {
   Future<List<LocalNotification>> handleItems(
     Iterable<ConversationItem> items,
   ) async {
+    final persisted = handlePersistedItems;
+    if (persisted != null) return persisted(items, _isWindowFocused());
     final fresh = <ConfirmationItem>[];
     for (final item in items) {
       if (item is! ConfirmationItem) continue;

@@ -237,6 +237,7 @@ class SettingsPage extends StatefulWidget {
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
     this.onRunNotificationSelfTest,
+    this.loadLastBackgroundCheck,
     this.onOpenAccountSecurity,
     this.onScanQr,
     this.onQrScanned,
@@ -436,6 +437,19 @@ class SettingsPage extends StatefulWidget {
   /// 同一约定：判定留在装配层，页面只渲染。
   final RunNotificationSelfTest? onRunNotificationSelfTest;
 
+  /// 读取「上一次后台检查成功」的时刻（null = 从未成功过）。
+  ///
+  /// 为 null 时**不展示**该行：只有真的装了后台排程的端才注入（当前仅
+  /// Android，见 `supportsBackgroundNotifications`）。
+  ///
+  /// ## 为什么必须把这条读数暴露给用户
+  ///
+  /// 移动端没有远程推送，后台检查是「尽力而为」的（`WorkManager` 最小 15
+  /// 分钟，Doze / 待机分桶 / 被划掉都会推迟或取消）。没有这个读数时，用户和
+  /// 我们都只能猜「到底跑过没有」——而「没收到通知」的两种原因（没跑 / 跑了
+  /// 但没卡）处置方式完全不同。只陈述事实，不承诺时效。
+  final Future<DateTime?> Function()? loadLastBackgroundCheck;
+
   /// 是否展示「自动同步」区块（启动时 / 周期）。
   ///
   /// ## 为什么必须由装配层显式打开，而不是「有 draft 字段就渲染」
@@ -548,6 +562,15 @@ class _SettingsPageState extends State<SettingsPage>
   /// 我们（或截图），而 SnackBar 几秒后就没了。
   NotificationSelfTestReport? _notificationSelfTestReport;
 
+  /// 上一次后台检查成功的时刻（null = 从未成功过）。
+  DateTime? _lastBackgroundCheck;
+
+  /// 是否已经读过一次（区分「从未成功」与「还没读到」）。
+  bool _loadedLastBackgroundCheck = false;
+
+  /// 读取本身失败（区别于「读到了、就是从未成功」）。
+  bool _lastBackgroundCheckReadFailed = false;
+
   /// 正在打开账号安全页（防连点开出多个标签页）。
   bool _openingAccountSecurity = false;
 
@@ -627,6 +650,9 @@ class _SettingsPageState extends State<SettingsPage>
       unawaited(_loadLaunchAtStartup());
       unawaited(_loadThemeMode());
       unawaited(_loadBiometricLock());
+      if (widget.loadLastBackgroundCheck != null) {
+        unawaited(_loadLastBackgroundCheck());
+      }
       if (!settings.scope.allGroups) unawaited(_loadGroups());
     } catch (e) {
       if (!mounted) return;
@@ -868,6 +894,56 @@ class _SettingsPageState extends State<SettingsPage>
             : null,
       ),
     );
+  }
+
+  /// 读「上次后台检查成功」的时刻。失败不报错，只当没读到。
+  Future<void> _loadLastBackgroundCheck() async {
+    final loader = widget.loadLastBackgroundCheck;
+    if (loader == null) return;
+    DateTime? at;
+    var failed = false;
+    try {
+      at = await loader();
+    } on Object catch (e) {
+      failed = true;
+      SpbLog.warn('读取后台通知检查时间失败', {'error': e.toString()});
+    }
+    if (!mounted) return;
+    setState(() {
+      _lastBackgroundCheck = at;
+      _lastBackgroundCheckReadFailed = failed;
+      _loadedLastBackgroundCheck = true;
+    });
+  }
+
+  static String _two(int value) => value.toString().padLeft(2, '0');
+
+  /// 「后台检查」行的副标题：只陈述事实（周期 + 上次成功的时刻）。
+  ///
+  /// 不写「保证送达」之类的承诺——`WorkManager` 在 Doze / 待机分桶 / 用户
+  /// 划掉应用时会被推迟甚至取消，写死承诺只会在没收到时误导排查方向。
+  String get _backgroundCheckSubtitle {
+    if (!_loadedLastBackgroundCheck) return '每 15 分钟检查一次待确认事项（读取中…）';
+    if (_lastBackgroundCheckReadFailed) {
+      // 「读不到」与「从未跑过」处置不同：前者可能是存储故障，后者是还没跑。
+      return '每 15 分钟检查一次待确认事项（上次检查时间读取失败）';
+    }
+    final at = _lastBackgroundCheck;
+    if (at == null) {
+      return '每 15 分钟检查一次待确认事项；尚未成功执行过'
+          '（需已登录并允许通知）';
+    }
+    final local = at.toLocal();
+    final now = DateTime.now();
+    final sameDay =
+        local.year == now.year &&
+        local.month == now.month &&
+        local.day == now.day;
+    final stamp = sameDay
+        ? '今天 ${_two(local.hour)}:${_two(local.minute)}'
+        : '${_two(local.month)}-${_two(local.day)} '
+              '${_two(local.hour)}:${_two(local.minute)}';
+    return '每 15 分钟检查一次待确认事项；上次成功：$stamp（系统可能延迟或跳过）';
   }
 
   /// 打开 IdP 账号安全页（Passkey / 双因素）。
@@ -1979,6 +2055,22 @@ class _SettingsPageState extends State<SettingsPage>
                     onTap: _runningNotificationSelfTest
                         ? null
                         : _runNotificationSelfTest,
+                  ),
+                ),
+              ],
+
+              // 后台检查（仅 Android 注入）：WorkManager 是尽力而为的，
+              // 这行读数就是「到底跑过没有」的唯一证据。
+              if (widget.loadLastBackgroundCheck != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-background-check'),
+                    leading: const Icon(Icons.schedule_outlined),
+                    title: const Text('后台检查'),
+                    subtitle: Text(_backgroundCheckSubtitle),
+                    isThreeLine: true,
                   ),
                 ),
               ],

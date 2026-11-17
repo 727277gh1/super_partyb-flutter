@@ -22,7 +22,7 @@
 | [界面与交互](ui.md) | `ui.md` | §6.16 §6.32 §6.38 §6.40 §6.44 §6.46 §6.51 §6.54 §6.62 §6.70 §6.76 §6.77 §6.78 §6.79 §6.80 §6.81 §6.82 §6.83 §6.88 §6.89 §6.91 |
 | [测试与仓库守卫](testing.md) | `testing.md` | §6.13 §6.17 §6.19 §6.21 §6.22 §6.24 §6.25 §6.26 §6.27 |
 | [构建、分发与发布](build-and-release.md) | `build-and-release.md` | §6.29 §6.30 §6.31 §6.33 §6.61 §6.87 §6.93 §6.101 §7 §8 |
-| [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 §6.99 §6.102 §6.109 |
+| [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 §6.99 §6.102 §6.109 §6.111 |
 | [性能与内存](performance.md) | `performance.md` | §6.47 §6.59 §6.60 §6.72 §6.73 §6.74 §6.96 |
 
 ## 全部小节
@@ -137,3 +137,4 @@
 | §6.108 | 交付物预览：`external` 按小程序 `preview_mode` 分三通道（HTML/SVG→一次性 ticket、图片/音视频/PDF→媒体签名 URL、Office/未知→旧预览页），415/403/5xx 回落；客户端只渲 text/image（2026-11） | [`chat.md`](chat.md) |
 | §6.109 | 通知验证压成三步：Linux 用进程内假 daemon 跑**真**插件（无 GUI 可测），Windows/macOS 靠 App 内「通知自检」；四步失败点分别记录（2026-11，issue #90） | [`runtime-and-ops.md`](runtime-and-ops.md) |
 | §6.110 | 交付物预览改用独立页面（root Navigator 压一层 MaterialPageRoute）：系统返回/AppBar 返回/✕ 三个出口同源，都只弹这一层、对话不出栈；正文限宽 980。图片两段式（先 256 缩略图占位、原图到位替换）与开页前预览域 TCP 预检（不通回落旧预览页）（2026-11） | [`chat.md`](chat.md) |
+| §6.111 | 移动端后台检查（`WorkManager`）：定位是「尽力而为」的兜底而非推送（15 分钟下限 / Doze / force-stop 都在）；必补三件事（跨 engine 判重、凭证与通知联动、稳定通知 id）；设置页给出「跑没跑」三态读数；刻意不做开关（2026-11，issue #88） | [`runtime-and-ops.md`](runtime-and-ops.md) |

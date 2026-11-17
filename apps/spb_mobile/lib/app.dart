@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_core/spb_core.dart';
+import 'package:spb_features/spb_features.dart' show AuthState;
 import 'package:spb_platform/spb_platform.dart';
 
 import 'providers.dart';
@@ -56,6 +58,10 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   /// `AppLifecycleListener` 的回调按平台分得更细（`onResume`/`onInactive`/
   /// `onHide`/`onShow`…），我们需要的是「是否在前台」这一个布尔，粗粒度即可。
   late final _LifecycleFocusObserver _lifecycleObserver;
+  NotificationForegroundBridge? _foregroundBridge;
+  ProviderSubscription<AuthState>? _notificationAuthSubscription;
+  ProviderSubscription<int>? _notificationSessionSubscription;
+  Future<void> _notificationPolling = Future<void>.value();
 
   @override
   void initState() {
@@ -89,7 +95,9 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
       // 启动就请求一次权限（幂等）。等「确认卡在后台到达」才请求的话，Android
       // 会在后台弹框（用户回到应用才看得到），而那条通知已经因未授权被丢弃——
       // 详见桌面端 `_installNotifications` 同一处的注释。
-      unawaited(notifier.ensurePermission());
+      unawaited(
+        notifier.ensurePermission().then((_) => _reconcileNotifications()),
+      );
     }
 
     // 点击通知 → 跳到该对话（payload 是 `/chat/{groupId}`）。
@@ -127,6 +135,30 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
       onResumed: _resyncOnResume,
     );
     WidgetsBinding.instance.addObserver(_lifecycleObserver);
+    if (ref.read(notificationPollingSchedulerProvider).supported) {
+      _foregroundBridge = NotificationForegroundBridge()
+        ..attach(() => ref.read(windowFocusedProvider));
+      _notificationAuthSubscription = ref.listenManual(
+        authStateProvider,
+        (_, _) => _reconcileNotifications(),
+      );
+      _notificationSessionSubscription = ref.listenManual(
+        sessionRevisionProvider,
+        (_, _) => _reconcileNotifications(),
+      );
+      _reconcileNotifications();
+    }
+  }
+
+  void _reconcileNotifications() {
+    _notificationPolling = _notificationPolling
+        .then((_) async {
+          if (!mounted) return;
+          await ref.read(reconcileNotificationPollingProvider)();
+        })
+        .catchError((Object error) {
+          SpbLog.warn('后台通知调度失败，下次回前台重试', {'error': error.toString()});
+        });
   }
 
   /// 回到前台时对一次账（issue #88 方案 C 的客户端部分）。
@@ -149,6 +181,7 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   /// 回放被截断时已有缺口探测兜底（见 `ChatStreamController.recoverIfStalled`）
   /// ——两套回填语义并存必然漂移。
   void _resyncOnResume() {
+    _reconcileNotifications();
     ref.invalidate(pendingConfirmationsProvider);
 
     final userId = ref.read(currentUserIdProvider).value;
@@ -160,6 +193,9 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
 
   @override
   void dispose() {
+    _notificationAuthSubscription?.close();
+    _notificationSessionSubscription?.close();
+    _foregroundBridge?.dispose();
     WidgetsBinding.instance.removeObserver(_lifecycleObserver);
     if (_ownsRouter) _router.dispose();
     super.dispose();
