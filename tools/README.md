@@ -34,7 +34,7 @@ for f in tools/check_*.sh; do bash "$f" || break; done
 |---|---|
 | `tools/coverage.sh` | 覆盖率采集与汇总 |
 | `tools/bundle_linux_deps.sh` | Linux 分发依赖打包 |
-| `tools/gen_brand_assets.py` | 品牌图标生成 |
+| `tools/gen_brand_assets.py` | 品牌图标生成（含 Android 通知白剪影 `ic_notification`；`--only notification` 只重生成这 5 张） |
 | `tools/build_windows_installer.ps1` | Inno Setup 安装包构建 |
 | `tools/reverse_verify_issue50.sh` | 双栈降级变异验证 |
 | `tools/sync-to-github.sh` | 导出干净仓库并推送 GitHub |

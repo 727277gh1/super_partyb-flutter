@@ -955,3 +955,23 @@ issue #90 的原始形态是一张 12 项的真机清单，在本机（Debian 12
   仍是事实记录，不要因为它「有工具了」就关掉）。
 - **Android emulator 路径**：CI 里尚未接（需要 `reactivecircus/android-emulator-runner`
   与 KVM 的 ubuntu runner）；在那之前 Android 只能靠真机跑自检。
+
+#### 状态栏小图标：必须是纯白剪影（`ic_notification`）
+
+插件的 `AndroidNotificationDetails(icon:)` 决定**状态栏**那枚图标；不传时回落到
+`AndroidInitializationSettings` 的 `defaultIcon`——我们曾经传的是 `@mipmap/ic_launcher`
+（彩色启动器图标）。API 21 起状态栏图标必须是单色剪影，系统把彩色图当 alpha 蒙版用，
+结果是一块实心白/灰方块，且只在真机上看得出来（CI 与单测都验不到）。
+
+现在走**生成**而不是手绘：`tools/gen_brand_assets.py` 的 `notification_icon` 取
+`_extract_bubble()` 的 alpha（浅色气泡轮廓，对勾处本就是透明洞），整片涂白 → 24dp 画布
+留 2dp 内边距 → 五个 density。`--only notification` 只重生成这 5 张，不会顺手重写启动器
+图标（那只会制造无意义的二进制 diff）。
+
+同时修掉一处**静默失效**：`androidChannelId/Name/Description` 三个构造参数一直存在，
+但 `_details()` 里写的是字面量，传了不生效、也不报错。现在读字段，并由
+`packages/spb_platform/test/local_notification_sink_details_test.dart` 断言「传进去的
+就是发出去的」——这几项都是**只有系统侧才看得出问题**的配置，测试至少能挡住「有人删了
+某一行」。
+
+**仍未验证**：真机上状态栏图标是否真的清晰（本机只能证明参数正确、剪影像素是纯白 + 透明）。

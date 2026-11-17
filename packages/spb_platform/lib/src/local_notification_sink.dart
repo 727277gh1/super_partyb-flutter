@@ -31,7 +31,7 @@ library;
 import 'dart:async' show Completer;
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'package:spb_core/spb_core.dart';
@@ -50,12 +50,23 @@ class LocalNotificationSink implements NotificationSink {
     this.androidChannelId = 'spb_confirmations',
     this.androidChannelName = '待确认事项',
     this.androidChannelDescription = '有新的确认卡需要你处理',
+    this.androidSmallIcon = 'ic_notification',
   }) : _plugin = plugin ?? FlutterLocalNotificationsPlugin();
 
   final FlutterLocalNotificationsPlugin _plugin;
   final String androidChannelId;
   final String androidChannelName;
   final String androidChannelDescription;
+
+  /// Android 状态栏小图标（`res/drawable-*/ic_notification.png`）。
+  ///
+  /// ## 为什么不能沿用 `initialize` 的 `@mipmap/ic_launcher`
+  ///
+  /// 那是**启动器图标**：彩色、满幅。API 21 起状态栏图标必须是单色剪影，
+  /// 系统把彩色图当 alpha 蒙版用 → 蓝底图标糊成一块实心白/灰。故单独提供
+  /// 一张纯白剪影（生成脚本 `tools/gen_brand_assets.py` 的 `notification_icon`），
+  /// 并在这里显式指定；不指定时插件会回落到 `defaultIcon`（即 `@mipmap/...`）。
+  final String androidSmallIcon;
 
   /// 是否已 [initialize]。未初始化时 [show] 静默跳过（记日志）。
   bool _initialized = false;
@@ -302,22 +313,37 @@ class LocalNotificationSink implements NotificationSink {
     return report;
   }
 
+  /// 平台通知参数。
+  ///
+  /// 对测试可见：这几项是**只有真机/系统侧才看得出问题**的配置（渠道重要性
+  /// 决定是否横幅、小图标决定状态栏显示成什么样），所以把「取参数」这一步
+  /// 放进测试，至少能挡住「有人删了某一行」这类回归。
+  @visibleForTesting
+  NotificationDetails get debugNotificationDetails => _details();
+
   NotificationDetails _details() {
-    return const NotificationDetails(
+    // ## 这里读字段而不是写字面量
+    //
+    // 三个 `androidChannel*` 字段一直是构造参数，但曾经在这里被写成字面量
+    // ——于是「定制渠道名」这个能力静默失效（传了也不生效）。字段化之后，
+    // 测试能断言「传进去的就是发出去的」。
+    //
+    // 注意 Android 的限制：channel id 与名字只在**首次创建**时生效，之后
+    // 改设置不会更新已存在的 channel（要改重要性只能换 id 或卸载重装）。
+    return NotificationDetails(
       android: AndroidNotificationDetails(
-        // channel id 必须与下面的 channelName 在**首次创建**时一致，
-        // 之后改名字不会更新已存在的 channel（Android 的限制）。
-        'spb_confirmations',
-        '待确认事项',
-        channelDescription: '有新的确认卡需要你处理',
+        androidChannelId,
+        androidChannelName,
+        channelDescription: androidChannelDescription,
+        icon: androidSmallIcon,
         importance: Importance.high,
         priority: Priority.high,
         // 确认卡需要用户行动，用默认提示音即可（不自定义，避免打包音频资源）。
         playSound: true,
       ),
-      iOS: DarwinNotificationDetails(),
-      macOS: DarwinNotificationDetails(),
-      linux: LinuxNotificationDetails(
+      iOS: const DarwinNotificationDetails(),
+      macOS: const DarwinNotificationDetails(),
+      linux: const LinuxNotificationDetails(
         // 确认卡是「需要处理」而不是「提示」，用 normal 而非 low。
         urgency: LinuxNotificationUrgency.normal,
       ),

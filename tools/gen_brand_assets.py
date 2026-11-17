@@ -202,6 +202,40 @@ class Generator:
             size = round(96 * factor)
             self.save(self.resize(size), f'{base}/drawable-{density}/launch_logo.png')
 
+    def notification_icon(self) -> None:
+        """Android 状态栏小图标（`ic_notification`）：24dp、纯白剪影、透明底。
+
+        ## 为什么不能拿 `@mipmap/ic_launcher` 当 smallIcon
+
+        API 21 起状态栏图标必须是**单色剪影**：系统会把彩色图当 alpha 蒙版用，
+        彩色启动图标（蓝底 + 浅色气泡）因而糊成一个实心方块或一团白斑。正确
+        做法是提供一张独立的白剪影（本方法产出），并在
+        `AndroidNotificationDetails(icon: 'ic_notification')` 里显式指定——
+        否则插件会回落到 `AndroidInitializationSettings` 的 `defaultIcon`
+        （见 `flutter_local_notifications` 的 `setSmallIcon`）。
+
+        ## 形状：气泡轮廓 + 镂空对勾
+
+        [_extract_bubble] 的 alpha 通道本身就是「浅色气泡」的形状（对勾处是
+        透明洞，因为原图那里透的是背景蓝）。把它整片涂白即得剪影：白色气泡
+        里挖出一个对勾，缩小到 24dp 仍能认出来。
+
+        24dp 里留 2dp 内边距（实际绘制区 20dp）：状态栏图标贴边会在部分 ROM
+        上被裁掉一圈，也会与相邻图标视觉粘连。
+        """
+        base = 'apps/spb_mobile/android/app/src/main/res'
+        bubble = self._extract_bubble()
+        silhouette = Image.new('RGBA', bubble.size, (255, 255, 255, 0))
+        silhouette.putalpha(bubble.getchannel('A'))
+        for density, factor in ANDROID_DENSITIES.items():
+            size = round(24 * factor)
+            inner = max(1, round(20 * factor))
+            canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            canvas.alpha_composite(
+                silhouette.resize((inner, inner), Image.LANCZOS),
+                ((size - inner) // 2, (size - inner) // 2))
+            self.save(canvas, f'{base}/drawable-{density}/ic_notification.png')
+
     def adaptive_foreground(self) -> Image.Image:
         """108dp 画布：透明底 + 居中的浅色气泡（反预乘解 alpha）。
 
@@ -233,6 +267,21 @@ class Generator:
 
     def _extract_bubble(self) -> Image.Image:
         """把源图里「浅色气泡 + 镂空对勾」抠成透明底图层。
+
+        ## 为什么缓存
+
+        逐像素反预乘要遍历 1024²（≈100 万）个像素，一次约数秒。本轮起它被
+        两处调用（adaptive 前景、通知小图标），不缓存则每次生成都要跑两遍。
+        """
+        cached = getattr(self, '_bubble_cache', None)
+        if cached is not None:
+            return cached
+        out = self._extract_bubble_uncached()
+        self._bubble_cache = out
+        return out
+
+    def _extract_bubble_uncached(self) -> Image.Image:
+        """见 [_extract_bubble]（本方法不带缓存）。
 
         源图 = `alpha·light + (1-alpha)·bg`。按亮度反解 alpha 再反预乘还原颜色，
         边缘（抗锯齿像素）自然过渡，不会出现一圈蓝边——直接阈值化抠图会留下硬边。
@@ -336,6 +385,7 @@ class Generator:
         self.macos()
         self.ios()
         self.android()
+        self.notification_icon()
         self.windows()
         self.windows_runtime()
         self.windows_installer()
@@ -351,6 +401,27 @@ def main() -> int:
                     help='源 SVG（仅用于读取品牌底色，可选）')
     ap.add_argument('--dry-run', action='store_true',
                     help='只列出将要写的文件，不落盘')
+    ap.add_argument(
+        '--only', default=None,
+        help='只生成指定组（逗号分隔）：macos,ios,android,notification,'
+             'windows,windows_runtime,windows_installer,desktop_runtime,in_app。'
+             '默认全部。')
+
+    # 组名 → 方法名。刻意把 `notification` 单列：它只产出 5 张
+    # drawable-*/ic_notification.png，与 `android` 那 15 张启动器/启动画面图
+    # 是两件事——改通知图标不该顺手重写全部启动器图标（那会引入无意义的
+    # 二进制 diff，掩盖真正改动的那几张）。
+    ONLY_GROUPS = {
+        'macos': 'macos',
+        'ios': 'ios',
+        'android': 'android',
+        'notification': 'notification_icon',
+        'windows': 'windows',
+        'windows_runtime': 'windows_runtime',
+        'windows_installer': 'windows_installer',
+        'desktop_runtime': 'desktop_runtime',
+        'in_app': 'in_app',
+    }
     args = ap.parse_args()
 
     if not os.path.isfile(args.master):
@@ -365,7 +436,16 @@ def main() -> int:
     brand = brand_from_svg(args.svg) if args.svg else DEFAULT_BRAND
     gen = Generator(master, brand)
     gen.dry_run = args.dry_run
-    gen.run()
+    if args.only:
+        names = [n.strip() for n in args.only.split(',') if n.strip()]
+        unknown = [n for n in names if n not in ONLY_GROUPS]
+        if unknown:
+            print(f'❌ 未知组：{", ".join(unknown)}（可用：{", ".join(ONLY_GROUPS)}）')
+            return 1
+        for name in names:
+            getattr(gen, ONLY_GROUPS[name])()
+    else:
+        gen.run()
 
     action = '将写入' if args.dry_run else '已写入'
     print(f'品牌底色 #{brand[0]:02x}{brand[1]:02x}{brand[2]:02x}')
