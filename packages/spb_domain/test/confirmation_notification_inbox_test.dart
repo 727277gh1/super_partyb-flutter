@@ -63,6 +63,28 @@ void main() {
     );
   }
 
+
+  Notice notice({
+    String id = 'n1',
+    String kind = 'confirmation_required',
+    String title = '需要你确认',
+    String body = '需要确认是否继续重试',
+    Map<String, String> data = const {},
+    DateTime? readAt,
+  }) => Notice(
+    id: id,
+    kind: kind,
+    severity: 'warning',
+    title: title,
+    body: body,
+    data: data,
+    groupId: 'g1',
+    createdAt: now,
+    readAt: readAt,
+  );
+  Future<void> pollNotices(List<Notice> items, {bool focused = false}) =>
+      inbox().handleNotices(items, focused: focused);
+
   setUp(() {
     store = _Store();
     shown = [];
@@ -155,5 +177,54 @@ void main() {
       ),
     ], focused: true);
     expect(cancelled, ['c1']);
+  });
+
+  // ---------- handleNotices：/me/notices 驱动的持久通知 ----------
+
+  test('通知标题来自服务端，不再硬编码', () async {
+    await pollNotices([notice(title: '有任务等你确认')]);
+    expect(shown, hasLength(1));
+    expect(shown.single.title, '有任务等你确认');
+  });
+
+  test('卡片已过期仍然通知，正文降级为已失效', () async {
+    // 这是 #187 的核心价值：卡片 10 分钟后消失，notice 不会。
+    clock = now.add(const Duration(hours: 2));
+    await pollNotices([
+      notice(data: {'expires_at': now.add(const Duration(minutes: 10)).toIso8601String()}),
+    ]);
+    expect(shown, hasLength(1));
+    expect(shown.single.body, contains('已失效'));
+    // 关键：不能把 expiresAt 传给本地通知，否则 _handle 会把它当成过期而跳过。
+    expect(shown.single.expiresAt, isNull);
+  });
+
+  test('升级窗口：旧 receipt 带过去的 expiresAt 不能吞掉新通知', () async {
+    // 旧路径（卡片列表）写下的 receipt 带已过期的 expiresAt。
+    store.data['n1'] = ConfirmationReceipt(
+      shown: false,
+      expiresAt: now.subtract(const Duration(minutes: 1)),
+    );
+    await pollNotices([notice()]);
+    expect(shown.map((n) => n.id), ['n1']);
+  });
+
+  test('已读（别端 ack）撤销本地通知且不重复弹', () async {
+    await pollNotices([notice()]);
+    expect(shown, hasLength(1));
+    await pollNotices([notice(readAt: now)]);
+    expect(cancelled, ['n1']);
+  });
+
+  test('同一通知只弹一次', () async {
+    await pollNotices([notice()]);
+    await pollNotices([notice()]);
+    expect(shown, hasLength(1));
+  });
+
+  test('未知 kind 也通知，不抛异常', () async {
+    await pollNotices([notice(kind: 'turn_completed', title: '任务完成', body: '好了')]);
+    expect(shown, hasLength(1));
+    expect(shown.single.title, '任务完成');
   });
 }

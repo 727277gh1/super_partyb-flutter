@@ -35,6 +35,58 @@ class ConfirmationNotificationInbox {
   final Future<bool> Function() canNotify;
   final DateTime Function() clock;
 
+  /// 确认卡的固定标题（历史两条入口——SSE 事件与卡片列表——都不带标题）。
+  ///
+  /// 新入口 [handleNotices] 用服务端下发的 `Notice.title`，不再读这里；
+  /// 保留它是为了不改变既有 SSE/轮询路径的行为。
+  static const _defaultTitle = '需要你确认';
+
+  /// 卡片失效后追加的标记。
+  ///
+  /// 语义：**通知本身不过期**，过期的是卡片。所以不跳过、不取消，只把正文
+  /// 降级为「已失效」——用户需要知道「刚才发生过什么」，而不是什么都看不到。
+  static const _expiredSuffix = '（已失效，仅作记录）';
+
+  /// 用 `/me/notices` 的**持久通知**驱动本地通知。
+  ///
+  /// ## 与 [reconcile] 的关键差别：通知不过期
+  ///
+  /// 确认卡 10 分钟后转 `expired` 并从卡片列表里消失，所以走卡片列表的轮询
+  /// 在 15 分钟周期下永远拉到已过期的卡（实现正确地跳过它，于是每次都白跑）。
+  /// notice 是持久事实：卡片过期后它仍然在，**必须弹**——它回答的是「刚才发生过
+  /// 什么」，不是「现在还能不能点」。
+  ///
+  /// 因此这里**不把 `expires_at` 传给本地通知**（传了会被 [_handle] 当成过期
+  /// 而 cancel），只把正文降级为带 [_expiredSuffix] 的版本。
+  ///
+  /// ## 已读即取消
+  ///
+  /// `readAt != null` 映射为 `resolved`：用户在另一台设备上看过了，本地那条
+  /// 通知就该撤销（已读是用户级、跨设备的）。
+  Future<List<LocalNotification>> handleNotices(
+    Iterable<Notice> notices, {
+    required bool focused,
+  }) => _handle([
+    for (final n in notices)
+      if (n.id.isNotEmpty)
+        _Notice(
+          id: n.id,
+          groupId: n.deepLinkGroupId ?? '',
+          title: n.title.isEmpty ? null : n.title,
+          body: _noticeBody(n),
+          resolved: n.isRead,
+          neverExpires: true,
+        ),
+  ], focused: focused);
+
+  /// 通知正文：卡片已失效的确认卡降级为「已失效」而不是被跳过。
+  String _noticeBody(Notice n) {
+    if (n.kind != 'confirmation_required') return n.body;
+    if (!n.isCardExpiredAt(clock())) return n.body;
+    final body = n.body.trim();
+    return body.isEmpty ? _expiredSuffix : '$body$_expiredSuffix';
+  }
+
   Future<List<LocalNotification>> handleItems(
     Iterable<ConversationItem> items, {
     required bool focused,
@@ -95,7 +147,9 @@ class ConfirmationNotificationInbox {
     for (final notice in notices) {
       if (notice.id.isEmpty) continue;
       final previous = receipts[notice.id];
-      final expiry = notice.expiresAt ?? previous?.expiresAt;
+      final expiry = notice.neverExpires
+          ? null
+          : (notice.expiresAt ?? previous?.expiresAt);
       if (notice.resolved || expiry?.isAfter(now) == false) {
         if (previous?.shown == true) await cancel(notice.id);
         receipts[notice.id] = ConfirmationReceipt(
@@ -115,7 +169,7 @@ class ConfirmationNotificationInbox {
       if (!await canNotify()) continue;
       final notification = LocalNotification(
         id: notice.id,
-        title: '需要你确认',
+        title: notice.title ?? _defaultTitle,
         body: notice.body.isEmpty ? '有一项操作等待确认' : notice.body,
         payload: notice.groupId.isEmpty
             ? null
@@ -146,11 +200,23 @@ class _Notice {
     required this.groupId,
     required this.body,
     required this.resolved,
+    this.title,
     this.expiresAt,
+    this.neverExpires = false,
   });
   final String id;
   final String groupId;
   final String body;
+
+  /// 通知标题。null 时回退到确认卡的固定文案（历史两条入口都没有标题）。
+  final String? title;
   final bool resolved;
   final DateTime? expiresAt;
+
+  /// 永不因过期而被跳过/撤销。
+  ///
+  /// 持久通知用它：`expires_at` 描述的是**卡片**还能不能点，不是**通知**该不该留。
+  /// 更要紧的是 [_handle] 会回退到 `previous?.expiresAt`——升级窗口里旧 receipt
+  /// 带着过去的 expiresAt，不屏蔽的话这条通知会被静默吞掉。
+  final bool neverExpires;
 }

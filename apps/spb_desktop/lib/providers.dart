@@ -128,6 +128,17 @@ final remoteSessionProvider = Provider<bool>((ref) {
 ///
 /// 判重集合若随对话页重建而丢失，SSE 重连回放会让同一张确认卡重复弹通知。
 /// 故本 provider 的生命周期与 app 一致。
+///
+/// ## 已知限制：桌面没有持久化判重
+///
+/// 桌面端没有后台排程（`supportsBackgroundNotifications == false`），
+/// `confirmationNotificationInboxProvider` 返回 null，故这里没有注入
+/// `handlePersistedItems` —— 判重退回 [ConfirmationNotifier] 的**内存**集合。
+/// 后果：进程重启后，仍未处理的确认卡会再弹一次（窗口 ≤ 卡片寿命 10 分钟）。
+/// 移动端不受影响（有后台就一定有 inbox，走 SQLite receipts）。
+///
+/// 修法（未做）：给桌面也开一个 `NotificationStateStore`（同一份 SQLite 即可），
+/// 把 `handlePersistedItems` 接上——但目前通知量极小，收益不抵复杂度。
 final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
   return ConfirmationNotifier(
     sink: ref.watch(notificationSinkProvider),

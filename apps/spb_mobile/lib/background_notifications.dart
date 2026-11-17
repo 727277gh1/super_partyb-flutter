@@ -13,7 +13,13 @@ import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_platform/spb_platform.dart';
 import 'package:workmanager/workmanager.dart';
 
-const notificationPollingTask = 'spb.confirmations.poll.v1';
+const notificationPollingTask = 'spb.notices.poll.v1';
+
+/// 旧任务名（轮询确认卡列表），只用于升级时显式取消。
+///
+/// 必须显式取消：WorkManager 的周期任务按 unique name 注册，改名不会自动清掉
+/// 旧的那个，两个并存就会各自唤醒、各自弹一条。
+const legacyNotificationPollingTask = 'spb.confirmations.poll.v1';
 const notificationPollingInterval = Duration(minutes: 15);
 
 NotificationStateStore openNotificationState() => NotificationStateStore.open(
@@ -44,6 +50,8 @@ class WorkmanagerNotificationScheduler implements NotificationPollingScheduler {
   @override
   Future<void> reconcile({required bool enabled}) async {
     if (!supported) return;
+    // 旧任务名无论开关都清掉（幂等）：升级后第一次 reconcile 就完成迁移。
+    await _workmanager.cancelByUniqueName(legacyNotificationPollingTask);
     if (!enabled) {
       await _workmanager.cancelByUniqueName(notificationPollingTask);
       return;
@@ -163,12 +171,22 @@ class BackgroundNotificationWorker {
           );
       if (apiClient != null) dio.interceptors.insert(0, auth);
       auth.replayDio = dio;
-      final api = ChatApi(dio);
-      final user = await api.me();
-      final cards = await api.listConfirmationsTyped(
-        status: 'pending',
-        limit: ChatApi.kConfirmationsRequestLimit,
-      );
+      // 数据源是 /me/notices（持久事实），不是 /chat/confirmations（卡片）。
+      // 卡片 10 分钟后过期并消失，而 15 分钟周期必然拉到过期卡——旧实现因此
+      // 每轮都白跑。notice 不会消失，15 分钟延迟就变成可接受的通知延迟。
+      final api = NoticesApi(dio);
+      // 第一跳只取一个整数：没有未读就直接返回，不拉整页列表。
+      final unread = await api.unreadCount();
+      if (_stopped) return false;
+      if (unread == 0) {
+        await state.exclusive(() async {
+          if (generation != await state.generation()) return;
+          await state.markChecked(DateTime.now());
+        });
+        SpbLog.info('后台通知检查完成', {'unread': 0, 'shown': 0});
+        return true;
+      }
+      final page = await api.list(unreadOnly: true, limit: 20);
       if (_stopped) return false;
       return await state.exclusive(() async {
         // 网络请求期间可能登出或换账号，旧响应不得发到新会话。
@@ -190,15 +208,16 @@ class BackgroundNotificationWorker {
           cancel: sink.cancel,
           canNotify: sink.hasPermission,
         );
-        final sent = await inbox.reconcile(
-          cards,
-          userId: user.id,
+        // complete 恒为 false：拉的是有上限的一页，不能据「缺席」推断已处理。
+        // 撤销靠 notice 的 read_at（已读即 resolved），不靠缺席。
+        final sent = await inbox.handleNotices(
+          page.notices,
           focused: false,
-          complete: cards.length < ChatApi.kConfirmationsRequestLimit,
         );
         await state.markChecked(DateTime.now());
-        SpbLog.info('后台待确认卡检查完成', {
-          'pending': cards.length,
+        SpbLog.info('后台通知检查完成', {
+          'unread': page.unread,
+          'fetched': page.notices.length,
           'shown': sent.length,
         });
         return true;

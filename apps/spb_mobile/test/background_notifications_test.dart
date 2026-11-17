@@ -45,9 +45,18 @@ class _WorkmanagerPlatform extends WorkmanagerPlatform {
     initializations++;
   }
 
+  final cancelledNames = <String>[];
+
   @override
   Future<void> cancelByUniqueName(String uniqueName) async {
-    expect(uniqueName, notificationPollingTask);
+    // 只允许两个名字：当前任务名，以及改名前的旧任务名。旧任务必须被显式取消
+    // ——WorkManager 按 unique name 注册，改名不会自动清掉旧的，两个并存就会
+    // 各自唤醒、各自弹一条。
+    expect(
+      uniqueName,
+      anyOf(notificationPollingTask, legacyNotificationPollingTask),
+    );
+    cancelledNames.add(uniqueName);
     cancellations++;
   }
 
@@ -101,7 +110,16 @@ void main() {
       ExistingPeriodicWorkPolicy.keep,
     );
     expect(platform.registrations.first.network, NetworkType.connected);
-    expect(platform.cancellations, 1);
+    // 每次 reconcile 都幂等清一次旧任务名（3 次），关闭时再清当前任务名（1 次）。
+    expect(platform.cancellations, 4);
+    expect(
+      platform.cancelledNames.where((n) => n == legacyNotificationPollingTask),
+      hasLength(3),
+    );
+    expect(
+      platform.cancelledNames.where((n) => n == notificationPollingTask),
+      hasLength(1),
+    );
   });
 
   group('后台 Worker 使用真实 API 适配和通知判定', () {
@@ -121,7 +139,6 @@ void main() {
       endpointCalls = 0;
       dio = createDio(baseUrl: 'https://example.invalid/pba');
       adapter = DioAdapter(dio: dio);
-      adapter.onGet('/api/auth/me', (s) => s.reply(200, {'id': 'u1'}));
     });
     BackgroundNotificationWorker worker() => BackgroundNotificationWorker(
       openState: () => state,
@@ -134,26 +151,43 @@ void main() {
         return SpbEndpoints.current;
       },
     );
-    Map<String, dynamic> card() => {
-      'id': 'c1',
-      'user_id': 'u1',
+    Map<String, dynamic> notice() => {
+      'id': 'n1',
+      'kind': 'confirmation_required',
+      'severity': 'warning',
+      'title': '需要你确认',
+      'body': '需要确认是否继续重试',
+      'data': {
+        'confirmation_id': 'c1',
+        'expires_at': DateTime.now()
+            .add(const Duration(minutes: 10))
+            .toIso8601String(),
+      },
       'group_id': 'g1',
-      'status': 'pending',
-      'expires_at': DateTime.now()
-          .add(const Duration(minutes: 10))
-          .toIso8601String(),
+      'created_at': DateTime.now().toIso8601String(),
     };
+    void stubUnread(int count) => adapter.onGet(
+      '/me/notices/unread-count',
+      (s) => s.reply(200, {'unread': count}),
+    );
+    void stubList(List<Map<String, dynamic>> items) => adapter.onGet(
+      '/me/notices',
+      (s) => s.reply(200, {'notices': items, 'unread': items.length}),
+      queryParameters: {'limit': 20, 'unread_only': '1'},
+    );
 
     test('真实列表响应发出通知且带对话路由', () async {
-      adapter.onGet(
-        '/chat/confirmations',
-        (s) => s.reply(200, {
-          'items': [card()],
-        }),
-        queryParameters: {'status': 'pending', 'limit': 50},
-      );
+      stubUnread(1);
+      stubList([notice()]);
       expect(await worker().run(), isTrue);
       expect(sink.shown.single.payload, '/chat/g1');
+      expect(sink.shown.single.title, '需要你确认');
+    });
+    test('没有未读时不拉整页列表', () async {
+      stubUnread(0);
+      // 列表端点故意不给桩：真被请求会 500 → run() 返回 false。
+      expect(await worker().run(), isTrue);
+      expect(sink.shown, isEmpty);
     });
     test('前台不探测端点、不请求网络、不通知', () async {
       foreground = true;
@@ -173,9 +207,8 @@ void main() {
     });
     test('HTTP 503 返回 retry，保留凭证', () async {
       adapter.onGet(
-        '/chat/confirmations',
+        '/me/notices/unread-count',
         (s) => s.reply(503, <String, dynamic>{}),
-        queryParameters: {'status': 'pending', 'limit': 50},
       );
       expect(await worker().run(), isFalse);
       expect(await tokens.read(), isNotNull);
@@ -185,20 +218,15 @@ void main() {
       dio.interceptors.add(
         InterceptorsWrapper(
           onResponse: (response, handler) async {
-            if (response.requestOptions.path.endsWith('/chat/confirmations')) {
+            if (response.requestOptions.path.endsWith('/me/notices')) {
               await state.exclusive(state.advanceSession);
             }
             handler.next(response);
           },
         ),
       );
-      adapter.onGet(
-        '/chat/confirmations',
-        (s) => s.reply(200, {
-          'items': [card()],
-        }),
-        queryParameters: {'status': 'pending', 'limit': 50},
-      );
+      stubUnread(1);
+      stubList([notice()]);
       expect(await worker().run(), isTrue);
       expect(sink.shown, isEmpty);
     });
@@ -211,13 +239,8 @@ void main() {
           },
         ),
       );
-      adapter.onGet(
-        '/chat/confirmations',
-        (s) => s.reply(200, {
-          'items': [card()],
-        }),
-        queryParameters: {'status': 'pending', 'limit': 50},
-      );
+      stubUnread(1);
+      stubList([notice()]);
       expect(await worker().run(), isTrue);
       expect(sink.shown, isEmpty);
     });

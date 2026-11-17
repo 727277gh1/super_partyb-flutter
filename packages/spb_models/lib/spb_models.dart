@@ -42,6 +42,7 @@ export 'src/chat_turn.dart';
 export 'src/chat_turn_schedule.dart';
 export 'src/context_usage.dart';
 export 'src/group_usage.dart';
+export 'src/notice.dart';
 export 'src/turn_runtime.dart';
 export 'src/chat_turn_summary.dart';
 export 'src/event_category.dart';
