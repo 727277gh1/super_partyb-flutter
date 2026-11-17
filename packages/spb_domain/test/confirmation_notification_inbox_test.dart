@@ -63,7 +63,6 @@ void main() {
     );
   }
 
-
   Notice notice({
     String id = 'n1',
     String kind = 'confirmation_required',
@@ -191,7 +190,11 @@ void main() {
     // 这是 #187 的核心价值：卡片 10 分钟后消失，notice 不会。
     clock = now.add(const Duration(hours: 2));
     await pollNotices([
-      notice(data: {'expires_at': now.add(const Duration(minutes: 10)).toIso8601String()}),
+      notice(
+        data: {
+          'expires_at': now.add(const Duration(minutes: 10)).toIso8601String(),
+        },
+      ),
     ]);
     expect(shown, hasLength(1));
     expect(shown.single.body, contains('已失效'));
@@ -223,7 +226,9 @@ void main() {
   });
 
   test('未知 kind 也通知，不抛异常', () async {
-    await pollNotices([notice(kind: 'turn_completed', title: '任务完成', body: '好了')]);
+    await pollNotices([
+      notice(kind: 'turn_completed', title: '任务完成', body: '好了'),
+    ]);
     expect(shown, hasLength(1));
     expect(shown.single.title, '任务完成');
   });

@@ -40,7 +40,8 @@ void main() {
     'severity': severity,
     'title': '需要你确认',
     'body': '需要确认是否继续重试',
-    'data': data ?? {'confirmation_id': 'c1', 'expires_at': '2026-11-17T12:10:00Z'},
+    'data':
+        data ?? {'confirmation_id': 'c1', 'expires_at': '2026-11-17T12:10:00Z'},
     'group_id': 'g1',
     'created_at': '2026-11-17T12:00:00Z',
     'updated_at': '2026-11-17T12:00:00Z',

@@ -210,10 +210,7 @@ class BackgroundNotificationWorker {
         );
         // complete 恒为 false：拉的是有上限的一页，不能据「缺席」推断已处理。
         // 撤销靠 notice 的 read_at（已读即 resolved），不靠缺席。
-        final sent = await inbox.handleNotices(
-          page.notices,
-          focused: false,
-        );
+        final sent = await inbox.handleNotices(page.notices, focused: false);
         await state.markChecked(DateTime.now());
         SpbLog.info('后台通知检查完成', {
           'unread': page.unread,
