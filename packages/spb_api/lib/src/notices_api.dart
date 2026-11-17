@@ -49,7 +49,9 @@ class NoticesApi {
     final notices = <Notice>[];
     if (raw is List) {
       for (final e in raw) {
-        if (e is Map) notices.add(Notice.fromJson(Map<String, dynamic>.from(e)));
+        if (e is Map) {
+          notices.add(Notice.fromJson(Map<String, dynamic>.from(e)));
+        }
       }
     }
     return NoticeListResult(
