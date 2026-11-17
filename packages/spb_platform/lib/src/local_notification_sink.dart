@@ -28,11 +28,13 @@
 /// [requestPermission] 返回 false，判定层静默跳过，不会崩）。
 library;
 
+import 'dart:async' show Completer;
 import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 
 /// 基于 `flutter_local_notifications` 的通知发送实现。
@@ -63,6 +65,16 @@ class LocalNotificationSink implements NotificationSink {
 
   void Function(String? payload)? _onSelect;
 
+  /// 自检的点击捕获点（issue #90）。
+  ///
+  /// ## 为什么与 [_onSelect] 分开而不是临时接管它
+  ///
+  /// [_onSelect] 是**业务导航**的接线（`ConfirmationNotifier.attach` 设的）。
+  /// 自检若把它临时替换掉，用户恰好在自检期间点了一张**真实确认卡**的通知，
+  /// 那次点击就丢了（页面不跳，用户以为确认卡坏了）。故自检只旁路监听，
+  /// 原回调照常执行。
+  void Function(String? payload)? _selfTestClick;
+
   @override
   set onSelect(void Function(String? payload)? callback) =>
       _onSelect = callback;
@@ -92,6 +104,7 @@ class LocalNotificationSink implements NotificationSink {
         ),
         onDidReceiveNotificationResponse: (response) {
           _onSelect?.call(response.payload);
+          _selfTestClick?.call(response.payload);
         },
       );
       _initialized = ok ?? false;
@@ -170,7 +183,12 @@ class LocalNotificationSink implements NotificationSink {
 
   @override
   Future<void> show(LocalNotification notification) async {
-    if (!await initialize()) return;
+    await _showInternal(notification);
+  }
+
+  /// [show] 的可判定版本：返回是否真的发出去（供自检区分「没弹」与「没点」）。
+  Future<bool> _showInternal(LocalNotification notification) async {
+    if (!await initialize()) return false;
     try {
       await _plugin.show(
         // ## id 为什么取 hashCode 而不是自增序号
@@ -188,10 +206,100 @@ class LocalNotificationSink implements NotificationSink {
         notificationDetails: _details(),
         payload: notification.payload,
       );
+      return true;
     } catch (e) {
       // 发送失败（无 D-Bus、被系统拒绝）不该影响业务逻辑。
       debugPrint('[notifications] 发送失败（已忽略）：$e');
+      return false;
     }
+  }
+
+  /// 通知自检（issue #90）：走完整四步并给出可读结论。
+  ///
+  /// ## 它解决的问题
+  ///
+  /// 「通知到底能不能用」在无真机/无桌面的环境里**永远无法证明**（§8/§9）：
+  /// 单测只能证明「装配对了」（注入的桩被调用），证明不了「toast 真的弹、
+  /// 点了真的回到对话」。故把四步（初始化 / 权限 / 发送 / 点击）串成一条
+  /// 可主动触发的自检，结果既给用户看，也进诊断报告。
+  ///
+  /// ## 为什么等待点击而不是立即返回
+  ///
+  /// 点击回调是异步且**可能永远不来**（权限被拒 / 用户没点 / 回调没接线）。
+  /// 立即返回只能证明「发出去了」，而那正是 issue #90 里最容易误导人的
+  /// 一半。故这里等 [clickWait]：拿到 payload = 全链路通；超时 = 前两/三步
+  /// 可能没问题但最后一步没验证到（报告里 [NotificationSelfTestReport.shown]
+  /// 仍是 true，用户据此判断「是没弹还是点不动」）。
+  ///
+  /// 等待期间 [_selfTestClick] 旁路捕获，**不接管**业务导航回调。
+  Future<NotificationSelfTestReport> selfTest({
+    String payload = kNotificationSelfTestPayload,
+    Duration clickWait = const Duration(seconds: 30),
+    String title = '通知自检',
+    String body = '点我：验证点击能回到应用',
+  }) async {
+    final initialized = await initialize();
+    if (!initialized) {
+      return NotificationSelfTestReport(
+        payload: payload,
+        initialized: false,
+        permissionGranted: false,
+        shown: false,
+      );
+    }
+
+    final granted = await requestPermission();
+    if (!granted) {
+      return NotificationSelfTestReport(
+        payload: payload,
+        initialized: true,
+        permissionGranted: false,
+        shown: false,
+      );
+    }
+
+    final clicked = Completer<String?>();
+    _selfTestClick = (p) {
+      if (!clicked.isCompleted) clicked.complete(p);
+    };
+
+    final shown = await _showInternal(
+      LocalNotification(
+        // 固定 id：反复自检只覆盖同一条，不在通知中心堆出一串「通知自检」。
+        id: 'spb-notification-self-test',
+        title: title,
+        body: body,
+        payload: payload,
+      ),
+    );
+
+    if (!shown) {
+      _selfTestClick = null;
+      return NotificationSelfTestReport(
+        payload: payload,
+        initialized: true,
+        permissionGranted: true,
+        shown: false,
+      );
+    }
+
+    final clickedPayload = await clicked.future.timeout(
+      clickWait,
+      onTimeout: () => null,
+    );
+    _selfTestClick = null;
+
+    final report = NotificationSelfTestReport(
+      payload: payload,
+      initialized: true,
+      permissionGranted: true,
+      shown: true,
+      clickedPayload: clickedPayload,
+      clickWait: clickWait,
+    );
+    // 写进环形缓冲：用户导出诊断报告时自带这一行，不必靠回忆。
+    SpbLog.info('通知自检完成', {'result': report.logLine});
+    return report;
   }
 
   NotificationDetails _details() {

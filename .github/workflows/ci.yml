@@ -312,6 +312,26 @@ jobs:
             (cd "apps/$app" && flutter test)
           done
 
+      # 通知链路的**真实现**测试（issue #90）。
+      #
+      # ## 为什么单独一步、且必须包 `dbus-run-session`
+      #
+      # `LocalNotificationSink` 在 Linux 上走 `flutter_local_notifications_linux`
+      # （**纯 Dart**，D-Bus 直连），所以测试可以用进程内的假 daemon 断言
+      # 「Notify 真的发出去了、ActionInvoked 真的把 payload 带回来」——这是
+      # 无 GUI/无真机环境下唯一能覆盖到插件真实现的一条。
+      #
+      # 但没有会话总线时那组用例会**整组 skip**（保持绿），所以不包一层
+      # `dbus-run-session` 就等于没跑：CI 必须显式建总线。
+      #
+      # `dbus` 包在 ubuntu-24.04 镜像里通常已有；`apt-get install` 兜底。
+      - name: Notification pipeline test (real D-Bus)
+        run: |
+          set -euo pipefail
+          command -v dbus-run-session >/dev/null || sudo apt-get update -qq
+          command -v dbus-run-session >/dev/null || sudo apt-get install -y -qq dbus
+          dbus-run-session -- bash -c 'cd packages/spb_platform && flutter test test/local_notification_sink_linux_test.dart'
+
       # ── 覆盖率采集（issue #25）───────────────────────────────────────
       #
       # 为什么单独一步而不是把 `--coverage` 加到上面的测试循环：

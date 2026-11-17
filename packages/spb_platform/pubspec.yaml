@@ -41,3 +41,13 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  # ---- 仅测试用：Linux 通知链路的真实现（issue #90）----
+  #
+  # 假 notification daemon 跑在**进程内**（`DBusObject` + `requestName`），
+  # 于是测试不需要外部脚本、不需要 GUI，CI 用 `dbus-run-session` 即可断言
+  # 「Notify 真的发出去了、ActionInvoked 真的把 payload 带回来」。
+  #
+  # 平台实现本身（`flutter_local_notifications_linux`）不用单独声明：它由
+  # 本包已有的 `flutter_local_notifications` 再导出，测试从那里拿
+  # `LinuxFlutterLocalNotificationsPlugin` 与 `FlutterLocalNotificationsPlatform`。
+  dbus: ^0.7.15
