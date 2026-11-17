@@ -2233,7 +2233,10 @@ HTML/CSS/JS 引擎，内嵌要 CEF 类运行时（Linux 桌面无官方实现：
 | `legacyPreviewPage` | Office / 压缩包 / 未知 | `/ufs/preview.html?file_id=…` | UFS `isMediaMime` **不放行** Office（会 415），只能回旧预览页 |
 
 **顺手修掉的一个真 bug：SVG 曾被判成 `image`。** `_imageExtensions` 里有 `.svg`，于是
-`Image.memory` 去解码 SVG——它没有解码器，用户得到的是「图片加载失败」。小程序的处置
+`Image.memory` 去解码 SVG——它没有解码器（框架不带 svg 解码器；仓库里的
+`flutter_svg` 只是经 `flutter_math_fork`（`GptMarkdown` 的公式渲染）进来的**传递**
+依赖，没有任何包直接声明它——真要用得先新增直接依赖并改 lockfile），用户得到的是
+「图片加载失败」。小程序的处置
 更彻底（`preview.ts` 的 `isSvgFile` 分支）：SVG 是可携带脚本的主动内容，`<image>` /
 `previewImage` 也不支持 `image/svg+xml`，故一律送独立预览域。这里同取：SVG 归
 `external · htmlSession`（UFS 的 `isPreviewableHTMLMime` 本就含 `image/svg+xml`）。
@@ -2301,3 +2304,60 @@ HTML/CSS/JS 引擎，内嵌要 CEF 类运行时（Linux 桌面无官方实现：
 - 真机观感（本机无 `DISPLAY`）：壳页多一步「打开预览」是否被用户当成故障。
 - 媒体签名 URL 在移动端的外部打开器里是否都能连贯播放（`UFS_MEDIA_TTL=30m`，刷新即 404）。
 - PDF 内联渲染仍不做（需 pdfium 类插件，Linux 支持与体积另评）——现在走浏览器，已不需登录。
+
+### 6.110 交付物预览改用独立页面（不是对话框）（2026-11）
+
+#### 问题：对话框把「怎么退出去」变成了要猜的事
+
+预览原本是 `showDialog`。语义上它也是一层 `ModalRoute`——系统返回键同样会 pop 它、
+对话不会被退掉。但用户看到的界面里**没有返回入口**：只有右上角 ✕ 和点遮罩。于是
+真实反馈是「按返回会不会把对话也退了？」——用户要么不敢按，要么按了落到列表/退出
+对话去找退路。另两处代价是尺寸上限（`maxWidth: 900 / maxHeight: 720`：长文本、大
+spec、`DataTable` 全在小窗里内滚）与 modal 遮罩（把聊天压暗，既读不痛快也不能顺手
+看上下文）。
+
+#### 决策：一份实现、一层页面、三个同源出口
+
+`showAgentFilePreview` 改成向 **root Navigator** push 一层 `MaterialPageRoute`
+（`RouteSettings(name: 'agent-file-preview')`），页面是 `Scaffold` + `AppBar`：
+
+| 出口 | 实现 | 结果 |
+|---|---|---|
+| 系统返回键 | Android/iOS 的 pop 路由消息 | `Navigator.pop` |
+| AppBar 返回箭头 | `BackButton` | 同上 |
+| 右上角 ✕ | `IconButton` → `maybePop` | 同上 |
+
+三者都**只弹这一层**：对话路由原样留在下面，关预览不会连带退对话。
+
+- **为什么压在 root Navigator**：移动端对话是 `StatefulShellRoute` 的 tab 分支，页面
+  若压进分支栈会与「返回对话 tab」的语义缠在一起（tab 切走再切回时还留着预览页）。
+  root 层是唯一的「整屏临时面」位置——与 `SpbRoutes.overlay`（无归属输入窗）、
+  `login` / `lock` 同一条理由。
+- **为什么两端都用页面（不做对称例外）**：桌面没有返回键，但 ✕ 与 AppBar 返回同源，
+  多一层转场换来「不被 720px 卡住、内容占满窗口」。§6.10 记录的是**面板族**的有意
+  不对称，不是这类「同一件事的两种容器」——换容器就两端一起换，否则判据要分叉。
+- **正文仍限宽 980**：桌面最大化窗口下不让正文/图片被拉成一行 2000px（可读行宽），
+  窄屏时该上限自然不生效。
+
+#### 代价与边界（诚实记录）
+
+- 桌面端多一次页面转场；预览时看不到对话——与对话框时代等价（多窗口 §6.5 做不到）。
+- 图片仍走 `InteractiveViewer` + 解码上限（§6.74 的 `cacheWidth`），页面只是给了它
+  更大的可用面积。
+- `external` 类**不是**这个页面能解决的：它照旧跳系统浏览器（通道见 §6.108）。
+- 预览页不参与 go_router 路由表（`MaterialPageRoute` 直接压 Navigator），故没有可
+  分享的 URL；需要「预览某文件」的深链是另一件事，别顺手把它塞进路由表。
+
+#### 反向验证
+
+- `packages/spb_features/test/chat/agent_file_preview_test.dart` 的「返回语义」组三条：
+  系统返回键 / AppBar 返回箭头 / 右上角 ✕ 各弹一次后都必须满足「预览页没了，宿主页
+  还在」（`find.text('open')`）。改回 `showDialog` 或压进分支栈 → 宿主路由断言即红；
+  用 `PopScope(canPop: false)` 拦返回 → 系统返回键那条红。
+- 未注入能力时不 push（`hasAny` 假 → 找不到 `agent-file-preview-page`）：改成
+  「先 push 再判空」会让「点了没反应」的框重新出现。
+
+#### 未验证
+
+- 真机观感（本机无 `DISPLAY`）：移动端 AppBar 返回箭头与系统返回手势（edge swipe）
+  是否都被用户当成「关掉这一页、对话还在」。

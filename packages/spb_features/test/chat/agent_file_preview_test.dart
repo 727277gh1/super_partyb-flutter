@@ -96,16 +96,80 @@ void main() {
     expect(find.text('3764.16'), findsOneWidget);
     expect(t.takeException(), isNull);
   });
+  group('返回语义：只关预览页，下层的对话路由不退（2026-11）', () {
+    // 这是把预览从对话框改成页面的**核心理由**：用户点系统返回时，关掉的应
+    // 该只有预览这一层（§6.109）。若将来有人把 push 换成「塞进对话路由」或
+    // 用 `PopScope` 拦返回，这一组会红——它比任何文档都可靠。
+    Future<void> openText(WidgetTester t) => _pumpPreview(
+      t,
+      file: _file(),
+      onPreview: AgentFilePreviewCallbacks(
+        loadBytes: (_) async => utf8.encode('# 标题\n正文'),
+      ),
+    );
+
+    testWidgets('系统返回键：预览页消失，宿主页（对话）仍在', (t) async {
+      await openText(t);
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-page')),
+        findsOneWidget,
+      );
+      // 宿主路由被页面覆盖，仍在树里但处在 Offstage（不参与默认 finder 命中）——
+      // 这里显式 skipOffstage:false 断言它**没有**被一起 pop 掉。
+      expect(
+        find.text('open', skipOffstage: false),
+        findsOneWidget,
+        reason: '宿主路由被页面覆盖但仍在下层',
+      );
+
+      // 模拟 Android/iOS 的系统返回：走 binding 的 pop 路由消息，
+      // 与按硬件返回键同一条链路（不是点 ✕）。
+      await t.binding.handlePopRoute();
+      await t.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-page')),
+        findsNothing,
+      );
+      // 关键断言：对话没有被一起退掉（宿主按钮重新可点）。
+      expect(find.text('open'), findsOneWidget);
+    });
+
+    testWidgets('AppBar 返回箭头也只弹一层', (t) async {
+      await openText(t);
+      await t.tap(find.byKey(const ValueKey('agent-file-preview-back')));
+      await t.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-page')),
+        findsNothing,
+      );
+      expect(find.text('open'), findsOneWidget);
+    });
+
+    testWidgets('右上角关闭与返回同源（同一个 pop 结果）', (t) async {
+      await openText(t);
+      await t.tap(find.byKey(const ValueKey('agent-file-preview-close')));
+      await t.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('agent-file-preview-page')),
+        findsNothing,
+      );
+      expect(find.text('open'), findsOneWidget);
+    });
+  });
+
   group('未注入能力：入口不渲染 / 不弹窗', () {
-    testWidgets('onPreview 为 null 时不弹对话框', (t) async {
+    testWidgets('onPreview 为 null 时不打开预览页', (t) async {
       await _pumpPreview(t, file: _file(), onPreview: null);
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsNothing,
       );
     });
 
-    testWidgets('两个回调都为 null（hasAny 假）时不弹对话框', (t) async {
+    testWidgets('两个回调都为 null（hasAny 假）时不打开预览页', (t) async {
       // 关键：`hasAny` 为假必须**拦住**，否则会弹出一个永远取不到内容的框。
       await _pumpPreview(
         t,
@@ -113,7 +177,7 @@ void main() {
         onPreview: const AgentFilePreviewCallbacks(),
       );
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsNothing,
       );
     });
@@ -136,7 +200,7 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsOneWidget,
       );
       expect(find.text('a.txt'), findsOneWidget);
@@ -718,7 +782,7 @@ void main() {
       );
 
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsNothing,
       );
     });
@@ -773,14 +837,14 @@ void main() {
         ),
       );
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsOneWidget,
       );
 
       await t.tap(find.byKey(const ValueKey('agent-file-preview-close')));
       await t.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsNothing,
       );
     });

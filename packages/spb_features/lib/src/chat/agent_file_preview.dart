@@ -18,7 +18,7 @@ import 'spec_ui_card.dart';
 /// 的语义是「预览大图」，与缩略图/头像/Markdown 图片各自不同）。
 ///
 /// 最终解码宽 = `1024 × devicePixelRatio`（`imageDecodeCeilingFor`）。
-/// 取 1024 而不是实际视口宽：预览对话框在窄屏手机上不足 1024，但解码
+/// 取 1024 而不是实际视口宽：预览页在窄屏手机上不足 1024，但解码
 /// 宽只影响内存不影响显示（`BoxFit.contain` 自己缩）；而桌面端全屏预览
 /// 可能接近这个量级。1024×2（常见 DPR）≈ 2048 物理像素，是「高清阅读
 /// 与内存占用」的折衷点（docs/memory-audit.md G4b 的 2048px 上限）。
@@ -99,21 +99,36 @@ class AgentFilePreviewCallbacks {
 
   /// 是否至少有一个可用能力（决定预览入口是否渲染）。
   ///
-  /// 注意 [openMapMarker] **不计入**：它只在已经打开的预览对话框里用得上，
+  /// 注意 [openMapMarker] **不计入**：它只在已经打开的预览页里用得上，
   /// 不能单独让「预览」按钮出现（否则只配了它时点预览会得到空对话框）。
   bool get hasAny => loadBytes != null || openExternal != null;
 }
 
-/// 打开文件预览对话框（按类型渲染文本 / 图片 / 外部跳转）。
+/// 打开文件预览**页面**（按类型渲染文本 / 图片 / 外部跳转）。
 ///
 /// ## 入口
 ///
 /// 由 [AgentFileCard] 的预览按钮调用；未注入 [AgentFilePreviewCallbacks] 时
 /// 按钮不渲染，故**只读时间线**用法完全不受影响。
 ///
+/// ## 为什么是独立页面而不是对话框（2026-11）
+///
+/// 对话框也是一层 `ModalRoute`，返回键同样能 pop 它，但有三处实际代价：
+///
+/// 1. **返回键心智模型**：用户对「关掉这块内容」的默认动作是系统返回 / 左上角
+///    返回。对话框没有返回箭头，只能点 ✕ 或遮罩——用户无法从界面确认「返回一次
+///    只关预览、对话还在」，实际用起来就会退到列表甚至退出对话去找退路。
+/// 2. **尺寸上限**：对话框曾固定 `maxWidth: 900 / maxHeight: 720`，长文本、
+///    大 spec、DataTable 全在小窗里内滚。
+/// 3. **对照与沉浸**：modal 遮罩把聊天压暗，既读不痛快也没法顺手看一眼上下文。
+///
+/// 页面在 **root Navigator** 上压一层 `MaterialPageRoute`：系统返回键、AppBar
+/// 返回箭头、右上角关闭三者都是 `Navigator.pop`，且**只弹这一层**——对话路由原样
+/// 留在下面，不会因为关闭预览把对话一起退掉。
+///
 /// ## 类型判定在打开时就定了
 ///
-/// [resolvePreviewKind] 是纯函数，不依赖网络。故对话框能**立刻**决定布局
+/// [resolvePreviewKind] 是纯函数，不依赖网络。故页面能**立刻**决定布局
 /// （图片占位尺寸、文本等宽字体、external 直接给跳转按钮），而不是先拉一次
 /// 字节再猜。取数只在 text / image 两条分支上发生。
 ///
@@ -127,24 +142,28 @@ Future<void> showAgentFilePreview({
   AgentFilePreviewCallbacks? onPreview,
 }) {
   if (onPreview == null || !onPreview.hasAny) return Future<void>.value();
-  return showDialog<void>(
-    context: context,
-    builder: (_) => _AgentFilePreviewDialog(file: file, onPreview: onPreview),
+  // 压在 root Navigator 上：不塞进任何分支的导航栈（移动端的
+  // `StatefulShellRoute` tab 栈），跨端行为一致（桌面没有返回键，但 AppBar 的
+  // 返回 / 关闭同源）。
+  return Navigator.of(context, rootNavigator: true).push<void>(
+    MaterialPageRoute<void>(
+      builder: (_) => _AgentFilePreviewPage(file: file, onPreview: onPreview),
+      settings: const RouteSettings(name: 'agent-file-preview'),
+    ),
   );
 }
 
-class _AgentFilePreviewDialog extends StatefulWidget {
-  const _AgentFilePreviewDialog({required this.file, required this.onPreview});
+class _AgentFilePreviewPage extends StatefulWidget {
+  const _AgentFilePreviewPage({required this.file, required this.onPreview});
 
   final AgentFileItem file;
   final AgentFilePreviewCallbacks onPreview;
 
   @override
-  State<_AgentFilePreviewDialog> createState() =>
-      _AgentFilePreviewDialogState();
+  State<_AgentFilePreviewPage> createState() => _AgentFilePreviewPageState();
 }
 
-class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
+class _AgentFilePreviewPageState extends State<_AgentFilePreviewPage> {
   /// text / image 的取数结果；external 恒为 null（不需要取数）。
   Future<_PreviewPayload>? _loading;
 
@@ -250,25 +269,35 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
     final scheme = theme.colorScheme;
     final kind = _kind;
 
-    return Dialog(
-      key: const ValueKey('agent-file-preview-dialog'),
-      insetPadding: const EdgeInsets.all(SpbSpacing.xxl),
-      clipBehavior: Clip.antiAlias,
-      child: ConstrainedBox(
-        // 上限而非固定尺寸：小图/短文本时对话框贴着内容，长文本时到顶后内滚。
-        constraints: const BoxConstraints(
-          maxWidth: 900,
-          maxHeight: 720,
-          minWidth: 320,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _header(theme, scheme, kind),
-            const Divider(height: 1),
-            Flexible(child: _body(kind)),
-          ],
+    return Scaffold(
+      key: const ValueKey('agent-file-preview-page'),
+      // 三个出口同源：系统返回键 / 这个返回箭头 / 右上角 ✕ 都是 `Navigator.pop`，
+      // 都只弹这一层页面——对话路由原样留在下面。
+      appBar: AppBar(
+        leading: const BackButton(key: ValueKey('agent-file-preview-back')),
+        titleSpacing: 0,
+        title: _header(theme, scheme, kind),
+        actions: [
+          IconButton(
+            key: const ValueKey('agent-file-preview-close'),
+            icon: const Icon(Icons.close),
+            tooltip: '关闭',
+            onPressed: () => Navigator.of(context).maybePop(),
+          ),
+        ],
+      ),
+      body: Center(
+        child: ConstrainedBox(
+          // 宽屏（桌面最大化窗口）不把内容拉成一行 2000px：保持可读行宽；
+          // 窄屏时该上限自然不生效。
+          constraints: const BoxConstraints(maxWidth: 980),
+          child: SizedBox(
+            width: double.infinity,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [Expanded(child: _body(kind))],
+            ),
+          ),
         ),
       ),
     );
@@ -311,12 +340,6 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
               ],
             ),
           ),
-          IconButton(
-            key: const ValueKey('agent-file-preview-close'),
-            icon: const Icon(Icons.close),
-            tooltip: '关闭',
-            onPressed: () => Navigator.of(context).maybePop(),
-          ),
         ],
       ),
     );
@@ -355,7 +378,7 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
     );
   }
 
-  /// spec：复用 `SpecUiCard`（只读展示——预览对话框无动作通道，不传 `onAction`）。
+  /// spec：复用 `SpecUiCard`（只读展示——预览页无动作通道，不传 `onAction`）。
   ///
   /// 包一层滚动容器：spec 文档可能比对话框高（服务端产出的 card 列表）。
   /// `SpecUiCard` 在 root 悬空时渲染 `SizedBox.shrink()`，但 `resolveTextPreview`
@@ -442,7 +465,7 @@ class _AgentFilePreviewDialogState extends State<_AgentFilePreviewDialog> {
   ///
   /// ## 链接不可点
   ///
-  /// 预览对话框**没有** `onLinkTap` 注入通道（与 `_specBody` 不传 `onAction`
+  /// 预览页**没有** `onLinkTap` 注入通道（与 `_specBody` 不传 `onAction`
   /// 同一约定：预览是只读展示，不引入动作）。故不传 `onLinkTap`——
   /// `GptMarkdown` 在它为 null 时只渲染样式、不响应点击，与
   /// `AssistantMessageBubble` 的可点行为刻意区分。

@@ -61,7 +61,7 @@ const int kTextPreviewMaxChars = 200 * 1024;
 /// ## 为什么 `.svg` 不在此处（2026-11，参考小程序实现）
 ///
 /// Flutter 的 `Image.memory` **不**解码 SVG（没有内置 svg 解码器），判成
-/// `image` 只会让预览对话框拿一句「图片加载失败」当结果。小程序对同一件事
+/// `image` 只会让预览界面拿一句「图片加载失败」当结果。小程序对同一件事
 /// 的处置更彻底（`apps/miniapp/src/pages/work-detail/media/preview.ts`）：
 /// SVG 是**可携带脚本的主动内容**且 `<image>`/`previewImage` 不支持
 /// `image/svg+xml`，故一律送 UFS 独立预览域（`isPreviewableHTMLMime` 含

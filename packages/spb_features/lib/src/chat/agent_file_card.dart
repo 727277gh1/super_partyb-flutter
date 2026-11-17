@@ -207,7 +207,7 @@ class _AgentFileCardState extends State<AgentFileCard> {
 
   Future<void> _handleOpen() => _runAction(widget.onOpen, '无法打开文件', '打开');
 
-  /// 打开预览对话框。
+  /// 打开预览页（独立页面，§6.110）。
   ///
   /// 不包 `_runAction`：预览没有「返回 bool 表示是否发起成功」的语义——
   /// 失败都发生在对话框内部（取数失败 / 跳转失败），由它自己呈现。

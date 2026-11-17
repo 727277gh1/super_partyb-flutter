@@ -421,7 +421,7 @@ void main() {
       await t.tap(find.byKey(const ValueKey('agent-file-preview')));
       await t.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('agent-file-preview-dialog')),
+        find.byKey(const ValueKey('agent-file-preview-page')),
         findsOneWidget,
       );
     });
