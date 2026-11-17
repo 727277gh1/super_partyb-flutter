@@ -38,7 +38,7 @@
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 [§6.22](design-decisions/testing.md)）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 [§6.14](design-decisions/chat.md)）
-- [x] 首 token之前的分发进度条（[issue #114](https://git.atjog.com/dever/super_partyb-flutter/issues/114) 阶段 2，服务端见 super_partyb#181）：`dispatch_stage` 只认本端 rid、不进缓冲/游标、500ms 门槛、root 收尾即收起，见 [§6.106](design-decisions/chat.md)；本地自动化回归通过，**待 #181 合入 + 123 打开 `SPB_DISPATCH_EVENTS=1` 后真机验收**
+- [x] 首 token之前的分发进度条（[issue #114](https://git.atjog.com/dever/super_partyb-flutter/issues/114) 阶段 2，服务端见 super_partyb#181）：`dispatch_stage` 只认本端 rid、不进缓冲/游标、500ms 门槛、root 收尾即收起，见 [§6.106](design-decisions/chat.md)；本地自动化回归通过，**已真机验收**（123 开关已开、用户实测看到进度；`9ab3b54` 补了「帧到没到」的诊断日志，判读见 [§6.106.1](design-decisions/chat.md)）
 - [x] 事件契约目录对拍 + 契约漂移可见出口（[issue #116](https://git.atjog.com/dever/super_partyb-flutter/issues/116) / [#117](https://git.atjog.com/dever/super_partyb-flutter/issues/117) / [#118](https://git.atjog.com/dever/super_partyb-flutter/issues/118)）：vendored `event-catalog.json` + 语义对拍（类别闭集 / timeline 全覆盖 / 控制类闭环）、未知类型不再静默（一行「未知事件」+ 每类型一次 warn），顺带修掉 `habit_pattern_recalibrated` 被丢弃的真 bug，见 [§6.107](design-decisions/chat.md)；「18 → ≤7 渲染器合并」按票面数据不成立，保持按类型分派
 - [x] `error` 事件按服务端 `code` 出表现（[issue #115](https://git.atjog.com/dever/super_partyb-flutter/issues/115)，服务端 P0 见 super_partyb#182）：`code` 闭集镜像 + vendored 对拍（`tools/sync_error_codes.sh`）、正文只取 `message`、`detail` 折叠进「技术详情」、`retryable` 决定「重发」，见 [§6.105](design-decisions/chat.md)；本地自动化回归通过（含 `error_banner` golden 未变），123 真实 OOM / 限流事件待复现复核
 - [x] 发送的乐观回显（请求在飞时「发送中」，issue #52，见 [§6.50](design-decisions/chat.md)）
