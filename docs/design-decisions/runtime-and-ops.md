@@ -873,3 +873,85 @@ Android 需要 FCM 或厂商通道（小米/vivo 等要求应用市场上架）�
 **重新评估触发条件**：服务端 WebPush / 厂商通道落地后，本节的"客户端无法突破"
 随之失效——届时需要重排 §6.99 的事件范围，并给移动端补通知渠道注册与
 `DisplayMode.standalone` 的 PWA 壳。
+
+---
+
+### 6.109 通知的真机验证压成「三步」：Linux 走真 D-Bus 自动化，其余靠 App 内自检（2026-11，issue #90）
+
+issue #90 的原始形态是一张 12 项的真机清单，在本机（Debian 12 LXC，无 `DISPLAY`、
+无真机、无 `/dev/kvm`，§9）**一项都跑不了**。本轮把它拆成「能自动化的自动化、
+不能的压到用户点三下」。
+
+#### 关键事实：Linux 这条路不需要 GUI
+
+`flutter_local_notifications_linux` 是**纯 Dart**（`dartPluginClass`，走 `dbus` 包
+直连 `org.freedesktop.Notifications`，不依赖 libnotify 的 C 库）。因此
+`flutter test` 可以驱动**真实现**，只要：
+
+1. 有会话总线（`dbus-run-session`）；
+2. 有人占住 `org.freedesktop.Notifications` 这个名字——测试里自己实现一个
+   进程内假 daemon（`DBusObject` + 方法分派 + `emitSignal`）。
+
+于是「通知弹出」被等价替换成「`Notify` 的参数正确」，「点击回到应用」被等价替换成
+「daemon 发 `ActionInvoked` 后 `LocalNotificationSink` 拿回期望 payload」。
+两条都在 `packages/spb_platform/test/local_notification_sink_linux_test.dart` 里。
+
+**三个坑（改这条测试前必看）**：
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| `flutter test` 的 `defaultTargetPlatform` 默认是 **android** | 插件按 android 分派 → `initialize()` 返回 false、静默降级 | `debugDefaultTargetPlatformOverride = TargetPlatform.linux` |
+| `flutter test` 不跑插件注册器 | `LateInitializationError: Field '_instance' ...` | 手动 `FlutterLocalNotificationsPlatform.instance = LinuxFlutterLocalNotificationsPlugin()`（不要写 `registerWith()`——它在 web 分支的 stub 上不存在，analyzer 报 `undefined_method`） |
+| 机器上真装了 `xfce4-notifyd` 时 D-Bus 会按需激活它 | 名字被抢走；它无 `DISPLAY` 起不来 → `Spawn.ChildExited` | 假 daemon 用 `doNotQueue` 先占名字，**占不到就跳过**（不是失败） |
+
+对齐的取舍：**没有会话总线时整组 skip**，不让「环境没总线」变成红灯；「插件不可用
+时的静默降级」由 `local_notification_sink_no_dbus_test.dart` 单独守（它刻意不注册
+平台实现，等价于无 D-Bus / 插件缺失）。
+
+#### 其余三档，以及为什么不再逐项手工验
+
+| 平台 | 覆盖方式 | 还差什么 |
+|---|---|---|
+| Linux | 上述自动化（含 `cancel` → `CloseNotification`） | 真实 daemon 的视觉呈现 |
+| Android | CI emulator（`dumpsys notification` 断言 + `uiautomator` 点击）；本机无 `/dev/kvm`（§8 / #30） | 厂商 ROM 的额外权限页 |
+| Windows / macOS | **App 内自检** + 用户口述结论 | toast 是否真弹、是否留在操作中心——CI 无交互桌面会话，只能真机 |
+
+#### App 内自检（`LocalNotificationSink.selfTest`）
+
+设置页多一个「通知自检」入口：发一条真的系统通知（payload = `/settings`），
+**等点击最长 30 秒**，然后给出**四步里第一个失败点**的可读结论并写进日志
+（于是也进诊断报告）。
+
+四个设计取舍：
+
+1. **四步分别记录，而不是一个 bool**：`initialize` / `permission` / `show` / 点击
+   失败时用户看到的都是「没反应」，但修法完全不同（装配 / 权限 / 环境 / 回调接线）。
+   报告给出 `outcome` 枚举 + 一行中文 `verdict`，是**给用户念给我们的那句话**。
+2. **旁路捕获点击，不接管 `onSelect`**：`onSelect` 是业务导航的接线；自检若临时
+   替换它，用户恰好在自检期间点了一张真实确认卡的通知，那次点击就丢了。
+3. **结论留在页面上（subtitle）而不只是 SnackBar**：SnackBar 几秒后消失，
+   报障时用户无话可念、无据可截。
+4. **payload 用 `/settings` 而不是某个对话**：指向 `/chat/<gid>` 要先有真实群 id
+   （换账号 / 空列表会退化成不存在的路由，用户点了落到错误页 → 被判成「点击坏了」）。
+   设置页总是有效，且用户就在那里点自检、能在同一页看到结论。
+
+入口显隐用**类型判定**（`sink is LocalNotificationSink`）而不是另开一个布尔开关：
+开关会与真实装配脱钩（override 改了、开关忘了改 → 用户点一个永远失败的自检）。
+
+#### 验证
+
+- `local_notification_sink_linux_test.dart` 3 条（Notify 参数 / 点击回传 payload /
+  `clickMissing` 不得渲染成 passed）+ `cancel` 一条；
+- `local_notification_sink_no_dbus_test.dart` 3 条（初始化 false 不抛 / show+cancel
+  静默 / 自检给出 `notInitialized` 与可读结论）；
+- `settings_page_test.dart` 6 条（未注入隐藏 / 注入展示 / 单次触发 + 等待态禁用 /
+  结论留存 / 未通过不得渲染成通过 / 抛异常不红屏）；
+- 两端 `production_overrides_test.dart` 各 +1（真 sink 才有入口，Noop 下必须为 null）。
+
+#### 未验证
+
+- **Windows / macOS 的真机结论**：本机无这两端，自检入口只保证「装配正确、结论可读」，
+  不保证 toast 真的弹出（**这正是 issue #90 保持 open 的原因**，#90 的勾选状态
+  仍是事实记录，不要因为它「有工具了」就关掉）。
+- **Android emulator 路径**：CI 里尚未接（需要 `reactivecircus/android-emulator-runner`
+  与 KVM 的 ubuntu runner）；在那之前 Android 只能靠真机跑自检。

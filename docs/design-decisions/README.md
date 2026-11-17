@@ -22,7 +22,7 @@
 | [界面与交互](ui.md) | `ui.md` | §6.16 §6.32 §6.38 §6.40 §6.44 §6.46 §6.51 §6.54 §6.62 §6.70 §6.76 §6.77 §6.78 §6.79 §6.80 §6.81 §6.82 §6.83 §6.88 §6.89 §6.91 |
 | [测试与仓库守卫](testing.md) | `testing.md` | §6.13 §6.17 §6.19 §6.21 §6.22 §6.24 §6.25 §6.26 §6.27 |
 | [构建、分发与发布](build-and-release.md) | `build-and-release.md` | §6.29 §6.30 §6.31 §6.33 §6.61 §6.87 §6.93 §6.101 §7 §8 |
-| [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 §6.99 §6.102 |
+| [产品边界与可运维性](runtime-and-ops.md) | `runtime-and-ops.md` | §6.9 §6.12 §6.20 §6.49 §6.57 §6.99 §6.102 §6.109 |
 | [性能与内存](performance.md) | `performance.md` | §6.47 §6.59 §6.60 §6.72 §6.73 §6.74 §6.96 |
 
 ## 全部小节
@@ -135,3 +135,4 @@
 | §6.106 | 首 token之前的空窗：`dispatch_stage` 进度条、500ms 门槛、只认本端 rid（2026-11，issue #114 / super_partyb#181） | [`chat.md`](chat.md) |
 | §6.107 | 事件目录 vendored 对拍（类别/时间线/控制类）；契约漂移的出口 = 一行「未知事件」+ 每类型一次 warn（2026-11，issue #116 / #117 / #118 / super_partyb#183） | [`chat.md`](chat.md) |
 | §6.108 | 交付物预览：`external` 按小程序 `preview_mode` 分三通道（HTML/SVG→一次性 ticket、图片/音视频/PDF→媒体签名 URL、Office/未知→旧预览页），415/403/5xx 回落；客户端只渲 text/image（2026-11） | [`chat.md`](chat.md) |
+| §6.109 | 通知验证压成三步：Linux 用进程内假 daemon 跑**真**插件（无 GUI 可测），Windows/macOS 靠 App 内「通知自检」；四步失败点分别记录（2026-11，issue #90） | [`runtime-and-ops.md`](runtime-and-ops.md) |
