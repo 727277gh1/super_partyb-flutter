@@ -33,6 +33,7 @@ void main() {
   _biometricLockTests();
   _accountSecurityTests();
   _scanQrLoginTests();
+  _notificationSelfTestTests();
 
   /// 把设置页放进最小可用的 MaterialApp。
   Future<void> pumpSettings(
@@ -2165,6 +2166,153 @@ void _scanQrLoginTests() {
       // 收尾：取消挂起的 future，避免测试结束时留下未完成的异步。
       gate.complete(null);
       await tester.pumpAndSettle();
+    });
+  });
+}
+
+/// 通知自检入口（issue #90）。
+///
+/// ## 这个测试防的是什么
+///
+/// 自检是**用户主动跑的排障工具**，它坏掉的方式都很安静：
+/// - 入口在真实现没装配时也显示 → 用户点了永远「初始化失败」，白跑一趟；
+/// - 等待点击期间不禁用 → 连点两下发两条通知、两个等待，结论互相覆盖；
+/// - 结论只弹 SnackBar → 几秒后消失，用户报障时无话可念、无据可截；
+/// - 失败被当成功渲染 → 用户以为通知功能好了。
+///
+/// 故这里钉住：显隐、单次触发、等待态、结论留存、失败不当成功。
+void _notificationSelfTestTests() {
+  Future<void> pumpEntry(
+    WidgetTester tester, {
+    Future<NotificationSelfTestReport> Function()? onRun,
+  }) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsPage(
+          loadSettings: () async => const SyncSettings(),
+          saveSettings: (_) async {},
+          loadGroups: () async => const [],
+          scanGroups: () async => const [],
+          executePrune: (_) async => const PruneOutcome(deleted: 0, failed: {}),
+          pickDirectory: () async => null,
+          desktopInfo: DesktopIntegrationInfo.hidden,
+          onRunNotificationSelfTest: onRun,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  NotificationSelfTestReport report({
+    bool shown = true,
+    String? clickedPayload,
+    bool initialized = true,
+    bool permissionGranted = true,
+  }) => NotificationSelfTestReport(
+    payload: kNotificationSelfTestPayload,
+    initialized: initialized,
+    permissionGranted: permissionGranted,
+    shown: shown,
+    clickedPayload: clickedPayload,
+    clickWait: const Duration(seconds: 30),
+  );
+
+  group('设置页：通知自检入口', () {
+    testWidgets('未注入时不展示（测试 / 无通知平台的装配）', (tester) async {
+      await pumpEntry(tester);
+
+      expect(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+        findsNothing,
+      );
+      expect(find.text('通知自检'), findsNothing);
+    });
+
+    testWidgets('注入后展示，并说明它会做什么', (tester) async {
+      await pumpEntry(tester, onRun: () async => report());
+
+      expect(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+        findsOneWidget,
+      );
+      expect(find.text('通知自检'), findsOneWidget);
+      expect(find.text('发一条测试通知：验证它能否弹出、点击能否回到应用'), findsOneWidget);
+    });
+
+    testWidgets('点击触发一次回调，等待期间禁用入口并给出等待文案', (tester) async {
+      var calls = 0;
+      final gate = Completer<NotificationSelfTestReport>();
+      await pumpEntry(
+        tester,
+        onRun: () {
+          calls++;
+          return gate.future;
+        },
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+      );
+      await tester.pump();
+
+      expect(calls, 1);
+      expect(find.textContaining('等待你点击'), findsOneWidget);
+
+      // 等待期间再点：不产生第二次调用（否则会发第二条通知、两个等待）。
+      await tester.tap(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+      );
+      await tester.pump();
+      expect(calls, 1);
+
+      gate.complete(report(clickedPayload: kNotificationSelfTestPayload));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('通过时结论留在页面上（不只是 SnackBar）', (tester) async {
+      await pumpEntry(
+        tester,
+        onRun: () async => report(clickedPayload: kNotificationSelfTestPayload),
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+      );
+      await tester.pumpAndSettle();
+
+      // SnackBar 与页面副标题都应带结论：前者即时、后者可截图/可念。
+      expect(find.textContaining('自检通过'), findsWidgets);
+    });
+
+    testWidgets('没收到点击时不能渲染成通过', (tester) async {
+      await pumpEntry(tester, onRun: () async => report(clickedPayload: null));
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('自检通过'), findsNothing);
+      expect(find.textContaining('没收到点击'), findsWidgets);
+    });
+
+    testWidgets('回调抛异常时给可见提示，不冒泡成红屏', (tester) async {
+      await pumpEntry(tester, onRun: () async => throw StateError('boom'));
+
+      await tester.tap(
+        find.byKey(const ValueKey('settings-notification-self-test')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('通知自检失败，请重试'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 }

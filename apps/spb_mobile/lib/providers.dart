@@ -43,6 +43,17 @@ final notificationSinkProvider = Provider<NotificationSink>((ref) {
   return const NoopNotificationSink();
 });
 
+/// 「通知自检」入口（issue #90）。null = 本端装配的不是真 sink → 不展示入口。
+///
+/// 与桌面端同名同构（判定用类型而不是开关，理由见那里）。移动端尤其需要它：
+/// Android 13+ 的运行时权限、后台/被杀后点通知冷启动都只能在真机（或 CI
+/// emulator）上验，而「弹得出、点得回」这一条至少能让用户自己先跑一遍。
+final notificationSelfTestProvider =
+    Provider<Future<NotificationSelfTestReport> Function()?>((ref) {
+      final sink = ref.watch(notificationSinkProvider);
+      return sink is LocalNotificationSink ? sink.selfTest : null;
+    });
+
 /// 主窗口/应用当前是否聚焦（可写）。
 ///
 /// ## 为什么是 `NotifierProvider` 而不是 `StateProvider`

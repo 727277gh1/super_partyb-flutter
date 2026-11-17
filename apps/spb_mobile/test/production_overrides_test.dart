@@ -56,6 +56,26 @@ void main() {
       final sink = container.read(notificationSinkProvider);
       expect(sink, isA<NoopNotificationSink>());
     });
+
+    // 「通知自检」入口（issue #90）随 sink 真假而显隐：真 sink 才给函数，
+    // Noop 给 null（页面据此不渲染入口）。这条同时守住两件事——漏挂 override
+    // 时入口不会凭空出现，而装配正确时它必须存在（否则用户永远点不到自检）。
+    test('通知自检入口只随真 sink 出现', () {
+      final container = buildProductionContainer();
+      expect(
+        container.read(notificationSelfTestProvider),
+        isNotNull,
+        reason: '生产装配是真的 sink，自检入口必须可点',
+      );
+
+      final plain = ProviderContainer();
+      addTearDown(plain.dispose);
+      expect(
+        plain.read(notificationSelfTestProvider),
+        isNull,
+        reason: 'Noop sink 下必须隐藏入口，而不是让用户点一个永远失败的自检',
+      );
+    });
   });
 
   testWidgets('真 sink 装配下，启动即请求一次通知权限', (tester) async {

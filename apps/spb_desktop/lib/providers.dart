@@ -55,6 +55,24 @@ final notificationSinkProvider = Provider<NotificationSink>((ref) {
   return const NoopNotificationSink();
 });
 
+/// 「通知自检」入口（issue #90）。null = 本端装配的不是真 sink → 不展示入口。
+///
+/// ## 为什么用类型判定而不是再开一个开关
+///
+/// 自检必须打到**真的**插件上（`initialize` → 权限 → `show` → 等点击），
+/// 而 `NotificationSink` 是契约：测试/不支持通知的平台拿到的是
+/// `NoopNotificationSink`（它连插件都不碰）。再开一个「支持自检」的布尔就会
+/// 与真实能力脱钩（装配改了、布尔忘了改 → 用户点一个永远失败的自检）。
+/// 类型判定直接问「你到底是不是那个真实现」。
+///
+/// 自检的完整编排在 `LocalNotificationSink.selfTest`（含 30 秒点击等待），
+/// 本 provider 只负责「有就接、没有就藏」。
+final notificationSelfTestProvider =
+    Provider<Future<NotificationSelfTestReport> Function()?>((ref) {
+      final sink = ref.watch(notificationSinkProvider);
+      return sink is LocalNotificationSink ? sink.selfTest : null;
+    });
+
 /// 主窗口/应用当前是否聚焦（可写）。
 ///
 /// ## 为什么是 `NotifierProvider` 而不是 `StateProvider`

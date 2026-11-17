@@ -3086,6 +3086,9 @@ class _SettingsPage extends ConsumerWidget {
       // 未注入 → 不展示入口（而非展示一个点了必失败的按钮）。
       onExportDiagnostics: () =>
           exportDiagnosticsReport(ref.read(desktopCapabilitiesProvider)),
+      // 通知自检（issue #90）：只有装配的是真 `LocalNotificationSink` 时才有
+      // 入口（否则 provider 给 null → 不展示）。移动端同名同构。
+      onRunNotificationSelfTest: ref.watch(notificationSelfTestProvider),
       // 自动同步：**仅桌面端**渲染（移动端没有可靠的后台排程，见
       // `SettingsPage.showAutoSync` 的说明）。
       showAutoSync: true,

@@ -27,6 +27,15 @@ typedef PickSettingsDirectory = Future<String?> Function();
 /// 用 `bool` 会把取消当失败，用户点一下取消就看到「导出失败」。
 typedef ExportDiagnostics = Future<DiagnosticsExportOutcome> Function();
 
+/// 运行「通知自检」（issue #90）。为 null 时**不展示**该入口。
+///
+/// ## 为什么由装配层注入而不是页面自己拿 sink
+///
+/// 自检要发一条**真的**系统通知并等用户点击（最长 30 秒），这与「导出诊断
+/// 报告」同一性质：它是平台能力的编排，判定留在装配层。测试注入一个立即返回
+/// 的报告，页面只负责渲染结论——否则页面测试得等 30 秒或造一个假 sink。
+typedef RunNotificationSelfTest = Future<NotificationSelfTestReport> Function();
+
 /// 读取主题模式偏好。
 typedef LoadThemeMode = Future<ThemeMode> Function();
 
@@ -227,6 +236,7 @@ class SettingsPage extends StatefulWidget {
     this.preferenceAgentOptions = const [],
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
+    this.onRunNotificationSelfTest,
     this.onOpenAccountSecurity,
     this.onScanQr,
     this.onQrScanned,
@@ -419,6 +429,13 @@ class SettingsPage extends StatefulWidget {
   /// 见 [ExportDiagnostics] 的说明。
   final ExportDiagnostics? onExportDiagnostics;
 
+  /// 运行「通知自检」（issue #90）。为 null 时**不展示**该入口。
+  ///
+  /// 装配层只在真的持有 `LocalNotificationSink` 时注入（测试 / 无通知平台
+  /// 拿到 `NoopNotificationSink` → 传 null）。理由与 [onExportDiagnostics]
+  /// 同一约定：判定留在装配层，页面只渲染。
+  final RunNotificationSelfTest? onRunNotificationSelfTest;
+
   /// 是否展示「自动同步」区块（启动时 / 周期）。
   ///
   /// ## 为什么必须由装配层显式打开，而不是「有 draft 字段就渲染」
@@ -518,6 +535,18 @@ class _SettingsPageState extends State<SettingsPage>
   /// 保存对话框是**模态**的，用户点了之后界面不会立即回来；不置 busy 会让
   /// 用户以为没反应而再点一下，弹出第二个对话框。
   bool _exportingDiagnostics = false;
+
+  /// 通知自检是否在途（防重复点击 + 禁用入口）。
+  ///
+  /// 自检会**等用户点通知**（最长 30 秒），期间必须让用户看到「正在等点击」
+  /// 而不是一个没反应的按钮。
+  bool _runningNotificationSelfTest = false;
+
+  /// 上一次自检的结论（null = 还没跑过）。
+  ///
+  /// 留在页面上而不是只弹一次 SnackBar：报障时用户要能把这句话**念给**
+  /// 我们（或截图），而 SnackBar 几秒后就没了。
+  NotificationSelfTestReport? _notificationSelfTestReport;
 
   /// 正在打开账号安全页（防连点开出多个标签页）。
   bool _openingAccountSecurity = false;
@@ -790,6 +819,55 @@ class _SettingsPageState extends State<SettingsPage>
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(message)));
     }
+  }
+
+  /// 运行通知自检（issue #90）。
+  ///
+  /// ## 为什么结果留在页面上而不是只弹 SnackBar
+  ///
+  /// 自检的目的是**报障**：用户要把一句能念出来的结论（「通知已发出，但 30 秒
+  /// 内没收到点击」）贴进 issue。SnackBar 几秒后就消失，而截图里只剩一个
+  /// 没反应的按钮。故结论同时进页面（subtitle）与日志（诊断报告）。
+  ///
+  /// ## 为什么不自己判断平台
+  ///
+  /// 判定全在注入的函数里（真的 sink 才会被注入，见 [onRunNotificationSelfTest]）。
+  /// 页面拿到报告就渲染，拿到 null 就不展示入口。
+  Future<void> _runNotificationSelfTest() async {
+    final run = widget.onRunNotificationSelfTest;
+    if (run == null || _runningNotificationSelfTest) return;
+
+    setState(() {
+      _runningNotificationSelfTest = true;
+      // 上一轮的结论先清掉：否则「等待点击」期间页面上还挂着上一次的
+      // 「自检通过」，用户会以为这次也成功了。
+      _notificationSelfTestReport = null;
+    });
+
+    NotificationSelfTestReport? report;
+    try {
+      report = await run();
+    } on Object catch (e) {
+      // 自检本身不应抛（sink 层已静默降级），但装配函数可能抛。
+      SpbLog.warn('通知自检失败', {'error': '$e'});
+    }
+    if (!mounted) return;
+    setState(() {
+      _runningNotificationSelfTest = false;
+      _notificationSelfTestReport = report;
+    });
+
+    final message = report?.verdict ?? '通知自检失败，请重试';
+    // 通过 / 未通过用不同颜色：同一条绿色提示在「没收到点击」时是误导。
+    final failed = report == null || !report.passed;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: failed
+            ? Theme.of(context).colorScheme.errorContainer
+            : null,
+      ),
+    );
   }
 
   /// 打开 IdP 账号安全页（Passkey / 双因素）。
@@ -1865,6 +1943,42 @@ class _SettingsPageState extends State<SettingsPage>
                     subtitle: const Text('跨对话回顾最近让 agent 做了什么'),
                     trailing: const Icon(Icons.chevron_right),
                     onTap: widget.onOpenMyTurns,
+                  ),
+                ),
+              ],
+
+              // 通知自检（issue #90）：发一条真的系统通知，验证「弹得出 + 点得回」。
+              //
+              // ## 为什么在设置页而不是「启动时自动跑」
+              //
+              // 自检要**等用户点通知**（最长 30 秒），启动时做会阻塞首屏；
+              // 而且它是一条会真出现在系统通知中心的通知，不该在用户没要求时
+              // 发出。报障时由用户主动点、把结论贴给我们，这是它的设计用途。
+              if (widget.onRunNotificationSelfTest != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: ListTile(
+                    key: const ValueKey('settings-notification-self-test'),
+                    leading: const Icon(Icons.notifications_active_outlined),
+                    title: const Text('通知自检'),
+                    subtitle: Text(
+                      _runningNotificationSelfTest
+                          ? '已发出测试通知，等待你点击（最长 30 秒）…'
+                          : _notificationSelfTestReport?.verdict ??
+                                '发一条测试通知：验证它能否弹出、点击能否回到应用',
+                    ),
+                    trailing: _runningNotificationSelfTest
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.play_circle_outline),
+                    enabled: !_runningNotificationSelfTest,
+                    onTap: _runningNotificationSelfTest
+                        ? null
+                        : _runNotificationSelfTest,
                   ),
                 ),
               ],
