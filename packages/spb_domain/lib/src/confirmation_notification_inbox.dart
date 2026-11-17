@@ -146,7 +146,17 @@ class ConfirmationNotificationInbox {
     final sent = <LocalNotification>[];
     for (final notice in notices) {
       if (notice.id.isEmpty) continue;
-      final previous = receipts[notice.id];
+      // 升级窗口：旧路径（卡片列表）写下的 receipt **带非空 `expiresAt`**，而
+      // 本路径（`/me/notices`）写的一律是 `null`。两者因此可区分：带 expire 的
+      // receipt 属于旧路径，对持久通知没有裁决权——它记录的「已处理」是卡片的
+      // 生命周期，不是「用户看过这条通知」。
+      //
+      // 不忽略的话，下面的 `previous != null` 分支会把这条通知记成「已弹过」
+      // 然后 `continue`，用户升级后一条都收不到（静默失效，无日志）。
+      final recorded = receipts[notice.id];
+      final previous = notice.neverExpires && recorded?.expiresAt != null
+          ? null
+          : recorded;
       final expiry = notice.neverExpires
           ? null
           : (notice.expiresAt ?? previous?.expiresAt);
@@ -216,7 +226,11 @@ class _Notice {
   /// 永不因过期而被跳过/撤销。
   ///
   /// 持久通知用它：`expires_at` 描述的是**卡片**还能不能点，不是**通知**该不该留。
-  /// 更要紧的是 [_handle] 会回退到 `previous?.expiresAt`——升级窗口里旧 receipt
-  /// 带着过去的 expiresAt，不屏蔽的话这条通知会被静默吞掉。
+  /// 它同时覆盖升级窗口的两条静默失效路径（[_handle] 里对应两处）：
+  ///
+  /// 1. 回退到 `previous?.expiresAt` —— 旧 receipt 带着过去的 expiresAt，不屏蔽
+  ///    就会被当成「已过期」直接跳过；
+  /// 2. `previous != null` 的判重分支 —— 旧 receipt 属于卡片路径，却会让这条通知
+  ///    被记成「已弹过」而永不发出。带非空 `expiresAt` 的 receipt 因此被忽略。
   final bool neverExpires;
 }
