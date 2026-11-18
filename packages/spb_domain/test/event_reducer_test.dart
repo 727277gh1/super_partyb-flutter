@@ -358,6 +358,180 @@ void main() {
       ]);
       expect(r.items, isEmpty);
     });
+
+    // 2026-11-18 生产：客户端出现**重复的思考内容**，且刷新后消失。
+    // 根因：服务端先发 transient 增量、再发权威快照（「增量追加、快照替换」契约），
+    // 而 tool_call 是段落边界——pigo 的 toolCalls 增量帧**先于**本轮 message_end
+    // 到达，快照到达时 current*Idx 已被清空，旧逻辑于是新建一段，同一段文本渲染两次。
+    group('权威快照接回自己的流式段（防重复渲染）', () {
+      test('思考：增量 + 权威快照只渲染一段', () {
+        final r = EventReducer.reduce([
+          ev(
+            EventTypes.thought,
+            id: 'th1',
+            payload: {'text': '先看'},
+            transient: true,
+          ),
+          ev(
+            EventTypes.thought,
+            id: 'th2',
+            payload: {'text': '一下数据'},
+            transient: true,
+          ),
+          ev(
+            EventTypes.thought,
+            id: 'th3',
+            payload: {'text': '先看一下数据'},
+            globalSeq: 3,
+          ),
+        ]);
+
+        expect(r.items, hasLength(1), reason: '同一段思考不应出现两份');
+        final item = r.items.single as ThoughtItem;
+        expect(item.text, '先看一下数据');
+        expect(item.isStreaming, isFalse);
+      });
+
+      test('思考：增量 → tool_call → 权威快照仍只一段（段落边界不得造成重复）', () {
+        // 实测帧序：thinking 增量 → toolCalls 增量（tool_call 事件）→ message_end。
+        final r = EventReducer.reduce([
+          ev(
+            EventTypes.thought,
+            id: 'th1',
+            payload: {'text': '该读文件了'},
+            transient: true,
+          ),
+          ev(
+            EventTypes.toolCall,
+            id: 'tc1',
+            payload: {
+              'tool_call_id': 'c1',
+              'name': 'bash',
+              'status': 'running',
+            },
+            transient: true,
+          ),
+          ev(
+            EventTypes.thought,
+            id: 'th2',
+            payload: {'text': '该读文件了'},
+            globalSeq: 3,
+          ),
+        ]);
+
+        final thoughts = r.items.whereType<ThoughtItem>().toList();
+        expect(thoughts, hasLength(1), reason: '快照应接回工具调用之前那段思考');
+        expect(thoughts.single.text, '该读文件了');
+        expect(thoughts.single.isStreaming, isFalse);
+        expect(r.items.whereType<ToolCallItem>(), hasLength(1));
+        // 顺序：思考在工具之前（快照接回的是原位置，不是追加到末尾）。
+        expect(r.items.indexWhere((e) => e is ThoughtItem), 0);
+      });
+
+      test('正文：增量 → tool_call → 权威快照仍只一段', () {
+        final r = EventReducer.reduce([
+          ev(
+            EventTypes.message,
+            id: 'm1',
+            payload: {'text': '我先读参考材料'},
+            transient: true,
+          ),
+          ev(
+            EventTypes.toolCall,
+            id: 'tc1',
+            payload: {
+              'tool_call_id': 'c1',
+              'name': 'read_file',
+              'status': 'running',
+            },
+            transient: true,
+          ),
+          ev(
+            EventTypes.message,
+            id: 'm2',
+            payload: {'text': '我先读参考材料'},
+            globalSeq: 3,
+          ),
+        ]);
+
+        final texts = r.items
+            .whereType<AssistantMessageItem>()
+            .map((e) => e.text)
+            .toList();
+        expect(texts, ['我先读参考材料'], reason: '过渡语不应因段落边界渲染两遍');
+      });
+
+      test('增量丢帧时快照仍接管同一段（文本以快照为准）', () {
+        final r = EventReducer.reduce([
+          ev(
+            EventTypes.thought,
+            id: 'th1',
+            payload: {'text': '先看'},
+            transient: true,
+          ),
+          // 后半截增量被限流丢掉：快照比累积文本长。
+          ev(
+            EventTypes.thought,
+            id: 'th2',
+            payload: {'text': '先看一下完整数据'},
+            globalSeq: 2,
+          ),
+        ]);
+
+        expect(r.items, hasLength(1));
+        expect((r.items.single as ThoughtItem).text, '先看一下完整数据');
+      });
+
+      test('历史回放（无增量的连续权威帧）不得互相覆盖', () {
+        // 回放时 transient 增量不落库，一个 turn 的多轮思考都是权威帧。
+        // 若把「接回」错写成「替换 currentThoughtIdx」，上一轮思考会被覆盖。
+        final r = EventReducer.reduce([
+          ev(EventTypes.thought, id: 'th1', payload: {'text': '第一轮思考'}),
+          ev(
+            EventTypes.toolCall,
+            payload: {'tool_call_id': 'c1', 'name': 'bash'},
+            globalSeq: 2,
+          ),
+          ev(
+            EventTypes.thought,
+            id: 'th2',
+            payload: {'text': '第二轮思考'},
+            globalSeq: 3,
+          ),
+        ]);
+
+        final texts = r.items
+            .whereType<ThoughtItem>()
+            .map((e) => e.text)
+            .toList();
+        expect(texts, ['第一轮思考', '第二轮思考']);
+      });
+
+      test('跨 turn 的残留索引不接管（防重放顺序错乱）', () {
+        final r = EventReducer.reduce([
+          ev(
+            EventTypes.thought,
+            id: 'th1',
+            turnId: 'turn_1',
+            payload: {'text': '上一轮思考'},
+            transient: true,
+          ),
+          ev(
+            EventTypes.thought,
+            id: 'th2',
+            turnId: 'turn_2',
+            payload: {'text': '这一轮思考'},
+            globalSeq: 2,
+          ),
+        ]);
+
+        final texts = r.items
+            .whereType<ThoughtItem>()
+            .map((e) => e.text)
+            .toList();
+        expect(texts, ['上一轮思考', '这一轮思考'], reason: '不同 turn 的段落不得互相接管');
+      });
+    });
   });
 
   group('tool_call / tool_result 配对', () {

@@ -132,6 +132,24 @@ class EventReducer {
     int? currentAssistantIdx;
     int? currentThoughtIdx;
 
+    // 尚未被权威快照接管的流式段落索引（每种类型各一份）。
+    //
+    // ## 为什么不能用 currentAssistantIdx / currentThoughtIdx 代替（2026-11-18，一次真实缺陷）
+    //
+    // 服务端对同一段文本先发 `transient: true` 的增量（`pigo_core.go` 的
+    // `handleUpdate` → `flushEventTransient`），再发一份权威快照（`message_end`）；
+    // 前端契约是「增量追加、快照替换」（见 `chatbus.Event.Transient` 的注释）。
+    //
+    // 但 `tool_call` 是段落边界（见 toolCall 分支），而 pigo 的 toolCalls 增量帧
+    // **先于**本轮的 message_end 到达——于是快照到达时 current*Idx 已被置空，旧
+    // 逻辑走了「新建一段」分支，**同一段文本被渲染两次**。生产表现：客户端出现
+    // 重复的思考内容，刷新后消失（增量不落库，回放只剩快照那一份）。
+    //
+    // 故另记一份「本段流式文本尚未被快照接管」的索引：它不被段落边界清掉，只被
+    // 快照消费（或下一段增量覆盖）。
+    int? pendingAssistantIdx;
+    int? pendingThoughtIdx;
+
     // Go 的增量帧没有 eventId，seq/globalSeq 也为 0。直接把 eventId 当行 ID
     // 会让多段正文共用空 Key，连权威帧到达后也保留冲突（copyWith 保留身份）。
     // 用首帧元数据生成仅供展示的稳定 ID；同时间戳的新段加序号，避免毫秒精度
@@ -305,6 +323,8 @@ class EventReducer {
           // 新 turn 开始：闭合上一段的流式状态，避免光标一直闪。
           currentAssistantIdx = null;
           currentThoughtIdx = null;
+          pendingAssistantIdx = null;
+          pendingThoughtIdx = null;
 
         case EventTypes.message:
           final text = ev.text;
@@ -319,8 +339,10 @@ class EventReducer {
                 text: prev.text + text,
                 isStreaming: true,
               );
+              pendingAssistantIdx = idx;
             } else {
               currentAssistantIdx = items.length;
+              pendingAssistantIdx = items.length;
               items.add(
                 AssistantMessageItem(
                   id: textItemId(ev),
@@ -333,7 +355,20 @@ class EventReducer {
               );
             }
           } else if (ev.isAuthoritativeFrame) {
-            // 权威帧：替换整段。若当前无段落则新建。
+            // 权威帧：先接回它自己那段流式文本（见 pendingAssistantIdx 的说明），
+            // 没接上就按旧规则「替换当前段落 / 新建」。
+            final adopted = _adoptPending(
+              items,
+              pendingAssistantIdx,
+              ev.turnId,
+              text,
+              isThought: false,
+            );
+            if (adopted != null) {
+              currentAssistantIdx = adopted;
+              pendingAssistantIdx = null;
+              break;
+            }
             final idx = currentAssistantIdx;
             if (idx != null && items[idx] is AssistantMessageItem) {
               items[idx] = (items[idx] as AssistantMessageItem).copyWith(
@@ -379,8 +414,10 @@ class EventReducer {
                 text: prev.text + text,
                 isStreaming: true,
               );
+              pendingThoughtIdx = idx;
             } else {
               currentThoughtIdx = items.length;
+              pendingThoughtIdx = items.length;
               items.add(
                 ThoughtItem(
                   id: textItemId(ev),
@@ -391,7 +428,36 @@ class EventReducer {
                 ),
               );
             }
+          } else if (ev.isAuthoritativeFrame) {
+            // 权威帧：快照是段内完整文本。先接回它自己那段流式文本，否则新建。
+            //
+            // ⚠️ 这里**不能**用 currentThoughtIdx 当替换目标：历史回放里一个
+            // turn 的多轮思考都是无增量的权威帧，接续替换会把上一轮的思考段
+            // 覆盖掉（正文丢失比多一段严重）。
+            final adopted = _adoptPending(
+              items,
+              pendingThoughtIdx,
+              ev.turnId,
+              text,
+              isThought: true,
+            );
+            if (adopted != null) {
+              currentThoughtIdx = adopted;
+              pendingThoughtIdx = null;
+              break;
+            }
+            currentThoughtIdx = items.length;
+            items.add(
+              ThoughtItem(
+                id: textItemId(ev),
+                createdAt: ev.createdAt,
+                text: text,
+                turnId: ev.turnId,
+                isStreaming: false,
+              ),
+            );
           } else {
+            // 非流式 thought（如历史 timeline 里的完整快照）：独立成项。
             currentThoughtIdx = items.length;
             items.add(
               ThoughtItem(
@@ -1445,6 +1511,41 @@ class EventReducer {
   }
 
   /// 把仍在 streaming 的段落标记为完成（收到 done 或流中断时调用）。
+  /// 把权威快照接回它自己那段流式文本（接上则返回被替换的索引，否则 null）。
+  ///
+  /// 服务端对同一段文本先发 `transient: true` 增量、再发一份权威快照（`message_end`
+  /// 携带全量文本）。前端契约是「增量追加、快照替换」，但 `tool_call` 是段落边界
+  /// （pigo 的 toolCalls 增量帧先于本轮 message_end 到达），快照到达时
+  /// `current*Idx` 已被清空——旧逻辑于是新建一段，同一段文本被渲染两次。
+  /// 生产表现：客户端出现重复的思考内容，刷新后消失（增量不落库，回放只剩快照）。
+  ///
+  /// ## 判据
+  ///
+  /// - **索引来自 pending\*Idx**：只有增量帧会设置它，故它一定指向「本段流式文本」，
+  ///   不会误抓上一轮的段落（历史回放里没有增量，永远不会命中）。
+  /// - **同 turn**：跨 turn 的残留索引不得接管（防御断线/重放顺序错乱）。
+  /// - **不比较文本**：快照是段内完整文本，增量可能被限流丢帧而短一截；
+  ///   按索引接管正是为了在丢帧时也能收敛到一份。
+  static int? _adoptPending(
+    List<ConversationItem> items,
+    int? pendingIdx,
+    String turnId,
+    String text, {
+    required bool isThought,
+  }) {
+    if (pendingIdx == null || pendingIdx >= items.length) return null;
+    final item = items[pendingIdx];
+    if (item.turnId != turnId) return null;
+    if (isThought) {
+      if (item is! ThoughtItem) return null;
+      items[pendingIdx] = item.copyWith(text: text, isStreaming: false);
+    } else {
+      if (item is! AssistantMessageItem) return null;
+      items[pendingIdx] = item.copyWith(text: text, isStreaming: false);
+    }
+    return pendingIdx;
+  }
+
   static void _sealStreaming(List<ConversationItem> items) {
     for (var i = 0; i < items.length; i++) {
       final it = items[i];
