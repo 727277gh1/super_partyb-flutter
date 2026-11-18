@@ -316,6 +316,18 @@ data: <json>
 | 状态变更通知（goal_updated 等） | `true` | 真源在业务表，事件只提示「数据过期」 |
 | 分发阶段进度（`dispatch_stage`，**默认不发**） | `true` | 首 token前的等待分段（见 §5.4.1） |
 
+⚠️ **快照可能晚于段落边界到达**（2026-11-18，客户端实测缺陷）：pigo 的 toolCalls
+增量帧**先于**本轮 `message_end` 到达（`handleUpdate` → `emitToolCall`），而
+`tool_call` 在客户端是段落边界。若实现把「替换目标」记在「当前段落」上，边界一闭合就
+记不住了，快照只好另开一段——**同一段文本渲染两次**（思考块最明显；刷新后消失，因为
+增量不落库，回放时只剩快照那一份）。
+
+正确做法：增量段落要单独记一份「本段流式文本尚未被快照接管」的索引，它**不被段落
+边界清掉**，只被快照消费（`EventReducer._adoptPending`）；webapp 侧对应
+`mergeTurnSegment` 的「回找最近一个 streaming 段」。判据只认「索引 + 同 turn」，
+**不比较文本**：增量可能被限流丢帧而短一截，快照才是段内完整文本。历史回放没有
+增量，永远不会命中这条路径，故多轮思考的权威帧仍各自成段、不会互相覆盖。
+
 #### 5.4.1 `dispatch_stage`：首 token之前的分发进度（issue #86 / #181 / #114）
 
 **真源**：`super_partyb/apps/go-api/internal/dispatch/{wire.go,stages.go}`。
