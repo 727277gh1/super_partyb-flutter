@@ -1071,3 +1071,54 @@ engine 轮换就直接采用；登出 / 换账号时 `advanceSession` 递增会�
 - **真机未验证**（与 §6.109 / #90 同一个瓶颈）：Doze 下的实际到达率、国产 ROM 省电策略、
   重启恢复、以及「15 分钟」在真实设备上到底是多久。这些只能真机跑，且**结论要回填 issue**，
   不要因为「代码齐了」就认为功能可用。
+
+---
+
+### 6.112 Windows 通知初始化缺一条设置：`InitializationSettings.windows` 必填，且失败要能查（2026-11）
+
+Windows 桌面端「通知自检」报 **「通知插件初始化失败，通知将静默不生效（装配/平台通道问题）」**。
+排查结论：**装配与平台通道都没问题，缺的是插件要求的一条初始化设置。**
+
+#### 根因
+
+`flutter_local_notifications` 在 Windows 分支对空值是硬性要求：
+
+```dart
+} else if (defaultTargetPlatform == TargetPlatform.windows) {
+  if (settings.windows == null) {
+    throw ArgumentError('Windows settings must be set when targeting Windows platform.');
+  }
+```
+
+而 `LocalNotificationSink.initialize` 的 `catch` 会把任何异常吞成 `_initialized = false`
+（**这是对的**：无平台通道 / 无 D-Bus 时不该崩），于是自检只能报四步里第一个失败点
+（§6.109 的 `notInitialized`），文案指向「装配/平台通道」——**方向完全指错**。
+
+漏掉的原因很具体：`flutter test` 都在 Linux 上跑（`defaultTargetPlatform == linux`，
+`linux:` 一直是给着的），Windows 分支只由 GH Actions 的 tag 构建编译，没人跑过自检。
+
+#### 修法
+
+| 面 | 做法 |
+|---|---|
+| 设置 | `windows: WindowsInitializationSettings(appName, appUserModelId, guid)`；`appName` / `appUserModelId` 做成构造参数（可测），`guid` 是**写死的常量** |
+| GUID | 它是 COM 激活器的注册键：换值 = 旧通知点不动（payload 回不来）+ 每次启动留一条无主注册项。不是密钥，公开无风险，**不要**随机化 |
+| AUMID | 与安装包标识一致（`windows/runner/Runner.rc` 的 `CompanyName.ProductName` = `com.atjog.spb.spb_desktop`）；不一致时 toast 归不到本应用，部分 Windows 版本静默丢弃 |
+| 可测性 | 插件是**单例**（私有构造 + factory），无法继承捕获参数 → 抽 `@visibleForTesting debugInitializationSettings` getter（与 `debugNotificationDetails` 同一取向：能验的只有「喂给插件的参数对不对」） |
+| 回归测试 | `local_notification_sink_windows_settings_test.dart`：用 `debugDefaultTargetPlatformOverride = TargetPlatform.windows` 断言 `windows != null` + 字段来源 + GUID 形态 + 「真插件不再抛 ArgumentError」+ 其他平台设置没被顺手删掉 |
+| 可观测 | 失败日志从 `debugPrint` 改 `SpbLog.warn`：诊断报告只导出 `SpbLog` 的环形缓冲，而 release 的 Windows 包没有控制台——`debugPrint` 等于把唯一线索丢给空气 |
+
+#### 修好之后仍然改不掉的两条（别当 bug 再查一遍）
+
+1. **非 MSIX 打包：`cancel()` 是空操作**（插件 README「Windows limitations」），
+   `getActiveNotifications` 也返回空。确认卡过期后横幅**不会**从操作中心消失，只能等系统
+   超时；「撤销已发通知」在 Windows 上等于没做。要去掉得改用 MSIX 分发（有签名成本，
+   本仓库目前没有 `msix` 配置）。
+2. **`timeoutAfter` 是 Android 专属**：Windows 端没有等价物，过期抑制只能靠我们自己
+   的 `expiresAt` 判断（`_showInternal` 已有）。
+
+#### 验证边界
+
+单测证明「设置项齐全、插件不再因此抛 `ArgumentError`」；**证明不了 toast 真的弹、
+点了真的回到应用**——仍需 Windows 真机（§9），且 `flutter run -d windows` 才能在控制台
+看到那条 `[notifications] …` 日志。

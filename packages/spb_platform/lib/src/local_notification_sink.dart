@@ -37,6 +37,27 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_domain/spb_domain.dart';
 
+/// Windows toast 的激活回调 GUID。
+///
+/// ## 为什么是写死的常量，而不是每次启动生成
+///
+/// `flutter_local_notifications_windows` 用它在系统里注册 COM 激活器；换值
+/// 等于换注册键——**旧通知点不动**（payload 回不来），而且每次启动都留下
+/// 一条无主的注册项。它不是密钥，公开无风险，故**不要**改成随机值或
+/// 构造参数。
+const String kWindowsNotificationActivationGuid =
+    'b1f0a6c4-2d3e-4f57-9a8b-6c0d7e5a1f92';
+
+/// Windows toast 的显示名（通知右上角与操作中心里显示的应用名）。
+const String kWindowsAppDisplayName = '成蹊';
+
+/// Windows toast 的 AppUserModelID。
+///
+/// 必须与安装包的标识一致（`windows/runner/Runner.rc` 的
+/// `CompanyName`=`com.atjog.spb` + `ProductName`=`spb_desktop`）；不一致时
+/// toast 归不到本应用，部分 Windows 版本会**静默丢弃**。
+const String kWindowsAppUserModelId = 'com.atjog.spb.spb_desktop';
+
 /// 基于 `flutter_local_notifications` 的通知发送实现。
 ///
 /// ## 初始化是**显式**的（不是构造时自动做）
@@ -51,6 +72,8 @@ class LocalNotificationSink implements NotificationSink {
     this.androidChannelName = '待确认事项',
     this.androidChannelDescription = '有新的确认卡需要你处理',
     this.androidSmallIcon = 'ic_notification',
+    this.windowsAppName = kWindowsAppDisplayName,
+    this.windowsAppUserModelId = kWindowsAppUserModelId,
   }) : _plugin = plugin ?? FlutterLocalNotificationsPlugin();
 
   final FlutterLocalNotificationsPlugin _plugin;
@@ -67,6 +90,12 @@ class LocalNotificationSink implements NotificationSink {
   /// 一张纯白剪影（生成脚本 `tools/gen_brand_assets.py` 的 `notification_icon`），
   /// 并在这里显式指定；不指定时插件会回落到 `defaultIcon`（即 `@mipmap/...`）。
   final String androidSmallIcon;
+
+  /// Windows toast 的显示名与 AppUserModelID（见 [kWindowsAppDisplayName] /
+  /// [kWindowsAppUserModelId]）。做成字段是为了可测：断言「传进去的就是
+  /// 初始化时用的那个」，而不是在 [initialize] 里写一次字面量。
+  final String windowsAppName;
+  final String windowsAppUserModelId;
 
   /// 是否已 [initialize]。未初始化时 [show] 静默跳过（记日志）。
   bool _initialized = false;
@@ -90,6 +119,46 @@ class LocalNotificationSink implements NotificationSink {
   set onSelect(void Function(String? payload)? callback) =>
       _onSelect = callback;
 
+  /// 喂给插件的初始化设置。
+  ///
+  /// ## 为什么做成可测试的 getter
+  ///
+  /// `FlutterLocalNotificationsPlugin` 是**单例**（私有构造 + factory），测试
+  /// 无法继承它来捕获参数。而「漏给某个平台的设置」正是 Windows 上踩过的
+  /// 静默失效（插件在 Dart 层抛 `ArgumentError('Windows settings must be set
+  /// when targeting Windows platform.')`，被 [initialize] 的 catch 吞成
+  /// 「初始化失败」，自检只报一句「装配/平台通道问题」）。
+  ///
+  /// 故把设置抽出来供 `local_notification_sink_windows_settings_test.dart`
+  /// 用 `debugDefaultTargetPlatformOverride` 断言——与
+  /// [debugNotificationDetails] 同一套取向：能验的只有「喂给插件的参数对不对」。
+  @visibleForTesting
+  InitializationSettings get debugInitializationSettings =>
+      InitializationSettings(
+        android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: const DarwinInitializationSettings(
+          // 权限申请交给 requestPermission 显式做（见其文档），
+          // 否则首次 initialize 就会弹框——那不是我们能解释文案的时机。
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
+        macOS: const DarwinInitializationSettings(
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
+        linux: const LinuxInitializationSettings(defaultActionName: '打开'),
+        // Windows **必须**给这组设置：插件对空值直接抛 ArgumentError，而它
+        // 会被 [initialize] 的 catch 吞成「初始化失败」——自检因此指错方向
+        // （Windows 真机 2026-11 踩过，`flutter test` 在 Linux 上跑发现不了）。
+        windows: WindowsInitializationSettings(
+          appName: windowsAppName,
+          appUserModelId: windowsAppUserModelId,
+          guid: kWindowsNotificationActivationGuid,
+        ),
+      );
+
   /// 初始化插件并接线点击回调。
   ///
   /// 返回是否初始化成功（失败时后续调用静默降级）。
@@ -97,22 +166,7 @@ class LocalNotificationSink implements NotificationSink {
     if (_initialized) return true;
     try {
       final ok = await _plugin.initialize(
-        settings: const InitializationSettings(
-          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-          iOS: DarwinInitializationSettings(
-            // 权限申请交给 requestPermission 显式做（见其文档），
-            // 否则首次 initialize 就会弹框——那不是我们能解释文案的时机。
-            requestAlertPermission: false,
-            requestBadgePermission: false,
-            requestSoundPermission: false,
-          ),
-          macOS: DarwinInitializationSettings(
-            requestAlertPermission: false,
-            requestBadgePermission: false,
-            requestSoundPermission: false,
-          ),
-          linux: LinuxInitializationSettings(defaultActionName: '打开'),
-        ),
+        settings: debugInitializationSettings,
         onDidReceiveNotificationResponse: (response) {
           _onSelect?.call(response.payload);
           _selfTestClick?.call(response.payload);
@@ -120,13 +174,17 @@ class LocalNotificationSink implements NotificationSink {
       );
       _initialized = ok ?? false;
       if (!_initialized) {
-        debugPrint('[notifications] 插件初始化返回 false，通知将静默降级');
+        SpbLog.warn('[notifications] 插件初始化返回 false，通知将静默降级');
       }
       return _initialized;
     } catch (e) {
       // 无平台通道（flutter test）或无 D-Bus 会话：静默降级。
       // 不抛异常——上层不该为「这个环境没有通知」写 try/catch。
-      debugPrint('[notifications] 插件初始化失败，通知将静默降级：$e');
+      //
+      // 走 SpbLog 而不是 debugPrint：诊断报告只导出 SpbLog 的环形缓冲，而
+      // release 的 Windows 包没有控制台，debugPrint 等于把这条唯一的线索
+      // 丢给空气（真机排查时正是卡在这里）。
+      SpbLog.warn('[notifications] 插件初始化失败，通知将静默降级', {'error': '$e'});
       _initialized = false;
       return false;
     }
