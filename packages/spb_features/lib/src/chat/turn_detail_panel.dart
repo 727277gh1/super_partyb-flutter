@@ -332,13 +332,17 @@ class TurnDetailPanel extends StatelessWidget {
       // 页是**历史快照**：一个 2024 年的工具调用不可能还在跑。转圈会让用户以为
       // 卡住了（测试也因无限动画而 `pumpAndSettle` 超时，是同一个问题的信号）。
       //
-      // 占位文案说明的是**事实**：结果不在本次加载到的事件里（上游不返回 events，
-      // 见 `super_partyb#56`；或结果被 timeline 分页窗口甩出去了）。不写
-      // 「失败」——没有证据。
+      // 占位文案只说事实：「无工具输出记录」。三种成因都落在这一句里：
+      //   1. 事件早于 2026-11-18——那时服务端**从不**带 output（pi-go 的
+      //      stream-json 只透 id/name/isError，客户端却已写好了读取分支）；
+      //   2. 结果被 timeline 分页窗口甩出去了（见 `super_partyb#56`）；
+      //   3. 结果只有图片块（base64 不进事件流，见服务端 `TextOnly`）。
+      // 不写「失败」——没有证据。也不写「本次加载」——旧事件是根本没存，
+      // 说成「加载」会把永久缺失误报成临时状态。
       return ToolCallTile(
         name: e.toolName ?? '（未知工具）',
         args: e.toolArgs,
-        output: e.toolOutput ?? '（结果未在本次加载的事件中）',
+        output: e.toolOutput ?? '（无工具输出记录）',
         isComplete: true,
       );
     }

@@ -193,7 +193,7 @@ void main() {
       expect(find.text('完成'), findsOneWidget);
       await t.tap(find.text('bash'));
       await t.pumpAndSettle();
-      expect(find.textContaining('结果未在本次加载的事件中'), findsOneWidget);
+      expect(find.textContaining('无工具输出记录'), findsOneWidget);
     });
 
     testWidgets('thought 事件渲染为思考块', (t) async {

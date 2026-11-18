@@ -2186,7 +2186,10 @@
       "optional": [
         "id",
         "status",
-        "error"
+        "error",
+        "output",
+        "bytes",
+        "truncated"
       ],
       "producer": [
         "internal/chatexec/pigo_core.go:flushEvent"

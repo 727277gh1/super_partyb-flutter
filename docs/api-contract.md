@@ -329,6 +329,34 @@ data: <json>
 **不比较文本**：增量可能被限流丢帧而短一截，快照才是段内完整文本。历史回放没有
 增量，永远不会命中这条路径，故多轮思考的权威帧仍各自成段、不会互相覆盖。
 
+#### 5.4.0.1 `tool_result` 的输出预览（`output`）
+
+**真源**：`pi-go/internal/runtime/headless.go`（wire）→
+`super_partyb/apps/go-api/internal/chatexec/pigo_core.go`（透传）。
+
+2026-11-18 之前 `tool_execution_end` 只透 `toolCallId/toolName/isError`，三端客户端
+**都已写好**读取分支（`ChatEvent.toolOutput` 读 `output`→`result`→`content`、webapp
+`turns.ts` 同理）却永远读不到——详情页因此显示占位文案，而真相是「从来没保存过」。
+
+| payload 键 | 含义 |
+|---|---|
+| `id` / `name` | 调用标识（与 `tool_call` 同键，客户端按 `(turnId, call_id)` 合并） |
+| `status` | `completed` / `failed` |
+| `error` | 仅失败时为 `true` |
+| `output` | **文本预览**，≤4KB，head+tail 截断，截断处带 `[truncated N bytes]` 标记 |
+| `bytes` | **原始**文本长度（不是预览长度）；同时是服务端日志的虚拟字段 |
+| `truncated` | 预览被截过（`true` 时才出现） |
+
+三条约束：
+
+1. **只取 text 块**：image 块的 `data` 是 base64，一次截图能把事件撑到 MB 级，故不进事件流；
+2. **空输出不产生字段**：客户端按「字段缺失」走占位文案，空串会渲染成空框；
+3. **失败也带 output**：stderr 是唯一能解释「为什么失败」的东西。
+
+客户端不需要任何改动（读取分支早就在），只需注意：`output` 缺失有三种成因——
+事件早于 2026-11-18、结果被分页窗口甩出去、结果只有图片块——详情页统一显示
+「（无工具输出记录）」，**不得**说成「加载中」（历史快照里不可能还在跑）。
+
 #### 5.4.1 `dispatch_stage`：首 token之前的分发进度（issue #86 / #181 / #114）
 
 **真源**：`super_partyb/apps/go-api/internal/dispatch/{wire.go,stages.go}`。
