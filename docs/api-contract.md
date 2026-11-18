@@ -388,6 +388,23 @@ logs-collector 里它是**一条带类型名的信号**而不是一片噪声。
 **对服务端的期待**：新增时间线事件时把它写进目录的 `timeline: true`——本仓的
 `test/event_catalog_test.dart` 会在下次同步时红，带上类型名。
 
+#### 5.4.1c `follow_up_suggested` 与正文的**顺序**（2026-11-18 起）
+
+**真源**：`super_partyb/apps/go-api/internal/chatexec/pigo_followup.go`（注入约定）+
+`internal/chatgate/followup_suggest.go`（wire format）。背景与现场见 super_partyb
+`apps/go-api/docs/2026-11-18-followup-suggest-ordering.md`。
+
+服务端把「后续提问建议」改成 **正文之前**发布（旧约定「正文先写、建议最后」在 tool-loop
+里不可执行，会让模型把正文重写一遍，同一 turn 落两份完整答案）。后果对客户端是**一条
+硬约束**：
+
+> `follow_up_suggested` 的 `seq` 可能**小于**同 turn 的正文 `message` 帧。
+> 建议卡永远属于 turn 尾部，**不能按 `seq` 就地渲染**。
+
+本仓实现：`EventReducer._pinFollowUpsToTurnEnd`——同一 turn 内非建议项保持原相对顺序，
+建议项整体后移到该 turn 末尾（不删内容、重放幂等）。webapp / 小程序是 FAB + Sheet
+（不内联在时间线里），不受影响；**新增内联渲染方时必须做同样的钉尾处理**。
+
 #### 5.4.2 `error` 事件的 payload（`code` 闭集 + `message`/`detail` 分工）
 
 **真源**：`super_partyb/apps/go-api/internal/chatbus/error_payload.go` 的
