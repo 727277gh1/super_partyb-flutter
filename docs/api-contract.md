@@ -313,6 +313,7 @@ data: <json>
 |---|---|---|
 | 流式增量（message/thought） | `true` | **追加**到当前段落 |
 | 权威帧（段级完整文本） | `false` | **替换**当前段落 |
+| 工具执行开始（`tool_call` 的 `{id,name,status:"running"}`） | `true` | **就地更新**该 `(turnId, call_id)` 那一行，**不得新开行**（2026-11-18 起不落库，回放时没有它） |
 | 状态变更通知（goal_updated 等） | `true` | 真源在业务表，事件只提示「数据过期」 |
 | 分发阶段进度（`dispatch_stage`，**默认不发**） | `true` | 首 token前的等待分段（见 §5.4.1） |
 

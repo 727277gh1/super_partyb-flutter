@@ -2088,6 +2088,36 @@
     },
     {
       "type": "tool_call",
+      "form": "delta",
+      "category": "event",
+      "timeline": false,
+      "persist": false,
+      "broadcast": true,
+      "diagnostics_exempt": false,
+      "retention": "purgeable",
+      "log": null,
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "name"
+      ],
+      "optional": [
+        "id",
+        "status"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_core.go:flushEventTransient"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
+      "type": "tool_call",
       "form": "durable",
       "category": "event",
       "timeline": false,
