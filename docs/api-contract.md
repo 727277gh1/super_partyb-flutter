@@ -343,7 +343,7 @@ data: <json>
 | `id` / `name` | 调用标识（与 `tool_call` 同键，客户端按 `(turnId, call_id)` 合并） |
 | `status` | `completed` / `failed` |
 | `error` | 仅失败时为 `true` |
-| `output` | **文本预览**，≤4KB，head+tail 截断，截断处带 `[truncated N bytes]` 标记 |
+| `output` | **文本预览**，≤4KB，head+tail 截断，截断处带 `[truncated N bytes]` 标记；凭证形态已被服务端替换为 `[REDACTED]` |
 | `bytes` | **原始**文本长度（不是预览长度）；同时是服务端日志的虚拟字段 |
 | `truncated` | 预览被截过（`true` 时才出现） |
 
@@ -351,7 +351,11 @@ data: <json>
 
 1. **只取 text 块**：image 块的 `data` 是 base64，一次截图能把事件撑到 MB 级，故不进事件流；
 2. **空输出不产生字段**：客户端按「字段缺失」走占位文案，空串会渲染成空框；
-3. **失败也带 output**：stderr 是唯一能解释「为什么失败」的东西。
+3. **失败也带 output**：stderr 是唯一能解释「为什么失败」的东西；
+4. **写库前已打码**（`internal/secretmask`，与会话摘要同一份规则）：厂商 token
+   前缀、JWT、`Bearer`、PEM 私钥块、DSN 口令、`KEY=value` 里像密钥的键，都被替换成
+   `[REDACTED]`。客户端**不需要**再做一次，也**不要**把 `[REDACTED]` 当异常展示——
+   它是刻意为之，`bytes` 仍是原始长度。
 
 客户端不需要任何改动（读取分支早就在），只需注意：`output` 缺失有三种成因——
 事件早于 2026-11-18、结果被分页窗口甩出去、结果只有图片块——详情页统一显示
