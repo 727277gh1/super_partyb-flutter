@@ -884,7 +884,7 @@ class EventReducer {
     }
 
     return ReductionResult(
-      items: items,
+      items: _pinFollowUpsToTurnEnd(items),
       lastEventId: lastEventId,
       gateDecisions: gateDecisions,
       activities: activities,
@@ -893,6 +893,58 @@ class EventReducer {
       ttsStatus: ttsStatus,
       terminalTurnIds: terminalTurnIds,
     );
+  }
+
+  /// 把 `FollowUpSuggestionItem` 钉到**所属 turn 的末尾**。
+  ///
+  /// 为什么不能只靠 seq 排序：2026-11-18 起服务端把「后续提问建议」改成
+  /// **正文之前**发布（super_partyb `chatexec/pigo_followup.go` 的顺序反转）。
+  /// 旧措辞是「先写正文、再发建议」，在 tool-loop 里不可执行——正文写完再调工具，
+  /// 工具返回后模型必然还要再说一句话，于是把正文重写一遍，同一 turn 落两份完整
+  /// 答案（两个气泡、TTS 念两遍、IM 回执拼两遍；现场见 super_partyb
+  /// `apps/go-api/docs/2026-11-18-followup-suggest-ordering.md`）。顺序反转后建议事件
+  /// 的 seq 小于正文帧，按 seq 排就会**先出现卡片、后出现答案**。
+  ///
+  /// 建议卡语义上是「读完之后可以继续问什么」，永远属于 turn 尾部，因此这里按
+  /// 归属重排：同一 turn 内非建议项保持原有相对顺序，建议项整体后移到最后。
+  /// 不删不改内容（与「过滤重复」不同），重放幂等：已排好的列表再跑一遍不变。
+  static List<ConversationItem> _pinFollowUpsToTurnEnd(
+    List<ConversationItem> items,
+  ) {
+    // 需要重排的 turn：其建议项后面还有同 turn 的其他项。
+    // 空 turnId（不应存在）无从判断边界，保持原位。
+    final needs = <String>{};
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      if (item is! FollowUpSuggestionItem || item.turnId.isEmpty) continue;
+      for (var j = i + 1; j < items.length; j++) {
+        final later = items[j];
+        if (later.turnId != item.turnId) continue;
+        if (later is FollowUpSuggestionItem) continue;
+        needs.add(item.turnId);
+        break;
+      }
+    }
+    if (needs.isEmpty) return items;
+
+    final result = List<ConversationItem>.of(items);
+    for (final turnId in needs) {
+      final slots = <int>[];
+      for (var i = 0; i < result.length; i++) {
+        if (result[i].turnId == turnId) slots.add(i);
+      }
+      final rest = <ConversationItem>[];
+      final followUps = <ConversationItem>[];
+      for (final i in slots) {
+        final item = result[i];
+        (item is FollowUpSuggestionItem ? followUps : rest).add(item);
+      }
+      final merged = <ConversationItem>[...rest, ...followUps];
+      for (var k = 0; k < slots.length; k++) {
+        result[slots[k]] = merged[k];
+      }
+    }
+    return result;
   }
 
   /// 插入或替换目标进度卡（同 turn 幂等，与 webapp「每 turn 取最后一条」一致）。

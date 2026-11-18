@@ -941,6 +941,87 @@ void main() {
       expect(empty.items, isEmpty);
     });
 
+    test('follow_up_suggested 钉到所属 turn 末尾（2026-11-18 顺序反转后）', () {
+      // 服务端改成「建议先发、正文后写」：建议事件的 seq 小于正文帧，
+      // 若只按 seq 排，用户会先看到卡片、后看到答案。
+      final r = EventReducer.reduce([
+        ev(
+          EventTypes.followUpSuggested,
+          payload: {
+            'suggestions': ['再问一句'],
+          },
+          seq: 2,
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.message,
+          payload: {'content': '正文答案'},
+          seq: 3,
+          globalSeq: 3,
+        ),
+      ]);
+
+      expect(r.items, hasLength(2));
+      expect(r.items.first, isA<AssistantMessageItem>());
+      expect((r.items.first as AssistantMessageItem).text, '正文答案');
+      expect(r.items.last, isA<FollowUpSuggestionItem>());
+    });
+
+    test('钉末尾只作用于所属 turn，不跨 turn 移动，且重放幂等', () {
+      final events = <ChatEvent>[
+        ev(
+          EventTypes.followUpSuggested,
+          payload: {
+            'suggestions': ['第一轮建议'],
+          },
+          turnId: 'turn_a',
+          seq: 2,
+          globalSeq: 2,
+        ),
+        ev(
+          EventTypes.message,
+          payload: {'content': '第一轮正文'},
+          turnId: 'turn_a',
+          seq: 3,
+          globalSeq: 3,
+        ),
+        ev(
+          EventTypes.userMessage,
+          payload: {'input': '第二轮提问'},
+          turnId: 'turn_b',
+          seq: 1,
+          globalSeq: 4,
+        ),
+        ev(EventTypes.start, turnId: 'turn_b', seq: 2, globalSeq: 5),
+        ev(
+          EventTypes.message,
+          payload: {'content': '第二轮正文'},
+          turnId: 'turn_b',
+          seq: 3,
+          globalSeq: 6,
+        ),
+      ];
+
+      final first = EventReducer.reduce(events);
+      expect(first.items.map((e) => e.turnId).toList(), [
+        'turn_a',
+        'turn_a',
+        'turn_b',
+        'turn_b',
+      ]);
+      expect(first.items[0], isA<AssistantMessageItem>());
+      expect(first.items[1], isA<FollowUpSuggestionItem>());
+      expect(first.items[2], isA<UserMessageItem>());
+      expect(first.items[3], isA<AssistantMessageItem>());
+
+      // 重放同一批事件：顺序不再变化（已排好的列表再跑一遍不变）。
+      final again = EventReducer.reduce(events);
+      expect(
+        again.items.map((e) => e.id).toList(),
+        first.items.map((e) => e.id).toList(),
+      );
+    });
+
     test('控制/诊断事件不进对话列表', () {
       final r = EventReducer.reduce([
         ev(EventTypes.heartbeat, payload: {}),
