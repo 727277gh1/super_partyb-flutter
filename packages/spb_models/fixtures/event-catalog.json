@@ -470,7 +470,9 @@
         "level": "INFO",
         "fields": [
           "status",
-          "first_token_ms"
+          "elapsed_ms",
+          "first_token_ms",
+          "finalizer"
         ],
         "aggregation": "none"
       },
@@ -526,7 +528,13 @@
         "finalizer",
         "stream",
         "memory_limit_mb",
-        "oom_evidence"
+        "oom_evidence",
+        "reason_code",
+        "scope",
+        "metric",
+        "period",
+        "used",
+        "limit"
       ],
       "producer": [
         "internal/chatexec/pigo_core.go:flushError",

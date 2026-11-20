@@ -173,7 +173,7 @@ void main() {
     void stubList(List<Map<String, dynamic>> items) => adapter.onGet(
       '/me/notices',
       (s) => s.reply(200, {'notices': items, 'unread': items.length}),
-      queryParameters: {'limit': 20, 'unread_only': '1'},
+      queryParameters: {'limit': 200},
     );
 
     test('真实列表响应发出通知且带对话路由', () async {
@@ -183,9 +183,9 @@ void main() {
       expect(sink.shown.single.payload, '/chat/g1');
       expect(sink.shown.single.title, '需要你确认');
     });
-    test('没有未读时不拉整页列表', () async {
+    test('没有未读也拉取已读事实以撤销陈旧通知', () async {
       stubUnread(0);
-      // 列表端点故意不给桩：真被请求会 500 → run() 返回 false。
+      stubList([]);
       expect(await worker().run(), isTrue);
       expect(sink.shown, isEmpty);
     });
@@ -207,8 +207,9 @@ void main() {
     });
     test('HTTP 503 返回 retry，保留凭证', () async {
       adapter.onGet(
-        '/me/notices/unread-count',
+        '/me/notices',
         (s) => s.reply(503, <String, dynamic>{}),
+        queryParameters: {'limit': 200},
       );
       expect(await worker().run(), isFalse);
       expect(await tokens.read(), isNotNull);

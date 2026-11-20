@@ -119,31 +119,67 @@ final remoteSessionProvider = Provider<bool>((ref) {
   return SpbDisplayEnv.remoteSession ?? false;
 });
 
-/// 确认卡到达时发 OS 通知（issue #21）。
-///
-/// 判定逻辑（判重 / 前台不打扰 / 权限幂等）在 `spb_domain` 的
-/// [ConfirmationNotifier]，此处只做装配：注入 sink 与聚焦状态、接上点击导航。
-///
-/// ## 为什么非 autoDispose（判重集合必须跨页面重建存活）
-///
-/// 判重集合若随对话页重建而丢失，SSE 重连回放会让同一张确认卡重复弹通知。
-/// 故本 provider 的生命周期与 app 一致。
-///
-/// ## 已知限制：桌面没有持久化判重
-///
-/// 桌面端没有后台排程（`supportsBackgroundNotifications == false`），
-/// `confirmationNotificationInboxProvider` 返回 null，故这里没有注入
-/// `handlePersistedItems` —— 判重退回 [ConfirmationNotifier] 的**内存**集合。
-/// 后果：进程重启后，仍未处理的确认卡会再弹一次（窗口 ≤ 卡片寿命 10 分钟）。
-/// 移动端不受影响（有后台就一定有 inbox，走 SQLite receipts）。
-///
-/// 修法（未做）：给桌面也开一个 `NotificationStateStore`（同一份 SQLite 即可），
-/// 把 `handlePersistedItems` 接上——但目前通知量极小，收益不抵复杂度。
+/// 旧确认卡判定器仅保留权限和点击接线，生产通知统一消费 NoticeCenter。
 final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
   return ConfirmationNotifier(
     sink: ref.watch(notificationSinkProvider),
     isWindowFocused: () => ref.read(windowFocusedProvider),
   );
+});
+
+final notificationStateStoreProvider = Provider<NotificationStateStore>((ref) {
+  final store = NotificationStateStore.open(
+    () async => File(
+      p.join((await getApplicationSupportDirectory()).path, 'notifications.db'),
+    ),
+  );
+  ref.onDispose(store.close);
+  return store;
+});
+
+/// 两端只装配依赖，拉取、判重、已读与展示策略统一在 domain。
+final noticeCenterProvider = Provider.autoDispose<NoticeCenter?>((ref) {
+  final authenticated = ref.watch(authStateProvider).isAuthenticated;
+  ref.watch(sessionRevisionProvider);
+  final sink = ref.watch(notificationSinkProvider);
+  if (!authenticated || sink is NoopNotificationSink) return null;
+  final state = ref.watch(notificationStateStoreProvider);
+  final tokens = ref.watch(tokenStoreProvider);
+  final center = NoticeCenter(
+    api: NoticesApi(ref.watch(dioProvider)),
+    inbox: ConfirmationNotificationInbox(
+      store: state,
+      show: (notice) async {
+        if (!ref.mounted || ref.read(windowFocusedProvider)) return false;
+        if (sink is LocalNotificationSink) return sink.showChecked(notice);
+        await sink.show(notice);
+        return true;
+      },
+      cancel: sink.cancel,
+      canNotify:
+          sink is LocalNotificationSink && supportsBackgroundNotifications
+          ? sink.hasPermission
+          : sink.requestPermission,
+    ),
+    sessionVersion: () async =>
+        await tokens.read() == null ? null : state.generation(),
+    isFocused: () => ref.read(windowFocusedProvider),
+  );
+  ref.onDispose(center.dispose);
+  ref.onCancel(center.stop);
+  ref.onResume(center.start);
+  center.start();
+  return center;
+});
+
+final noticeUnreadProvider = StreamProvider.autoDispose<int>((ref) async* {
+  final center = ref.watch(noticeCenterProvider);
+  if (center == null) {
+    yield 0;
+    return;
+  }
+  yield center.snapshot.unread;
+  yield* center.changes.map((snapshot) => snapshot.unread);
 });
 
 /// 生产装配的 Provider override 清单——**唯一**来源。
@@ -216,13 +252,14 @@ final sessionTokenProvider = Provider<Future<String?> Function()>((ref) {
   return manager.currentAccessToken;
 });
 
-/// 会话凭证存储（Keychain / Keystore / libsecret）。
-///
-/// 由 [SecureTokenStore] 实现，非 autoDispose：**必须单例**——它持有内存
-/// 缓存（issue #68），重建会丢缓存；更要紧的是「写路径与读路径必须是同一
-/// 实例」，否则 `write` 暖的缓存对另一个实例不可见（读到旧值）。
+/// 凭证切换与通知 receipts 共用事务，旧账号的在途通知不能落到新会话。
+/// Android 的后台 engine 会刷新凭证，必须绕过内存缓存；其他平台保留单实例缓存。
 final tokenStoreProvider = Provider<TokenStore>((ref) {
-  return SecureTokenStore();
+  return CoordinatedTokenStore(
+    tokens: SecureTokenStore(cacheEnabled: !supportsBackgroundNotifications),
+    state: ref.watch(notificationStateStoreProvider),
+    cancelNotification: ref.watch(notificationSinkProvider).cancel,
+  );
 });
 
 /// OIDC 配置（编译期注入，见 `SpbEnv.oidcIssuer` 等）。

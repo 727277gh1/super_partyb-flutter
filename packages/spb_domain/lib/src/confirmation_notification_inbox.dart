@@ -6,10 +6,15 @@ import 'notifications.dart';
 
 /// 只保存判重和撤销所需信息，不落盘通知正文。
 class ConfirmationReceipt {
-  const ConfirmationReceipt({required this.shown, this.expiresAt});
+  const ConfirmationReceipt({
+    required this.shown,
+    this.expiresAt,
+    this.revision,
+  });
 
   final bool shown;
   final DateTime? expiresAt;
+  final String? revision;
 }
 
 abstract interface class ConfirmationReceiptStore {
@@ -41,12 +46,6 @@ class ConfirmationNotificationInbox {
   /// 保留它是为了不改变既有 SSE/轮询路径的行为。
   static const _defaultTitle = '需要你确认';
 
-  /// 卡片失效后追加的标记。
-  ///
-  /// 语义：**通知本身不过期**，过期的是卡片。所以不跳过、不取消，只把正文
-  /// 降级为「已失效」——用户需要知道「刚才发生过什么」，而不是什么都看不到。
-  static const _expiredSuffix = '（已失效，仅作记录）';
-
   /// 用 `/me/notices` 的**持久通知**驱动本地通知。
   ///
   /// ## 与 [reconcile] 的关键差别：通知不过期
@@ -57,7 +56,7 @@ class ConfirmationNotificationInbox {
   /// 什么」，不是「现在还能不能点」。
   ///
   /// 因此这里**不把 `expires_at` 传给本地通知**（传了会被 [_handle] 当成过期
-  /// 而 cancel），只把正文降级为带 [_expiredSuffix] 的版本。
+  /// 而 cancel），只把正文降级为带“已失效，仅作记录”的版本。
   ///
   /// ## 已读即取消
   ///
@@ -73,19 +72,13 @@ class ConfirmationNotificationInbox {
           id: n.id,
           groupId: n.deepLinkGroupId ?? '',
           title: n.title.isEmpty ? null : n.title,
-          body: _noticeBody(n),
+          body: n.displayBody(clock()),
           resolved: n.isRead,
           neverExpires: true,
+          revision: n.revision,
+          route: n.route,
         ),
   ], focused: focused);
-
-  /// 通知正文：卡片已失效的确认卡降级为「已失效」而不是被跳过。
-  String _noticeBody(Notice n) {
-    if (n.kind != 'confirmation_required') return n.body;
-    if (!n.isCardExpiredAt(clock())) return n.body;
-    final body = n.body.trim();
-    return body.isEmpty ? _expiredSuffix : '$body$_expiredSuffix';
-  }
 
   Future<List<LocalNotification>> handleItems(
     Iterable<ConversationItem> items, {
@@ -139,6 +132,7 @@ class ConfirmationNotificationInbox {
         receipts[entry.key] = ConfirmationReceipt(
           shown: false,
           expiresAt: entry.value.expiresAt,
+          revision: entry.value.revision,
         );
       }
     }
@@ -165,13 +159,22 @@ class ConfirmationNotificationInbox {
         receipts[notice.id] = ConfirmationReceipt(
           shown: false,
           expiresAt: expiry,
+          revision: notice.revision,
         );
         continue;
       }
-      if (previous != null || focused) {
+      final sameRevision =
+          previous != null &&
+          (notice.revision == null || previous.revision == notice.revision);
+      if (sameRevision || focused) {
+        // 同 ID 内容更新时，前台抑制也要清理后台遗留的旧横幅。
+        if (!sameRevision && focused && previous?.shown == true) {
+          await cancel(notice.id);
+        }
         receipts[notice.id] = ConfirmationReceipt(
-          shown: previous?.shown ?? false,
+          shown: sameRevision && previous.shown,
           expiresAt: expiry,
+          revision: notice.revision,
         );
         continue;
       }
@@ -179,17 +182,20 @@ class ConfirmationNotificationInbox {
       if (!await canNotify()) continue;
       final notification = LocalNotification(
         id: notice.id,
-        title: notice.title ?? _defaultTitle,
-        body: notice.body.isEmpty ? '有一项操作等待确认' : notice.body,
-        payload: notice.groupId.isEmpty
-            ? null
-            : confirmationNotificationPayload(notice.groupId),
+        title: notice.title ?? (notice.neverExpires ? '通知' : _defaultTitle),
+        body: notice.body,
+        payload:
+            notice.route ??
+            (notice.groupId.isEmpty
+                ? null
+                : confirmationNotificationPayload(notice.groupId)),
         expiresAt: expiry,
       );
       if (await show(notification)) {
         receipts[notice.id] = ConfirmationReceipt(
           shown: true,
           expiresAt: expiry,
+          revision: notice.revision,
         );
         sent.add(notification);
       }
@@ -213,6 +219,8 @@ class _Notice {
     this.title,
     this.expiresAt,
     this.neverExpires = false,
+    this.revision,
+    this.route,
   });
   final String id;
   final String groupId;
@@ -222,6 +230,8 @@ class _Notice {
   final String? title;
   final bool resolved;
   final DateTime? expiresAt;
+  final String? revision;
+  final String? route;
 
   /// 永不因过期而被跳过/撤销。
   ///

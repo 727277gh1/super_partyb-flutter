@@ -9,7 +9,7 @@ Windows 安装包，以及 Linux 分发依赖（§7）与各平台构建限制�
 
 ### 6.29 开源镜像同步（`tools/sync-to-github.sh`）
 
-权威源是 **Gitea**（`git@git.atjog.com:dever/super_partyb-flutter.git`，完整历史 +
+权威源是 **Gitea**（`git@<gitea-host>:dever/super_partyb-flutter.git`，完整历史 +
 blame）。GitHub 上另有一份**公开镜像**：
 **`git@github.com:727277gh1/super_partyb-flutter.git`**（`main` 分支），用 squash
 方案导出：只含「恰好 HEAD 这一棵树」，一条提交。
@@ -143,8 +143,8 @@ GitHub 上当时的 HEAD `8715622` 对应 Gitea 的 **`30cbbf2`**（品牌图标
 git worktree add --detach /tmp/gitea-x 30cbbf2
 diff -rq --exclude=.git /tmp/gitea-x /tmp/gh-clone
 # → 只有 2 个文件不同，且差异全是**脱敏替换**：
-#     AGENTS.md              （idp.atjog.com → idp.<internal-domain>，tbcc → app.example.com）
-#     .github/dependabot.yml （git.atjog.com → git@<gitea-host>）
+#     AGENTS.md              （idp.<internal-domain> → idp.<internal-domain>，tbcc → app.example.com）
+#     .github/dependabot.yml （<gitea-host> → git@<gitea-host>）
 ```
 
 时间戳也对得上（Gitea `11:23:52` → GitHub `11:24:03`）。故**核对镜像是否落后**
@@ -226,7 +226,7 @@ action 会直接失败。
 
 ### 6.31 生产部署接线：public client、release.yml 的两个缺陷、tbcc6 判定
 
-把客户端接到 `tbcc.atjog.com` 的过程中查出四件事，其中**两个是 release.yml
+把客户端接到 `app.example.com` 的过程中查出四件事，其中**两个是 release.yml
 的真实缺陷**（CI 绿不代表 release 绿——两条 workflow 的构建步骤从未对齐过）。
 
 #### 一、桌面端 OIDC client 必须是 **public + loopback**
@@ -336,7 +336,7 @@ bad=$(find lib -name '*.so*' -exec sh -c \
 
 | 证据 | 值 |
 |---|---|
-| CNAME 链 | `tbcc6.atjog.com` → `qpoweiurty.atjog.com`（随机串，DDNS 特征） |
+| CNAME 链 | `app2.example.com` → `qpoweiurty.atjog.com`（随机串，DDNS 特征） |
 | AAAA | `2409:8a55:a20:8570:be24:11ff:fee3:581a` |
 | 地址段 | `2409:8a55::/32` = 中国移动（家宽段） |
 | 接口标识 | `be24:11ff:fee3:581a` = EUI-64（由网卡 MAC 推导）→ 动态地址 |
@@ -361,8 +361,8 @@ bad=$(find lib -name '*.so*' -exec sh -c \
 | 有 IPv6、tbcc6 不可达 | 探测失败 → 保持 CDN |
 | 升级后断网/换网/证书失效 | 3 次失败 → 降级 CDN，冷却后重探 |
 
-**第二个错误**：曾说「`tbcc.atjog.com` 本身已是双栈，不需要 preferred hosts」。
-**双栈 ≠ 直连源站**——`tbcc.atjog.com` 的 AAAA 是 EdgeOne **边缘节点**
+**第二个错误**：曾说「`app.example.com` 本身已是双栈，不需要 preferred hosts」。
+**双栈 ≠ 直连源站**——`app.example.com` 的 AAAA 是 EdgeOne **边缘节点**
 （`240d:c010::/32`），流量仍过 CDN；`tbcc6` 是**绕过 CDN 直连源站**，两者目的
 完全不同，IPv6 只是顺带的。把两件事混为一谈，就得出了「不需要配」的错误结论。
 
@@ -401,7 +401,7 @@ SPB_PREFERRED_HOSTS = dever.atjog.com=dever6.atjog.com;dever-preview.atjog.com=d
 | `SPB_PREFERRED_HOSTS` | `dever.atjog.com=dever6.atjog.com;dever-preview.atjog.com=dever6-preview.atjog.com`（见上节四） |
 
 > **已执行（2026-11-13）**：上表就是当前仓库 Variables 的取值，`tbcc*` 已全部换掉。
-> 历史遗留的 `https://tbcc.atjog.com/…` 不再使用。仓库里的 `.github/workflows/*`
+> 历史遗留的 `https://app.example.com/…` 不再使用。仓库里的 `.github/workflows/*`
 > 只**读**这些 Variables，所以改域名时**代码里什么都不用改**，但必须同步改
 > Settings → Variables，否则下次出包仍会连 bcc（`tools/check_build_defines.sh`
 > 只看「有没有传」，**不比较域名**，拦不住这类漂移）。

@@ -13,6 +13,7 @@ import 'package:spb_ui/spb_ui.dart';
 import '../auth/qr_scan.dart';
 import '../sync/sync_run_section.dart';
 import 'notification_subscriptions_card.dart';
+import 'notice_center_card.dart';
 import 'user_preferences_card.dart';
 
 /// 弹出目录选择器。返回 null = 用户取消。
@@ -237,6 +238,8 @@ class SettingsPage extends StatefulWidget {
     this.preferenceFallbackDisplayName = '',
     this.onExportDiagnostics,
     this.onRunNotificationSelfTest,
+    this.noticeCenter,
+    this.onOpenNotice,
     this.loadLastBackgroundCheck,
     this.onOpenAccountSecurity,
     this.onScanQr,
@@ -436,6 +439,8 @@ class SettingsPage extends StatefulWidget {
   /// 拿到 `NoopNotificationSink` → 传 null）。理由与 [onExportDiagnostics]
   /// 同一约定：判定留在装配层，页面只渲染。
   final RunNotificationSelfTest? onRunNotificationSelfTest;
+  final NoticeCenter? noticeCenter;
+  final void Function(String route)? onOpenNotice;
 
   /// 读取「上一次后台检查成功」的时刻（null = 从未成功过）。
   ///
@@ -2030,6 +2035,14 @@ class _SettingsPageState extends State<SettingsPage>
               // 自检要**等用户点通知**（最长 30 秒），启动时做会阻塞首屏；
               // 而且它是一条会真出现在系统通知中心的通知，不该在用户没要求时
               // 发出。报障时由用户主动点、把结论贴给我们，这是它的设计用途。
+              if (widget.noticeCenter != null) ...[
+                const SizedBox(height: SpbSpacing.lg),
+                NoticeCenterCard(
+                  key: ObjectKey(widget.noticeCenter),
+                  center: widget.noticeCenter!,
+                  onOpen: widget.onOpenNotice,
+                ),
+              ],
               if (widget.onRunNotificationSelfTest != null) ...[
                 const SizedBox(height: SpbSpacing.lg),
                 Card(

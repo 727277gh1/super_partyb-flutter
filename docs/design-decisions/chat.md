@@ -1604,7 +1604,7 @@ _emit();                   // ← 回填返回后才推
 #### 作用域：已加载区间 + **有界**自动补页（#108）
 
 v1 只定位已加载区间，越界就给一句「不在已加载范围内，先向上翻」。2026-11 起改为
-**有界自动补页**（[issue #108](https://git.atjog.com/dever/super_partyb-flutter/issues/108)）：
+**有界自动补页**（[issue #108](https://<gitea-host>/dever/super_partyb-flutter/issues/108)）：
 目标轮更早时自动向上拉页（每页 50），命中后落位。上限由
 `ConversationPage.anchorBackfillPages` 控制（默认 5 页 = 250 轮，`0` = 关闭补页，
 退回 v1 行为）——深链不得把整个历史拖下来。
@@ -1718,7 +1718,7 @@ v1 只定位已加载区间，越界就给一句「不在已加载范围内，�
 | ~~轮次导航面板（上一轮 / 下一轮）~~ | **已翻转**：刻度条版本已实现，见 [§6.94](#694-轮次导航刻度条右侧竖置齿轮2026-11) |
 | 无界的「一直往前拉直到找到」 | 有界见「作用域」；一次深链拖下整个历史既慢又抢滚动条 |
 | 清理 URL 的 `?turn=` | 见上，与 webapp 同取舍 |
-| OS 层深链（`partyb://chat/<gid>?turn=`） | 需 dispatcher + 冷启动暂存 + 门禁（auth.md §6.71），桌面端还要协议注册与单实例转发；见 [issue #109](https://git.atjog.com/dever/super_partyb-flutter/issues/109) |
+| OS 层深链（`partyb://chat/<gid>?turn=`） | 需 dispatcher + 冷启动暂存 + 门禁（auth.md §6.71），桌面端还要协议注册与单实例转发；见 [issue #109](https://<gitea-host>/dever/super_partyb-flutter/issues/109) |
 
 #### 未验证
 
@@ -1992,7 +1992,7 @@ Markdown；150ms ≈ 9 帧，而 §6.74 记的整窗重绘单帧就是 20–40ms
 
 **闭集怎么不漂**：`docs/error-codes.json` 的副本 vendored 到
 `packages/spb_domain/test/fixtures/error_codes.json`（`tools/sync_error_codes.sh` 刷新，
-**不联网**——本仓库 CI 在 GitHub Actions，到不了 `git.atjog.com`），
+**不联网**——本仓库 CI 在 GitHub Actions，到不了 `<gitea-host>`），
 `test/error_code_test.dart` 断言「集合相等 + 顺序相等 + 逐条 `retryable` 相等」。
 顺序也断言，是因为顺序不同的 diff 无法审查（到底加了一个 code 还是全部重排）。
 
@@ -2128,7 +2128,7 @@ debug 根本不落**，用 debug 等于没写。字段只放 `request_id` / `nam
   刷新（`cp`，不改写），流程与三条纪律写在 `fixtures/README.md`（issue #118 合入）。
 - **生产代码不 import 它**，也不做 codegen（§6.2 禁 `build_runner`）：类型常量与类别
   仍是手写镜像，由 `test/event_catalog_test.dart` 对拍。
-- 为什么不用 `sha256` 锁死：CI 在 GitHub Actions 到不了 `git.atjog.com`（§8），
+- 为什么不用 `sha256` 锁死：CI 在 GitHub Actions 到不了 `<gitea-host>`（§8），
   `sha256` 只能锁「上次同步的那份」，同步一次改一次常量，收益为零。断言改为**语义等价**：
   类别闭集（集合 + 顺序）、`timeline:true` 全部可渲染、`timeline:false` 的类型要么本仓认识
   要么登记在 `EventTypes.diagnosticOnly`。

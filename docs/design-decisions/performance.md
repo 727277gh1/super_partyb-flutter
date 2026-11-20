@@ -274,7 +274,7 @@ Stream/Timer 生命周期）→ 逐条读码核实有界性。**边界（诚实�
 `DISPLAY` 无真机（[§9](../development.md)），没有做过绝对 RSS profile——「无界」是读码确认的
 **结构事实**，增长速率与用户可感知影响未量化；第三方包（gpt_markdown / drift
 / dio）内部缓存不在可核实范围。绝对内存曲线（RSS / Dart heap 分解）需
-DevTools + 桌面环境，列为 openQuestion。
+DevTools + 桌面环境，列为 既有问题。
 
 #### 五项修复的判据与折衷（每项均有反向验证）
 
@@ -445,7 +445,7 @@ builder 就等于接管这条路径。`MemoryImage` 的相等性是字节列表*
 kImageDecodeCeilingLogicalWidth`，与 G4 预览图同一取舍：超宽窗口略糊）；DPR
 变化会重解码一次（`ResizeImage` 的缓存键含解码宽）。
 
-**内存采样：把 openQuestion 变成用户机器可回收的数据。** 新增
+**内存采样：把 既有问题 变成用户机器可回收的数据。** 新增
 `spb_platform` 的 `MemoryProbe`：每 60s 取 `ProcessInfo.currentRss` /
 `ProcessInfo.maxRss`（OS 高水位）与 imageCache 的字节/张数/live 张数，进 12 槽
 环形缓冲；`exportDiagnosticsReport` 导出那一刻**强制再采一次**，并在报告里

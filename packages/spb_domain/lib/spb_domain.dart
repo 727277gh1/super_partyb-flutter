@@ -90,6 +90,7 @@ export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
 export 'src/confirmation_notifier.dart';
 export 'src/notifications.dart';
+export 'src/notice_center.dart';
 export 'src/conversation_item.dart';
 export 'src/conversation_search.dart';
 export 'src/default_sync_root.dart';

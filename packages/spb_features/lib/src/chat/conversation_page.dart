@@ -2359,8 +2359,20 @@ class _ConversationPageState extends State<ConversationPage>
           // 排队轮次达到上限：等在跑的轮次结束后再发。
           detail = '排队轮次已达上限，请稍等当前任务完成后再发送';
         case 'workspace_quota_exceeded':
-          // 工作区并发配额用尽：同样是等待语义。
-          detail = '同时运行的任务已达上限，请稍后再试';
+          // 工作区空间/文件配额已满，需要清理工作区或联系管理员调整配额。
+          detail = '群工作区已达到空间配额，请清理文件后再发送';
+        case 'quota_account_disabled':
+          detail = '用户账户已停用，请联系管理员';
+        case 'quota_no_entitlement':
+          detail = '尚未获得该资源的使用额度，请充值或联系管理员';
+        case 'quota_exceeded':
+          detail = '用户或群组的资源额度已用尽，请充值、清理文件或联系管理员';
+        case 'group_token_quota_exceeded':
+          detail = '本群 token 配额已用尽，请等待额度周期重置';
+        case 'workspace_usage_reconciling':
+          detail = '正在核对群工作区用量，请稍后重试';
+        case 'token_quota_unavailable':
+          detail = '暂时无法核验本群额度，请稍后重试';
         default:
           detail = '发送失败：${e.message}';
       }

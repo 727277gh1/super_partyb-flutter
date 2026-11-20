@@ -15,6 +15,8 @@
 ///   sync          —— 交付物同步页（目录选择/触发同步由 app 注入）
 library;
 
+export 'src/settings/notice_banner.dart';
+
 export 'src/auth/auth.dart';
 export 'src/chat/chat.dart';
 export 'src/habit/habit.dart';

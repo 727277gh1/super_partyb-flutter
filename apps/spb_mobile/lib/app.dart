@@ -6,7 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_core/spb_core.dart';
-import 'package:spb_features/spb_features.dart' show AuthState;
+import 'package:spb_features/spb_features.dart' show AuthState, NoticeBanner;
 import 'package:spb_platform/spb_platform.dart';
 
 import 'providers.dart';
@@ -182,6 +182,7 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   /// ——两套回填语义并存必然漂移。
   void _resyncOnResume() {
     _reconcileNotifications();
+    unawaited(ref.read(noticeCenterProvider)?.refresh());
     ref.invalidate(pendingConfirmationsProvider);
 
     final userId = ref.read(currentUserIdProvider).value;
@@ -218,6 +219,9 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
 
   @override
   Widget build(BuildContext context) {
+    // 应用级常驻，切离对话页也持续接收所有通知类型。
+    final notices = ref.watch(noticeCenterProvider);
+    final focused = ref.watch(windowFocusedProvider);
     // 扫码登录深链 → 导航到确认页。
     //
     // ## 为什么导航只在这一个地方
@@ -239,6 +243,12 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
       // 用户选择的主题模式（跟随系统 / 浅色 / 深色），持久化在
       // `ui.theme_mode`。默认 system = 跟随系统，与改动前行为一致。
       themeMode: ref.watch(themeModeProvider),
+      builder: (context, child) => NoticeBanner(
+        center: notices,
+        focused: focused,
+        onOpen: _router.go,
+        child: child ?? const SizedBox.shrink(),
+      ),
       routerConfig: _router,
     );
   }

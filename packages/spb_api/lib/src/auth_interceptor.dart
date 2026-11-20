@@ -349,6 +349,13 @@ SpbError mapDioError(DioException e) {
       if (status == 401) {
         return AuthError('会话已失效，请重新登录', statusCode: 401, cause: e);
       }
+      // 额度账户停用是可恢复的业务拒绝，保留 code 供 UI 提示，重新登录不能解决。
+      final body = _bodyPreview(e.response?.data);
+      if (status == 403 &&
+          HttpError(status, '', body: body).errorCode ==
+              'quota_account_disabled') {
+        return HttpError(status, '用户账户已停用，请联系管理员', body: body, cause: e);
+      }
       if (status == 403) {
         return AuthError('没有权限执行该操作', statusCode: 403, cause: e);
       }

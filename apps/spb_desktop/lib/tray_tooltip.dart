@@ -15,21 +15,7 @@ import 'package:spb_platform/spb_platform.dart';
 /// `unreadCount` / `syncEnabled` / `syncing` 与 `displayTooltip` 的拼装规则，
 /// 但它**零引用**——托盘提示从未被推送过，用户看到的永远是托盘库的默认值。
 ///
-/// ## `unreadCount` 为什么恒为 0（不是忘了接）
-///
-/// 服务端**没有**「全局未读」这个数据：`super_partyb` Go API 里既无
-/// `/chat/unread` 之类的端点，也无 `unread` 字段（grep `unread` 在
-/// `internal/server/*.go` 无命中）。可用的只有按 group 的
-/// `pendingMessages(userId, groupId)` 与 `listConfirmations()`——前者要逐
-/// group 轮询（N 个 group = N 个请求，随对话数线性增长），后者语义是
-/// 「待确认」而非「未读」。
-///
-/// 故这里**如实留 0**，而不是拿 `listConfirmations().length` 之类的近似值
-/// 去填：那会让托盘显示一个用户无法解释的数字（「为什么这里写 3？我明明
-/// 没有 3 条未读」）。等有了真正的全局未读来源再接。
-///
-/// 参数保留 [unreadCount] 而非硬编码 0，是为了「接入点已就位」——
-/// 将来只需让调用方传真实值，本函数与测试都不用改。
+/// 未读数由 `/me/notices` 提供，表示站内通知，不是聊天消息计数。
 TrayState buildTrayState({
   required bool syncConfigured,
   required bool syncing,
@@ -75,9 +61,11 @@ class TrayTooltipController {
     required DesktopCapabilities capabilities,
     required bool Function() syncConfigured,
     required bool Function() syncing,
+    int Function()? unreadCount,
   }) : _capabilities = capabilities,
        _syncConfigured = syncConfigured,
-       _syncing = syncing;
+       _syncing = syncing,
+       _unreadCount = unreadCount;
 
   final DesktopCapabilities _capabilities;
 
@@ -89,6 +77,7 @@ class TrayTooltipController {
 
   /// 读取「是否正在同步」。
   final bool Function() _syncing;
+  final int Function()? _unreadCount;
 
   /// 上一次推送的文本。去重，避免每次状态通知都做一次平台调用。
   String? _lastPushed;
@@ -101,6 +90,7 @@ class TrayTooltipController {
     final text = buildTrayState(
       syncConfigured: _syncConfigured(),
       syncing: _syncing(),
+      unreadCount: _unreadCount?.call() ?? 0,
     ).displayTooltip;
 
     if (text == _lastPushed) return;

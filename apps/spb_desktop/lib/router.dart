@@ -2725,14 +2725,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
     final confirmationsChanged =
         baseline != null && !_setEquals(baseline, confIds);
 
-    // 新确认卡到达时发 OS 通知（issue #21）。
-    //
-    // ## 为什么放在 `mounted` 检查之前、且不 await
-    //
-    // 通知是**副作用**，与本次 setState 无关：用户可能在页面已卸载（切走）
-    // 时仍需收到通知——那正是通知存在的意义。await 会把它排进本帧之后，
-    // 但判定本身是同步的（只有真正的 show 是异步），故不 await 即可。
-    unawaited(ref.read(confirmationNotifierProvider).handleItems(items));
+    // 系统通知由应用级 NoticeCenter 消费站内通知，避免 SSE 与轮询重复提醒。
 
     if (!mounted) return;
     // 同一次 setState 里同时更新待办面板的数据与交付物刷新令牌：
@@ -3114,6 +3107,8 @@ class _SettingsPage extends ConsumerWidget {
       // 通知自检（issue #90）：只有装配的是真 `LocalNotificationSink` 时才有
       // 入口（否则 provider 给 null → 不展示）。移动端同名同构。
       onRunNotificationSelfTest: ref.watch(notificationSelfTestProvider),
+      noticeCenter: ref.watch(noticeCenterProvider),
+      onOpenNotice: (route) => context.go(route),
       // 自动同步：**仅桌面端**渲染（移动端没有可靠的后台排程，见
       // `SettingsPage.showAutoSync` 的说明）。
       showAutoSync: true,

@@ -214,6 +214,16 @@ Future<TestHarness> pumpApp(
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
+  final notificationState = NotificationStateStore(
+    AppDatabase(NativeDatabase.memory()),
+  );
+  addTearDown(notificationState.close);
+  adapter.onGet(
+    '/me/notices',
+    (server) =>
+        server.reply(200, {'notices': <Map<String, dynamic>>[], 'unread': 0}),
+    queryParameters: {'limit': 200},
+  );
 
   // 默认的 `/api/auth/me`。
   //
@@ -283,6 +293,7 @@ Future<TestHarness> pumpApp(
         const NoopDesktopCapabilities(),
       ),
       dioProvider.overrideWithValue(dio),
+      notificationStateStoreProvider.overrideWithValue(notificationState),
       if (notificationSink != null)
         notificationSinkProvider.overrideWithValue(notificationSink),
       // 初始前后台状态。`_SpbMobileAppState` 通过 `AppLifecycleState` 推送

@@ -79,43 +79,58 @@ final windowFocusedProvider = NotifierProvider<WindowFocusedNotifier, bool>(
   WindowFocusedNotifier.new,
 );
 
-/// 确认卡到达时发 OS 通知（issue #21）。见桌面端同名 provider 的文档。
+/// 旧确认卡判定器仅保留权限和点击接线，生产通知统一消费 NoticeCenter。
 final confirmationNotifierProvider = Provider<ConfirmationNotifier>((ref) {
-  final inbox = ref.watch(confirmationNotificationInboxProvider);
   return ConfirmationNotifier(
     sink: ref.watch(notificationSinkProvider),
     isWindowFocused: () => ref.read(windowFocusedProvider),
-    handlePersistedItems: inbox == null
-        ? null
-        : (items, focused) async {
-            final state = ref.read(notificationStateStoreProvider);
-            return state.exclusive(() async {
-              if (await ref.read(tokenStoreProvider).read() == null) return [];
-              return inbox.handleItems(items, focused: focused);
-            });
-          },
   );
 });
 
 final notificationStateStoreProvider = Provider<NotificationStateStore>((ref) {
-  final store = openNotificationState();
+  final store = NotificationStateStore.open(
+    () async => File(
+      p.join((await getApplicationSupportDirectory()).path, 'notifications.db'),
+    ),
+  );
   ref.onDispose(store.close);
   return store;
 });
 
-final confirmationNotificationInboxProvider =
-    Provider<ConfirmationNotificationInbox?>((ref) {
-      final sink = ref.watch(notificationSinkProvider);
-      if (!supportsBackgroundNotifications || sink is! LocalNotificationSink) {
-        return null;
-      }
-      return ConfirmationNotificationInbox(
-        store: ref.watch(notificationStateStoreProvider),
-        show: sink.showChecked,
-        cancel: sink.cancel,
-        canNotify: sink.hasPermission,
-      );
-    });
+/// 两端只装配依赖，拉取、判重、已读与展示策略统一在 domain。
+final noticeCenterProvider = Provider.autoDispose<NoticeCenter?>((ref) {
+  final authenticated = ref.watch(authStateProvider).isAuthenticated;
+  ref.watch(sessionRevisionProvider);
+  final sink = ref.watch(notificationSinkProvider);
+  if (!authenticated || sink is NoopNotificationSink) return null;
+  final state = ref.watch(notificationStateStoreProvider);
+  final tokens = ref.watch(tokenStoreProvider);
+  final center = NoticeCenter(
+    api: NoticesApi(ref.watch(dioProvider)),
+    inbox: ConfirmationNotificationInbox(
+      store: state,
+      show: (notice) async {
+        if (!ref.mounted || ref.read(windowFocusedProvider)) return false;
+        if (sink is LocalNotificationSink) return sink.showChecked(notice);
+        await sink.show(notice);
+        return true;
+      },
+      cancel: sink.cancel,
+      canNotify:
+          sink is LocalNotificationSink && supportsBackgroundNotifications
+          ? sink.hasPermission
+          : sink.requestPermission,
+    ),
+    sessionVersion: () async =>
+        await tokens.read() == null ? null : state.generation(),
+    isFocused: () => ref.read(windowFocusedProvider),
+  );
+  ref.onDispose(center.dispose);
+  ref.onCancel(center.stop);
+  ref.onResume(center.start);
+  center.start();
+  return center;
+});
 
 /// 「上一次后台检查成功」的时刻（设置页展示用）。
 ///
@@ -207,18 +222,14 @@ final sessionTokenProvider = Provider<Future<String?> Function()>((ref) {
   return manager.currentAccessToken;
 });
 
-/// 会话凭证存储（Keychain / Keystore）。
-///
-/// 非 autoDispose 且必须单例：它持有内存缓存（issue #68），写路径与读路径
-/// 必须命中同一实例，否则 `write` 暖的缓存对另一实例不可见（读到旧值）。
+/// 凭证切换与通知 receipts 共用事务，旧账号的在途通知不能落到新会话。
+/// Android 的后台 engine 会刷新凭证，必须绕过内存缓存；其他平台保留单实例缓存。
 final tokenStoreProvider = Provider<TokenStore>((ref) {
-  if (supportsBackgroundNotifications) {
-    return createNotificationTokenStore(
-      ref.watch(notificationStateStoreProvider),
-      LocalNotificationSink(),
-    );
-  }
-  return SecureTokenStore();
+  return CoordinatedTokenStore(
+    tokens: SecureTokenStore(cacheEnabled: !supportsBackgroundNotifications),
+    state: ref.watch(notificationStateStoreProvider),
+    cancelNotification: ref.watch(notificationSinkProvider).cancel,
+  );
 });
 
 /// OIDC 配置（编译期注入，见 `SpbEnv.oidcIssuer` 等）。
@@ -1551,31 +1562,12 @@ final pendingConfirmationsProvider =
       )) {
         return const [];
       }
-      final inbox = ref.read(confirmationNotificationInboxProvider);
-      final state = inbox == null
-          ? null
-          : ref.read(notificationStateStoreProvider);
-      final generation = await state?.exclusive(state.generation);
-      if (!ref.mounted) return const [];
       final cards = await ref
           .watch(chatApiProvider)
           .listConfirmationsTyped(
             status: 'pending',
             limit: ChatApi.kConfirmationsRequestLimit,
           );
-      if (inbox != null && state != null && ref.mounted) {
-        final userId = await ref.read(currentUserIdProvider.future);
-        await state.exclusive(() async {
-          if (!ref.mounted || generation != await state.generation()) return;
-          if (!ref.mounted) return;
-          await inbox.reconcile(
-            cards,
-            userId: userId,
-            focused: ref.read(windowFocusedProvider),
-            complete: cards.length < ChatApi.kConfirmationsRequestLimit,
-          );
-        });
-      }
       return cards;
     });
 

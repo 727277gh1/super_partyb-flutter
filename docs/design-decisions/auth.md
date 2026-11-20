@@ -661,7 +661,7 @@ attempts 分支，`ErrHandoffTooManyAttempts` 是不可达分支。真相是：�
 
 **结论**：WebAuthn 的 ceremony 只能跑在**浏览器上下文**（或系统 passkey provider）里，
 本仓（Flutter 客户端）在推荐档位下**没有代码要做**。`spbf#82` 因此并入实现单
-[`id-provider#12`](https://git.atjog.com/dever/id-provider/issues/12) 并关闭。
+[`id-provider#12`](https://<gitea-host>/dever/id-provider/issues/12) 并关闭。
 
 判据不是"谁方便"，而是绑定机制：**assertion 的签名绑在 RP ID 上，而 RP ID 由浏览器
 按页面 origin 计算**（`https://dever.atjog.com` → `rpId=dever.atjog.com`）。客户端自己
@@ -675,10 +675,10 @@ attempts 分支，`ErrHandoffTooManyAttempts` 是不可达分支。真相是：�
 | 档位 | 谁实现 | 对本仓意味着什么 |
 |---|---|---|
 | ② `ASWebAuthenticationSession` / Custom Tabs 打开 IdP 登录页（**默认选它**） | IdP（登录页 + 表 + 两个 ceremony 端点） | 零改动 |
-| ① 原生（`ASAuthorization` / Credential Manager 取 assertion） | 客户端 + IdP | 需 AASA `webcredentials` / assetlinks `get_login_creds` 关联域已验证；iOS 侧卡 [`spbf#111`](https://git.atjog.com/dever/super_partyb-flutter/issues/111)（Apple 付费账号）→ **现阶段不选** |
+| ① 原生（`ASAuthorization` / Credential Manager 取 assertion） | 客户端 + IdP | 需 AASA `webcredentials` / assetlinks `get_login_creds` 关联域已验证；iOS 侧卡 [`spbf#111`](https://<gitea-host>/dever/super_partyb-flutter/issues/111)（Apple 付费账号）→ **现阶段不选** |
 | ③ 内嵌 WebView | — | 禁止（§6.91） |
 
-**RP ID / origin 修正**：实现单里写的 `tbcc.atjog.com` + 双栈 `tbcc6` 已过期——生产目标
+**RP ID / origin 修正**：实现单里写的 `app.example.com` + 双栈 `tbcc6` 已过期——生产目标
 域名是 `dever.atjog.com`（`*6` 域名全线不可用，见仓库根 `AGENTS.md`），origin 只注册
 `dever.atjog.com` 一个。WebAuthn 要求安全上下文，`http://localhost` 是唯一例外
 （RP ID 只能是 `localhost`，**不能**用 IP 或内网域名替代）。
@@ -831,7 +831,7 @@ API（Android Credential Manager / iOS `ASAuthorizationPlatformPublicKeyCredenti
 > iOS 侧 `apple-app-site-association` 仍是 404，且无 Apple 账号签不出
 > associated domains，故原生路径在 iOS 上**从零开始**。
 
-前置清单与分期见 [id-provider#40](https://git.atjog.com/dever/id-provider/issues/40)（`priority/p3`、不排期）。
+前置清单与分期见 [id-provider#40](https://<gitea-host>/dever/id-provider/issues/40)（`priority/p3`、不排期）。
 
 #### 2. 分工：页面只收集意图
 

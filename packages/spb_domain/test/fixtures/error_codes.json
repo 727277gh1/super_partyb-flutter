@@ -35,6 +35,21 @@
     "retryable": true
   },
   {
+    "code": "quota_exceeded",
+    "default_message": "本群 token 配额已用尽，本轮已停止",
+    "retryable": false
+  },
+  {
+    "code": "quota_unavailable",
+    "default_message": "用量额度暂时无法核验，本轮已安全停止，请稍后重试",
+    "retryable": true
+  },
+  {
+    "code": "workspace_quota_exceeded",
+    "default_message": "群工作区已达到空间配额，本轮已停止",
+    "retryable": false
+  },
+  {
     "code": "internal_error",
     "default_message": "执行异常，请联系管理员",
     "retryable": false

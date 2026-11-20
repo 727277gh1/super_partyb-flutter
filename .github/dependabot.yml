@@ -8,7 +8,7 @@
 #
 # ## ⚠️ 前提：本文件只在 GitHub 上生效
 #
-# 本仓库的**权威远端是 Gitea**（`git@git.atjog.com:dever/super_partyb-flutter`），
+# 本仓库的**权威远端是 Gitea**（`git@<gitea-host>:dever/super_partyb-flutter`），
 # 而 `.github/workflows/*.yml` 是为 GitHub Actions 写的（`release.yml` 的
 # macOS job 需要 GitHub 的 macOS runner）。若 CI 实际跑在 Gitea Actions 上，
 # **Dependabot 不生效**——Gitea 用 Renovate 或 `renovate.json`。

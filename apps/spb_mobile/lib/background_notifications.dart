@@ -175,18 +175,8 @@ class BackgroundNotificationWorker {
       // 卡片 10 分钟后过期并消失，而 15 分钟周期必然拉到过期卡——旧实现因此
       // 每轮都白跑。notice 不会消失，15 分钟延迟就变成可接受的通知延迟。
       final api = NoticesApi(dio);
-      // 第一跳只取一个整数：没有未读就直接返回，不拉整页列表。
-      final unread = await api.unreadCount();
-      if (_stopped) return false;
-      if (unread == 0) {
-        await state.exclusive(() async {
-          if (generation != await state.generation()) return;
-          await state.markChecked(DateTime.now());
-        });
-        SpbLog.info('后台通知检查完成', {'unread': 0, 'shown': 0});
-        return true;
-      }
-      final page = await api.list(unreadOnly: true, limit: 20);
+      // 数量不变也可能更新内容；包含已读通知才能撤销别端已读的横幅。
+      final page = await api.list(limit: 200);
       if (_stopped) return false;
       return await state.exclusive(() async {
         // 网络请求期间可能登出或换账号，旧响应不得发到新会话。

@@ -234,7 +234,32 @@ void main() {
       expect(find.textContaining('quota'), findsNothing);
     });
 
-    testWidgets('429 workspace_quota_exceeded 同样映射为等待语义', (tester) async {
+    for (final scenario in {
+      'quota_account_disabled': '用户账户已停用，请联系管理员',
+      'quota_no_entitlement': '尚未获得该资源的使用额度，请充值或联系管理员',
+      'quota_exceeded': '用户或群组的资源额度已用尽，请充值、清理文件或联系管理员',
+    }.entries) {
+      testWidgets('远程额度拒绝 ${scenario.key} 显示对应原因', (tester) async {
+        mockTimeline();
+        await startController(tester);
+        adapter.onPost(
+          '/users/usr_1/chat/messages',
+          (server) => server.reply(
+            scenario.key == 'quota_account_disabled' ? 403 : 429,
+            {'error': '中心额度拒绝', 'code': scenario.key},
+          ),
+          data: Matchers.any,
+        );
+        await pumpPage(tester);
+        await tester.enterText(find.byType(TextField), '继续');
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('composer-send')));
+        await tester.pumpAndSettle();
+        expect(find.text(scenario.value), findsOneWidget);
+      });
+    }
+
+    testWidgets('429 workspace_quota_exceeded 提示清理工作区', (tester) async {
       mockTimeline();
       await startController(tester);
       adapter.onPost(
@@ -252,7 +277,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('composer-send')));
       await tester.pumpAndSettle();
 
-      expect(find.text('同时运行的任务已达上限，请稍后再试'), findsOneWidget);
+      expect(find.text('群工作区已达到空间配额，请清理文件后再发送'), findsOneWidget);
     });
   });
 

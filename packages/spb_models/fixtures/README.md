@@ -37,7 +37,7 @@ producer/consumers/actions`（`entries`），以及用户动作表（`actions`�
    schema**——所以「fixture 换了但 schema 没变」是**正常**，别当成漏改。
 2. **不允许在本仓库手工编辑 fixture**：真源不在本仓库，改这份只会在下次同步时被覆盖，
    且会掩盖真正的问题（缺实现、归类错、或服务端本就该改）。
-3. **不做运行时 / CI 拉取**：本仓 CI 跑在 GitHub Actions，到不了 `git.atjog.com`
+3. **不做运行时 / CI 拉取**：本仓 CI 跑在 GitHub Actions，到不了 `<gitea-host>`
    （AGENTS.md §8）。对拍只能读仓库内副本；跨仓一致性由本地脚本负责。
 
 ## 谁在读它
@@ -53,3 +53,9 @@ producer/consumers/actions`（`entries`），以及用户动作表（`actions`�
   `error` 的 `code/message/detail` 分工见 `docs/api-contract.md` §5.4.2；
   `dispatch_stage` 的分阶段语义见 §5.4.1。
 - **顺序保证**：目录声明的是「有哪些」，不是「按什么序到达」。
+
+### notification-contract.json
+
+由 Go `internal/notices/contract_test.go` 从 DTO 与通知能力矩阵生成，刷新命令为
+`bash tools/sync_notification_contract.sh`。PWA 与 SPBF 使用同一份样本验证未知类型兼容、
+同 ID 更新、卡片过期展示和深链；流程见 `docs/api-contract.md` 的站内通知契约。

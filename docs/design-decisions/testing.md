@@ -692,7 +692,7 @@ issue #40 的第 2 层（崩溃上报）仍**有意不做**（[§6.20](runtime-a
 | 文件:行 | 内容 | 替换为 |
 |---|---|---|
 | `docs/m0-manual-verification.md:416` | 生产服务器 IP | 「生产 SSH 别名，见 §部署约定」 |
-| 同上 | 内部域名 `idp.atjog.com` | 「IdP 生产地址」 |
+| 同上 | 内部域名 `idp.<internal-domain>` | 「IdP 生产地址」 |
 | `:92`、`:108` | 本地绝对路径 | `/path/to/super_partyb-flutter` |
 
 并在 §3 的 `tools/` 清单下写明 `scrub-history.sh` 的**使用顺序**（`--dry-run` →

@@ -78,6 +78,7 @@ class NotificationStateStore implements ConfirmationReceiptStore {
         ConfirmationReceipt(
           shown: row['shown'] == true,
           expiresAt: DateTime.tryParse(row['expires_at'] as String? ?? ''),
+          revision: row['revision'] as String?,
         ),
       );
     });
@@ -91,6 +92,7 @@ class NotificationStateStore implements ConfirmationReceiptStore {
           receipts.map(
             (id, row) => MapEntry(id, {
               'shown': row.shown,
+              if (row.revision != null) 'revision': row.revision,
               if (row.expiresAt != null)
                 'expires_at': row.expiresAt!.toUtc().toIso8601String(),
             }),

@@ -69,6 +69,20 @@ class Notice {
 
   bool get isRead => readAt != null;
 
+  /// 服务端会复用 ID 覆盖同群的终态；只按 ID 判重会永久吞掉后续结果。
+  String get revision =>
+      '${(updatedAt ?? createdAt).toUtc().toIso8601String()}:${data['turn_id'] ?? ''}';
+
+  /// 通知是历史事实，确认卡失效只改变展示，不删除通知。
+  String displayBody(DateTime now) =>
+      kind == 'confirmation_required' && isCardExpiredAt(now)
+      ? '$body（已失效，仅作记录）'
+      : body;
+
+  String get route => deepLinkGroupId == null
+      ? '/settings'
+      : '/chat/${Uri.encodeComponent(deepLinkGroupId!)}';
+
   /// 卡片失效时刻（只有确认卡类通知才有）。
   ///
   /// 注意语义：**通知本身不过期**，过期的是卡片。过期后仍应展示这条通知，
@@ -84,9 +98,9 @@ class Notice {
   /// 深链目标 group：`data.group_id` 优先，退回顶层 `group_id`。
   String? get deepLinkGroupId {
     final fromData = data['group_id'];
-    if (fromData != null && fromData.trim().isNotEmpty) return fromData;
+    if (fromData != null && fromData.trim().isNotEmpty) return fromData.trim();
     final top = groupId;
-    if (top != null && top.trim().isNotEmpty) return top;
+    if (top != null && top.trim().isNotEmpty) return top.trim();
     return null;
   }
 

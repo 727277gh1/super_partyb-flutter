@@ -324,6 +324,16 @@ Future<TestHarness> pumpApp(
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
+  final notificationState = NotificationStateStore(
+    AppDatabase(NativeDatabase.memory()),
+  );
+  addTearDown(notificationState.close);
+  adapter.onGet(
+    '/me/notices',
+    (server) =>
+        server.reply(200, {'notices': <Map<String, dynamic>>[], 'unread': 0}),
+    queryParameters: {'limit': 200},
+  );
 
   // 默认的 `/api/auth/me`。
   //
@@ -483,6 +493,7 @@ Future<TestHarness> pumpApp(
             ),
       ),
       if (ufsApi != null) ufsApiProvider.overrideWithValue(ufsApi),
+      notificationStateStoreProvider.overrideWithValue(notificationState),
       if (notificationSink != null)
         notificationSinkProvider.overrideWithValue(notificationSink),
       // 初始聚焦状态。`_SpbDesktopAppState` 只在能力实现 WindowFocusTarget

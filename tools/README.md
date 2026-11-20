@@ -40,4 +40,5 @@ for f in tools/check_*.sh; do bash "$f" || break; done
 | `tools/sync-to-github.sh` | 导出干净仓库并推送 GitHub |
 | `tools/sync_error_codes.sh` | 刷新 vendored 的 `error` code 闭集（服务端 `docs/error-codes.json`）|
 | `tools/sync_event_catalog.sh` | 刷新 vendored 的事件契约目录（服务端 `docs/event-catalog.json`，流程见 `packages/spb_models/fixtures/README.md`）|
+| `tools/sync_notification_contract.sh` | 同步 Go 通知 DTO/类型样本，PWA 与 SPBF 共用行为对拍 |
 | `tools/scrub-history.sh` | 开源前清理历史中的真实标识；只重写历史，用法见脚本头 |

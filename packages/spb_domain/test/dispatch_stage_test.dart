@@ -468,7 +468,7 @@ void main() {
     test('服务端 dispatch.KnownStages() 的每个段名都有专属文案（跨仓库对拍）', () {
       // 清单真源：`super_partyb/apps/go-api/internal/dispatch/stages.go` 的
       // `KnownStages()`。这里是**手抄**的副本（本仓库 CI 在 GitHub Actions，
-      // 到不了 git.atjog.com），服务端新增段时它不会自动红——但一旦有人手工
+      // 到不了 <gitea-host>），服务端新增段时它不会自动红——但一旦有人手工
       // 补齐文案，这条用例就保证「补齐」不是补成 fallback。
       //
       // 落进 fallback 的后果不是崩溃：用户看到「正在处理」，而服务端明明知道

@@ -929,6 +929,8 @@ class _SettingsTab extends ConsumerWidget {
       onOpenMyTurns: () => context.go(SpbRoutes.myTurns),
       // 通知自检（issue #90）：与桌面端同名同构（provider 给 null 时不展示）。
       onRunNotificationSelfTest: ref.watch(notificationSelfTestProvider),
+      noticeCenter: ref.watch(noticeCenterProvider),
+      onOpenNotice: (route) => context.go(route),
       // 后台检查（仅 Android）：没有远程推送，这条链路是尽力而为的，
       // 设置页据此展示「上次成功」时刻（§6.110）。桌面端不注入 → 不展示。
       loadLastBackgroundCheck: ref.watch(lastBackgroundCheckProvider),
@@ -2319,9 +2321,7 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       ..clear()
       ..addAll(ids);
 
-    // 新确认卡到达时发 OS 通知（issue #21）。理由同桌面端：副作用、与
-    // setState 无关，且页面已卸载时**更需要**通知。
-    unawaited(ref.read(confirmationNotifierProvider).handleItems(items));
+    // 系统通知由应用级 NoticeCenter 消费站内通知，避免 SSE 与轮询重复提醒。
 
     if (!mounted) return;
     setState(() {

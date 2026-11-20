@@ -478,9 +478,12 @@ fixture 在 `packages/spb_domain/test/fixtures/error_codes.json`
 | `content` | 过渡期兼容键，**逐字等于 `message`** | 旧消费者；三端迁到 `message` 后服务端删除 |
 | `detail` | 原始诊断串（`transport: upstream 429` / `responses invoke: …`） | **不进正文**：含英文诊断、路径、命令 → 只在「技术详情」展开/详情页展示 |
 
-闭集（8 个，顺序即清单顺序）：`oom_kill` / `upstream_rate_limited` /
+闭集（11 个，顺序即清单顺序）：`oom_kill` / `upstream_rate_limited` /
 `upstream_error` / `timeout_inactivity` / `timeout_hard` / `turn_stalled` /
-`turn_interrupted` / `internal_error`。
+`turn_interrupted` / `quota_exceeded` / `quota_unavailable` /
+`workspace_quota_exceeded` / `internal_error`。配额错误带来的停止会通过
+`error` 事件说明 `period`/`metric`、`used` 与 `limit`；token 按 UTC 日/月累计，缓存 token 已归一到 input 子集，不能再加一次。
+达到额度的 turn 状态为 `cancelled`；用量账本结算失败状态为 `failed`。
 
 `turn_interrupted` 是**重启回填**专用：服务端进程退出（部署重启 / 崩溃 / 被强杀）
 会把在跑的 turn 一起带走，启动后为遗留的 `running` turn 补发一条
@@ -489,7 +492,8 @@ fixture 在 `packages/spb_domain/test/fixtures/error_codes.json`
 路径的 code（super_partyb#184），生产已实测出现（2026-11-16，3 例）。
 
 `retryable` 的真源是服务端 `chatbus.Retryable(code)`：限流 / 上游错误 / 两档超时 /
-挂死 / 重启中断 → true；`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩、
+挂死 / 重启中断 / `quota_unavailable` → true；`quota_exceeded`、
+`workspace_quota_exceeded`、`oom_kill` 与 `internal_error` → false（同样输入 + 同样上限必然再崩、
 兜底码提示找管理员）。客户端镜像它，**未知 code 走 fail-open**
 （`ErrorCodeTraits.failOpen`：可重发、无徽标、通用图标）——历史事件
 （#182 之前只写 `content`）与未来服务端先发的新 code 都走这一格，绝不因客户端
@@ -676,3 +680,42 @@ turn 与一个回填出来仍在跑的 turn，归约结果**完全一致**
 
 **调用方注意**：`lastTurnRunState` 等查询的 `terminalTurnIds` 参数**不可省**（生产路径）。
 省略时终态信息丢失，会把所有历史 turn 判成可能在跑（有一条测试专门钉住这个陷阱）。
+
+### 独立额度服务拒绝（2026-11）
+
+启用远程额度后，准入沿用裸 JSON 错误结构：`quota_exceeded`（HTTP 429，用户或 Group 的任一资源超限）、`quota_no_entitlement`（HTTP 429，无可用权益）、`quota_account_disabled`（HTTP 403，额度账户或 IdP 用户停用）。直接准入响应可带 `reason_code`、`scope`、`metric`、`period`、`used`、`limit`；客户端不能再一律提示“等待本群日额度重置”。远程服务不可用或采集 revision 未追平沿用 `token_quota_unavailable`（HTTP 503）。
+
+执行中的 turn 沿用 SSE `error.code=quota_exceeded`，额外携带 `reason_code`、`scope`、`metric`，展示服务端 message；不新增 SSE 事件类型。周期检查发现停用/超额会取消当前 turn，`quota_unavailable` 表示暂时无法核验。
+
+## 站内通知契约（PWA / SPBF 共用）
+
+真源：`super_partyb/apps/go-api/internal/notices/store.go` 与 `internal/notify/matrix.go`。
+
+| 操作 | 契约 |
+|---|---|
+| `GET /me/notices?limit=200` | `{notices, unread}`；按 `updated_at DESC, id DESC`，最多 200 条；已读与未读均返回 |
+| `GET /me/notices/unread-count` | `{unread}`，仅作角标；数量不变不能证明内容未变 |
+| `POST /me/notices/read` | `{ids:[...]}` 或 `{all:true}`；`{updated, missing?}`；404 表示记录失效，重新刷新 |
+
+DTO 保持 snake_case：`id, kind, severity, title, body, data, group_id, created_at, updated_at, read_at`。
+`kind` 未知仍展示；深链取 `data.group_id`，其次 `group_id`，路径段必须转义。
+服务端复用 ID 时更新 `updated_at` 并清空 `read_at`，故客户端按 ID + 版本判重。
+确认卡 `data.expires_at` 仅表示卡片失效，不能用来删除历史通知。
+展示/关闭/导航不自动已读；显式 ack 的唯一真源是服务端 `read_at`。
+平台机制与实现边界见 §6.99，通知接口不改变聊天 SSE 契约。
+
+维护时运行：
+
+```bash
+# 在 super_partyb/apps/go-api
+UPDATE_NOTIFICATION_CONTRACT=1 go test ./internal/notices -run TestClientNotificationContract
+# 在 super_partyb-flutter
+bash tools/sync_notification_contract.sh
+(cd packages/spb_models && dart test test/notification_contract_test.dart)
+# 在 super_partyb/apps/webapp
+pnpm exec vitest run src/lib/notices.test.ts
+```
+
+Go 测试由真实 DTO/能力矩阵生成 `docs/notification-contract.json`，PWA 直接读取，
+SPBF 的 `packages/spb_models/fixtures/notification-contract.json` 为离线 CI 副本。
+新增通知类型只改服务端类型/文案，客户端无需再增加专用发通知分支。

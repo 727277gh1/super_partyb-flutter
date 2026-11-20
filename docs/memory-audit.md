@@ -116,9 +116,9 @@
 读数口径不变：`peak` 是 OS 高水位（`ProcessInfo.maxRss`）、`rss` 是工作集
 （`ProcessInfo.currentRss`）——峰值时刻只回答"何时"，不改变"是哪个口径"。
 
-### 绝对内存曲线：从 openQuestion 降级为「只能远程采集」
+### 绝对内存曲线：从 既有问题 降级为「只能远程采集」
 
-旧版本把这一项列为 openQuestion，理由是 DevTools 需要桌面环境与 profile
+旧版本把这一项列为 既有问题，理由是 DevTools 需要桌面环境与 profile
 模式。**现已被 [MemoryProbe] 绕过**：
 `ProcessInfo.currentRss` / `maxRss` 是 `dart:io` 的进程级读数，release 包里
 也能拿（Windows 由运行时经 `GetProcessMemoryInfo` 提供），因此曲线由**用户

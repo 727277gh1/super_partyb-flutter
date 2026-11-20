@@ -22,28 +22,31 @@
 
 ### M1+：功能实现（**大部分已完成**）
 
+- [x] PWA / SPBF 站内通知对齐（[#120](https://<gitea-host>/dever/super_partyb-flutter/issues/120)）：桌面/移动应用级接入、共享通知中心/前台提示、完成与失败通知、持久版本判重、跨端已读与 Go 契约样本；实现已落地，验证结果见该 issue，Windows/macOS 真机与发布仍独立验收。
+
+
 - [x] OIDC 登录（自实现 PKCE + loopback，非 `flutter_appauth`）
 - [x] 账号安全入口（Passkey / 双因素）：设置页跳系统浏览器打开 IdP `/dashboard/security`，客户端不做 WebAuthn ceremony（见 [§6.103](design-decisions/auth.md)；原生 passkey 评估见 id-provider#40）
-- [x] 两端切账号身份与离线缓存归属失效（[issue #103](https://git.atjog.com/dever/super_partyb-flutter/issues/103)，见 [§6.90](design-decisions/auth.md)；本地修复与自动化回归）
-- [x] 对话列表刷新竞态、SSE 删除后复活及归档快照丢失（[issue #104](https://git.atjog.com/dever/super_partyb-flutter/issues/104)，见 [§6.91](design-decisions/ui.md)；本地修复与自动化回归）
-- [x] 页面可用性修复（[issue #105](https://git.atjog.com/dever/super_partyb-flutter/issues/105)）：聊天顶部操作分行、同步设置草稿离开保护、首屏同步入口、桌面表单限宽、侧栏换行与触控/语义补齐；本地自动化及离屏截图验证通过，真机待复核。登录非主路径折叠为 #98 的部分完成。
-- [x] 对话卡片待确认计数、任务失败/阻塞摘要与当前任务名称（[issue #106](https://git.atjog.com/dever/super_partyb-flutter/issues/106)，见 [§6.89](design-decisions/ui.md)）：两端复用全局查询与列表快照，进入/返回及手动刷新时更新；完整性边界、刷新行为和大字号布局已通过本地自动化及离屏检查，真机待复核。
+- [x] 两端切账号身份与离线缓存归属失效（[issue #103](https://<gitea-host>/dever/super_partyb-flutter/issues/103)，见 [§6.90](design-decisions/auth.md)；本地修复与自动化回归）
+- [x] 对话列表刷新竞态、SSE 删除后复活及归档快照丢失（[issue #104](https://<gitea-host>/dever/super_partyb-flutter/issues/104)，见 [§6.91](design-decisions/ui.md)；本地修复与自动化回归）
+- [x] 页面可用性修复（[issue #105](https://<gitea-host>/dever/super_partyb-flutter/issues/105)）：聊天顶部操作分行、同步设置草稿离开保护、首屏同步入口、桌面表单限宽、侧栏换行与触控/语义补齐；本地自动化及离屏截图验证通过，真机待复核。登录非主路径折叠为 #98 的部分完成。
+- [x] 对话卡片待确认计数、任务失败/阻塞摘要与当前任务名称（[issue #106](https://<gitea-host>/dever/super_partyb-flutter/issues/106)，见 [§6.89](design-decisions/ui.md)）：两端复用全局查询与列表快照，进入/返回及手动刷新时更新；完整性边界、刷新行为和大字号布局已通过本地自动化及离屏检查，真机待复核。
 - [x] 桌面对话列表限宽单列、三层摘要与状态降噪，两端常显管理菜单（见 [§6.84](design-decisions/ui.md)）：本地交互/布局回归及离屏检查通过，真实窗口操作待复核。
 - [x] 对话列表 + SSE 实时流（cursor 续接 / 切 group 复用连接 / 加载更早历史）
-- [x] 流式回复空 ID 导致多轮正文滚动消失：已复现并修复，自动化回归通过（[issue #100](https://git.atjog.com/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；Windows release 待设备复核）
+- [x] 流式回复空 ID 导致多轮正文滚动消失：已复现并修复，自动化回归通过（[issue #100](https://<gitea-host>/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；Windows release 待设备复核）
 - [x] 长对话性能评审：追底动画去重、Markdown 完成时保留解析状态、稳定链接回调、行索引缓存与图片缓存修复（见 [§6.47](design-decisions/performance.md)；本地回归通过，Windows release 待设备复核）
 - [x] 已读长短消息往返滚动时总高度变化：补充按行身份保存的布局高度缓存，历史前插复用、窗口与字号变化重测（见 [§6.47 第十节](design-decisions/performance.md)；本地回归通过，Windows 实机流畅度待验证）
-- [x] 上翻加载历史保持阅读位置，分页在途切组隔离旧响应（[issue #100](https://git.atjog.com/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；本地回归通过，Windows release 待设备复核）
+- [x] 上翻加载历史保持阅读位置，分页在途切组隔离旧响应（[issue #100](https://<gitea-host>/dever/super_partyb-flutter/issues/100)，见 [§6.85](design-decisions/chat.md)；本地回归通过，Windows release 待设备复核）
 - [x] 对话列表卡片化 + 列数跟随宽度（移动端一列、桌面端并排 2~4 列，见 [§6.84](design-decisions/ui.md)）
 - [x] SSE 传输层单测（issue #41，含测出的 UTF-8 分片损坏修复，见 [§6.22](design-decisions/testing.md)）
 - [x] 消息发送 + 无归属入口（悬浮窗）
 - [x] 失败 turn 重发（`ErrorItem` → 重新投递，见 [§6.14](design-decisions/chat.md)）
-- [x] 首 token之前的分发进度条（[issue #114](https://git.atjog.com/dever/super_partyb-flutter/issues/114) 阶段 2，服务端见 super_partyb#181）：`dispatch_stage` 只认本端 rid、不进缓冲/游标、500ms 门槛、root 收尾即收起，见 [§6.106](design-decisions/chat.md)；本地自动化回归通过，**已真机验收**（123 开关已开、用户实测看到进度；`9ab3b54` 补了「帧到没到」的诊断日志，判读见 [§6.106.1](design-decisions/chat.md)）
-- [x] 事件契约目录对拍 + 契约漂移可见出口（[issue #116](https://git.atjog.com/dever/super_partyb-flutter/issues/116) / [#117](https://git.atjog.com/dever/super_partyb-flutter/issues/117) / [#118](https://git.atjog.com/dever/super_partyb-flutter/issues/118)）：vendored `event-catalog.json` + 语义对拍（类别闭集 / timeline 全覆盖 / 控制类闭环）、未知类型不再静默（一行「未知事件」+ 每类型一次 warn），顺带修掉 `habit_pattern_recalibrated` 被丢弃的真 bug，见 [§6.107](design-decisions/chat.md)；「18 → ≤7 渲染器合并」按票面数据不成立，保持按类型分派
-- [x] `error` 事件按服务端 `code` 出表现（[issue #115](https://git.atjog.com/dever/super_partyb-flutter/issues/115)，服务端 P0 见 super_partyb#182）：`code` 闭集镜像 + vendored 对拍（`tools/sync_error_codes.sh`）、正文只取 `message`、`detail` 折叠进「技术详情」、`retryable` 决定「重发」，见 [§6.105](design-decisions/chat.md)；本地自动化回归通过（含 `error_banner` golden 未变），123 真实 OOM / 限流事件待复现复核
+- [x] 首 token之前的分发进度条（[issue #114](https://<gitea-host>/dever/super_partyb-flutter/issues/114) 阶段 2，服务端见 super_partyb#181）：`dispatch_stage` 只认本端 rid、不进缓冲/游标、500ms 门槛、root 收尾即收起，见 [§6.106](design-decisions/chat.md)；本地自动化回归通过，**已真机验收**（123 开关已开、用户实测看到进度；`9ab3b54` 补了「帧到没到」的诊断日志，判读见 [§6.106.1](design-decisions/chat.md)）
+- [x] 事件契约目录对拍 + 契约漂移可见出口（[issue #116](https://<gitea-host>/dever/super_partyb-flutter/issues/116) / [#117](https://<gitea-host>/dever/super_partyb-flutter/issues/117) / [#118](https://<gitea-host>/dever/super_partyb-flutter/issues/118)）：vendored `event-catalog.json` + 语义对拍（类别闭集 / timeline 全覆盖 / 控制类闭环）、未知类型不再静默（一行「未知事件」+ 每类型一次 warn），顺带修掉 `habit_pattern_recalibrated` 被丢弃的真 bug，见 [§6.107](design-decisions/chat.md)；「18 → ≤7 渲染器合并」按票面数据不成立，保持按类型分派
+- [x] `error` 事件按服务端 `code` 出表现（[issue #115](https://<gitea-host>/dever/super_partyb-flutter/issues/115)，服务端 P0 见 super_partyb#182）：`code` 闭集镜像 + vendored 对拍（`tools/sync_error_codes.sh`）、正文只取 `message`、`detail` 折叠进「技术详情」、`retryable` 决定「重发」，见 [§6.105](design-decisions/chat.md)；本地自动化回归通过（含 `error_banner` golden 未变），123 真实 OOM / 限流事件待复现复核
 - [x] 发送的乐观回显（请求在飞时「发送中」，issue #52，见 [§6.50](design-decisions/chat.md)）
 - [x] 对话内搜索（搜已加载时间线，见 [§6.15](design-decisions/chat.md)）+ 窄屏 AppBar 溢出修复（issue #31，见 [§6.16](design-decisions/ui.md)）
-- [x] 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（搜索命中 / 待确认收件箱 / 习惯执行历史 / 我的轮次四处入口都带上锚点，落位 + 高亮 + 「回到最新」，见 [§6.92](design-decisions/chat.md)）：本地自动化回归通过，真机跳变观感待复核；越界自动补页（[#108](https://git.atjog.com/dever/super_partyb-flutter/issues/108)）与 OS 层深链（[#109](https://git.atjog.com/dever/super_partyb-flutter/issues/109)）未做
+- [x] 跳到会话内某一轮：`/chat/{groupId}?turn={turnId}` 深链（搜索命中 / 待确认收件箱 / 习惯执行历史 / 我的轮次四处入口都带上锚点，落位 + 高亮 + 「回到最新」，见 [§6.92](design-decisions/chat.md)）：本地自动化回归通过，真机跳变观感待复核；越界自动补页（[#108](https://<gitea-host>/dever/super_partyb-flutter/issues/108)）与 OS 层深链（[#109](https://<gitea-host>/dever/super_partyb-flutter/issues/109)）未做
 - [x] 轮次导航刻度条（会话右侧竖置刻度：常驻横杠 + hover 显示各轮问题前 24 字 + 刻度列可滚 + 点击跳转；触屏改开 48dp 列表弹层、窄屏走「更多」菜单，见 [§6.94](design-decisions/chat.md)）：本地自动化回归通过（含面板淡入淡出 / 横杠伸缩的动效用例与「减少动效」降级）；hover 观感、触控板手感与真机触屏点按待复核
 - [x] spec 看板：Table、六类 Chart、响应式 Stack/Grid、状态快照取值（见 [§6.9.4](design-decisions/runtime-and-ops.md)；本地回归与 golden 通过，设备效果待验收）
 - [x] 交付物同步（单向拉取 + 双向回传与冲突物化）

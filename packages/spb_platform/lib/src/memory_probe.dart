@@ -5,7 +5,7 @@
 ///
 /// `docs/memory-audit.md` 的全部内存结论都停在**结构事实**层面（「这个容器
 /// 无界」），因为开发机无 `DISPLAY`、无真机（AGENTS.md §9），拿不到绝对
-/// RSS 曲线——那一项一直挂在 openQuestion。而内存问题的最终判据只能来自
+/// RSS 曲线——那一项一直挂在 既有问题。而内存问题的最终判据只能来自
 /// **真实用户的机器**：哪台机器、跑了多久、涨到多少。
 ///
 /// 本模块把这条通道补上，且不依赖 DevTools：
@@ -368,7 +368,7 @@ MemoryProbe? get installedMemoryProbe => _installed;
 /// `FrameTimingReporter` 是 `SPB_FRAME_TIMING` opt-in 的，因为它的回调**每帧**
 /// 触发。本模块是每分钟一次、6 个整数、一个 12 槽环形缓冲——成本可忽略，而
 /// 它换来的恰恰是「用户报障时报告里有没有内存数据」。默认关掉等于永远拿不到
-/// 真实机器的曲线（openQuestion 会一直挂着）。
+/// 真实机器的曲线（既有问题 会一直挂着）。
 ///
 /// ## 为什么在 `configureImageCache()` 之后调用
 ///

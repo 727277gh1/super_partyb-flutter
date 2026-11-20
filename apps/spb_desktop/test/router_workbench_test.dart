@@ -24,203 +24,89 @@ import 'support/desktop_harness.dart';
 /// ⚠️ 本文件由 `widget_test.dart` 按顶层用例边界拆出（issue #48）——
 /// 纯移动，未改动任何断言。共享夹具见 `support/desktop_harness.dart`。
 void main() {
-  group('确认卡到达时发 OS 通知（issue #21）', () {
-    /// 推一帧 confirmation_required。
-    void pushConfirmation(
-      FakeSseClient sse, {
-      String eventId = 'evt_n1',
-      String confirmationId = 'conf_n1',
-      String groupId = 'grp_n',
-      String question = '要部署到生产吗？',
-    }) {
-      sse.push('confirmation_required', {
-        'eventId': eventId,
-        'eventType': 'confirmation_required',
-        'groupId': groupId,
-        'turnId': 'turn_n1',
-        'userId': 'usr_REAL',
-        'seq': 1,
-        'createdAt': '2026-01-01T00:00:00Z',
-        'payload': {
-          'confirmation_id': confirmationId,
-          'question': question,
-          'options': ['继续', '取消'],
-        },
+  group('应用级站内通知接线', () {
+    for (final kind in [
+      'confirmation_required',
+      'turn_completed',
+      'turn_failed',
+      'sandbox_suppressed',
+      'future_kind',
+    ]) {
+      testWidgets('$kind 在非对话页也能收到，重复轮询不重发', (tester) async {
+        final sink = RecordingNotificationSink();
+        final h = await pumpApp(
+          tester,
+          notificationSink: sink,
+          windowFocused: false,
+          beforePump: (adapter) {
+            adapter.onGet(
+              '/me/notices',
+              (server) => server.reply(200, {
+                'notices': [
+                  {
+                    'id': 'notice1',
+                    'kind': kind,
+                    'severity': 'info',
+                    'title': '服务端通知',
+                    'body': '服务端正文',
+                    'group_id': 'grp_n',
+                    'created_at': '2026-11-20T10:00:00Z',
+                    'updated_at': '2026-11-20T10:00:00Z',
+                  },
+                ],
+                'unread': 1,
+              }),
+              queryParameters: {'limit': 200},
+            );
+          },
+        );
+        final center = h.container.read(noticeCenterProvider)!;
+        await tester.runAsync(center.refresh);
+        await tester.runAsync(center.refresh);
+        await tester.pump();
+        expect(sink.sent, hasLength(1));
+        expect(sink.sent.single.title, '服务端通知');
+        expect(sink.sent.single.payload, '/chat/grp_n');
+        expect(center.snapshot.unread, 1);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
       });
     }
-
-    /// 起一个「已进入某对话页」的测试环境（通知判定挂在对话页的 items 流上）。
-    Future<TestHarness> pumpInChat(
-      WidgetTester tester, {
-      required FakeSseClient sse,
-      required NotificationSink sink,
-      bool focused = false,
-      String groupId = 'grp_n',
-    }) async {
+    testWidgets('前台仍有通知事实但不弹系统横幅', (tester) async {
+      final sink = RecordingNotificationSink();
       final h = await pumpApp(
         tester,
-        sseClient: sse,
         notificationSink: sink,
-        windowFocused: focused,
+        windowFocused: true,
         beforePump: (adapter) {
           adapter.onGet(
-            '/api/auth/me',
+            '/me/notices',
             (server) => server.reply(200, {
-              'id': 'usr_REAL',
-              'email': 'a@b.c',
-              'name': 'Test',
-              'role': 'member',
-              'roles': ['member'],
-              'permissions': <String>[],
-              'status': 'active',
-            }),
-          );
-          adapter.onGet(
-            '/chat/groups/$groupId',
-            (server) => server.reply(200, {
-              'id': groupId,
-              'user_id': 'usr_REAL',
-              'title': '通知测试',
-            }),
-          );
-          adapter.onGet(
-            '/chat/groups/$groupId/timeline',
-            (server) => server.reply(200, {
-              'items': <Map<String, dynamic>>[],
-              'next_before_global_seq': '',
+              'notices': [
+                {
+                  'id': 'notice1',
+                  'kind': 'turn_completed',
+                  'title': '任务完成',
+                  'body': '请查看结果',
+                  'created_at': '2026-11-20T10:00:00Z',
+                },
+              ],
+              'unread': 1,
             }),
             queryParameters: {'limit': 200},
           );
-          adapter.onGet(
-            '/users/usr_REAL/chat/messages/pending',
-            (server) => server.reply(200, {'items': <Map<String, dynamic>>[]}),
-            queryParameters: {'group_id': groupId, 'limit': 20},
-          );
         },
       );
-      h.router.go(SpbRoutes.chat(groupId));
+      final center = h.container.read(noticeCenterProvider)!;
+      await tester.runAsync(center.refresh);
       await tester.pump();
-      await tester.pump(const Duration(seconds: 2));
-      return h;
-    }
-
-    /// 推帧后结算（归约 → items 流 → 通知判定）。
-    Future<void> settle(WidgetTester tester) async {
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-    }
-
-    testWidgets('新的确认卡到达 → 发一条通知（窗口在后台）', (tester) async {
-      final sse = FakeSseClient();
-      final sink = RecordingNotificationSink();
-      await pumpInChat(tester, sse: sse, sink: sink, focused: false);
-
-      pushConfirmation(sse);
-      await settle(tester);
-
-      expect(sink.sent, hasLength(1));
-      expect(sink.sent.single.title, '需要你确认');
-      expect(sink.sent.single.body, '要部署到生产吗？');
-      expect(sink.sent.single.payload, '/chat/grp_n');
-
-      await tester.pumpWidget(const SizedBox.shrink());
-    });
-
-    testWidgets('窗口聚焦中 → 不发通知（不打扰正在看对话的用户）', (tester) async {
-      final sse = FakeSseClient();
-      final sink = RecordingNotificationSink();
-      await pumpInChat(tester, sse: sse, sink: sink, focused: true);
-
-      pushConfirmation(sse);
-      await settle(tester);
-
       expect(sink.sent, isEmpty);
-      expect(sink.permissionCalls, 0, reason: '不发就不该请求权限');
-
+      expect(center.snapshot.notices.single.isRead, isFalse);
       await tester.pumpWidget(const SizedBox.shrink());
-    });
-
-    testWidgets('同 id 重复推送（SSE 重连回放）→ 只发一次', (tester) async {
-      final sse = FakeSseClient();
-      final sink = RecordingNotificationSink();
-      await pumpInChat(tester, sse: sse, sink: sink, focused: false);
-
-      pushConfirmation(sse, eventId: 'evt_n1');
-      await settle(tester);
-      // 回放：同一张确认卡，**新的 eventId**（回放会重发事件）。
-      pushConfirmation(sse, eventId: 'evt_n1_replay');
-      await settle(tester);
-
-      expect(sink.sent, hasLength(1), reason: '同一张卡回放不得重复弹');
-
-      await tester.pumpWidget(const SizedBox.shrink());
-    });
-
-    testWidgets('权限被拒 → 不发通知（静默降级，不崩）', (tester) async {
-      final sse = FakeSseClient();
-      final sink = RecordingNotificationSink(granted: false);
-      await pumpInChat(tester, sse: sse, sink: sink, focused: false);
-
-      pushConfirmation(sse);
-      await settle(tester);
-
-      expect(sink.sent, isEmpty);
-      expect(sink.permissionCalls, 1);
-
-      await tester.pumpWidget(const SizedBox.shrink());
-    });
-
-    testWidgets('两张不同的确认卡 → 各发一条', (tester) async {
-      final sse = FakeSseClient();
-      final sink = RecordingNotificationSink();
-      await pumpInChat(tester, sse: sse, sink: sink, focused: false);
-
-      pushConfirmation(sse, eventId: 'evt_a', confirmationId: 'conf_a');
-      pushConfirmation(sse, eventId: 'evt_b', confirmationId: 'conf_b');
-      await settle(tester);
-
-      expect(sink.sent.map((n) => n.id), ['conf_a', 'conf_b']);
-
-      await tester.pumpWidget(const SizedBox.shrink());
-    });
-
-    testWidgets('普通消息（非确认卡）不触发通知', (tester) async {
-      final sse = FakeSseClient();
-      final sink = RecordingNotificationSink();
-      await pumpInChat(tester, sse: sse, sink: sink, focused: false);
-
-      sse.push('message', {
-        'eventId': 'evt_msg',
-        'eventType': 'message',
-        'groupId': 'grp_n',
-        'turnId': 'turn_n1',
-        'userId': 'usr_REAL',
-        'seq': 1,
-        'createdAt': '2026-01-01T00:00:00Z',
-        'payload': {'text': '普通回复'},
-      });
-      // 必须再推 `done` 收尾：`message` 会让该 turn 进入「进行中」，控制器据此
-      // 武装 per-turn 看门狗计时器（见 `ChatStreamController` 的 stale 机制）。
-      // 不收尾就会留下 pending timer，测试框架报「A Timer is still pending」。
-      sse.push('done', {
-        'eventId': 'evt_done',
-        'eventType': 'done',
-        'groupId': 'grp_n',
-        'turnId': 'turn_n1',
-        'userId': 'usr_REAL',
-        'seq': 2,
-        'createdAt': '2026-01-01T00:00:01Z',
-        'payload': <String, dynamic>{},
-      });
-      await settle(tester);
-
-      expect(sink.sent, isEmpty);
-      expect(sink.permissionCalls, 0);
-
-      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
     });
   });
+
   group('小程序工作台（桌面端接线）', () {
     testWidgets('对话列表点「工作台」进入工作列表', (tester) async {
       // 端到端验证 router 把首页的 onOpenWorks 接到了真实路由与端点。

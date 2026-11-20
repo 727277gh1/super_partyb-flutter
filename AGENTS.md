@@ -205,7 +205,7 @@ spb_design / spb_models / spb_core → 无包内依赖
 
 ## 11. 已知问题
 
-**未修项只存在于 issue 跟踪器**（`git.atjog.com/dever/super_partyb-flutter`，用 `type/` +
+**未修项只存在于 issue 跟踪器**（`<gitea-host>/dever/super_partyb-flutter`，用 `type/` +
 `priority/` + `area/` 标签筛）。**已修项的根因与反向验证不另设清单**——它们写在
 `docs/design-decisions/` 的对应 §6.x 小节里（改代码前读那里），只与代码绑定、无独立小节的写在源码文档注释里
 （例：`apps/*/lib/providers.dart` 的 `notificationSinkProvider`）。
@@ -249,7 +249,7 @@ docs: 补充 Windows 构建限制
 | 文档 | 位置 |
 |---|---|
 | 设计决策全文（§6.x / §7 / §8） | `docs/design-decisions/`（索引 `README.md`） |
-| 未修项与历史修复讨论 | issue 跟踪器：`git.atjog.com/dever/super_partyb-flutter/issues`（`type/` + `priority/` + `area/` 标签） |
+| 未修项与历史修复讨论 | issue 跟踪器：`<gitea-host>/dever/super_partyb-flutter/issues`（`type/` + `priority/` + `area/` 标签） |
 | Go API 契约（§5）与事件类型真源 | `docs/api-contract.md`（真源：`super_partyb/apps/go-api/internal/chatbus/broker.go`） |
 | 开发环境与无头验证边界（§9） | `docs/development.md` |
 | 待办与里程碑（§10） | `docs/roadmap.md` |

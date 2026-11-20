@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_data/spb_data.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
 
 void main() {
   late Directory directory;
@@ -50,6 +51,43 @@ void main() {
     ]);
     expect(shown, ['c']);
     expect((await second.loadReceipts())['c']!.shown, isTrue);
+  });
+
+  test('通知版本跨 engine 持久化，同 ID 更新重新发送而已读可以撤销', () async {
+    final shown = <String>[];
+    final cancelled = <String>[];
+    ConfirmationNotificationInbox inbox(NotificationStateStore state) =>
+        ConfirmationNotificationInbox(
+          store: state,
+          show: (n) async {
+            shown.add(n.id);
+            return true;
+          },
+          cancel: (id) async => cancelled.add(id),
+          canNotify: () async => true,
+        );
+    final at = DateTime.utc(2026, 11, 20);
+    Notice notice(int revision, {bool read = false}) => Notice(
+      id: 'n1',
+      kind: 'turn_completed',
+      severity: 'info',
+      title: '完成',
+      body: '请查看',
+      createdAt: at,
+      updatedAt: at.add(Duration(seconds: revision)),
+      readAt: read ? at : null,
+    );
+    await Future.wait([
+      inbox(first).handleNotices([notice(1)], focused: false),
+      inbox(second).handleNotices([notice(1)], focused: false),
+    ]);
+    expect(shown, ['n1']);
+    expect((await second.loadReceipts())['n1']!.revision, notice(1).revision);
+    await inbox(second).handleNotices([notice(2)], focused: false);
+    await inbox(first).handleNotices([notice(2)], focused: false);
+    expect(shown, ['n1', 'n1']);
+    await inbox(first).handleNotices([notice(3, read: true)], focused: false);
+    expect(cancelled, ['n1']);
   });
 
   test('两个 manager 刷新不并发，登出等待在途刷新后清空凭证和通知', () async {

@@ -77,6 +77,7 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
 
   /// 托盘提示的订阅（同步在途状态变化时重推）。
   ProviderSubscription<bool>? _syncInFlightSub;
+  ProviderSubscription<AsyncValue<int>>? _noticeUnreadSub;
 
   /// 认证状态的订阅（登录/登出时武装或暂停自动同步）。
   ProviderSubscription<AuthState>? _authSub;
@@ -145,8 +146,13 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
       syncConfigured: () =>
           ref.read(syncLocalRootProvider).value?.trim().isNotEmpty ?? false,
       syncing: () => ref.read(syncInFlightProvider),
+      unreadCount: () => ref.read(noticeUnreadProvider).value ?? 0,
     );
     _trayTooltip = controller;
+    _noticeUnreadSub = ref.listenManual(
+      noticeUnreadProvider,
+      (_, _) => controller.push(),
+    );
 
     // 先推一次当前状态：否则托盘会一直显示托盘库的默认值，直到用户第一次
     // 同步——而「未配置同步目录」这个信息恰恰在用户还没同步时最有用。
@@ -232,7 +238,14 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
     // （`_router` 此时已存在，故其实可以）——选择 `_router` 是为了不依赖
     // `context` 在 `initState` 阶段的可用性（`GoRouter.of(context)` 在
     // `initState` 里拿不到 InheritedWidget）。
-    notifier.attach(onNavigate: (payload) => _router.go(payload));
+    notifier.attach(
+      onNavigate: (payload) {
+        unawaited(
+          ref.read(desktopCapabilitiesProvider).showWindow(WindowRole.main),
+        );
+        _router.go(payload);
+      },
+    );
 
     // 冷启动的启动详情（issue #86）：App 被杀后点通知，payload 不走 onSelect
     // （那只覆盖进程存活时的点击），要单独读一次 launch details。
@@ -266,7 +279,10 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
       // 先提升成局部变量：Dart 的类型提升不穿透 `is` 检查到后续的 cascade
       // （与 `desktop_integration.dart` 里 `WindowDisplayTarget` 同一原因）。
       final focus = caps as WindowFocusTarget;
-      focus.onFocus = () => ref.read(windowFocusedProvider.notifier).set(true);
+      focus.onFocus = () {
+        ref.read(windowFocusedProvider.notifier).set(true);
+        unawaited(ref.read(noticeCenterProvider)?.refresh());
+      };
       focus.onBlur = () => ref.read(windowFocusedProvider.notifier).set(false);
       _focusTarget = focus;
     }
@@ -285,6 +301,7 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
         ..onBlur = null;
     }
     _syncInFlightSub?.close();
+    _noticeUnreadSub?.close();
     _authSub?.close();
     _trayTooltip?.dispose();
     _integration?.detach();
@@ -294,6 +311,9 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
 
   @override
   Widget build(BuildContext context) {
+    // 应用级常驻，切离对话页也持续接收所有通知类型。
+    final notices = ref.watch(noticeCenterProvider);
+    final focused = ref.watch(windowFocusedProvider);
     return MaterialApp.router(
       title: 'Super PartyB',
       debugShowCheckedModeBanner: false,
@@ -325,6 +345,12 @@ class _SpbDesktopAppState extends ConsumerState<SpbDesktopApp> {
         // `builder` 的 child 在 MaterialApp 内部可能为 null（它要等路由
         // 构建完）；返回空盒子而**不是** null——否则框架会插一个红屏。
         if (child == null) return const SizedBox.shrink();
+        child = NoticeBanner(
+          center: notices,
+          focused: focused,
+          onOpen: _router.go,
+          child: child,
+        );
         if (!ref.watch(remoteSessionProvider)) return child;
         final media = MediaQuery.maybeOf(context);
         if (media == null || media.disableAnimations) return child;

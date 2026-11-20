@@ -12,7 +12,7 @@
 #
 # ## 为什么是 vendored 副本 + 手动脚本，而不是 CI 拉取
 #
-# 本仓库的 CI 与构建**全在 GitHub Actions**（AGENTS.md §8），到不了 `git.atjog.com`
+# 本仓库的 CI 与构建**全在 GitHub Actions**（AGENTS.md §8），到不了 `<gitea-host>`
 # （私有 + 内网）。所以对拍只能读仓库内的副本：本脚本负责刷新，守卫测试
 # （`packages/spb_models/test/event_catalog_test.dart`）负责比对。
 #

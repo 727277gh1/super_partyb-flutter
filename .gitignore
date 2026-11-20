@@ -99,7 +99,7 @@ key.properties
 # 属本机会话状态而非项目源码，不入库。
 .pi/
 
-# AI Agent 技能（由外部 skills 仓库 git@git.atjog.com:aier/skills 安装到本机）
+# AI Agent 技能（由外部 skills 仓库 git@<gitea-host>:aier/skills 安装到本机）
 #
 # 各 harness 的 skills 目录只是**本机安装副本**，不是项目源码：内容随安装版本漂移，
 # 提交后会和上游仓库变成两份各自演进的副本。需要技能就在本机跑安装命令。

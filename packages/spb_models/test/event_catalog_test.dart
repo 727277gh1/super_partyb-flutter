@@ -23,7 +23,7 @@ import 'package:test/test.dart';
 ///
 /// ## 为什么读 vendored fixture 而不是服务端文件
 ///
-/// 本仓库 CI 在 GitHub Actions，到不了 `git.atjog.com`（AGENTS.md §8）。副本由
+/// 本仓库 CI 在 GitHub Actions，到不了 `<gitea-host>`（AGENTS.md §8）。副本由
 /// `tools/sync_event_catalog.sh` 刷新并随 PR 提交（流程见 `fixtures/README.md`）。
 ///
 /// ## 为什么不用 `sha256` 锁死

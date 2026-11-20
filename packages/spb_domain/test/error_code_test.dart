@@ -25,7 +25,7 @@ import 'package:test/test.dart';
 ///
 /// ## 为什么读的是 vendored fixture 而不是服务端文件
 ///
-/// 本仓库 CI 在 GitHub Actions，到不了 `git.atjog.com`（AGENTS.md §8）。
+/// 本仓库 CI 在 GitHub Actions，到不了 `<gitea-host>`（AGENTS.md §8）。
 /// 副本由 `tools/sync_error_codes.sh` 刷新，随 PR 提交——CI 只读仓库内文件。
 void main() {
   List<Map<String, dynamic>> loadServerCodes() {

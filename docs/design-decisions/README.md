@@ -87,7 +87,7 @@
 | §6.55 | Windows 托盘：图标不显示 + 右键菜单卡死（2026-11） | [`platform.md`](platform.md) |
 | §6.56 | group 用量（token 消耗）展示：REST 权威 + SSE 增量 + 重连对账（2026-11，对齐 Go `4a05176c` / `20874489`） | [`chat.md`](chat.md) |
 | §6.57 | 桌面端可诊断性：本地文件日志 + 会话标记 + 悬浮窗失败回滚（2026-11） | [`runtime-and-ops.md`](runtime-and-ops.md) |
-| §6.99 | 通知事件范围：只覆盖确认卡及其撤销，回复完成/失败/同步/后台任务一律不发；`unreadCount` 恒 0（2026-11，issue #89） | [`runtime-and-ops.md`](runtime-and-ops.md) |
+| §6.99 | 通知统一消费站内事实：PWA/SPBF 类型、已读、版本判重与展示对齐（2026-11，issue #120） | [`runtime-and-ops.md`](runtime-and-ops.md) |
 | §6.58 | 归属提示重构：`routing_selected` 合并进气泡，无聊原因零空间（2026-11） | [`chat.md`](chat.md) |
 | §6.59 | 内存审计与处置（2026-11）：无界集合加界 / 图片解码降采样 / batch 写入 | [`performance.md`](performance.md) |
 | §6.60 | 第二轮内存/峰值优化：哈希下放 isolate / 交付物树懒构建 / 内存压力接线（2026-11） | [`performance.md`](performance.md) |

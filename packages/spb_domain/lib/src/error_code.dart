@@ -128,6 +128,15 @@ abstract final class ErrorCodes {
   /// 重发而好转。
   static const turnInterrupted = 'turn_interrupted';
 
+  /// Group token 日/月额度已用尽，执行中的 turn 已停止。
+  static const quotaExceeded = 'quota_exceeded';
+
+  /// token 用量账本暂时不可用；安全停止后可重试。
+  static const quotaUnavailable = 'quota_unavailable';
+
+  /// 群工作区字节或文件数超限，执行中的 turn 已停止。
+  static const workspaceQuotaExceeded = 'workspace_quota_exceeded';
+
   /// 兜底码（服务端保证「无 code 可填时落它」）。
   static const internalError = 'internal_error';
 
@@ -143,6 +152,9 @@ abstract final class ErrorCodes {
     timeoutHard,
     turnStalled,
     turnInterrupted,
+    quotaExceeded,
+    quotaUnavailable,
+    workspaceQuotaExceeded,
     internalError,
   ];
 
@@ -182,6 +194,21 @@ abstract final class ErrorCodes {
       retryable: true,
       icon: ErrorCodeIcon.interrupted,
       label: '本轮被中断',
+    ),
+    quotaExceeded: ErrorCodeTraits(
+      retryable: false,
+      icon: ErrorCodeIcon.server,
+      label: '额度已用尽',
+    ),
+    quotaUnavailable: ErrorCodeTraits(
+      retryable: true,
+      icon: ErrorCodeIcon.server,
+      label: '额度核验失败',
+    ),
+    workspaceQuotaExceeded: ErrorCodeTraits(
+      retryable: false,
+      icon: ErrorCodeIcon.server,
+      label: '工作区空间已满',
     ),
     internalError: ErrorCodeTraits(
       retryable: false,
