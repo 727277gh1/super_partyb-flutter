@@ -1683,6 +1683,11 @@ final externalQuickCaptureBridgeProvider = Provider<ExternalQuickCaptureBridge>(
   (ref) => const ExternalQuickCaptureBridge(),
 );
 
+// 临时 engine 内保留读取结果；页面重建及前后台切换不重新读取剪贴板。
+final quickCaptureClipboardProvider = FutureProvider<ExternalQuickCapture>(
+  (ref) => ref.watch(externalQuickCaptureBridgeProvider).readClipboard(),
+);
+
 final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>(
   (ref) {
     return QuickCaptureEnqueueUseCase(ref.watch(chatApiProvider));

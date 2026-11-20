@@ -15,6 +15,7 @@ import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
 import 'package:spb_features/spb_features.dart';
 import 'package:spb_models/spb_models.dart';
+import 'package:spb_platform/spb_platform.dart' show ExternalQuickCapture;
 
 import 'providers.dart';
 
@@ -3020,10 +3021,54 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    void close() {
+      if (external != null) {
+        unawaited(ref.read(externalQuickCaptureBridgeProvider).finish());
+      } else if (context.mounted) {
+        if (context.canPop()) {
+          context.pop();
+        } else {
+          context.go(SpbRoutes.conversations);
+        }
+      }
+    }
+
+    var capture = external;
+    if (external?.readClipboard == true) {
+      final clipboard = ref.watch(quickCaptureClipboardProvider);
+      if (clipboard.isLoading) {
+        // 先绘制首帧，让 Android 获得焦点；不能在 main 的 load 中等待剪贴板。
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) close();
+          },
+          child: Scaffold(
+            appBar: AppBar(
+              title: const Text('快速对话'),
+              leading: IconButton(
+                tooltip: '关闭',
+                onPressed: close,
+                icon: const Icon(Icons.close),
+              ),
+            ),
+            body: const Center(child: CircularProgressIndicator()),
+          ),
+        );
+      }
+      capture =
+          clipboard.value ??
+          const ExternalQuickCapture(
+            text: '',
+            files: [],
+            error: '无法读取剪贴板，请长按输入框粘贴，或直接输入。',
+          );
+    }
+
     return OverlayQuickCapturePage(
-      initialText: external?.text ?? '',
-      initialFiles: external?.files ?? const [],
-      initialError: external?.error,
+      initialText: capture?.text ?? '',
+      initialFiles: capture?.files ?? const [],
+      initialError: capture?.error,
       submit: ({required input, required attachments, onUploadProgress}) =>
           useCase.submit(
             input: input,
@@ -3032,17 +3077,7 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
             requireAllAttachments: external != null,
           ),
       dragDrop: ref.watch(dragDropCapabilityProvider),
-      onClose: () {
-        if (external != null) {
-          unawaited(ref.read(externalQuickCaptureBridgeProvider).finish());
-        } else if (context.mounted) {
-          if (context.canPop()) {
-            context.pop();
-          } else {
-            context.go(SpbRoutes.conversations);
-          }
-        }
-      },
+      onClose: close,
     );
   }
 }

@@ -42,4 +42,33 @@ void main() {
   test('普通启动无原生入口时保持原导航', () async {
     expect(await bridge.load(), isNull);
   });
+
+  test('磁贴启动只标记待读取，前台页面再单独获取剪贴板', () async {
+    final calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      return call.method == 'load'
+          ? {'readClipboard': true}
+          : {'text': '刚复制的文字'};
+    });
+    final launch = (await bridge.load())!;
+    expect(launch.readClipboard, isTrue);
+    expect(launch.text, isEmpty);
+    expect(calls, ['load']);
+    final capture = await bridge.readClipboard();
+    expect(capture.text, '刚复制的文字');
+    expect(capture.files, isEmpty);
+    expect(capture.readClipboard, isFalse);
+    expect(calls, ['load', 'readClipboard']);
+  });
+
+  test('剪贴板读取异常不泄露平台信息，仍允许手动粘贴', () async {
+    messenger.setMockMethodCallHandler(channel, (_) async {
+      throw PlatformException(code: 'denied', message: '私有内容');
+    });
+    final capture = await bridge.readClipboard();
+    expect(capture.text, isEmpty);
+    expect(capture.error, contains('长按输入框粘贴'));
+    expect(capture.error, isNot(contains('私有内容')));
+  });
 }

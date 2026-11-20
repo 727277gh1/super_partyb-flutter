@@ -1,6 +1,7 @@
 package com.atjog.spb.spb_mobile
 
 import android.content.Intent
+import android.content.ClipboardManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -19,9 +20,13 @@ class QuickCaptureActivity : MainActivity() {
     private var payload: Map<String, Any?>? = null
     private var loading = false
     private val waiting = mutableListOf<MethodChannel.Result>()
+    private var clipboardLaunch = false
+    private var clipboardPayload: Map<String, Any?>? = null
+    private val clipboardWaiting = mutableListOf<MethodChannel.Result>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         captureDirectory = File(cacheDir, "external-quick-capture/${UUID.randomUUID()}")
+        clipboardLaunch = intent.action == CLIPBOARD_ACTION
         super.onCreate(savedInstanceState)
         active = WeakReference(this)
     }
@@ -33,6 +38,11 @@ class QuickCaptureActivity : MainActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "load" -> {
+                    // 首帧前只返回入口类型；等待焦点必须在 Flutter 已绘制后，避免启动互等。
+                    if (clipboardLaunch) {
+                        result.success(mapOf("readClipboard" to true))
+                        return@setMethodCallHandler
+                    }
                     payload?.let { result.success(it); return@setMethodCallHandler }
                     waiting.add(result)
                     if (!loading) {
@@ -52,15 +62,59 @@ class QuickCaptureActivity : MainActivity() {
                         }
                     }
                 }
+                "readClipboard" -> {
+                    if (!clipboardLaunch) {
+                        result.error("unsupported", "此入口不读取剪贴板", null)
+                        return@setMethodCallHandler
+                    }
+                    clipboardPayload?.let { result.success(it); return@setMethodCallHandler }
+                    clipboardWaiting.add(result)
+                    completeClipboardRead()
+                }
                 "finish" -> {
                     result.success(null)
                     // PROCESS_TEXT 不返回替换文本，避免修改来源应用中用户选中的文字。
                     setResult(RESULT_CANCELED)
-                    finish()
+                    if (clipboardLaunch && isTaskRoot) finishAndRemoveTask() else finish()
                 }
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) completeClipboardRead()
+    }
+
+    private fun completeClipboardRead() {
+        // Android 10+ 要求读取方有输入焦点。请求只在 Flutter 登录/解锁守卫之后发来。
+        if (clipboardWaiting.isEmpty() || !hasWindowFocus() || isFinishing || isDestroyed) return
+        val loaded = try {
+            val clip = getSystemService(ClipboardManager::class.java).primaryClip
+            var text = ""
+            var error: String? = null
+            if (clip == null || clip.itemCount == 0) {
+                error = "剪贴板没有文字，请先复制文字，或在这里直接输入。"
+            } else {
+                // 只取文本，不能通过 coerceToText 隐式读取剪贴板 URI 指向的文件。
+                val value = clip.getItemAt(0).text
+                if (value.isNullOrBlank()) {
+                    error = "剪贴板没有文字，请先复制文字，或在这里直接输入。"
+                } else if (value.length > 200_000) {
+                    error = "剪贴板文字过长，请缩短后重新复制。"
+                } else {
+                    text = value.toString()
+                }
+            }
+            mapOf("text" to text, "error" to error)
+        } catch (_: Exception) {
+            mapOf("error" to "无法读取剪贴板，请长按输入框粘贴，或直接输入。")
+        }
+        // 一次呼出只读取一次；登录回调、系统面板或切回前台不能覆盖已编辑的草稿。
+        clipboardPayload = loaded
+        clipboardWaiting.forEach { it.success(loaded) }
+        clipboardWaiting.clear()
     }
 
     private fun readCapture(source: Intent): Map<String, Any?> {
@@ -148,6 +202,7 @@ class QuickCaptureActivity : MainActivity() {
 
     override fun onDestroy() {
         if (active?.get() === this) active = null
+        clipboardWaiting.clear()
         // 排在导入任务后删除，避免读取尚未结束时清理目录又被后台线程重建。
         worker.execute { captureDirectory.deleteRecursively() }
         worker.shutdown()
@@ -155,6 +210,7 @@ class QuickCaptureActivity : MainActivity() {
     }
 
     companion object {
+        const val CLIPBOARD_ACTION = "com.atjog.spb.QUICK_CAPTURE_CLIPBOARD"
         private const val CHANNEL = "com.atjog.spb/external_quick_capture"
         private const val RESUME_ACTION = "com.atjog.spb.RESUME_QUICK_CAPTURE"
         private var active: WeakReference<QuickCaptureActivity>? = null
