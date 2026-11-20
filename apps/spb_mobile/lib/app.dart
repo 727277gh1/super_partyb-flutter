@@ -44,6 +44,10 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
       widget.router ??
       createMobileRouter(
         refreshListenable: ref.read(authRefreshListenableProvider),
+        initialLocation: ref.read(externalQuickCaptureProvider) == null
+            ? SpbRoutes.conversations
+            : SpbRoutes.overlay,
+        externalQuickCapture: ref.read(externalQuickCaptureProvider) != null,
       );
 
   /// 外部传入的 router 由传入方负责 dispose。
@@ -57,7 +61,7 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   /// `didChangeAppLifecycleState`（resumed/inactive/paused），而
   /// `AppLifecycleListener` 的回调按平台分得更细（`onResume`/`onInactive`/
   /// `onHide`/`onShow`…），我们需要的是「是否在前台」这一个布尔，粗粒度即可。
-  late final _LifecycleFocusObserver _lifecycleObserver;
+  _LifecycleFocusObserver? _lifecycleObserver;
   NotificationForegroundBridge? _foregroundBridge;
   ProviderSubscription<AuthState>? _notificationAuthSubscription;
   ProviderSubscription<int>? _notificationSessionSubscription;
@@ -78,8 +82,11 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
     //
     // 移动端尤其需要：用户在地铁里断网发一条 → 杀掉 App → 出站后重新打开，
     // 若队列未预热则这条消息永远不会被重试。
-    ref.read(outboxQueueProvider);
-    _installNotifications();
+    // 临时 engine 只承接当前分享，不启动第二份离线重发和通知，也不让通知跳转抢走草稿。
+    if (ref.read(externalQuickCaptureProvider) == null) {
+      ref.read(outboxQueueProvider);
+      _installNotifications();
+    }
   }
 
   /// 接线本地通知（issue #21）。与桌面端 `_installNotifications` 同构。
@@ -134,7 +141,7 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
           ref.read(windowFocusedProvider.notifier).set(focused),
       onResumed: _resyncOnResume,
     );
-    WidgetsBinding.instance.addObserver(_lifecycleObserver);
+    WidgetsBinding.instance.addObserver(_lifecycleObserver!);
     if (ref.read(notificationPollingSchedulerProvider).supported) {
       _foregroundBridge = NotificationForegroundBridge()
         ..attach(() => ref.read(windowFocusedProvider));
@@ -197,7 +204,8 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
     _notificationAuthSubscription?.close();
     _notificationSessionSubscription?.close();
     _foregroundBridge?.dispose();
-    WidgetsBinding.instance.removeObserver(_lifecycleObserver);
+    final observer = _lifecycleObserver;
+    if (observer != null) WidgetsBinding.instance.removeObserver(observer);
     if (_ownsRouter) _router.dispose();
     super.dispose();
   }
@@ -220,7 +228,9 @@ class _SpbMobileAppState extends ConsumerState<SpbMobileApp> {
   @override
   Widget build(BuildContext context) {
     // 应用级常驻，切离对话页也持续接收所有通知类型。
-    final notices = ref.watch(noticeCenterProvider);
+    final notices = ref.watch(externalQuickCaptureProvider) == null
+        ? ref.watch(noticeCenterProvider)
+        : null;
     final focused = ref.watch(windowFocusedProvider);
     // 扫码登录深链 → 导航到确认页。
     //

@@ -211,6 +211,7 @@ Future<TestHarness> pumpApp(
   ///
   /// 传 false 模拟「应用切到后台」——通知只在该状态下发。
   bool appForeground = true,
+  ExternalQuickCapture? externalQuickCapture,
 }) async {
   final dio = createDio(baseUrl: 'https://api.test/pba');
   final adapter = DioAdapter(dio: dio);
@@ -289,6 +290,7 @@ Future<TestHarness> pumpApp(
   // 「未登录用户停在列表页」。
   final container = ProviderContainer(
     overrides: [
+      externalQuickCaptureProvider.overrideWithValue(externalQuickCapture),
       desktopCapabilitiesProvider.overrideWithValue(
         const NoopDesktopCapabilities(),
       ),

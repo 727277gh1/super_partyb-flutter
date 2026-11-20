@@ -1061,7 +1061,7 @@ class _GroupListPageState extends State<GroupListPage> {
           ? null
           : FloatingActionButton(
               key: const ValueKey('group-list-quick-capture'),
-              tooltip: '快速记录',
+              tooltip: '快速对话',
               onPressed: widget.onOpenQuickCapture,
               child: const Icon(Icons.bolt),
             ),

@@ -10,6 +10,28 @@
 
 ## 5. 与 Go API 的契约（**最重要**）
 
+### 普通对话附件
+
+真源：`internal/server/workspace_sync.go::ufsUpload`、`chat_stream.go::sendMessage`
+与 `chat_file_context.go::prepareFileContext`。
+
+1. `POST /chat/groups/:group_id/workspace-sync/ufs-upload`，multipart 字段为
+   `file`、`relative_path`。客户端为每条消息分配独立的 `uploads/{request_id}/`
+   目录，避免覆盖同名文件；从响应的 `file.id` 取 UFS 标识，并核对 `group_id`。
+2. `POST /users/:user_id/chat/messages` 携带当前 `group_id`、`routing.mode=manual`、
+   `file_context:[{"file_id":"..."}]` 和稳定的 `request_id`，沿用当前选择的 Agent。
+   一次最多 10 个文件；只有附件时客户端补充 `input="请查看附件。"`，因为服务端
+   仍要求非空 input。文件大小、格式及文本索引限制由服务端判定，错误原样反馈。
+3. 上传或提交失败保留草稿；未修改草稿的重试复用已上传文件和 request_id。
+   当前离线队列仅存文字，因此附件失败不进入该队列，避免重发时静默丢附件。
+
+`user_message.payload.attachments` 按服务端 `user_message_attachments.go` 读取
+`name/ufs_file_id/mime_type/size_bytes/note`，用户气泡保留附件并复用 UFS 预览。
+仅附件、没有文字的历史消息同样显示；不读取服务器内部的 path/text 字段。
+
+全局快速对话仍走 `/me/quick-capture/attachments` → `/me/quick-capture/enqueue`，
+不携带 group_id。Android 外部分享要求全部附件上传成功才投递，失败保留临时页。
+
 ### 可视化交付偏好
 
 `GET/PUT /me/preferences` 新增 `spec_json: bool`（自动可视化引导，缺省关）和
@@ -426,7 +448,7 @@ payload 分三种形态，靠 `phase` 区分（同一个事件类型发多条帧
 | 情形 | 出口 |
 |---|---|
 | 不认识 ∧ **落库** ∧ 不像控制事件 | 一行弱化文本「未知事件：`<type>`（×N）（客户端可能需要升级）」，按 `(turnId, eventType)` 合并计数、**不透传 payload** |
-| 增量帧 / 服务端标 `diagnostic` / 登记在 `EventTypes.diagnosticOnly`（12 个） | 静默（只记日志） |
+| 增量帧 / 服务端标 `diagnostic` / 登记在 `EventTypes.diagnosticOnly` | 静默（只记日志） |
 
 判据实现是 `EventTypes.shouldSurfaceUnknown`，理由见
 [§6.107](design-decisions/chat.md)（控制类若也渲染，每次执行都会多几行噪声——
@@ -435,6 +457,12 @@ logs-collector 里它是**一条带类型名的信号**而不是一片噪声。
 
 **对服务端的期待**：新增时间线事件时把它写进目录的 `timeline: true`——本仓的
 `test/event_catalog_test.dart` 会在下次同步时红，带上类型名。
+
+`skills_skipped` 是 pigo 技能加载失败的非致命诊断，payload 为
+`{count, skills:[{name,path,reason}], truncated?}`。服务端收到后按诊断开关落库、
+不广播；历史回放也不进入对话时间线，不改变 turn 终态。`count` 为明细截断前的
+条数，明细经凭证打码，最多保留 128 条、每字段 2048 字符；截断时标记 `truncated`。
+没有该事件不表示所有预期技能已加载。
 
 #### 5.4.1c `follow_up_suggested` 与正文的**顺序**（2026-11-18 起）
 

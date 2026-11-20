@@ -1946,6 +1946,43 @@
       "actions": []
     },
     {
+      "type": "skills_skipped",
+      "form": "durable",
+      "category": "event",
+      "timeline": false,
+      "persist": true,
+      "broadcast": false,
+      "diagnostics_exempt": false,
+      "retention": "permanent",
+      "log": {
+        "level": "WARN",
+        "fields": [
+          "count",
+          "truncated"
+        ],
+        "aggregation": "none"
+      },
+      "envelope": [
+        "group_id",
+        "turn_id",
+        "request_id"
+      ],
+      "required": [
+        "count",
+        "skills"
+      ],
+      "optional": [
+        "truncated"
+      ],
+      "producer": [
+        "internal/chatexec/pigo_skills_skipped.go:emitSkillsSkipped"
+      ],
+      "consumers": [
+        "debug"
+      ],
+      "actions": []
+    },
+    {
       "type": "start",
       "form": "durable",
       "category": "event",

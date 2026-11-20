@@ -22,6 +22,8 @@
 
 ### M1+：功能实现（**大部分已完成**）
 
+- [x] 普通对话附件上传（Android/桌面共享输入栏），Android 系统分享与选中文字快速对话、发送后返回来源；本地实现与自动化验证，平台范围及真机验收见 [§6.113](design-decisions/chat.md)。尚未发布。
+
 - [x] PWA / SPBF 站内通知对齐（[#120](https://<gitea-host>/dever/super_partyb-flutter/issues/120)）：桌面/移动应用级接入、共享通知中心/前台提示、完成与失败通知、持久版本判重、跨端已读与 Go 契约样本；实现已落地，验证结果见该 issue，Windows/macOS 真机与发布仍独立验收。
 
 

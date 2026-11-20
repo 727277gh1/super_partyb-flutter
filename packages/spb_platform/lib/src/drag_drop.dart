@@ -53,9 +53,10 @@ class DroppedFile {
   /// 从 `XFile` 构造。
   ///
   /// `desktop_drop` 的 `DropItem` 继承自 `XFile`，故拖拽与文件选择走同一入口。
-  static DroppedFile fromXFile(XFile file) {
+  static DroppedFile fromXFile(XFile file, {String? name}) {
     return DroppedFile._(
-      name: _basename(file.name.isEmpty ? file.path : file.name),
+      // XFile 的 IO 实现忽略构造参数 name，外部分享须显式保留原名。
+      name: _basename(name ?? (file.name.isEmpty ? file.path : file.name)),
       // XFile.path 对磁盘来源是绝对路径；对「内存构造」的 XFile 是空串。
       // 空串归一成 null，否则上传层会拿空路径去打开文件。
       path: file.path.isEmpty ? null : file.path,

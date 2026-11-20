@@ -1676,6 +1676,13 @@ final groupUpdatesProvider = Provider.autoDispose<Stream<GroupUpdate>>((ref) {
 /// 与桌面端一致：`/me/*` 是用户级端点，服务端从网关注入的会话里解析身份，
 /// 不接受路径参数。故这里不读 `currentUserIdProvider`——那会平白引入一个
 /// 异步依赖（userId 未就绪时本 provider 就无法构造，而它本不依赖 userId）。
+final externalQuickCaptureProvider = Provider<ExternalQuickCapture?>(
+  (ref) => null,
+);
+final externalQuickCaptureBridgeProvider = Provider<ExternalQuickCaptureBridge>(
+  (ref) => const ExternalQuickCaptureBridge(),
+);
+
 final quickCaptureEnqueueUseCaseProvider = Provider<QuickCaptureEnqueueUseCase>(
   (ref) {
     return QuickCaptureEnqueueUseCase(ref.watch(chatApiProvider));

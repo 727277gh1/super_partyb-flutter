@@ -1,6 +1,8 @@
 package com.atjog.spb.spb_mobile
 
 import io.flutter.embedding.android.FlutterFragmentActivity
+import android.content.Intent
+import android.os.Bundle
 
 /**
  * 本机门禁（issue #94）要求 `FlutterFragmentActivity`，不是 `FlutterActivity`。
@@ -15,4 +17,17 @@ import io.flutter.embedding.android.FlutterFragmentActivity
  * 行为差异（除 Fragment 支持外）：`FlutterFragmentActivity` 的窗口与
  * `FlutterActivity` 等价，官方模板对需要插件 Fragment 的应用默认用它。
  */
-class MainActivity : FlutterFragmentActivity()
+open class MainActivity : FlutterFragmentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val forwarded = this !is QuickCaptureActivity && QuickCaptureActivity.forwardAuthIntent(intent)
+        // 回调只由持有登录草稿的 engine 消费，避免两个 engine 竞争兑换同一授权码。
+        if (forwarded) setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
+        super.onCreate(savedInstanceState)
+        if (forwarded) finish()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        if (this !is QuickCaptureActivity && QuickCaptureActivity.forwardAuthIntent(intent)) return
+        super.onNewIntent(intent)
+    }
+}

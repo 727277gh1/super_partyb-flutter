@@ -4,6 +4,8 @@
 /// 事件类型常量与 Go 侧 `internal/chatbus/broker.go` 一一对应，**改动必须两边同步**。
 library;
 
+export 'src/message_attachment.dart';
+
 // 导出的契约类型（barrel 文件，便于检索与确认公共 API 面）：
 //   ChatEvent / EventTypes          —— 聊天事件与事件类型常量
 //   EventCategory                   —— 事件类别 7 值闭集（服务端目录的镜像）

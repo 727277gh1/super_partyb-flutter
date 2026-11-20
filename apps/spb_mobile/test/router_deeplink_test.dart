@@ -18,11 +18,23 @@ import 'package:spb_mobile/router.dart';
 /// 断言面选**渲染出来的页面**而不是「有没有抛异常」：go_router 把匹配失败
 /// 转成错误页而不是抛出，只看异常/日志会让这个 bug 静默通过。
 void main() {
-  Widget app({required AuthState auth, required String initialLocation}) {
+  Widget app({
+    required AuthState auth,
+    required String initialLocation,
+    bool externalQuickCapture = false,
+  }) {
     final router = GoRouter(
       initialLocation: initialLocation,
-      redirect: buildAuthRedirect(authState: () => auth),
+      redirect: buildAuthRedirect(
+        authState: () => auth,
+        externalQuickCapture: externalQuickCapture,
+      ),
       routes: [
+        GoRoute(
+          path: SpbRoutes.overlay,
+          builder: (_, _) => const Text('CAPTURE'),
+        ),
+        GoRoute(path: SpbRoutes.lock, builder: (_, _) => const Text('LOCK')),
         GoRoute(path: SpbRoutes.login, builder: (_, _) => const Text('LOGIN')),
         GoRoute(
           path: SpbRoutes.conversations,
@@ -51,6 +63,43 @@ void main() {
 
   /// go_router 的默认错误页标题（`MaterialErrorScreen`）。
   const errorPageTitle = 'Page Not Found';
+
+  group('快速对话登录回跳', () {
+    testWidgets('已登录回到临时草稿，不打开主列表', (tester) async {
+      await pumpApp(
+        tester,
+        app(
+          auth: const AuthState(status: AuthStatus.authenticated),
+          initialLocation: 'partyb://oidc/callback?code=test&state=test',
+          externalQuickCapture: true,
+        ),
+      );
+      expect(find.text('CAPTURE'), findsOneWidget);
+      expect(find.text('HOME'), findsNothing);
+    });
+    testWidgets('未登录记住草稿目标，锁定时必须先解锁', (tester) async {
+      await pumpApp(
+        tester,
+        app(
+          auth: const AuthState(status: AuthStatus.unauthenticated),
+          initialLocation: 'partyb://oidc/callback?code=test&state=test',
+          externalQuickCapture: true,
+        ),
+      );
+      final router = GoRouter.of(tester.element(find.text('LOGIN')));
+      expect(router.state.uri.queryParameters['from'], SpbRoutes.overlay);
+      await pumpApp(
+        tester,
+        app(
+          auth: AuthState.locked,
+          initialLocation: 'partyb://oidc/callback?code=test&state=test',
+          externalQuickCapture: true,
+        ),
+      );
+      expect(find.text('LOCK'), findsOneWidget);
+      expect(find.text('CAPTURE'), findsNothing);
+    });
+  });
 
   group('扫码登录深链', () {
     testWidgets('已登录 → 直接落到确认页（不能被「外部入口」分支送去首页）', (tester) async {

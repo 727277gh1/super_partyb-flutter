@@ -103,6 +103,7 @@ class ConversationPage extends StatefulWidget {
     this.onSpecAction,
     this.onSelectAgent,
     this.onSend,
+    this.onSendAttachments,
     this.onRetryTurn,
     this.enableSearch = false,
     this.overflowItems,
@@ -259,6 +260,8 @@ class ConversationPage extends StatefulWidget {
   /// 之所以可覆盖：悬浮窗等入口走 `QuickCaptureUseCase`（无归属），
   /// 而本页是「已知 group」的常规发送。
   final Future<void> Function(String text)? onSend;
+  final Future<void> Function(ChatAttachmentSubmission submission)?
+  onSendAttachments;
 
   /// 重发一个**已失败**的 turn（用原输入重新投递一轮）。
   ///
@@ -3078,7 +3081,9 @@ class _ConversationPageState extends State<ConversationPage>
               reloadKey: widget.pendingReloadKey ?? '',
             ),
           MessageComposer(
+            key: ValueKey(widget.historyKey),
             onSubmit: _handleSubmit,
+            onSendAttachments: widget.onSendAttachments,
             onFlush: widget.onFlush,
             onFlushWithStrategy: widget.onFlushWithStrategy,
             onNewSession: widget.onNewSession,
@@ -3507,12 +3512,34 @@ class _ConversationPageState extends State<ConversationPage>
   Widget _buildItem(ConversationItem item) => switch (item) {
     UserMessageItem(
       :final text,
+      :final attachments,
       :final pending,
       :final routingReason,
       :final routingSwitched,
     ) =>
       UserMessageBubble(
         text: text,
+        attachments: attachments,
+        onPreviewAttachment: !(widget.onPreviewAgentFile?.hasAny ?? false)
+            ? null
+            : (attachment) {
+                showAgentFilePreview(
+                  context: context,
+                  onPreview: widget.onPreviewAgentFile,
+                  file: AgentFileItem(
+                    id: '${item.id}:${attachment.fileId}',
+                    createdAt: item.createdAt,
+                    turnId: item.turnId,
+                    relativePath: attachment.name,
+                    fileName: attachment.name,
+                    displayName: attachment.name,
+                    action: 'created',
+                    ufsFileId: attachment.fileId,
+                    mimeType: attachment.mimeType,
+                    sizeBytes: attachment.sizeBytes,
+                  ),
+                );
+              },
         pending: pending,
         routingReason: routingReason,
         routingSwitched: routingSwitched,

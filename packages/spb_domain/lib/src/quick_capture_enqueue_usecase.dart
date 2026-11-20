@@ -167,6 +167,7 @@ class QuickCaptureEnqueueUseCase {
     String input = '',
     List<QuickCaptureAttachment> attachments = const [],
     void Function(int done, int total)? onUploadProgress,
+    bool requireAllAttachments = false,
   }) async {
     final text = input.trim();
     if (text.isEmpty && attachments.isEmpty) {
@@ -217,6 +218,18 @@ class QuickCaptureEnqueueUseCase {
       }
     }
     onUploadProgress?.call(attachments.length, attachments.length);
+
+    // 外部分享是一份完整草稿；缺附件时不发送，留在临时页让用户重试。
+    if (requireAllAttachments && failed.isNotEmpty) {
+      return QuickCaptureEnqueueResult(
+        delivered: false,
+        uploaded: uploaded,
+        failedUploads: failed,
+        error: ValidationError(
+          '附件上传失败，消息未发送：${failed.map((f) => f.filename).join('、')}',
+        ),
+      );
+    }
 
     // 全部附件失败且无文本 → 不投递。
     //

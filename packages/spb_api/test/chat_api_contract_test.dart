@@ -577,6 +577,35 @@ void main() {
   });
 
   group('契约：sendMessage（POST /users/:user_id/chat/messages）', () {
+    test('附件引用只发送 file_id，绑定当前 group', () async {
+      final rec = await startRecorder(
+        (_) => {
+          'turn_id': 'turn_file',
+          'group_id': 'grp_file',
+          'status': 'queued',
+        },
+      );
+      addTearDown(rec.close);
+      await apiFor(rec).sendMessage(
+        'usr_1',
+        input: '查看文件',
+        groupId: 'grp_file',
+        routingMode: 'manual',
+        fileContext: ['ufs_1', 'ufs_2'],
+      );
+      expect(rec.paths.single, '/users/usr_1/chat/messages');
+      expect(rec.bodies.single['file_context'], [
+        {'file_id': 'ufs_1'},
+        {'file_id': 'ufs_2'},
+      ]);
+      expect(rec.bodies.single['group_id'], 'grp_file');
+      expect(rec.bodies.single['routing'], {'mode': 'manual'});
+      await expectLater(
+        apiFor(rec).sendMessage('usr_1', input: '无归属', fileContext: ['ufs_1']),
+        throwsArgumentError,
+      );
+      expect(rec.paths, hasLength(1));
+    });
     // 真源：`chat_stream.go:149` 的 `sendMessage`。
     // 响应：**平铺**的 `{turn_id, group_id, status, deduped, ...}`
     // （`chat_stream.go:215`），**不是** `{turn: {...}}`。

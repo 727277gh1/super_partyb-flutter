@@ -529,7 +529,12 @@ class ChatApi {
     String routingMode = 'auto',
     String? requestId,
     Map<String, dynamic>? options,
+    List<String> fileContext = const [],
   }) async {
+    if (fileContext.isNotEmpty &&
+        (groupId == null || groupId.isEmpty || fileContext.length > 10)) {
+      throw ArgumentError('附件消息需要指定对话，且一次最多 10 个文件');
+    }
     final res = await _post(
       '/users/$userId/chat/messages',
       body: {
@@ -539,6 +544,10 @@ class ChatApi {
         'routing': {'mode': routingMode},
         if (requestId != null) 'request_id': requestId,
         if (options != null) 'options': options,
+        if (fileContext.isNotEmpty)
+          'file_context': [
+            for (final id in fileContext) {'file_id': id},
+          ],
       },
     );
     return SendMessageResult.fromJson(_asMap(res));

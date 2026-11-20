@@ -369,19 +369,19 @@ class EventTypes {
   ///
   /// ## 为什么需要这张表（它不属于 [all]）
   ///
-  /// [all] 的语义是「本仓认识」。下面这 12 个类型本仓**确实不认识**（没有归约分支、
+  /// [all] 的语义是「本仓认识」。下面这些类型本仓**确实不认识**（没有归约分支、
   /// 没有渲染器），但服务端目录（`event-catalog.json`）明确写着 `timeline: false`
   /// 且 `consumers: ["debug"]`——它们是**控制/诊断事件**，进时间线才是错的。
   ///
-  /// 若只靠 [isKnown] 判「要不要渲染未知类型」，这 12 个会被当成「服务端新增的
-  /// 时间线事件」而渲染成 12 种「未知事件」行——每一次执行都会冒出
+  /// 若只靠 [isKnown] 判「要不要渲染未知类型」，它们会被当成「服务端新增的
+  /// 时间线事件」而渲染成「未知事件」行——每一次执行都会冒出
   /// `executor_startup` / `retry_push_done` / `session_rotated` 之类的噪声。
   /// 那比静默丢弃更糟：用户会以为客户端坏了。
   ///
   /// ## 判据从哪来
   ///
   /// `super_partyb/apps/go-api/docs/event-catalog.json`：`timeline: false` 且不在
-  /// [all] 里的类型，恰好就是这 12 个（vendored 副本在
+  /// [all] 里的类型，登记在这里（vendored 副本在
   /// `packages/spb_models/fixtures/`）。`test/event_catalog_test.dart` 断言
   /// 「目录里每个 `timeline:false` 的类型，要么在 [all] 里、要么在这里」——
   /// 服务端新增控制类事件时必须把它登记进来（或实现它），否则测试红。
@@ -404,6 +404,7 @@ class EventTypes {
     'session_handoff_stage',
     'session_rotated',
     'session_summary',
+    'skills_skipped',
     'turn_reminder_injected',
   };
 

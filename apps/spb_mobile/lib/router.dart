@@ -119,11 +119,15 @@ class SpbRoutes {
 ///
 /// 用 `indexedStack` 而非 `pageBuilder` 版本：它保留各分支的 widget 状态
 /// （滚动位置、输入框内容），符合标签栏的预期行为。
-GoRouter createMobileRouter({Listenable? refreshListenable}) {
+GoRouter createMobileRouter({
+  Listenable? refreshListenable,
+  String initialLocation = SpbRoutes.conversations,
+  bool externalQuickCapture = false,
+}) {
   return GoRouter(
-    initialLocation: SpbRoutes.conversations,
+    initialLocation: initialLocation,
     routes: buildMobileRoutes(),
-    redirect: buildAuthRedirect(),
+    redirect: buildAuthRedirect(externalQuickCapture: externalQuickCapture),
     refreshListenable: refreshListenable,
   );
 }
@@ -136,7 +140,10 @@ GoRouter createMobileRouter({Listenable? refreshListenable}) {
 /// - [AuthStatus.unknown] 时**不重定向**（读凭证是异步的，否则已登录用户
 ///   会看到登录页闪一下），由 `refreshListenable` 在判定完成后重跑；
 /// - 未认证时带上 `from` 参数记住原目标，登录后可回跳。
-GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
+GoRouterRedirect buildAuthRedirect({
+  AuthState Function()? authState,
+  bool externalQuickCapture = false,
+}) {
   return (context, state) {
     final auth = authState?.call() ?? _authStateFromContext(context);
 
@@ -157,6 +164,15 @@ GoRouterRedirect buildAuthRedirect({AuthState Function()? authState}) {
     // 守卫把用户送出。桌面端不需要这条：它的回调是 loopback HTTP，
     // 从不经 `Router` 进入（见 `docs/rfc8252-loopback-signin.md`）。
     if (state.uri.scheme.isNotEmpty) {
+      // 临时 Activity 登录后仍回到分享草稿；不能被普通深链兜底送到主列表。
+      if (externalQuickCapture) {
+        if (auth != null && auth.isLocked) {
+          return _lockLocation(SpbRoutes.overlay);
+        }
+        return auth != null && auth.isAuthenticated
+            ? SpbRoutes.overlay
+            : '${SpbRoutes.login}?from=${Uri.encodeComponent(SpbRoutes.overlay)}';
+      }
       // 已锁定（issue #94）时先过门禁：深链不该成为绕过锁屏的入口——从通知 /
       // 浏览器点进来的链接会绕过 App 的冷启动流程。
       if (auth != null && auth.isLocked) return _lockLocation(null);
@@ -2721,6 +2737,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 发完**不清**（对齐 webapp 的 `agentByGroup[groupId]`）：清了就等于
       // 「每条消息都要重新选一次 Agent」，而 AppBar 上明明写着当前是谁。
       // 不必清的理由见 [_localChoice]（键是 groupId，换对话不串味）。
+      onSendAttachments: (submission) => submission.send(
+        api: ref.read(chatApiProvider),
+        controller: ref.read(chatStreamControllerProvider(userId)),
+        groupId: widget.groupId,
+        agentId: _effectiveAgentId,
+      ),
       onSend: (text) => controller.send(
         input: text,
         // 发的是 `_effectiveAgentId` 而不是原始本地值：AppBar 标签显示的就是
@@ -2993,17 +3015,33 @@ class _OverlayQuickCapturePage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final useCase = ref.watch(quickCaptureEnqueueUseCaseProvider);
+    final external = ref.watch(externalQuickCaptureProvider);
+    if (external != null && !ref.watch(authStateProvider).isAuthenticated) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
 
     return OverlayQuickCapturePage(
+      initialText: external?.text ?? '',
+      initialFiles: external?.files ?? const [],
+      initialError: external?.error,
       submit: ({required input, required attachments, onUploadProgress}) =>
           useCase.submit(
             input: input,
             attachments: attachments,
             onUploadProgress: onUploadProgress,
+            requireAllAttachments: external != null,
           ),
       dragDrop: ref.watch(dragDropCapabilityProvider),
       onClose: () {
-        if (context.mounted) context.go(SpbRoutes.conversations);
+        if (external != null) {
+          unawaited(ref.read(externalQuickCaptureBridgeProvider).finish());
+        } else if (context.mounted) {
+          if (context.canPop()) {
+            context.pop();
+          } else {
+            context.go(SpbRoutes.conversations);
+          }
+        }
       },
     );
   }

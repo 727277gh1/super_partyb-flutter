@@ -73,6 +73,7 @@ export 'src/diagnostics_export.dart';
 export 'src/directory_picker.dart';
 export 'src/display_env.dart';
 export 'src/drag_drop.dart';
+export 'src/external_quick_capture.dart';
 export 'src/file_sink.dart';
 export 'src/frame_activity.dart';
 export 'src/frame_timing.dart';

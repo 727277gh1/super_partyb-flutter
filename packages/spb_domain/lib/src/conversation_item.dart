@@ -54,9 +54,11 @@ final class UserMessageItem extends ConversationItem {
     this.routingReason,
     this.routingSwitched = false,
     this.pending = false,
+    this.attachments = const [],
   });
 
   final String text;
+  final List<MessageAttachment> attachments;
 
   /// 发出时选中的 agent（本地乐观回显才有；服务端 `user_message` 事件不带该
   /// 字段，故权威帧合并后会丢失）。用途是「重发」时带上同一个 agent。

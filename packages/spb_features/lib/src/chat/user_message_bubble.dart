@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:spb_design/spb_design.dart';
 import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_models/spb_models.dart';
 import 'package:spb_ui/spb_ui.dart';
 
 /// 用户发出的消息气泡（右对齐）。
@@ -19,9 +20,13 @@ class UserMessageBubble extends StatelessWidget {
     this.pending = false,
     this.routingReason,
     this.routingSwitched = false,
+    this.attachments = const [],
+    this.onPreviewAttachment,
   });
 
   final String text;
+  final List<MessageAttachment> attachments;
+  final void Function(MessageAttachment attachment)? onPreviewAttachment;
 
   /// 请求在飞：与 [AssistantMessageBubble.isStreaming] 同一取向的短暂状态，
   /// 由归约层 [UserMessageItem.pending] 派生，气泡自身不持有状态。
@@ -61,6 +66,30 @@ class UserMessageBubble extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              if (attachments.isNotEmpty)
+                Wrap(
+                  spacing: SpbSpacing.xs,
+                  children: [
+                    for (final attachment in attachments)
+                      ActionChip(
+                        avatar: const Icon(
+                          Icons.attach_file,
+                          size: SpbSpacing.md,
+                        ),
+                        label: Text(
+                          attachment.name,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        tooltip: attachment.note ?? attachment.name,
+                        onPressed:
+                            onPreviewAttachment != null &&
+                                attachment.fileId != null &&
+                                attachment.fileId!.isNotEmpty
+                            ? () => onPreviewAttachment!(attachment)
+                            : null,
+                      ),
+                  ],
+                ),
               SelectableText(
                 text,
                 style: SpbType.body(textTheme)?.copyWith(

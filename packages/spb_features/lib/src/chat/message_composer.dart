@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:spb_api/spb_api.dart';
 import 'package:spb_core/spb_core.dart';
 import 'package:spb_design/spb_design.dart';
+import 'package:spb_domain/spb_domain.dart';
+import 'package:spb_platform/spb_platform.dart';
 
 import 'flush_strategy_dialog.dart';
 
@@ -59,7 +61,11 @@ class MessageComposer extends StatefulWidget {
     this.onFlush,
     this.onFlushWithStrategy,
     this.onNewSession,
+    this.onSendAttachments,
   });
+
+  final Future<void> Function(ChatAttachmentSubmission submission)?
+  onSendAttachments;
 
   /// 提交回调。参数是去除首尾空白后的文本。
   ///
@@ -137,6 +143,76 @@ class MessageComposer extends StatefulWidget {
 class _MessageComposerState extends State<MessageComposer> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
+  final _files = <DroppedFile>[];
+  ChatAttachmentSubmission? _attachmentSubmission;
+  bool _sendingFiles = false;
+  bool _pickingFiles = false;
+  String? _attachmentError;
+
+  Future<void> _pickFiles() async {
+    if (_sendingFiles || _pickingFiles) return;
+    setState(() => _pickingFiles = true);
+    try {
+      final picked = await pickFilesForOverlay();
+      if (!mounted) return;
+      if (_files.length + picked.length > 10) {
+        setState(() => _attachmentError = '一次最多添加 10 个文件');
+        return;
+      }
+      setState(() {
+        _files.addAll(picked);
+        _attachmentSubmission = null;
+        _attachmentError = null;
+      });
+    } finally {
+      if (mounted) setState(() => _pickingFiles = false);
+    }
+  }
+
+  Future<void> _submitFiles() async {
+    final send = widget.onSendAttachments;
+    if (send == null || _sendingFiles) return;
+    setState(() {
+      _sendingFiles = true;
+      _attachmentError = null;
+    });
+    try {
+      if (_attachmentSubmission == null) {
+        final sources = <QuickCaptureAttachment>[];
+        for (final file in _files) {
+          if (await file.length() == 0) {
+            throw ValidationError('${file.name} 是空文件');
+          }
+          sources.add(
+            QuickCaptureAttachment(
+              filename: file.name,
+              path: file.path,
+              bytes: file.path == null ? await file.readBytes() : null,
+            ),
+          );
+        }
+        _attachmentSubmission = ChatAttachmentSubmission(
+          input: _controller.text,
+          attachments: sources,
+        );
+      }
+      await send(_attachmentSubmission!);
+      if (!mounted) return;
+      _controller.clear();
+      setState(() {
+        _files.clear();
+        _attachmentSubmission = null;
+      });
+    } on Object catch (e) {
+      if (!mounted) return;
+      setState(
+        () => _attachmentError = e is SpbError ? e.message : '文件读取或发送失败，请重试',
+      );
+      SpbLog.warn('对话附件发送失败', {'error': '$e'});
+    } finally {
+      if (mounted) setState(() => _sendingFiles = false);
+    }
+  }
 
   /// 「立即发送」是否在途（防重复点 + 禁用按钮）。
   bool _flushing = false;
@@ -184,15 +260,23 @@ class _MessageComposerState extends State<MessageComposer> {
     super.dispose();
   }
 
-  void _onTextChanged() => setState(() {});
+  void _onTextChanged() => setState(() {
+    if (!_sendingFiles) _attachmentSubmission = null;
+  });
 
   bool get _canSubmit =>
       widget.enabled &&
+      !_sendingFiles &&
+      !_pickingFiles &&
       widget.onSubmit != null &&
-      _controller.text.trim().isNotEmpty;
+      (_controller.text.trim().isNotEmpty || _files.isNotEmpty);
 
   void _submit() {
     if (!_canSubmit) return;
+    if (_files.isNotEmpty) {
+      _submitFiles();
+      return;
+    }
     final text = _controller.text.trim();
     // 先清空再回调：回调是异步的（会走网络），若等它完成再清空，
     // 用户在等待期间会看到输入框里还留着刚发出去的内容，容易误以为没发出去
@@ -317,6 +401,7 @@ class _MessageComposerState extends State<MessageComposer> {
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (_sendingFiles) return KeyEventResult.handled;
 
     // Esc 清空：比逐字删除快，且与大多数 IM 一致。
     if (event.logicalKey == LogicalKeyboardKey.escape) {
@@ -389,104 +474,156 @@ class _MessageComposerState extends State<MessageComposer> {
         color: scheme.surface,
         border: Border(top: BorderSide(color: scheme.outlineVariant, width: 1)),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 「清空上下文」：本端唯一不可撤销的动作，故先弹确认。
-          //
-          // 放在输入栏**左侧**：webapp 同一个按钮也在输入栏；而 AppBar 在窄屏
-          // 没有余量（issue #31）。放左侧而不是紧贴发送按钮，是为了不把
-          // 「不可撤销」和「发送」放到同一个热区里。
-          if (widget.onNewSession != null) ...[
-            IconButton(
-              key: const ValueKey('composer-new-session'),
-              onPressed: _startingNewSession ? null : _newSession,
-              tooltip: '清空上下文',
-              icon: _startingNewSession
-                  ? const SizedBox(
-                      width: SpbSpacing.lg,
-                      height: SpbSpacing.lg,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.restart_alt, size: SpbSpacing.lg),
+          if (_files.isNotEmpty)
+            Wrap(
+              spacing: SpbSpacing.xs,
+              children: [
+                for (final file in _files)
+                  InputChip(
+                    label: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: availableWidth * .55,
+                      ),
+                      child: Text(file.name, overflow: TextOverflow.ellipsis),
+                    ),
+                    deleteButtonTooltipMessage: '移除附件 ${file.name}',
+                    onDeleted: _sendingFiles
+                        ? null
+                        : () => setState(() {
+                            _files.remove(file);
+                            _attachmentSubmission = null;
+                            _attachmentError = null;
+                          }),
+                  ),
+              ],
             ),
-            const SizedBox(width: SpbSpacing.xs),
-          ],
-          Expanded(
-            child: Focus(
-              onKeyEvent: _onKey,
-              child: TextField(
-                controller: _controller,
-                focusNode: _focusNode,
-                enabled: widget.enabled && widget.onSubmit != null,
-                autofocus: widget.autofocus,
-                // 多行 + 限高：输入长内容时输入框最多长到 6 行，之后内部滚动，
-                // 避免输入框把整个时间线挤没。
-                minLines: 1,
-                maxLines: 6,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                decoration: InputDecoration(hintText: widget.hintText),
-              ),
-            ),
-          ),
-          const SizedBox(width: SpbSpacing.sm),
-          // 「立即发送」入口（仅接线时出现）。
-          //
-          // 用 tooltip 说明它与「发送」的区别：两个按钮相邻且图标都是发送类，
-          // 不解释的话用户会以为重复了。
-          if (widget.onFlush != null) ...[
-            IconButton(
-              key: const ValueKey('composer-flush'),
-              onPressed: _flushing ? null : _flush,
-              tooltip: '立即发送（把已排队的消息马上合并提交）',
-              icon: _flushing
-                  ? const SizedBox(
-                      width: SpbSpacing.lg,
-                      height: SpbSpacing.lg,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.flash_on_outlined, size: SpbSpacing.lg),
-            ),
-            const SizedBox(width: SpbSpacing.xs),
-          ],
-          // 用 IconButton + tooltip 而非纯图标：桌面端 tooltip 能提示快捷键。
-          IconButton.filled(
-            key: const ValueKey('composer-send'),
-            onPressed: _canSubmit ? _submit : null,
-            tooltip: '发送（Enter）',
-            icon: const Icon(Icons.send, size: SpbSpacing.lg),
-          ),
-          const SizedBox(width: SpbSpacing.xs),
-          // 快捷键说明：窄屏**隐藏**，宽屏保留。
-          //
-          // ## 为什么必须处理（它是一个真实的窄屏溢出源）
-          //
-          // 这句文本实测宽 **约 304dp**（12px 令牌，§6.78 由 11px 的
-          // `labelSmall` 迁到 `SpbType.listMeta`；11px 时是 287.5dp），且它在
-          // `Row` 里不是 `Expanded`/`Flexible`——于是它把整行撑破：320dp
-          // 溢出 104px、360dp 64px、390dp 34px（接线「立即发送」时；未接线时
-          // 小 52px）。
-          //
-          // ## 为什么按宽度隐藏而不是 `Flexible` + 省略号
-          //
-          // 截断后剩下的会是「Enter 发送 · Shift+En…」——一个比不显示更让人
-          // 困惑的半句。而这句话的价值本就只在**桌面端**（有物理键盘、需要知道
-          // Enter 与 Shift+Enter 的区别）；手机是软键盘，回车键行为由
-          // `textInputAction` 决定，这行说明对移动端用户无意义。
-          //
-          // 阈值用 `SpbBreakpoints.compact`（720dp）而不是「刚好够放下」的
-          // 实测值：说明文本的出现与否不该随「几个像素」抖动，且 720 以下
-          // 一律是单栏窄屏，正是它的适用场景分界。
-          //
-          // `availableWidth` 是**这一栏**的宽度（本控件从 `LayoutBuilder`
-          // 拿到的约束），不是窗口宽度：侧边栏展开时窗口 1280 而这一栏 455。
-          // 放大字号后也要为输入框保留空间，避免横屏时说明挤出多行输入框。
-          if (!SpbBreakpoints.isCompact(availableWidth / hintScale))
+          if (_sendingFiles) const LinearProgressIndicator(),
+          if (_attachmentError != null)
             Text(
-              'Enter 发送 · Shift+Enter 换行',
-              style: hintStyle.copyWith(color: scheme.onSurfaceVariant),
+              _attachmentError!,
+              style: textTheme.bodySmall?.copyWith(color: scheme.error),
             ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (widget.onSendAttachments != null)
+                IconButton(
+                  key: const ValueKey('composer-attach'),
+                  tooltip: '添加文件',
+                  onPressed: widget.enabled && !_sendingFiles && !_pickingFiles
+                      ? _pickFiles
+                      : null,
+                  icon: const Icon(Icons.attach_file),
+                ),
+              // 「清空上下文」：本端唯一不可撤销的动作，故先弹确认。
+              //
+              // 放在输入栏**左侧**：webapp 同一个按钮也在输入栏；而 AppBar 在窄屏
+              // 没有余量（issue #31）。放左侧而不是紧贴发送按钮，是为了不把
+              // 「不可撤销」和「发送」放到同一个热区里。
+              if (widget.onNewSession != null) ...[
+                IconButton(
+                  key: const ValueKey('composer-new-session'),
+                  onPressed: _startingNewSession || _sendingFiles
+                      ? null
+                      : _newSession,
+                  tooltip: '清空上下文',
+                  icon: _startingNewSession
+                      ? const SizedBox(
+                          width: SpbSpacing.lg,
+                          height: SpbSpacing.lg,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.restart_alt, size: SpbSpacing.lg),
+                ),
+                const SizedBox(width: SpbSpacing.xs),
+              ],
+              Expanded(
+                child: Focus(
+                  onKeyEvent: _onKey,
+                  child: TextField(
+                    controller: _controller,
+                    focusNode: _focusNode,
+                    enabled:
+                        widget.enabled &&
+                        widget.onSubmit != null &&
+                        !_sendingFiles,
+                    autofocus: widget.autofocus,
+                    // 多行 + 限高：输入长内容时输入框最多长到 6 行，之后内部滚动，
+                    // 避免输入框把整个时间线挤没。
+                    minLines: 1,
+                    maxLines: 6,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    decoration: InputDecoration(hintText: widget.hintText),
+                  ),
+                ),
+              ),
+              const SizedBox(width: SpbSpacing.sm),
+              // 「立即发送」入口（仅接线时出现）。
+              //
+              // 用 tooltip 说明它与「发送」的区别：两个按钮相邻且图标都是发送类，
+              // 不解释的话用户会以为重复了。
+              if (widget.onFlush != null) ...[
+                IconButton(
+                  key: const ValueKey('composer-flush'),
+                  onPressed: _flushing ? null : _flush,
+                  tooltip: '立即发送（把已排队的消息马上合并提交）',
+                  icon: _flushing
+                      ? const SizedBox(
+                          width: SpbSpacing.lg,
+                          height: SpbSpacing.lg,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(
+                          Icons.flash_on_outlined,
+                          size: SpbSpacing.lg,
+                        ),
+                ),
+                const SizedBox(width: SpbSpacing.xs),
+              ],
+              // 用 IconButton + tooltip 而非纯图标：桌面端 tooltip 能提示快捷键。
+              IconButton.filled(
+                key: const ValueKey('composer-send'),
+                onPressed: _canSubmit ? _submit : null,
+                tooltip: '发送（Enter）',
+                icon: const Icon(Icons.send, size: SpbSpacing.lg),
+              ),
+              const SizedBox(width: SpbSpacing.xs),
+              // 快捷键说明：窄屏**隐藏**，宽屏保留。
+              //
+              // ## 为什么必须处理（它是一个真实的窄屏溢出源）
+              //
+              // 这句文本实测宽 **约 304dp**（12px 令牌，§6.78 由 11px 的
+              // `labelSmall` 迁到 `SpbType.listMeta`；11px 时是 287.5dp），且它在
+              // `Row` 里不是 `Expanded`/`Flexible`——于是它把整行撑破：320dp
+              // 溢出 104px、360dp 64px、390dp 34px（接线「立即发送」时；未接线时
+              // 小 52px）。
+              //
+              // ## 为什么按宽度隐藏而不是 `Flexible` + 省略号
+              //
+              // 截断后剩下的会是「Enter 发送 · Shift+En…」——一个比不显示更让人
+              // 困惑的半句。而这句话的价值本就只在**桌面端**（有物理键盘、需要知道
+              // Enter 与 Shift+Enter 的区别）；手机是软键盘，回车键行为由
+              // `textInputAction` 决定，这行说明对移动端用户无意义。
+              //
+              // 阈值用 `SpbBreakpoints.compact`（720dp）而不是「刚好够放下」的
+              // 实测值：说明文本的出现与否不该随「几个像素」抖动，且 720 以下
+              // 一律是单栏窄屏，正是它的适用场景分界。
+              //
+              // `availableWidth` 是**这一栏**的宽度（本控件从 `LayoutBuilder`
+              // 拿到的约束），不是窗口宽度：侧边栏展开时窗口 1280 而这一栏 455。
+              // 放大字号后也要为输入框保留空间，避免横屏时说明挤出多行输入框。
+              if (!SpbBreakpoints.isCompact(availableWidth / hintScale))
+                Text(
+                  'Enter 发送 · Shift+Enter 换行',
+                  style: hintStyle.copyWith(color: scheme.onSurfaceVariant),
+                ),
+            ],
+          ),
         ],
       ),
     );

@@ -1971,6 +1971,12 @@ class _ChatPageState extends ConsumerState<_ChatPage> {
       // 会在标签写着「写作助手」时以 `routing.mode=auto` 发出去，服务端
       // `auto_agent` 可能换个人回答，且那个 agent 没有绑定行 → 拿不到 session
       // （见 super_partyb AGENTS.md 的「自动路由的代价」）。
+      onSendAttachments: (submission) => submission.send(
+        api: ref.read(chatApiProvider),
+        controller: ref.read(chatStreamControllerProvider(userId)),
+        groupId: widget.groupId,
+        agentId: _effectiveAgentId,
+      ),
       onSend: (text) => ref
           .read(chatStreamControllerProvider(userId))
           .send(

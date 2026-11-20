@@ -2628,6 +2628,7 @@ class ChatStreamController {
     String? agentId,
     String routingMode = 'auto',
     String? requestId,
+    List<String> fileContext = const [],
   }) async {
     final resolvedGroupId = groupId ?? _groupId;
     // 幂等键**只生成一次**，首次直发与失败入队共用（issue #58）。
@@ -2658,6 +2659,7 @@ class ChatStreamController {
         agentId: agentId,
         routingMode: routingMode,
         requestId: rid,
+        fileContext: fileContext,
       );
       if (result.deferred) {
         // 群正忙：服务端把输入缓冲进 inbox，**没有建 turn**（issue #113）。
@@ -2677,7 +2679,12 @@ class ChatStreamController {
     } on SpbError catch (e) {
       _removeLocalEcho(echoId);
       final outbox = _outbox;
-      if (outbox == null || !OutboxRetryPolicy.isRetryable(e)) rethrow;
+      // 现有离线队列只持久化文字，不能丢掉附件后悄悄重发。附件草稿留在输入栏重试。
+      if (fileContext.isNotEmpty ||
+          outbox == null ||
+          !OutboxRetryPolicy.isRetryable(e)) {
+        rethrow;
+      }
 
       final outcome = await outbox.submit(
         userId: userId,

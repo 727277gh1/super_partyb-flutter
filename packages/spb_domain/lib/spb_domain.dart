@@ -88,6 +88,7 @@ export 'src/agent_file_batch.dart';
 export 'src/group_file_summary.dart';
 export 'src/artifact_tree.dart';
 export 'src/chat_stream_controller.dart';
+export 'src/chat_attachment_submission.dart';
 export 'src/confirmation_notifier.dart';
 export 'src/notifications.dart';
 export 'src/notice_center.dart';

@@ -95,7 +95,14 @@ class OverlayQuickCapturePage extends StatefulWidget {
     this.hintText,
     this.autofocus = true,
     this.showKeyboardHints = false,
+    this.initialText = '',
+    this.initialFiles = const [],
+    this.initialError,
   });
+
+  final String initialText;
+  final List<DroppedFile> initialFiles;
+  final String? initialError;
 
   /// 提交实现。生产传 `QuickCaptureEnqueueUseCase.submit` 的适配闭包。
   final OverlaySubmit submit;
@@ -189,6 +196,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
 
   bool _busy = false;
   bool _dragging = false;
+  bool _loadingInitialFiles = false;
 
   /// 一次性提示（提交结果）。null 表示无提示。
   ///
@@ -202,7 +210,17 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   @override
   void initState() {
     super.initState();
+    _controller.text = widget.initialText;
+    if (widget.initialError != null) {
+      _hint = Hint(widget.initialError!, HintKind.error);
+    }
     _controller.addListener(_onTextChanged);
+    if (widget.initialFiles.isNotEmpty) {
+      _loadingInitialFiles = true;
+      _addFiles(widget.initialFiles).whenComplete(() {
+        if (mounted) setState(() => _loadingInitialFiles = false);
+      });
+    }
   }
 
   @override
@@ -232,7 +250,7 @@ class _OverlayQuickCapturePageState extends State<OverlayQuickCapturePage> {
   bool get _hasDraft =>
       _controller.text.trim().isNotEmpty || _attachments.isNotEmpty;
 
-  bool get _canSubmit => !_busy && _hasDraft;
+  bool get _canSubmit => !_busy && !_loadingInitialFiles && _hasDraft;
 
   /// 是否有附件超限（超限时禁止提交并给出明确提示）。
   bool get _hasOversizedAttachment =>

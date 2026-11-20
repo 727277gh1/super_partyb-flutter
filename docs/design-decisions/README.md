@@ -139,3 +139,4 @@
 | §6.110 | 交付物预览改用独立页面（root Navigator 压一层 MaterialPageRoute）：系统返回/AppBar 返回/✕ 三个出口同源，都只弹这一层、对话不出栈；正文限宽 980。图片两段式（先 256 缩略图占位、原图到位替换）与开页前预览域 TCP 预检（不通回落旧预览页）（2026-11） | [`chat.md`](chat.md) |
 | §6.111 | 移动端后台检查（`WorkManager`）：定位是「尽力而为」的兜底而非推送（15 分钟下限 / Doze / force-stop 都在）；必补三件事（跨 engine 判重、凭证与通知联动、稳定通知 id）；设置页给出「跑没跑」三态读数；刻意不做开关（2026-11，issue #88） | [`runtime-and-ops.md`](runtime-and-ops.md) |
 | §6.112 | Windows 通知初始化：`InitializationSettings.windows` 必填（缺了插件抛 `ArgumentError`，被 catch 吞成「装配/平台通道问题」）；GUID 写死、AUMID 对齐 Runner.rc、设置抽成可测 getter、失败日志走 `SpbLog`；非 MSIX 下 `cancel()` 是空操作（2026-11） | [`runtime-and-ops.md`](runtime-and-ops.md) |
+| §6.113 | 普通对话附件与 Android 全局快速对话：系统分享、选中文字、临时 Activity 返回来源（2026-11） | [`chat.md`](chat.md) |

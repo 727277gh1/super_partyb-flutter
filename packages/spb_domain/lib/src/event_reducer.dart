@@ -286,7 +286,10 @@ class EventReducer {
           // 正文在 `payload['input']`，**不在** `payload['text']`——故不能直接用
           // [ChatEvent.text]（它对 user_message 恒为空串）。
           final text = _userMessageText(ev);
-          if (text.isEmpty) break;
+          final attachments = MessageAttachment.parseList(
+            ev.payload?['attachments'],
+          );
+          if (text.isEmpty && attachments.isEmpty) break;
 
           // 去重：`enqueue.go` 把 user_message 放进 `broadcasts`，即服务端**会**
           // 通过 SSE 推它；而 [ChatStreamController.send] 已用**同一 turnId** 插过
@@ -296,6 +299,11 @@ class EventReducer {
             id: ev.eventId,
             createdAt: ev.createdAt,
             text: text,
+            attachments: ev.payload?.containsKey('attachments') == true
+                ? attachments
+                : (existing != null && items[existing] is UserMessageItem
+                      ? (items[existing] as UserMessageItem).attachments
+                      : const []),
             turnId: ev.turnId,
             // 服务端 `user_message` 事件不带 agent_id（那是客户端回显独有的键）。
             // 原位替换时**保留**本地已知的那个，否则「重发」会在权威帧到达后
@@ -1316,6 +1324,7 @@ class EventReducer {
       routingReason: reason,
       routingSwitched: prev.routingSwitched || switched,
       pending: prev.pending,
+      attachments: prev.attachments,
     );
     return true;
   }

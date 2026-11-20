@@ -115,6 +115,7 @@ class _ThrowingApi implements ChatApi {
     String routingMode = 'auto',
     String? requestId,
     Map<String, dynamic>? options,
+    List<String> fileContext = const [],
   }) async => throw error;
 }
 
