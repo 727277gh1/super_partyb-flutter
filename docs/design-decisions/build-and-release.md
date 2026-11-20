@@ -1135,3 +1135,9 @@ PR 与手动触发均不跑——避免日常开发白烧 10× 额度。
 
 Android 正式签名走 **Secrets**（`ANDROID_KEYSTORE_BASE64` / `ANDROID_STORE_PASSWORD` /
 `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`）；未配置时回退 debug 签名并打印警告。
+
+Android CI 在 runner 安装 `.github/gradle-repositories.init.gradle`，为插件解析补
+Maven Central，并保留 Gradle Plugin Portal。Flutter SDK 的 included build 没有
+声明 `pluginManagement.repositories`；2026-11 磁贴出包时 Plugin Portal 连续两次
+缺少 Kotlin 2.2.21 的 stdlib/BOM，只有项目根目录的 Maven Central 无法覆盖该构建。
+init script 对 included build 生效，不修改 Flutter SDK，也不改变依赖版本。

@@ -348,6 +348,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Configure Gradle plugin repositories
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+          cp .github/gradle-repositories.init.gradle "$HOME/.gradle/init.d/spbf-repositories.gradle"
+
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
