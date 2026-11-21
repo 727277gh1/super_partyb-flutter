@@ -1,0 +1,57 @@
+[
+  {
+    "code": "oom_kill",
+    "default_message": "执行被内存上限打断（OOM），本轮未完成",
+    "retryable": false
+  },
+  {
+    "code": "upstream_rate_limited",
+    "default_message": "模型服务限流，稍后重试",
+    "retryable": true
+  },
+  {
+    "code": "upstream_error",
+    "default_message": "模型服务返回错误，请稍后重试",
+    "retryable": true
+  },
+  {
+    "code": "timeout_inactivity",
+    "default_message": "长时间无进展已终止（可重试）",
+    "retryable": true
+  },
+  {
+    "code": "timeout_hard",
+    "default_message": "本轮超时已终止",
+    "retryable": true
+  },
+  {
+    "code": "turn_stalled",
+    "default_message": "执行异常中断（长时间未完成），已标记失败",
+    "retryable": true
+  },
+  {
+    "code": "turn_interrupted",
+    "default_message": "本轮被意外中断（服务重启或进程退出），可重试",
+    "retryable": true
+  },
+  {
+    "code": "quota_exceeded",
+    "default_message": "本群 token 配额已用尽，本轮已停止",
+    "retryable": false
+  },
+  {
+    "code": "quota_unavailable",
+    "default_message": "用量额度暂时无法核验，本轮已安全停止，请稍后重试",
+    "retryable": true
+  },
+  {
+    "code": "workspace_quota_exceeded",
+    "default_message": "群工作区已达到空间配额，本轮已停止",
+    "retryable": false
+  },
+  {
+    "code": "internal_error",
+    "default_message": "执行异常，请联系管理员",
+    "retryable": false
+  }
+]

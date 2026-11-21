@@ -1,0 +1,736 @@
+/// 文件预览类型判定（纯逻辑，无 IO、无 Flutter）。
+///
+/// 文本内容按 map → spec → 原文分流：map 只认顶层格式，spec 支持嵌套提取。
+/// spec 复用 SpecUiCard，支持基础卡片、响应式布局、表格、六类图表及状态快照。
+/// 无法识别或 root 悬空时保留原文，避免把有效文件展示成空白。
+///
+/// `dashboard.spec.json` 的真实产物是 `{root,elements,state}`，走 spec 路径；
+/// 独立的 `{type:"dashboard",components:[...]}` 网格协议仍不支持。
+/// MapSpecCard 使用 CustomPaint 绘制无底图轨迹，并提供高德外链。
+library;
+
+import 'dart:convert';
+
+import 'map_schema.dart';
+import 'spec_ui.dart';
+
+/// 尝试把整段文本解析成 JSON（失败返回 null）。
+///
+/// **只解析顶层**，不做「从字符串里抠 JSON」的猜测（那是
+/// [extractSpecSchemaFromUnknown] 的职责，用于**嵌套** schema）。
+/// map spec 是顶层格式，故这里只认「整段就是一份 JSON」。
+Object? _tryDecodeJson(String content) {
+  final trimmed = content.trim();
+  // 快速排除：非 `{`/`[` 开头的不可能是 JSON 对象/数组（省一次异常）。
+  if (trimmed.isEmpty || (trimmed[0] != '{' && trimmed[0] != '[')) return null;
+  try {
+    return jsonDecode(trimmed);
+  } on Object {
+    return null;
+  }
+}
+
+/// 预览形态。三态即本轮全部能力（见库文档的六类对照表）。
+enum FilePreviewKind {
+  /// 内联展示文本内容（数据型文本 + 源码，见 [isInlineTextPreviewable]）。
+  text,
+
+  /// 内联展示图片（缩略图或原图字节 → `Image.memory`）。
+  image,
+
+  /// 无法内联：交给 UFS 的预览页（由 app 层拼 URL 并打开）。
+  external,
+}
+
+/// 文本预览的字符上限（约 200 KB 的 UTF-16 码元）。
+///
+/// ## 为什么需要上限
+///
+/// 一次 turn 可能产出数 MB 的日志/JSON。把整串塞进 `Text` 会让首帧布局耗时
+/// 到秒级（`TextPainter` 要整段测量）。上限保证对话框**必然**能开。
+///
+/// ## 为什么不是「静默截断」
+///
+/// 静默截断是最坏的形态：用户看到一份「完整的」报告，实际少了后面一半，而
+/// 界面上没有任何迹象。故 [buildTextPreview] 会带上 [TextPreview.truncated]
+/// 与原始长度，UI **必须**据此给出明确提示（见 `showAgentFilePreview`）。
+const int kTextPreviewMaxChars = 200 * 1024;
+
+/// 图片扩展名（对齐 webapp `IMAGE_FILE_EXTENSIONS`，**但明确不含 `.svg`**）。
+///
+/// ## 为什么 `.svg` 不在此处（2026-11，参考小程序实现）
+///
+/// Flutter 的 `Image.memory` **不**解码 SVG（没有内置 svg 解码器），判成
+/// `image` 只会让预览界面拿一句「图片加载失败」当结果。小程序对同一件事
+/// 的处置更彻底（`apps/miniapp/src/pages/work-detail/media/preview.ts`）：
+/// SVG 是**可携带脚本的主动内容**且 `<image>`/`previewImage` 不支持
+/// `image/svg+xml`，故一律送 UFS 独立预览域（`isPreviewableHTMLMime` 含
+/// `image/svg+xml`，走一次性 ticket）。本仓库同一取——见
+/// [resolveExternalPreviewChannel] 的 `htmlSession` 分支。
+const Set<String> _imageExtensions = {
+  '.apng',
+  '.avif',
+  '.bmp',
+  '.gif',
+  '.ico',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+};
+
+/// 可内联的数据型文本 MIME（对齐 webapp `INLINE_TEXT_MIME_TYPES`）。
+///
+/// ⚠️ 这里**只放数据/源码**，不含 `text/html`、`text/css`、`image/svg+xml`
+/// ——webapp 明确把这些 markup/样式文件排除在内联之外（结构渲染易乱、
+/// CSS 单独看无意义），统一跳 UFS 预览页。
+const Set<String> _inlineTextMimeTypes = {
+  'application/json',
+  'application/ld+json',
+  'application/manifest+json',
+  'application/x-ndjson',
+  'application/sql',
+  'application/toml',
+  'application/x-yaml',
+  'application/yaml',
+  'application/x-sh',
+  'application/javascript',
+  'application/x-javascript',
+  'application/typescript',
+};
+
+/// 可内联的文本扩展名（对齐 webapp `INLINE_TEXT_FILE_EXTENSIONS`）。
+const Set<String> _inlineTextExtensions = {
+  '.txt',
+  '.log',
+  '.csv',
+  '.md',
+  '.mdx',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.json',
+  '.jsonl',
+  '.py',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.go',
+  '.rs',
+  '.java',
+  '.c',
+  '.cc',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.cs',
+  '.rb',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.sql',
+};
+
+/// 归一化 MIME：去掉 `;charset=…` 参数、去空白、转小写。
+///
+/// 与 webapp `normalizeMimeType` 同义。服务端常返回
+/// `text/markdown; charset=utf-8`，不剥参数会让集合查找全部落空。
+String normalizeMimeType(String? value) {
+  final raw = value ?? '';
+  final semi = raw.indexOf(';');
+  final head = semi >= 0 ? raw.substring(0, semi) : raw;
+  return head.trim().toLowerCase();
+}
+
+/// 路径/文件名的扩展名（小写，含点）。无扩展名返回空串。
+///
+/// 与 webapp `getFileExtension` 同义：先剥 `?query` / `#fragment`，
+/// 再取最后一个点之后的部分；点在最后一段斜杠之前时视为无扩展名。
+String fileExtensionOf(String value) {
+  final normalized = value.split('?').first.split('#').first;
+  final lastSlash = normalized.lastIndexOf('/');
+  final lastDot = normalized.lastIndexOf('.');
+  if (lastDot <= lastSlash) return '';
+  return normalized.substring(lastDot).toLowerCase();
+}
+
+/// 一个文件名的**全部**候选扩展名（对齐 webapp `getFileExtensions`）。
+///
+/// ## 为什么不止一个
+///
+/// 复合扩展名要能同时命中两段：`config.env.example` 的候选是
+/// `.example`（末段）与 `.env.example`（首段起）——webapp 的文本白名单里有
+/// `.env.example`，只取末段会漏掉。
+///
+/// 规则（照抄 webapp）：
+/// - 末段（最后一个点起）——总是候选；
+/// - 首段（第一个点起），当它与末段不同；
+/// - 隐藏文件（首个字符就是点，如 `.gitignore`）——整名作为候选。
+List<String> fileExtensionsOf(String value) {
+  final normalized = value.split('?').first.split('#').first;
+  final lastSlash = normalized.lastIndexOf('/');
+  final fileName = normalized.substring(lastSlash + 1);
+  final firstDot = fileName.indexOf('.');
+  final lastDot = fileName.lastIndexOf('.');
+
+  final out = <String>[];
+  if (lastDot > 0) out.add(fileName.substring(lastDot).toLowerCase());
+  if (firstDot > 0 && firstDot != lastDot) {
+    out.add(fileName.substring(firstDot).toLowerCase());
+  }
+  if (firstDot == 0 && lastDot > 0) out.add(fileName.toLowerCase());
+  return out;
+}
+
+/// 是否为图片（mime 前缀 `image/`，或扩展名命中 [._imageExtensions]）。
+///
+/// `image/svg+xml` **例外**：Flutter 解不了 SVG，且它是可携带脚本的主动内容，
+/// 应走 UFS 预览域（见 [_imageExtensions] 的说明）。
+bool isImagePreviewable({String? mimeType, required String fileName}) {
+  final mime = normalizeMimeType(mimeType);
+  if (mime == 'image/svg+xml') return false;
+  if (mime.startsWith('image/')) return true;
+  final name = fileName.toLowerCase();
+  return fileExtensionsOf(name).any(_imageExtensions.contains);
+}
+
+/// 是否可**内联**为文本（数据型文本 + 源码；不含 html/css/svg/xml）。
+///
+/// 判据顺序（对齐 webapp `isInlinePreviewableFile`）：
+/// 1. `text/*`，但排除 `text/html` 与 `text/css`；
+/// 2. 数据型 MIME 白名单；
+/// 3. `+json` / `+yaml` 后缀（如 `application/vnd.foo+json`）；
+/// 4. 扩展名白名单。
+bool isInlineTextPreviewable({String? mimeType, required String fileName}) {
+  final mime = normalizeMimeType(mimeType);
+
+  if (mime.startsWith('text/')) {
+    // markup / 样式不内联（与 webapp 同判据）。`image/svg+xml` 也不在此分支
+    // （它不是 `text/`）：由 [resolveExternalPreviewChannel] 归入 `htmlSession`。
+    if (mime == 'text/html' || mime == 'text/css') return false;
+    return true;
+  }
+  if (_inlineTextMimeTypes.contains(mime)) return true;
+  if (mime.endsWith('+json') || mime.endsWith('+yaml')) return true;
+
+  final name = fileName.toLowerCase();
+  return fileExtensionsOf(name).any(_inlineTextExtensions.contains);
+}
+
+/// Markdown 的 MIME 白名单（判定是否用 Markdown 渲染器呈现文本）。
+const Set<String> _markdownMimeTypes = {'text/markdown', 'text/x-markdown'};
+
+/// Markdown 扩展名（小写，含点）。
+///
+/// 必须与 [_inlineTextExtensions] 的 Markdown 项**保持一致**：`.markdown` 不在
+/// 文本白名单里（对齐 webapp `INLINE_TEXT_FILE_EXTENSIONS`），故也不能在这里——
+/// 否则会出现「判为 Markdown 渲染但压根走不到 text 分支」的死项。
+const Set<String> _markdownExtensions = {'.md', '.mdx'};
+
+/// 是否应以 **Markdown 渲染**（而不是等宽纯文本）呈现该文本内容。
+///
+/// ## 为什么是独立函数而不是并进 [isInlineTextPreviewable]
+///
+/// 两者判的是不同问题：[isInlineTextPreviewable] 答「能不能内联看」，本函数答
+/// 「看的时候用什么渲染器」。`.md` 两者都命中，但 `.txt` 只命中前者——若合并，
+/// 就再也分不出该用哪种渲染方式。
+///
+/// ## 为什么判 mime **或**扩展名
+///
+/// 服务端报的 mime 常是通用的 `text/plain`（尤其 UFS 上传时未探测），此时只能
+/// 靠扩展名。反之扩展名可能被剥（无后缀的下载），此时只能靠 mime。任一命中即可。
+///
+/// 与 webapp `WorkbenchFeed.tsx` 对 `text` 预览一律走 `MarkdownRenderer` 的做法
+/// **不完全相同**：webapp 是无条件 Markdown 渲染，客户端保留等宽纯文本分支——
+/// 对 `.log` / `.csv` 这类内容，Markdown 渲染会把 `#`、`*` 当语法吃掉，反而不如
+/// 纯文本忠实。故只在确实声明是 Markdown 时才切渲染器。
+bool isMarkdownTextPreview({String? mimeType, required String fileName}) {
+  if (_markdownMimeTypes.contains(normalizeMimeType(mimeType))) return true;
+  return fileExtensionsOf(fileName.toLowerCase())
+      .any(_markdownExtensions.contains);
+}
+
+/// 判定预览形态。**这是本轮对外的唯一入口。**
+///
+/// 顺序即语义（对齐 webapp `loadAgentFilePreview`）：
+/// 1. 图片 → [FilePreviewKind.image]；
+/// 2. 可内联文本 → [FilePreviewKind.text]；
+/// 3. 其余（PDF / Office / 压缩包 / html / css / 未知二进制）→
+///    [FilePreviewKind.external]。
+///
+/// ## 为什么「其余」是 external 而不是「不支持」
+///
+/// webapp 的取舍：不认识的类型不报错，而是把用户送到 UFS 预览页——那里能渲染
+/// PDF、Office 等。报错等于「这个文件你永远看不到内容」；跳转至少留了出路。
+/// 这也满足 issue 的验收项「不认识的类型 → 退化到外部跳转，不报错」。
+FilePreviewKind resolvePreviewKind({
+  String? mimeType,
+  required String fileName,
+  String? relativePath,
+}) {
+  // 用 relativePath 优先（含扩展名更完整，如 `a/b/config.env.example`）；
+  // 为空时退回 fileName。webapp 用的是 `file.path || file.name`。
+  final pathForExt = (relativePath == null || relativePath.isEmpty)
+      ? fileName
+      : relativePath;
+
+  if (isImagePreviewable(mimeType: mimeType, fileName: pathForExt)) {
+    return FilePreviewKind.image;
+  }
+  // 主动内容按**扩展名**兜一层：服务端常把 `.html` / `.svg` 报成 `text/plain`
+  // （上传未探测 mime），按 mime 会落到下面的 text 分支——用户看到的是源码，
+  // 而不是页面/SVG 图。
+  if (_looksLikeActiveContent(pathForExt)) {
+    return FilePreviewKind.external;
+  }
+  if (isInlineTextPreviewable(mimeType: mimeType, fileName: pathForExt)) {
+    return FilePreviewKind.text;
+  }
+  return FilePreviewKind.external;
+}
+
+/// 扩展名是否属于「主动内容」（HTML / SVG）。
+///
+/// 只用于 [resolvePreviewKind] 的**兜底**判定：mime 已明确时由 mime 决定
+/// （`text/html` / `application/xhtml+xml` / `image/svg+xml` 本就不会进 text 分支）。
+bool _looksLikeActiveContent(String fileName) =>
+    fileExtensionsOf(fileName.toLowerCase())
+        .any(_activeContentExtensions.contains);
+
+/// 主动内容扩展名（与 [resolveExternalPreviewChannel] 的 htmlSession 分支同一集合）。
+const Set<String> _activeContentExtensions = {
+  '.html',
+  '.htm',
+  '.xhtml',
+  '.svg',
+  '.svgz',
+};
+
+/// `external` 类文件该走哪条**物理通道**打开。
+///
+/// ## 为什么与 [FilePreviewKind] 分开
+///
+/// [FilePreviewKind] 答「能不能内联看」（三分支、UI 直接消费）；本枚举答
+/// 「不能内联时把用户送到哪个面」，只被装配层用它决定「建哪种会话/拼哪种
+/// URL」。两者同维度不同粒度，混成一个会让预览对话框的穷尽 switch 里多出
+/// 两个它根本不渲染的取值。
+///
+/// ## 判据来源：小程序的 `preview_mode`
+///
+/// 小程序的判型在服务端（`super_partyb/apps/go-api/internal/server/
+/// miniapp_artifacts.go` 的 `previewMode()`），客户端只做分发：
+/// `webview` → 预览会话；`image`/`audio`/`video` → 媒体签名 URL（原生组件带不了
+/// Authorization）；`document`/`download` → 下载后再用系统查看器。时间线的
+/// `AgentFileItem` **没有** `preview_mode` 字段，故这份判据镜像到本仓库；
+/// 新增分支前先核对小程序同名函数，两边判型不一致会出现「小程序能看、客户端
+/// 打不开」这种最难排查的差异。
+enum ExternalPreviewChannel {
+  /// HTML / XHTML / SVG → UFS **一次性预览会话**（`POST /api/files/{id}/
+  /// preview-sessions` → 免登录入场）。
+  ///
+  /// 含 SVG：`isPreviewableHTMLMime` 放行 `image/svg+xml`，而 Flutter 既解不了
+  /// SVG、也不该让主动内容跑在自己的源上。
+  htmlSession,
+
+  /// 图片 / 音视频 / PDF → UFS **媒体签名 URL**（`POST /api/files/{id}/
+  /// media-access`）。短期 HMAC bearer，UFS 自验签，浏览器或系统播放器免
+  /// Authorization 即可流式读取。
+  ///
+  /// 服务端 `isMediaMime` 只放行 png/jpeg/gif/webp/bmp、`video/*`、`audio/*`
+  /// 与 `application/pdf`——**Office 文档不在内**（会 415）。
+  mediaAccess,
+
+  /// 其余（Office / 压缩包 / 未知二进制）→ UFS **旧预览页**
+  /// （`/ufs/preview.html?file_id=…`，需浏览器侧的网关登录会话）。
+  legacyPreviewPage,
+}
+
+/// 判定 `external` 文件该走哪条通道（规则见 [ExternalPreviewChannel]）。
+ExternalPreviewChannel resolveExternalPreviewChannel({
+  String? mimeType,
+  required String fileName,
+}) {
+  final mime = normalizeMimeType(mimeType);
+  final exts = fileExtensionsOf(fileName.toLowerCase());
+
+  // 1) 主动内容 → 预览会话（含 SVG，理由见 htmlSession 分支）。
+  if (mime == 'text/html' ||
+      mime == 'application/xhtml+xml' ||
+      mime == 'image/svg+xml') {
+    return ExternalPreviewChannel.htmlSession;
+  }
+  if (exts.any(const {'.html', '.htm', '.xhtml', '.svg', '.svgz'}.contains)) {
+    return ExternalPreviewChannel.htmlSession;
+  }
+
+  // 2) 媒体签名 URL：图片 / 音视频 / PDF。
+  if (isImagePreviewable(mimeType: mimeType, fileName: fileName)) {
+    return ExternalPreviewChannel.mediaAccess;
+  }
+  if (mime.startsWith('audio/') ||
+      mime.startsWith('video/') ||
+      mime == 'application/pdf') {
+    return ExternalPreviewChannel.mediaAccess;
+  }
+  const mediaExts = {
+    '.mp3',
+    '.wav',
+    '.ogg',
+    '.m4a',
+    '.aac',
+    '.flac',
+    '.mp4',
+    '.m4v',
+    '.mov',
+    '.webm',
+    '.mkv',
+    '.avi',
+    '.pdf',
+  };
+  if (exts.any(mediaExts.contains)) return ExternalPreviewChannel.mediaAccess;
+
+  // 3) 其余 → 旧预览页（小程序里对应 document/download：下载后用系统查看器）。
+  return ExternalPreviewChannel.legacyPreviewPage;
+}
+
+/// 视频「值得要压缩版」的体积下限（16 MiB）。
+///
+/// 低于它的视频直接拉 `original`：UFS 的 `compact` 是「1568 长边 + H.264 CRF28」
+/// （见 UFS #16 / `internal/service/media_variant.go`），对几十秒的小片段收益
+/// 有限，而多一次变体判定与一次转码排队反而更慢。高于它的录屏（1080p 一分钟
+/// ≈ 30–60 MB）压缩比在 80% 上下，移动数据上差别是「能看」与「看不了」。
+///
+/// 必须与小程序 `apps/miniapp/src/pages/work-detail/media/preview.ts` 的
+/// `COMPACT_VIDEO_MIN_BYTES` 保持同值：两端判据不一致会出现「同一文件桌面端
+/// 走压缩、小程序走原片」，而现象只是「一边快一边慢」，排查时看不出原因。
+const int kCompactVideoMinBytes = 16 * 1024 * 1024;
+
+/// 预览该文件时是否优先向 UFS 要 `compact`（压缩版）媒体签名。
+///
+/// ## 只对视频生效
+///
+/// - 图片：内联预览走缩略图，点开要的是**原图**（压缩版会把图中细节压掉）；
+/// - 音频：UFS 侧**没有** compact 产物（`audio/*` 请求会 415，见 UFS #16）；
+/// - PDF / 其余：没有压缩收益。
+///
+/// ## 体积未知时返回 false
+///
+/// `agent.file.deleted` 事件不带 size（[AgentFileItem.sizeBytes] 为 null）。
+/// 「不知道多大」不构成要压缩版的理由——按原片处理，不为几 KB 的片段白跑
+/// 一次变体判定。
+bool shouldPreferCompactVideo({
+  String? mimeType,
+  required String fileName,
+  int? sizeBytes,
+}) {
+  if (sizeBytes == null || sizeBytes < kCompactVideoMinBytes) return false;
+  final mime = normalizeMimeType(mimeType);
+  if (mime.startsWith('video/')) return true;
+  // mime 缺失 / octet-stream 时按扩展名兜底（与 [resolveExternalPreviewChannel]
+  // 同策略）：workspace sync 上传可能丢 Content-Type，UFS 侧也按扩展名回退。
+  if (mime.isNotEmpty && mime != 'application/octet-stream') return false;
+  const videoExts = {
+    '.mp4',
+    '.m4v',
+    '.mov',
+    '.webm',
+    '.mkv',
+    '.avi',
+    '.mpeg',
+    '.mpg',
+  };
+  return fileExtensionsOf(fileName.toLowerCase()).any(videoExts.contains);
+}
+
+/// 文本内容层判定的结果：原文，或识别出的 spec 文档。
+///
+/// ## 为什么不是给 [FilePreviewKind] 加一个 `spec` 值
+///
+/// [resolvePreviewKind] 判的是 **mime / 扩展名**（这个文件是什么格式），
+/// 本类型判的是**内容**（这段字节里装的是什么）。两者是不同维度：一个
+/// `.json` 文件既可能是 spec 也可能只是一份配置。塞进同一枚举会让
+/// [resolvePreviewKind] 的穷尽 switch 也被迫处理 spec，语义错位。
+///
+/// ## 为什么是 sealed 而不是「nullable 字段」
+///
+/// 调用方（预览对话框）必须对两种形态**都**给出渲染分支，且两者互斥。
+/// sealed + 穷尽 switch 让「将来新增一种形态」变成编译错误，而不是运行时空白。
+sealed class TextPreviewPayload {
+  const TextPreviewPayload();
+}
+
+/// 原文呈现（spec 识别失败时的**唯一**出路）。
+final class PlainTextPreview extends TextPreviewPayload {
+  const PlainTextPreview(this.text);
+
+  /// 已裁剪的原文（见 [buildTextPreview]）。
+  final TextPreview text;
+}
+
+/// spec 结构化呈现（交给 `SpecUiCard`）。
+final class SpecTextPreview extends TextPreviewPayload {
+  const SpecTextPreview(this.doc);
+
+  /// 已解析的文档。构造时保证 `doc.root != null`（见 [resolveTextPreview]）。
+  final SpecUiDocument doc;
+}
+
+/// map spec 呈现（交给 `MapSpecCard`，issue #12 的 `map` 项）。
+///
+/// 与 [SpecTextPreview] 并列而非「塞进 spec」：map 是**顶层 `type: "map"` +
+/// `markers`/`routes`** 的独立格式（见 [MapSchema]），与 `{root, elements}`
+/// 树形 UI 不兼容。webapp 也是两个并列分支（`MapSchemaRenderer` /
+/// `JsonUiSchemaRenderer`）。
+final class MapTextPreview extends TextPreviewPayload {
+  const MapTextPreview(this.schema);
+
+  /// 已解析的文档。构造时保证 [MapSchema.isRenderable]（见 [resolveTextPreview]）。
+  final MapSchema schema;
+}
+
+/// 内容层判定：把解码后的文本分成「map 文档」「spec 文档」或「原文」。
+///
+/// 对齐 webapp `file-preview.ts` 的 `resolveTextPreview`（含 map 分支；
+/// dashboard 仍不做——网格格式无已知生产者，见库文档）。
+///
+/// ## 判定顺序（与 webapp 一致：map → spec）
+///
+/// map 先判：它的特征最明确（顶层 `type: "map"` + 坐标），且
+/// [parseMapSchema] **只认顶层**、不做深度下探（见其文档）。反过来的话，
+/// 一份含 `{type:'map'}` 字段的 spec 会被 [extractSpecSchemaFromUnknown]
+/// 的深度扫描先抢走。
+///
+/// ## 识别失败必须退回原文
+///
+/// ⚠️ 这是本函数的**硬约束**：解析失败绝不能变成空白对话框。
+/// `SpecUiCard` 在 `doc` 为 null 或 `root` 悬空时渲染 `SizedBox.shrink()`，
+/// 用户看到的是空对话框——比原文差得多。故这里只在 `root` 确实存在时返回
+/// [SpecTextPreview]（[extractSpecSchemaFromUnknown] 已校验），map 只在
+/// [MapSchema.isRenderable] 时返回 [MapTextPreview]。
+///
+/// ## 为什么识别失败不退 `external`
+///
+/// 那会让 JSON 文件从「能看原文」退化成「跳 UFS 预览页」——比识别不出来更差。
+TextPreviewPayload resolveTextPreview(String content) {
+  // 顶层 JSON 解析失败 → 原文（map 是顶层格式，必须先有可解析的 JSON）。
+  final decoded = _tryDecodeJson(content);
+  if (decoded != null) {
+    final map = parseMapSchema(decoded);
+    if (map != null && map.isRenderable) return MapTextPreview(map);
+  }
+
+  final schema = extractSpecSchemaFromUnknown(content);
+  if (schema != null) {
+    final doc = parseSpecUi(schema);
+    // `root != null`：悬空 root 会让 SpecUiCard 渲染空对话框，不如给原文。
+    if (doc != null && doc.root != null) return SpecTextPreview(doc);
+  }
+  return PlainTextPreview(buildTextPreview(content));
+}
+
+/// 从字符串里抽取 schema 时，扫描的字符上限。
+///
+/// 与 [kTextPreviewMaxChars] 同值：超过这个长度时深度遍历一个巨型 JSON
+/// 只是白烧 CPU（用户的注意力也不在末尾）。webapp 用独立的
+/// `MAX_JSON_SCAN_CHARS = 120_000`；此处复用文本上限，避免多一个需要单独
+/// 解释的常量。
+const int _kSpecScanMaxChars = kTextPreviewMaxChars;
+
+/// 提取 schema 时的深度上限（对齐 webapp `extractSchemaFromUnknown`）。
+const int _kSpecExtractMaxDepth = 5;
+
+/// 优先尝试的键（对齐 webapp 的 `priorityKeys`）。
+///
+/// 命中顺序即优先级：先试这些语义明确的容器键，未命中再遍历其余键
+/// （覆盖嵌套在自定义字段下的 schema）。
+const List<String> _specPriorityKeys = [
+  'schema',
+  'ui_schema',
+  'uiSchema',
+  'json',
+  'data',
+  'result',
+  'output',
+  'content',
+  'text',
+  'value',
+];
+
+/// 从任意 JSON 值里深度下探，提取 `{root, elements}` 形状的 spec schema。
+///
+/// 对齐 webapp `json-ui-schema.ts` 的 `extractSchemaFromUnknown`。返回**原始
+/// Map**（而非 [SpecUiDocument]），以便与 [parseSpecUi] 的输入形态一致。
+///
+/// ## 判定顺序
+///
+/// 1. `depth > 5` 或 null → 放弃（防止损坏数据导致无限下探）；
+/// 2. 字符串 → 抽 JSON 候选（整体 / ```json 围栏 / 首尾大括号切片），逐个递归；
+/// 3. 数组 → 逐项递归（取第一个命中的）；
+/// 4. 当前值本身是合法 schema → 返回；
+/// 5. 按 [_specPriorityKeys] 递归；
+/// 6. 遍历其余键递归。
+///
+/// ## 「合法 schema」的判据
+///
+/// 必须能通过 [parseSpecUi]，**且** `elements[root]` 存在。后者是对齐 webapp
+/// 的关键：`parseSpecUi` 容忍悬空 root（返回 document 但 `root` 为 null），
+/// 而那样的 document 交给 `SpecUiCard` 会渲染成空对话框——比原文更差。
+Map<String, Object?>? extractSpecSchemaFromUnknown(
+  Object? value, {
+  int depth = 0,
+}) {
+  if (depth > _kSpecExtractMaxDepth || value == null) return null;
+
+  if (value is String) {
+    for (final candidate in _jsonCandidatesFromString(value)) {
+      final schema = extractSpecSchemaFromUnknown(candidate, depth: depth + 1);
+      if (schema != null) return schema;
+    }
+    return null;
+  }
+
+  if (value is List) {
+    for (final item in value) {
+      final schema = extractSpecSchemaFromUnknown(item, depth: depth + 1);
+      if (schema != null) return schema;
+    }
+    return null;
+  }
+
+  final direct = _normalizeSpecSchema(value);
+  if (direct != null) return direct;
+
+  if (value is Map) {
+    for (final key in _specPriorityKeys) {
+      if (!value.containsKey(key)) continue;
+      final schema = extractSpecSchemaFromUnknown(value[key], depth: depth + 1);
+      if (schema != null) return schema;
+    }
+    for (final key in value.keys) {
+      if (_specPriorityKeys.contains(key)) continue;
+      final schema = extractSpecSchemaFromUnknown(value[key], depth: depth + 1);
+      if (schema != null) return schema;
+    }
+  }
+
+  return null;
+}
+
+/// 当前值是否本身就是一个合法 schema；是则返回其 `Map<String, Object?>` 形态。
+Map<String, Object?>? _normalizeSpecSchema(Object? candidate) {
+  if (candidate is! Map) return null;
+  final doc = parseSpecUi(candidate);
+  // 悬空 root 不算命中（见 extractSpecSchemaFromUnknown 的说明）。
+  if (doc == null || doc.root == null) return null;
+  return candidate.map((key, value) => MapEntry(key.toString(), value));
+}
+
+/// 从字符串里抽取可能的 JSON 候选（对齐 webapp `extractJsonCandidatesFromString`）。
+///
+/// 三种来源，按可靠性排序：
+/// 1. 整串就是一个 JSON；
+/// 2. Markdown 围栏 ```json ... ``` 里的内容（LLM 产出常见）；
+/// 3. 首尾大括号之间的切片（前后夹了说明文字时）。
+List<Object?> _jsonCandidatesFromString(String value) {
+  final text = value.trim();
+  if (text.isEmpty) return const [];
+
+  final clipped = text.length > _kSpecScanMaxChars
+      ? text.substring(0, _kSpecScanMaxChars)
+      : text;
+  final candidates = <Object?>[];
+
+  final direct = _tryParseJson(clipped);
+  if (direct != null) candidates.add(direct);
+
+  for (final match in _fencedJsonPattern.allMatches(clipped)) {
+    final inner = (match.group(1) ?? '').trim();
+    final parsed = _tryParseJson(inner);
+    if (parsed != null) candidates.add(parsed);
+  }
+
+  final firstBrace = clipped.indexOf('{');
+  final lastBrace = clipped.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    final parsed = _tryParseJson(clipped.substring(firstBrace, lastBrace + 1));
+    if (parsed != null) candidates.add(parsed);
+  }
+
+  return candidates;
+}
+
+/// ```json ... ``` 围栏（大小写不敏感，`json` 标记可省）。
+final RegExp _fencedJsonPattern = RegExp(
+  r'```(?:json)?\s*([\s\S]*?)```',
+  caseSensitive: false,
+);
+
+/// JSON 解析，失败返回 null（**不抛异常**：候选里混着非 JSON 是常态）。
+Object? _tryParseJson(String text) {
+  try {
+    return jsonDecode(text);
+  } on FormatException {
+    return null;
+  }
+}
+
+/// 文本预览的裁剪结果。
+///
+/// [truncated] 必须被 UI 消费（给出「已截断，仅显示前 N 字符」之类的提示）。
+/// 这正是 issue 要求的「大文本截断且有明确提示，不静默截断」——把提示责任
+/// 放在数据上，而不是靠调用方记得。
+class TextPreview {
+  const TextPreview({
+    required this.content,
+    required this.truncated,
+    required this.originalLength,
+  });
+
+  /// 实际展示的文本（已裁剪到 [kTextPreviewMaxChars] 以内）。
+  final String content;
+
+  /// true = 原文更长，[content] 只是前缀。
+  final bool truncated;
+
+  /// 原始字符数（未截断时等于 `content.length`）。
+  ///
+  /// 用于提示里的「共 N 字符」——只说「已截断」而不说原始规模，
+  /// 用户无法判断是漏了一行还是漏了 10 万行。
+  final int originalLength;
+
+  /// 被丢弃的字符数（未截断时为 0）。
+  int get omittedLength => originalLength - content.length;
+}
+
+/// 把解码后的文本裁到 [kTextPreviewMaxChars]，并标记是否截断。
+///
+/// 调用方负责先把字节解码成字符串（用 `utf8.decode(bytes, allowMalformed: true)`，
+/// 否则遇到非法 UTF-8 会抛异常而不是退化为可读内容）。
+///
+/// ## 为什么截断发生在解码之后
+///
+/// 字节级截断会切碎多字节字符（UTF-8 一个汉字 3 字节），得到一个尾部的替换
+/// 字符。字符级截断虽然省不了下载流量（`UfsApi.download` 返回完整字节），
+/// 但保证显示内容干净。省流量需要 `Range` 请求，那是 `UfsApi` 的改动，
+/// 不在本 issue 范围。
+TextPreview buildTextPreview(
+  String content, {
+  int maxChars = kTextPreviewMaxChars,
+}) {
+  final limit = maxChars <= 0 ? kTextPreviewMaxChars : maxChars;
+  if (content.length <= limit) {
+    return TextPreview(
+      content: content,
+      truncated: false,
+      originalLength: content.length,
+    );
+  }
+  return TextPreview(
+    content: content.substring(0, limit),
+    truncated: true,
+    originalLength: content.length,
+  );
+}

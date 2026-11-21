@@ -1,0 +1,8 @@
+// Flutter 的 included build 未声明插件仓库，只走 Plugin Portal 时可能找不到 Kotlin
+// 的传递依赖。为所有 included build 补官方 Maven Central，保留插件 marker 的来源。
+settingsEvaluated { settings ->
+    settings.pluginManagement.repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}

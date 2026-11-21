@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 8.0+ 自适应启动图标（API 26+）。
+
+  ## 为什么需要它
+
+  API 26 起启动器不再直接把 mipmap 目录下的 ic_launcher.png 贴到桌面，而是把
+  「背景层 + 前景区」按厂商自己的形状（圆/方/水滴/squircle）裁切，并做视差
+  位移。没有这份 XML 时系统会回退到旧的方图——在圆形图标主题下会显示成
+  「圆里套一个方」，这是最常见的一眼可见的图标问题。
+
+  ## 两层的分工
+
+  background：纯品牌蓝，见 values/colors.xml 的 ic_launcher_background。
+  foreground：透明底的浅色气泡，对勾是镂空（露出背景蓝）。
+
+  ⚠️ 前景图的标志只占画布中央约 48%：安全区是 66%（108dp 画布里约 72dp），
+  超出会被裁掉。生成脚本见 tools/gen_brand_assets.py。
+
+  ⚠️ mipmap 目录下的 ic_launcher.png 不能删：API 26 以下的设备只用得到那几张。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
