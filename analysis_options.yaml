@@ -1,0 +1,53 @@
+# 工作区级静态分析配置。
+#
+# 各包/应用有自己的 analysis_options.yaml（继承 flutter_lints 或 lints），
+# 这里只放跨包统一的严格度设置。
+#
+# ## 严格模式三项均已开启（issue #47）
+#
+# 三项**全仓零告警**（实测 `dart analyze --fatal-infos .` → No issues found）：
+#
+# | 项 | 作用 | 开前需修的告警 |
+# |---|---|---|
+# | `strict-casts` | 隐式 downcast（如 `Map` → `Map<String, dynamic>`）不静默 | 0 |
+# | `strict-raw-types` | 裸 `Map` / `List` 必须写类型参数 | 4 |
+# | `strict-inference` | 集合字面量/泛型调用的类型参数推断失败要显式 | 103 |
+#
+# 其中 `strict-inference` 的 103 条里，79 条是测试的 JSON 固定数据（`'items': []`
+# 这类，改成 `'items': <dynamic>[]` 即可，语义不变）；24 条在 `lib/`，主要是
+# `_dio.get/post/...` 未写类型参数（dio 的 `Response<T>` 里 T 无约束，无法推断）
+# 与两处集合字面量。均已在 issue #47 中逐条修掉。
+#
+# ⚠️ **不要因为「测试里的 79 条太吵」而把 `strict-inference` 只开在 lib/**——
+# analyzer 的 `language:` 是**按文件**生效的，没有「只对 lib」这种写法；按目录
+# 关就只能拆出两份配置，那会重新引入「根配置只对 include 了它的包生效」这个
+# 静默失效（见 tools/check_analysis_options.sh 的文件头）。
+#
+# 这三项由 tools/check_analysis_options.sh 守着——删掉任一项，`dart analyze`
+# 依然报「No issues found!」，没有任何 lint 会提醒你门禁少了一层。
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+    strict-inference: true
+  errors:
+    # 未使用的 import / 变量在 CI 里应视为失败，而非仅警告。
+    unused_import: warning
+    unused_local_variable: warning
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "**/build/**"
+    - "**/flutter/ephemeral/**"
+
+linter:
+  rules:
+    # 显式类型注解公共 API：客户端代码长期可维护性的基础。
+    always_declare_return_types: true
+    # 避免 `print` 绕过 SpbLog。
+    avoid_print: true
+    # 异步安全。
+    unawaited_futures: true
+    # 常量优先。
+    prefer_const_constructors: true
+    prefer_const_declarations: true

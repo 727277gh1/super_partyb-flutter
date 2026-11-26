@@ -1,0 +1,28 @@
+{
+  "scenario_id": "spbf-sse-utf8-fragmentation",
+  "repo": "dever/super_partyb-flutter",
+  "injection": "把含中文的完整 SSE 流按 1 字节切分喂给传输层（等价任意网络分段）",
+  "scope": "in-process",
+  "criteria": [
+    {
+      "id": "frames-parsed",
+      "requirement": "逐字节分片下解析出全部两帧（分帧不因分片方式变化）",
+      "observed": "frames=2",
+      "passed": true
+    },
+    {
+      "id": "utf8-not-corrupted",
+      "requirement": "UTF-8 多字节被切在分片中间时不得出现 U+FFFD",
+      "observed": "utf8_clean=true",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "metrics": {
+    "frames": 2
+  },
+  "evidence": [
+    "packages/spb_api/test/rehearsal_drill_test.dart"
+  ],
+  "notes": "复用 issue #41 的传输层契约测试结论；分片缓冲 + 流式 UTF-8 解码是既有实现。"
+}

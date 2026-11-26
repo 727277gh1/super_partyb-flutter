@@ -1,0 +1,55 @@
+name: spb_data
+description: 本地持久化：drift 数据库、缓存、偏好存储
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  spb_core:
+  spb_models:
+  spb_domain:
+  spb_api:
+  drift: ^2.28.0
+  # ⚠️ 本包 lib **没有 import** 它（它只提供 `lib/sqlite3_flutter_libs.dart` 的
+  # `applyWorkaroundToOpenSqlite3OnOldAndroidVersions`），但**不能删**：
+  #
+  # 它是**原生插件**（android/ios/macos/linux/windows 都有 pluginClass），
+  # 职责是把 `libsqlite3.so` 打进 Android/iOS 包。drift 的 `NativeDatabase`
+  # 在移动端直接 `DynamicLibrary.open('libsqlite3.so')`，少了它会在**运行时**
+  # 报「找不到库」，而不是编译/静态分析报错。
+  #
+  # 实测：`flutter build apk` 产物里 `lib/{arm64-v8a,armeabi-v7a,x86_64}/libsqlite3.so`
+  # 就是它带进去的；本机 Flutter 的 native assets 为 `(Not set)`（未开启），
+  # 故不能靠 sqlite3 的 native-asset hook 替代。
+  #
+  # 它只属于 spb_data（两个 app 都通过本包间接得到），故留在这里而非下移到 app。
+  sqlite3_flutter_libs: ^0.5.28
+  # 会话凭证的加密存储（Keychain / Keystore / libsecret）。
+  # 与两个 app 声明的版本保持一致，避免同一工作区解析出两份。
+  flutter_secure_storage: ^9.2.2
+
+  # ⚠️ 曾声明 path_provider / path / shared_preferences，但本包 lib 从未 import：
+  # - `path_provider`：应用数据目录由**两个 app** 解析后传进来（见 database.dart
+  #   的 `openAppDatabaseLazy` 文档：路径是异步拿到的，由调用方 resolve）；
+  # - `path`：drift 自己的依赖，本包不直接拼路径；
+  # - `shared_preferences`：preferences_store.dart 的注释明写「**不用**它，改用
+  #   drift」（issue #26 的离线缓存决策）。
+  # 已删（issue #36）。
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+  drift_dev: ^2.28.0
+  # 测试用：替换 flutter_secure_storage 的 MethodChannel 后端，
+  # 使「写入/读取 round-trip」能在无平台通道的 flutter test 里跑。
+  plugin_platform_interface: ^2.1.8
+  flutter_secure_storage_platform_interface: ^1.1.2

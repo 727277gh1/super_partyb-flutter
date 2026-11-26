@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  资源压缩的 keep 名单（**没有这一条，release 包的通知整条静默失效**）。
+
+  ## 为什么需要它
+
+  `ic_notification`（状态栏白剪影小图标）**只被 Dart 以字符串引用**：
+
+      AndroidNotificationDetails(icon: 'ic_notification')   ← 字符串，不是 R.drawable.xxx
+
+  而 Flutter 3.47 的 Gradle 插件对 release 构建强制打开 R8 资源压缩
+  （`FlutterPlugin.kt` 里 `isMinifyEnabled = true` + `isShrinkResources = true`）。
+  压缩器看不到任何 Java/XML 引用，判定「这个 drawable 没人用」→ 从 APK 删掉。
+
+  运行时的表现是**构建成功、安装成功、通知发不出去**：插件按名字
+  `getIdentifier("ic_notification", "drawable", 包名)` 查资源，查不到就抛
+  `PlatformException(invalid_icon)`，`LocalNotificationSink` 静默降级成 false
+  → 用户只看到「通知发送失败」，而 debug 包（不压缩）一切正常。
+
+  实测（2026-11-20 的 CI release 产物）：`resources.arsc` 里
+  `ic_launcher` / `launch_logo` / `ic_quick_capture` 都在（它们分别被清单与
+  XML 引用），**只有 `ic_notification` 不见了**。
+
+  ## 为什么是 keep.xml 而不是代码里写一句 R.drawable.ic_notification
+
+  后者是「用一次假引用骗压缩器」，且需要一个永远不会执行的字段/函数，
+  容易被后续重构当成死代码删掉。`tools:keep` 是 Android 官方为
+  「只按名字取资源」这种场景提供的机制，语义直接。
+
+  ## 改动约定
+
+  改名（`ic_notification` → 别的）时，这里、`LocalNotificationSink` 的
+  `androidSmallIcon` 默认值、`tools/gen_brand_assets.py` 的 `notification`
+  组必须同时改；`tools/check_android_notification_icon.sh` 会盯着三处一致。
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_notification" />
