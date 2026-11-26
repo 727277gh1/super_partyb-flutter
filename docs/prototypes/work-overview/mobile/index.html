@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Super PartyB · 移动端工作概览草稿</title>
+  <link rel="stylesheet" href="mobile.css">
+  <script src="../sample-data.js" defer></script>
+  <script src="mobile.js" defer></script>
+</head>
+<body>
+  <div class="phone">
+    <header id="bar">
+      <span class="brand"><img src="../../../../apps/spb_mobile/android/app/src/main/res/mipmap-hdpi/ic_launcher.png" width="28" height="28" alt="">Super PartyB</span>
+      <small>移动草稿 · 示例数据</small>
+    </header>
+    <main id="screen" tabindex="-1"></main>
+    <nav id="nav" aria-label="主导航"></nav>
+  </div>
+  <dialog aria-labelledby="sheet-title">
+    <div class="handle" aria-hidden="true"></div>
+    <div class="sheet-head"><h2 id="sheet-title"></h2><button class="icon" data-back aria-label="关闭" title="关闭"><i aria-hidden="true">&#xe16a;</i></button></div>
+    <div id="sheet-body"></div>
+  </dialog>
+  <div role="status" id="feedback"></div>
+</body>
+</html>

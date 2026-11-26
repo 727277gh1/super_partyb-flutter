@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>工作概览 · Super PartyB 信息结构原型</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="sample-data.js" defer></script>
+    <script src="prototype.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <aside class="prototype-bar" aria-label="原型控制">
+      <span><strong>信息结构原型</strong> <span class="muted">示例数据 · 未连接服务</span></span>
+      <div class="prototype-controls">
+        <a class="button" href="mobile/index.html">移动端草稿</a>
+        <label for="scenario">数据状态</label>
+        <select id="scenario">
+          <option value="normal">正常</option>
+          <option value="empty">空数据</option>
+          <option value="loading">加载中</option>
+          <option value="error">待确认查询失败</option>
+          <option value="offline">离线缓存</option>
+          <option value="truncated">查询结果截断</option>
+        </select>
+        <button id="theme" type="button" aria-pressed="false">深色预览</button>
+      </div>
+    </aside>
+    <div class="app-layout">
+      <nav class="app-nav" aria-label="主导航">
+        <div class="brand"><img src="../../../apps/spb_mobile/android/app/src/main/res/mipmap-hdpi/ic_launcher.png" width="28" height="28" alt="">Super PartyB</div>
+        <a href="#overview" data-nav="overview">工作概览</a>
+        <a href="#conversations" data-nav="conversations">对话</a>
+        <a href="#more" data-nav="more">更多</a>
+      </nav>
+      <main id="main" tabindex="-1"></main>
+    </div>
+    <p id="announcement" class="sr-only" role="status" aria-atomic="true"></p>
+    <dialog id="dialog" aria-labelledby="dialog-title">
+      <div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" id="close-dialog">关闭</button></div>
+      <div id="dialog-body"></div>
+    </dialog>
+  </body>
+</html>

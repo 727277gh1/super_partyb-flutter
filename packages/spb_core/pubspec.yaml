@@ -1,0 +1,17 @@
+name: spb_core
+description: 基础设施：日志、错误类型、环境配置、平台无关工具（纯 Dart）
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dependencies:
+  # 本包**零第三方依赖**（纯 Dart 基础设施，只用 dart:core / dart:io）。
+  # 曾声明 meta / collection，但源码从未 import——已删（issue #36）。
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0

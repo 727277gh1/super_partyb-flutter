@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!--
+	  出站网络。沙箱下**不开这项就无法发起任何网络请求**，表现为登录、
+	  SSE、全部 API 调用一起失败——而 debug 构建（用
+	  DebugProfile.entitlements，见其 network.server 一行）能正常联网，
+	  于是问题只在正式包上暴露。
+	-->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!--
+	  用户所选文件的读写。交付物同步用 `LocalFileSink` 往用户通过
+	  `file_selector` 选定的同步目录写文件；沙箱下**缺这一项会被拒**，
+	  表现为「同步报写入失败」。debug 构建的沙箱较松（DebugProfile
+	  另有 network.server 等放宽项）可能不暴露，**只在正式包上现形**
+	  ——见 AGENTS.md §8 的同类陷阱。
+	-->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,31 @@
+{
+  "scenario_id": "spbf-sse-transient-id-passthrough",
+  "repo": "dever/super_partyb-flutter",
+  "injection": "喂入瞬态 id（transient-abc）与数字 id（42）各一帧，检查帧上 id 透传",
+  "scope": "in-process",
+  "criteria": [
+    {
+      "id": "id-preserved-on-frame",
+      "requirement": "事件 id 原样出现在帧上（上层凭它区分瞬态/持久）",
+      "observed": "ids=[transient-abc, 42]",
+      "passed": true
+    },
+    {
+      "id": "cursor-decision-stays-upstream",
+      "requirement": "游标推进决策留在上层归约层（传输层不吞 id）",
+      "observed": "frames_with_id=2",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "metrics": {
+    "ids": [
+      "transient-abc",
+      "42"
+    ]
+  },
+  "evidence": [
+    "packages/spb_api/test/rehearsal_drill_test.dart"
+  ],
+  "notes": "「瞬态 ID 不推进持久化游标」的最终判定在 spb_domain 归约测试（chat_stream_controller_gap_probe_test.dart 已覆盖）；此处验证传输层前提：id 完整透传。"
+}

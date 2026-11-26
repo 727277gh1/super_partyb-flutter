@@ -1,0 +1,34 @@
+{
+  "scenario_id": "spbf-sse-multiline-crlf",
+  "repo": "dever/super_partyb-flutter",
+  "injection": "CRLF 与 LF 混用的流在中点切断（等价断流后重连），多行 data 拼接",
+  "scope": "in-process",
+  "criteria": [
+    {
+      "id": "multiline-data-joined",
+      "requirement": "同一事件的多行 data 拼接为一帧（A、B 同帧）",
+      "observed": "frames=2 merged={\"part\":\"A\"}\n{\"part\":\"B\"}|{\"part\":\"C\"}",
+      "passed": true
+    },
+    {
+      "id": "no-frame-loss-across-cut",
+      "requirement": "切断点之后的事件仍完整到达（不丢帧）",
+      "observed": "total_frames=2",
+      "passed": true
+    },
+    {
+      "id": "crlf-handled",
+      "requirement": "CRLF 行尾被正确处理（不被当成数据内容）",
+      "observed": "merged_no_crlf=true",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "metrics": {
+    "frames": 2
+  },
+  "evidence": [
+    "packages/spb_api/test/rehearsal_drill_test.dart"
+  ],
+  "notes": "断流重连后的「终态与服务端一致」由 PartyB 与客户端联调核对（#107 真机部分）。"
+}
