@@ -1,0 +1,27 @@
+name: spb_api
+description: HTTP 与 SSE 传输层（dio + 手写 SSE 解析），不含业务逻辑
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dependencies:
+  spb_core:
+  spb_models:
+  dio: ^5.7.0
+  # PKCE 的 S256 challenge = BASE64URL(SHA256(code_verifier))。
+  # 用 `package:crypto` 而非自己拼 SHA256：手写实现错了不会报错，
+  # 只会在真实登录时得到 invalid_grant（极难定位）。
+  crypto: ^3.0.7
+
+  # ⚠️ 曾声明 http_parser / meta，但源码从未 import——已删（issue #36）。
+  # 注：`DioMediaType` 是 dio 自己的 typedef（= http_parser 的 MediaType），
+  # 经 dio 转出，故本包无需直接依赖 http_parser。
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0
+  http_mock_adapter: ^0.6.1

@@ -1,0 +1,25 @@
+name: spb_models
+description: 数据契约：DTO / 聊天事件 / 枚举（手写 fromJson）
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dependencies:
+  # ⚠️ 模型全部**手写 fromJson**（0 个 @freezed / @JsonSerializable，0 个 .g.dart）。
+  #
+  # 此前声明了 freezed_annotation / json_annotation / collection / spb_core，
+  # 但源码一个都没 import；dev_dependencies 的 build_runner / freezed /
+  # json_serializable 也从未产出文件（`melos run gen` 对本包为空）。
+  # 全部删除（issue #36）——这是 AGENTS.md §6.2「契约手写、暂不上代码生成」
+  # 决策的落实：要么用手写，要么用生成器，不该两者都占。
+  #
+  # 若将来事件类型 > 50 个或出现「服务端改了 payload 而客户端静默不兼容」
+  # 的实际事故（§6.2 的重新评估条件），再一次性接回生成链。
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0

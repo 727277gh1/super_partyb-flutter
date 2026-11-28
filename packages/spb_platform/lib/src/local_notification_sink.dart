@@ -1,0 +1,482 @@
+/// `flutter_local_notifications` 支撑的 [NotificationSink] 实现。
+///
+/// ## 为什么在本包（而不是 apps）
+///
+/// 契约与判定在 `spb_domain`（纯 Dart，可无平台通道单测）；**实现**需要插件，
+/// 而插件是平台能力——放 `spb_platform` 让两端 apps 各写一份「初始化时机 +
+/// 导航接线」即可，不必重复实现「插件调用 → 契约」的翻译。
+///
+/// ## 平台差异
+///
+/// | 平台 | 底层 | 系统依赖 |
+/// |---|---|---|
+/// | Android | 原生 `NotificationManager` | 无（需 `POST_NOTIFICATIONS` 运行时权限，API 33+） |
+/// | iOS | `UNUserNotificationCenter` | 无 |
+/// | Linux | `flutter_local_notifications_linux`（**纯 Dart**，走 D-Bus/XDG portal） | **无**（不依赖 libnotify 的 C 库，见下） |
+/// | Windows/macOS | 各自实现 | 无 |
+///
+/// ## Linux 为什么没有新增系统依赖（与 issue #21 正文的预判不同）
+///
+/// issue 正文预判「Linux 走 libnotify，需加系统依赖，是主要成本」。核实后**不成立**：
+/// `flutter_local_notifications_linux` 的 `pubspec.yaml` 只声明
+/// `dartPluginClass: LinuxFlutterLocalNotificationsPlugin`，**没有 `pluginClass`、
+/// 没有 `linux/` CMake 目录**——它是纯 Dart 实现，通过 `dbus` 包直接调
+/// `org.freedesktop.Notifications`（或 XDG portal）。故 `bundle_linux_deps.sh`
+/// 无需新增任何 `.so`。
+///
+/// 代价是**运行时**需要 D-Bus 会话总线（桌面环境都有；无头环境没有，此时
+/// [requestPermission] 返回 false，判定层静默跳过，不会崩）。
+library;
+
+import 'dart:async' show Completer;
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+import 'package:spb_core/spb_core.dart';
+import 'package:spb_domain/spb_domain.dart';
+
+/// Windows toast 的激活回调 GUID。
+///
+/// ## 为什么是写死的常量，而不是每次启动生成
+///
+/// `flutter_local_notifications_windows` 用它在系统里注册 COM 激活器；换值
+/// 等于换注册键——**旧通知点不动**（payload 回不来），而且每次启动都留下
+/// 一条无主的注册项。它不是密钥，公开无风险，故**不要**改成随机值或
+/// 构造参数。
+const String kWindowsNotificationActivationGuid =
+    'b1f0a6c4-2d3e-4f57-9a8b-6c0d7e5a1f92';
+
+/// Windows toast 的显示名（通知右上角与操作中心里显示的应用名）。
+const String kWindowsAppDisplayName = '成蹊';
+
+/// Windows toast 的 AppUserModelID。
+///
+/// 必须与安装包的标识一致（`windows/runner/Runner.rc` 的
+/// `CompanyName`=`com.atjog.spb` + `ProductName`=`spb_desktop`）；不一致时
+/// toast 归不到本应用，部分 Windows 版本会**静默丢弃**。
+const String kWindowsAppUserModelId = 'com.atjog.spb.spb_desktop';
+
+/// 基于 `flutter_local_notifications` 的通知发送实现。
+///
+/// ## 初始化是**显式**的（不是构造时自动做）
+///
+/// `initialize` 需要在合适的时机调用（Android 需要先有 Activity、iOS 需要
+/// 在 `runApp` 之后设置 delegate）。构造时自动初始化会让「谁负责调用」
+/// 变得模糊，且测试里无法构造一个「未初始化的实例」。
+class LocalNotificationSink implements NotificationSink {
+  LocalNotificationSink({
+    FlutterLocalNotificationsPlugin? plugin,
+    this.androidChannelId = 'spb_confirmations',
+    this.androidChannelName = '待确认事项',
+    this.androidChannelDescription = '有新的确认卡需要你处理',
+    this.androidSmallIcon = 'ic_notification',
+    this.windowsAppName = kWindowsAppDisplayName,
+    this.windowsAppUserModelId = kWindowsAppUserModelId,
+  }) : _plugin = plugin ?? FlutterLocalNotificationsPlugin();
+
+  final FlutterLocalNotificationsPlugin _plugin;
+  final String androidChannelId;
+  final String androidChannelName;
+  final String androidChannelDescription;
+
+  /// Android 状态栏小图标（`res/drawable-*/ic_notification.png`）。
+  ///
+  /// ## 为什么不能沿用 `initialize` 的 `@mipmap/ic_launcher`
+  ///
+  /// 那是**启动器图标**：彩色、满幅。API 21 起状态栏图标必须是单色剪影，
+  /// 系统把彩色图当 alpha 蒙版用 → 蓝底图标糊成一块实心白/灰。故单独提供
+  /// 一张纯白剪影（生成脚本 `tools/gen_brand_assets.py` 的 `notification_icon`），
+  /// 并在这里显式指定；不指定时插件会回落到 `defaultIcon`（即 `@mipmap/...`）。
+  final String androidSmallIcon;
+
+  /// Windows toast 的显示名与 AppUserModelID（见 [kWindowsAppDisplayName] /
+  /// [kWindowsAppUserModelId]）。做成字段是为了可测：断言「传进去的就是
+  /// 初始化时用的那个」，而不是在 [initialize] 里写一次字面量。
+  final String windowsAppName;
+  final String windowsAppUserModelId;
+
+  /// 是否已 [initialize]。未初始化时 [show] 静默跳过（记日志）。
+  bool _initialized = false;
+
+  /// 上一次 [_showInternal] 抛出的异常摘要（null = 上次没抛）。
+  ///
+  /// ## 为什么要把异常留一手
+  ///
+  /// 失败时 [NotificationSelfTestReport] 的 `error` 字段是**用户念给我们听**
+  /// 的那半句话。此前 `show` 的异常只进 `debugPrint`，于是自检结论停在
+  /// 「通知发送失败」——四种成因（图标资源 / 渠道被关 / 系统拦截 / 插件通
+  /// 道）看起来一模一样，等于把 #90 想解决的问题原样留给了下一次排查。
+  ///
+  /// 只存字符串、只在自检里读出，不进任何落盘或网络路径。
+  String? _lastShowError;
+
+  /// 已确认的权限结果（避免重复调用插件）。
+  bool? _permissionGranted;
+
+  void Function(String? payload)? _onSelect;
+
+  /// 自检的点击捕获点（issue #90）。
+  ///
+  /// ## 为什么与 [_onSelect] 分开而不是临时接管它
+  ///
+  /// [_onSelect] 是**业务导航**的接线（`ConfirmationNotifier.attach` 设的）。
+  /// 自检若把它临时替换掉，用户恰好在自检期间点了一张**真实确认卡**的通知，
+  /// 那次点击就丢了（页面不跳，用户以为确认卡坏了）。故自检只旁路监听，
+  /// 原回调照常执行。
+  void Function(String? payload)? _selfTestClick;
+
+  @override
+  set onSelect(void Function(String? payload)? callback) =>
+      _onSelect = callback;
+
+  /// 喂给插件的初始化设置。
+  ///
+  /// ## 为什么做成可测试的 getter
+  ///
+  /// `FlutterLocalNotificationsPlugin` 是**单例**（私有构造 + factory），测试
+  /// 无法继承它来捕获参数。而「漏给某个平台的设置」正是 Windows 上踩过的
+  /// 静默失效（插件在 Dart 层抛 `ArgumentError('Windows settings must be set
+  /// when targeting Windows platform.')`，被 [initialize] 的 catch 吞成
+  /// 「初始化失败」，自检只报一句「装配/平台通道问题」）。
+  ///
+  /// 故把设置抽出来供 `local_notification_sink_windows_settings_test.dart`
+  /// 用 `debugDefaultTargetPlatformOverride` 断言——与
+  /// [debugNotificationDetails] 同一套取向：能验的只有「喂给插件的参数对不对」。
+  @visibleForTesting
+  InitializationSettings get debugInitializationSettings =>
+      InitializationSettings(
+        android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
+        iOS: const DarwinInitializationSettings(
+          // 权限申请交给 requestPermission 显式做（见其文档），
+          // 否则首次 initialize 就会弹框——那不是我们能解释文案的时机。
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
+        macOS: const DarwinInitializationSettings(
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
+        linux: const LinuxInitializationSettings(defaultActionName: '打开'),
+        // Windows **必须**给这组设置：插件对空值直接抛 ArgumentError，而它
+        // 会被 [initialize] 的 catch 吞成「初始化失败」——自检因此指错方向
+        // （Windows 真机 2026-11 踩过，`flutter test` 在 Linux 上跑发现不了）。
+        windows: WindowsInitializationSettings(
+          appName: windowsAppName,
+          appUserModelId: windowsAppUserModelId,
+          guid: kWindowsNotificationActivationGuid,
+        ),
+      );
+
+  /// 初始化插件并接线点击回调。
+  ///
+  /// 返回是否初始化成功（失败时后续调用静默降级）。
+  Future<bool> initialize() async {
+    if (_initialized) return true;
+    try {
+      final ok = await _plugin.initialize(
+        settings: debugInitializationSettings,
+        onDidReceiveNotificationResponse: (response) {
+          _onSelect?.call(response.payload);
+          _selfTestClick?.call(response.payload);
+        },
+      );
+      _initialized = ok ?? false;
+      if (!_initialized) {
+        SpbLog.warn('[notifications] 插件初始化返回 false，通知将静默降级');
+      }
+      return _initialized;
+    } catch (e) {
+      // 无平台通道（flutter test）或无 D-Bus 会话：静默降级。
+      // 不抛异常——上层不该为「这个环境没有通知」写 try/catch。
+      //
+      // 走 SpbLog 而不是 debugPrint：诊断报告只导出 SpbLog 的环形缓冲，而
+      // release 的 Windows 包没有控制台，debugPrint 等于把这条唯一的线索
+      // 丢给空气（真机排查时正是卡在这里）。
+      SpbLog.warn('[notifications] 插件初始化失败，通知将静默降级', {'error': '$e'});
+      _initialized = false;
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> requestPermission() async {
+    final cached = _permissionGranted;
+    if (cached != null) return cached;
+
+    if (!await initialize()) {
+      _permissionGranted = false;
+      return false;
+    }
+
+    try {
+      // 平台分派。iOS/macOS 走 Darwin 的显式请求；Android 13+ 走运行时权限；
+      // Linux/Windows 无权限概念（直接 true）。
+      final granted = await _requestPlatformPermission();
+      _permissionGranted = granted;
+      return granted;
+    } catch (e) {
+      debugPrint('[notifications] 权限请求失败，按「未授予」处理：$e');
+      _permissionGranted = false;
+      return false;
+    }
+  }
+
+  Future<bool> _requestPlatformPermission() async {
+    if (Platform.isAndroid) {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+      // API < 33 时该方法返回 true（无运行时权限）。
+      return await android?.requestNotificationsPermission() ?? false;
+    }
+    if (Platform.isIOS) {
+      final ios = _plugin
+          .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin
+          >();
+      return await ios?.requestPermissions(
+            alert: true,
+            badge: true,
+            sound: true,
+          ) ??
+          false;
+    }
+    if (Platform.isMacOS) {
+      final macos = _plugin
+          .resolvePlatformSpecificImplementation<
+            MacOSFlutterLocalNotificationsPlugin
+          >();
+      return await macos?.requestPermissions(
+            alert: true,
+            badge: true,
+            sound: true,
+          ) ??
+          false;
+    }
+    // Linux / Windows：无权限概念。
+    return true;
+  }
+
+  @override
+  Future<void> show(LocalNotification notification) async {
+    await _showInternal(notification);
+  }
+
+  /// 后台只查询已有授权，不能依赖 Activity 发起运行时权限请求。
+  Future<bool> hasPermission() async {
+    if (!await initialize()) return false;
+    if (!Platform.isAndroid) return false;
+    return await _plugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.areNotificationsEnabled() ??
+        false;
+  }
+
+  /// 持久化判重只能在平台接受通知后标记成功，失败时允许下轮重试。
+  Future<bool> showChecked(LocalNotification notification) =>
+      _showInternal(notification);
+
+  /// [show] 的可判定版本：返回是否真的发出去（供自检区分「没弹」与「没点」）。
+  Future<bool> _showInternal(LocalNotification notification) async {
+    if (!await initialize()) return false;
+    if (notification.expiresAt?.isAfter(DateTime.now()) == false) return false;
+    try {
+      await _plugin.show(
+        // 跨 engine 和重启保持一致，后台创建的通知才能被前台撤销。
+        id: stableNotificationId(notification.id),
+        title: notification.title,
+        body: notification.body,
+        notificationDetails: _details(expiresAt: notification.expiresAt),
+        payload: notification.payload,
+      );
+      _lastShowError = null;
+      return true;
+    } catch (e) {
+      // 发送失败（无 D-Bus、被系统拒绝）不该影响业务逻辑。
+      //
+      // 走 SpbLog 而不是只 debugPrint：前台 engine 的环形缓冲会带上这条，
+      // 「导出诊断日志」才有证据（后台 engine 另说，见 §6.111 的验证边界）。
+      _lastShowError = '$e';
+      SpbLog.warn('[notifications] 发送失败（已忽略）', {'error': '$e'});
+      return false;
+    }
+  }
+
+  /// 通知自检（issue #90）：走完整四步并给出可读结论。
+  ///
+  /// ## 它解决的问题
+  ///
+  /// 「通知到底能不能用」在无真机/无桌面的环境里**永远无法证明**（§8/§9）：
+  /// 单测只能证明「装配对了」（注入的桩被调用），证明不了「toast 真的弹、
+  /// 点了真的回到对话」。故把四步（初始化 / 权限 / 发送 / 点击）串成一条
+  /// 可主动触发的自检，结果既给用户看，也进诊断报告。
+  ///
+  /// ## 为什么等待点击而不是立即返回
+  ///
+  /// 点击回调是异步且**可能永远不来**（权限被拒 / 用户没点 / 回调没接线）。
+  /// 立即返回只能证明「发出去了」，而那正是 issue #90 里最容易误导人的
+  /// 一半。故这里等 [clickWait]：拿到 payload = 全链路通；超时 = 前两/三步
+  /// 可能没问题但最后一步没验证到（报告里 [NotificationSelfTestReport.shown]
+  /// 仍是 true，用户据此判断「是没弹还是点不动」）。
+  ///
+  /// 等待期间 [_selfTestClick] 旁路捕获，**不接管**业务导航回调。
+  Future<NotificationSelfTestReport> selfTest({
+    String payload = kNotificationSelfTestPayload,
+    Duration clickWait = const Duration(seconds: 30),
+    String title = '通知自检',
+    String body = '点我：验证点击能回到应用',
+  }) async {
+    final initialized = await initialize();
+    if (!initialized) {
+      return NotificationSelfTestReport(
+        payload: payload,
+        initialized: false,
+        permissionGranted: false,
+        shown: false,
+      );
+    }
+
+    final granted = await requestPermission();
+    if (!granted) {
+      return NotificationSelfTestReport(
+        payload: payload,
+        initialized: true,
+        permissionGranted: false,
+        shown: false,
+      );
+    }
+
+    final clicked = Completer<String?>();
+    _selfTestClick = (p) {
+      if (!clicked.isCompleted) clicked.complete(p);
+    };
+
+    final shown = await _showInternal(
+      LocalNotification(
+        // 固定 id：反复自检只覆盖同一条，不在通知中心堆出一串「通知自检」。
+        id: 'spb-notification-self-test',
+        title: title,
+        body: body,
+        payload: payload,
+      ),
+    );
+
+    if (!shown) {
+      _selfTestClick = null;
+      return NotificationSelfTestReport(
+        payload: payload,
+        initialized: true,
+        permissionGranted: true,
+        shown: false,
+        // 把真实异常带进结论：只报「发送失败」时，图标资源、渠道被关、
+        // 系统拦截、插件通道四种成因无法区分。
+        error: _lastShowError,
+      );
+    }
+
+    final clickedPayload = await clicked.future.timeout(
+      clickWait,
+      onTimeout: () => null,
+    );
+    _selfTestClick = null;
+
+    final report = NotificationSelfTestReport(
+      payload: payload,
+      initialized: true,
+      permissionGranted: true,
+      shown: true,
+      clickedPayload: clickedPayload,
+      clickWait: clickWait,
+    );
+    // 写进环形缓冲：用户导出诊断报告时自带这一行，不必靠回忆。
+    SpbLog.info('通知自检完成', {'result': report.logLine});
+    return report;
+  }
+
+  /// 平台通知参数。
+  ///
+  /// 对测试可见：这几项是**只有真机/系统侧才看得出问题**的配置（渠道重要性
+  /// 决定是否横幅、小图标决定状态栏显示成什么样），所以把「取参数」这一步
+  /// 放进测试，至少能挡住「有人删了某一行」这类回归。
+  @visibleForTesting
+  NotificationDetails get debugNotificationDetails => _details();
+
+  NotificationDetails _details({DateTime? expiresAt}) {
+    // ## 这里读字段而不是写字面量
+    //
+    // 三个 `androidChannel*` 字段一直是构造参数，但曾经在这里被写成字面量
+    // ——于是「定制渠道名」这个能力静默失效（传了也不生效）。字段化之后，
+    // 测试能断言「传进去的就是发出去的」。
+    //
+    // 注意 Android 的限制：channel id 与名字只在**首次创建**时生效，之后
+    // 改设置不会更新已存在的 channel（要改重要性只能换 id 或卸载重装）。
+    return NotificationDetails(
+      android: AndroidNotificationDetails(
+        androidChannelId,
+        androidChannelName,
+        channelDescription: androidChannelDescription,
+        icon: androidSmallIcon,
+        importance: Importance.high,
+        priority: Priority.high,
+        // 确认卡需要用户行动，用默认提示音即可（不自定义，避免打包音频资源）。
+        playSound: true,
+        onlyAlertOnce: true,
+        timeoutAfter: expiresAt
+            ?.difference(DateTime.now())
+            .inMilliseconds
+            .clamp(1, 2147483647),
+      ),
+      iOS: const DarwinNotificationDetails(),
+      macOS: const DarwinNotificationDetails(),
+      linux: const LinuxNotificationDetails(
+        // 确认卡是「需要处理」而不是「提示」，用 normal 而非 low。
+        urgency: LinuxNotificationUrgency.normal,
+      ),
+    );
+  }
+
+  @override
+  Future<void> cancel(String id) async {
+    if (!await initialize()) return;
+    try {
+      await _plugin.cancel(id: stableNotificationId(id));
+    } catch (e) {
+      // 撤销失败的最坏后果只是通知多留一会儿，不影响业务。
+      debugPrint('[notifications] 撤销通知失败（已忽略）：$e');
+    }
+  }
+
+  /// 冷启动的启动详情（issue #86）。
+  ///
+  /// App 被系统杀掉后点通知，payload 随 launch details 到达——它不会走
+  /// [onSelect]（那只覆盖进程存活时的点击）。调用方在路由建好后读一次：
+  /// 非空则导航到 payload（一次），与热路径的 onSelect 互斥（本方法返回后
+  /// 应把详情消费掉，避免同一次点击导航两次）。
+  ///
+  /// 未初始化 / 插件抛异常时返回 null（调用方退化为「打开主窗口」）。
+  Future<NotificationAppLaunchDetails?> launchDetails() async {
+    if (!await initialize()) return null;
+    try {
+      return await _plugin.getNotificationAppLaunchDetails();
+    } catch (e) {
+      debugPrint('[notifications] 读取启动详情失败（按无点击处理）：$e');
+      return null;
+    }
+  }
+}
+
+/// FNV-1a 的正 31 位结果，避免 String.hashCode 的跨 isolate 不稳定性。
+int stableNotificationId(String id) {
+  var hash = 0x811c9dc5;
+  for (final unit in id.codeUnits) {
+    hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+  }
+  return hash & 0x7fffffff;
+}

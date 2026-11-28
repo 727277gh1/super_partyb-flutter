@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  启动画面（API 21+，见 drawable/launch_background.xml 的说明）。
+
+  ## 与 drawable/ 版本的唯一差异
+
+  背景色在这里同样写死为品牌蓝，而**不是** `?android:colorBackground`：
+  后者在深色模式下是近黑色，而启动图（浅色气泡）与近黑底对比过强、像故障；
+  且 Flutter 首帧的主题在启动瞬间还不确定，用固定品牌色才能与「应用自身的
+  首屏」无缝衔接。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/ic_launcher_background" />
+
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/launch_logo" />
+    </item>
+</layer-list>

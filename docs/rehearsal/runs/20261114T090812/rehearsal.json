@@ -1,0 +1,111 @@
+{
+  "schema": "rehearsal/v1",
+  "run_id": "20261114T011133Z",
+  "repo": "dever/super_partyb-flutter",
+  "commit": "cfedbb0",
+  "commit_full": "cfedbb0781ae5e5cdebf789d7f207a6ddacac267",
+  "generated_at": "2026-11-14T09:11:33+08:00",
+  "scenarios": [
+    {
+      "scenario_id": "spbf-sse-multiline-crlf",
+      "repo": "dever/super_partyb-flutter",
+      "injection": "CRLF 与 LF 混用的流在中点切断（等价断流后重连），多行 data 拼接",
+      "scope": "in-process",
+      "criteria": [
+        {
+          "id": "multiline-data-joined",
+          "requirement": "同一事件的多行 data 拼接为一帧（A、B 同帧）",
+          "observed": "frames=2 merged={\"part\":\"A\"}\n{\"part\":\"B\"}|{\"part\":\"C\"}",
+          "passed": true
+        },
+        {
+          "id": "no-frame-loss-across-cut",
+          "requirement": "切断点之后的事件仍完整到达（不丢帧）",
+          "observed": "total_frames=2",
+          "passed": true
+        },
+        {
+          "id": "crlf-handled",
+          "requirement": "CRLF 行尾被正确处理（不被当成数据内容）",
+          "observed": "merged_no_crlf=true",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "metrics": {
+        "frames": 2
+      },
+      "evidence": [
+        "packages/spb_api/test/rehearsal_drill_test.dart"
+      ],
+      "notes": "断流重连后的「终态与服务端一致」由 PartyB 与客户端联调核对（#107 真机部分）。"
+    },
+    {
+      "scenario_id": "spbf-sse-transient-id-passthrough",
+      "repo": "dever/super_partyb-flutter",
+      "injection": "喂入瞬态 id（transient-abc）与数字 id（42）各一帧，检查帧上 id 透传",
+      "scope": "in-process",
+      "criteria": [
+        {
+          "id": "id-preserved-on-frame",
+          "requirement": "事件 id 原样出现在帧上（上层凭它区分瞬态/持久）",
+          "observed": "ids=[transient-abc, 42]",
+          "passed": true
+        },
+        {
+          "id": "cursor-decision-stays-upstream",
+          "requirement": "游标推进决策留在上层归约层（传输层不吞 id）",
+          "observed": "frames_with_id=2",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "metrics": {
+        "ids": [
+          "transient-abc",
+          "42"
+        ]
+      },
+      "evidence": [
+        "packages/spb_api/test/rehearsal_drill_test.dart"
+      ],
+      "notes": "「瞬态 ID 不推进持久化游标」的最终判定在 spb_domain 归约测试（chat_stream_controller_gap_probe_test.dart 已覆盖）；此处验证传输层前提：id 完整透传。"
+    },
+    {
+      "scenario_id": "spbf-sse-utf8-fragmentation",
+      "repo": "dever/super_partyb-flutter",
+      "injection": "把含中文的完整 SSE 流按 1 字节切分喂给传输层（等价任意网络分段）",
+      "scope": "in-process",
+      "criteria": [
+        {
+          "id": "frames-parsed",
+          "requirement": "逐字节分片下解析出全部两帧（分帧不因分片方式变化）",
+          "observed": "frames=2",
+          "passed": true
+        },
+        {
+          "id": "utf8-not-corrupted",
+          "requirement": "UTF-8 多字节被切在分片中间时不得出现 U+FFFD",
+          "observed": "utf8_clean=true",
+          "passed": true
+        }
+      ],
+      "passed": true,
+      "metrics": {
+        "frames": 2
+      },
+      "evidence": [
+        "packages/spb_api/test/rehearsal_drill_test.dart"
+      ],
+      "notes": "复用 issue #41 的传输层契约测试结论；分片缓冲 + 流式 UTF-8 解码是既有实现。"
+    }
+  ],
+  "summary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0
+  },
+  "extra": {
+    "dart": "Dart SDK version: 3.13.4 (stable) (Tue Sep 15 01:01:15 2026 -0700) on \"linux_x64\""
+  }
+}
